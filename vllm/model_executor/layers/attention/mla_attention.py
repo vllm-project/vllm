@@ -308,7 +308,12 @@ from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
     maybe_gather_mla_latent_cache_inputs,
 )
-from vllm.v1.attention.ops.shardq import allocate_shardq_buffers, shard_q, unshard_out
+from vllm.v1.attention.ops.shardq import (
+    ShardQMetadata,
+    allocate_shardq_buffers,
+    shard_q,
+    unshard_out,
+)
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
@@ -329,6 +334,7 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.index_group import (
         SparseMLAIndexGroupBuilder,
     )
+    from vllm.v1.attention.ops.dcp_shardq.context import DcpShardQContext
 
 logger = init_logger(__name__)
 
@@ -651,6 +657,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             indexer_op = getattr(indexer, "indexer_op", None)
             if indexer_op is not None:
                 indexer_op.k_cache.use_shardq = True
+                # Under DCP the indexer gathers this layer's context too.
+                indexer_op.k_cache.shardq_layer_name = self.layer_name
         index_group = getattr(impl, "index_group", None)
         self.hisparse_cache = (
             index_group.cache(cast(Any, impl).index_group_index)
@@ -1103,6 +1111,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 dtype=k_c_normed.dtype,
             )
             self.impl.reserve_workspace()
+            if self.use_shardq and self.impl.dcp_world_size > 1:
+                self._reserve_dcp_shardq_workspace(k_c_normed.device)
 
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
@@ -1150,6 +1160,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 num_mqa_tokens = q.size(0)
                 num_mha_tokens = 0
 
+        shardq = attn_metadata.shardq
+        gathered_context = attn_metadata.dcp_gathered_context
+        if gathered_context is not None:
+            # A DCP ShardQ step's prefill tokens attend a gathered copy of
+            # their context, which still lacks the step's new tokens; every
+            # rank writes all of them.
+            num_dcp_decode_tokens = gathered_context.num_decode_tokens
+            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+                k_c_normed[num_dcp_decode_tokens:],
+                k_pe[num_dcp_decode_tokens:],
+                gathered_context.mla_view(kv_cache),
+                gathered_context.slot_mapping,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
+
         mha_use_quant_output = (
             quant_key is not None
             and self.prefill_backend is not None
@@ -1190,40 +1216,53 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             mqa_output_slice = output[:num_mqa_tokens]
             if mqa_q_prepared is not None:
                 mqa_q = mqa_q_prepared[:num_mqa_tokens]
-            elif q_dcp_replicated is not None:
+            elif q_dcp_replicated is not None and gathered_context is None:
                 mqa_q = self._prepare_mqa_query(
                     q_dcp_replicated[:num_mqa_tokens], qrep_decode=True
                 )
             else:
+                # A DCP ShardQ step exchanges the local heads' query (shard_q)
+                # instead of gathering it.
                 mqa_q = self._prepare_mqa_query(
                     q[:num_mqa_tokens],
                     qrep_decode=False,
                     fused_q_heads=self._fused_decode_query_heads(attn_metadata),
+                    gather_query=gathered_context is None,
                 )
-            shardq = getattr(attn_metadata, "shardq", None)
             mqa_metadata = attn_metadata
+            mqa_kv_cache = kv_cache
             if shardq is not None:
                 decode_q, mqa_q = shard_q(mqa_q, shardq)
                 decode_out = None
-                if decode_q.shape[0]:
+                if decode_q.shape[0] and gathered_context is not None:
+                    # Decode tokens keep the DCP path.
+                    decode_out = self._forward_dcp_decode(
+                        decode_q, kv_cache, attn_metadata, gathered_context
+                    )
+                elif decode_q.shape[0]:
                     # Decode tokens attend head-sharded.
                     decode_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
                         decode_q, kv_cache, attn_metadata, self
                     )
                 mqa_metadata = shardq.attn_metadata
+                if gathered_context is not None:
+                    mqa_kv_cache = gathered_context.mla_view(kv_cache)
 
             # call decode attn
             if not self.impl.is_sparse:
                 assert attn_metadata.decode is not None
-            attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, mqa_metadata, self)  # type: ignore[attr-defined]
+            attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
+                mqa_q, mqa_kv_cache, mqa_metadata, self
+            )
             if shardq is not None:
                 attn_out = unshard_out(attn_out, shardq, decode_out)
 
             # correct dcp attn_out with lse.
-            if self.impl.dcp_world_size > 1:
+            merged_v_up = False
+            if self.impl.dcp_world_size > 1 and gathered_context is None:
                 assert lse is not None
                 assert self.dcp_manager is not None
-                decode_metadata = getattr(attn_metadata, "decode", None)
+                decode_metadata = attn_metadata.decode
                 if not use_mha and not self.use_pcp:
                     seq_lens = cast(torch.Tensor, attn_metadata.seq_lens)  # type: ignore[attr-defined]
                     query_start_loc = attn_metadata.query_start_loc
@@ -1251,6 +1290,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         seq_lens=seq_lens,
                         query_start_loc=query_start_loc,
                     )
+                    merged_v_up = True
                 elif num_merge_rows == attn_out.shape[0]:
                     attn_out = self.dcp_manager.combine(
                         attn_out,
@@ -1269,7 +1309,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
             # v_up projection, unless the DCP merge already applied it
-            if not use_fused_v_up_proj:
+            if not merged_v_up:
                 self._v_up_proj(attn_out, out=mqa_output_slice)
 
         if quant_key is not None:
@@ -1320,6 +1360,63 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             output_padded[num_actual_toks:].zero_()
         return output_padded
 
+    def _forward_dcp_decode(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: "MLACommonMetadata",
+        gathered_context: "DcpShardQContext",
+    ) -> torch.Tensor:
+        """The attention output of a DCP ShardQ step's leading decode tokens
+        (head-sharded query) on the DCP path: query gather, the DCP-local
+        partials, LSE combine."""
+        assert self.dcp_manager is not None
+        assert self.dcp_manager.query_gather is not None
+        num_decodes = gathered_context.num_decodes
+        out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
+            self.dcp_manager.query_gather(q), kv_cache, attn_metadata, self
+        )
+        assert lse is not None
+        return self.dcp_manager.combine(
+            out,
+            lse,
+            seq_lens=attn_metadata.seq_lens[:num_decodes],  # type: ignore[attr-defined]
+            query_start_loc=attn_metadata.query_start_loc[: num_decodes + 1],
+        )
+
+    def _reserve_dcp_shardq_workspace(self, device: torch.device) -> None:
+        """Reserve the gathered-context workspace of DCP ShardQ steps (see
+        ShardQMetadata.gathered_context) in the memory profile, and warm up
+        the DCP path that their other steps keep."""
+        from vllm.v1.attention.ops.dcp_shardq import context as shardq_context
+        from vllm.v1.attention.ops.dcp_shardq.context import (
+            ContextLayout,
+            reserve_workspace,
+        )
+
+        vllm_config = get_current_vllm_config()
+        # The metadata builder's condition (_init_dcp_shardq).
+        layout = ContextLayout.from_layer(
+            self.get_kv_cache_config(vllm_config).spec, self.indexer
+        )
+        if layout is None:
+            return
+        scheduler_config = vllm_config.scheduler_config
+        reserve_workspace(
+            layout,
+            shardq_context.workspace_max_tokens(vllm_config),
+            scheduler_config.max_num_seqs,
+            device,
+        )
+        # The first DCP-path step may come late, once the KV cache and the
+        # caching allocator hold the memory that its NCCL collectives allocate
+        # on first use. A step whose prefill requests do not fit the workspace
+        # takes the DCP path whole, so reserve a full step.
+        assert self.dcp_manager is not None
+        shardq_context.warm_up_dcp_fallback(
+            self.dcp_manager, scheduler_config.max_num_batched_tokens
+        )
+
     def prepare_mqa_query(
         self, q: torch.Tensor, kv_c_normed: torch.Tensor, k_pe: torch.Tensor
     ) -> torch.Tensor | None:
@@ -1329,15 +1426,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         write and attends with the leading rows, as MQA tokens come first.
         Only the symmetric-memory gather is moved: an NCCL gather could race
         concurrent collectives on the same communicator."""
-        if (
-            self.use_pcp
-            or self.hisparse_cache is not None
-            or get_attention_context(self.layer_name)[0] is None
-        ):
+        attn_metadata = get_attention_context(self.layer_name)[0]
+        if self.use_pcp or self.hisparse_cache is not None or attn_metadata is None:
             return None
         if self.impl.dcp_world_size > 1:
             assert self.dcp_manager is not None
             if q.shape[0] > self.dcp_manager.direct_query_gather_max_tokens:
+                return None
+            # DCP ShardQ steps do not gather the query.
+            if attn_metadata.dcp_gathered_context is not None:
                 return None
         if self.kv_sharing_target_layer_name is None:
             torch.ops.vllm.unified_mla_kv_cache_update(
@@ -1350,9 +1447,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         mqa_q = self._prepare_mqa_query(
             q,
             qrep_decode=False,
-            fused_q_heads=self._fused_decode_query_heads(
-                get_attention_context(self.layer_name)[0]
-            ),
+            fused_q_heads=self._fused_decode_query_heads(attn_metadata),
         )
         # Concat here rather than into the backend's shared workspace.
         return torch.cat(mqa_q, dim=-1) if isinstance(mqa_q, tuple) else mqa_q
@@ -1371,7 +1466,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         mqa_q: torch.Tensor,
         qrep_decode: bool,
         fused_q_heads: int | None = None,
+        gather_query: bool = True,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Absorb the MQA query (and, with `gather_query`, DCP-gather it)."""
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
         mqa_q_nope, mqa_q_pe = mqa_q.split(
             [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
@@ -1472,6 +1569,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
+        if not gather_query:
+            return mqa_q
         # concatenate nope + pe -> (B, N, L + P) (fp8 op above may have fused)
         if self.impl.dcp_world_size > 1:
             assert self.dcp_manager is not None
@@ -2034,6 +2133,13 @@ class MLACommonMetadata(AttentionMetadata, Generic[D]):
 
     prefill: MLACommonPrefillMetadata | None = None
     decode: D | None = None
+    # Set on token-sharded TP prefill steps (see vllm.v1.attention.ops.shardq).
+    shardq: ShardQMetadata | None = None
+
+    @property
+    def dcp_gathered_context(self) -> "DcpShardQContext | None":
+        """The gathered context of a DCP ShardQ step, or None."""
+        return None if self.shardq is None else self.shardq.gathered_context
 
     def __post_init__(self):
         if self.head_dim is not None and not MLACommonBackend.supports_head_size(
@@ -3319,6 +3425,15 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             block_table = prefill_metadata.block_table[chunk.request_slice]
             if self.kv_cache_dtype == "fp8_ds_mla":
                 ops.cp_gather_and_upconvert_fp8_kv_cache(
+                    src_cache=kv_c_and_k_pe_cache,
+                    dst=workspace[:toks],
+                    block_table=block_table,
+                    workspace_starts=padded_local_cu_seq_lens,
+                    batch_size=chunk.num_requests,
+                    seq_starts=chunk.starts,
+                )
+            elif self.kv_cache_dtype == "nvfp4_ds_mla":
+                ops.cp_gather_and_upconvert_nvfp4_kv_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace[:toks],
                     block_table=block_table,

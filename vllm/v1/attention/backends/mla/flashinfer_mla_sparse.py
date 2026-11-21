@@ -794,6 +794,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     supports_dcp: bool = True
     lse_base_on_e: bool = False
     supports_shardq: ClassVar[bool] = True
+    supports_dcp_shardq: ClassVar[bool] = True
     # fp8 query quantization is required when using fp8 kv_cache,
     # as the TRTLLM-GEN sparse MLA kernel requires matching dtypes
     # for query and kv_cache (mixed bf16+fp8 is not supported).
@@ -884,14 +885,20 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._k_scale_float
 
-    def _get_prims_ts_plans(self, device: torch.device, heads: int, max_topk: int):
+    def _get_prims_ts_plans(
+        self,
+        device: torch.device,
+        heads: int,
+        max_topk: int,
+        return_lse: bool | None = None,
+    ):
         return _prims_ts_plans.get(
             device,
             self.prims_ts_buckets,
             heads,
             self.prims_ts_format,
             max_topk,
-            self.need_to_return_lse_for_decode,
+            self.need_to_return_lse_for_decode if return_lse is None else return_lse,
         )
 
     def reserve_workspace(self) -> None:
@@ -943,11 +950,14 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         valid_counts: torch.Tensor,
         layer: AttentionLayer,
         block_size: int,
+        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Sparse MLA of every row of `q` [T, H, 576] (E4M3, quantized by the
         layer with `q_scale`) over its `valid_counts` leading physical rows
         of `topk_indices` (-1 entries are masked)."""
         assert q.dtype == torch.float8_e4m3fn, q.dtype
+        if return_lse is None:
+            return_lse = self.need_to_return_lse_for_decode
         num_tokens, heads, _ = q.shape
         # Storage rows; the backend aligns block strides to whole rows.
         is_fp8 = self.prims_ts_format == "native"
@@ -960,10 +970,12 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         out = q.new_empty((num_tokens, heads, self.kv_lora_rank), dtype=torch.bfloat16)
         lse = (
             q.new_empty((num_tokens, heads), dtype=torch.float32)
-            if self.need_to_return_lse_for_decode
+            if return_lse
             else None
         )
-        plans = self._get_prims_ts_plans(q.device, heads, topk_indices.shape[1])
+        plans = self._get_prims_ts_plans(
+            q.device, heads, topk_indices.shape[1], return_lse
+        )
         for start in range(0, num_tokens, buckets[-1]):
             end = min(num_tokens, start + buckets[-1])
             n = end - start
@@ -1045,7 +1057,10 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         layer: AttentionLayer,
         block_size: int,
         is_decode: bool,
+        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if return_lse is None:
+            return_lse = self.need_to_return_lse_for_decode
         if isinstance(q, tuple):
             ql_nope, q_pe = q
             if q_pe.shape[-1] == 0 and ql_nope.is_contiguous():
@@ -1055,7 +1070,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         if self.use_prims_ts:
             return self._forward_prims_ts(
-                q, kv_cache, topk_indices, seq_lens, layer, block_size
+                q, kv_cache, topk_indices, seq_lens, layer, block_size, return_lse
             )
 
         self._prepare_mqa_kernel(layer, q.device)
@@ -1111,7 +1126,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             (num_tokens, padded_heads, self.kv_lora_rank), dtype=torch.bfloat16
         )
         lse = None
-        if self.need_to_return_lse_for_decode:
+        if return_lse:
             lse = q.new_empty((num_tokens, padded_heads), dtype=torch.float32)
 
         # One trtllm-gen request per token, and requests map to gridDim.z: a

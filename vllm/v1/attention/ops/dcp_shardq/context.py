@@ -1,0 +1,600 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""ShardQ prefill steps under DCP: attention over a gathered context.
+
+DCP shards the KV cache by token, so a DCP prefill step runs every query token
+with all heads against each rank's 1/W of the keys, merges the indexer's
+per-rank top-k across ranks, and combines the attention partials by LSE: per
+layer it moves gigabytes and repeats the attention work W times over.
+
+When the TP group is the DCP group, a prefill step can instead run as a TP
+ShardQ step (vllm.v1.attention.ops.shardq): each rank gathers its requests'
+whole context into a symmetric-memory workspace, in token order and in the
+paged formats of the MLA and indexer caches, then scores and attends its slice
+of the query tokens with all heads over the workspace, exactly as TP ShardQ
+does over a replicated cache. No top-k merge and no LSE combine remain.
+
+Per layer, the indexer pushes every rank's KV shard of the step's requests
+into all workspaces (the MLA and indexer KV of the prior context, plus the
+indexer KV of the new tokens); the MLA layer then writes the new tokens' MLA
+KV, which every rank computes for all tokens, into its own workspace.
+
+A step runs this way when ShardQ splits its tokens (build_shardq_split) and
+its prefill requests fit the workspace (`max_model_len` tokens of context,
+plus a page per request); a step whose prefill requests need more takes the
+DCP path whole. Its leading decode requests (at most
+`1 + num_speculative_tokens` query tokens each, which the indexer scores on
+its decode path) keep the DCP path within the step; its other requests are
+token-sharded, including the short prefill chunks that the sparse MLA backend
+classifies as decodes. The workspace holds the prefill requests only.
+`DcpShardQPlanner` decides, and counts the prefill steps and tokens of each
+path.
+
+Scope: any sparse MLA layer with a DSA-style fp8 indexer cache, under DCP
+with the DCP group equal to the TP group; nothing here is model-specific.
+"""
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import torch
+
+from vllm.distributed.parallel_state import get_tp_group
+from vllm.logger import init_logger
+from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadataBuilder,
+    DeepseekV32IndexerPrefillChunkMetadata,
+    build_prefill_chunk_metadata,
+)
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    ConvertReqIndexToGlobalIndexKernel,
+)
+from vllm.v1.attention.ops.cp_common import symm_mem
+from vllm.v1.attention.ops.dcp import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp_shardq import PAGE_TOKENS
+from vllm.v1.attention.ops.shardq import ShardQSplit
+from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.v1.attention.ops.dcp import MLADCPManager
+
+logger = init_logger(__name__)
+
+# Workspace block tables are padded to whole multiples of this many pages, so
+# their per-request stride has one Triton specialization.
+TABLE_PAGES_ALIGN = 16
+
+
+@dataclass(frozen=True)
+class ContextLayout:
+    """Per-token bytes of a DSA layer's MLA and indexer caches."""
+
+    mla_token_bytes: int
+    index_token_bytes: int
+    index_scale_bytes: int
+
+    @classmethod
+    def from_layer(cls, spec: KVCacheSpec, indexer: object) -> "ContextLayout | None":
+        """The layout of a DSA layer that DCP ShardQ steps can gather, or None.
+
+        The MLA cache must keep one-byte elements (per-tensor `fp8`,
+        `nvfp4_ds_mla`) in kernel blocks of whole 64-token pages (a packed
+        cache may use e.g. 1024-token blocks), and the indexer fp8 keys
+        with one 4-byte scale per `quant_block_size` values (or MXFP4 keys:
+        64 B of values and 4 B of scales per token).
+        """
+        k_cache = getattr(indexer, "k_cache", None)
+        quant_block = getattr(indexer, "quant_block_size", 0)
+        if (
+            not isinstance(spec, MLAAttentionSpec)
+            or get_dtype_size(spec.dtype) != 1
+            or spec.block_size % PAGE_TOKENS
+            or k_cache is None
+            or not quant_block
+        ):
+            return None
+        if getattr(indexer, "use_fp4_cache", False):
+            # MXFP4 keys: head_dim / 2 B of E2M1 values and one UE8M0 scale per
+            # 32 values (17 / 32 B per dim), pages of the values then the scales
+            # (as the fp8 layout).
+            index_token_bytes = k_cache.head_dim * 16 // 17
+        else:
+            # fp8 keys with one 4-byte scale per quant_block values.
+            index_token_bytes = k_cache.head_dim * quant_block // (quant_block + 4)
+        return cls(
+            spec.state_content_size_bytes,
+            index_token_bytes,
+            k_cache.head_dim - index_token_bytes,
+        )
+
+    @property
+    def mla_page_bytes(self) -> int:
+        return PAGE_TOKENS * self.mla_token_bytes
+
+    @property
+    def index_page_bytes(self) -> int:
+        return PAGE_TOKENS * (self.index_token_bytes + self.index_scale_bytes)
+
+
+def workspace_max_tokens(vllm_config: "VllmConfig") -> int:
+    """Tokens of context the workspace holds: `max_model_len`, so any one
+    request fits. It costs about `mla_token_bytes + index_token_bytes` (plus
+    the index scales) per token on each rank, ~0.7 GB per 1M tokens with a
+    per-tensor `fp8` cache and ~0.5 GB with `nvfp4_ds_mla`. Call it
+    through this module so tests can patch it."""
+    return vllm_config.model_config.max_model_len
+
+
+def capacity_pages(max_tokens: int, max_reqs: int) -> int:
+    """Workspace pages for `max_tokens` tokens, each request rounded up."""
+    return -(-max_tokens // PAGE_TOKENS) + max_reqs
+
+
+@dataclass
+class _Workspace:
+    storage: torch.Tensor
+    handle: Any
+    # Every rank's workspace address, [world].
+    peer_ptrs: torch.Tensor
+
+
+# Shared by every layer; outgrown workspaces stay alive for queued kernels.
+_workspace_buffer: _Workspace | None = None
+_retired: list[_Workspace] = []
+
+
+def _workspace(layout: ContextLayout, pages: int, device) -> _Workspace:
+    """The symmetric-memory workspace, grown to `pages` pages if needed.
+    Sizes come from the configuration, so every rank rendezvouses together."""
+    global _workspace_buffer
+    nbytes = pages * (layout.mla_page_bytes + layout.index_page_bytes)
+    buf = _workspace_buffer
+    if buf is not None and buf.storage.numel() >= nbytes:
+        return buf
+    if buf is not None:
+        _retired.append(buf)
+    group = get_tp_group().device_group
+    storage = symm_mem.empty(nbytes, dtype=torch.uint8, device=device)
+    handle = symm_mem.rendezvous(storage, group.group_name)
+    peer_ptrs = torch.tensor(
+        [
+            handle.get_buffer(peer, [nbytes], torch.uint8, 0).data_ptr()
+            for peer in range(group.size())
+        ],
+        dtype=torch.int64,
+        device=storage.device,
+    )
+    _workspace_buffer = _Workspace(storage, handle, peer_ptrs)
+    return _workspace_buffer
+
+
+def reserve_workspace(
+    layout: ContextLayout, max_tokens: int, max_reqs: int, device: torch.device
+) -> None:
+    """Allocate the workspace in the memory profile; symmetric memory lives
+    outside the torch caching allocator, so it counts as non-torch memory."""
+    _workspace(layout, capacity_pages(max_tokens, max_reqs), device)
+
+
+# The (group, step shape) keys warm_up_dcp_fallback ran.
+_WARMED_UP_DCP_FALLBACK: set[tuple[Any, ...]] = set()
+
+
+def warm_up_dcp_fallback(dcp_manager: "MLADCPManager", num_tokens: int) -> None:
+    """Run `dcp_manager`'s query gather and output combine of a step of
+    `num_tokens` tokens, and the combine's Triton kernels for every batch
+    size, on dummy inputs (once per process and shape).
+
+    A DCP ShardQ instance takes most prefill steps off the DCP path, so the
+    steps that keep it (decodes only, few tokens, a full workspace) may come
+    only late, after the KV cache and the caching allocator took the memory.
+    Beyond the direct workspaces the DCP path falls back to NCCL collectives,
+    which connect their peers and allocate their buffers on first use, and its
+    Triton kernels compile on first use; calling this in the memory profile
+    run makes both happen there and accounts for them. Every rank of the
+    group must call it.
+    """
+    world = dcp_manager.group.world_size
+    key = (
+        dcp_manager.group.unique_name,
+        num_tokens,
+        dcp_manager.num_heads,
+        dcp_manager.query_head_dim,
+        dcp_manager.output_head_dim,
+        dcp_manager.query_dtype,
+        dcp_manager.output_dtype,
+        dcp_manager.is_lse_base_on_e,
+    )
+    if world == 1 or key in _WARMED_UP_DCP_FALLBACK:
+        return
+    _WARMED_UP_DCP_FALLBACK.add(key)
+    # The gathered query stays alive while the attention writes its partial
+    # output and the combine runs, as in a real step.
+    gathered_query = None
+    if dcp_manager.query_gather is not None:
+        gathered_query = dcp_manager.query_gather(
+            torch.zeros(
+                (num_tokens, dcp_manager.num_heads, dcp_manager.query_head_dim),
+                dtype=dcp_manager.query_dtype,
+                device=dcp_manager.device,
+            )
+        )
+    # Every head's partial output, as the attention backend returns it.
+    partial_output = torch.zeros(
+        (num_tokens, world * dcp_manager.num_heads, dcp_manager.output_head_dim),
+        dtype=dcp_manager.output_dtype,
+        device=dcp_manager.device,
+    )
+    partial_lse = torch.zeros(
+        partial_output.shape[:2], dtype=torch.float32, device=dcp_manager.device
+    )
+
+    def batch(num_tokens: int, num_seqs: int) -> dict[str, torch.Tensor]:
+        # num_seqs requests of one token each, the last one taking the rest.
+        query_start_loc = torch.arange(
+            num_seqs + 1, dtype=torch.int32, device=dcp_manager.device
+        )
+        query_start_loc[-1] = num_tokens
+        seq_lens = torch.ones(num_seqs, dtype=torch.int32, device=dcp_manager.device)
+        return dict(seq_lens=seq_lens, query_start_loc=query_start_loc)
+
+    dcp_manager.combine(partial_output, partial_lse, **batch(num_tokens, 1))
+    if dcp_manager.use_a2a and (
+        dcp_manager.direct_a2a is None
+        or num_tokens > dcp_manager.direct_a2a.max_num_tokens
+    ):
+        # The NCCL A2A's pack kernel compiles once per power-of-two
+        # bucket of the batch's requests, and both its kernels once per
+        # alignment of the per-rank stride of their buffers, a multiple of
+        # the token count: a multiple of 16 tokens takes one, an odd count
+        # the other one (if any).
+        num_seqs = 1
+        while num_seqs < 2 * dcp_manager.max_num_seqs and num_seqs <= num_tokens:
+            for n in (round_up(num_seqs, 16), num_seqs | 1):
+                if n > num_tokens:
+                    continue
+                dcp_a2a_lse_reduce(
+                    partial_output[:n],
+                    partial_lse[:n],
+                    cp_group=dcp_manager.group,
+                    is_lse_base_on_e=dcp_manager.is_lse_base_on_e,
+                    **batch(n, num_seqs),
+                )
+            num_seqs *= 2
+    del gathered_query
+    logger.info_once("Warmed up the MLA DCP collectives of %d-token steps.", num_tokens)
+
+
+@dataclass
+class DcpShardQContext:
+    """One step's gathered-context plan (see the module docstring).
+
+    The workspace holds `pages` MLA pages, then as many indexer pages.
+    """
+
+    layout: ContextLayout
+    world: int
+    rank: int
+    pages: int
+    # The step's leading decodes, which keep the DCP path: its requests
+    # before num_decodes and its tokens before num_decode_tokens.
+    num_decodes: int
+    num_decode_tokens: int
+    # The prefill requests: int32 sequence lengths and query start locations,
+    # on the device.
+    seq_lens: torch.Tensor
+    query_start_loc: torch.Tensor
+    # Most local 64-token pages of any prefill request on any rank.
+    max_local_pages: int
+    # int32 [num_reqs, width]: workspace page of each prefill request's
+    # 64-token block, addressed like a paged block table by the step's request
+    # index (width a multiple of TABLE_PAGES_ALIGN; the decodes' entries unused).
+    block_table: torch.Tensor
+    # int64 [num_prefill_tokens]: workspace slot of each new prefill token.
+    slot_mapping: torch.Tensor
+    # Indexer prefill chunks over the workspace, in the non-DCP form, over
+    # the indexer query tokens of gather_indices.
+    indexer_chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
+    # The tokens the indexer scores, in the order their top-k is written:
+    # every decode token in place, then this rank's ShardQ tokens.
+    gather_indices: torch.Tensor
+
+    # The workspace's pages of 64 tokens address its views and block table.
+    block_size = PAGE_TOKENS
+
+    def _view(self, dtype: torch.dtype, offset: int, token_bytes: int, device):
+        """The workspace pages at `offset` as a [pages, 64, token_bytes] cache."""
+        storage = _workspace(self.layout, self.pages, device).storage
+        return torch.as_strided(
+            storage.view(dtype),
+            (self.pages, PAGE_TOKENS, token_bytes),
+            (PAGE_TOKENS * token_bytes, token_bytes, 1),
+            offset,
+        )
+
+    def mla_view(self, mla_cache: torch.Tensor) -> torch.Tensor:
+        """The workspace's MLA pages, typed as `mla_cache`."""
+        layout = self.layout
+        return self._view(mla_cache.dtype, 0, layout.mla_token_bytes, mla_cache.device)
+
+    def index_view(self, index_cache: torch.Tensor) -> torch.Tensor:
+        """The workspace's indexer pages, typed as `index_cache`."""
+        layout = self.layout
+        return self._view(
+            index_cache.dtype,
+            self.pages * layout.mla_page_bytes,
+            layout.index_token_bytes + layout.index_scale_bytes,
+            index_cache.device,
+        )
+
+    def push(
+        self,
+        mla_cache: torch.Tensor,
+        mla_block_table: torch.Tensor,
+        index_cache: torch.Tensor,
+        index_block_table: torch.Tensor,
+        dst_addrs: torch.Tensor,
+    ) -> None:
+        """Copy this rank's KV shard of the prefill requests from one layer's
+        DCP-local paged caches (with the step's kernel block tables) into the
+        workspaces at `dst_addrs`."""
+        if self.max_local_pages:
+            # gather imports cutlass, so import it only on the SM100 path.
+            from vllm.v1.attention.ops.dcp_shardq.gather import (
+                DCP_CONTEXT_PUSH_KERNEL,
+            )
+
+            first = self.num_decodes
+            DCP_CONTEXT_PUSH_KERNEL(
+                mla_cache=mla_cache,
+                mla_block_table=mla_block_table[first:],
+                index_cache=index_cache,
+                index_block_table=index_block_table[first:],
+                seq_lens=self.seq_lens,
+                query_start_loc=self.query_start_loc,
+                dst_block_table=self.block_table[first:],
+                max_local_pages=self.max_local_pages,
+                dst_addrs=dst_addrs,
+                dst_index_offset=self.pages * self.layout.mla_page_bytes,
+                rank=self.rank,
+                index_token_bytes=self.layout.index_token_bytes,
+            )
+
+    def gather(
+        self,
+        mla_cache: torch.Tensor,
+        mla_block_table: torch.Tensor,
+        index_cache: torch.Tensor,
+        index_block_table: torch.Tensor,
+    ) -> torch.Tensor:
+        """Push this rank's KV shard of one layer into every rank's workspace
+        (see `push`) and return the workspace as the indexer's cache view, once
+        every rank's shard has landed in it."""
+        index_view = self.index_view(index_cache)
+        buffer = _workspace(self.layout, self.pages, index_cache.device)
+        # Peers may still read the previous layer from their workspaces.
+        buffer.handle.barrier()
+        self.push(
+            mla_cache, mla_block_table, index_cache, index_block_table, buffer.peer_ptrs
+        )
+        buffer.handle.barrier()
+        return index_view
+
+
+def build_dcp_shardq_context(
+    common_attn_metadata: CommonAttentionMetadata,
+    split: ShardQSplit,
+    layout: ContextLayout,
+    max_pages: int,
+    max_indexer_keys: int,
+    max_logits_bytes: int,
+    world: int,
+    rank: int,
+    device: torch.device,
+) -> DcpShardQContext | None:
+    """The context plan of `split`'s step on DCP rank `rank` of `world`,
+    or None when its prefill requests (the requests after `split`'s decode
+    tokens) do not fit the `max_pages` workspace pages.
+
+    Every rank derives the same plan; the push kernel finds each rank's local
+    tokens from the step's device sequence lengths.
+    """
+    num_reqs = common_attn_metadata.num_reqs
+    query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
+    all_qsl = query_start_loc_cpu.numpy().astype(np.int64)
+    num_decode_tokens = split.num_decode_tokens
+    num_decodes = int(np.searchsorted(all_qsl, num_decode_tokens))
+    if all_qsl[num_decodes] != num_decode_tokens:
+        return None
+    seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+    assert seq_lens_cpu is not None
+    # Exact for prefill requests.
+    seq_lens_cpu = seq_lens_cpu[:num_reqs]
+    qsl = all_qsl[num_decodes:]
+    query_lens = np.diff(qsl)
+    seq_lens = seq_lens_cpu.numpy().astype(np.int64)[num_decodes:]
+    pages = -(-seq_lens // PAGE_TOKENS)
+    if pages.sum() > max_pages:
+        return None
+    page_start = np.cumsum(pages) - pages
+
+    context_lens = seq_lens - query_lens
+    # Rank 0 holds the most tokens: ceil(seq_len / world).
+    max_local_pages = -(-int(seq_lens.max()) // (world * PAGE_TOKENS))
+    # Columns past a request's pages are never addressed.
+    width = -(-int(pages.max()) // TABLE_PAGES_ALIGN) * TABLE_PAGES_ALIGN
+    block_table = np.zeros((num_reqs, width), dtype=np.int64)
+    block_table[num_decodes:] = page_start[:, None] + np.arange(width)
+    slot_mapping = np.repeat(
+        page_start * PAGE_TOKENS + context_lens - (qsl[:-1] - qsl[0]), query_lens
+    ) + np.arange(int(qsl[-1] - qsl[0]))
+
+    # The indexer scores every decode token in place, then this rank's tokens
+    # compactly, each at its position; the requests' query ranges are
+    # renumbered over those tokens (the decodes' stay put).
+    local_start = int(split.num_tokens_per_rank[:rank].sum())
+    local_token_ids = split.token_ids[
+        local_start : local_start + int(split.num_tokens_per_rank[rank])
+    ]
+    gather_indices = np.concatenate(
+        (np.arange(num_decode_tokens), local_token_ids + num_decode_tokens)
+    )
+    all_seq_lens = seq_lens_cpu.numpy().astype(np.int64)
+    token_to_req = np.searchsorted(all_qsl[1:], gather_indices, side="right")
+    positions = gather_indices + all_seq_lens[token_to_req] - all_qsl[token_to_req + 1]
+    compact_qsl = np.searchsorted(gather_indices, all_qsl)
+
+    def to_device(array: np.ndarray, dtype: torch.dtype) -> torch.Tensor:
+        host = torch.from_numpy(np.ascontiguousarray(array)).to(dtype)
+        if device.type == "cuda":
+            host = host.pin_memory()
+        return host.to(device, non_blocking=True)
+
+    block_table_gpu = to_device(block_table, torch.int32)
+    compact_qsl_cpu = torch.from_numpy(compact_qsl).to(torch.int32)
+    compact_qsl_gpu = to_device(compact_qsl, torch.int32)
+    positions_gpu = to_device(positions, torch.int32)
+    seq_lens_gpu = common_attn_metadata.seq_lens[:num_reqs]
+    chunk_specs = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
+        seq_lens_cpu[num_decodes:],
+        torch.diff(compact_qsl_cpu[num_decodes:]),
+        max_indexer_keys,
+        max_logits_bytes,
+        request_offset=num_decodes,
+    )
+    indexer_chunks = [
+        build_prefill_chunk_metadata(
+            req_slice.start,
+            req_slice.stop,
+            compact_qsl_gpu,
+            compact_qsl_cpu,
+            seq_lens_gpu,
+            seq_lens_gpu,
+            seq_lens_cpu,
+            block_table_gpu,
+            1,
+            query_slice=query_slice,
+            skip_kv_gather=query_slice.start > 0,
+            positions=positions_gpu,
+        )
+        for req_slice, query_slice in chunk_specs
+    ]
+    return DcpShardQContext(
+        layout=layout,
+        world=world,
+        rank=rank,
+        pages=max_pages,
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decode_tokens,
+        seq_lens=seq_lens_gpu[num_decodes:],
+        query_start_loc=common_attn_metadata.query_start_loc[
+            num_decodes : num_reqs + 1
+        ],
+        max_local_pages=max_local_pages,
+        block_table=block_table_gpu,
+        slot_mapping=to_device(slot_mapping, torch.int64),
+        indexer_chunks=[chunk for chunk in indexer_chunks if chunk is not None],
+        gather_indices=to_device(gather_indices, torch.int64),
+    )
+
+
+class _GatheredContextIndexRemap(ConvertReqIndexToGlobalIndexKernel):
+    """The sparse-MLA top-k remap as a DCP ShardQ step runs it
+    (SparseMLACommonImpl.forward_mqa over kv_gathered metadata): onto the
+    workspace's 64-token pages, without DCP, with valid counts, through a
+    block table padded to TABLE_PAGES_ALIGN pages. Its Triton kernel is the
+    one every ConvertReqIndexToGlobalIndexKernel launches, so warming these
+    keys here warms the runtime launches."""
+
+    def get_warmup_keys(  # type: ignore[override]
+        self, *, num_topk_tokens: int
+    ) -> list[ConvertReqIndexToGlobalIndexKernel.CompileKey]:
+        return [
+            self.dispatch(
+                BLOCK_SIZE=PAGE_TOKENS,
+                BLOCK_STRIDE_ROWS=PAGE_TOKENS,
+                BLOCK_N=128,
+                NUM_TOPK_TOKENS=num_topk_tokens,
+                HAS_PREFILL_WORKSPACE=False,
+                HAS_IDX_MAPPING=False,
+                COUNT_VALID=True,
+                COMPACT_TO_FRONT=True,
+                DCP_SIZE=1,
+                DCP_RANK=0,
+                DCP_INTERLEAVE=1,
+                max_num_blocks_per_req=TABLE_PAGES_ALIGN,
+            )
+        ]
+
+
+_GATHERED_CONTEXT_INDEX_REMAP = _GatheredContextIndexRemap()
+
+
+def register_warmup(layout: ContextLayout, world: int, num_topk_tokens: int) -> None:
+    """Register the JIT kernels that only DCP ShardQ steps launch with the
+    active warmup registry: the context push and the top-k remap onto the
+    workspace. (The prefill chunk metadata kernel warms its non-DCP form when
+    `sparse_mla_shard_q` is set under DCP; ShardQ's exchange kernel warms
+    with every ShardQ layer.)"""
+    # gather imports cutlass, so import it only on the SM100 path.
+    from vllm.v1.attention.ops.dcp_shardq.gather import DCP_CONTEXT_PUSH_KERNEL
+
+    DCP_CONTEXT_PUSH_KERNEL.register_warmup(
+        world=world,
+        mla_token_bytes=layout.mla_token_bytes,
+        index_token_bytes=layout.index_token_bytes,
+        index_scale_bytes=layout.index_scale_bytes,
+    )
+    _GATHERED_CONTEXT_INDEX_REMAP.register_warmup(num_topk_tokens=num_topk_tokens)
+
+
+class DcpShardQPlanner:
+    """Plans the DCP ShardQ steps of one metadata builder (see the module
+    docstring); every rank reaches the same decisions from the same batch."""
+
+    def __init__(
+        self,
+        layout: ContextLayout,
+        max_pages: int,
+        max_indexer_keys: int,
+        max_logits_bytes: int,
+        world: int,
+        rank: int,
+        device: torch.device,
+    ) -> None:
+        self.layout = layout
+        self.max_pages = max_pages
+        self.max_indexer_keys = max_indexer_keys
+        self.max_logits_bytes = max_logits_bytes
+        self.world = world
+        self.rank = rank
+        self.device = device
+
+    def plan(
+        self, common_attn_metadata: CommonAttentionMetadata, split: ShardQSplit | None
+    ) -> DcpShardQContext | None:
+        """The context plan of a step that runs as a DCP ShardQ step with the
+        token split `split` (vllm.v1.attention.ops.shardq.build_shardq_split),
+        or None for the DCP path.
+
+        The split's decode tokens (which the indexer scores on its decode path)
+        keep the DCP path; the plan covers the rest.
+        """
+        if split is None or common_attn_metadata.num_actual_tokens == 0:
+            return None
+        return build_dcp_shardq_context(
+            common_attn_metadata,
+            split,
+            self.layout,
+            self.max_pages,
+            self.max_indexer_keys,
+            self.max_logits_bytes,
+            self.world,
+            self.rank,
+            self.device,
+        )

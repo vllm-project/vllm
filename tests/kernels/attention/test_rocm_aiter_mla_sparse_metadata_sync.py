@@ -158,6 +158,7 @@ def _make_builder(max_num_batched_tokens: int = 8):
     builder.cp_kv_cache_interleave_size = 1
     builder.use_pcp = False
     builder.use_shardq = False
+    builder.dcp_shardq = None
     builder._prefill_backend = None
 
     builder._build_req_id_per_token = _cpu_token_to_req  # type: ignore[method-assign]
