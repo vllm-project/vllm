@@ -33,6 +33,7 @@ a value that literally contains `<|close|>argument<|sep|>` or
 
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import regex as re
 from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
@@ -52,6 +53,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 
@@ -67,6 +69,15 @@ def _partial_tag_overlap(text: str, tag: str) -> int:
         if text.endswith(tag[:n]):
             return n
     return 0
+
+
+@dataclass
+class _StreamingCall:
+    index: int | None
+    arg_count: int = 0
+    arg_type: str | None = None
+    value_start: int = 0
+    value_sent: int = 0
 
 
 class KimiK3ToolParser(ToolParser):
@@ -134,12 +145,21 @@ class KimiK3ToolParser(ToolParser):
             re.DOTALL,
         )
         self._call_close_re = re.compile(_C + r"\s*call\s*" + _S)
+        self._call_open_re = re.compile(
+            _O + r"\s*call\s+(?P<attrs>" + _TEXT_UNTIL_SEP + r")" + _S,
+            re.DOTALL,
+        )
+        self._arg_open_re = re.compile(
+            _O + r"\s*argument\s+(?P<attrs>" + _TEXT_UNTIL_SEP + r")" + _S,
+            re.DOTALL,
+        )
+        self._arg_close_re = re.compile(_C + r"\s*argument\s*" + _S)
 
         # streaming state
         self._sent_content_idx = 0
         self._sent_tool_call_count = 0
-        self._stream_call_close_idx = 0
-        self._stream_call_parse_idx = 0
+        self._stream_tool_idx = 0
+        self._stream_call: _StreamingCall | None = None
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -281,8 +301,6 @@ class KimiK3ToolParser(ToolParser):
         #   <|open|> / response / <|sep|>Hi     -> emit only "Hi" after open closes
         #   Hi<|open|> / tools / <|sep|>...     -> emit "Hi", hold the tools marker
         #   Hi<|close|> / response / <|sep|>... -> emit "Hi", hold the close marker
-        # Tool calls are even simpler: they are not emitted until a full
-        # <|close|>call<|sep|> is present in current_text.
         m_open = self._response_open_re.search(current_text)
         # In the normal chat path, the response-open marker may be consumed as
         # the generation prefix. Then generated text starts directly with the
@@ -314,6 +332,121 @@ class KimiK3ToolParser(ToolParser):
         content = current_text[self._sent_content_idx : sendable_idx]
         self._sent_content_idx = sendable_idx
         return content or None
+
+    @staticmethod
+    def _append_arguments(
+        deltas: list[DeltaToolCall], index: int | None, arguments: str
+    ) -> None:
+        if index is None or not arguments:
+            return
+        if deltas and deltas[-1].index == index and deltas[-1].function is not None:
+            function = deltas[-1].function
+            function.arguments = (function.arguments or "") + arguments
+            return
+        deltas.append(
+            DeltaToolCall(
+                index=index,
+                function=DeltaFunctionCall(arguments=arguments).model_dump(
+                    exclude_none=True
+                ),
+            )
+        )
+
+    def _stream_tool_calls(self, text: str) -> list[DeltaToolCall]:
+        """Stream calls from the tools channel without waiting for call close.
+
+        String values are raw XTML text, so they can be JSON-escaped and sent
+        as they arrive. Other values are JSON-decoded and normalized like the
+        non-streaming path, so they are sent once their argument closes.
+        """
+        deltas: list[DeltaToolCall] = []
+        pos = self._stream_tool_idx
+        while True:
+            call = self._stream_call
+            if call is None:
+                m_call = self._call_open_re.search(text, pos, partial=True)
+                if m_call is None:
+                    pos = len(text)
+                    break
+                if m_call.partial:
+                    pos = m_call.start()
+                    break
+                name = self._attrs(m_call["attrs"]).get("tool", "")
+                index = self._sent_tool_call_count if name else None
+                self._stream_call = _StreamingCall(index)
+                pos = m_call.end()
+                if index is not None:
+                    self._sent_tool_call_count += 1
+                    deltas.append(
+                        DeltaToolCall(
+                            index=index,
+                            id=make_tool_call_id(),
+                            type="function",
+                            function=DeltaFunctionCall(
+                                name=name, arguments="{"
+                            ).model_dump(exclude_none=True),
+                        )
+                    )
+                continue
+
+            if call.arg_type is None:
+                m_arg = self._arg_open_re.search(text, pos, partial=True)
+                m_close = self._call_close_re.search(text, pos, partial=True)
+                complete = [
+                    match
+                    for match in (m_arg, m_close)
+                    if match is not None and not match.partial
+                ]
+                if not complete:
+                    pos = min(
+                        (match.start() for match in (m_arg, m_close) if match),
+                        default=len(text),
+                    )
+                    break
+                match = min(complete, key=lambda item: item.start())
+                pos = match.end()
+                if match is m_close:
+                    self._append_arguments(deltas, call.index, "}")
+                    self._stream_call = None
+                    continue
+                attrs = self._attrs(match["attrs"])
+                call.arg_type = attrs.get("type", "string")
+                call.value_start = call.value_sent = pos
+                prefix = ", " if call.arg_count else ""
+                prefix += json.dumps(attrs.get("key", ""), ensure_ascii=False) + ": "
+                if call.arg_type == "string":
+                    prefix += '"'
+                self._append_arguments(deltas, call.index, prefix)
+                call.arg_count += 1
+                continue
+
+            m_value_close = self._arg_close_re.search(text, pos, partial=True)
+            value_end = len(text) if m_value_close is None else m_value_close.start()
+            if call.arg_type == "string":
+                value = text[call.value_sent : value_end]
+                self._append_arguments(
+                    deltas, call.index, json.dumps(value, ensure_ascii=False)[1:-1]
+                )
+                call.value_sent = value_end
+            if m_value_close is None or m_value_close.partial:
+                pos = value_end
+                break
+            if call.arg_type == "string":
+                self._append_arguments(deltas, call.index, '"')
+            else:
+                raw_value = text[call.value_start : value_end]
+                try:
+                    value = json.loads(raw_value)
+                except json.JSONDecodeError:
+                    value = raw_value
+                self._append_arguments(
+                    deltas, call.index, json.dumps(value, ensure_ascii=False)
+                )
+            call.arg_type = None
+            pos = m_value_close.end()
+
+        self._stream_tool_idx = pos
+        return deltas
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
@@ -373,38 +506,8 @@ class KimiK3ToolParser(ToolParser):
         if m_tools is None:
             return DeltaMessage(content=content) if content else None
 
-        self._stream_call_parse_idx = max(self._stream_call_parse_idx, m_tools.end())
-        self._stream_call_close_idx = max(self._stream_call_close_idx, m_tools.end())
-        new_calls: list[ToolCall] = []
-        while True:
-            m_close = self._call_close_re.search(
-                current_text, self._stream_call_close_idx, partial=True
-            )
-            if m_close.partial:
-                self._stream_call_close_idx = m_close.start()
-                break
-            self._stream_call_close_idx = m_close.end()
-            for call_match in self._call_re.finditer(
-                current_text, self._stream_call_parse_idx, m_close.end()
-            ):
-                tool_call = self._decode_call(call_match["attrs"], call_match["body"])
-                if tool_call is not None:
-                    new_calls.append(tool_call)
-                self._stream_call_parse_idx = call_match.end()
-
-        if not new_calls:
+        self._stream_tool_idx = max(self._stream_tool_idx, m_tools.end())
+        deltas = self._stream_tool_calls(current_text)
+        if not deltas:
             return DeltaMessage(content=content) if content else None
-
-        deltas = [
-            DeltaToolCall(
-                index=self._sent_tool_call_count + i,
-                id=tc.id,
-                type="function",
-                function=DeltaFunctionCall(
-                    name=tc.function.name, arguments=tc.function.arguments
-                ).model_dump(exclude_none=True),
-            )
-            for i, tc in enumerate(new_calls)
-        ]
-        self._sent_tool_call_count += len(new_calls)
         return DeltaMessage(content=content, tool_calls=deltas)
