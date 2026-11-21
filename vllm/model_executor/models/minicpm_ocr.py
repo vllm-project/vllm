@@ -30,6 +30,8 @@ import torch
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize
+from vllm.multimodal.processing import ProcessorInputs
+from vllm.multimodal.processing.dummy_inputs import MultiModalDummyOptions
 from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
     cached_encode,
@@ -233,6 +235,20 @@ class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
             {
                 **self._drop_image_upsize_kwargs(mm_kwargs),
                 **_VIDEO_PINNED_UPSIZE_KWARGS,
+            },
+        )
+
+    def get_dummy_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: MultiModalDummyOptions,
+    ) -> ProcessorInputs:
+        inputs = super().get_dummy_inputs(seq_len, mm_counts, mm_options)
+        return dataclass_replace(
+            inputs,
+            hf_processor_mm_kwargs={
+                "images_kwargs": {"small_image_upsize": "always"},
             },
         )
 

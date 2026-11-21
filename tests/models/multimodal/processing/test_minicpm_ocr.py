@@ -711,20 +711,32 @@ def test_scoped_small_image_upsize_matches_the_transformers_processor(
     ) == int((reference["input_ids"] == image_token_id).sum())
 
 
-def test_image_budget_covers_the_largest_image():
+@pytest.mark.parametrize(
+    "mm_processor_kwargs",
+    [
+        None,
+        {"small_image_upsize": "adaptive"},
+        {"images_kwargs": {"small_image_upsize": "adaptive"}},
+    ],
+)
+def test_image_budget_covers_the_largest_image(mm_processor_kwargs):
     model_config, processor = _ocr_processor(
-        limit_mm_per_prompt={"image": 1, "video": 0}
+        mm_processor_kwargs, limit_mm_per_prompt={"image": 1, "video": 0}
     )
     budget = processor.info.get_mm_max_tokens_per_item(
         seq_len=model_config.max_model_len, mm_counts={"image": 1}
     )
     dummy = processor.get_dummy_mm_inputs({"image": 1})
     dummy_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["image"])
+    dense_text = np.full((188, 7474, 3), 255, dtype=np.uint8)
+    for y in range(0, 184, 9):
+        for x in range(0, 7471, 8):
+            dense_text[y : y + 4, x : x + 3] = 0
 
     assert budget is not None
     assert dummy_embeds == budget["image"]
     assert budget["image"] >= _num_embeds(
-        processor, "image", PIL.Image.new("RGB", (7474, 188))
+        processor, "image", PIL.Image.fromarray(dense_text)
     )
 
 
