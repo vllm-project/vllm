@@ -87,7 +87,9 @@ from vllm.multimodal.video_prune.evs import (
     compute_mrope_for_media,
     compute_retained_tokens_count,
     compute_retention_mask,
+    pack_mrope_positions,
     recompute_mrope_positions,
+    unpack_mrope_positions,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -1512,8 +1514,8 @@ class Qwen2_5_VLForConditionalGeneration(
 
         Returns:
             Tuple of image embeddings for each image item.
-            Resulting embeddings will have extra 4 channels for
-            computed mrope positions.
+            Resulting embeddings will have encoded 4-channel mrope position
+            metadata appended.
 
         """
         merge_size = self.visual.spatial_merge_size
@@ -1524,7 +1526,7 @@ class Qwen2_5_VLForConditionalGeneration(
             positions = async_tensor_h2d(
                 compute_mrope_for_media(size, merge_size), emb.device
             )
-            emb = torch.cat([emb, positions], dim=1)
+            emb = torch.cat([emb, pack_mrope_positions(positions, emb.dtype)], dim=1)
             image_embeds_out.append(emb)
         return tuple(image_embeds_out)
 
@@ -1569,8 +1571,8 @@ class Qwen2_5_VLForConditionalGeneration(
 
         Returns:
             Tuple of video embeddings for each video item.
-            Resulting embeddings will have extra 4 channels for
-            computed mrope positions.
+            Resulting embeddings will have encoded 4-channel mrope position
+            metadata appended.
 
         """
         grid_thw = video_input["video_grid_thw"]
@@ -1612,7 +1614,7 @@ class Qwen2_5_VLForConditionalGeneration(
             with gpu_sync_allowed():
                 emb = emb[retention_mask]
                 positions = positions[retention_mask]
-            emb = torch.cat([emb, positions], dim=1)
+            emb = torch.cat([emb, pack_mrope_positions(positions, emb.dtype)], dim=1)
             video_embeds_out.append(emb)
         return tuple(video_embeds_out)
 
@@ -1660,10 +1662,12 @@ class Qwen2_5_VLForConditionalGeneration(
         else:
             input_ids_t = async_tensor_h2d(input_ids, dtype=torch.long, device=device)
 
-        mm_embeddings_out = [mm[:, :-4] for mm in multimodal_embeddings]
-        mm_embeddings_pos = [
-            mm[:, -4:].permute(1, 0).long() for mm in multimodal_embeddings
-        ]
+        mm_embeddings_out = []
+        mm_embeddings_pos = []
+        for mm in multimodal_embeddings:
+            mm_emb, mm_pos = unpack_mrope_positions(mm, num_channels=4)
+            mm_embeddings_out.append(mm_emb)
+            mm_embeddings_pos.append(mm_pos)
 
         with gpu_sync_allowed():
             positions, mrope_positions_delta = recompute_mrope_positions(
