@@ -1908,6 +1908,58 @@ def test_glm5_next_fused_shared_expert_loads_into_the_shared_slot() -> None:
     assert glm5_next_model._fused_shared_expert_name(routed, 288) == routed
 
 
+def test_mistral_large4_fused_shared_expert_loads_into_the_appended_slot() -> None:
+    """Mistral Large 4's loader appends a fused shared expert after the routed
+    experts.
+
+    `_load_weights` maps the consolidated checkpoint names and wraps the stream
+    with `maybe_fuse_shared_experts(ckpt_prefix="mlp.shared_experts")`. Only a
+    fused MoE layer's shared-expert projections are redirected, and the `w1`/
+    `w2`/`w3` names (and their block-FP8 scales) are preserved so the routed-
+    expert mapping places them.
+    """
+    from vllm.models.mistral.mistral_large4.amd.model import _to_vllm_weight_name
+
+    n_routed_experts = 128
+    fused_layer, unfused_layer = 1, 2
+    weight = torch.zeros(1)
+
+    def redirect(raw_name: str) -> str:
+        [(out_name, _)] = list(
+            maybe_fuse_shared_experts(
+                [(_to_vllm_weight_name(raw_name), weight)],
+                n_routed_experts=n_routed_experts,
+                n_shared_experts=1,
+                fused_shared_expert_layers=frozenset({fused_layer}),
+                ckpt_prefix="mlp.shared_experts",
+            )
+        )
+        return out_name
+
+    slot = n_routed_experts  # first expert slot appended after the routed ones
+    assert (
+        redirect(f"layers.{fused_layer}.shared_experts.w1.weight")
+        == f"model.layers.{fused_layer}.mlp.experts.{slot}.w1.weight"
+    )
+    assert (
+        redirect(f"layers.{fused_layer}.shared_experts.w2.weight")
+        == f"model.layers.{fused_layer}.mlp.experts.{slot}.w2.weight"
+    )
+    assert (
+        redirect(f"layers.{fused_layer}.shared_experts.w2.qscale_weight")
+        == f"model.layers.{fused_layer}.mlp.experts.{slot}.w2.weight_scale_inv"
+    )
+    # A routed expert and a shared expert on a non-fused layer are untouched.
+    assert (
+        redirect(f"layers.{fused_layer}.experts.3.w2.weight")
+        == f"model.layers.{fused_layer}.mlp.experts.3.w2.weight"
+    )
+    assert (
+        redirect(f"layers.{unfused_layer}.shared_experts.w1.weight")
+        == f"model.layers.{unfused_layer}.mlp.shared_experts.w1.weight"
+    )
+
+
 @pytest.mark.parametrize(
     ("exclude", "expected"),
     [([], True), ([r"re:.*\.shared_expert\..*"], False)],

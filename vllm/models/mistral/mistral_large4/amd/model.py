@@ -31,7 +31,9 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle3
 from vllm.model_executor.models.utils import (
     WeightsMapper,
+    get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
+    maybe_fuse_shared_experts,
     maybe_prefix,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
@@ -392,29 +394,51 @@ def _load_weights(
     """
     config = mistral_model.config
     params = dict(model.named_parameters())
+    n_routed_experts = getattr(config, "n_routed_experts", None) or 0
+    n_shared_experts = getattr(config, "n_shared_experts", None) or 0
+    # Layers whose always-on shared expert is fused into the routed MoE call
+    # (ROCm AITER). Their shared-expert checkpoint weights are loaded into
+    # expert slots appended after the routed experts, so widen the expert
+    # mapping accordingly.
+    fused_shared_expert_layers = get_fused_shared_expert_layers(model, MistralMoE)
     expert_mapping = fused_moe_make_expert_params_mapping(
         model,
         ckpt_gate_proj_name="w1",
         ckpt_down_proj_name="w2",
         ckpt_up_proj_name="w3",
-        num_experts=getattr(config, "n_routed_experts", None) or 0,
+        num_experts=n_routed_experts
+        + (n_shared_experts if fused_shared_expert_layers else 0),
     )
     loaded: set[str] = set()
     lerope_alpha: torch.Tensor | None = None
 
-    for ckpt_name, weight in weights:
-        if ckpt_name == "lerope.alpha":
-            lerope_alpha = weight
-            continue
-        if ckpt_name.startswith("mtp_"):
-            # Speculative-decoding heads are loaded by their draft model.
-            continue
-        # Layers beyond the configured depth (e.g. a truncated debug model).
-        layer = re.match(r"layers\.(\d+)\.", ckpt_name)
-        if layer is not None and int(layer.group(1)) >= config.num_hidden_layers:
-            continue
-        name = _to_vllm_weight_name(ckpt_name)
+    def _mapped_weights() -> Iterable[tuple[str, torch.Tensor]]:
+        """Yield `(vllm_name, weight)` pairs, filtering non-model entries."""
+        nonlocal lerope_alpha
+        for ckpt_name, weight in weights:
+            if ckpt_name == "lerope.alpha":
+                lerope_alpha = weight
+                continue
+            if ckpt_name.startswith("mtp_"):
+                # Speculative-decoding heads are loaded by their draft model.
+                continue
+            # Layers beyond the configured depth (e.g. a truncated debug model).
+            layer = re.match(r"layers\.(\d+)\.", ckpt_name)
+            if layer is not None and int(layer.group(1)) >= config.num_hidden_layers:
+                continue
+            yield _to_vllm_weight_name(ckpt_name), weight
 
+    # On fused-shared-expert layers (ROCm AITER), the always-on shared expert
+    # is packed into the routed expert tensor: its checkpoint weights are
+    # renamed to `mlp.experts.{n_routed_experts + j}` so the routed-expert
+    # loader below places them in the appended expert slots.
+    for name, weight in maybe_fuse_shared_experts(
+        _mapped_weights(),
+        n_routed_experts=n_routed_experts,
+        n_shared_experts=n_shared_experts,
+        fused_shared_expert_layers=fused_shared_expert_layers,
+        ckpt_prefix="mlp.shared_experts",
+    ):
         if ".mlp.experts." in name:
             is_expert_weight = False
             for param_name, weight_name, expert_id, shard_id in expert_mapping:
@@ -435,9 +459,9 @@ def _load_weights(
                     loaded.add(mapped)
                     break
             else:
-                # A known expert weight that is not local to this EP rank is skipped.
+                # A known expert weight not local to this EP rank is skipped.
                 if not is_expert_weight:
-                    raise ValueError(f"Unexpected expert weight: {ckpt_name}")
+                    raise ValueError(f"Unexpected expert weight: {name}")
             continue
 
         for param_part, ckpt_part, stacked_shard_id in _STACKED_PARAMS:
