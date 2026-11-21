@@ -250,6 +250,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.triton import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
     XPUFp8BlockScaledMMKernel,
+    XPUFp8W8A16BlockScaledMMKernel,
     XPUW8A8FP8LinearKernel,
     XPUW8A16FP8LinearKernel,
 )
@@ -304,6 +305,23 @@ def _batch_invariant_fp8_kernel(kernel, config, quantization: str):
             linear_backend,
         )
     return kernel
+
+
+def _xpu_preferred_fp8_kernel(
+    quantization: str,
+    w8a8_kernel: type[Any],
+    w8a16_kernel: type[Any],
+) -> type[Any] | None:
+    """Xe3p computes FP8 natively and prefers W8A8. Other XPUs have no FP8
+    compute units and run faster weight-only, so they prefer W8A16 (no
+    activation quantization). Returns None when --linear-backend is set, and
+    the normal list order is the fallback if the forced kernel cannot be used.
+    """
+    if _get_linear_backend(quantization=quantization) != "auto":
+        return None
+    from vllm._xpu_ops import xpu_ops
+
+    return w8a8_kernel if xpu_ops.supports_fp8_compute() else w8a16_kernel
 
 
 # Kernel classes covered by each --linear-backend value.
@@ -411,6 +429,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type[LinearKernel]]] = {
     },
     "xpu_woq": {
         XPUW8A16FP8LinearKernel,
+        XPUFp8W8A16BlockScaledMMKernel,
     },
 }
 
@@ -540,6 +559,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     ],
     PlatformEnum.XPU: [
         XPUFp8BlockScaledMMKernel,
+        XPUFp8W8A16BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
         BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
@@ -876,6 +896,12 @@ def init_fp8_linear_kernel(
                 scaled_mm_linear_kernel_config,
                 "fp8_block_w8a8",
             )
+        elif current_platform.is_xpu() and force_kernel is None:
+            force_kernel = _xpu_preferred_fp8_kernel(
+                "fp8_block_w8a8",
+                XPUFp8BlockScaledMMKernel,
+                XPUFp8W8A16BlockScaledMMKernel,
+            )
 
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
@@ -915,6 +941,10 @@ def init_fp8_linear_kernel(
                 TritonFP8ScaledMMLinearKernel,
                 scaled_mm_linear_kernel_config,
                 "fp8_w8a8",
+            )
+        elif current_platform.is_xpu() and force_kernel is None:
+            force_kernel = _xpu_preferred_fp8_kernel(
+                "fp8_w8a8", XPUW8A8FP8LinearKernel, XPUW8A16FP8LinearKernel
             )
 
         kernel_type = choose_scaled_mm_linear_kernel(
