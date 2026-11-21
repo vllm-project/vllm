@@ -29,9 +29,18 @@ class ChunkStatus(ctypes.Structure):
     ref_cnt - the current number of transfers using this chunk as a source.
         A value of -1 indicates the chunk is not yet ready to be read.
     chunk_id - index of the physical CPU buffer slot.
+    ready_time - monotonic time at which the chunk became readable.
+    last_access_time - monotonic time of the last request access.
+    reused - whether a load or a remote read used the chunk.
     """
 
-    _fields_ = [("ref_cnt", ctypes.c_int32), ("chunk_id", ctypes.c_int64)]
+    _fields_ = [
+        ("ref_cnt", ctypes.c_int32),
+        ("chunk_id", ctypes.c_int64),
+        ("ready_time", ctypes.c_double),
+        ("last_access_time", ctypes.c_double),
+        ("reused", ctypes.c_bool),
+    ]
 
     def __init__(self, chunk_id: int):
         super().__init__()

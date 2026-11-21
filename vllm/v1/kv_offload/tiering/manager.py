@@ -266,7 +266,10 @@ class _SecondaryTierFacingParent(ParentManager):
     def create_store_job(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> TransferJob:
-        return self._m.create_store_job(keys, req_context, self._origin_idx)
+        job = self._m.create_store_job(keys, req_context, self._origin_idx)
+        # Unlike a cascade, serving a remote request reads the chunks.
+        self._m.primary_tier.record_reads(keys)
+        return job
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         return self._m.on_request_finished(

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections import OrderedDict
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
@@ -93,6 +94,8 @@ class CPUOffloadingManager(OffloadingManager):
         self.max_tracker_size: int = max_tracker_size
         self.stores_skipped_in_current_batch: int = 0
         self.allocation_sizes_in_current_batch: list[int] = []
+        # (idle seconds, lifetime seconds, reused) of each evicted chunk.
+        self.evictions_in_current_batch: list[tuple[float, float, bool]] = []
         self._cache_generation = 0
 
         # Number of chunk references. It is ordered so can evict the LRU entry in O(1).
@@ -200,6 +203,15 @@ class CPUOffloadingManager(OffloadingManager):
             key for key in reused_keys if key not in state.inserted_keys
         )
 
+    def record_reads(self, keys: Iterable[OffloadKey]) -> None:
+        """Mark ready chunks as read by a load or a remote request."""
+        now = time.monotonic()
+        for key in keys:
+            chunk = self._policy.get(key)
+            assert chunk is not None
+            chunk.reused = True
+            chunk.last_access_time = now
+
     # --- OffloadingManager interface ---
 
     @override
@@ -250,6 +262,7 @@ class CPUOffloadingManager(OffloadingManager):
             chunks.append(chunk)
         if record_access:
             self._record_request_cache_access(keys, req_context, reused_keys=keys)
+            self.record_reads(keys)
         return self._get_load_store_spec(keys, chunks)
 
     @override
@@ -287,6 +300,7 @@ class CPUOffloadingManager(OffloadingManager):
         # aged out; the threshold applies only to new store candidates.
         keys_to_store: list[OffloadKey] = []
         ready_existing_keys: list[OffloadKey] = []
+        now = time.monotonic()
         for key in keys:
             chunk = self._policy.get(key)
             if chunk is None:
@@ -294,6 +308,7 @@ class CPUOffloadingManager(OffloadingManager):
             else:
                 if chunk.is_ready:
                     ready_existing_keys.append(key)
+                    chunk.last_access_time = now
 
         if self.counts is not None:
             admitted_keys: list[OffloadKey] = []
@@ -354,6 +369,9 @@ class CPUOffloadingManager(OffloadingManager):
             assert self._num_evictable_cache_chunks >= 0
 
             for key, chunk in evicted:
+                self.evictions_in_current_batch.append(
+                    (now - chunk.last_access_time, now - chunk.ready_time, chunk.reused)
+                )
                 self._free_chunk(chunk)
                 to_evict.append(key)
 
@@ -406,10 +424,12 @@ class CPUOffloadingManager(OffloadingManager):
         removed_keys: list[OffloadKey] = []
 
         if success:
+            now = time.monotonic()
             for key in keys:
                 chunk = self._policy.get(key)
                 if chunk is not None and not chunk.is_ready:
                     chunk.ref_cnt = 0
+                    chunk.ready_time = chunk.last_access_time = now
                     self._num_write_pending_chunks -= 1
                     self._num_evictable_cache_chunks += 1
                     self._policy.mark_evictable(key)
@@ -526,6 +546,17 @@ class CPUOffloadingManager(OffloadingManager):
                 CPUOffloadingMetrics.CPU_ALLOCATION_SIZE, allocation_size
             )
         self.allocation_sizes_in_current_batch.clear()
+
+        for idle, lifetime, reused in self.evictions_in_current_batch:
+            stats.observe_histogram(
+                CPUOffloadingMetrics.CPU_CHUNK_IDLE_BEFORE_EVICT, idle
+            )
+            stats.observe_histogram(CPUOffloadingMetrics.CPU_CHUNK_LIFETIME, lifetime)
+            stats.increase_counter(
+                CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS,
+                labelvalues=("true" if reused else "false",),
+            )
+        self.evictions_in_current_batch.clear()
 
         write_usage = (
             self._num_write_pending_chunks / self._num_chunks

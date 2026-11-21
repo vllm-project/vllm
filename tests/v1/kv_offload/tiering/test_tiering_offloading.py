@@ -351,6 +351,20 @@ class TestTieringOffloadingManager:
         if req_context.req_id not in self.manager._req_state:
             self.manager.on_new_request(req_context)
 
+    def test_only_remote_reads_mark_primary_chunks_reused(self, manager_setup):
+        keys = to_keys([1, 2])
+        self._start_request()
+        self.primary_tier.prepare_write(keys, _CTX)
+        self.primary_tier.complete_write(keys, _CTX)
+
+        self.manager.create_store_job(keys[:1], _CTX)
+        parent = self.manager._tier_parents[self.secondary_tier1]
+        parent.create_store_job(keys[1:], _CTX)
+
+        cascaded, served = (self.primary_tier._policy.get(key) for key in keys)
+        assert cascaded is not None and not cascaded.reused
+        assert served is not None and served.reused
+
     def test_failed_promotion_finalizes_primary_with_failure(self, manager_setup):
         """A failed promotion still finalizes the primary slots with
         success=False; the tier corrects its own verdict."""

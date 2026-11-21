@@ -3,6 +3,7 @@
 from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -18,6 +19,7 @@ from vllm.v1.kv_offload.base import (
     StoreTrigger,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu import manager as manager_module
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
@@ -360,6 +362,54 @@ def test_cpu_manager_reports_allocation_size_histogram():
     assert f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count" not in (
         second_stats.reduce()
     )
+
+
+def test_cpu_manager_reports_chunk_eviction_metrics(monkeypatch):
+    clock = 0.0
+    monkeypatch.setattr(
+        manager_module, "time", SimpleNamespace(monotonic=lambda: clock)
+    )
+    manager = make_cpu_manager(num_chunks=1)
+
+    def store(key: int, success: bool = True) -> None:
+        keys = to_keys([key])
+        assert manager.prepare_store(
+            keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        manager.complete_store(
+            keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE, success=success
+        )
+
+    # Chunk 1 is never accessed: idle time is measured from its store.
+    clock = 10.0
+    store(1)
+    clock = 30.0
+    store(2)
+    # Chunk 2 is loaded.
+    clock = 40.0
+    reuse_keys(manager, to_keys([2]))
+    clock = 100.0
+    store(3)
+    # Offering the cached chunk 3 is an access, but not a read.
+    clock = 110.0
+    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
+    # Neither a failed store nor a cache reset is an eviction.
+    clock = 150.0
+    store(4, success=False)
+    store(5)
+    manager.reset_cache()
+
+    stats = manager.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    idle = CPUOffloadingMetrics.CPU_CHUNK_IDLE_BEFORE_EVICT
+    lifetime = CPUOffloadingMetrics.CPU_CHUNK_LIFETIME
+    evictions = CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS
+    assert reduced[f"{idle}_count"] == reduced[f"{lifetime}_count"] == 3
+    assert reduced[f"{idle}_sum"] == 20 + 60 + 40
+    assert reduced[f"{lifetime}_sum"] == 20 + 70 + 50
+    assert reduced[f"{evictions}:('false',)"] == 2
+    assert reduced[f"{evictions}:('true',)"] == 1
 
 
 def test_cpu_manager_reports_allocation_size_on_allocation_failure(monkeypatch):
