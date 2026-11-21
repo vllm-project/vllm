@@ -20,6 +20,8 @@ use super::{
     BenchCommand, Cli, Command, DtypeArg, LogStatsInterval, SharedRuntimeArgs, parse_int_flag,
 };
 
+use super::MmProcessorCacheType;
+
 /// Resolve the data parallel topology the way `vllm-rs serve` does at startup.
 fn topology(args: &super::ServeArgs) -> vllm_managed_engine::data_parallel::DataParallelTopology {
     args.data_parallel_lb.resolve(&args.managed_engine, args.headless).unwrap()
@@ -287,6 +289,9 @@ fn serve_args_forward_python_flags_with_separator() {
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
+                        mm_processor_cache_type: None,
+                        mm_processor_cache_gb: 4.0,
+                        mm_shm_cache_max_object_size_mb: 128,
                         mm_processor_kwargs: {},
                         lora_modules: [],
                         default_mm_loras: {},
@@ -2352,6 +2357,9 @@ fn frontend_args_accept_json() {
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
+                        mm_processor_cache_type: None,
+                        mm_processor_cache_gb: 4.0,
+                        mm_shm_cache_max_object_size_mb: 128,
                         mm_processor_kwargs: {},
                         lora_modules: [],
                         default_mm_loras: {},
@@ -3236,6 +3244,280 @@ fn serve_args_accept_headless_mode() {
 }
 
 #[test]
+fn serve_args_accept_mm_processor_cache_shm() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--mm-processor-cache-type",
+        "shm",
+        "--mm-processor-cache-gb",
+        "8",
+        "--mm-shm-cache-max-object-size-mb",
+        "64",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(
+        args.runtime.mm_processor_cache_type,
+        Some(MmProcessorCacheType::Shm)
+    );
+    assert_eq!(args.runtime.mm_processor_cache_gb, 8.0);
+    assert_eq!(args.runtime.mm_shm_cache_max_object_size_mb, 64);
+    args.check_mm_shm_cache_support().unwrap();
+
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    let shm_config = args.runtime.mm_shm_cache_config(5555).expect("shm cache should be enabled");
+    assert_eq!(shm_config.data_buffer_size, 8 << 30);
+    assert_eq!(shm_config.max_object_size, 64 << 20);
+
+    assert_eq!(
+        config.python_args,
+        vec![
+            "--reasoning-parser".to_string(),
+            "qwen3".to_string(),
+            "--mm-processor-cache-type".to_string(),
+            "shm".to_string(),
+            "--mm-processor-cache-gb".to_string(),
+            "8".to_string(),
+            "--mm-shm-cache-max-object-size-mb".to_string(),
+            "64".to_string(),
+            "--mm-shm-cache-buffer-name".to_string(),
+            shm_config.shm_name.clone(),
+        ]
+    );
+}
+
+#[test]
+fn serve_args_mm_processor_cache_numeric_defaults_match_python() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.mm_processor_cache_type, None);
+    assert_eq!(args.runtime.mm_processor_cache_gb, 4.0);
+    assert_eq!(args.runtime.mm_shm_cache_max_object_size_mb, 128);
+    assert!(args.runtime.mm_shm_cache_config(5555).is_none());
+}
+
+#[test]
+fn serve_args_mm_processor_cache_gb_zero_disables_cache() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--mm-processor-cache-type",
+        "shm",
+        "--mm-processor-cache-gb",
+        "0",
+        "--data-parallel-size",
+        "2",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert!(args.runtime.mm_shm_cache_config(5555).is_none());
+    args.check_mm_shm_cache_support().unwrap();
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    assert!(!config.python_args.iter().any(|arg| arg == "--mm-shm-cache-buffer-name"));
+}
+
+#[test]
+fn serve_args_reject_negative_mm_processor_cache_gb() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--mm-processor-cache-gb",
+        "-1",
+    ])
+    .unwrap_err();
+
+    assert!(error.to_string().contains("unexpected argument '-1'"));
+}
+
+#[test]
+fn serve_args_reject_mm_shm_options_without_shm_cache() {
+    for (flag, value) in [
+        ("--mm-processor-cache-gb", "8"),
+        ("--mm-shm-cache-max-object-size-mb", "64"),
+    ] {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag, value]).unwrap();
+
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        let error = args.check_mm_shm_cache_support().unwrap_err();
+        assert!(error.contains(flag), "{flag}: {error}");
+        assert!(error.contains("--mm-processor-cache-type shm"), "{error}");
+    }
+}
+
+#[test]
+fn serve_args_reject_mm_processor_cache_type_lru() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--mm-processor-cache-type",
+        "lru",
+    ])
+    .unwrap_err();
+
+    expect![[r#"
+        error: invalid value 'lru' for '--mm-processor-cache-type <TYPE>': unsupported multi-modal processor cache type `lru`: only `shm` is implemented in the Rust frontend
+
+        For more information, try '--help'.
+    "#]]
+    .assert_eq(&error.to_string());
+}
+
+#[test]
+fn serve_args_mm_shm_cache_rejects_data_parallel_without_external_lb() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--mm-processor-cache-type",
+        "shm",
+        "--data-parallel-size",
+        "2",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let error = args.check_mm_shm_cache_support().unwrap_err();
+    assert!(error.contains("--data-parallel-size 1"), "{error}");
+    assert!(error.contains("--data-parallel-external-lb"), "{error}");
+}
+
+#[test]
+fn serve_args_mm_shm_cache_accepts_external_data_parallel_lb() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--mm-processor-cache-type",
+        "shm",
+        "--data-parallel-size",
+        "2",
+        "--data-parallel-external-lb",
+        "--data-parallel-rank",
+        "1",
+        "--data-parallel-rpc-port",
+        "5555",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    args.check_mm_shm_cache_support().unwrap();
+    topology(&args);
+}
+
+#[test]
+fn serve_args_mm_shm_cache_rejects_headless() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--mm-processor-cache-type",
+        "shm",
+        "--headless",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let error = args.check_mm_shm_cache_support().unwrap_err();
+    assert!(error.contains("--headless"), "{error}");
+}
+
+#[test]
+fn serve_args_mm_shm_cache_rejects_remote_only_engines() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--mm-processor-cache-type",
+        "shm",
+        "--data-parallel-size-local",
+        "0",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let error = args.check_mm_shm_cache_support().unwrap_err();
+    assert!(error.contains("--data-parallel-size-local 0"), "{error}");
+}
+
+#[test]
+fn frontend_args_json_rejects_mm_processor_cache_type() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "4",
+        "--output-listener-fd",
+        "5",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","mm_processor_cache_type":"shm"}"#,
+    ])
+    .unwrap_err();
+
+    expect![[r#"
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","mm_processor_cache_type":"shm"}' for '--args-json <JSON>': `mm_processor_cache_type` is only supported by managed `vllm-rs serve` mode; the Python-supervised frontend cannot create the shm object-storage buffer
+
+        For more information, try '--help'.
+    "#]]
+    .assert_eq(&error.to_string());
+}
+
+#[test]
+fn frontend_args_json_validates_mm_processor_cache_options() {
+    for (cache_args, expected) in [
+        (r#""mm_processor_cache_gb":-1"#, "must be non-negative"),
+        (r#""mm_processor_cache_gb":8"#, "--mm-processor-cache-gb"),
+        (
+            r#""mm_shm_cache_max_object_size_mb":64"#,
+            "--mm-shm-cache-max-object-size-mb",
+        ),
+    ] {
+        let args_json = format!(r#"{{"model_tag":"Qwen/Qwen3-0.6B",{cache_args}}}"#);
+        let error = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "4",
+            "--output-listener-fd",
+            "5",
+            "--args-json",
+            &args_json,
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains(expected), "{args_json}: {error}");
+    }
+}
+
+#[test]
 fn serve_args_keep_python_passthrough_flags_after_separator() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -3444,6 +3726,9 @@ fn serve_args_accept_handshake_aliases() {
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
+                        mm_processor_cache_type: None,
+                        mm_processor_cache_gb: 4.0,
+                        mm_shm_cache_max_object_size_mb: 128,
                         mm_processor_kwargs: {},
                         lora_modules: [],
                         default_mm_loras: {},

@@ -167,6 +167,7 @@ impl ChatRequestProcessor {
         &self,
         request: &ChatRequest,
         rendered: RenderedPrompt,
+        mm_info: Option<&multimodal::MultimodalModelInfo>,
     ) -> Result<(Prompt, Option<MmFeatures>)> {
         let media_is_empty = match &rendered.media_order {
             Some(media_order) => media_order.is_empty(),
@@ -177,7 +178,7 @@ impl ChatRequestProcessor {
                 multimodal::finalize_rendered_prompt(
                     request,
                     rendered,
-                    self.backend.multimodal_model_info(),
+                    mm_info,
                     model_dtype,
                     self.max_model_len,
                 )
@@ -223,6 +224,7 @@ impl ChatRequestProcessor {
     async fn prepare_text_request(
         &self,
         mut request: ChatRequest,
+        mm_info: Option<&multimodal::MultimodalModelInfo>,
     ) -> Result<(TextRequest, Option<String>)> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
@@ -243,7 +245,8 @@ impl ChatRequestProcessor {
         // Taken before media placeholders are expanded, like Python.
         let prompt_text =
             request.return_prompt_text.then(|| rendered.prompt.as_text().cloned()).flatten();
-        let (prompt, mm_features) = self.finalize_rendered_prompt(&request, rendered).await?;
+        let (prompt, mm_features) =
+            self.finalize_rendered_prompt(&request, rendered, mm_info).await?;
         let text_request = TextRequest {
             request_id: request.request_id,
             prompt,
@@ -269,10 +272,19 @@ impl ChatRequestProcessor {
     }
 
     /// Prepare one chat request for tokenization without constructing an output processor.
+    ///
+    /// Tokenization never submits to the engine, so it uses a cacheless
+    /// multimodal pipeline: no worker would read the shm chunks, and cached
+    /// puts would leak writer references. Python uses a separate processor-only
+    /// cache for tokenize.
     pub async fn prepare_for_tokenization(&self, mut request: ChatRequest) -> Result<TextRequest> {
         request.validate()?;
         self.map_reasoning_effort(&mut request);
-        let (text_request, _) = self.prepare_text_request(request).await?;
+        let mm_info = self
+            .backend
+            .multimodal_model_info()
+            .map(|info| info.clone().with_mm_processor_cache(None));
+        let (text_request, _) = self.prepare_text_request(request, mm_info.as_ref()).await?;
         Ok(text_request)
     }
 
@@ -304,7 +316,8 @@ impl ChatRequestProcessor {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        let (mut text_request, prompt_text) = self.prepare_text_request(request).await?;
+        let (mut text_request, prompt_text) =
+            self.prepare_text_request(request, self.backend.multimodal_model_info()).await?;
 
         // Initialize the output processors from the final prompt token IDs and
         // apply the output grammar to the request, if any. The processors of

@@ -205,6 +205,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config.default_chat_template_kwargs.clone(),
             limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
+            // The render server has no engine to share a shm segment with.
+            mm_processor_cache: None,
             mm_processor_kwargs: config.mm_processor_kwargs.clone(),
         },
     )

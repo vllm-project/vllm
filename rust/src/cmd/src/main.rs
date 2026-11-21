@@ -6,6 +6,7 @@ mod cli;
 use std::env;
 use std::ffi::OsStr;
 use std::process::{ExitCode, ExitStatus};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -13,6 +14,8 @@ use thiserror_ext::AsReport as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use vllm_managed_engine::ManagedEngineHandle;
+use vllm_mm_cache::MmProcessorShmCache;
+use vllm_server::Config;
 use vllm_tracing::LogLevel;
 
 use crate::cli::{BenchCommand, Cli, Command, frontend_ipc_handshake_address};
@@ -126,6 +129,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             vllm_bench::run(bench_args).await
         }
         Command::Serve(args) => {
+            args.check_mm_shm_cache_support().map_err(anyhow::Error::msg)?;
             let topology = args.data_parallel_lb.resolve(&args.managed_engine, args.headless)?;
             let handshake_port = args.managed_engine.resolve_handshake_port()?;
 
@@ -145,6 +149,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
 
             let shutdown_timeout = args.runtime.shutdown_timeout();
+
             // The frontend owning rank 0 hosts the deployment's handshake. In hybrid or
             // external DP LB, another node's frontend serves only its engines' second
             // handshake, on a local IPC endpoint.
@@ -156,6 +161,15 @@ async fn async_main(cli: Cli) -> Result<()> {
                 &topology,
                 client_handshake_address.clone(),
             );
+            // Create the shm multi-modal processor cache (the P0 writer) before
+            // spawning the managed Python engine, so its workers can open the
+            // segment named by `--mm-shm-cache-buffer-name`.
+            let mm_cache = args
+                .runtime
+                .mm_shm_cache_config(handshake_port)
+                .map(|config| MmProcessorShmCache::create(config).map(Arc::new))
+                .transpose()
+                .context("failed to create the shm multi-modal processor cache")?;
             let handshake_address =
                 client_handshake_address.unwrap_or_else(|| engine_config.handshake_address());
 
@@ -173,7 +187,10 @@ async fn async_main(cli: Cli) -> Result<()> {
                     Ok(())
                 })
             } else {
-                let config = args.to_frontend_config(handshake_address, &topology);
+                let config = Config {
+                    mm_processor_cache: mm_cache.clone(),
+                    ..args.to_frontend_config(handshake_address, &topology)
+                };
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
                     let result = vllm_server::serve(config, shutdown).await;

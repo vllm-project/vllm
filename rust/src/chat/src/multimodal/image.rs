@@ -6,11 +6,14 @@
 
 use std::sync::Arc;
 
-use llm_multimodal::{ImageFrame, Modality, PreprocessedEncoderInputs, VisionPreprocessingContext};
+use itertools::izip;
+use llm_multimodal::{
+    ImageFrame, Modality, PreprocessedEncoderInputs, PromptReplacement, VisionPreprocessingContext,
+};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
 use super::timing::MM_STAGE_TARGET;
-use super::{MultimodalModelInfo, PreparedMedia, VisionModalitySupport, item};
+use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary image encoder input.
@@ -19,6 +22,10 @@ pub(super) const IMAGE_PRIMARY_KEY: &str = "pixel_values";
 impl MultimodalModelInfo {
     /// Preprocess all fetched image frames as one batch and build per-item
     /// features.
+    ///
+    /// Cache hits after fetch/decode skip preprocessing; misses are
+    /// preprocessed here as one batch. Budget-sensitive processors bypass the
+    /// cache (see [`Self::mm_cache_for`]), so they always preprocess inline.
     #[tracing::instrument(
         name = "mm_stage",
         target = MM_STAGE_TARGET,
@@ -35,6 +42,35 @@ impl MultimodalModelInfo {
         let support = self.image.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Image.to_string(),
         })?;
+
+        let sources = izip!(frames, uuids).collect::<Vec<_>>();
+        let compute = async |misses| {
+            self.preprocess_image_batch(support, misses, model_dtype, preprocessing_context)
+                .await
+        };
+        let (replacements, items) = match self.mm_cache_for(Modality::Image) {
+            Some(cache) => cache.prepare_cached(sources, compute).await?,
+            None => compute(sources).await?,
+        };
+
+        Ok(PreparedMedia {
+            modality: Modality::Image,
+            placeholder: support.placeholder.clone(),
+            replacements,
+            items,
+        })
+    }
+
+    /// Preprocess fetched image frames as one batch and build per-item
+    /// replacements and engine kwargs.
+    async fn preprocess_image_batch(
+        &self,
+        support: &VisionModalitySupport,
+        misses: Vec<(Arc<ImageFrame>, Option<String>)>,
+        model_dtype: ModelDtype,
+        preprocessing_context: VisionPreprocessingContext,
+    ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)> {
+        let (frames, uuids): (Vec<_>, Vec<_>) = misses.into_iter().unzip();
         let preprocessed = self.preprocess_images(support, &frames, preprocessing_context).await?;
         let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != frames.len() {
@@ -47,13 +83,7 @@ impl MultimodalModelInfo {
         let hashes = frames.iter().map(|frame| frame.hash.clone()).collect();
         let items =
             item::build_batched_items(&support.spec, preprocessed, hashes, uuids, model_dtype)?;
-
-        Ok(PreparedMedia {
-            modality: Modality::Image,
-            placeholder: support.placeholder.clone(),
-            replacements,
-            items,
-        })
+        Ok((replacements, items))
     }
 
     /// Preprocess fetched image frames with the model's resolved vision
