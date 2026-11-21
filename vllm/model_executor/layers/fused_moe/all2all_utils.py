@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed import (
     GroupCoordinator,
     get_ep_group,
@@ -463,6 +463,22 @@ def maybe_make_prepare_finalize(
             )
 
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:
+        vllm_config = get_current_vllm_config_or_none()
+        if (
+            current_platform.is_cuda()
+            and vllm_config is not None
+            and vllm_config.parallel_config.enable_dbo
+        ):
+            if use_monolithic:
+                raise ValueError(
+                    "CUDA DBO with allgather_reducescatter requires a modular "
+                    "MoE kernel. Select a compatible --moe-backend, such as triton."
+                )
+            if all2all_manager.internode:
+                raise ValueError(
+                    "CUDA DBO with allgather_reducescatter requires all expert "
+                    "parallel ranks to be on the same node."
+                )
         prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
             use_monolithic=use_monolithic,
             is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
