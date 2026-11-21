@@ -543,6 +543,13 @@ class HummingLinearMethod(LinearMethodBase):
                 param_dtype=layer.param_dtype,
             )
             tensors.update(input_tensors)
+            placeholder = layer._parameters.get("weight")
+            if (
+                placeholder is not None
+                and placeholder.ndim == 0
+                and "weight" in tensors
+            ):
+                del layer._parameters["weight"]
             replace_layer_parameters(layer, tensors, list(layer._parameters))
             del tensors
 
