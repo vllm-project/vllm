@@ -14,8 +14,8 @@ use vllm_text::Prompt;
 use vllm_text::tokenizer::DynTokenizer;
 
 use super::{ChatRenderer, RenderedPrompt, RendererSelection};
-use crate::Result;
-use crate::request::ChatRequest;
+use crate::error::{Result, bail_invalid_message_tools};
+use crate::request::{ChatContent, ChatMessage, ChatRequest};
 
 /// Kimi K3 checkpoint generation rendered by [`KimiK3ChatRenderer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +71,9 @@ impl KimiK3ChatRenderer {
 impl ChatRenderer for KimiK3ChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         request.validate()?;
+        if self.variant == KimiK3Variant::K3 {
+            validate_system_tools(request)?;
+        }
         let reasoning =
             encoding::resolve_reasoning(request, &self.default_template_kwargs, self.variant)?;
         let mut effective_template_kwargs = reasoning.template_kwargs(request);
@@ -94,4 +97,40 @@ impl ChatRenderer for KimiK3ChatRenderer {
             effective_template_kwargs,
         })
     }
+}
+
+/// K3 system declarations have no instruction text and use identifier names.
+/// K3.1 and the existing developer-message path retain their own encoding.
+fn validate_system_tools(request: &ChatRequest) -> Result<()> {
+    for message in &request.messages {
+        let ChatMessage::System {
+            content,
+            tools: Some(tools),
+        } = message
+        else {
+            continue;
+        };
+        if tools.is_empty() {
+            continue;
+        }
+        let empty = match content {
+            ChatContent::Text(text) => text.is_empty(),
+            ChatContent::Parts(parts) => parts.is_empty(),
+        };
+        if !empty {
+            bail_invalid_message_tools!("Kimi K3 system messages with tools require empty content");
+        }
+        for tool in tools {
+            let mut name = tool.name.chars();
+            if tool.name.len() > 256
+                || !name.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                || !name.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                bail_invalid_message_tools!(
+                    "Kimi K3 dynamic tool names must match [A-Za-z_][A-Za-z0-9_]* and be at most 256 bytes"
+                );
+            }
+        }
+    }
+    Ok(())
 }

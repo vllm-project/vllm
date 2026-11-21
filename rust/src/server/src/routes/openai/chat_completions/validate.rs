@@ -57,7 +57,10 @@ pub(super) fn validate_request_compat(
     }
 
     for message in &request.messages {
-        if let ChatMessage::Developer {
+        if let ChatMessage::System {
+            tools: Some(tools), ..
+        }
+        | ChatMessage::Developer {
             tools: Some(tools), ..
         } = message
         {

@@ -334,7 +334,7 @@ impl ChatRenderer for HfChatRenderer {
 struct TemplateMessage<'a> {
     role: &'a str,
     content: TemplateContent,
-    // Developer-role messages may provide message-local tools in the same shape
+    // Instruction messages may provide message-local tools in the same shape
     // as top-level request tools.
     tools: Option<Vec<TemplateTool>>,
     // Reasoning-capable HF templates are inconsistent on the exact field name,
@@ -421,10 +421,10 @@ fn to_template_message<'a>(
     multimodal: Option<&MultimodalRenderInfo>,
 ) -> Result<TemplateMessage<'a>> {
     Ok(match message {
-        ChatMessage::System { content } => TemplateMessage {
+        ChatMessage::System { content, tools } => TemplateMessage {
             role: "system",
             content: to_template_content(content, content_format, multimodal)?,
-            tools: None,
+            tools: tools.as_deref().map(to_template_tools),
             reasoning: None,
             reasoning_content: None,
             tool_calls: None,
@@ -778,6 +778,43 @@ mod tests {
         assert_eq!(rendered, "2:developer:lookup:lookup");
         assert_eq!(request.tool_choice(), &ChatToolChoice::Auto);
         assert_eq!(request.tools().len(), 1);
+    }
+
+    #[test]
+    fn system_tools_survive_developer_role_lowering_in_place() {
+        let declaration = ChatMessage::System {
+            content: "".into(),
+            tools: Some(vec![ChatTool {
+                name: "lookup".to_string(),
+                description: None,
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                defer_loading: None,
+            }]),
+        };
+        let template = "{% for m in messages %}{% if m.role not in ['system', 'user', 'assistant', 'tool'] %}{{ raise_exception('unsupported role') }}{% endif %}{{ m.role }}:{{ m.content }}{% if m.tools %}:{{ m.tools[0].function.name }}{% endif %};{% endfor %}";
+        let mut prompts = Vec::new();
+        for messages in [
+            vec![
+                ChatMessage::developer("instructions", None),
+                declaration.clone(),
+                ChatMessage::user("hello"),
+            ],
+            vec![
+                declaration,
+                ChatMessage::developer("instructions", None),
+                ChatMessage::user("hello"),
+            ],
+        ] {
+            prompts.push(render(Some(template), &sample_request(messages)).unwrap());
+        }
+        expect![[r#"
+            [
+                "system:instructions;system::lookup;user:hello;",
+                "system::lookup;system:instructions;user:hello;",
+            ]
+        "#]]
+        .assert_debug_eq(&prompts);
     }
 
     fn render(template: Option<&str>, request: &ChatRequest) -> Result<String> {
