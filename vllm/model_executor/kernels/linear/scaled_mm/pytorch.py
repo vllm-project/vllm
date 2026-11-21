@@ -197,6 +197,18 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
 
 
 class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        # Persistent unit scales for torch._scaled_mm (a per-call allocation can be
+        # read stale under stream overlap). Kept as a buffer so weight reloads and
+        # sleep mode preserve the tensor that captured CUDA graphs use.
+        w = self._get_layer_params(layer)[0]
+        unit_scale = getattr(layer, "_scaled_mm_unit_scale", None)
+        if unit_scale is None or unit_scale.device != w.device:
+            unit_scale = torch.ones(1, dtype=torch.float32, device=w.device)
+            layer.register_buffer("_scaled_mm_unit_scale", unit_scale, persistent=False)
+        self._unit_scale = unit_scale
+
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
@@ -235,8 +247,10 @@ class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         # does not support s_w being a vector.
 
         # Input scaling factors are no longer optional in _scaled_mm starting
-        # from pytorch 2.5. Allocating a dummy tensor to pass as scales
-        dummy_tensor = torch.ones(1, dtype=torch.float32, device=A.device)
+        # from pytorch 2.5. Pass the unit scales from process_weights_after_loading.
+        dummy_tensor = getattr(self, "_unit_scale", None)
+        if dummy_tensor is None or dummy_tensor.device != A.device:
+            dummy_tensor = torch.ones(1, dtype=torch.float32, device=A.device)
 
         # GEMM
         # This computes C = (X * W).
