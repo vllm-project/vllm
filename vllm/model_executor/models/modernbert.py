@@ -80,15 +80,16 @@ class ModernBertAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         self.layer_id = layer_id
         self.deterministic_flash_attn = config.deterministic_flash_attn
-        self.num_heads = config.num_attention_heads
-        assert self.num_heads % tp_size == 0
-        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.total_num_heads = config.num_attention_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.head_dim = config.hidden_size // self.total_num_heads
         self.all_head_size = self.head_dim * self.num_heads
         self.scaling = self.head_dim**-0.5
         self.Wqkv = QKVParallelLinear(
             config.hidden_size,
             self.head_dim,
-            self.num_heads,
+            self.total_num_heads,
             bias=config.attention_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.Wqkv",
