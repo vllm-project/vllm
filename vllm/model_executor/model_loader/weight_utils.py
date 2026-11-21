@@ -1319,11 +1319,22 @@ def _fastsafetensors_memory_budget(
         # Agree on the CPU/gloo group: WORLD often has no NCCL communicator at
         # this point (compute runs on the TP/DCP/EP subgroups), and creating one
         # costs pinned host buffers per proxy connection for its lifetime.
+        # Under elastic EP the coordinator is stateless: it covers every
+        # replica, so a reduce over it would wait on ranks that are not
+        # loading, and its group is not registered for plain collectives.
+        # Fall back to the loader's own group there.
         agree_group = None
         try:
-            from vllm.distributed.parallel_state import get_world_group
+            from vllm.distributed.stateless_coordinator import (
+                StatelessGroupCoordinator,
+            )
 
-            agree_group = get_world_group().cpu_group
+            world_group = get_world_group()
+            if (
+                not isinstance(world_group, StatelessGroupCoordinator)
+                and world_group.world_size == pg.size()
+            ):
+                agree_group = world_group.cpu_group
         except Exception:
             agree_group = None
         if agree_group is not None:
@@ -1338,6 +1349,20 @@ def _fastsafetensors_memory_budget(
         if agreed_budget != budget:
             budget, reason = agreed_budget, "agreed across ranks"
     return (budget or None), reason
+
+
+def _safetensors_tensor_sizes(
+    hf_weights_files: list[str],
+) -> Generator[tuple[str, int], None, None]:
+    """Yield each tensor's name and size in bytes, from the shard headers."""
+    for path in hf_weights_files:
+        with open(path, "rb") as f:
+            header = json.loads(f.read(struct.unpack("<Q", f.read(8))[0]))
+        for name, meta in header.items():
+            if name == "__metadata__":
+                continue
+            start, end = meta["data_offsets"]
+            yield name, end - start
 
 
 def _safetensors_largest_tensor(
@@ -1355,24 +1380,20 @@ def _safetensors_largest_tensor(
             same predicate: a tensor that is never read cannot constrain a chunk.
 
     """
-    largest = 0
-    for path in hf_weights_files:
-        with open(path, "rb") as f:
-            header = json.loads(f.read(struct.unpack("<Q", f.read(8))[0]))
-        for name, meta in header.items():
-            if name == "__metadata__":
-                continue
-            if keep_tensor is not None and not keep_tensor(name):
-                continue
-            start, end = meta["data_offsets"]
-            largest = max(largest, end - start)
-    return largest
+    return max(
+        (
+            size
+            for name, size in _safetensors_tensor_sizes(hf_weights_files)
+            if keep_tensor is None or keep_tensor(name)
+        ),
+        default=0,
+    )
 
 
 def fastsafetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
-    accumulate_resident: bool = False,
+    accumulate_resident: bool | None = False,
     local_expert_ids: set[int] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
@@ -1387,21 +1408,24 @@ def fastsafetensors_weights_iterator(
         use_tqdm_on_load: Whether to show a progress bar.
         accumulate_resident: Whether device memory grows as tensors are
             yielded. False when parameters are allocated before loading and
-            only copied into, which is the common case.
+            only copied into, which is the common case. None when the consumer
+            was not inspected, as on a reload: no budget is derived, and an
+            explicit one bounds staging only.
         local_expert_ids: Experts this rank owns under expert parallelism, or
             None to load every expert. Expert weights outside the set are
             skipped, matching the default loader.
 
     Note:
-        Collective. Every rank must call this the same number of times in the
-        same order: the budget all-reduces, and the loader broadcasts. A model
-        is loaded once per weights source, so a model whose ``secondary_weights``
-        differed between ranks -- gated on the pipeline stage owning a submodule,
-        say -- would leave the ranks issuing different numbers of collectives
+        Collective, except for a model built as a single pipeline stage,
+        which loads under a group of one and issues none. Otherwise every rank
+        must call this the same number of times in the same order: the budget
+        all-reduces, and the loader broadcasts. A model is loaded once per
+        weights source, so a model whose ``secondary_weights`` differed between
+        ranks would leave the ranks issuing different numbers of collectives
         and the load would hang. Today every source list is built from config
-        alone, before any pipeline branching. Each source is planned
-        separately and reads free memory at its own point, so a load with
-        several sources has a budget per source rather than one overall.
+        alone. Each source is planned separately and reads free memory at its
+        own point, so a load with several sources has a budget per source
+        rather than one overall.
 
     """
     from fastsafetensors import BudgetInfeasibleError
@@ -1437,8 +1461,15 @@ def fastsafetensors_weights_iterator(
     # Skip expert weights this rank does not own, as the default path does:
     # experts are ~85-90% of weight bytes, so under EP this otherwise reads
     # roughly an order of magnitude more than --load-format auto.
+    # A checkpoint that stacks its experts has no per-expert names to filter,
+    # and would give up broadcast loading for nothing. Decided from the shard
+    # headers, which every rank reads alike, so the ranks agree.
+    no_expert_ids: set[int] = set()
     keep_tensor: Callable[[str], bool] | None = None
-    if local_expert_ids is not None:
+    if local_expert_ids is not None and any(
+        should_skip_weight(name, no_expert_ids)
+        for name, _ in _safetensors_tensor_sizes(hf_weights_files)
+    ):
 
         def keep_tensor(name: str) -> bool:  # noqa: F811
             return not should_skip_weight(name, local_expert_ids)
@@ -1459,7 +1490,7 @@ def fastsafetensors_weights_iterator(
     # over-charged by the quantization ratio and refused a load that fits, so
     # leave those unplanned unless a budget was asked for explicitly.
     budget, budget_reason = _fastsafetensors_memory_budget(
-        device, pg, derive=not accumulate_resident
+        device, pg, derive=accumulate_resident is False
     )
     nogds = nogds or budget is not None
 
@@ -1472,7 +1503,7 @@ def fastsafetensors_weights_iterator(
             device=str(device),
             nogds=nogds,
             all_local=all_local,
-            accumulate_resident=accumulate_resident,
+            accumulate_resident=bool(accumulate_resident),
             tensor_filter=keep_tensor,
         )
         if budget is None:

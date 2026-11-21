@@ -137,3 +137,109 @@ def test_fastsafetensors_accumulate_resident_skips_derived_budget(monkeypatch):
             )
         }
     assert names
+
+
+def _spy_parallel_loader(monkeypatch):
+    """Record the keyword arguments each ParallelLoader is built with."""
+    from fastsafetensors import parallel_loader
+
+    calls = []
+    real = parallel_loader.ParallelLoader
+
+    def spy(**kwargs):
+        calls.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(parallel_loader, "ParallelLoader", spy)
+    return calls
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="fastsafetensors requires NVIDIA/AMD GPUs",
+)
+def test_fastsafetensors_expert_filter_needs_per_expert_names(monkeypatch):
+    """The expert filter applies only to checkpoints with per-expert names.
+
+    Filtering gives up broadcast loading, so a checkpoint with nothing to
+    filter must keep it. GPT-2 has no expert tensors: a rank that owns only
+    expert 0 is handed every tensor and the loader is left as configured. A
+    checkpoint that names its experts drops the weights of the others.
+    """
+    from safetensors.torch import save_file
+
+    monkeypatch.delenv("VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET", raising=False)
+    monkeypatch.setenv("VLLM_FASTSAFETENSORS_ALL_LOCAL", "0")
+    calls = _spy_parallel_loader(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        safetensors = _download_gpt2(tmpdir)
+        unfiltered = {
+            name
+            for name, _ in fastsafetensors_weights_iterator(
+                safetensors, True, local_expert_ids={0}
+            )
+        }
+        expected = {name for name, _ in safetensors_weights_iterator(safetensors, True)}
+        assert unfiltered == expected
+        assert calls[-1]["tensor_filter"] is None
+        assert calls[-1]["all_local"] is False
+
+        per_expert = f"{tmpdir}/per_expert.safetensors"
+        save_file(
+            {
+                "layers.0.mlp.experts.0.w1.weight": torch.ones(4, 4),
+                "layers.0.mlp.experts.1.w1.weight": torch.ones(4, 4),
+                "layers.0.attn.weight": torch.ones(4, 4),
+            },
+            per_expert,
+        )
+        filtered = {
+            name
+            for name, _ in fastsafetensors_weights_iterator(
+                [per_expert], True, local_expert_ids={0}
+            )
+        }
+    assert filtered == {"layers.0.mlp.experts.0.w1.weight", "layers.0.attn.weight"}
+    assert calls[-1]["all_local"] is True
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="fastsafetensors requires NVIDIA/AMD GPUs",
+)
+def test_fastsafetensors_uninspected_consumer_is_not_planned(monkeypatch):
+    """A consumer that was never inspected gets no derived budget.
+
+    Reload paths build a loader and call get_all_weights without load_weights,
+    so nothing established whether parameters materialize during the load. The
+    loader passes None for those: no budget is derived, and an explicit budget
+    still bounds staging without charging the bytes read as resident, which
+    would refuse a reload of any model larger than the budget.
+    """
+    from vllm.config.load import LoadConfig
+    from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+
+    loader = DefaultModelLoader(LoadConfig(load_format="fastsafetensors"))
+    assert loader.params_materialize_during_load is None
+
+    calls = _spy_parallel_loader(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        safetensors = _download_gpt2(tmpdir)
+
+        monkeypatch.delenv("VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET", raising=False)
+        assert list(
+            fastsafetensors_weights_iterator(
+                safetensors, True, accumulate_resident=None
+            )
+        )
+        assert "device_memory_budget" not in calls[-1]
+
+        budget = 512 * 1024 * 1024
+        monkeypatch.setenv("VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET", str(budget))
+        assert list(
+            fastsafetensors_weights_iterator(
+                safetensors, True, accumulate_resident=None
+            )
+        )
+        assert calls[-1]["device_memory_budget"] == budget
+        assert calls[-1]["accumulate_resident"] is False

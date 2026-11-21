@@ -99,7 +99,11 @@ class DefaultModelLoader(BaseModelLoader):
         # Set in load_weights when --mm-encoder-only; used to drop LM-only shards.
         self._encoder_only_lm_prefixes: tuple[str, ...] | None = None
         self._encoder_only_weights_mapper: WeightsMapper | None = None
-        self.params_materialize_during_load = False
+        # None until load_weights inspects the model. A reload builds a new
+        # loader and calls get_all_weights directly, and whether its parameters
+        # materialize during the load depends on the reload, so fastsafetensors
+        # derives no budget for it.
+        self.params_materialize_during_load: bool | None = None
 
         extra_config = load_config.model_loader_extra_config
         if not isinstance(extra_config, dict):
