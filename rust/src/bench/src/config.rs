@@ -865,7 +865,7 @@ impl BenchConfig {
             speed_bench_config: args.speed_bench_config,
             speed_bench_category: args.speed_bench_category.clone(),
             speed_bench_max_input_len: args.speed_bench_max_input_len,
-            speed_bench_output_len: args.speed_bench_output_len,
+            speed_bench_output_len: args.output_len.unwrap_or(args.speed_bench_output_len),
             hf_split: args.hf_split.clone(),
             hf_subset: args.hf_subset.clone(),
             hf_output_len: args.output_len.or(args.hf_output_len),
@@ -1250,6 +1250,24 @@ mod tests {
             config(&[&hf[..], &["--output-len", "32", "--hf-output-len", "16"]].concat())
                 .hf_output_len,
             Some(32)
+        );
+    }
+
+    #[test]
+    fn test_output_len_maps_to_speed_bench() {
+        let output_len = |args: &[&str]| {
+            let mut argv = vec!["vllm-bench", "--model", "test-model"];
+            argv.extend(["--dataset-name", "speed-bench"]);
+            argv.extend_from_slice(args);
+            BenchConfig::from_args(&parse_args(argv)).unwrap().speed_bench_output_len
+        };
+
+        assert_eq!(output_len(&[]), 4096);
+        assert_eq!(output_len(&["--output-len", "32"]), 32);
+        assert_eq!(output_len(&["--speed-bench-output-len", "16"]), 16);
+        assert_eq!(
+            output_len(&["--output-len", "32", "--speed-bench-output-len", "16"]),
+            32
         );
     }
 
