@@ -1116,7 +1116,10 @@ class MooncakeLayerwiseRequestHandler:
         worker = self._worker
         if meta.protocol_version != 1:
             raise ValueError("Mooncake peers require the same layerwise protocol")
-        if meta.remote_pcp_size < 1 or not 0 <= meta.remote_pcp_rank < meta.remote_pcp_size:
+        if (
+            meta.remote_pcp_size < 1
+            or not 0 <= meta.remote_pcp_rank < meta.remote_pcp_size
+        ):
             raise ValueError("Layerwise PCP requires complete cache replicas")
         if (
             meta.logical_block_size != worker.logical_block_size
