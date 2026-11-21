@@ -134,6 +134,12 @@ class ModelState(ABC):
     def remove_request(self, req_id: str) -> None:
         return None
 
+    def remove_request_for_update(self, req_id: str) -> None:
+        self.remove_request(req_id)
+
+    def get_max_cached_positions(self, input_batch: InputBatch) -> dict[str, int]:
+        return {}
+
     def apply_staged_writes(self) -> None:
         return None
 
