@@ -78,9 +78,6 @@ def inkling_fa4_num_splits(
     max_kv_len: int,
 ) -> int:
     """Return the split-KV cap for Inkling relative attention."""
-    capability = current_platform.get_device_capability()
-    if capability is not None and capability.major == 9:
-        return 1
     if is_local:
         return 1
 
