@@ -8,6 +8,7 @@ from copy import copy
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -32,7 +33,7 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.utils import refill_derived
 from vllm.models.muse_spark.amd.model import MuseSparkDecoderLayer
 from vllm.models.muse_spark.amd.mono.drafter import maybe_attach_drafter
-from vllm.models.muse_spark.amd.ops import fused_markov
+from vllm.models.muse_spark.amd.ops import fused_markov, markov_vocab_shard
 from vllm.models.muse_spark.common.layers import (
     MuseSparkRMSNorm,
     materialize_residual_path_constants,
@@ -411,6 +412,8 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
         if hasattr(self, "sample_sequential"):
             # The fused rounds sample in draft ids, so they need d2t = 0.
             self.d2t_is_identity = not self.draft_id_to_target_id.any().item()
+        if envs.VLLM_MUSE_DSPARK_MARKOV_VOCAB_SHARD:
+            markov_vocab_shard.attach(self)
 
 
 EntryClass = MuseSparkDSparkForCausalLM
