@@ -28,7 +28,6 @@ import itertools
 import json
 import os
 import shutil
-import time
 import uuid
 from collections import deque
 from contextlib import ExitStack, asynccontextmanager
@@ -190,46 +189,36 @@ def _active_blocks() -> set[tuple[int, int]]:
 
 def _metadata(folder: str) -> list[ParamMeta]:
     """What a trainer declares at init: every checkpoint tensor's name, dtype
-    and shape, read from the file headers."""
+    and shape, read without the values (an empty slice keeps the dtype)."""
     metas = []
     for path in _safetensors(folder):
         with safe_open(path, "pt") as f:
             for n in f.keys():  # noqa: SIM118
                 s = f.get_slice(n)
-                metas.append(
-                    ParamMeta(n, _ST_DTYPES[s.get_dtype()], tuple(s.get_shape()))
-                )
+                shape = tuple(s.get_shape())
+                t = s[(slice(0, 0),) * len(shape)] if shape else f.get_tensor(n)
+                metas.append(ParamMeta(n, t.dtype, shape))
     return metas
 
 
-_ST_DTYPES = {
-    "BOOL": torch.bool,
-    "U8": torch.uint8,
-    "I8": torch.int8,
-    "I16": torch.int16,
-    "I32": torch.int32,
-    "I64": torch.int64,
-    "F16": torch.float16,
-    "BF16": torch.bfloat16,
-    "F32": torch.float32,
-    "F64": torch.float64,
-    "F8_E4M3": torch.float8_e4m3fn,
-    "F8_E5M2": torch.float8_e5m2,
-    "F8_E8M0": torch.float8_e8m0fnu,
-}
+def _plan_at_start(worker, folder: str) -> None:
+    """Make the engine's `start_weight_update` plan at the first update, right
+    after `start_reload` and before the worker lends the KV cache, as the NCCL
+    engine with `use_load_plan` does."""
+    engine = worker.weight_transfer_engine
+    if hasattr(engine, "_refit_start"):
+        return
+    engine._refit_start = engine.start_weight_update
+    metadata = _metadata(folder)
+    worker._refit_plan = None
 
+    def start() -> None:
+        engine._refit_start()
+        if worker._refit_plan is None:
+            model = worker.model_runner.get_model()
+            worker._refit_plan = plan_loads(model, metadata)
 
-def _plan_report(plan) -> dict:
-    """Per-rank M0 numbers: names and bytes by kind, fallbacks with reasons."""
-    from vllm.model_executor.model_loader.reload.plan import _nbytes
-
-    kinds: dict[str, list[int]] = {}
-    for e in plan.entries.values():
-        kind = "fallback" if e.writes is None else "direct" if e.boxes else "unneeded"
-        n, b = kinds.setdefault(kind, [0, 0])
-        kinds[kind] = [n + 1, b + _nbytes(e)]
-    fallbacks = {n: e.reason for n, e in plan.entries.items() if e.writes is None}
-    return {"kinds": kinds, "fallbacks": fallbacks}
+    engine.start_weight_update = start
 
 
 def _stream_reload(worker, folder: str, planned: bool = False) -> dict:
@@ -251,15 +240,13 @@ def _stream_reload(worker, folder: str, planned: bool = False) -> dict:
     base = torch.accelerator.memory_allocated()
     torch.accelerator.reset_peak_memory_stats()
 
+    if planned:
+        _plan_at_start(worker, folder)
     worker.start_weight_update()
     mode = "direct" if direct_reload_active(model) else "layerwise"
     with set_current_vllm_config(worker.vllm_config):
         load = model.load_weights
         if planned:
-            if not hasattr(worker, "_refit_plan"):
-                t0 = time.perf_counter()
-                worker._refit_plan = plan_loads(model, _metadata(folder))
-                worker._refit_plan_seconds = time.perf_counter() - t0
             load = partial(load_planned, model, worker._refit_plan)
         while batch := [
             (n, t.to(worker.device)) for n, t in itertools.islice(weights, BATCH_SIZE)
@@ -283,10 +270,26 @@ def _stream_reload(worker, folder: str, planned: bool = False) -> dict:
     }
 
 
-def _plan_summary(worker) -> dict:
-    report = _plan_report(worker._refit_plan)
-    report["bake_s"] = round(worker._refit_plan_seconds, 3)
-    return report
+def _fallbacks(worker) -> dict[str, str]:
+    """This rank's fallback names and why (`plan_loads` logs the rest)."""
+    entries = worker._refit_plan.entries.values()
+    return {e.name: e.reason for e in entries if e.writes is None}
+
+
+def _unexpected(fallbacks: dict[str, str], allowed: dict[str, str]) -> dict:
+    """Fallbacks no allowlist entry (name regex: reason) matches, with that
+    reason."""
+    return {
+        n: r
+        for n, r in fallbacks.items()
+        if not any(re.fullmatch(p, n) and r == why for p, why in allowed.items())
+    }
+
+
+def _stale(per_rank: list[dict[str, str]], allowed: dict[str, str]) -> list[str]:
+    """Allowlist entries no rank's fallback matches."""
+    names = {n for fallbacks in per_rank for n in fallbacks}
+    return [p for p in allowed if not any(re.fullmatch(p, n) for n in names)]
 
 
 def _diff(before: dict, after: dict) -> dict:
@@ -308,117 +311,59 @@ def _download(model: str) -> str:
 
 _LAYER = re.compile(r"\.layers\.(\d+)\.")
 _EXPERT = re.compile(r"\.experts\.(\d+)\.")
-_EXPERT_KEYS = (
-    "num_experts",
-    "num_local_experts",
-    "n_routed_experts",
-    "moe_num_experts",
-)
-_NOT_DECODER = ("vision", "visual", "audio", "mtp", "quantization")
+# What the cut families' configs and checkpoints name (gpt-oss, Qwen3 MoE,
+# Qwen3.5): per-layer lists, routed-expert counts, stacked experts and routers.
+_PER_LAYER_KEYS = ("layer_types",)
+_EXPERT_KEYS = ("num_experts", "num_local_experts")
+_STACKED = re.compile(r".*\.mlp\.(experts\.[a-z_]+|router\.\w+|gate\.weight)")
 
 
-def _is_pattern(v, n: int) -> bool:
-    """A per-layer pattern string, e.g. Nemotron-H's `MEMEM*E...`."""
-    return isinstance(v, str) and len(v) == n and len(set(v)) <= 4
-
-
-def _cut_layers(d: dict, n: int, layers: int) -> None:
-    """Truncate per-layer lists and patterns, and lists of layer indices, to
-    `layers`; entries and indices of MTP layers (past `n`) stay, renumbered."""
-
-    def index(i: int) -> int | None:
-        return i if i < layers else i - n + layers if i >= n else None
-
-    for k, v in d.items():
-        if isinstance(v, list) and n <= len(v) <= n + 3 or _is_pattern(v, n):
-            d[k] = v[:layers] + v[n:]  # MTP layers' entries stay
-        elif "layer" in k and isinstance(v, list) and all(type(i) is int for i in v):
-            d[k] = [j for i in v if (j := index(i)) is not None]
-        elif "layer" in k and isinstance(v, str) and re.fullmatch(r"[\d,]+", v):
-            kept = (index(int(i)) for i in v.split(","))
-            d[k] = ",".join(str(j) for j in kept if j is not None)
-        elif isinstance(v, dict) and not any(s in k for s in _NOT_DECODER):
-            _cut_layers(v, n, layers)  # e.g. linear_attn_config
-
-
-def _reduce_config(cfg: dict, layers: int, experts: int | None) -> int:
+def _reduce_config(cfg: dict, layers: int, experts: int) -> int:
     """Cut the decoder's config to `layers` layers and `experts` routed
     experts in place; return the original expert count."""
-    if "text_config" in cfg:
-        return _reduce_config(cfg["text_config"], layers, experts)
-    _cut_layers(cfg, cfg["num_hidden_layers"], layers)
+    cfg = cfg.get("text_config", cfg)
+    for k in _PER_LAYER_KEYS:
+        if k in cfg:
+            cfg[k] = cfg[k][:layers]
     cfg["num_hidden_layers"] = layers
-    num_experts = 0
-    for k in _EXPERT_KEYS:
-        if experts is not None and isinstance(cfg.get(k), int):
-            num_experts, cfg[k] = cfg[k], experts
-    if experts is not None and not num_experts:
-        raise ValueError(f"no routed-expert count among {_EXPERT_KEYS}")
+    keys = [k for k in _EXPERT_KEYS if k in cfg]
+    if len(keys) != 1:
+        raise ValueError(f"expected one routed-expert count of {_EXPERT_KEYS}")
+    key = keys[0]
+    num_experts, cfg[key] = cfg[key], experts
     return num_experts
 
 
-def _not_config(folder: str, names: list[str]) -> list[str]:
-    """For `copytree`: weights, caches and files a partial snapshot lacks."""
-    skip = set(
-        shutil.ignore_patterns("*.safetensors", "*.index.json", ".cache")(folder, names)
-    )
-    return [
-        n for n in names if n in skip or not os.path.exists(os.path.join(folder, n))
-    ]
-
-
-def _reduced(model: str, layers: int, experts: int | None, out: Path) -> str:
+def _reduced(model: str, layers: int, experts: int, out: Path) -> str:
     """A checkpoint of `model` cut to its first `layers` decoder layers and
     first `experts` routed experts, with real names, dtypes, quantization and
     values; only the shards holding kept tensors are downloaded."""
-    local = os.path.isdir(model)
-    src = (
-        model
-        if local
-        else hf_api().snapshot_download(model, allow_patterns=CONFIG_FILES)
-    )
+    src = hf_api().snapshot_download(model, allow_patterns=CONFIG_FILES)
     cfg = json.loads(Path(src, "config.json").read_text())
     num_experts = _reduce_config(cfg, layers, experts)
 
     def keep(name: str) -> bool:
-        m = _LAYER.search(name)
-        decoder = not any(v in name for v in _NOT_DECODER)
-        if m and decoder and int(m.group(1)) >= layers:
-            return False
-        m = _EXPERT.search(name)
-        return experts is None or not m or int(m.group(1)) < experts
+        layer, expert = _LAYER.search(name), _EXPERT.search(name)
+        return not (
+            (layer and int(layer.group(1)) >= layers)
+            or (expert and int(expert.group(1)) >= experts)
+        )
 
-    index = Path(src, "model.safetensors.index.json")
-    if index.exists():
-        weight_map = json.loads(index.read_text())["weight_map"]
-        files = sorted({f for n, f in weight_map.items() if keep(n)})
-    else:
-        files = ["*.safetensors"]
-    if not local:
-        src = hf_api().snapshot_download(model, allow_patterns=[*CONFIG_FILES, *files])
-    shutil.copytree(
-        src,
-        out,
-        ignore=_not_config,
-    )
+    weight_map = json.loads(Path(src, "model.safetensors.index.json").read_text())
+    files = sorted({f for n, f in weight_map["weight_map"].items() if keep(n)})
+    src = hf_api().snapshot_download(model, allow_patterns=[*CONFIG_FILES, *files])
+    out.mkdir(parents=True)
+    for pattern in CONFIG_FILES:
+        for f in glob.glob(os.path.join(src, pattern)):
+            if not f.endswith(".index.json"):
+                shutil.copy(f, out)
     (out / "config.json").write_text(json.dumps(cfg, indent=2))
     tensors = {}
-    paths = [os.path.join(src, f) for f in files] if index.exists() else None
-    for path in paths or _safetensors(src):
-        with safe_open(path, "pt") as f:
-            for n in f.keys():  # noqa: SIM118
-                if not keep(n):
-                    continue
+    for file in files:
+        with safe_open(os.path.join(src, file), "pt") as f:
+            for n in filter(keep, f.keys()):
                 sl = f.get_slice(n)
-                shape = sl.get_shape()
-                # stacked experts, router rows and biases: the first `experts`
-                if (
-                    experts
-                    and shape
-                    and shape[0] == num_experts
-                    and not _EXPERT.search(n)
-                    and re.search(r"(experts|moe|mlp|gate|router)[._]", n)
-                ):
+                if _STACKED.fullmatch(n) and sl.get_shape()[0] == num_experts:
                     tensors[n] = sl[:experts].contiguous()
                 else:
                     tensors[n] = f.get_tensor(n)
@@ -577,10 +522,10 @@ class RefitCase:
     # cache after it, as RL colocated with training does
     sleep: bool = False
     # A cut to (decoder layers, routed experts) at test time, see `_reduced`
-    reduce: tuple[int, int | None] | None = None
+    reduce: tuple[int, int] | None = None
     # reload through a load plan; fallback names must match `fallbacks`
     planned: bool = False
-    fallbacks: tuple[str, ...] = ()  # regexes
+    fallbacks: dict[str, str] = field(default_factory=dict)  # name regex: reason
 
     @property
     def tp(self) -> int:
@@ -666,16 +611,22 @@ REFIT_CASES = [
         )
         for parallel in ({}, TP2_EP)
     ),
+    # the plan's destination views must survive a level-2 sleep
+    RefitCase(
+        "gpt-oss", "mxfp4", GPT_OSS, engine=TRTLLM_MOE, sleep=True, **PLAN_GPT_OSS
+    ),
     # Gated DeltaNet and full attention, FP8
     RefitCase(
         "qwen3.5-moe",
         "fp8",
         "Qwen/Qwen3.5-35B-A3B-FP8",
         engine={"limit_mm_per_prompt": {"image": 0, "video": 0}},
-        marks=NIGHTLY,
+        # the cut downloads 24 GB before the engines start
+        marks=(*NIGHTLY, pytest.mark.timeout(1800)),
         planned=True,
         reduce=(4, 32),
-        fallbacks=(r".*\.linear_attn\.conv1d\.weight",),  # a `view` the plan rejects
+        # RFC #64418 L11: the GDN conv1d loader's `view` is not traced as one
+        fallbacks={r".*\.linear_attn\.conv1d\.weight": "applies view.default to it"},
     ),
 ]
 
@@ -723,7 +674,14 @@ def _gpu_marks(num_gpus: int) -> list:
 @pytest.mark.parametrize(
     "case",
     [
-        pytest.param(c, id=c.id, marks=[*c.marks, *_gpu_marks(c.num_gpus)])
+        pytest.param(
+            c,
+            id=c.id,
+            marks=[
+                *c.marks,
+                *_gpu_marks(c.num_gpus),
+            ],
+        )
         for c in REFIT_CASES
     ],
 )
@@ -778,17 +736,13 @@ async def test_refit_equals_fresh(
             result[f"reload_{name}_moved"] = list(map(_diff, ptrs, moved))
 
         if case.planned:
-            plans = await _rpc(engine, _plan_summary)
+            per_rank = await _rpc(engine, _fallbacks)
+            result["unexpected_fallbacks"] = [
+                _unexpected(f, case.fallbacks) for f in per_rank
+            ]
+            result["stale_allowlist"] = _stale(per_rank, case.fallbacks)
     for name, per_rank in differs.items():
         result[f"reload_{name}_differs"] = per_rank
-    if case.planned:
-        for rank, report in enumerate(plans):
-            print(f"M0 {case.id} rank {rank}: {json.dumps(report, default=str)}")
-        allowed = re.compile("|".join(case.fallbacks) or "(?!)")
-        result["unexpected_fallbacks"] = [
-            {n: r for n, r in p["fallbacks"].items() if not allowed.fullmatch(n)}
-            for p in plans
-        ]
     # one assert, so a failure reports everything
     ranks = case.num_gpus
     reload = dict(mode="direct", new_blocks=[], freed_blocks=[], peak_bounded=True)
@@ -802,7 +756,11 @@ async def test_refit_equals_fresh(
             for key, value in (("", reload), ("_differs", {}), ("_moved", {}))
         },
         **{f"reload_{name}{key}": v for name in ("b", "a") for key, v in sleep.items()},
-        **({"unexpected_fallbacks": [{}] * ranks} if case.planned else {}),
+        **(
+            {"unexpected_fallbacks": [{}] * ranks, "stale_allowlist": []}
+            if case.planned
+            else {}
+        ),
     }
     # same engine, same graphs: reloading A must reproduce its cold outputs
     assert tokens["a"] == cold_a_tokens
