@@ -23,6 +23,7 @@ from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -264,6 +265,10 @@ def mamba_v2_sharded_weight_loader(
     return loader
 
 
+# Output slices of the Mamba2 input projection, in row order.
+MAMBA2_IN_PROJ_SLICES = ("z", "x", "B", "C", "dt")
+
+
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 # --8<-- [start:mamba_mixer2]
 @PluggableLayer.register("mamba_mixer2")
@@ -297,7 +302,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        split_in_proj: bool = False,
+        low_rank: dict[str, int] | None = None,
     ):
+        """`split_in_proj` builds one linear per in_proj slice (`z_proj`, `x_proj`,
+        `B_proj`, `C_proj`, `dt_proj`), so each slice can use its own quantization.
+        `low_rank` maps a slice name (z, x, B, C, dt, or out for out_proj) to a
+        rank: the slice becomes `<name>_a_proj` (input -> rank) followed by
+        `<name>_b_proj` (rank -> output), as in DeepSeek's `q_a_proj`/`q_b_proj`.
+        A low-rank in_proj slice implies `split_in_proj`."""
         super().__init__()
 
         # For TP, the sharding plan is as follows:
@@ -350,6 +363,22 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
 
+        self.low_rank = dict(low_rank or {})
+        unknown = set(self.low_rank) - {*MAMBA2_IN_PROJ_SLICES, "out"}
+        if unknown or any(
+            type(rank) is not int or rank < 1 for rank in self.low_rank.values()
+        ):
+            raise ValueError(
+                f"Mamba2 low-rank slices must map {MAMBA2_IN_PROJ_SLICES} or "
+                f"'out' to positive ranks, got {self.low_rank}"
+            )
+        self.split_in_proj = split_in_proj or bool(set(self.low_rank) - {"out"})
+        if self.split_in_proj and n_groups % self.tp_size != 0:
+            raise ValueError(
+                "Per-slice Mamba2 in_proj requires tensor parallel size to "
+                "divide n_groups."
+            )
+
         if n_groups % self.tp_size == 0:
             self.conv1d = MergedColumnParallelLinear(
                 input_size=conv_kernel_size,
@@ -363,19 +392,28 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 prefix=f"{prefix}.conv1d",
             )
 
-            self.in_proj = MergedColumnParallelLinear(
-                input_size=hidden_size,
-                output_sizes=[
-                    intermediate_size,
-                    intermediate_size,
-                    self.groups_ssm_state_size,
-                    self.groups_ssm_state_size,
-                    self.num_heads,
-                ],
-                bias=use_bias,
-                quant_config=quant_config,
-                prefix=f"{prefix}.in_proj",
+            slice_sizes = (
+                intermediate_size,
+                intermediate_size,
+                self.groups_ssm_state_size,
+                self.groups_ssm_state_size,
+                self.num_heads,
             )
+            if self.split_in_proj:
+                self._in_proj_slices = [
+                    self._make_slice(
+                        name, hidden_size, size, use_bias, quant_config, prefix
+                    )
+                    for name, size in zip(MAMBA2_IN_PROJ_SLICES, slice_sizes)
+                ]
+            else:
+                self.in_proj = MergedColumnParallelLinear(
+                    input_size=hidden_size,
+                    output_sizes=list(slice_sizes),
+                    bias=use_bias,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.in_proj",
+                )
         else:
             # This is the n_groups == 1 case,
             # where we need to duplicate groups if TP>1.
@@ -502,14 +540,31 @@ class MambaMixer2(MambaBase, PluggableLayer):
         set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
-        self.out_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=use_bias,
-            input_is_parallel=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.out_proj",
-        )
+        if "out" in self.low_rank:
+            self.out_a_proj = RowParallelLinear(
+                intermediate_size,
+                self.low_rank["out"],
+                bias=False,
+                input_is_parallel=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.out_a_proj",
+            )
+            self.out_b_proj = ReplicatedLinear(
+                self.low_rank["out"],
+                hidden_size,
+                bias=use_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.out_b_proj",
+            )
+        else:
+            self.out_proj = RowParallelLinear(
+                intermediate_size,
+                hidden_size,
+                bias=use_bias,
+                input_is_parallel=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.out_proj",
+            )
 
         self.norm = Mixer2RMSNormGated(
             intermediate_size, n_groups, self.use_rms_norm, eps=rms_norm_eps
@@ -602,13 +657,63 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
 
+    def _make_slice(self, name, input_size, output_size, bias, quant_config, prefix):
+        """One in_proj slice: a column-parallel linear, or a low-rank pair.
+        Returns attribute names, so wrappers (for example LoRA) installed on the
+        attributes after construction are the modules that run."""
+        rank = self.low_rank.get(name)
+        if rank is None:
+            layer = ColumnParallelLinear(
+                input_size,
+                output_size,
+                bias=bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.{name}_proj",
+            )
+            setattr(self, f"{name}_proj", layer)
+            return (f"{name}_proj",)
+        down = ReplicatedLinear(
+            input_size,
+            rank,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.{name}_a_proj",
+        )
+        up = ColumnParallelLinear(
+            rank,
+            output_size,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.{name}_b_proj",
+        )
+        setattr(self, f"{name}_a_proj", down)
+        setattr(self, f"{name}_b_proj", up)
+        return (f"{name}_a_proj", f"{name}_b_proj")
+
+    def _project_in(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if not self.split_in_proj:
+            return self.in_proj(hidden_states)[0]
+        outputs = []
+        for names in self._in_proj_slices:
+            output = hidden_states
+            for name in names:
+                output, _ = getattr(self, name)(output)
+            outputs.append(output)
+        return torch.cat(outputs, dim=-1)
+
+    def _project_out(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if "out" not in self.low_rank:
+            return self.out_proj(hidden_states)[0]
+        latent, _ = self.out_a_proj(hidden_states)
+        return self.out_b_proj(latent)[0]
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         mup_vector: torch.Tensor | None = None,
     ):
         # 1. Gated MLP's linear projection
-        projected_states, _ = self.in_proj(hidden_states)
+        projected_states = self._project_in(hidden_states)
         if mup_vector is not None:
             projected_states = projected_states * mup_vector
 
@@ -639,9 +744,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         hidden_states = self.norm(ssm_output, gate)
 
         # 5. Final linear projection
-        output, _ = self.out_proj(hidden_states)
-
-        return output
+        return self._project_out(hidden_states)
 
     def D_bf16(self) -> torch.Tensor:
         """`D` cast to bfloat16 for FlashInfer's SSD, refreshed whenever the
