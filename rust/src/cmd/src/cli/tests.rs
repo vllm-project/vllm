@@ -1242,6 +1242,59 @@ fn log_error_stack_defaults_to_server_dev_mode() {
 }
 
 /// CLI args take precedence over environment variables for `--max-tokenize-tokens`.
+
+#[test]
+fn serve_cli_flag_takes_precedence_over_env_var() {
+    unsafe {
+        std::env::set_var("VLLM_MAX_TOKENIZE_TOKENS", "100");
+    }
+
+    let cli_no_flag = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
+    let Command::Serve(serve_no_flag) = cli_no_flag.command else {
+        panic!()
+    };
+    assert_eq!(
+        serve_no_flag.runtime.api_server_options().max_tokenize_tokens,
+        Some(100)
+    );
+
+    let cli_flag = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--max-tokenize-tokens",
+        "200",
+    ])
+    .unwrap();
+    let Command::Serve(serve_flag) = cli_flag.command else {
+        panic!()
+    };
+    assert_eq!(
+        serve_flag.runtime.api_server_options().max_tokenize_tokens,
+        Some(200)
+    );
+
+    let cli_flag_disabled = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--max-tokenize-tokens",
+        "0",
+    ])
+    .unwrap();
+    let Command::Serve(serve_flag_disabled) = cli_flag_disabled.command else {
+        panic!()
+    };
+    assert_eq!(
+        serve_flag_disabled.runtime.api_server_options().max_tokenize_tokens,
+        Some(0)
+    );
+
+    unsafe {
+        std::env::remove_var("VLLM_MAX_TOKENIZE_TOKENS");
+    }
+}
+
 #[test]
 fn max_tokenize_tokens_arg_takes_precedence_over_env() {
     let json = |args_json: &str, vars: &[(&str, &str)]| {
