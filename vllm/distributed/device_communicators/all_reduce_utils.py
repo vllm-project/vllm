@@ -27,7 +27,7 @@ logger = init_logger(__name__)
 KiB = 1024
 MiB = 1024 * 1024
 # Max size for each world size in case symmetric memory is available
-# For different SM architectures
+# For different SM architectures (CUDA) and gfx architectures (ROCm)
 CUSTOM_ALL_REDUCE_MAX_SIZES = {
     "9.0": {
         2: 64 * MiB,  # 64 MB
@@ -53,7 +53,14 @@ CUSTOM_ALL_REDUCE_MAX_SIZES = {
         6: 8 * MiB,  # 8 MB
         8: 4 * MiB,  # 4 MB
     },
+    # MI200 copies its input in under graph capture. At TP=4, RCCL overtakes
+    # it from about 4 MiB on MI250X (about 3 MB on MI210); at TP=2/8 it stays
+    # ahead up to the default 8 MiB.
+    "gfx90a": {
+        4: 4 * MiB,  # 4 MB
+    },
 }
+
 
 SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
     "9.0": {
