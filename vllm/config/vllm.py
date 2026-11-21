@@ -117,6 +117,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
         "Inkling2ForConditionalGeneration",
+        "Inkling2LoopForConditionalGeneration",
         "KimiK3ForConditionalGeneration",
         "KimiK3MTPModel",
         "KimiK31ForConditionalGeneration",
@@ -1563,6 +1564,19 @@ class VllmConfig:
             return
         model_dtype = str(self.model_config.dtype).removeprefix("torch.")
         if model_dtype == cache_dtype:
+            return
+        if (
+            cache_dtype == "float16"
+            and model_dtype == "bfloat16"
+            and current_platform.is_device_capability_family(120)
+            and getattr(self.model_config, "architecture", None)
+            in (
+                "Inkling2ForConditionalGeneration",
+                "Inkling2LoopForConditionalGeneration",
+            )
+            and self.speculative_config is None
+        ):
+            # Inkling2's SM12 kernel converts stored KV to the query dtype.
             return
         allowed = (
             f"`auto` or `{model_dtype}`"
