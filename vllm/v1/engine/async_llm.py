@@ -157,7 +157,8 @@ class AsyncLLM(EngineClient):
         custom_stat_loggers.extend(load_stat_logger_plugin_factories())
 
         has_custom_loggers = bool(custom_stat_loggers)
-        self.log_stats = log_stats or has_custom_loggers
+        # Tracing needs the request stats; default stat loggers stay off.
+        self.log_stats = log_stats or has_custom_loggers or tracing_endpoint is not None
         if not log_stats and has_custom_loggers:
             logger.info(
                 "AsyncLLM created with log_stats=False, "
