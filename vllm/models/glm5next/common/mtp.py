@@ -24,7 +24,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
 from vllm.model_executor.models.utils import (
-    checkpoint_params_dict,
     extract_layer_index,
     get_fused_shared_expert_layers,
     maybe_prefix,
@@ -359,7 +358,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
         )
 
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
         # ``kv_a_proj_with_mqa``; pad them with zeros for the model shape.

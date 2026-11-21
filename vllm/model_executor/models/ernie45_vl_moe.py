@@ -59,7 +59,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 
@@ -662,7 +661,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
             num_experts=max(self.config.moe_num_experts),
         )
 
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if self.config.tie_word_embeddings and name.endswith("lm_head.weight"):

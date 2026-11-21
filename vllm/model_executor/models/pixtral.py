@@ -43,7 +43,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import WeightsMapper, checkpoint_params_dict
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -2086,7 +2086,7 @@ class PixtralHFVisionModel(nn.Module):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         layer_count = len(self.transformer.layers)
 

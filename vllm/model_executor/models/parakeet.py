@@ -17,7 +17,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.parakeet import ExtractorConfig, ParakeetConfig
 
@@ -76,7 +75,7 @@ class ProjectedParakeet(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loaded_params: set[str] = set()
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         buffers_dict = dict(self.named_buffers())
 
         if isinstance(weights, dict):

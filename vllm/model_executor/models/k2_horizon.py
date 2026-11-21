@@ -95,7 +95,6 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    checkpoint_params_dict,
     extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -1188,7 +1187,7 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
         # )
         ignore_suffixes = ()
 
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
 
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()

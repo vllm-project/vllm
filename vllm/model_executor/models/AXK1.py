@@ -76,10 +76,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MLP,
     yarn_get_mscale,
 )
-from vllm.model_executor.models.utils import (
-    checkpoint_params_dict,
-    sequence_parallel_chunk,
-)
+from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -861,7 +858,7 @@ class AXK1Model(nn.Module):
             num_redundant_experts=self.num_redundant_experts,
         )
 
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:

@@ -36,7 +36,6 @@ from vllm.model_executor.models.bert import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    checkpoint_params_dict,
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
@@ -257,7 +256,7 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
 
         super().load_weights(weights)
 
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
 
         for name, loaded_weight in secondary:
             if any(

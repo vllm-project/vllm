@@ -47,10 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
     remap_moe_expert_weights,
 )
-from vllm.model_executor.models.utils import (
-    checkpoint_params_dict,
-    sequence_parallel_chunk,
-)
+from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
@@ -558,7 +555,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
         weights: Iterable[tuple[str, torch.Tensor]],
         stacked_params_mapping: list[tuple[str, str, str]],
     ) -> set[str]:
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
         use_ep = self.parallel_config.enable_expert_parallel
@@ -745,7 +742,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
         weights: Iterable[tuple[str, torch.Tensor]],
         stacked_params_mapping: list[tuple[str, str, str]],
     ) -> set[str]:
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
         use_ep = self.parallel_config.enable_expert_parallel
@@ -1151,7 +1148,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
         weights: Iterable[tuple[str, torch.Tensor]],
         stacked_params_mapping: list[tuple[str, str, str]],
     ) -> set[str]:
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
         use_ep = self.parallel_config.enable_expert_parallel

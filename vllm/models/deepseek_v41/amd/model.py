@@ -52,7 +52,6 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
-    checkpoint_params_dict,
     extract_layer_index,
     is_pp_missing_parameter,
     make_layers,
@@ -1182,7 +1181,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ("compressor.fused_wkv_wgate", "compressor.wkv", 0),
             ("compressor.fused_wkv_wgate", "compressor.wgate", 1),
         ]
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
         def _resolve_param_name(name: str) -> str:

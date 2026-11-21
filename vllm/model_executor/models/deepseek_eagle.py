@@ -25,7 +25,6 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV3ForCausalLM,
 )
-from vllm.model_executor.models.utils import checkpoint_params_dict
 
 from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 
@@ -117,7 +116,7 @@ class DeepseekV2Model(nn.Module):
             num_experts=self.config.n_routed_experts,
         )
 
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:

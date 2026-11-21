@@ -84,7 +84,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
     sharded_weight_loader,
 )
-from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 from vllm.third_party.flash_linear_attention.ops.kda import (
@@ -1555,7 +1554,7 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
         weights = _maybe_remap_ling_mxfp4_weight_names(weights, self.quant_config)
-        params_dict = checkpoint_params_dict(self, remove_duplicate=False)
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         stacked_mappings = [
             (".gate_up_proj", ".gate_proj", 0),

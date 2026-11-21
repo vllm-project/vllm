@@ -212,16 +212,6 @@ class WeightsMapper:
         )
 
 
-def checkpoint_params_dict(
-    module: nn.Module, remove_duplicate: bool = True
-) -> dict[str, nn.Parameter]:
-    """`module`'s parameters keyed by checkpoint name, without LoRA's `base_layer.`."""
-    return {
-        name.replace(".base_layer.", "."): param
-        for name, param in module.named_parameters(remove_duplicate=remove_duplicate)
-    }
-
-
 def _get_tied_embedding_params(module: nn.Module) -> dict[str, str]:
     """Map each tied word embedding qualname to the first name it aliases."""
     canonical = dict[int, str]()

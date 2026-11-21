@@ -27,7 +27,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import SupportsPP
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.model_executor.models.whisper import (
     WhisperEncoder,
     _create_fake_bias_for_k_proj,
@@ -858,7 +857,7 @@ class VoxtralEncoderModel(nn.Module):
                     (".mlp.down_proj", ".mlp.fc2"),
                 ]
             )
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
 
         name, loaded_weight = weight
         for pattern, repl in self.mistral_remapping:

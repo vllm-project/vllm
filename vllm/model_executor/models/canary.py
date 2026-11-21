@@ -27,7 +27,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
@@ -621,7 +620,7 @@ class CanaryForConditionalGeneration(
             (".encoder_attn.kv_proj", ".encoder_attn.k_proj", "k"),
             (".encoder_attn.kv_proj", ".encoder_attn.v_proj", "v"),
         ]
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         params_dict.update(self.named_buffers())
         loaded_params: set[str] = set()
 

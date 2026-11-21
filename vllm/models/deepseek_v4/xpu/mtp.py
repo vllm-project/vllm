@@ -31,7 +31,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
-from vllm.model_executor.models.utils import checkpoint_params_dict, maybe_prefix
+from vllm.model_executor.models.utils import maybe_prefix
 from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
     _FUSED_MTP_INPUT_RMSNORM_KERNEL,
     _MTP_SHARED_HEAD_RMSNORM_KERNEL,
@@ -325,7 +325,7 @@ class DeepSeekV4MTP(nn.Module):
             ("attn.fused_wqa_wkv", "attn.wq_a", 0),
             ("attn.fused_wqa_wkv", "attn.wkv", 1),
         ]
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
         # Pre-compute expert mapping ONCE.

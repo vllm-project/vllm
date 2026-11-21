@@ -31,7 +31,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -1820,7 +1819,7 @@ class CohereASRModel(nn.Module):
             (".second_sub_layer.kv_proj", ".second_sub_layer.key_net", "k"),
             (".second_sub_layer.kv_proj", ".second_sub_layer.value_net", "v"),
         ]
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         buffers_dict = dict(self.named_buffers())
         params_dict.update(buffers_dict)
 

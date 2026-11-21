@@ -42,7 +42,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
 )
 from vllm.model_executor.models.radio import RadioModel, radio_config_from_args
-from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.model_executor.models.whisper import WhisperAttention, WhisperCrossAttention
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -312,7 +311,7 @@ class MBartDecoderNoPos(nn.Module):
             (".encoder_attn.kv_proj", ".encoder_attn.k_proj", 0),
             (".encoder_attn.kv_proj", ".encoder_attn.v_proj", 1),
         ]
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if name.startswith("embed_positions"):

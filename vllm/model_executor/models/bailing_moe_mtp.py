@@ -27,7 +27,6 @@ from vllm.model_executor.models.bailing_moe_linear import (
     BailingMoeV25,
     BailingMoeV25MLAAttention,
 )
-from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.sequence import IntermediateTensors
 
 from .utils import maybe_prefix
@@ -253,7 +252,7 @@ class BailingMoeV25MTPModel(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
         expert_params_mapping = list(self.get_expert_mapping())
-        params_dict = checkpoint_params_dict(self, remove_duplicate=False)
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
 
         def load_param(

@@ -63,7 +63,6 @@ from vllm.model_executor.models.glm4_moe import (
     Glm4MoE,
     Glm4MoeMLP,
 )
-from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import (
@@ -370,7 +369,7 @@ class Glm4MoeLiteModel(nn.Module):
             + (self.config.n_shared_experts if self.fused_shared_expert_layers else 0),
         )
 
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:

@@ -25,7 +25,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import (
-    checkpoint_params_dict,
     is_pp_missing_parameter,
     maybe_prefix,
 )
@@ -717,7 +716,7 @@ class HYV4MTP(nn.Module):
         return consumed
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
         mtp_start = self.config.num_hidden_layers

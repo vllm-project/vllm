@@ -38,7 +38,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import (
@@ -270,7 +269,7 @@ class MiMoV2MTP(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
 
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         # The pairing state must outlive this call: AutoWeightsLoader delegates
         # per contiguous group of names, so a pair can straddle two calls and

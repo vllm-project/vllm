@@ -24,11 +24,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.utils import (
-    checkpoint_params_dict,
-    get_pp_missing_layer_names,
-    maybe_prefix,
-)
+from vllm.model_executor.models.utils import get_pp_missing_layer_names, maybe_prefix
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
@@ -259,7 +255,7 @@ class KimiK3MTP(nn.Module):
         )
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         # Under the MXFP4 quant interface the routed experts register unpacked
         # params (``w13_weight``), while the compressed-tensors checkpoint names
         # them ``.weight_packed``. Rebind so the expert mapping resolves; scales

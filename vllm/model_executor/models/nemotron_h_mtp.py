@@ -30,7 +30,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import (
     WeightsMapper,
     _merge_multimodal_embeddings,
-    checkpoint_params_dict,
     get_draft_quant_config,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
@@ -476,7 +475,7 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbed
                 num_redundant_experts=self.num_redundant_experts,
             )
 
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:

@@ -85,7 +85,6 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
-    checkpoint_params_dict,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
@@ -1389,7 +1388,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             )
         else:
             expert_params_mapping = []
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
 
         # Under the MXFP4 quant interface the routed experts register unpacked
         # params (``w13_weight``), while the compressed-tensors checkpoint names

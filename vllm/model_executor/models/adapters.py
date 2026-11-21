@@ -13,7 +13,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
-from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.transformers_utils.config import (
     try_get_dense_modules,
 )
@@ -197,7 +196,7 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
         def _load_pooling_model_weights(
             self, weights: Iterable[tuple[str, torch.Tensor]]
         ):
-            params_dict = checkpoint_params_dict(self)
+            params_dict = dict(self.named_parameters())
             # Use model-owned remapping only for the probe membership check
             # (e.g. Gemma4 model.language_model.* -> language_model.model.*)
             # so the "" / "model." scan can early-exit. Forwarded names stay

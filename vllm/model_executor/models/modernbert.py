@@ -29,7 +29,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import checkpoint_params_dict
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding, SupportsLoRA
@@ -281,7 +280,7 @@ class ModernBertModel(nn.Module, SupportsLoRA):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if name.endswith(".bias") and name not in params_dict:
@@ -400,7 +399,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
         self.model.load_weights(weight_filter())
 
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
 
         for name, loaded_weight in self_weights:
             if name.startswith("classifier"):

@@ -94,7 +94,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
-    checkpoint_params_dict,
     extract_layer_index,
     get_fused_shared_expert_layers,
     sequence_parallel_chunk,
@@ -1576,7 +1575,7 @@ class DeepseekV2Model(nn.Module):
             num_redundant_experts=self.num_redundant_experts,
         )
 
-        params_dict = checkpoint_params_dict(self)
+        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         # With index_topk_freq>1 only some layers build an indexer, yet the
         # checkpoint ships indexer weights for all of them; track the built ones.
