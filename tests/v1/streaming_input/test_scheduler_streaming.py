@@ -856,3 +856,71 @@ def test_overflow_update_is_dropped_and_session_resumes():
     assert dropped_output.finish_reason == FinishReason.LENGTH
     assert resumed_output.new_token_ids == [13]
     assert list(session.all_token_ids)[-4:] == [40, 41, 42, 13]
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_sessions_holding_all_kv_blocks_do_not_wedge_scheduler(async_scheduling):
+    """Parked sessions hold KV blocks but cannot be preempted. If they hold all
+    of them and every next chunk needs a block, sessions outside `running` are
+    evicted until each chunk is processed."""
+    num_sessions, block_size = 9, 4
+    scheduler = create_async_scheduler(
+        num_blocks=num_sessions + 1,  # Block 0 is the null block.
+        block_size=block_size,
+        max_model_len=num_sessions * block_size,
+        async_scheduling=async_scheduling,
+        skip_tokenizer_init=True,
+    )
+    sessions = [
+        DummyRequest(f"s{i}", prompt_token_ids=[1, 2, 3, 4], max_tokens=1)
+        for i in range(num_sessions)
+    ]
+    for session in sessions:
+        scheduler.add_request(session)
+
+    in_flight: deque = deque()
+
+    def step() -> None:
+        in_flight.append(scheduler.schedule())
+        if len(in_flight) <= async_scheduling:
+            return
+        output = in_flight.popleft()
+        req_ids = list(output.num_scheduled_tokens)
+        sampled = [
+            [5]
+            if scheduler.requests[req_id].num_computed_tokens
+            >= scheduler.requests[req_id].num_tokens
+            else []
+            for req_id in req_ids
+        ]
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                sampled_token_ids=sampled,
+                logprobs=None,
+                prompt_logprobs_dict={req_id: None for req_id in req_ids},
+                pooler_output=[],
+            ),
+        )
+
+    for _ in range(4):
+        step()
+    assert all(s.status == RequestStatus.WAITING_FOR_STREAMING_REQ for s in sessions)
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == 0
+
+    for session in sessions:
+        scheduler.add_request(
+            DummyRequest(session.request_id, prompt_token_ids=[7], max_tokens=1)
+        )
+    # Each session ends with its 4 prompt tokens, a token for the chunk, and the
+    # chunk's sample.
+    for _ in range(30):
+        step()
+        if all(
+            s.status == RequestStatus.WAITING_FOR_STREAMING_REQ and s.num_tokens == 6
+            for s in sessions
+        ):
+            break
+    else:
+        pytest.fail("Scheduler stalled with sessions holding all KV blocks")
