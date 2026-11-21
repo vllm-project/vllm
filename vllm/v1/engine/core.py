@@ -1286,7 +1286,9 @@ class EngineCore:
             params.watermarking = True
 
         if self.vllm_config.aux_output_config.enabled:
-            salt_aux_outputs(request)
+            salt_aux_outputs(
+                request, self.vllm_config.aux_output_config.object_key_prefix
+            )
         frontend_hashes = frontend_block_hashes(request, self.prefix_hash_config)
         req = Request.from_engine_core_request(
             request, self.request_block_hasher, frontend_hashes

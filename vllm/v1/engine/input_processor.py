@@ -450,6 +450,17 @@ class InputProcessor:
                     parameter="aux_prompt_start",
                     value=sampling_params.aux_prompt_start,
                 )
+            if sampling_params.aux_namespace is not None:
+                if self.vllm_config.aux_output_config.object_key_prefix is None:
+                    raise VLLMValidationError(
+                        "aux_namespace requires AuxOutputConfig.object_key_prefix.",
+                        parameter="aux_namespace",
+                    )
+                if resumable:
+                    raise VLLMValidationError(
+                        "aux_namespace does not support streaming input.",
+                        parameter="aux_namespace",
+                    )
             start = sampling_params.prompt_logprob_start or 0
             if start and start >= prompt_len - 1:
                 raise VLLMValidationError(

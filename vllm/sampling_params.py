@@ -5,6 +5,7 @@
 import copy
 import json as json_mod
 import math
+import re
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -33,6 +34,8 @@ _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
 
 MAX_LOGPROB_TOKEN_IDS = 128
+_AUX_NAMESPACE = re.compile(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*")
+_MAX_AUX_NAMESPACE_LENGTH = 256
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
@@ -456,6 +459,12 @@ class SamplingParams(
     already holds: they are not returned. In multi-turn agent scenarios, set
     this to the length of the already-returned prefix. Default 0 returns all
     prompt positions. At most the prompt length."""
+    aux_namespace: str | None = None
+    """Namespace whose auxiliary outputs are delivered as shared objects under
+    `AuxOutputConfig.object_key_prefix` and listed in `aux_objects`. Only
+    requests of the same namespace share prefix-cache blocks. Segments of
+    `[A-Za-z0-9._-]` separated by `/` name namespaces nested in the namespace
+    of their leading segments, whose release also removes them."""
 
     @staticmethod
     def from_optional(
@@ -779,6 +788,31 @@ class SamplingParams(
                 f"bad_words cannot contain an empty string. "
                 f"Got bad_words={self.bad_words}"
             )
+        if self.aux_namespace is not None:
+            self._verify_aux_namespace(self.aux_namespace)
+
+    def _verify_aux_namespace(self, namespace: str) -> None:
+        if (
+            len(namespace) > _MAX_AUX_NAMESPACE_LENGTH
+            or not _AUX_NAMESPACE.fullmatch(namespace)
+            or "tail" in namespace.split("/")
+        ):
+            reason = (
+                f"must be at most {_MAX_AUX_NAMESPACE_LENGTH} characters: "
+                "non-empty segments of [A-Za-z0-9._-] separated by '/', none of "
+                "them 'tail'"
+            )
+        elif not self.return_aux_outputs:
+            reason = "requires return_aux_outputs"
+        elif self.stop:
+            reason = "does not support stop strings; use stop_token_ids"
+        elif self.n > 1:
+            reason = "does not support n > 1"
+        else:
+            return
+        raise VLLMValidationError(
+            f"aux_namespace {reason}.", parameter="aux_namespace", value=namespace
+        )
 
     def _verify_extra_args(self) -> None:
         # JSON accepts arbitrary integers, but the engine's MessagePack

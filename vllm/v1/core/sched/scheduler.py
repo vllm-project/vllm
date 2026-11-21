@@ -465,6 +465,7 @@ class Scheduler(SchedulerInterface):
             AuxOutputSchedulerConnector(
                 self.kv_cache_manager,
                 retained_objects(vllm_config, self.kv_cache_manager.kv_cache_config)[0],
+                vllm_config.aux_output_config.object_key_prefix,
             )
             if vllm_config.aux_output_config.enabled
             else None

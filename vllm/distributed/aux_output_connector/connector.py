@@ -21,6 +21,7 @@ from vllm.v1.core.kv_cache_utils import (
     maybe_convert_block_hash,
     resolve_kv_cache_block_sizes,
 )
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -58,25 +59,36 @@ _AUX_SALT_PREFIX = "vllm-aux:"
 
 
 def aux_output_cache_salt(
-    cache_salt: str | None, sampling_params: SamplingParams | None
+    cache_salt: str | None,
+    sampling_params: SamplingParams | None,
+    object_key_prefix: str | None = None,
 ) -> str | None:
     """Salt a request by the auxiliary outputs its KV blocks carry. A request
-    that skips them has blocks without recorded routing, so it gets a salt in
-    the reserved form, which no other request can produce."""
+    that skips them has blocks without recorded routing, and a request with
+    `aux_namespace` has blocks whose routing is in objects named by its key
+    prefix and namespace, so each gets a salt in the reserved form, which no
+    other request can produce."""
     salt: dict[str, Any] = {}
     if sampling_params is not None and not sampling_params.return_aux_outputs:
         salt["aux_outputs"] = False
+    if sampling_params is not None and sampling_params.aux_namespace is not None:
+        salt["aux_namespace"] = sampling_params.aux_namespace
+        salt["object_key_prefix"] = object_key_prefix
     if not salt and not (cache_salt or "").startswith(_AUX_SALT_PREFIX):
         return cache_salt
     salt["cache_salt"] = cache_salt
     return _AUX_SALT_PREFIX + json.dumps(salt, sort_keys=True)
 
 
-def salt_aux_outputs(request: EngineCoreRequest) -> None:
+def salt_aux_outputs(
+    request: EngineCoreRequest, object_key_prefix: str | None = None
+) -> None:
     """Apply aux_output_cache_salt to a request entering an engine that records
     auxiliary outputs. Frontend prompt hashes do not include a changed salt, so
     they are dropped and the engine hashes the prompt."""
-    cache_salt = aux_output_cache_salt(request.cache_salt, request.sampling_params)
+    cache_salt = aux_output_cache_salt(
+        request.cache_salt, request.sampling_params, object_key_prefix
+    )
     if cache_salt != request.cache_salt:
         request.cache_salt = cache_salt
         request.block_hashes = None
@@ -117,6 +129,7 @@ class AuxOutputSchedulerConnector:
         self,
         kv_cache_manager: KVCacheManager,
         num_objects: int,
+        key_prefix: str | None = None,
     ) -> None:
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
@@ -141,6 +154,20 @@ class AuxOutputSchedulerConnector:
         self._capacity = num_objects // (self._block_size // self._hash_block_size)
         self._retained_hashes: list[bytes] = []
         self._released_hashes: list[bytes] = []
+        if key_prefix is not None and (
+            coordinator.enable_partial_hash_hits
+            or self._block_pool.num_hash_lookahead_tokens > 1
+            or type(self._manager) is not FullAttentionManager
+            or any(
+                group.prefix_replay_tokens
+                for group in kv_cache_manager.kv_cache_config.kv_cache_groups
+            )
+        ):
+            raise ValueError(
+                "AuxOutputConfig.object_key_prefix needs a plain full-attention "
+                "KV cache group, prefix-cache hits on KV block boundaries, at "
+                "most one hash look-ahead token and no prefix replay."
+            )
 
     def build_connector_meta(
         self,
