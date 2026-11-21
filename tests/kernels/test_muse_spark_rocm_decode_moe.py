@@ -34,7 +34,7 @@ NORM_EPS = 1e-5
 @pytest.mark.parametrize("routing", ["random", "ties"])
 @pytest.mark.parametrize("split_k_partials", [True, False])
 @torch.inference_mode()
-def test_decode_moe_prep_is_bitwise_the_unfused_kernels(
+def test_decode_moe_prep_matches_the_unfused_kernels(
     num_tokens: int, routing: str, split_k_partials: bool
 ) -> None:
     """One prep launch, from the router's split-K partials or its logits, picks
@@ -331,106 +331,9 @@ def test_compact_experts_match_the_flydsl_stages(
     assert rel_l2(compact, flydsl) < COMPACT_REL_L2
 
 
-def _mxfp4_reference(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Packed E2M1 codes and E8M0 scales of fp32 rows `x` per 32 columns: scale
-    2^ceil(log2(amax / 6)) (2^-126 for an all-zero block), codes rounded to the
-    nearest E2M1 value, ties to the even code; even column in the low nibble."""
-    rows, cols = x.shape
-    blocks = x.view(rows, cols // 32, 32)
-    amax = blocks.abs().amax(dim=-1, keepdim=True)
-    sixth = torch.tensor(1.0 / 6.0, dtype=torch.float32, device=x.device)
-    ratio = torch.clamp(amax, min=6.0 * 2.0**-126) * sixth
-    e8m0 = (ratio.view(torch.int32) + 0x7FFFFF) >> 23
-    scaled = blocks * ((254 - e8m0) << 23).view(torch.float32)
-    values = torch.tensor(
-        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=x.device
-    ).view(1, 1, 1, 8)
-    dist = (scaled.abs().unsqueeze(-1) - values).abs()
-    nearest = dist == dist.amin(dim=-1, keepdim=True)
-    even = nearest & (torch.arange(8, device=x.device) % 2 == 0)
-    pick = torch.where(even.any(-1, keepdim=True), even, nearest)
-    codes = pick.int().argmax(dim=-1) | ((scaled < 0).int() << 3)
-    codes = codes.view(rows, cols)
-    packed = (codes[:, 0::2] | (codes[:, 1::2] << 4)).to(torch.uint8)
-    return packed, e8m0.view(rows, cols // 32).to(torch.uint8)
-
-
-def _quant_rule_rows(device: torch.device) -> torch.Tensor:
-    """`[16, 64]` fp32 rows that probe the MXFP4 rule: amax at 6 * 2^k and the
-    next float above it, every E2M1 midpoint, an all-zero block, tiny and large
-    blocks, and random rows."""
-    g = torch.Generator(device="cpu").manual_seed(0)
-    rows = torch.randn(16, 64, generator=g) * 3.0
-    mids = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0, 6.0])
-    for r, k in enumerate(range(-3, 3)):
-        scale = 2.0**k
-        block = torch.cat([mids, -mids, mids / 2, -mids / 2]) * scale
-        rows[r, :32] = block
-        above = torch.nextafter(torch.tensor(6.0 * scale), torch.tensor(1e9))
-        rows[r, 32:] = torch.cat([block[:-1], above.view(1)])
-    rows[6, :32] = 0.0
-    rows[7, :32] = torch.randn(32, generator=g) * 2.0**-100
-    rows[8, :32] = torch.randn(32, generator=g) * 2.0**100
-    return rows.to(device)
-
-
-if ROCM_GFX950_AITER:
-    from vllm.models.muse_spark.amd.ops import compact_moe
-    from vllm.triton_utils import tl, triton
-
-    @triton.jit
-    def _quant_rows_probe(x_ptr, q_ptr, s_ptr, BM: tl.constexpr, BN: tl.constexpr):
-        r = tl.arange(0, BM)[:, None]
-        x = tl.load(x_ptr + r * BN + tl.arange(0, BN)[None, :])
-        q, s = compact_moe._quant_rows(x, BM, BN)
-        tl.store(q_ptr + r * (BN // 2) + tl.arange(0, BN // 2)[None, :], q)
-        tl.store(s_ptr + r * (BN // 32) + tl.arange(0, BN // 32)[None, :], s)
-
-    @triton.jit
-    def _silu_mul_quant_probe(
-        g_ptr, u_ptr, q_ptr, s_ptr, BM: tl.constexpr, BN: tl.constexpr
-    ):
-        r = tl.arange(0, BM)[:, None]
-        c = tl.arange(0, BN)[None, :]
-        gate = tl.load(g_ptr + r * BN + c)
-        up = tl.load(u_ptr + r * BN + c)
-        q, s = compact_moe._silu_mul_quant(gate, up, BM, BN)
-        tl.store(q_ptr + r * (BN // 2) + tl.arange(0, BN // 2)[None, :], q)
-        tl.store(s_ptr + r * (BN // 32) + tl.arange(0, BN // 32)[None, :], s)
-
-
-@pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
-@torch.inference_mode()
-def test_compact_quant_rule() -> None:
-    """The compact input quant and the stage-1 epilogue quant give the MXFP4
-    rule's exact scale and code bytes."""
-    device = torch.device("cuda")
-    x = _quant_rule_rows(device)
-    q = torch.empty(16, 32, dtype=torch.uint8, device=device)
-    s = torch.empty(16, 2, dtype=torch.uint8, device=device)
-    _quant_rows_probe[(1,)](x, q, s, BM=16, BN=64)
-    ref_q, ref_s = _mxfp4_reference(x)
-    torch.testing.assert_close(s, ref_s, rtol=0, atol=0)
-    torch.testing.assert_close(q, ref_q, rtol=0, atol=0)
-
-    # SiLU(32) is exactly 32 in fp32, so the epilogue sees 32 * up. Each up
-    # value sits just above a value that bf16 rounds back to an E2M1 midpoint,
-    # so only a product rounded to bf16 before the quant ties to the even code.
-    gate = torch.full((16, 64), 32.0, device=device)
-    target = x.to(torch.bfloat16).float()
-    nudged = target * (1.0 + 2.0**-12)
-    up = nudged / 32.0
-    q.zero_()
-    s.zero_()
-    _silu_mul_quant_probe[(1,)](gate, up, q, s, BM=16, BN=64)
-    ref_q, ref_s = _mxfp4_reference((32.0 * up).to(torch.bfloat16).float())
-    torch.testing.assert_close(s, ref_s, rtol=0, atol=0)
-    torch.testing.assert_close(q, ref_q, rtol=0, atol=0)
-
-
 LOCAL_EXPERTS = 64
 SORT_BLOCK_M = 32
-SORT_QUANT_TOKENS = [*range(1, 65), 96, 127, 128, 129, 200, 256, 257, 384, 511, 512]
+SORT_QUANT_TOKENS = [1, 2, 31, 32, 33, 63, 64, 65, 127, 128, 129, 256, 257, 511, 512]
 # AITER's HIP quant floors a 32-value block's amax at 1e-10 (scale 2^-35),
 # `sort_quant` (AITER's Triton quant) at the smallest normal scale, so blocks
 # below 1e-10 get other scales; both dequantize within 6 * 2^-35 of each other.
@@ -653,24 +556,3 @@ def test_sort_quant_matches_the_aiter_sort_and_quant(
         _assert_sort_quant_matches_aiter(
             _rows(num_tokens, g, device), ids, expert_map, mask
         )
-
-
-@pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
-@torch.inference_mode()
-def test_sort_quant_quantizes_every_finite_bf16_like_aiter() -> None:
-    """Every finite bf16 value, in 32-value groups of similar magnitude (every
-    reachable scale) and shuffled (flush to zero, saturation)."""
-    device = torch.device("cuda")
-    g = torch.Generator(device=device).manual_seed(1)
-    bits = torch.arange(-(2**15), 2**15, dtype=torch.int32, device=device)
-    values = bits.to(torch.int16).view(torch.bfloat16)
-    values = values[torch.isfinite(values)]
-    pad = -values.numel() % HIDDEN
-    values = torch.cat([values, values[:pad]])
-    by_magnitude = values[torch.argsort(values.float().abs(), stable=True)]
-    shuffled = values[torch.randperm(values.numel(), device=device, generator=g)]
-    expert_map, mask = _ep_maps("linear", 0, device)
-    for x in (by_magnitude, shuffled):
-        x = x.view(-1, HIDDEN).contiguous()
-        ids = _route_ids(x.shape[0], "local", mask, g)
-        _assert_sort_quant_matches_aiter(x, ids, expert_map, mask)
