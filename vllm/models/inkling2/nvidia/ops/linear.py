@@ -5,10 +5,12 @@ reference `linear` with fp32 accumulation in ordered 1024-wide K groups."""
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import is_flashinfer_autotuning
 
 from . import use_sm100_kernels
+from .gemv import sm12x_bf16_gemv, use_sm12x_bf16_gemv
 
 # Up to this many rows, FlashInfer's CuTe DSL low-M kernels run near HBM
 # bandwidth (cuBLAS is up to 2x slower); larger batches use cuBLAS.
@@ -23,6 +25,8 @@ def linear(
     if out is not None:
         assert x.shape[0] > LOW_M_MAX_TOKENS
         return torch.mm(x, weight.t(), out=out)
+    if use_sm12x_bf16_gemv(x, weight):
+        return sm12x_bf16_gemv(x, weight)
     # Autotuning would profile the CuTe DSL kernels past their 32-row limit.
     if (
         x.shape[0] > LOW_M_MAX_TOKENS
@@ -62,7 +66,7 @@ def _k_group_tile(
     for g in tl.static_range(NUM_GROUPS):
         group = first + g
         partial = tl.zeros((BM, BN), tl.float32)
-        for tile in range(8):
+        for tile in range(tl.minimum(8, tl.cdiv(K - group * 1024, 128))):
             k = group * 1024 + tile * 128 + ks
             x = tl.load(
                 X + rows[:, None] * K + k[None, :],
@@ -75,6 +79,17 @@ def _k_group_tile(
                 other=0,
             )
             partial = tl.dot(x, w, partial)
+        if g > 0:
+            # Keep a short tail's dot separate from the preceding 1024-wide
+            # groups; folding total into its MMA changes the rounding order.
+            partial = tl.inline_asm_elementwise(
+                "mov.b32 $0, $1;",
+                "=f,f",
+                [partial],
+                dtype=tl.float32,
+                is_pure=True,
+                pack=1,
+            )
         total = partial if g == 0 else total + partial
     tl.store(
         Y + (first * M + rows[:, None]) * N + cols[None, :],
@@ -198,7 +213,8 @@ def k_group_partials(
     assert x.is_contiguous() and weight.is_contiguous()
     tokens, hidden = x.shape
     n = weight.shape[0]
-    if tokens >= TMA_MIN_TOKENS:
+    sm120 = current_platform.is_device_capability_family(120)
+    if tokens >= TMA_MIN_TOKENS and not sm120:
         from triton.tools.tensor_descriptor import TensorDescriptor
 
         out = torch.empty((1, tokens, n), dtype=out_dtype, device=x.device)
@@ -226,6 +242,8 @@ def k_group_partials(
     split = groups > 1 and tokens < 4096
     num_warps = 4 if block_n <= 64 else 8
     num_stages = 4 if not split else 3 if block_n <= 64 else 2
+    if sm120:
+        num_stages = min(num_stages, 2)
     out = torch.empty(
         (groups if split else 1, tokens, n),
         dtype=torch.float32 if split else out_dtype,
