@@ -5,8 +5,7 @@ sublayer, for large batches of an already reduced input (CUDA)."""
 
 import torch
 
-from vllm.platforms import current_platform
-
+from . import use_native_conv_mix
 from .attn_res import attn_res
 from .sconv import short_conv
 from .seq_parallel import SeqParallel
@@ -89,9 +88,9 @@ def conv_mix(
     )
     if sp is None:
         assert halo == 0 and positions.shape[0] == num_tokens and x.dim() == 2
-        if current_platform.is_device_capability_family(120):
+        if not use_native_conv_mix():
             # Native conv/mix kernels require Hopper or SM10x. Keep the
-            # loop executor's cache writes and residual rounding on SM12x.
+            # loop executor's cache writes and residual rounding elsewhere.
             short_conv(
                 x,
                 conv_weight,

@@ -9,8 +9,9 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import is_flashinfer_autotuning
 
-from . import use_sm100_kernels
+from . import use_pdl, use_sm100_kernels
 from .gemv import sm12x_bf16_gemv, use_sm12x_bf16_gemv
+from .pdl import gdc_launch_dependents, gdc_wait
 
 # Up to this many rows, FlashInfer's CuTe DSL low-M kernels run near HBM
 # bandwidth (cuBLAS is up to 2x slower); larger batches use cuBLAS.
@@ -131,7 +132,7 @@ def _k_group_kernel(
 ):
     if SPLIT and tl.program_id(1) == 0:
         _prefetch_k_group_tile(W, N, K, BN, tl.program_id(0), tl.program_id(2))
-    tl.extra.cuda.gdc_wait()
+    gdc_wait()
     _k_group_tile(
         X,
         W,
@@ -150,7 +151,7 @@ def _k_group_kernel(
 
 @triton.jit
 def _k_group_sum_kernel(Partials, Y, MN, GROUPS: tl.constexpr, BLOCK: tl.constexpr):
-    tl.extra.cuda.gdc_wait()
+    gdc_wait()
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < MN
     total = tl.load(Partials + offs, mask)
@@ -178,9 +179,9 @@ def _k_group_tma_kernel(
     GROUP_TILES: tl.constexpr = 1024 // BK
     rows = tl.program_id(1) * BM
     cols = tl.program_id(0) * BN
-    tl.extra.cuda.gdc_wait()
+    gdc_wait()
     if LAUNCH_DEPENDENTS:
-        tl.extra.cuda.gdc_launch_dependents()
+        gdc_launch_dependents()
     total = tl.zeros((BM, BN), tl.float32)
     partial = tl.zeros((BM, BN), tl.float32)
     for tile in tl.range(TILES, warp_specialize=True):
@@ -213,8 +214,9 @@ def k_group_partials(
     assert x.is_contiguous() and weight.is_contiguous()
     tokens, hidden = x.shape
     n = weight.shape[0]
-    sm120 = current_platform.is_device_capability_family(120)
-    if tokens >= TMA_MIN_TOKENS and not sm120:
+    # SM12x and SM8x have ~100 KB of shared memory per block (SM8x no TMA).
+    small_smem = current_platform.is_device_capability_family(120) or not use_pdl()
+    if tokens >= TMA_MIN_TOKENS and not small_smem:
         from triton.tools.tensor_descriptor import TensorDescriptor
 
         out = torch.empty((1, tokens, n), dtype=out_dtype, device=x.device)
@@ -233,7 +235,7 @@ def k_group_partials(
             num_warps=4 if block_n == 64 else 8,
             num_stages=4 if block_n == 64 else 3,
             enable_fp_fusion=False,
-            launch_pdl=True,
+            launch_pdl=use_pdl(),
         )
         return out
     block_m = 16 if tokens <= 128 else 64
@@ -242,7 +244,7 @@ def k_group_partials(
     split = groups > 1 and tokens < 4096
     num_warps = 4 if block_n <= 64 else 8
     num_stages = 4 if not split else 3 if block_n <= 64 else 2
-    if sm120:
+    if small_smem:
         num_stages = min(num_stages, 2)
     out = torch.empty(
         (groups if split else 1, tokens, n),
@@ -267,7 +269,7 @@ def k_group_partials(
         num_warps=num_warps,
         num_stages=num_stages,
         enable_fp_fusion=False,
-        launch_pdl=True,
+        launch_pdl=use_pdl(),
     )
     return out
 
@@ -285,6 +287,6 @@ def linear_k_groups(
         return partials[0]
     out = torch.empty(partials.shape[1:], dtype=out_dtype, device=x.device)
     _k_group_sum_kernel[(triton.cdiv(out.numel(), 1024),)](
-        partials, out, out.numel(), partials.shape[0], 1024, launch_pdl=True
+        partials, out, out.numel(), partials.shape[0], 1024, launch_pdl=use_pdl()
     )
     return out

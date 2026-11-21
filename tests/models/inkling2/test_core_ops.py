@@ -37,6 +37,48 @@ def test_rms_norm_rounds_once_to_bf16(in_dtype, width):
     torch.testing.assert_close(out, ref.bfloat16(), atol=0, rtol=1e-2)
 
 
+def test_e4m3_conversions_match_torch():
+    """`to_e4m3` rounds to nearest even like torch and `from_e4m3` decodes
+    every byte: in software below SM89."""
+    from vllm.models.inkling2.nvidia.ops.e4m3 import e4m3_arg, from_e4m3, to_e4m3
+    from vllm.triton_utils import tl, triton
+
+    @triton.jit
+    def convert(X, Codes, Values, Bytes, Decoded, N: tl.constexpr):
+        offs = tl.arange(0, N)
+        codes = to_e4m3(tl.load(X + offs))
+        tl.store(Codes + offs, codes)
+        tl.store(Values + offs, from_e4m3(codes))
+        decoded = from_e4m3(tl.load(Bytes + offs % 256))
+        tl.store(Decoded + offs, decoded, offs < 256)
+
+    torch.manual_seed(0)
+    all_bytes = torch.arange(256, device=DEVICE).to(torch.uint8)
+    values = all_bytes.view(torch.float8_e4m3fn).float()
+    finite = values[~values.isnan()].sort().values
+    # Every value, the ties between neighbours and random values in range.
+    x = torch.cat((finite, (finite[1:] + finite[:-1]) / 2))
+    x = torch.cat((x, torch.randn(4096 - x.numel(), device=DEVICE) * 30))
+    x = x.clamp(-448, 448)
+    codes = torch.empty(4096, device=DEVICE, dtype=torch.float8_e4m3fn)
+    roundtrip = torch.empty(4096, device=DEVICE)
+    decoded = torch.empty(256, device=DEVICE)
+    convert[(1,)](
+        x,
+        e4m3_arg(codes),
+        roundtrip,
+        e4m3_arg(all_bytes.view(torch.float8_e4m3fn)),
+        decoded,
+        N=4096,
+    )
+    expected = x.to(torch.float8_e4m3fn)
+    assert torch.equal(codes.view(torch.uint8), expected.view(torch.uint8))
+    assert torch.equal(roundtrip, expected.float())
+    assert torch.equal(decoded.isnan(), values.isnan())
+    nan = values.isnan()
+    assert torch.equal(decoded[~nan].view(torch.int32), values[~nan].view(torch.int32))
+
+
 @pytest.mark.parametrize("tokens", [0, 1, 8, 37, 8192])
 @pytest.mark.parametrize("broadcast", [False, True])
 def test_loop_norm_preserves_stacked_reference_and_graph(tokens, broadcast):
