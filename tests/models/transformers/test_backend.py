@@ -292,6 +292,54 @@ def test_sinks(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner]) -> None
         torch.testing.assert_close(sink, expected[i].cpu())
 
 
+def get_expert_params(model) -> dict[tuple[str, str], torch.Tensor]:
+    """The expert parameters, keyed by (layer index, parameter name)."""
+    suffixes = ("w13_weight", "w13_weight_scale", "w13_bias")
+    suffixes += ("w2_weight", "w2_weight_scale", "w2_bias")
+    params = {}
+    for name, param in model.named_parameters():
+        if "experts" in name and name.endswith(suffixes):
+            layer = name.partition("layers.")[2].partition(".")[0]
+            params[(layer, name.rpartition(".")[2])] = param.detach().cpu()
+    return params
+
+
+def test_gpt_oss_mxfp4_experts_match_native(vllm_runner: type[VllmRunner]) -> None:
+    """gpt-oss MXFP4 experts load into `FusedMoE` identically to native."""
+    from vllm.platforms import current_platform
+
+    if not (current_platform.is_cuda() and current_platform.has_device_capability(80)):
+        pytest.skip("MXFP4 needs a CUDA device with compute capability 8.0")
+
+    model = "tiny-random/gpt-oss-mxfp4"
+    kwargs = {"max_model_len": 1024, "moe_backend": "marlin"}
+    with vllm_runner(model, enforce_eager=True, **kwargs) as native:
+        expected = native.apply_model(get_expert_params)[0]
+
+    with vllm_runner(model, model_impl="transformers", **kwargs) as backend:
+        assert backend.llm.llm_engine.model_config.using_transformers_backend()
+        actual = backend.apply_model(get_expert_params)[0]
+        assert backend.generate_greedy(["Hello"], max_tokens=4)
+
+    assert expected and actual.keys() == expected.keys()
+    for key, weight in expected.items():
+        torch.testing.assert_close(actual[key], weight, rtol=0, atol=0, msg=str(key))
+
+
+@pytest.mark.parametrize(("tp_size", "ep_size"), [(2, 1), (1, 2)])
+def test_gpt_oss_mxfp4_parallel_experts_unsupported(tp_size: int, ep_size: int):
+    """The whole stacked experts are loaded, so a rank can't take a shard of them."""
+    from vllm.model_executor.models.transformers.moe import TransformersRoutedExperts
+
+    parallel_config = SimpleNamespace(tp_size=tp_size, ep_size=ep_size)
+    experts = SimpleNamespace(
+        moe_config=SimpleNamespace(moe_parallel_config=parallel_config)
+    )
+    weights = [("gate_up_proj_blocks", torch.zeros(2, 4, 1, 16))]
+    with pytest.raises(NotImplementedError, match="does not support TP or EP"):
+        list(TransformersRoutedExperts._load_gpt_oss_mxfp4(experts, weights))
+
+
 def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
     model = "vllm-project/tiny-random-DeepseekV2ForCausalLM"
     args = (example_prompts, 32, 5)

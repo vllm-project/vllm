@@ -108,7 +108,8 @@ def _transformers_moe_forward(
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     self._moe_state.topk_ids = topk_ids
-    return self._forward_super(hidden_states, topk_weights)
+    # Kernels that pad hidden_size (e.g. Marlin MXFP4) return a strided view
+    return self._forward_super(hidden_states, topk_weights).contiguous()
 
 
 def _transformers_moe_forward_fake(
@@ -196,7 +197,37 @@ class TransformersRoutedExperts(RoutedExperts):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
+        if self.quant_config and self.quant_config.get_name() == "gpt_oss_mxfp4":
+            return self._load_gpt_oss_mxfp4(weights)
         return super().load_weights(self._detect_mixtral_format(weights))
+
+    def _load_gpt_oss_mxfp4(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        """Load the stacked experts whole: their gate and up projections are
+        interleaved, so splitting them into halves would scramble them.
+
+        `{gate_up,down}_proj_{blocks,scales,bias}` load into the `w13`/`w2`
+        `_weight`/`_weight_scale`/`_bias` parameters."""
+        parallel_config = self.moe_config.moe_parallel_config
+        if parallel_config.tp_size > 1 or parallel_config.ep_size > 1:
+            raise NotImplementedError(
+                "gpt-oss MXFP4 does not support TP or EP in the Transformers backend."
+            )
+        for name, weight in weights:
+            param_name = (
+                name.replace("gate_up_proj", "w13")
+                .replace("down_proj", "w2")
+                .replace("_blocks", "_weight")
+                .replace("_scales", "_weight_scale")
+            )
+            param = getattr(self, param_name)
+            if name.endswith("_blocks"):  # (E, N, K // 32, 16) -> (E, N, K // 2)
+                weight = weight.flatten(2)
+            param.weight_loader(
+                param, weight, weight_name=param_name, shard_id=None, expert_id=None
+            )
+            yield param_name
 
     def _detect_mixtral_format(
         self, weights: Iterable[tuple[str, torch.Tensor]]
@@ -311,6 +342,11 @@ class MoEMixin(MixtureOfExperts, Base):
         # Down projections of shared experts consumed by FusedMoE
         shared_down_projs: list[tuple[nn.Module, str]] = []
 
+        is_gpt_oss_mxfp4 = (
+            self.quant_config is not None
+            and self.quant_config.get_name() == "gpt_oss_mxfp4"
+        )
+
         # Recursively fuse MoE layers
         def _recursive_replace(module: nn.Module, prefix: str):
             # Decoder layers are fused later, in `_pre_decoder_layer_replace`
@@ -323,7 +359,12 @@ class MoEMixin(MixtureOfExperts, Base):
                 # Packed implementations will have experts as 3D tensors of shapes like:
                 # gate_up_proj = (num_experts, 2 * intermediate_size, hidden_size)
                 # down_proj = (num_experts, intermediate_size, hidden_size)
-                params = list(child_module.parameters())
+                # gpt-oss MXFP4 experts also have 2D biases, which `FusedMoE` loads
+                params = [
+                    p
+                    for n, p in child_module.named_parameters()
+                    if not (is_gpt_oss_mxfp4 and n.endswith("bias"))
+                ]
                 is_3d = len(params) > 0 and all(p.ndim == 3 for p in params)
                 if child_name == experts_name and (is_modulelist or is_3d):
                     # Alias for readability
