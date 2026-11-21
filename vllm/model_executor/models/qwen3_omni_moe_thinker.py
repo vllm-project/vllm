@@ -179,7 +179,7 @@ _AUDIO_CUDAGRAPH_BACKENDS = {
 }
 
 
-def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
+def _get_feat_extract_output_lengths(input_lengths: torch.Tensor | int):
     input_lengths_leave = input_lengths % 100
     feat_lengths = (input_lengths_leave - 1) // 2 + 1
     output_lengths = (
@@ -1729,12 +1729,12 @@ class Qwen3OmniMoeAudioEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         mm_kwargs: dict[str, Any],
     ) -> list[EncoderItemSpec]:
         feature_lens = self._get_audio_feature_lengths(mm_kwargs)
-        output_lens = _get_feat_extract_output_lengths(feature_lens)
         return [
-            EncoderItemSpec(input_size=input_size, output_tokens=output_tokens)
-            for input_size, output_tokens in zip(
-                feature_lens.tolist(), output_lens.tolist()
+            EncoderItemSpec(
+                input_size=input_size,
+                output_tokens=_get_feat_extract_output_lengths(input_size),
             )
+            for input_size in feature_lens.tolist()
         ]
 
     def select_encoder_cudagraph_items(
