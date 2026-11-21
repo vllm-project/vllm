@@ -75,12 +75,12 @@ def test_fp4_zero_sign_canonicalization_preserves_nonzero_values(size: int) -> N
     assert packed.data_ptr() == pointer
     torch.testing.assert_close(packed, expected, rtol=0, atol=0)
 
-    torch.cuda.synchronize()
-    torch.cuda.reset_peak_memory_stats()
-    allocated = torch.cuda.memory_allocated()
+    torch.accelerator.synchronize()
+    torch.accelerator.reset_peak_memory_stats()
+    allocated = torch.accelerator.memory_allocated()
     b12x._canonicalize_fp4_zero_signs_(packed)
-    torch.cuda.synchronize()
-    assert torch.cuda.max_memory_allocated() == allocated
+    torch.accelerator.synchronize()
+    assert torch.accelerator.max_memory_allocated() == allocated
 
 
 def test_fp4_zero_sign_canonicalization_beyond_int32_offsets() -> None:
