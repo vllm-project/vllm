@@ -581,6 +581,14 @@ def test_aux_output_cache_salt(return_aux_outputs, recording, salted):
         assert aux_output_cache_salt(salt, None, config) == salt
 
 
+@pytest.mark.parametrize("skipped_salt", [None, "user"])
+def test_aux_output_cache_salt_cannot_be_forged(skipped_salt):
+    config = _routed_experts_config(True)
+    skipped = aux_output_cache_salt(skipped_salt, _aux_outputs_params(False), config)
+    forged = aux_output_cache_salt(skipped, _aux_outputs_params(True), config)
+    assert forged != skipped
+
+
 def test_aux_outputs_opt_out_prefix_cache_is_separate():
     scheduler = create_scheduler(enable_prefix_caching=True)
     scheduler.aux_output_connector = _aux_output_connector(scheduler)

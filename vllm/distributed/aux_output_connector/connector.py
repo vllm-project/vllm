@@ -4,11 +4,12 @@
 
 from __future__ import annotations
 
+import json
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from itertools import chain, islice
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.engine import EngineCoreRequest
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -52,20 +54,41 @@ def retained_objects(
     return num_blocks * (block_size // hash_block_size), hash_block_size
 
 
+_AUX_SALT_PREFIX = "vllm-aux:"
+
+
 def aux_output_cache_salt(
     cache_salt: str | None,
     sampling_params: SamplingParams | None,
     vllm_config: VllmConfig,
 ) -> str | None:
-    """Salt a request that skips auxiliary outputs on a server recording
-    routed experts: its blocks have no recorded routing to serve."""
+    """Salt a request by the auxiliary outputs its KV blocks carry. A request
+    that skips them on a server recording routed experts has blocks without
+    recorded routing, so it gets a salt in the reserved form, which no other
+    request can produce."""
+    salt: dict[str, Any] = {}
     if (
-        sampling_params is None
-        or sampling_params.return_aux_outputs
-        or not vllm_config.aux_output_config.enable_return_routed_experts
+        sampling_params is not None
+        and not sampling_params.return_aux_outputs
+        and vllm_config.aux_output_config.enable_return_routed_experts
     ):
+        salt["aux_outputs"] = False
+    if not salt and not (cache_salt or "").startswith(_AUX_SALT_PREFIX):
         return cache_salt
-    return f"{cache_salt or ''}\x00aux_outputs=off"
+    salt["cache_salt"] = cache_salt
+    return _AUX_SALT_PREFIX + json.dumps(salt, sort_keys=True)
+
+
+def salt_aux_outputs(request: EngineCoreRequest, vllm_config: VllmConfig) -> None:
+    """Apply aux_output_cache_salt to a request entering the engine. Frontend
+    prompt hashes do not include a changed salt, so they are dropped and the
+    engine hashes the prompt."""
+    cache_salt = aux_output_cache_salt(
+        request.cache_salt, request.sampling_params, vllm_config
+    )
+    if cache_salt != request.cache_salt:
+        request.cache_salt = cache_salt
+        request.block_hashes = None
 
 
 @dataclass(slots=True)

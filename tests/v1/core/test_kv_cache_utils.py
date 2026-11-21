@@ -1208,10 +1208,19 @@ def test_frontend_block_hashes_count_check():
     assert frontend_hashes(config, 3) is None
 
 
-@pytest.mark.parametrize("return_aux_outputs", [True, False])
-def test_aux_outputs_opt_out_ignores_frontend_block_hashes(return_aux_outputs):
-    """Frontend prompt hashes lack the aux-output salt, so the engine hashes an
-    opted-out request itself."""
+@pytest.mark.parametrize(
+    "return_aux_outputs,cache_salt,engine_hashed",
+    [
+        (True, None, False),
+        (True, "user", False),
+        (False, None, True),
+        (True, "vllm-aux:user", True),
+    ],
+    ids=["records", "records-salted", "skips", "records-reserved-salt"],
+)
+def test_aux_output_salt_ignores_frontend_block_hashes(
+    return_aux_outputs, cache_salt, engine_hashed
+):
     from vllm.v1.engine import EngineCoreRequest, PrefixHashConfig
     from vllm.v1.engine.core import EngineCore
 
@@ -1230,7 +1239,7 @@ def test_aux_outputs_opt_out_ignores_frontend_block_hashes(return_aux_outputs):
         pooling_params=None,
         arrival_time=0.0,
         lora_request=None,
-        cache_salt=None,
+        cache_salt=cache_salt,
         data_parallel_rank=None,
         block_hashes=list(frontend_hashes),
     )
@@ -1248,15 +1257,15 @@ def test_aux_outputs_opt_out_ignores_frontend_block_hashes(return_aux_outputs):
 
     req, _ = EngineCore.preprocess_add_request(cast(EngineCore, engine), request)
 
-    if return_aux_outputs:
-        assert req.cache_salt is None
-        assert req.block_hashes == frontend_hashes
-    else:
-        assert req.cache_salt is not None
+    if engine_hashed:
+        assert req.cache_salt != cache_salt
         engine_hashes = Request.from_engine_core_request(request, block_hasher)
         assert req.block_hashes == engine_hashes.block_hashes
         assert len(req.block_hashes) == len(frontend_hashes)
         assert set(req.block_hashes).isdisjoint(frontend_hashes)
+    else:
+        assert req.cache_salt == cache_salt
+        assert req.block_hashes == frontend_hashes
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
