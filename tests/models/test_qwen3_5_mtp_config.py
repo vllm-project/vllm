@@ -182,3 +182,33 @@ def test_mtp_num_hidden_layers_selects_multi_module_mtp(
 
     assert speculative_config.use_multi_module_mtp() is multi_module
     assert speculative_config.num_mtp_modules() == mtp_layers
+
+
+def _dspark_config(model_type: str, architecture: str) -> PreTrainedConfig:
+    """A DSpark draft built on a Qwen3.5 target.
+
+    It carries the same ``mtp_num_hidden_layers`` field as an MTP head but
+    declares a DSpark architecture, which must not be rewritten to MTP.
+    """
+    return PreTrainedConfig(
+        model_type=model_type,
+        architectures=[architecture],
+        mtp_num_hidden_layers=1,
+    )
+
+
+@pytest.mark.parametrize(
+    "model_type",
+    ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"],
+)
+@pytest.mark.parametrize("architecture", ["Qwen3DSparkModel", "DSparkDraftModel"])
+def test_mtp_override_resolves_dspark_draft_to_qwen3_dspark(
+    model_type: str, architecture: str
+) -> None:
+    """A DSpark draft on a Qwen3.5 target must resolve to Qwen3DSparkModel.
+
+    Otherwise the DSpark dispatch no longer recognises the draft and falls
+    through to the DeepSeek-V4 model, which fails on ``config.hc_mult``.
+    """
+    cfg = SpeculativeConfig.hf_config_override(_dspark_config(model_type, architecture))
+    assert cfg.architectures == ["Qwen3DSparkModel"]
