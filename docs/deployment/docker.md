@@ -12,7 +12,7 @@ toc_depth: 2
 
 Release images (from v0.33.0) and nightly images are also published under the
 shorter `vllm/vllm` name, with the platform as a tag suffix. These are the same
-images (same digests) as the `vllm/vllm-openai*` tags.
+images (same digests) as the corresponding full repository tags.
 
 | Image | `vllm/vllm` tag |
 | --- | --- |
@@ -23,15 +23,31 @@ images (same digests) as the `vllm/vllm-openai*` tags.
 | `vllm/vllm-openai-rocm:{latest,v<version>,nightly}-<variant>` | `vllm/vllm:{latest,v<version>,nightly}-<variant>`, e.g. `-rocm100` |
 | `vllm/vllm-openai-cpu:{latest,v<version>,nightly}` | `vllm/vllm:{latest,v<version>,nightly}-cpu` |
 | `vllm/vllm-openai-xpu:{latest,v<version>,nightly}` | `vllm/vllm:{latest,v<version>,nightly}-xpu` |
+| `vllm/vllm-rust-frontend:{latest,v<version>,nightly}` | `vllm/vllm:{latest,v<version>,nightly}-rust-frontend` |
 
 For example, `docker pull vllm/vllm:v0.33.0-rocm` pulls the same image as
 `docker pull vllm/vllm-openai-rocm:v0.33.0`. Per-architecture tags, ROCm `-base`
 images and commit-pinned nightly tags (`nightly-<commit>`) are only published
-under the `vllm/vllm-openai*` names.
+under their full repository names.
 
 Release images for ROCm and XPU are also published as `vllm/vllm-rocm` and
 `vllm/vllm-xpu`, with the same tags as `vllm/vllm-openai-rocm` and
 `vllm/vllm-openai-xpu` (e.g. `vllm/vllm-rocm:v0.33.0`, `vllm/vllm-xpu:latest`).
+
+## Standalone Rust frontend
+
+Use `vllm/vllm-rust-frontend` on Linux AMD64 or ARM64 for engine-free rendering:
+
+```bash
+docker run --rm -p 127.0.0.1:8000:8000 \
+    -v vllm-rust-cache:/home/vllm/.cache/huggingface vllm/vllm-rust-frontend:latest \
+    render Qwen/Qwen3-0.6B --host 0.0.0.0
+```
+
+For inference with an [external engine](https://github.com/vllm-project/vllm/blob/main/rust/README.md#external-engine),
+use `serve --data-parallel-size-local 0` and match the frontend and engine tags
+(`v<version>` or `nightly-<full-commit-sha>`). Build locally from the repository
+root with `docker buildx bake -f docker/docker-bake.hcl rust-frontend`.
 
 ## Run a vLLM Recipes configuration
 

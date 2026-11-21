@@ -28,3 +28,21 @@ steps:
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
   commands:
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
+
+- label: ":docker: Standalone Rust frontend image"
+  key: rust-frontend-image
+  depends_on: []
+  device: cpu-medium
+  timeout_in_minutes: 60
+  no_plugin: true
+  source_file_dependencies:
+  - rust/
+  - rust-toolchain.toml
+  - docker/Dockerfile.rust
+  - docker/docker-bake.hcl
+  - .dockerignore
+  - LICENSE
+  - .buildkite/test_areas/rust_frontend_cargo.yaml
+  commands:
+  - docker buildx bake -f docker/docker-bake.hcl rust-frontend --set "rust-frontend.tags=local/vllm-rust-frontend:$$BUILDKITE_JOB_ID"
+  - docker run --rm "local/vllm-rust-frontend:$$BUILDKITE_JOB_ID" --version

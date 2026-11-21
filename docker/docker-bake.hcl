@@ -50,7 +50,7 @@ group "default" {
 }
 
 group "all" {
-  targets = ["openai", "openai-ubuntu2404"]
+  targets = ["openai", "openai-ubuntu2404", "rust-frontend"]
 }
 
 # Base targets
@@ -103,6 +103,14 @@ target "openai" {
   target   = "vllm-openai"
   tags     = ["vllm:openai"]
   output   = ["type=docker"]
+}
+
+target "rust-frontend" {
+  context    = "."
+  dockerfile = "docker/Dockerfile.rust"
+  target     = "rust-frontend"
+  tags       = ["local/vllm-rust-frontend:dev"]
+  output     = ["type=docker"]
 }
 
 # Ubuntu 24.04 targets
