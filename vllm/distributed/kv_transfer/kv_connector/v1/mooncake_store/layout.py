@@ -338,6 +338,21 @@ class RankLocalStoreLayout(StoreLayout):
         self.block_stride = block_strides
         self.block_len = block_lens
 
+    def _chunk_blocks(
+        self, chunks: Sequence[tuple[int, int]], block_ids: list[int]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Token span and first block ID of each chunk."""
+        n = len(chunks)
+        starts = np.fromiter((c[0] for c in chunks), dtype=np.int64, count=n)
+        spans = np.fromiter((c[1] for c in chunks), dtype=np.int64, count=n) - starts
+        assert np.all(spans % self.hash_block_size == 0)
+        bids = np.fromiter(
+            (block_ids[i] for i in (starts // self.block_size).tolist()),
+            dtype=np.int64,
+            count=n,
+        )
+        return spans, bids
+
     def prepare_values(
         self,
         chunks: Sequence[tuple[int, int]],
@@ -359,15 +374,7 @@ class RankLocalStoreLayout(StoreLayout):
             [self.block_len[i % length] for i in range(base.shape[0])],
             dtype=np.int64,
         )
-        n = len(chunks)
-        starts = np.fromiter((c[0] for c in chunks), dtype=np.int64, count=n)
-        spans = np.fromiter((c[1] for c in chunks), dtype=np.int64, count=n) - starts
-        assert np.all(spans % self.hash_block_size == 0)
-        bids = np.fromiter(
-            (block_ids[i] for i in (starts // self.block_size).tolist()),
-            dtype=np.int64,
-            count=n,
-        )
+        spans, bids = self._chunk_blocks(chunks, block_ids)
         addrs = base[None, :] + bids[:, None] * stride[None, :]
         block_counts = (spans + self.block_size - 1) // self.block_size
         # A chunk spanning several consecutive blocks also copies the
@@ -391,13 +398,14 @@ class LayerRangeStoreLayout(RankLocalStoreLayout):
         super().__init__(metadata, block_size, hash_block_size)
         self.range_objects = range_objects
         self._key_prefixes = [PoolKey.build_prefix(m) for m in range_objects.metadata]
+        self._shard_ids = tuple(range(len(self._key_prefixes)))
         # Per range: block-0 addresses and block strides of its segments as
         # arrays, and their lengths.
         self._range_segments: list[tuple[np.ndarray, np.ndarray, list[int]]] = []
 
     @property
     def local_shard_ids(self) -> tuple[StoreShardId, ...]:
-        return tuple(range(len(self._key_prefixes)))
+        return self._shard_ids
 
     def key_for(self, shard_id: StoreShardId, chunk_hash: BlockHash) -> str:
         return PoolKey.build_key_string(self._key_prefixes[shard_id], chunk_hash.hex())
@@ -468,19 +476,11 @@ class LayerRangeStoreLayout(RankLocalStoreLayout):
             return [], [], []
         if len(chunks) != len(shard_ids):
             raise ValueError("Each Store chunk must have one shard ID")
-        n = len(chunks)
-        starts = np.fromiter((c[0] for c in chunks), dtype=np.int64, count=n)
-        spans = np.fromiter((c[1] for c in chunks), dtype=np.int64, count=n) - starts
-        assert np.all(spans % self.hash_block_size == 0)
+        spans, bids = self._chunk_blocks(chunks, block_ids)
         assert np.all(spans <= self.block_size)
-        bids = np.fromiter(
-            (block_ids[i] for i in (starts // self.block_size).tolist()),
-            dtype=np.int64,
-            count=n,
-        )
         shards = np.asarray(shard_ids, dtype=np.int64)
-        addrs: list[list[int]] = [[] for _ in range(n)]
-        sizes: list[list[int]] = [[] for _ in range(n)]
+        addrs: list[list[int]] = [[] for _ in chunks]
+        sizes: list[list[int]] = [[] for _ in chunks]
         for shard_id, (base, stride, lengths) in enumerate(self._range_segments):
             rows = np.flatnonzero(shards == shard_id)
             if rows.size == 0:
@@ -838,10 +838,7 @@ class AttentionStoreLayout(TPShardedStoreLayout):
             else _object_order(self.range_objects, len(kv_caches), layer_names)
         )
         templates: list[list[tuple[list[int], list[int], list[int]]]] = [
-            [
-                ([], [], [])
-                for _ in range(len(self._range_metadata) * self.shards_per_rank)
-            ]
+            [([], [], []) for _ in self.store_shard_ids]
             for _ in range(self.chunks_per_block)
         ]
         for cache_index, range_index in order:

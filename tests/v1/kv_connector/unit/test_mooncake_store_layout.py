@@ -648,9 +648,8 @@ def test_tp_shared_layer_ranges_round_trip_across_pp_and_tp_sizes(batches: int):
         for shard_id, shard_addrs, shard_sizes in zip(
             shard_ids, addrs, sizes, strict=True
         ):
-            stored[layout.key_for(shard_id, block_hash)] = b"".join(
-                ctypes.string_at(addr, size)
-                for addr, size in zip(shard_addrs, shard_sizes, strict=True)
+            stored[layout.key_for(shard_id, block_hash)] = _read_segments(
+                shard_addrs, shard_sizes
             )
 
     for tp_rank in range(2):

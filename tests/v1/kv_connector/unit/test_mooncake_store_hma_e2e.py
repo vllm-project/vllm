@@ -475,6 +475,23 @@ def _span_mask(spans, nbytes: int) -> torch.Tensor:
     return mask
 
 
+def _plan_kv_caches(groups, layout: KVCacheLayout, num_blocks: int, model: str):
+    """KV cache config and tensors of `groups` in the planner's real layout."""
+    planner_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: layout,
+            num_gpu_blocks_override=num_blocks,
+            prefix_cache_retention_interval=None,
+        ),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    try:
+        cfg = get_kv_cache_config_from_groups(planner_config, groups, 1 << 30)
+        return cfg, allocate_kv_cache(cfg, torch.device("cpu"), layout)
+    except (ValueError, AssertionError):
+        pytest.skip(f"{layout.name} cannot express {model}")
+
+
 @pytest.mark.parametrize("layout", list(KVCacheLayout), ids=lambda x: x.name)
 @pytest.mark.parametrize("model", list(_MODELS))
 def test_store_values_round_trip_every_layout(request, model, layout):
@@ -495,19 +512,7 @@ def test_store_values_round_trip_every_layout(request, model, layout):
         )
     num_blocks, block = 4, 2
     groups = [make_kv_cache_group(names, spec) for names, spec in _MODELS[model]]
-    planner_config = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            get_resolved_kv_cache_layout=lambda: layout,
-            num_gpu_blocks_override=num_blocks,
-            prefix_cache_retention_interval=None,
-        ),
-        attention_config=SimpleNamespace(hisparse_config=None),
-    )
-    try:
-        cfg = get_kv_cache_config_from_groups(planner_config, groups, 1 << 30)
-        kv_caches = allocate_kv_cache(cfg, torch.device("cpu"), layout)
-    except (ValueError, AssertionError):
-        pytest.skip(f"{layout.name} cannot express {model}")
+    cfg, kv_caches = _plan_kv_caches(groups, layout, num_blocks, model)
     worker = _build_worker_with_dict_store(
         _minimal_vllm_config(cache_block_size=16), cfg, _DictStore()
     )
@@ -617,19 +622,7 @@ def _pp_stage(
     """Worker and KV caches of one PP stage of a `pp_sizes=[1, 2]` instance,
     through the planner's real layout."""
     groups = _pp_groups(model, range(*get_pp_indices(_PP_NUM_LAYERS, rank, pp_size)))
-    planner_config = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            get_resolved_kv_cache_layout=lambda: layout,
-            num_gpu_blocks_override=num_blocks,
-            prefix_cache_retention_interval=None,
-        ),
-        attention_config=SimpleNamespace(hisparse_config=None),
-    )
-    try:
-        cfg = get_kv_cache_config_from_groups(planner_config, groups, 1 << 30)
-        kv_caches = allocate_kv_cache(cfg, torch.device("cpu"), layout)
-    except (ValueError, AssertionError):
-        pytest.skip(f"{layout.name} cannot express {model}")
+    cfg, kv_caches = _plan_kv_caches(groups, layout, num_blocks, model)
     vllm_config = _minimal_vllm_config(cache_block_size=16)
     vllm_config.parallel_config.pipeline_parallel_size = pp_size
     vllm_config.parallel_config.rank = rank
