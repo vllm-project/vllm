@@ -919,7 +919,8 @@ def test_fp8_reloading(
     # Set model config as model_config.dtype is required in Fp8LinearMethod.
     default_vllm_config.model_config = ModelConfig()
     default_vllm_config.kernel_config.moe_backend = "triton"
-    layer_size = 128 if weight_block_size is not None else 1
+    # 16-aligned, so the CUTLASS kernel does not pad and loaders can rerun as is
+    layer_size = 128 if weight_block_size is not None else 16
     with torch.device(f"{DEVICE_TYPE}:0"):
         config = Fp8Config(
             weight_block_size=weight_block_size,
