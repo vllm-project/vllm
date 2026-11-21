@@ -108,8 +108,12 @@ steps:
   - vllm/model_executor/parameter.py
   - vllm/v1/worker/extensible_kv_cache.py
   - vllm/v1/worker/gpu_worker.py
+  # the FP8 KV-scale reload case
+  - vllm/model_executor/layers/quantization/kv_cache.py
+  - vllm/v1/attention/backends/flashinfer.py
   - tests/model_executor/model_loader/test_direct_reload.py
   - tests/model_executor/model_loader/test_load_plan.py
+  - tests/model_executor/model_loader/test_reload.py
   - tests/model_executor/model_loader/test_reload_refit.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -118,6 +122,7 @@ steps:
     pytest -v -s
     model_executor/model_loader/test_direct_reload.py
     model_executor/model_loader/test_load_plan.py
+    model_executor/model_loader/test_reload.py::test_kv_scale_reload
   - >-
     pytest -v -s model_executor/model_loader/test_reload_refit.py
     -m "not distributed and not slow_test" --timeout=900 --timeout-method=thread
