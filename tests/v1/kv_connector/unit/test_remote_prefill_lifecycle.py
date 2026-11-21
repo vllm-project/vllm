@@ -1194,3 +1194,26 @@ def test_deferred_lookup_does_not_block_parked_load():
         scheduler_output = scheduler.schedule()
         assert req_a.status == RequestStatus.RUNNING
         assert scheduler_output.num_scheduled_tokens[req_a.request_id] > 0
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_write_abort_retains_producer_until_worker_ack():
+    """A producer abort must reach the worker before its blocks are released."""
+    from vllm.v1.request import RequestStatus
+
+    from .moriio.test_moriio_connector import (
+        _setup_kv_transfer_request,
+        create_vllm_config,
+    )
+    from .utils import create_request, create_scheduler
+
+    scheduler = create_scheduler(create_vllm_config(role="kv_producer"))
+    request = create_request(num_tokens=32, do_remote_decode=True)
+    _setup_kv_transfer_request(request, fake_transfer_id="abort-before-submit")
+    scheduler.add_request(request)
+    scheduler.schedule()
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.request_id in scheduler.requests
+    output = scheduler.schedule()
+    assert set(output.kv_connector_metadata.reqs_to_abort) == {request.request_id}

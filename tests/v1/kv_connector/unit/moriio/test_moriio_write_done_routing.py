@@ -154,6 +154,7 @@ def _real_wrapper() -> MoRIIOWrapper:
     wrapper._write_done_senders = {}
     wrapper.failed_write_cache_req_ids = []
     wrapper._terminal_transfer_ids = OrderedDict()
+    wrapper._aborted_write_endpoints = {}
     return wrapper
 
 
@@ -474,6 +475,7 @@ def _fanout_save_worker(remote_agents: set[str]) -> MoRIIOConnectorWorker:
     worker.moriio_config = SimpleNamespace(transfer_timeout=0.01)
     worker.handshakes = []
     worker.writes = []
+    worker._writer = SimpleNamespace(bind_transfer=lambda meta: True)
     worker._background_moriio_handshake = (  # type: ignore[method-assign]
         lambda req_id, remote_engine_id, meta: worker.handshakes.append(req_id)
     )
@@ -661,6 +663,8 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
         moriio_wrapper=wrapper,
         transfer_id_to_request_id={"tA": "req-1"},
         _unmatched_write_failures=OrderedDict(),
+        _reported_write_transfers=set(),
+        _completed_write_transfers=OrderedDict(),
         get_finished=lambda: (set(), set()),
     )
 
