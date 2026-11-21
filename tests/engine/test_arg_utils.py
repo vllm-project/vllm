@@ -5,6 +5,7 @@ import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
+from pathlib import Path
 from typing import Annotated, Literal
 
 import pytest
@@ -31,6 +32,42 @@ from vllm.engine.arg_utils import (
     parse_type,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+
+@pytest.mark.parametrize("address", [None, "192.0.2.20"])
+def test_ray_dp_size_one_preserves_cli_address(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, address: str | None
+) -> None:
+    from transformers import LlamaConfig
+
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        vocab_size=128,
+    ).save_pretrained(tmp_path)
+    monkeypatch.setenv("VLLM_HOST_IP", "192.0.2.10")
+    monkeypatch.setenv("VLLM_DP_MASTER_IP", "198.51.100.20")
+
+    options = [
+        "--model",
+        str(tmp_path),
+        "--data-parallel-backend",
+        "ray",
+        "--data-parallel-size",
+        "1",
+    ]
+    if address is not None:
+        options.extend(["--data-parallel-address", address])
+
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    config = EngineArgs.from_cli_args(parser.parse_args(options)).create_engine_config()
+
+    assert config.parallel_config.data_parallel_master_ip == (address or "192.0.2.10")
+    assert config.parallel_config.data_parallel_size == 1
 
 
 @pytest.mark.parametrize(
