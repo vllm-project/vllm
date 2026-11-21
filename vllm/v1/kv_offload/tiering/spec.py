@@ -71,7 +71,7 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
     REGION_SEGMENTS,
     SharedOffloadRegion,
 )
-from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec, _shared_region_barrier
 from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
     SecondaryTierManager,
@@ -424,6 +424,12 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     rank=None,
                     kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
+                    barrier=(
+                        _shared_region_barrier
+                        if self.config.parallel.per_rank_engine
+                        else None
+                    ),
+                    unlink_owner=True,
                     num_segments=REGION_SEGMENTS,
                     populate=False,
                 )
@@ -480,10 +486,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                         )
                 elif scheduler_mmap is not None:
                     try:
-                        scheduler_mmap.cleanup()
+                        scheduler_mmap.abort_startup_cleanup()
                     except Exception:
                         logger.exception(
-                            "Failed to clean up scheduler mmap during "
+                            "Failed to abort scheduler mmap during "
                             "initialization cleanup"
                         )
                 self._scheduler_mmap = None
@@ -567,22 +573,26 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         if self.secondary_tier_configs and self.config.parallel.world_size > 1:
             _reject_workers_across_nodes()
+        rank = 0 if self.replicated_layout else self.worker_rank
+        worker_mmap: SharedOffloadRegion | None = None
         world_size = self.config.parallel.world_size
-        worker_index = self.config.parallel.rank
-        worker_mmap = SharedOffloadRegion(
-            engine_id=self._engine_id,
-            num_chunks=self.num_chunks,
-            rank=0 if self.replicated_layout else worker_index,
-            kv_bytes_per_chunk=self.kv_bytes_per_chunk,
-            cpu_page_size=self.cpu_page_size_per_worker,
-            num_segments=REGION_SEGMENTS,
-            # Every worker maps the same bytes in the replicated layout, so
-            # each pre-faults only its share.
-            populate_shard=(
-                (worker_index, world_size) if self.replicated_layout else None
-            ),
-        )
         try:
+            worker_mmap = SharedOffloadRegion(
+                engine_id=self._engine_id,
+                num_chunks=self.num_chunks,
+                rank=rank,
+                kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+                cpu_page_size=self.cpu_page_size_per_worker,
+                # All workers must have mapped the file before a failed worker
+                # aborts startup and removes its name. On success the
+                # scheduler mapping phase performs the final unlink.
+                barrier=_shared_region_barrier,
+                unlink_owner=False,
+                num_segments=REGION_SEGMENTS,
+                populate_shard=(
+                    (self.worker_rank, world_size) if self.replicated_layout else None
+                ),
+            )
             if self.config.canonical_layout:
                 self._validate_canonical_refs(kv_caches)
             return CPUOffloadingWorker(
@@ -593,7 +603,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 canonical_layout=self.config.canonical_layout,
             )
         except Exception:
-            worker_mmap.cleanup()
+            # The constructor barrier above guarantees that every worker has
+            # finished opening/mapping before this abort cleanup runs.  Thus
+            # removing the name cannot make a peer create a second inode.
+            if worker_mmap is not None:
+                worker_mmap.abort_startup_cleanup()
             raise
 
     def _validate_canonical_refs(self, kv_caches: CanonicalKVCaches) -> None:
