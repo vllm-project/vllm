@@ -462,6 +462,7 @@ steps:
   - vllm/v1/attention
     # TODO: remove this dependency (https://github.com/vllm-project/vllm/issues/32267)
   - vllm/model_executor/layers/attention
+  - vllm/models/inkling2/nvidia/ops/dspark.py
   - vllm/utils/flashinfer.py
   - tests/kernels/attention
   commands:
