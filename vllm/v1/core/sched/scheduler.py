@@ -2545,8 +2545,15 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             routed_experts = None
+            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
+            prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
+            # Diffusion prefill completes before denoising emits any tokens.
             should_emit_output = bool(
-                new_token_ids or pooler_output is not None or stopped
+                new_token_ids
+                or pooler_output is not None
+                or stopped
+                or prompt_logprobs_tensors is not None
+                or prompt_token_id_logprobs is not None
             )
             if self.aux_output_connector is not None and should_emit_output:
                 routed_experts = self.aux_output_connector.take_output(
@@ -2614,9 +2621,6 @@ class Scheduler(SchedulerInterface):
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
-            # Get prompt logprobs for this request.
-            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
             if should_emit_output:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(

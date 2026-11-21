@@ -40,6 +40,53 @@ requires_gpu = pytest.mark.skipif(
 )
 
 
+@requires_gpu
+def test_diffusion_generation_preserves_prompt_logprobs(vllm_runner, tmp_path):
+    """LLM generation keeps prompt scores even though prefill emits no token."""
+    from vllm import SamplingParams
+    from vllm.transformers_utils.configs import NemotronLabsDiffusionConfig
+
+    config = NemotronLabsDiffusionConfig(
+        architectures=["NemotronLabsDiffusionModel"],
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=32,
+        max_position_embeddings=128,
+        block_size=4,
+    )
+    config.save_pretrained(tmp_path)
+    prompt = {"prompt_token_ids": [5, 6, 7, 8, 9, 10, 11, 12]}
+    params = dict(temperature=0, max_tokens=4, ignore_eos=True, detokenize=False)
+    with vllm_runner(
+        str(tmp_path),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        enable_prefix_caching=False,
+        diffusion_config={"canvas_length": 4, "max_denoising_steps": 2},
+    ) as model:
+        (scored,) = model.llm.generate(
+            [prompt], SamplingParams(prompt_logprobs=0, **params)
+        )
+        (plain,) = model.llm.generate([prompt], SamplingParams(**params))
+    assert len(scored.outputs[0].token_ids) == 4
+    assert scored.outputs[0].token_ids == plain.outputs[0].token_ids
+    assert plain.prompt_logprobs is None
+    assert len(scored.prompt_logprobs) == len(prompt["prompt_token_ids"])
+    assert scored.prompt_logprobs[0] is None
+    for token, scores in zip(
+        prompt["prompt_token_ids"][1:], scored.prompt_logprobs[1:]
+    ):
+        assert torch.isfinite(torch.tensor(scores[token].logprob))
+
+
 # ---------------------------------------------------------------------------
 # CPU-only: registration & diffusion detection
 # ---------------------------------------------------------------------------
