@@ -10,7 +10,8 @@ Example (record the baseline and candidate SHAs):
     .venv/bin/python benchmarks/kernels/benchmark_mxfp8_tp4.py \
         --baseline /tmp/baseline_rocm_native.py
 
-Add `--shape-set prefill` for the TP1 prefill-chunk shapes of the same linears.
+Add `--shape-set prefill` for the TP1 prefill-chunk shapes of the same linears,
+or `--shape-set short-k-prefill` for large prefill at K <= 1024.
 Reports cold (>400 MiB rotating weights) and warm timings separately. Each timing
 is the median of 30 device-event samples; Python wall time is never ranked.
 """
@@ -49,6 +50,12 @@ SHAPE_SETS = {
             (6144, 3072),
         ]
         for m in [2048, 4096, 8192, 16384]
+    ],
+    # shared_down at TP4 and TP8, o_proj at TP8, and two narrower N.
+    "short-k-prefill": [
+        (m, n, k)
+        for n, k in [(6144, 768), (6144, 384), (6144, 1024), (3072, 1024), (1536, 1024)]
+        for m in [1025, 2048, 4096, 8192, 16384]
     ],
 }
 

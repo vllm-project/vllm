@@ -380,6 +380,12 @@ def _select_cfg(M, N, K):
         cfg = _select_m31_cfg(M, N, K)
         if cfg is not None:
             return cfg
+    if _ON_GFX950 and M > 1024 and N > 1024 and K <= 1024 and K % 128 == 0:
+        # Short-K large prefill (e.g. shared_down K=768): 128x128x128 with two
+        # stages uses about 68 kB of LDS, against 102 kB with three stages and
+        # 136 kB with BLOCK_K=256, and beats both tiles below. At larger K it
+        # is not a consistent win, so those stay.
+        return 128, 128, 128, 8, 2
     if M <= 64:
         # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The
         # lever is NARROW BLOCK_N=16 (maximize N-tiles so more CUs stream the weight in
