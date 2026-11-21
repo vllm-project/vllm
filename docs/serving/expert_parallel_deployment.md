@@ -153,6 +153,19 @@ Behavior:
 - Draft and MTP expert layers use the target's `--moe-backend` unless `--speculative-config` sets `moe_backend` and the speculative method applies it; DSpark does not, so its drafts always use the target's. For example, with DeepSeek-V4.1-Flash-NVFP4 and `--speculative-config '{"method": "dspark", ...}'`, both the target's NVFP4 experts and the draft's MXFP4 experts run on this backend.
 - Not supported on SM107 with this backend: EPLB, and reloading weights (`reload_weights`). The `flashinfer_moe_ep_mega_deep_gemm` backend does not support SM107.
 
+### FlashInfer nosync on SM120
+
+Set `--kernel-config '{"moe_backend":"flashinfer_moe_ep_nosync"}'` to opt into FlashInfer's SM120 MXFP4 nosync megakernel for supported routed experts. It is never selected automatically.
+
+At most 128 tokens per rank across the full DP group run on the nosync kernel. Larger global batches use the DeepGEMM FP4 experts instead. The DP maximum, rather than each rank's local token count, keeps kernel selection uniform across EP ranks. A capture without that global token metadata fails explicitly instead of risking divergent execution.
+
+Requirements and current limits:
+
+- TP=1 with expert parallelism and SM120 GPUs.
+- A FlashInfer build that supports the `deepgemm` scale layout ([FlashInfer PR #9822](https://github.com/flashinfer-ai/flashinfer/pull/9822)).
+- MXFP4 FP4 weights and DeepGEMM packed UE8M0 `int32` scales. The final scale parameters are shared between the fallback and nosync paths instead of duplicated.
+- Standard SwiGLU without expert bias. TP>1, EPLB, and `apply_router_weight_on_input=True` are not supported by this backend.
+
 ## Multi-Node Deployment
 
 For multi-node deployment, use the DeepEP communication kernel with one of two modes (see [Backend Selection Guide](#backend-selection-guide) above).
