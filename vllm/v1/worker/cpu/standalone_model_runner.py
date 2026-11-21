@@ -850,6 +850,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
                 logits_indices,
                 cu_num_logits_np,
                 batch_req_state.has_prefill,
+                num_active_loras=len(self.lora_state.get_activate_loras(req_ids)),
             )
 
         num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
