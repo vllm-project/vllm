@@ -139,9 +139,16 @@ def _mask_candidates_kernel(
     TILE: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
-    cols = tl.program_id(1) * TILE + tl.arange(0, TILE)
     start = tl.load(starts + row // ROW_REPEAT * stride_start) if HAS_STARTS else 0
     end = tl.load(ends + row // ROW_REPEAT * stride_end)
+    # Dead-store elimination: every consumer of the masked logits reads only
+    # [start, end) per row (top_k_per_row_prefill/decode and _block_scores are
+    # extent-bounded; the DCP merge is a no-op at dcp_world_size == 1), so
+    # poisoning columns outside that range is wasted bandwidth. Skip tiles
+    # beyond the row extent entirely.
+    if tl.program_id(1) * TILE >= end:
+        return
+    cols = tl.program_id(1) * TILE + tl.arange(0, TILE)
     valid = (cols >= start) & (cols < end) & (cols < width)
     block = (cols - start) // BLOCK_SIZE
     keep = tl.load(flags + row * (nblocks + 1) + block, valid, other=0)
@@ -150,7 +157,7 @@ def _mask_candidates_kernel(
     tl.store(
         logits + row * stride_row + cols * stride_col,
         -float("inf"),
-        (cols < width) & ~(valid & keep),
+        valid & ~keep,
     )
 
 
