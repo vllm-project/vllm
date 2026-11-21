@@ -31,6 +31,7 @@ from vllm.v1.serial_utils import UtilityResult
 # - "wait": Wait for in-flight requests to complete before pausing.
 # - "keep": Freeze requests in queue; they resume on resume_generation().
 PauseMode = Literal["abort", "wait", "keep"]
+WeightCheckerModel = Literal["target", "draft", "both"]
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -163,6 +164,13 @@ class EngineCoreReadyResponse:
     # VllmConfig (the Rust frontend). False under --kv-sharing-fast-prefill,
     # which skips prompt tokens in some layers.
     supports_prompt_logprobs: bool = True
+    # Whether a disaggregated consumer accepts placeholder metadata without
+    # embedding tensors.
+    allow_missing_mm_embeddings: bool = False
+    # Encoder cache tokens a request's distinct multimodal items may need in
+    # total, for frontends without a VllmConfig (the Rust frontend). Set
+    # without chunked prefill, when they are all encoded in one step.
+    max_mm_embeds_per_request: int | None = None
 
 
 class EngineCoreRequest(

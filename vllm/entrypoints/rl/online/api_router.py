@@ -16,7 +16,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.rl.online.metrics import weight_operation_metrics
 from vllm.logger import init_logger
-from vllm.v1.engine import PauseMode
+from vllm.v1.engine import PauseMode, WeightCheckerModel
 
 logger = init_logger(__name__)
 
@@ -234,29 +234,13 @@ async def weight_checker(
     raw_request: Request,
     action: Annotated[Literal["checksum", "reset", "compare"], Body(embed=True)],
     baseline: Annotated[dict[str, str] | None, Body(embed=True)] = None,
-    target: Annotated[Literal["model", "draft"], Body(embed=True)] = "model",
+    model: Annotated[WeightCheckerModel, Body(embed=True)] = "target",
 ) -> JSONResponse:
-    """Checksum or compare model weights, or reset the target model."""
+    """Checksum, reset, or compare model weights against a baseline."""
     client = engine_client(raw_request)
-    is_draft = target == "draft"
-    if is_draft:
-        if action == "reset":
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST.value,
-                detail="action='reset' only supports target='model'",
-            )
-        spec = client.vllm_config.speculative_config
-        if (
-            spec is None
-            or spec.draft_model_config is None
-            or spec.prefill_context_kv_only
-        ):
-            raise HTTPException(
-                status_code=HTTPStatus.CONFLICT.value,
-                detail="target='draft' requires a resident speculative draft model",
-            )
     if action == "reset":
-        await client.collective_rpc("reset_weights")
+        if error := await client.reset_weights(model):
+            raise HTTPException(status_code=HTTPStatus.CONFLICT.value, detail=error)
         return JSONResponse(content={"status": "reset"})
     if action == "compare" and baseline is None:
         raise HTTPException(
@@ -265,12 +249,11 @@ async def weight_checker(
         )
 
     checksums: dict[str, str] = {}
-    per_worker = (
-        await client.compute_weight_checksums(is_draft=True)
-        if is_draft
-        else await client.compute_weight_checksums()
-    )
-    for worker_checksums in per_worker:
+    for worker_checksums in await client.compute_weight_checksums(model):
+        if isinstance(worker_checksums, str):
+            raise HTTPException(
+                status_code=HTTPStatus.CONFLICT.value, detail=worker_checksums
+            )
         if duplicates := checksums.keys() & worker_checksums.keys():
             raise HTTPException(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,

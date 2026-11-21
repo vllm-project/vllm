@@ -61,6 +61,7 @@ from vllm.v1.core.kv_cache_planning import (
     finalize_extensible_kv_cache,
     get_global_kv_cache_groups,
     get_kv_cache_configs,
+    resolve_mamba_block_size,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -94,6 +95,7 @@ from vllm.v1.engine import (
     ReconfigureRankType,
     UtilityOutput,
     UtilityResult,
+    WeightCheckerModel,
 )
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
@@ -289,6 +291,11 @@ class EngineCore:
 
         # Get all kv cache needed by the model
         layer_configs = self.model_executor.get_kv_cache_layer_configs()
+        mamba_block_size = resolve_mamba_block_size(vllm_config, layer_configs)
+        if mamba_block_size is not None:
+            vllm_config.cache_config.mamba_block_size = mamba_block_size
+            self.model_executor.set_mamba_block_size(mamba_block_size)
+            layer_configs = self.model_executor.get_kv_cache_layer_configs()
 
         # Resolve the KV cache layout before memory profiling: workers that
         # capture full cudagraphs initialize a minimal KV cache during it.
@@ -1221,9 +1228,26 @@ class EngineCore:
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 
-    def compute_weight_checksums(self, is_draft: bool = False) -> list[dict[str, str]]:
-        args = (True,) if is_draft else ()
+    def compute_weight_checksums(
+        self, model: WeightCheckerModel = "target"
+    ) -> list[dict[str, str] | str]:
+        args = () if model == "target" else (model,)
         return self.collective_rpc("compute_weight_checksums", args=args)
+
+    def reset_weights(
+        self, model: WeightCheckerModel, validate_only: bool
+    ) -> str | None:
+        # Both phases validate every worker. EngineCore processes the checks
+        # and writes in the second phase without interleaving utility calls.
+        errors: list[str | None] = self.collective_rpc(
+            "reset_weights", args=(model, True)
+        )
+        if error := next((error for error in errors if error is not None), None):
+            return error
+        if not validate_only:
+            errors = self.collective_rpc("reset_weights", args=(model,))
+            return next((error for error in errors if error is not None), None)
+        return None
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
@@ -2120,6 +2144,7 @@ class EngineCoreProc(EngineCore):
     def _make_ready_response(self) -> EngineCoreReadyResponse:
         parallel_config = self.vllm_config.parallel_config
         scheduler_config = self.vllm_config.scheduler_config
+        mm_config = self.vllm_config.model_config.multimodal_config
         return EngineCoreReadyResponse(
             max_model_len=self.vllm_config.model_config.max_model_len,
             num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
@@ -2180,6 +2205,12 @@ class EngineCoreProc(EngineCore):
             enable_expert_parallel=parallel_config.enable_expert_parallel,
             supports_prompt_logprobs=(
                 not self.vllm_config.cache_config.kv_sharing_fast_prefill
+            ),
+            allow_missing_mm_embeddings=(
+                mm_config is not None and mm_config.allow_missing_mm_embeddings
+            ),
+            max_mm_embeds_per_request=getattr(
+                self.scheduler, "max_mm_embeds_per_request", None
             ),
         )
 
