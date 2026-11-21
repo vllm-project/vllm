@@ -771,7 +771,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         self.softmax_scale = scale
         # Keep padded workspaces for kernels without small-head support.
         self.prefill_padding = 64
-        self._sm_count = num_compute_units(torch.accelerator.current_device_index())
+        device_index = torch.accelerator.current_device_index()
+        self._sm_count = num_compute_units(device_index)
+        device_name = current_platform.get_device_name(device_index)
+        self._use_etap_for_small_batches = (device_name, self._sm_count) in (
+            ("NVIDIA H20", 78),
+            ("NVIDIA H100 80GB HBM3", 132),
+        )
         # The SM90 sparse decode kernel asserts `topk_length == nullptr` for the
         # V3.2 cache layout ("V3.2 does not support dynamic topk length").
         self.fp8_supports_topk_length = current_platform.is_device_capability_family(
@@ -1421,10 +1427,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if actual_num_heads not in (8, 16, 32):
             return False
 
-        # Each query launches one CTA. These empirical token-per-SM cutoffs
-        # favor padding for small batches; 32 heads use a higher cutoff.
-        # They are performance heuristics, not correctness requirements.
+        # Benchmarks favor ETAP at 8/16 heads, including single-query batches.
+        # Keep the cutoff for 32 heads and devices without benchmark evidence.
         min_tokens_per_sm = 2 if actual_num_heads == 32 else 1
+        if self._use_etap_for_small_batches and actual_num_heads in (8, 16):
+            min_tokens_per_sm = 0
         return num_tokens > self._sm_count * min_tokens_per_sm
 
     def _bf16_flash_mla_kernel(
