@@ -52,7 +52,7 @@ from vllm.model_executor.warmup.watermark_sample_warmup import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
-from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.flashinfer import has_flashinfer, is_flashinfer_bf16_tuning_loaded
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 
@@ -415,6 +415,8 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
     )
 
     skip_ops: set[str] = set()
+    if is_flashinfer_bf16_tuning_loaded():
+        skip_ops.add("bf16_gemm")
     if runner.cache_config.enable_extensible_kv_cache:
         # The trtllm-gen MLA decode sweep reads arbitrary block ids, which
         # an extensible KV cache has not committed yet.

@@ -29,6 +29,7 @@ from vllm.model_executor.kernels.linear.nvfp4.base import (
 )
 from vllm.model_executor.kernels.linear.nvfp4.cutlass import CutlassNvFp4LinearKernel
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    FlashInferAutoNvFp4LinearKernel,
     FlashInferB12xNvFp4LinearKernel,
     FlashInferCudnnNvFp4LinearKernel,
     FlashInferCuteDslNvFp4LinearKernel,
@@ -71,6 +72,7 @@ from vllm.platforms import current_platform
 SUPPORTING = {
     CutlassFP8ScaledMMLinearKernel,
     FlashInferFP8ScaledMMLinearKernel,
+    FlashInferAutoNvFp4LinearKernel,
     FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
