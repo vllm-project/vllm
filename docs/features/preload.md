@@ -15,9 +15,8 @@ Key benefits:
 - **Fast engine restarts**: weight loading reduces to mapping existing GPU
   memory, cutting restart time from minutes (disk load + quantization
   processing) to seconds.
-- **Zero-copy sharing**: in the default `zero_copy` mode the engine directly
-  shares the daemon's GPU memory, so a restart adds no extra GPU memory
-  footprint.
+- **Zero-copy sharing**: the engine directly shares the daemon's GPU memory,
+  so a restart adds no extra GPU memory footprint.
 - **Safe fallback**: if the daemon is unavailable or its cached weights don't
   match the engine's configuration, the engine falls back to loading from
   disk.
@@ -232,8 +231,7 @@ Mooncake RDMA and requires `--seed-token`.
     The remote control plane accepts JSON seed requests after authenticating
     the shared token; it never uses pickle. The connection is unencrypted, so
     use it only on a trusted network and keep the token secret. Exporting IPC
-    handles and releasing weights remain local operations over the
-    owner-verified Unix socket.
+    handles remains a local operation over the owner-verified Unix socket.
 
 ## Sharing warmup caches through Mooncake (optional)
 
@@ -301,8 +299,9 @@ engine, preserving parameter identity.
 Shared weights count toward the engine's `gpu_memory_utilization` budget.
 If IPC loading falls back to disk, the engine removes the corresponding external
 weight charge before profiling its locally loaded weights for KV cache sizing.
-The updated budget must still fit the available GPU memory; fallback does not
-stop the daemon or release its cached weights in zero-copy mode.
+The updated budget must still fit the available GPU memory. Engines never
+actively release the daemon's cache, and fallback does not stop the daemon:
+its cached weights remain resident until the daemon shuts down.
 
 ## Multi-node and data parallelism
 
@@ -355,37 +354,27 @@ parallelism, only the GPUs of the last stage serve the draft model, since the
 engine runs the draft model there; draft daemons on the other stages exit
 after startup.
 
-## Cache modes
-
-The loader supports two modes, selected via `--model-loader-extra-config`:
-
-- `zero_copy` (default): the engine maps the daemon's CUDA allocations
-  directly. The daemon must stay alive for the engine's lifetime, and each
-  GPU carries only one copy of the weights.
-- `copy`: the engine clones every tensor into its own GPU memory and then
-  asks the daemon to release its cache. Use this when the daemon should free
-  GPU memory after handing off, at the cost of a full copy per restart.
-
-!!! warning
-    In `zero_copy` mode the weights live in the daemon's CUDA IPC allocations,
-    so [sleep mode](sleep_mode.md) (CuMemAllocator weight offloading) must not
-    be used with this loader.
-
 ## Loader configuration
 
-The `ipc_cache` loader accepts extra keys via `--model-loader-extra-config`:
+The `ipc_cache` loader supports only zero-copy loading of new model instances;
+standalone in-place weight reload is not supported. The engine maps the
+daemon's CUDA allocations directly, so each GPU carries only one copy of the
+weights. Already-mapped engines keep serving if the daemon exits, but a
+restarted daemon holds a second copy and new engines cannot attach until it is
+ready.
+
+The loader accepts extra keys via `--model-loader-extra-config`:
 
 ```bash
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --load-format ipc_cache \
-    --model-loader-extra-config '{"mode": "copy", "fallback": false}'
+    --model-loader-extra-config '{"fallback": false}'
 ```
 
 | Key | Default | Description |
 | --- | ------- | ----------- |
 | `socket_path` | per-GPU path derived from the GPU UUID | Explicit daemon socket path. |
 | `socket_dir` | per-user private dir under the temp dir | Directory containing the daemon sockets. |
-| `mode` | `zero_copy` | `zero_copy` or `copy` (see above). |
 | `fallback` | `true` | Fall back to disk loading when the daemon is unavailable or the fingerprints mismatch. |
 | `connect_timeout_s` | `5.0` | Socket connect timeout in seconds. |
 | `state_timeout_s` | `300.0` | Timeout for the weight-transfer request in seconds. |
@@ -394,6 +383,11 @@ The daemon's `--weight-cache-socket-dir` and the loader's `socket_dir` /
 `socket_path` must agree when the default per-user directory is not used.
 Socket paths are derived from the GPU UUID, so they are stable regardless of
 `CUDA_VISIBLE_DEVICES` index remapping.
+
+!!! warning
+    The weights live in the daemon's CUDA IPC allocations, so
+    [sleep mode](sleep_mode.md) (CuMemAllocator weight offloading) must not be
+    used with this loader.
 
 ## Limitations
 
@@ -420,8 +414,10 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   handle is node-local; `rdma` requires Mooncake on both sides. A mirror
   copies the weights into its own memory, so it does not depend on the
   source staying alive afterwards, and a mirror replica forms its own world
-  group like a normal preload. Source release and graceful shutdown wait for
-  outstanding copies to acknowledge before weight memory is freed.
+  group like a normal preload. Each outstanding copy holds a lease until the
+  mirror acknowledges it. During graceful shutdown, the source waits for these
+  acknowledgements before weight memory is freed, subject to the timeout under
+  [Daemon lifecycle](#daemon-lifecycle).
 - **Autotuning cannot overlap the load**: autotuning picks a tactic by timing
   candidates, so running it while a daemon is still copying weights onto the
   same GPU would measure the wrong thing and cache the wrong choice. To pay
@@ -463,6 +459,9 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   compressed-tensors
   schemes, block sizes, transform wrappers, linear backends and MoE are not
   enabled by this support.
+  Serialized `compressed-tensors` WNA16 linear layers can reuse Marlin-packed
+  weights with FP16/BF16 activations. Humming, other WNA16 backends and MoE
+  are not enabled by this support.
   ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
   CUTLASS, the daemon fuses activation scales once; engines reuse the fused
   scales without modifying the daemon's shared tensors.
@@ -511,9 +510,12 @@ threat model.
   attaching new engines.
 - `SIGINT`/`SIGTERM` to the `vllm preload` process terminates all daemon
   ranks and exits with status 130/143.
-- In either shutdown path, ranks that do not stop within ten seconds are
-  killed and reaped, releasing their GPU memory. A forcibly
-  terminated rank may leave a stale socket; the next daemon replaces it
-  after acquiring the per-GPU lock.
+- During graceful shutdown, a daemon serving as a D2D weight source stops
+  accepting new copy leases and waits up to five minutes for outstanding
+  copies to acknowledge before releasing its weight memory. The launcher
+  allows 30 seconds beyond this lease timeout before killing and reaping ranks
+  that have not stopped. When shutdown follows a rank failure, the launcher
+  instead allows ten seconds. A forcibly terminated rank may leave a stale
+  socket; the next daemon replaces it after acquiring the per-GPU lock.
 
 See [vllm preload](../cli/preload.md) for the full CLI reference.

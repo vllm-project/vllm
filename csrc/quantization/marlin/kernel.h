@@ -32,9 +32,10 @@ template <const vllm::ScalarTypeId a_type_id,  // A ScalarType id
                                       // only works when thread_m_blocks == 1
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
-          const int group_blocks,  // number of consecutive 16x16 blocks
-                                   // with a separate quantization scale
-          const bool is_zp_float   // is zero point of float16 type?
+          const int group_blocks,     // number of consecutive 16x16 blocks
+                                      // with a separate quantization scale
+          const bool is_zp_float,     // is zero point of float16 type?
+          const int m_tile_group = 1  // full-K M tiles grouped for weight reuse
           >
 __global__ void Marlin(MARLIN_KERNEL_PARAMS);
 

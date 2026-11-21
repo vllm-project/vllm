@@ -10,7 +10,6 @@ import pytest
 import vllm.envs as envs
 from vllm import SamplingParams
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_replayssm_fp8_checkpoints
 from vllm.v1.metrics.reader import Counter
 
 from ...models.utils import check_logprobs_close
@@ -85,10 +84,6 @@ requires_flashinfer_replayssm_materialization = pytest.mark.skipif(
     not (HAS_FLASHINFER_CHECKPOINTING_SSU and HAS_FLASHINFER_REPLAYSSM_MATERIALIZE),
     reason="FlashInfer ReplaySSM materialization APIs not available",
 )
-requires_flashinfer_replayssm_fp8_checkpoints = pytest.mark.skipif(
-    not has_flashinfer_replayssm_fp8_checkpoints(),
-    reason="Installed FlashInfer does not bound FP8 checkpoint scales",
-)
 
 
 def _check_replayssm_parity(
@@ -106,7 +101,6 @@ def _check_replayssm_parity(
     # common-mode and only ReplaySSM varies.
     common = dict(
         max_model_len=1024,
-        trust_remote_code=True,
         enable_prefix_caching=False,
         tensor_parallel_size=tensor_parallel_size,
         mamba_backend=mamba_backend,
@@ -193,7 +187,6 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(
         speculative_config["prompt_lookup_max"] = 3
     common = dict(
         max_model_len=1024,
-        trust_remote_code=True,
         enable_prefix_caching=False,
         mamba_cache_mode="none",
         mamba_backend="flashinfer",
@@ -279,11 +272,9 @@ def _check_replayssm_prefix_caching(
     speculative_method: str | None = None,
     mamba_backend: str = "flashinfer",
     tensor_parallel_size: int = 1,
-    replayssm_state_dtype: str = "auto",
 ):
     common = dict(
         max_model_len=8192,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
         mamba_cache_mode="align",
         mamba_backend=mamba_backend,
@@ -309,17 +300,12 @@ def _check_replayssm_prefix_caching(
             enable_mamba_cache_stochastic_rounding=True,
             mamba_cache_philox_rounds=5,
         )
-    if replayssm_state_dtype != "auto":
-        common.update(
-            dtype="bfloat16", mamba_cache_dtype="bfloat16", mamba_ssm_cache_dtype="auto"
-        )
     outputs = []
     for use_replayssm in (False, True):
         with vllm_runner(
             model_name,
             use_replayssm=use_replayssm,
             replayssm_buffer_len=16,
-            replayssm_state_dtype=replayssm_state_dtype if use_replayssm else "auto",
             # Shared prompts must not populate the baseline's cache.
             enable_prefix_caching=use_replayssm,
             **common,
@@ -371,30 +357,21 @@ def _check_replayssm_prefix_caching(
 @requires_flashinfer_replayssm_materialization
 @pytest.mark.parametrize("model_name", FLASHINFER_MODELS)
 @pytest.mark.parametrize(
-    ("use_ngram", "state_dtype"),
+    "use_ngram",
     [
-        pytest.param(True, "auto", id="align-ngram-t4"),
-        pytest.param(False, "auto", id="align-stp"),
-        pytest.param(
-            False,
-            "fp8",
-            id="align-fp8",
-            marks=requires_flashinfer_replayssm_fp8_checkpoints,
-        ),
-        pytest.param(False, "int8", id="align-int8"),
+        pytest.param(True, id="align-ngram-t4"),
+        pytest.param(False, id="align-stp"),
     ],
 )
 def test_flashinfer_replayssm_prefix_cache_tp1(
     vllm_runner,
     model_name,
     use_ngram: bool,
-    state_dtype: str,
 ):
     _check_replayssm_prefix_caching(
         vllm_runner,
         model_name,
         speculative_method="ngram" if use_ngram else None,
-        replayssm_state_dtype=state_dtype,
     )
 
 
@@ -544,7 +521,6 @@ def test_flashinfer_replayssm_mtp_preemption_and_boundary_reuse(vllm_runner):
     for use_replayssm in (True, False):
         with vllm_runner(
             MAMBA2_MTP_MODEL,
-            trust_remote_code=True,
             max_model_len=32_768,
             max_num_seqs=4,
             max_num_batched_tokens=2048,

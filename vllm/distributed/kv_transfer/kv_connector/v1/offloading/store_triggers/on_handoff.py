@@ -49,8 +49,10 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
     def first_live_chunk_idx(
         self, req_status: RequestOffloadState, config_group_idx: int
     ) -> int | None:
-        # The source blocks come from the scheduler output, not from the
-        # request's block list.
+        # The aligned boundary and CoW sources come from the scheduler output.
+        # The partial tail reads the request's block ids only of full-attention
+        # groups: supports_partial_tail excludes sliding-window groups that are
+        # not CoW sources, and the scheduler zeroes only sliding-window groups.
         return None
 
     @override

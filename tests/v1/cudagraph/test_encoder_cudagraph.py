@@ -9,6 +9,7 @@ Test organization:
     - TestGetInputModality     — modality routing from mm_kwargs keys
     - TestSupportsBatch        — precomputed embeddings skip the graph
     - TestDefaultBudgetTable   — subdivided default budgets, user overrides
+    - TestQwen2VLEncoderCudaGraphMixin — shared Qwen2-VL-style select/capture logic
   GPU required:
     - TestEncoderCudaGraphCaptureReplay — capture, replay, fallback, counters
     - TestEncoderCudaGraphVideoReplay   — video modality capture, replay
@@ -24,6 +25,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm.model_executor.models.encoder_cudagraph_utils import (
+    Qwen2VLEncoderCudaGraphMixin,
+)
 from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import (
@@ -1174,6 +1178,110 @@ class TestSupportsBatch:
 
 
 # ---------------------------------------------------------------------------
+# No-GPU tests — Qwen2VLEncoderCudaGraphMixin
+# ---------------------------------------------------------------------------
+
+
+class _StubQwen2VLVisual:
+    spatial_merge_size = 2
+    patch_embed = SimpleNamespace(
+        proj=SimpleNamespace(in_channels=3), patch_size=2, temporal_patch_size=1
+    )
+    input_norm = SimpleNamespace(input_dtype=None)
+
+    def __init__(self):
+        self.metadata_calls: list[tuple[list[list[int]], dict[str, Any]]] = []
+
+    def prepare_encoder_metadata(self, grid_thw, **kwargs):
+        self.metadata_calls.append((grid_thw, kwargs))
+        return {"cu_seqlens": torch.zeros(len(grid_thw) + 1, dtype=torch.int32)}
+
+
+class _Qwen2VLHost(Qwen2VLEncoderCudaGraphMixin):
+    def __init__(self):
+        self.visual = _StubQwen2VLVisual()
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["image", "video"],
+            buffer_keys=["pixel_values", "cu_seqlens"],
+            out_hidden_size=12,
+            max_frames_per_video=self.get_max_frames_per_video(),
+        )
+
+    def get_max_frames_per_video(self) -> int:
+        return 3
+
+
+@pytest.mark.parametrize(
+    ("max_num_batched_tokens", "max_model_len"), [(8192, 4096), (2048, 32768)]
+)
+def test_default_budget_range(max_num_batched_tokens, max_model_len):
+    """Models without their own override budget from 64 up to the smaller of
+    max_num_batched_tokens and max_model_len."""
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens),
+        model_config=SimpleNamespace(max_model_len=max_model_len),
+    )
+    budget_range = SupportsEncoderCudaGraph.get_encoder_cudagraph_budget_range(
+        cast(Any, None), cast(Any, vllm_config)
+    )
+    assert budget_range == (64, min(max_num_batched_tokens, max_model_len))
+
+
+class TestQwen2VLEncoderCudaGraphMixin:
+    """Shared logic used by models with a Qwen2-VL-style vision tower."""
+
+    def test_select_slices_items_by_patch_count(self):
+        host = _Qwen2VLHost()
+        grid = [[2, 2, 4], [1, 2, 2], [1, 4, 2]]
+        pixel_values = torch.arange(28).unsqueeze(1)
+        mm_kwargs = {"pixel_values_videos": pixel_values, "video_grid_thw": grid}
+
+        specs = host.get_encoder_cudagraph_item_specs(mm_kwargs)
+        assert [s.output_tokens for s in specs] == [4, 1, 2]
+
+        selected = host.select_encoder_cudagraph_items(mm_kwargs, [2, 0])
+        assert selected["video_grid_thw"] == [[1, 4, 2], [2, 2, 4]]
+        expected = torch.cat([pixel_values[20:], pixel_values[:16]])
+        assert torch.equal(selected["pixel_values_videos"], expected)
+
+        empty = host.select_encoder_cudagraph_items(mm_kwargs, [])
+        assert empty["video_grid_thw"] == []
+        assert empty["pixel_values_videos"].shape == (0, 1)
+
+    @pytest.mark.parametrize(
+        ("token_budget", "max_batch_size", "max_frames_per_batch", "grid_row"),
+        [
+            # ceil(10 / 2) = 5 tokens per item, spread over 3 frames of 2 tokens.
+            (10, 2, 6, [3, 2, 4]),
+            # Image layout; 324 / 8 does not divide, so items round up to 41.
+            (324, 8, 0, [1, 2, 82]),
+        ],
+    )
+    def test_capture_buffers_cover_budget(
+        self, token_budget, max_batch_size, max_frames_per_batch, grid_row
+    ):
+        host = _Qwen2VLHost()
+        values = host.prepare_encoder_cudagraph_capture_inputs(
+            token_budget=token_budget,
+            max_batch_size=max_batch_size,
+            max_frames_per_batch=max_frames_per_batch,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        ).values
+
+        ((grid, kwargs),) = host.visual.metadata_calls
+        assert grid == [grid_row] * max_batch_size
+        t, h, w = grid_row
+        # The captured buffers must fit one item that uses the full budget.
+        assert t * (h // 2) * (w // 2) * max_batch_size >= token_budget
+        assert kwargs["max_seqlen_override"] == token_budget * 4
+        assert values["pixel_values"].shape == (max_batch_size * t * h * w, 12)
+        assert list(values) == ["cu_seqlens", "pixel_values"]
+
+
+# ---------------------------------------------------------------------------
 # GPU tests — DeepSeek-VL2 batched-tile encoder CUDA graph
 # ---------------------------------------------------------------------------
 
@@ -2082,3 +2190,45 @@ def test_step3_vl_postprocess_clones_global_only_item():
     )
     assert torch.equal(dest[0], global_out)
     assert dest[0].data_ptr() != global_out.data_ptr()
+
+
+class TestKimiVLCaptureMaxSeqlen:
+    """Kimi-VL bakes max_seqlen into the graph at capture. MoonViT attention
+    runs on pre-merge patches, so it must cover the patches of one image that
+    uses the whole token budget."""
+
+    @staticmethod
+    def _captured_max_seqlen(token_budget: int, max_batch_size: int) -> int:
+        from vllm.model_executor.models.kimi_vl import (
+            KimiVLForConditionalGeneration as KimiVL,
+        )
+
+        def prepare_encoder_metadata(grid_hws_list, *, max_seqlen_override, **_):
+            return {"max_seqlen": torch.tensor(max_seqlen_override)}
+
+        fake = SimpleNamespace(
+            config=SimpleNamespace(
+                vision_config=SimpleNamespace(merge_kernel_size=(2, 2), patch_size=14)
+            ),
+            vision_tower=SimpleNamespace(
+                encoder=SimpleNamespace(
+                    rope_2d=SimpleNamespace(max_height=512, max_width=512)
+                ),
+                prepare_encoder_metadata=prepare_encoder_metadata,
+            ),
+        )
+        inputs = KimiVL.prepare_encoder_cudagraph_capture_inputs(
+            cast(Any, fake),
+            token_budget,
+            max_batch_size,
+            0,
+            torch.device("cpu"),
+            torch.float32,
+        )
+        return int(inputs.values["max_seqlen"])
+
+    @pytest.mark.parametrize("token_budget", [64, 256, 1024])
+    def test_covers_one_image_using_the_whole_budget(self, token_budget):
+        # One image of token_budget merged tokens has token_budget * 2 * 2 patches.
+        full_budget_image_patches = token_budget * 2 * 2
+        assert self._captured_max_seqlen(token_budget, 4) >= full_budget_image_patches

@@ -31,7 +31,6 @@ class MambaBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
 
 
 MambaSSUAlgorithm = Literal["auto", "simple", "vertical", "horizontal"]
-MambaSRRNG = Literal["philox", "shared_seed"]
 
 
 @config
@@ -42,21 +41,14 @@ class MambaConfig:
     """Mamba SSU backend to use."""
 
     enable_stochastic_rounding: bool = False
-    """Enable stochastic rounding when writing SSM state to FP16 cache or
-    shared FP8/INT8 ReplaySSM checkpoints.
+    """Enable stochastic rounding when writing SSM state to fp16 cache.
     Uses random bits to unbias the rounding error, which can improve
     numerical stability for long sequences. The Triton backend requires
     compute capability 10.0 on CUDA or gfx950 on ROCm."""
     stochastic_rounding_philox_rounds: int = 0
-    """Philox PRNG rounds when stochastic rounding uses Philox.
-    Zero selects the backend default (10 for FlashInfer ReplaySSM).
-    Shared-seed rounding does not use this count."""
-
-    stochastic_rounding_rng: MambaSRRNG = "philox"
-    """Stochastic-rounding random source (Philox by default).
-    `shared_seed` reuses one fresh seed with uniform low 32 bits per layer
-    invocation instead of per-element Philox with FlashInfer ReplaySSM.
-    Rounding decisions across elements are correlated."""
+    """Number of Philox PRNG rounds for stochastic rounding random number
+    generation. 0 uses the Triton default. Higher values improve randomness
+    quality at the cost of compute."""
 
     ssu_algorithm: MambaSSUAlgorithm | None = None
     """Selective state update algorithm to use with the FlashInfer backend.
@@ -67,7 +59,7 @@ class MambaConfig:
     prefill_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     """Kernel backend for the SSD scan of Mamba2 prefills. "flashinfer" runs
     FlashInfer's fused SSD scan (SM100/SM103 only); prefills that store Mamba
-    checkpoints or quantized ReplaySSM states always use "triton"."""
+    checkpoints always use "triton"."""
 
     @field_validator("backend", "prefill_backend", mode="before")
     @classmethod
@@ -111,16 +103,6 @@ class MambaConfig:
     def __post_init__(self):
         self.validate_ssu_algorithm()
         self.validate_prefill_backend()
-        if self.stochastic_rounding_rng not in get_args(MambaSRRNG):
-            raise ValueError("Unknown Mamba stochastic-rounding random source")
-        if self.stochastic_rounding_rng == "shared_seed" and (
-            not self.enable_stochastic_rounding
-            or self.backend != MambaBackendEnum.FLASHINFER
-        ):
-            raise ValueError(
-                "Shared-seed Mamba rounding requires stochastic rounding and "
-                "the FlashInfer ReplaySSM backend"
-            )
         if self.enable_stochastic_rounding:
             from vllm.platforms import current_platform
 

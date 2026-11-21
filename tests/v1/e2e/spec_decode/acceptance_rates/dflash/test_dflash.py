@@ -93,7 +93,6 @@ def test_dflash_reference_acceptance_lengths(vllm_runner):
         vllm_runner,
         spec_config={
             "model": QWEN3_DFLASH.model,
-            "trust_remote_code": True,
             "speculative_config": {
                 "method": "dflash",
                 "model": QWEN3_DFLASH.draft_model,
@@ -138,7 +137,6 @@ def test_dflash_correctness(
     with vllm_runner(
         config.model,
         block_size=None,
-        trust_remote_code=True,
         speculative_config={
             "method": "dflash",
             "model": config.draft_model,

@@ -469,12 +469,11 @@ def _check_shared_storage_lifetime_and_failures(failure):
         assert result.value == 0
         return result
 
-    with pytest.MonkeyPatch.context() as patch:
-        if current_platform.is_cuda():
-            from vllm.models.deepseek_v41.nvidia.ops import engram_fabric_table
+    engram_host_table = _engram_host_table()
 
-            # Exercise the /dev/shm path even where cuMem tables are used.
-            patch.setattr(engram_fabric_table, "share_host_table", lambda *args: None)
+    with pytest.MonkeyPatch.context() as patch:
+        # Exercise the /dev/shm path even where host-memory tables are used.
+        patch.setattr(engram_host_table, "share_host_table", lambda *args: None)
         patch.setattr(
             engram_ops,
             "tempfile",
@@ -523,6 +522,16 @@ def _check_shared_storage_lifetime_and_failures(failure):
         assert all(not path.exists() for path in paths)
 
 
+def _engram_host_table():
+    if current_platform.is_rocm():
+        from vllm.models.deepseek_v41.amd.ops import engram_host_table
+    else:
+        from vllm.models.deepseek_v41.nvidia.ops import (
+            engram_fabric_table as engram_host_table,
+        )
+    return engram_host_table
+
+
 def _check_ple_shared_table(shm_fits):
     """Qwen4Exp's PLE table is one /dev/shm mapping per EDP group, loaded by its
     leader; without room in /dev/shm, every rank loads its own table."""
@@ -550,11 +559,12 @@ def _check_ple_shared_table(shm_fits):
 def _check_cumem_host_table(failure, packed_fp4):
     """Chunked cuMem tables read back across ranks; a failed allocation or
     import on any rank falls back to /dev/shm on all of them."""
-    if not current_platform.is_cuda():
-        return
-    from vllm.models.deepseek_v41.nvidia.ops import engram_fabric_table
-
-    if not engram_fabric_table.fabric_host_memory_supported():
+    engram_host_table = _engram_host_table()
+    is_rocm = current_platform.is_rocm()
+    if is_rocm:
+        if not engram_host_table.host_memory_supported():
+            return
+    elif not engram_host_table.fabric_host_memory_supported():
         return
 
     group = get_engram_dp_group()
@@ -562,18 +572,30 @@ def _check_cumem_host_table(failure, packed_fp4):
     row_bytes = DIM // 2 if packed_fp4 else DIM
     rows = 5 * (1 << 20) // row_bytes
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(engram_fabric_table, "CHUNK_BYTES", 2 << 20)
+        if is_rocm:
+            patch.setenv("VLLM_ROCM_ENGRAM_HIP_VMM", "1")
+        patch.setattr(engram_host_table, "CHUNK_BYTES", 2 << 20)
         if failure == "create" and group.rank_in_group == 0:
-            patch.setattr(engram_fabric_table, "NUMA_RESERVE_FRACTION", 1.0)
+            patch.setattr(engram_host_table, "NUMA_RESERVE_FRACTION", 1.0)
         if failure == "import" and group.rank_in_group == 1:
-            patch.setattr(
-                engram_fabric_table.cu,
-                "cuMemImportFromShareableHandle",
-                lambda *args: (
-                    engram_fabric_table.cu.CUresult.CUDA_ERROR_INVALID_VALUE,
-                    None,
-                ),
-            )
+            if is_rocm:
+                call = engram_host_table._call
+
+                def fail_import(name, *args):
+                    if name == "hipMemImportFromShareableHandle":
+                        raise RuntimeError(f"{name} failed: hipErrorInvalidValue")
+                    call(name, *args)
+
+                patch.setattr(engram_host_table, "_call", fail_import)
+            else:
+                patch.setattr(
+                    engram_host_table.cu,
+                    "cuMemImportFromShareableHandle",
+                    lambda *args: (
+                        engram_host_table.cu.CUresult.CUDA_ERROR_INVALID_VALUE,
+                        None,
+                    ),
+                )
         storage = engram_ops.DPSharedEngramStorage(
             rows, DIM, BLOCK, group, packed_fp4=packed_fp4
         )
@@ -693,7 +715,10 @@ def _check_table(
             if dp_shared_memory:
                 assert layer.dp_size == 1
                 assert layer.head_start == tp_rank * layer.part_n_hash_cols
-                assert layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
+                # A dmabuf CPU mapping cannot be pinned; lookups use the GPU views.
+                if not (current_platform.is_rocm() and layer._shared_memory.huge_pages):
+                    assert layer.weight.is_pinned()
+                    assert layer.weight_scale_inv.is_pinned()
             if local:
 
                 def unexpected_collective(*args, **kwargs):
@@ -981,6 +1006,17 @@ def test_engram_table_shared_across_dp_replicas(tp_size, monkeypatch, tmp_path):
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
     mp.spawn(_worker, args=(tp_size, get_open_port(), str(tmp_path)), nprocs=WORLD_SIZE)
     cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+def test_engram_hip_host_table_failure_clears_hip_error():
+    """A failed HIP VMM call must not fail the next torch launch, which the
+    /dev/shm fallback runs right after it."""
+    from vllm.models.deepseek_v41.amd.ops import engram_host_table
+
+    with pytest.raises(RuntimeError, match="hipMemCreate failed"):
+        engram_host_table._create_chunk(2 << 20, numa_node=1 << 20)
+    assert torch.ones(4, device="cuda").sum().item() == 4
 
 
 @pytest.mark.parametrize(

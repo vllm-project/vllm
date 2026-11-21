@@ -53,8 +53,8 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
                              // fetch pipeline
           const int group_blocks,  // number of consecutive 16x16 blocks
                                    // with a separate quantization scale
-          const bool is_zp_float   // is zero point of float16 type?
-          >
+          const bool is_zp_float,  // is zero point of float16 type?
+          const int m_tile_group>
 __global__ void Marlin(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,  // 4bit quantized weight matrix of shape kxn
@@ -212,8 +212,8 @@ template <const vllm::ScalarTypeId a_type_id,  // A ScalarType id
                              // fetch pipeline
           const int group_blocks,  // number of consecutive 16x16 blocks
                                    // with a separate quantization scale
-          const bool is_zp_float   // is zero point of float16 type?
-          >
+          const bool is_zp_float,  // is zero point of float16 type?
+          const int m_tile_group>
 __global__ void Marlin(
     const int4* __restrict__ A0,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,   // 4bit quantized weight matrix of shape kxn
@@ -446,6 +446,18 @@ __global__ void Marlin(
       part1_mn_iters--;
       par_id = slice_col_par / n_tiles;
       slice_col = slice_col_par % n_tiles;
+      if constexpr (m_tile_group > 1) {
+        // Full-K grouping: https://github.com/vllm-project/vllm/pull/56493.
+        // Leave the Stream-K tail unchanged.
+        int full_m = (global_mn_tiles - part2_mn_tiles) / n_tiles;
+        if (full_m > 1 && slice_col_par < full_m * n_tiles) {
+          int group = slice_col_par / (m_tile_group * n_tiles);
+          int group_m = min(m_tile_group, full_m - group * m_tile_group);
+          int tile = slice_col_par - group * m_tile_group * n_tiles;
+          par_id = group * m_tile_group + tile % group_m;
+          slice_col = tile / group_m;
+        }
+      }
       slice_iters = k_tiles;
       A = A0 + 16 * thread_m_blocks / 8 * par_id * lda;
       C = C0 + 16 * thread_m_blocks / 8 * par_id * prob_n;

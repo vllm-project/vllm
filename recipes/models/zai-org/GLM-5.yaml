@@ -110,7 +110,6 @@ guide: |
 
   - **vLLM version:** >= 0.24.0 for the `glm47` reasoning parser
   - **Hardware (FP8):** 8xH200 or 8xH20 (141GB × 8)
-  - **DeepGEMM (FP8, NVIDIA):** install via `install_deepgemm.sh` from the vLLM repo
   - **Hardware (FP8, AMD):** 8x MI325X (256GB × 8) or 8x MI350X (288GB × 8), vLLM >= 0.32.0, `vllm/vllm-openai-rocm:latest`; uses AITER, not DeepGEMM
 
   ### Using Docker
@@ -138,8 +137,6 @@ guide: |
   uv pip install "vllm==0.24.0" --torch-backend=auto
   uv pip install "transformers>=5.4.0"
   ```
-
-  On NVIDIA, install DeepGEMM using `install_deepgemm.sh` from the vLLM tools directory.
 
   ## Launching the Server
 
@@ -219,12 +216,10 @@ guide: |
 
   ## Troubleshooting
 
-  - **Accuracy drift:** Prefer the 0.19.0 stable release over nightly for best accuracy.
   - **Tool calling + MTP:** If you need both, use the latest vLLM main branch.
-  - **FP8 installation (NVIDIA):** DeepGEMM is required for FP8 performance.
+  - **FP8 installation (NVIDIA):** DeepGEMM is required for FP8 performance; it is bundled in vLLM wheels.
 
   ## References
 
   - [Model card](https://huggingface.co/zai-org/GLM-5)
   - [FP8 checkpoint](https://huggingface.co/zai-org/GLM-5-FP8)
-  - [DeepGEMM install script](https://github.com/vllm-project/vllm/blob/v0.16.0rc0/tools/install_deepgemm.sh)

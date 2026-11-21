@@ -53,62 +53,6 @@ def test_optional_type():
     assert optional_type_func("42") == 42
 
 
-def test_mamba_cache_shared_seed_cli(tmp_path):
-    from transformers import NemotronHConfig
-
-    from vllm.config.mamba import MambaConfig
-
-    NemotronHConfig(
-        architectures=["NemotronHForCausalLM"],
-        layers_block_type=["linear_attention"],
-        vocab_size=128,
-        max_position_embeddings=1024,
-    ).save_pretrained(tmp_path)
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    options = [
-        "--model",
-        str(tmp_path),
-        "--dtype",
-        "bfloat16",
-        "--skip-tokenizer-init",
-        "--max-model-len",
-        "1024",
-        "--max-num-seqs",
-        "1",
-        "--mamba-backend",
-        "flashinfer",
-        "--use-replayssm",
-        "--replayssm-state-dtype",
-        "int8",
-        "--no-enable-prefix-caching",
-        "--enable-mamba-cache-stochastic-rounding",
-    ]
-
-    def make_config(extra, mamba_config=None):
-        args = EngineArgs.from_cli_args(parser.parse_args(options + extra))
-        if mamba_config is not None:
-            args.mamba_config = mamba_config
-        return args.create_engine_config()
-
-    config = make_config(["--mamba-cache-sr-rng", "shared_seed"])
-    assert config.mamba_config.stochastic_rounding_rng == "shared_seed"
-    assert config.mamba_config.enable_stochastic_rounding
-    assert config.cache_config.replayssm_state_dtype == "int8"
-    assert not config.cache_config.enable_prefix_caching
-    assert config.use_flashinfer_replayssm
-    nested = MambaConfig(
-        backend="flashinfer",
-        enable_stochastic_rounding=True,
-        stochastic_rounding_rng="shared_seed",
-    )
-    config = make_config([], nested)
-    assert config.mamba_config.stochastic_rounding_rng == "shared_seed"
-    config = make_config(["--mamba-cache-sr-rng", "philox"], nested)
-    assert config.mamba_config.stochastic_rounding_rng == "philox"
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--mamba-cache-sr-rng", "unknown"])
-
-
 def test_watermark_config_cli():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(
@@ -158,6 +102,26 @@ def test_watermark_config_cli():
     config = EngineArgs.from_cli_args(args).create_watermark_config()
     assert config is not None
     assert config.enforce is True
+
+
+def test_watermark_config_cli_reads_key_file(tmp_path):
+    """A mounted secret keeps the key off the command line."""
+    key_file = tmp_path / "watermark_key"
+    key_file.write_text("1234567890\n")
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--model",
+            "dummy",
+            "--watermark-config",
+            json.dumps({"key_file": str(key_file)}),
+        ]
+    )
+
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+
+    assert config is not None
+    assert config.key == 1234567890
 
 
 @pytest.mark.parametrize(

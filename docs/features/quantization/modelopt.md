@@ -20,18 +20,21 @@ following `quantization.quant_algo` values:
 - `W4A16_NVFP4`: weight-only ModelOpt NVFP4 checkpoints with 16-bit
   activations (use `quantization="modelopt_fp4"`).
 - `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
-- `INT8_PB_WO`: block-scaled INT8 weight-only linear layers with 16-bit
-  activations (use `quantization="modelopt_int8"`): a symmetric int8 `weight`
-  and a `weight_scale` per `group_size` input elements (for example 16 or 32).
-  `group_size` is required. vLLM serves these layers with its mixed-precision
-  (WNA16) kernels, such as Marlin and Humming. MoE experts are not supported.
+- `INT8_PB_WO`: block-scaled INT8 weight-only linear layers and MoE experts
+  with 16-bit activations (use `quantization="modelopt_int8"`): a symmetric
+  int8 `weight` and a `weight_scale` per `group_size` input elements (for
+  example 16 or 32). `group_size` is required. vLLM serves these layers with
+  its mixed-precision (WNA16) kernels, such as Marlin and Humming on NVIDIA and
+  Triton on ROCm. MoE experts run on NVIDIA GPUs only, on the WNA16 MoE
+  kernels (Marlin, Triton, or Humming with `--moe-backend humming`).
 - `MIXED_PRECISION`: per-layer formats specified by `quantized_layers`
   (use `quantization="modelopt_mixed"`). Each layer may use any format above;
-  `INT8_PB_WO` layers take their own `group_size`. A token embedding marked
-  `W4A16_NVFP4` stays packed and only the looked-up rows are dequantized; the
-  model must build its embedding with the checkpoint prefix, as Nemotron-H does.
-  Such an embedding cannot be tied to the LM head, so checkpoints that tie it
-  are rejected.
+  `INT8_PB_WO` layers take their own `group_size`. `INT8_PB_WO` routed
+  experts must use it for every expert and projection of their MoE layer, with
+  one `group_size`. A token embedding marked `W4A16_NVFP4` stays packed and only
+  the looked-up rows are dequantized; the model must build its embedding with
+  the checkpoint prefix, as Nemotron-H does. Such an embedding cannot be tied to
+  the LM head, so checkpoints that tie it are rejected.
 
 For per-tensor `FP8`, vLLM converts E4M3FN weights and scales to E4M3FNUZ
 when required by the GPU, for example on AMD MI300.
@@ -45,14 +48,25 @@ module prefix and decoder layer indices before constructing quantized layers.
     time from the backends available on the current platform (CUTLASS,
     FlashInfer, Marlin, and others). On GPUs without a supported native FP4
     GEMM kernel, vLLM falls back to weight-only (W4A16) execution via Marlin
-    and logs a warning; this may reduce throughput for compute-heavy
-    workloads. Use `--linear-backend` to override the automatic selection
+    and logs the selected backend at info level. This may reduce throughput
+    for compute-heavy workloads. Use `--linear-backend` to override the automatic selection
     (this replaces the deprecated `VLLM_NVFP4_GEMM_BACKEND` environment
     variable). Values relevant to NVFP4 include `cutlass`,
     `flashinfer_cutlass`, `flashinfer_cutedsl`, `flashinfer_trtllm`,
     `flashinfer_cudnn`, and `marlin`; see `KernelConfig` on the
     [Engine Arguments](../../configuration/engine_args.md) page and shown by
     `vllm serve --help=KernelConfig`.
+
+    On SM120 and SM121, eligible Mamba2 input and output projections use
+    Marlin for ModelOpt NVFP4 weights with FP16 or BF16 activations. This
+    Mamba2-specific choice takes precedence over `--linear-backend`; attention
+    and MoE layers keep their configured backends. The choice applies to both
+    prefill and decode and uses one Marlin weight representation. LoRA,
+    batch-invariant mode, preprocessed checkpoints and disabled Marlin kernels
+    retain their existing selection.
+
+    On SM121, BF16 Bolt projections also use shape-specific
+    Marlin launch profiles for prefill and decode.
 
 !!! note
     For models quantized to MXFP8 with BF16 activations on SM100-family GPUs,
@@ -176,63 +190,3 @@ export VLLM_TEST_MODELOPT_FP8_PC_PT_MODEL_PATH=<path_to_fp8_pc_pt_checkpoint>
 export VLLM_TEST_MODELOPT_FP8_PB_WO_MODEL_PATH=<path_to_fp8_pb_wo_checkpoint>
 pytest -q tests/quantization/test_modelopt.py
 ```
-
-## GB10 Mamba2 input projection and convolution
-
-A CUDA13 build can fuse input projection and convolution for an already
-selected Marlin NVFP4 W4A16 Mamba2 layer on GB10 SM121 hardware with 48 SMs.
-The specialization requires BF16, tensor parallel size 1, and the supported
-4096-hidden/128-head geometry using FlashInfer ReplaySSM. It supports batch
-sizes `B=1–4` and configured token lengths `T=1–8` when `B*T <= 16`.
-
-Batch size is a runtime value; the configured token length `T` is compiled
-for each graph. With `B=1`, runtime metadata may select fewer valid tokens
-than the configured length. With `B=2–4`, every request must have the same
-length, equal to the configured `T`. The fast path requires structural
-metadata and padded-layout checks to pass. Inactive cache slots remain
-protected. Unsupported or unproven geometry, metadata, wrappers and backends
-retain the original projection and convolution path.
-
-On SM120 and SM121, supported ModelOpt NVFP4 weight-only Mamba2 input/output
-projections select Marlin locally before normal post-load weight packing,
-including shapes that have not been tuned and may be slower. The fused input
-projection and tuned output launch below apply only to GB10. Attention,
-other linears, MoE and the shared backend configuration are unchanged; only one
-weight pack is created. Unsupported codecs/dtypes, LoRA, batch-invariant mode
-and explicitly disabled Marlin kernels retain their configured owners.
-The fused operators require those existing Marlin packs and never convert
-another backend's packed weights at runtime. Unmatched token/batch shapes use
-ordinary Marlin for the same Mamba-owned weights. The fusion preserves ReplaySSM
-state and stochastic-rounding seed handling.
-
-Only the matching Mamba output callsite selects the tuned existing Marlin
-kernel for BF16 `M=8, K=8192, N=4096` with NVFP4 group16 weights. The generic
-Marlin operator and its dispatcher keep their stock behavior.
-
-For compatible FP16 ReplaySSM calls, this GB10 path applies measured launch
-profiles to 29 combinations of uniform batch/token shape and caller-selected
-rounding policy among `B=1–4`, `T=1–8`, `B*T <= 16`. The policy must be Philox
-with five configured rounds or shared seed, independent of its unused round count.
-The selector never changes the caller's rounding mode or round count. It
-requires the actual fused Marlin-convolution producer, equal configured/runtime
-verification lengths, BF16 inputs, a 16-token checkpoint window
-(`16+T` physical ring entries; 24 at `T=8`), 128 value heads of width 64,
-128 state channels and eight shared Q/K groups, with PDL disabled and the
-supported state/ring layouts and scratch buffers. FP8, INT8, round-to-nearest
-and unmatched shapes retain normal FlashInfer selection/autotuning.
-
-For `B=1`, both policies use the two-kernel profile through `T=6`, then
-monolith with `d_split=1` at `T=7–8`. `B=2` uses the same rule for Philox5;
-shared seed retains normal selection at `T=1–4`, uses the two-kernel profile
-at `T=5–6`, and monolith with `d_split=1` at `T=7–8`. `B=3, T=5` with Philox5
-uses monolith with `d_split=2`; all other `B=3–4` points retain normal selection.
-
-Profiles use existing monolithic or two-kernel algorithms and launch controls.
-The installed FlashInfer API is inspected once at backend initialization;
-profiles requiring new MAIN controls retain normal selection when those
-controls are unavailable. Shared seed requires a compatible FlashInfer API.
-An explicit SSU algorithm setting retains precedence, including `auto`.
-Setting any of `FLASHINFER_SSU_HEADS_PER_CTA`,
-`FLASHINFER_SSU_PRECOMPUTE_NUM_WARPS`, `FLASHINFER_SSU_MAIN_CTA_PER_SM` or
-`FLASHINFER_SSU_MAIN_PIPELINE_STAGES` also preserves the configured FlashInfer
-path.

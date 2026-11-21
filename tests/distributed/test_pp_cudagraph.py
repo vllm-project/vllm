@@ -75,7 +75,6 @@ def test_pp_cudagraph_mode_differs_across_stages(
     for enforce_eager in (True, False):
         with vllm_runner(
             "Qwen/Qwen3-8B",
-            trust_remote_code=False,
             max_model_len=2048,
             enforce_eager=enforce_eager,
             pipeline_parallel_size=2,

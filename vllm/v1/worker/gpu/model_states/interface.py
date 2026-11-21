@@ -126,6 +126,11 @@ class ModelState(ABC):
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         return None
 
+    def get_mrope_position_delta(self, req_index: int) -> int | None:
+        """M-RoPE position delta of the request at `req_index`, or None if the
+        model does not use M-RoPE."""
+        return None
+
     def remove_request(self, req_id: str) -> None:
         return None
 

@@ -173,6 +173,8 @@ steps:
   timeout_in_minutes: 50
   source_file_dependencies:
     - vllm/v1/
+    - vllm/model_executor/layers/mamba/gdn/
+    - vllm/third_party/flash_linear_attention/ops/
     - tests/v1/e2e/general/
   commands:
     - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
@@ -194,6 +196,8 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/v1/
+      - vllm/model_executor/layers/mamba/gdn/
+      - vllm/third_party/flash_linear_attention/ops/
       - tests/v1/e2e/general/
       - vllm/platforms/rocm.py
       commands:
@@ -218,12 +222,7 @@ steps:
     - vllm/v1/kv_cache_interface.py
     - vllm/config/cache.py
     - vllm/config/vllm.py
-    - vllm/config/mamba.py
-    - vllm/engine/arg_utils.py
-    - vllm/utils/flashinfer.py
     - vllm/model_executor/layers/mamba/
-    - vllm/model_executor/models/config.py
-    - vllm/model_executor/models/interfaces.py
     - vllm/model_executor/models/nemotron_h.py
     - vllm/model_executor/warmup/kernel_warmup.py
     - vllm/model_executor/warmup/replayssm_warmup.py
@@ -239,14 +238,7 @@ steps:
       VLLM_TEST_REQUIRE_REPLAYSSM=1 VLLM_TEST_REPLAYSSM_NUM_GPUS=1
       pytest -v -s v1/e2e/test_replayssm_decode.py
       -k "matches_baseline and not prefix_cache and not tp2"
-    - >-
-      VLLM_TEST_REQUIRE_REPLAYSSM=1 VLLM_TEST_REPLAYSSM_NUM_GPUS=1 pytest -v -s
-      kernels/mamba/test_ssu_dispatch.py::test_replayssm_materializes_only_accepted_boundary_with_compacted_rows
-      kernels/mamba/test_ssu_dispatch.py::test_replayssm_postprocess_commits_staged_transition
-      kernels/mamba/test_ssu_dispatch.py::test_shared_prefill_selected_slots_and_reuse
-      kernels/mamba/test_ssu_dispatch.py::test_shared_fp8_prefill_tiny_rows_keep_valid_scales
-      kernels/mamba/test_ssu_dispatch.py::test_shared_graph_mixed_flush_checkpoint_bytes
-      kernels/mamba/test_ssu_dispatch.py::test_replayssm_quantized_cache_spec_requires_matching_scale
+    - VLLM_TEST_REQUIRE_REPLAYSSM=1 VLLM_TEST_REPLAYSSM_NUM_GPUS=1 pytest -v kernels/mamba/test_ssu_dispatch.py::test_replayssm_materializes_only_accepted_boundary_with_compacted_rows kernels/mamba/test_ssu_dispatch.py::test_replayssm_postprocess_commits_staged_transition
   mirror:
     amd:
       automatic_shard: true
@@ -269,6 +261,7 @@ steps:
   device: h100
   num_devices: 2
   key: replayssm-e2e-tp2
+  automatic_shard: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -297,6 +290,7 @@ steps:
       -k "decode_matches_baseline_tp2"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) ReplaySSM E2E TP2"
       dind: false
       device: mi355_2

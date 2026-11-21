@@ -73,6 +73,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.stats import SchedulerIterationDetails
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     DraftTokenIds,
@@ -672,18 +673,23 @@ def test_scheduler_stats_route_to_existing_output_client():
     scheduler.add_request(request)
 
     scheduler_output = scheduler.schedule()
+    iteration_record = SchedulerIterationDetails(0, 1, 10, 0, 0, elapsed_ms=1.5)
     model_output = ModelRunnerOutput(
         req_ids=[request.request_id],
         sampled_token_ids=[[1000]],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
+        iteration_records=[iteration_record],
     )
 
     engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)
 
     assert 0 not in engine_core_outputs
     assert engine_core_outputs[1].scheduler_stats is not None
+    assert engine_core_outputs[1].scheduler_stats.iteration_records == [
+        iteration_record
+    ]
     assert len(engine_core_outputs[1].outputs) == 1
 
 
@@ -1096,6 +1102,257 @@ def test_encoder_cache_pressure_respects_disabled_chunked_prefill(
         ),
     )
     assert scheduler.schedule().num_scheduled_tokens == {second.request_id: 800}
+
+
+def _encoder_deferral_scheduler(
+    async_scheduling: bool = True, enable_chunked_prefill: bool = False, **kwargs
+) -> Scheduler:
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=enable_chunked_prefill,
+        async_scheduling=async_scheduling,
+        **kwargs,
+    )
+    # The CPU platform turns async scheduling off. These tests overlap steps as
+    # async scheduling does, so keep it on in the config that the hold reads.
+    # State set up at construction, such as deferred block freeing with a KV
+    # connector, still follows the platform. The assert guards the override.
+    scheduler.scheduler_config.async_scheduling = async_scheduling
+    assert (scheduler.vllm_config.max_concurrent_batches > 1) == async_scheduling
+    return scheduler
+
+
+FOUR_IMAGES = [(10, 250), (260, 250), (510, 250), (760, 250)]
+
+
+@pytest.mark.parametrize(
+    "async_scheduling,enable_chunked_prefill,big_images,expected",
+    [
+        (True, False, FOUR_IMAGES, (2, 1020)),
+        # The only image starts at token 0, so the request is cut to 0 tokens.
+        (True, False, [(0, 800)], (2, 1020)),
+        (False, False, FOUR_IMAGES, (1, 1020)),
+        (True, True, FOUR_IMAGES, (1, 260)),
+    ],
+    ids=["async", "async-cut-to-zero", "sync", "chunked-prefill"],
+)
+def test_encoder_deferred_request_is_not_overtaken(
+    async_scheduling, enable_chunked_prefill, big_images, expected
+):
+    """A request deferred for encoder cache space is scheduled while one-image
+    requests keep arriving (#67292)."""
+    scheduler = _encoder_deferral_scheduler(async_scheduling, enable_chunked_prefill)
+    num_small = 0
+
+    def add_small():
+        nonlocal num_small
+        num_small += 1
+        (request,) = create_requests(
+            num_requests=1,
+            num_tokens=300,
+            max_tokens=1,
+            req_ids=[f"small{num_small}"],
+            mm_positions=[[PlaceholderRange(offset=10, length=250)]],
+            mm_hashes_list=[[f"small{num_small}"]],
+        )
+        scheduler.add_request(request)
+
+    def finish(output):
+        req_ids = list(output.num_scheduled_tokens)
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                sampled_token_ids=[[EOS_TOKEN_ID] for _ in req_ids],
+            ),
+        )
+
+    for _ in range(3):
+        add_small()
+    in_flight = [scheduler.schedule()]
+    (big,) = create_requests(
+        num_requests=1,
+        num_tokens=1020,
+        max_tokens=1,
+        req_ids=["big"],
+        mm_positions=[[PlaceholderRange(offset=o, length=n) for o, n in big_images]],
+        mm_hashes_list=[[f"big{i}" for i in range(len(big_images))]],
+    )
+    scheduler.add_request(big)
+    scheduled = None
+    for step in range(1, 9):
+        add_small()
+        add_small()
+        if not async_scheduling:
+            finish(in_flight.pop())
+        output = scheduler.schedule()
+        in_flight.append(output)
+        if async_scheduling:
+            finish(in_flight.pop(0))
+        if big.request_id in output.num_scheduled_tokens:
+            scheduled = (step, output.num_scheduled_tokens[big.request_id])
+            break
+    assert scheduled == expected
+
+
+def test_encoder_deferral_holds_only_later_requests_needing_the_encoder():
+    """Behind a request deferred for encoder cache space, only later requests
+    that need the encoder in this step wait."""
+    scheduler = _encoder_deferral_scheduler(enable_prefix_caching=True)
+    in_flight, deferred = create_requests(
+        num_requests=2,
+        num_tokens=800,
+        max_tokens=1,
+        req_ids=["in_flight", "deferred"],
+        mm_positions=[
+            [PlaceholderRange(offset=0, length=600)],
+            [PlaceholderRange(offset=100, length=600)],
+        ],
+        mm_hashes_list=[["busy"], ["new"]],
+    )
+    # Same prompt and image as in_flight, so its image is in its prefix-cache hit.
+    (cached_mm,) = create_requests(
+        num_requests=1,
+        num_tokens=800,
+        req_ids=["cached_mm"],
+        mm_positions=[[PlaceholderRange(offset=0, length=600)]],
+        mm_hashes_list=[["busy"]],
+    )
+    (small_mm,) = create_requests(
+        num_requests=1,
+        num_tokens=300,
+        req_ids=["small_mm"],
+        mm_positions=[[PlaceholderRange(offset=10, length=200)]],
+        mm_hashes_list=[["small"]],
+    )
+    (text,) = create_requests(num_requests=1, num_tokens=100, req_ids=["text"])
+    scheduler.add_request(in_flight)
+    assert scheduler.schedule().num_scheduled_tokens == {"in_flight": 800}
+
+    for request in (deferred, small_mm, cached_mm, text):
+        scheduler.add_request(request)
+    # small_mm's image would fit in the 424 free slots, but deferred needs them.
+    assert scheduler.schedule().num_scheduled_tokens == {"cached_mm": 16, "text": 100}
+
+
+@pytest.mark.parametrize(
+    "tail_offset,tail_is_embed,expected,expected_next",
+    [
+        (0, [True] * 400 + [False] * 200, {"tail": 288}, {"deferred": 288}),
+        (40, [True] * 400 + [False] * 200, {"tail": 288}, {"deferred": 288}),
+        (0, [False] * 200 + [True] * 400, {}, {"deferred": 288, "tail": 288}),
+        (200, [True] * 400 + [False] * 200, {}, {"deferred": 288, "tail": 288}),
+    ],
+    ids=[
+        "no-embeds-in-window",
+        "no-embeds-in-window-offset",
+        "embeds-in-window",
+        "embeds-in-window-offset",
+    ],
+)
+def test_encoder_deferral_holds_only_requests_with_embeddings_in_window(
+    tail_offset, tail_is_embed, expected, expected_next
+):
+    """Behind a request deferred for encoder cache space, a later request whose
+    tokens this step overlap an image only at positions without embeddings is
+    scheduled, and one whose tokens include embeddings waits."""
+    scheduler = _encoder_deferral_scheduler(
+        use_kv_connector=mock_kv(512, is_async=False)
+    )
+    busy, deferred, tail = create_requests(
+        num_requests=3,
+        num_tokens=800,
+        max_tokens=1,
+        req_ids=["busy", "deferred", "tail"],
+        mm_positions=[
+            [PlaceholderRange(offset=0, length=600)],
+            [PlaceholderRange(offset=100, length=600)],
+            [
+                PlaceholderRange(
+                    offset=tail_offset,
+                    length=600,
+                    is_embed=torch.tensor(tail_is_embed),
+                )
+            ],
+        ],
+        mm_hashes_list=[["busy"], ["deferred"], ["tail"]],
+    )
+    # Each request has 512 tokens from the KV connector and schedules the
+    # other 288.
+    scheduler.add_request(busy)
+    first = scheduler.schedule()
+    assert first.num_scheduled_tokens == {"busy": 288}
+
+    scheduler.add_request(deferred)
+    scheduler.add_request(tail)
+    # deferred needs 600 slots, and 424 are free.
+    assert scheduler.schedule().num_scheduled_tokens == expected
+
+    # Once busy's step is processed, deferred is scheduled.
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(req_ids=["busy"], sampled_token_ids=[[EOS_TOKEN_ID]]),
+    )
+    assert scheduler.schedule().num_scheduled_tokens == expected_next
+
+
+@pytest.mark.parametrize(
+    "deferred_image_length,expected,expected_next",
+    [(300, {}, {"deferred": 1000}), (400, {"small": 300}, {"small": 1})],
+    ids=["fits-cache", "never-fits-cache"],
+)
+def test_encoder_deferral_holds_only_behind_requests_fitting_the_encoder_cache(
+    deferred_image_length, expected, expected_next
+):
+    """With a configured encoder cache, a deferred request holds later ones only
+    if its images fit the cache together. One that never fits is never
+    scheduled with chunked prefill off, as on main since the cache size became
+    configurable, but it does not hold later requests."""
+    scheduler = _encoder_deferral_scheduler(encoder_cache_size=600)
+    (busy,) = create_requests(
+        num_requests=1,
+        num_tokens=400,
+        max_tokens=1,
+        req_ids=["busy"],
+        mm_positions=[[PlaceholderRange(offset=0, length=300)]],
+        mm_hashes_list=[["busy"]],
+    )
+    (deferred,) = create_requests(
+        num_requests=1,
+        num_tokens=1000,
+        req_ids=["deferred"],
+        mm_positions=[
+            [
+                PlaceholderRange(offset=10, length=deferred_image_length),
+                PlaceholderRange(offset=500, length=deferred_image_length),
+            ]
+        ],
+        mm_hashes_list=[["first", "second"]],
+    )
+    (small,) = create_requests(
+        num_requests=1,
+        num_tokens=300,
+        req_ids=["small"],
+        mm_positions=[[PlaceholderRange(offset=10, length=100)]],
+        mm_hashes_list=[["small"]],
+    )
+    scheduler.add_request(busy)
+    first = scheduler.schedule()
+    assert first.num_scheduled_tokens == {"busy": 400}
+
+    scheduler.add_request(deferred)
+    scheduler.add_request(small)
+    # 300 of the 600 slots are free. deferred needs 600 or 800 slots, and
+    # small's 100 would fit.
+    assert scheduler.schedule().num_scheduled_tokens == expected
+
+    # Once busy's step is processed, a deferred request that fits is scheduled.
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(req_ids=["busy"], sampled_token_ids=[[EOS_TOKEN_ID]]),
+    )
+    assert scheduler.schedule().num_scheduled_tokens == expected_next
 
 
 def test_schedule_partial_requests():
@@ -2566,6 +2823,58 @@ def test_preemption_re_records_prefix_cache_query():
     scheduler.schedule()
     assert request.status == RequestStatus.RUNNING
     assert stats.preempted_requests == 1
+
+
+def test_preemption_of_aborted_request_is_counted():
+    """A request preempted and then aborted is still counted once."""
+    # 10 usable blocks: two 80-token requests fill them, so the second request
+    # is preempted when the first one needs a new block.
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        block_size=16,
+        num_blocks=11,
+        enable_prefix_caching=False,
+    )
+    first, second = create_requests(num_requests=2, num_tokens=80, block_size=16)
+    scheduler.add_request(first)
+    first_output = scheduler.schedule()
+    scheduler.add_request(second)
+    scheduler.schedule()
+    scheduler.update_from_output(
+        first_output,
+        ModelRunnerOutput(
+            req_ids=[first.request_id],
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    preempting_output = scheduler.schedule()
+    assert second.status == RequestStatus.PREEMPTED
+    scheduler.finish_requests(
+        [first.request_id, second.request_id], RequestStatus.FINISHED_ABORTED
+    )
+    # A step with no request outputs still carries the stats.
+    engine_core_outputs = scheduler.update_from_output(
+        preempting_output,
+        ModelRunnerOutput(
+            req_ids=[],
+            sampled_token_ids=[],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    eco = next(iter(engine_core_outputs.values()))
+    assert not eco.outputs
+
+    assert eco.scheduler_stats is not None
+    assert eco.scheduler_stats.num_preempted_reqs == 1
+
+    next_stats = scheduler.make_stats()
+    assert next_stats is not None
+    assert next_stats.num_preempted_reqs == 0
 
 
 def test_preemption_processes_stale_aux_output():
@@ -4443,12 +4752,7 @@ def create_scheduler_with_priority(
       {class}`Scheduler` instance with priority scheduling
 
     """
-    model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-    )
+    model_config = ModelConfig(model=model, dtype="float16", seed=42)
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
@@ -5146,9 +5450,8 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
 def test_grammar_compile_error_finishes_only_request(async_grammar: bool):
     scheduler = create_scheduler()
     manager = scheduler.structured_output_manager
-    manager.backend = Mock()
-    manager.backend_name = "xgrammar"
-    manager.backend.compile_grammar.side_effect = RuntimeError(
+    manager.backends["xgrammar"] = Mock()
+    manager.backends["xgrammar"].compile_grammar.side_effect = RuntimeError(
         "forced FSM compilation error"
     )
     manager._use_async_grammar_compilation = async_grammar
@@ -5234,6 +5537,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.aux_output_connector = None
     scheduler.grammar_compile_error_reqs = {}
     scheduler.encoder_cache_mismatch_reqs = set()
+    scheduler.dropped_streaming_updates = []
     scheduler.vllm_config = Mock()
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
@@ -6926,12 +7230,7 @@ def _create_encoder_decoder_scheduler(
     """
     from vllm.v1.core.encoder_cache_manager import EncoderDecoderCacheManager
 
-    model_config = ModelConfig(
-        model="facebook/opt-125m",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-    )
+    model_config = ModelConfig(model="facebook/opt-125m", dtype="float16", seed=42)
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
@@ -8300,11 +8599,7 @@ def _create_hybrid_mamba_connector_scheduler(
 ) -> Scheduler:
     """FA + Mamba ("align" cache mode) scheduler with a MockKVConnector."""
     model_config = ModelConfig(
-        model="facebook/opt-125m",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-        skip_tokenizer_init=True,
+        model="facebook/opt-125m", dtype="float16", seed=42, skip_tokenizer_init=True
     )
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
@@ -8879,6 +9174,17 @@ def test_drafts_unused_with_async_placeholders():
     (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
     request.num_output_placeholders = 2
     assert not scheduler._drafts_unused(request, 17, 3)
+
+    # Depth > 2: 1 verified + 2 in-flight steps + this step = max_tokens.
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=4)
+    request.append_output_token_ids(100)
+    request.num_output_placeholders = 4
+    request.num_output_placeholder_steps = 2
+    assert scheduler._drafts_unused(request, 21, 3)
+    # With one of them in flight, it may not.
+    request.num_output_placeholders = 2
+    request.num_output_placeholder_steps = 1
+    assert not scheduler._drafts_unused(request, 19, 3)
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])

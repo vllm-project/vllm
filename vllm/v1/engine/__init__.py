@@ -163,6 +163,9 @@ class EngineCoreReadyResponse:
     # VllmConfig (the Rust frontend). False under --kv-sharing-fast-prefill,
     # which skips prompt tokens in some layers.
     supports_prompt_logprobs: bool = True
+    # Whether a disaggregated consumer accepts placeholder metadata without
+    # embedding tensors.
+    allow_missing_mm_embeddings: bool = False
 
 
 class EngineCoreRequest(

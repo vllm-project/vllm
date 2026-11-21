@@ -91,7 +91,7 @@ import os
 import select
 import signal
 import socket
-import threading
+import time
 from collections.abc import Callable, Iterable
 
 import torch
@@ -125,7 +125,6 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     ensure_private_socket_dir,
     get_current_device_uuid,
     get_socket_path,
-    hash_rope_parameters,
     recv_msg,
     send_msg,
     verify_peer_is_owner,
@@ -151,11 +150,12 @@ from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import 
 from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
     FlashInferWarmupCache,
 )
-from vllm.model_executor.model_loader.weight_cache.weight_seed import (
-    WeightShardSeed,
-)
 from vllm.model_executor.model_loader.weight_cache.weight_seed.loader import (
     PeerModelLoader,
+)
+from vllm.model_executor.model_loader.weight_cache.weight_seed.seed import (
+    WEIGHT_COPY_LEASE_TIMEOUT_S,
+    WeightShardSeed,
 )
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import format_gib
@@ -185,11 +185,6 @@ class WeightCacheDaemon:
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
             raise ValueError("The weight cache daemon does not support EPLB.")
-        # Seed peers are served on their own thread; this serializes their
-        # reads of the state with the local socket's requests. Reentrant
-        # because the local "seed" command re-enters it through
-        # WeightShardSeed.resolve.
-        self._state_lock = threading.RLock()
         self.seed_config = seed_config or SeedConfig()
         warmup_cache_stores = tuple(warmup_cache_stores)
         self.warmup_caches: list[WarmupCache] = [
@@ -289,8 +284,6 @@ class WeightCacheDaemon:
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
             with single_pp_stage() if self.is_draft else contextlib.nullcontext():
                 self.model = self.get_model()
-        # In-place reloads use configs already normalized by model construction.
-        self.loaded_rope_parameters_hash = hash_rope_parameters(self.model_config)
         # Loading and post-processing leave freed transients in the caching
         # allocator; return them so engines sharing the GPU can use them.
         gc.collect()
@@ -419,9 +412,7 @@ class WeightCacheDaemon:
                 conn, _ = server.accept()
                 self._serve_connection(conn)
         finally:
-            release_error = self._shutdown(server, socket_path, lock_fd)
-            if release_error:
-                raise release_error[0]
+            self._shutdown(server, socket_path, lock_fd)
 
     def _serve_connection(self, conn: socket.socket) -> None:
         with conn:
@@ -437,50 +428,24 @@ class WeightCacheDaemon:
                 with contextlib.suppress(OSError):
                     send_msg(conn, {"status": "error", "message": str(e)})
 
-    def _release_weights_on_shutdown(self, release_error: list[Exception]) -> None:
-        try:
-            self.weight_seed.release()
-        except Exception as e:
-            release_error.append(e)
-            logger.exception("Error releasing weight cache during shutdown")
-
-    def _drain_shutdown_clients(
-        self, server: socket.socket, release_thread: threading.Thread
-    ) -> None:
-        shutdown_clients = []
+    def _drain_shutdown_clients(self, server: socket.socket) -> None:
+        self.weight_seed.start_release()
+        deadline = time.monotonic() + WEIGHT_COPY_LEASE_TIMEOUT_S
         # Keep accepting local lease acknowledgements until the source
         # registrations and weights are safe to tear down.
-        while release_thread.is_alive():
+        while self.weight_seed.active_copies and time.monotonic() < deadline:
             try:
                 conn, _ = server.accept()
             except TimeoutError:
                 continue
             conn.settimeout(5.0)
-            client_thread = threading.Thread(
-                target=self._serve_connection,
-                args=(conn,),
-                name="vllm-weight-cache-shutdown-client",
-                daemon=True,
-            )
-            shutdown_clients.append(client_thread)
-            client_thread.start()
-        release_thread.join()
-        for client_thread in shutdown_clients:
-            client_thread.join(timeout=5.0)
+            self._serve_connection(conn)
+        self.weight_seed.finish_release()
 
-    def _shutdown(
-        self, server: socket.socket, socket_path: str, lock_fd: int
-    ) -> list[Exception]:
-        release_error: list[Exception] = []
-        release_thread = threading.Thread(
-            target=self._release_weights_on_shutdown,
-            args=(release_error,),
-            name="vllm-weight-cache-shutdown-release",
-        )
-        release_thread.start()
+    def _shutdown(self, server: socket.socket, socket_path: str, lock_fd: int) -> None:
         server.settimeout(0.5)
         try:
-            self._drain_shutdown_clients(server, release_thread)
+            self._drain_shutdown_clients(server)
         finally:
             server.close()
             for watcher in self._watchers:
@@ -489,7 +454,6 @@ class WeightCacheDaemon:
             if os.path.exists(socket_path):
                 os.unlink(socket_path)
             os.close(lock_fd)
-        return release_error
 
     def _acquire_gpu_lock(self, socket_path: str) -> int:
         """Take an exclusive lock guarding this GPU's socket path.
@@ -517,10 +481,6 @@ class WeightCacheDaemon:
             is_draft=self.is_draft,
         )
 
-    @property
-    def has_weights(self) -> bool:
-        return self.model is not None
-
     def _export_state(self) -> tuple[dict[str, TensorEntry], dict[str, str], dict]:
         """Export this rank's tensors, aliases and flags for one client."""
         assert self.model is not None
@@ -539,35 +499,24 @@ class WeightCacheDaemon:
         request = recv_msg(conn)
         cmd = request.get("cmd")
         if cmd == "get_state":
-            with self._state_lock:
-                self._handle_get_state(conn, request)
+            self._handle_get_state(conn, request)
         elif cmd == "get_memory":
-            with self._state_lock:
-                send_msg(
-                    conn,
-                    {
-                        "status": "ok",
-                        "memory_bytes": exported_weight_bytes(self.model),
-                        # The launcher maps source GPUs to local device indices
-                        # when it places a same-host mirror.
-                        "gpu_uuid": get_current_device_uuid(),
-                    },
-                )
+            send_msg(
+                conn,
+                {
+                    "status": "ok",
+                    "memory_bytes": exported_weight_bytes(self.model),
+                    # The launcher maps source GPUs to local device indices
+                    # when it places a same-host mirror.
+                    "gpu_uuid": get_current_device_uuid(),
+                },
+            )
         elif cmd == "seed":
             # A same-host peer's D2D request; the pickle plane can carry the
             # peer_ipc seed's CUDA IPC handles, which JSON cannot.
             send_msg(conn, self.d2d.handle_request(request))
-        elif cmd == "release":
-            release_conn = conn.dup()
-            threading.Thread(
-                target=self._handle_release,
-                args=(release_conn,),
-                name="vllm-weight-cache-release",
-                daemon=True,
-            ).start()
         elif cmd == "watch":
-            with self._state_lock:
-                self._handle_watch(conn)
+            self._handle_watch(conn)
         else:
             send_msg(conn, {"status": "error", "message": f"Unknown command {cmd!r}"})
 
@@ -577,18 +526,9 @@ class WeightCacheDaemon:
             send_msg(conn, {"status": "error", "message": "Missing cache_key"})
             return
         mismatched = self.cache_key.mismatched_fields(client_key)
-        if (
-            request.get("is_reload", False)
-            and "rope_parameters_hash" in mismatched
-            and client_key.rope_parameters_hash == self.loaded_rope_parameters_hash
-        ):
-            mismatched.remove("rope_parameters_hash")
         if mismatched:
             logger.warning("WeightCacheKey mismatch on fields: %s", mismatched)
             send_msg(conn, {"status": "mismatch", "fields": mismatched})
-            return
-        if not self.has_weights:
-            send_msg(conn, {"status": "error", "message": "Weights were released"})
             return
         entries, aliases, attrs = self._export_state()
         send_msg(
@@ -632,25 +572,6 @@ class WeightCacheDaemon:
             else:
                 alive.append(watcher)
         self._watchers = alive
-
-    def _handle_release(self, conn: socket.socket) -> None:
-        with conn:
-            try:
-                # Unregister from the NIC before the memory returns to the driver.
-                self.weight_seed.release()
-                with self._state_lock:
-                    self.model = None
-                    torch.accelerator.empty_cache()
-                logger.info(
-                    "Weight cache %s daemon rank %d released cached weights",
-                    self.role,
-                    self.global_rank,
-                )
-                send_msg(conn, {"status": "ok"})
-            except Exception as e:
-                logger.exception("Error releasing weight cache")
-                with contextlib.suppress(OSError):
-                    send_msg(conn, {"status": "error", "message": str(e)})
 
 
 def _run_daemon(

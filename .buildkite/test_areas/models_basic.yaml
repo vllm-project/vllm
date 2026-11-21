@@ -137,6 +137,7 @@ steps:
       - tests/models/test_deepseek_v41_pcp.py
       - tests/models/test_deepseek_v41_amd_replay_forward.py
       - tests/models/test_deepseek_v4_dspark_rocm.py
+      - tests/models/test_deepseek_dspark_packed_mapping.py
       - tests/models/test_deepseek_v4_rocm_wo_a.py
       - tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
       - tests/models/test_dsv41_mono_decode.py
@@ -168,6 +169,7 @@ steps:
         models/test_deepseek_v41_pcp.py
         models/test_deepseek_v41_amd_replay_forward.py
         models/test_deepseek_v4_dspark_rocm.py
+        models/test_deepseek_dspark_packed_mapping.py
         models/test_deepseek_v4_rocm_wo_a.py
         models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
         models/test_dsv41_mono_decode.py
@@ -372,6 +374,7 @@ steps:
   device: h200_35gb
   source_file_dependencies:
   - vllm/models/glm5next/
+  - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
   - tests/models/glm5next/
   - vllm/model_executor/layers/mamba/checkpoint.py
   commands:
@@ -399,6 +402,10 @@ steps:
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - vllm/model_executor/layers/mamba/checkpoint.py
+  - vllm/v1/hisparse/
+  - vllm/distributed/kv_transfer/kv_connector/v1/hisparse/
+  - vllm/v1/attention/backends/mla/index_group.py
+  - vllm/model_executor/warmup/qwen4_exp_qsa_warmup.py
   - tests/models/qwen4_exp/
   commands:
     - >-
@@ -437,6 +444,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
   - vllm/models/qwen4_exp/nvidia/ops/qsa.py
   - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
+  - vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
   - tests/models/qwen4_exp/test_hc_ops.py
   - tests/models/qwen4_exp/test_mega_moe.py
   - tests/models/qwen4_exp/test_qsa_reference.py
@@ -482,6 +490,7 @@ steps:
 
 - label: ":computer: (CPU) Qwen4 Exp"
   key: qwen4-exp-unit-tests-cpu
+  automatic_shard: true
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 20
@@ -540,6 +549,7 @@ steps:
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
+  automatic_shard: true
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 30
@@ -555,6 +565,7 @@ steps:
   - tests/models/test_alice_ai.py
   - tests/models/test_alice_ai_config.py
   - tests/models/test_indexer_logits_dtype_config.py
+  - tests/models/test_qwen3_5_slot.py
   - tests/models/test_beam_weight_mapping.py
   - tests/models/test_beam_numerics.py
   - tests/models/transformers/fusers/
@@ -564,6 +575,7 @@ steps:
   - tests/models/deepseek_v32/test_sequence_parallel.py
   - tests/models/deepseek_v32/test_pp_topk.py
   - tests/models/test_deepseek_v4_fi_moe_ep.py
+  - tests/models/test_deepseek_dspark_packed_mapping.py
   - tests/models/test_dspark_mla.py
   - tests/models/transformers/test_layer_registry.py
   - tests/models/test_cohere2_moe_parallel_block.py
@@ -583,12 +595,14 @@ steps:
       models/deepseek_v32/test_sequence_parallel.py
       models/deepseek_v32/test_pp_topk.py
       models/test_deepseek_v4_fi_moe_ep.py
+      models/test_deepseek_dspark_packed_mapping.py
       models/test_dspark_mla.py
       models/transformers/test_layer_registry.py
       models/test_dory.py
       models/test_alice_ai.py
       models/test_alice_ai_config.py
       models/test_indexer_logits_dtype_config.py
+      models/test_qwen3_5_slot.py
       models/test_beam_weight_mapping.py
       models/test_beam_numerics.py
       models/test_cohere2_moe_parallel_block.py
@@ -670,6 +684,7 @@ steps:
 
 - label: ":nvidia: (B200) Mistral Large 4"
   key: mistral-large-4-unit-tests-b200
+  automatic_shard: true
   timeout_in_minutes: 30
   device: b200-k8s
   source_file_dependencies:
@@ -681,6 +696,7 @@ steps:
     --ignore=models/mistral/mistral_large4/amd_specialized_decode
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Mistral Large 4"
       dind: false
       device: mi355_1
