@@ -134,6 +134,9 @@ def _builder(
         _use_triton_dcp_verify=False,
         _use_triton_verify=False,
         _triton_verify_qlens=(),
+        _triton_verify_min_qlen=AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN + 1,
+        # No KV cache is bound in these cases; the wide-KV test binds one.
+        _kv_view_checked=True,
         _fp8_v_scale_fix_qlens=frozenset(),
         # Derived once in the real constructor, so derive it once here too.
         _dcp_verify_page_size=rocm_aiter_mla._segmented_mla_page_size(
@@ -197,6 +200,9 @@ def _builder(
     )
     stub._fill_dcp_verify_page_table = (
         AiterMLAMetadataBuilder._fill_dcp_verify_page_table.__get__(stub)
+    )
+    stub._route_wide_kv_to_triton_verify = (
+        AiterMLAMetadataBuilder._route_wide_kv_to_triton_verify.__get__(stub)
     )
     stub._flat_page_index_steps = (
         AiterMLAMetadataBuilder._flat_page_index_steps.__get__(stub)
@@ -2079,6 +2085,111 @@ def test_asm_causal_verify_unsupported(
         )
         is expected
     )
+
+
+def _block_row_cache(num_blocks: int, block_size: int = 1024, row_slots: int = 38):
+    """A draft layer's cache laid inside a wider block row, as DSpark binds it:
+    each block's slot sits `row_slots` slots apart. Meta, so no memory."""
+    return torch.empty_strided(
+        (num_blocks, block_size, 576),
+        (block_size * 576 * row_slots, 576, 1),
+        dtype=torch.uint8,
+        device="meta",
+    )
+
+
+def test_flat_mla_kv_view_bytes():
+    contiguous = torch.empty(3, 16, 576, dtype=torch.bfloat16, device="meta")
+    assert rocm_aiter_mla._flat_mla_kv_view_bytes(contiguous) == 3 * 16 * 576 * 2
+    # One layer holds 925 blocks (0.5 GiB), but its view spans the whole row.
+    cache = _block_row_cache(925)
+    page_stride = 1024 * 576 * 38
+    assert rocm_aiter_mla._flat_mla_kv_view_bytes(cache) == (
+        924 * page_stride + 1024 * 576
+    )
+    assert rocm_aiter_mla._flat_mla_kv_view_bytes(cache) > 2**32 > cache.numel()
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "view_bytes", "dcp", "cdna", "expected"),
+    [
+        pytest.param("fp8", 2**32 + 576, 1, 3, True, id="fp8-past-4gib"),
+        pytest.param("fp8", 2**32, 1, 3, False, id="fp8-at-4gib"),
+        pytest.param("auto", 2**34, 1, 3, False, id="bf16"),
+        pytest.param("fp8", 2**34, 2, 3, False, id="dcp"),
+        pytest.param("fp8", 2**34, 1, 4, False, id="cdna4"),
+    ],
+)
+def test_asm_decode_wraps_kv(
+    monkeypatch, kv_cache_dtype, view_bytes, dcp, cdna, expected
+):
+    import vllm.platforms.rocm as rocm_platform
+
+    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna)
+    assert (
+        rocm_aiter_mla._asm_decode_wraps_kv(kv_cache_dtype, view_bytes, dcp) is expected
+    )
+
+
+def _wide_kv_builder(monkeypatch, *, qlen: int, kv_cache, kv_cache_dtype="fp8"):
+    import vllm.platforms.rocm as rocm_platform
+
+    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: 3)
+    builder = _builder(mtp_decode_qlen=qlen, kv_cache_dtype=kv_cache_dtype)
+    builder._kv_view_checked = False
+    builder._flat_index_layer = "draft.attn"
+    builder.compilation_config.static_forward_context = {
+        "draft.attn": SimpleNamespace(kv_cache=kv_cache)
+    }
+    builder._triton_verify_max_seq_len = 4096
+    builder._sm_count = 304
+    builder.mla_dims = SimpleNamespace(kv_lora_rank=512)
+    return builder
+
+
+@pytest.mark.parametrize(
+    ("kv_cache", "kv_cache_dtype", "routed"),
+    [
+        pytest.param(None, "fp8", False, id="unbound"),
+        pytest.param(_block_row_cache(8), "fp8", False, id="fp8-narrow"),
+        pytest.param(_block_row_cache(925), "auto", False, id="bf16-wide"),
+        pytest.param(_block_row_cache(925), "fp8", True, id="fp8-wide"),
+    ],
+)
+def test_wide_kv_routing_decision(monkeypatch, kv_cache, kv_cache_dtype, routed):
+    builder = _wide_kv_builder(
+        monkeypatch, qlen=3, kv_cache=kv_cache, kv_cache_dtype=kv_cache_dtype
+    )
+    builder._route_wide_kv_to_triton_verify()
+    # An unbound cache is checked again on the next build.
+    assert builder._kv_view_checked is (kv_cache is not None)
+    assert builder._use_triton_verify is routed
+    assert builder._triton_verify_min_qlen == (1 if routed else 5)
+    assert builder._triton_verify_qlens == ((1, 2, 3) if routed else ())
+
+
+def test_wide_fp8_kv_view_routes_decode_to_triton_verify(monkeypatch):
+    """Once the bound cache's view passes 4 GiB, verify at qlen 3 (DSpark's
+    default) leaves the asm decode, whose offsets would wrap."""
+    qlen = 3
+    builder = _wide_kv_builder(monkeypatch, qlen=qlen, kv_cache=_block_row_cache(925))
+
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        builder,
+        block_table_tensor=torch.arange(16, dtype=torch.int32).view(2, 8),
+        seq_lens_device=torch.tensor([7, 5], dtype=torch.int32),
+        max_seq_len=7,
+        query_start_loc_cpu=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
+        query_start_loc_device=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
+        num_decode_tokens=2 * qlen,
+        max_query_len=qlen,
+        dcp_tot_seq_lens_device=None,
+    )
+
+    assert metadata.triton_verify_num_kv_splits > 0
+    assert metadata.triton_verify_qlens == (1, 2, 3)
+    assert metadata.paged_kv_indices is None
+    assert not metadata.has_persistent_metadata
 
 
 def _adaptive_config(
