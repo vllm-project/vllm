@@ -18,7 +18,7 @@ _MP = 16
 _MAX_TILES = 4096
 
 
-@triton.jit(do_not_specialize=["M"])
+@triton.jit
 def _low_m_bmm_kernel(
     X,
     W,
@@ -105,7 +105,7 @@ def _segment_input(b, XQ, XK, XV, SXQ, SXK, SXV):
     return x, stride
 
 
-@triton.jit(do_not_specialize=["M"])
+@triton.jit
 def _qkv_bmm_kernel(
     XQ,
     XK,
