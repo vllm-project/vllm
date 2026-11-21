@@ -2,14 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The specialized decode's hooks on `KimiLinearForCausalLM`, kept here so the
 model only calls them: `init_specialized_decode` in `__init__` (after the config
-check, which runs before any module allocates weights), `plan_specialized_decode`
-in `forward` and `after_specialized_decode_step` in `compute_logits`. The
+check, which runs before any module allocates weights),
+`keep_specialized_decode_weights` once the decoder layers exist,
+`plan_specialized_decode` in `forward` and `after_specialized_decode_step` in
+`compute_logits`. The
 model state (`model_state.KimiK3ModelState`) builds the executor after load."""
 
 from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.models.kimi_k3.amd.specialized_decode.runtime import DecodeConfig
 
 if TYPE_CHECKING:
@@ -18,6 +21,8 @@ if TYPE_CHECKING:
         Step,
     )
     from vllm.v1.worker.gpu.model_states.interface import ModelState
+
+logger = init_logger(__name__)
 
 
 class SpecializedDecodeMixin:
@@ -32,6 +37,24 @@ class SpecializedDecodeMixin:
         stock decode."""
         self.specialized_decode_config = config
         self.specialized_decode = None
+
+    def keep_specialized_decode_weights(self) -> None:
+        """After `self.model` is built, before the weights load: with
+        `specialized_decode_bf16_copies`, the online-FP8 linears the kernels read
+        keep a bf16 copy (`runtime.mark_bf16_copies`)."""
+        config = self.specialized_decode_config
+        if config is None or not config.bf16_copies:
+            return
+        from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
+            mark_bf16_copies,
+        )
+
+        nbytes = mark_bf16_copies(self.model)
+        logger.info(
+            "Kimi-K3 specialized decode: the layer kernels read bf16 copies of "
+            "online-FP8 linears (%.2f GiB on this rank)",
+            nbytes / 2**30,
+        )
 
     def build_specialized_decode(self) -> None:
         from vllm.models.kimi_k3.amd.specialized_decode.runtime.decode import (

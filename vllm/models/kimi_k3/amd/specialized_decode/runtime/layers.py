@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.models.kimi_k3.amd.specialized_decode.runtime import dense_weight
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
 
 if TYPE_CHECKING:
@@ -115,14 +116,14 @@ def _k2(
 
     m = layer.mlp
     ex = getattr(m.experts, "routed_experts", m.experts)
-    w_up = m.routed_expert_up_proj.weight
+    w_up = dense_weight(m.routed_expert_up_proj)
     if not getattr(m.routed_output_transform, "row_sharded", False):
         w_up = w_up.narrow(0, runner.rank * moe.UP_N, moe.UP_N)
     out = torch.empty_like(prefix)
     k2.k2_launch(
         _k2_key(layer, runner, core.size(0), reset, m1b_in is not None),
         core=core,
-        w_o=layer.self_attn.o_proj.weight,
+        w_o=dense_weight(layer.self_attn.o_proj),
         prefix=prefix,
         blocks=blocks,
         ares_nw=layer.mlp_res_norm.weight,
@@ -130,9 +131,9 @@ def _k2(
         in_nw=layer.post_attention_layernorm.weight,
         w_gate=m.gate.weight,
         bias=m.gate.e_score_correction_bias,
-        w_ld=m.routed_expert_down_proj.weight,
-        w_sgu=m.shared_experts.gate_up_proj.weight,
-        w_sd=m.shared_experts.down_proj.weight,
+        w_ld=dense_weight(m.routed_expert_down_proj),
+        w_sgu=dense_weight(m.shared_experts.gate_up_proj),
+        w_sd=dense_weight(m.shared_experts.down_proj),
         w13=ex.w13_weight,
         w13s=ex.w13_weight_scale,
         w2=ex.w2_weight,
@@ -255,8 +256,8 @@ class WholeLayer(_Layer):
             ares_nw=layer.self_attention_res_norm.weight,
             ares_qk=layer.self_attention_res_proj.weight.view(kda.HIDDEN),
             in_nw=layer.input_layernorm.weight,
-            w_in=attn.in_proj_qkvgfab.weight,
-            w_fb=attn.f_b_proj.weight,
+            w_in=dense_weight(attn.in_proj_qkvgfab),
+            w_fb=dense_weight(attn.f_b_proj),
             conv_w=attn.conv1d.weight.view(kda.QKV, 4),
             conv_state=conv_state,
             a_log=attn.A_log,

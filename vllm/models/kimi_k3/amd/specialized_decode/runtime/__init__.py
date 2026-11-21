@@ -18,6 +18,10 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 AUTO, SPECIALIZED = "auto", "latency_specialized"
+# additional_config key: the online-FP8 linears the layer kernels read keep a
+# bf16 copy of their loaded weight (`mark_bf16_copies`), so online FP8 linears
+# and the specialized decode run together, at the copies' memory cost
+BF16_COPIES = "specialized_decode_bf16_copies"
 TP = 8
 DCP = TP  # the MLA layers' KV shards: one a TP rank
 DCP_SIZES = (1, DCP)  # M1's builds: the whole KV a rank, or DCP over the TP group
@@ -49,6 +53,8 @@ class DecodeConfig:
     # the most requests a step has (spec verify: ``step_reasons`` caps its rows;
     # regular decode: unbounded, steps past MAX_ROWS run vLLM's decode)
     max_num_seqs: int = 1
+    # online-FP8 linears the kernels read keep a bf16 copy (`BF16_COPIES`)
+    bf16_copies: bool = False
 
     @property
     def widths(self) -> tuple[int, ...]:
@@ -68,12 +74,22 @@ def decode_backend(vllm_config) -> str:
     return extra.get("decode_backend", AUTO) if isinstance(extra, dict) else AUTO
 
 
+def bf16_copies_requested(vllm_config) -> bool:
+    extra = vllm_config.additional_config
+    return bool(extra.get(BF16_COPIES, False)) if isinstance(extra, dict) else False
+
+
 def specialized_decode_config(vllm_config) -> DecodeConfig | None:
     """The deployment's specialized decode settings, None for the stock decode.
     Raises when the specialized decode is requested for an unsupported deployment,
     listing every reason."""
     backend = decode_backend(vllm_config)
     if backend == AUTO:
+        if bf16_copies_requested(vllm_config):
+            raise ValueError(
+                f"{BF16_COPIES} needs decode_backend={SPECIALIZED}: the copies "
+                "are read only by the specialized decode's layer kernels"
+            )
         return None
     if backend != SPECIALIZED:
         raise ValueError(
@@ -104,6 +120,7 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
         m1=not m1,
         interleave=vllm_config.parallel_config.cp_kv_cache_interleave_size,
         max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
+        bf16_copies=bf16_copies_requested(vllm_config),
     )
 
 
@@ -341,3 +358,46 @@ def layer_kinds(config) -> dict[int, str]:
         elif i % block:
             out[i] = FFN
     return out
+
+
+def kernel_linears(layer, kind: str) -> list[torch.nn.Module]:
+    """The linears of a kernel layer whose weights K1 / K2 read as bf16."""
+    m, attn = layer.mlp, layer.self_attn
+    shared = getattr(m, "shared_experts", None)
+    linears = [
+        attn.o_proj,
+        getattr(m, "routed_expert_down_proj", None),
+        getattr(m, "routed_expert_up_proj", None),
+        getattr(shared, "gate_up_proj", None),
+        getattr(shared, "down_proj", None),
+    ]
+    if kind == WHOLE:
+        linears += [attn.in_proj_qkvgfab, attn.f_b_proj]
+    return [linear for linear in linears if linear is not None]
+
+
+def mark_bf16_copies(model) -> int:
+    """Before the weights load: every online-FP8 linear the kernels read keeps a
+    bf16 copy of its loaded weight (`dense_weight`). `model`: the
+    `KimiLinearModel`. Returns the copies' bytes on this rank."""
+    from vllm.model_executor.layers.quantization.online.fp8 import (
+        OnlineLinearBase,
+        keep_unquantized_weight,
+    )
+
+    nbytes = 0
+    for i, kind in layer_kinds(model.config).items():
+        if not model.start_layer <= i < model.end_layer:
+            continue
+        for linear in kernel_linears(model.layers[i], kind):
+            if isinstance(getattr(linear, "quant_method", None), OnlineLinearBase):
+                keep_unquantized_weight(linear)
+                nbytes += linear.weight.numel() * linear.weight.element_size()
+    return nbytes
+
+
+def dense_weight(linear) -> torch.Tensor:
+    """The bf16 weight a layer kernel reads: the copy an online-FP8 linear kept
+    (`mark_bf16_copies`), else the linear's own weight."""
+    copy = getattr(linear, "unquantized_weight", None)
+    return linear.weight if copy is None else copy
