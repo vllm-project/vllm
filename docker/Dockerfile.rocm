@@ -224,13 +224,22 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
 # mamba-ssm and causal-conv1d, the fast path transformers uses for the hybrid-model references in the
 # language model tests. CI only. Their setup.py targets HIP_ARCHITECTURES (default: the local GPU).
 FROM dev AS build_mamba
-ARG MAMBA_COMMIT="269cbe654d10883374736eb936e61d3ee5625695"
+# mamba v2.3.2
+ARG MAMBA_COMMIT="77069de5cdb55cbe98b670889c80df211e031039"
 ARG CAUSAL_CONV1D_COMMIT="da6dbaa9fd5a919967f14d3fd031da1288ad5025"
 ARG HIP_ARCHITECTURES="gfx942,gfx950"
-RUN MAMBA_FORCE_BUILD=TRUE CAUSAL_CONV1D_FORCE_BUILD=TRUE \
+# Both pin -std=c++17; torch 2.14's ATen headers need C++20.
+RUN for src in state-spaces/mamba@${MAMBA_COMMIT} Dao-AILab/causal-conv1d@${CAUSAL_CONV1D_COMMIT}; do \
+        d=/tmp/src/${src%@*}; git init -q "$d" \
+        && git -C "$d" fetch -q --depth 1 "https://github.com/${src%@*}" "${src#*@}" \
+        && git -C "$d" checkout -q --detach FETCH_HEAD \
+        && git -C "$d" submodule update -q --init --recursive \
+        && sed -i 's/-std=c++17/-std=c++20/g' "$d/setup.py" || exit 1; \
+    done \
+    && MAMBA_FORCE_BUILD=TRUE CAUSAL_CONV1D_FORCE_BUILD=TRUE \
     python3 -m pip wheel --no-build-isolation --no-deps -w /app/mamba_install \
-        "git+https://github.com/AndreasKaratzas/mamba@${MAMBA_COMMIT}" \
-        "git+https://github.com/Dao-AILab/causal-conv1d@${CAUSAL_CONV1D_COMMIT}" \
+        /tmp/src/state-spaces/mamba /tmp/src/Dao-AILab/causal-conv1d \
+    && rm -rf /tmp/src \
     && for w in /app/mamba_install/*.whl; do python3 -m zipfile -e "$w" /tmp/whl; done \
     && for so in /tmp/whl/*.so; do for a in $(echo "$HIP_ARCHITECTURES" | tr , ' '); do \
          llvm-objdump --offloading "$so" | grep -qw "$a" || { echo "$so lacks $a" >&2; exit 1; }; done; done \
