@@ -56,6 +56,39 @@ llm = LLM(
 
 ## Backend Selection Behavior
 
+### DeepSeek V4.1 native-head sparse attention on SM90
+
+`TRITON_MLA_SPARSE_DSV41` is an opt-in backend with separate Triton prefill
+and decode kernels. It supports SM90, BF16 queries, 512-dimensional heads
+with 64 RoPE dimensions, and 8 or 16 attention heads per tensor-parallel rank.
+For a checkpoint with 64 attention heads, these correspond to TP8 and TP4.
+The KV format is `fp8_ds_mla`; `auto` and `fp8` resolve to this packed format.
+Incompatible explicit selections raise an error. Other backend selections
+and the default selection remain unchanged.
+
+```bash
+vllm serve <DeepSeek-V4.1-model-path> \
+    --tensor-parallel-size 8 \
+    --dtype bfloat16 \
+    --kv-cache-dtype fp8_ds_mla \
+    --attention-backend TRITON_MLA_SPARSE_DSV41
+```
+
+The backend accepts chunked prefill and mixed prefill/decode batches.
+Full CUDA Graph capture is limited to decode; prefill uses the non-full-graph
+path. DSpark variable-length verification and its non-causal draft window
+use the model's shared metadata builders. Decode can also run without DSpark.
+Eligible verification queries share gathered keys; other queries use the
+direct Triton decoder.
+
+Serving performance has been evaluated on H20×8 with TP8 and DSpark enabled,
+using 8K and 32K inputs. TP4 and DSpark-disabled execution have targeted
+coverage, but do not have the same end-to-end performance qualification.
+A configured 1M context limit does not establish performance at 1M input.
+This backend is not a memory-saving option: graph and allocator reservations
+can increase peak GPU memory. Profile it at the intended concurrency and KV
+budget before changing a deployment's backend.
+
 ### Triton/FlashAttention Composite
 
 On Hopper, `TRITON_FLASH_ATTN` is preferred for compatible multimodal-prefix
