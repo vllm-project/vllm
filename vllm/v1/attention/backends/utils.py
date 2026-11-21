@@ -21,7 +21,7 @@ from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import _layout_from_name
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv, round_down
+from vllm.utils.math_utils import cdiv, next_power_of_2, round_down
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -116,6 +116,9 @@ def compute_mm_prefix_range_tensor(
 
     Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty ranges.
     Empty ranges have start==end==0, which kernel skips via is_valid check.
+
+    max_ranges is rounded up to a power of two: the Triton kernel takes it as a
+    tl.constexpr, so every distinct value would JIT-compile on the serving path.
     """
     if mm_prefix_range is None:
         return None
@@ -127,7 +130,7 @@ def compute_mm_prefix_range_tensor(
     if all(r == [(0, 0)] for r in range_lists):
         return None
 
-    max_ranges = max(len(r) for r in range_lists)
+    max_ranges = next_power_of_2(max(len(r) for r in range_lists))
     padded = []
     for r in range_lists:
         padded_r = list(r) + [(0, 0)] * (max_ranges - len(r))
