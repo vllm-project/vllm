@@ -610,10 +610,8 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
         RVVI(__riscv_vfmul_vv_f32, LMUL_256)(poly, exp_val, VEC_ELEM_NUM), 1.0f,
         VEC_ELEM_NUM);
 
-    rvv_mask_f32x8_t mask = RVVIB(__riscv_vmflt_vf_f32, LMUL_256, BOOL_256)(
-        reg, 0.0f, VEC_ELEM_NUM);
     return FP32Vec8(
-        RVVI3(__riscv_vfneg_v_f32, LMUL_256, _m)(mask, res, VEC_ELEM_NUM));
+        RVVI(__riscv_vfsgnj_vv_f32, LMUL_256)(res, reg, VEC_ELEM_NUM));
   }
 };
 
@@ -877,10 +875,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
         RVVI(__riscv_vfmul_vv_f32, LMUL_512)(poly, exp_val, VEC_ELEM_NUM), 1.0f,
         VEC_ELEM_NUM);
 
-    rvv_mask_f32x16_t mask = RVVIB(__riscv_vmflt_vf_f32, LMUL_512, BOOL_512)(
-        reg, 0.0f, VEC_ELEM_NUM);
     return FP32Vec16(
-        RVVI3(__riscv_vfneg_v_f32, LMUL_512, _m)(mask, res, VEC_ELEM_NUM));
+        RVVI(__riscv_vfsgnj_vv_f32, LMUL_512)(res, reg, VEC_ELEM_NUM));
   }
 };
 
