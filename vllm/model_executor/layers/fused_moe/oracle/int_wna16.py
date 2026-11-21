@@ -19,6 +19,7 @@ from vllm.config import get_current_vllm_config_or_none
 from vllm.config.kernel import MoEBackend
 from vllm.config.quantization import user_activation_override
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -86,6 +87,7 @@ class WNA16MoEBackend(Enum):
     RDNA3 = "RDNA3"
     # Int8 activations per 32 values (kInt8Dynamic32Sym) for up to 64 tokens.
     RDNA3_INT4_INT8 = "RDNA3_INT4_INT8"
+    AITER = "AITER"
     # No compute backend: requantization sources only dequantize weights.
     NONE = "NONE"
 
@@ -150,6 +152,12 @@ def backend_to_kernel_cls(
         )
 
         return [Rdna3Int4Int8Experts]
+    elif backend == WNA16MoEBackend.AITER:
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+            AiterInt4Experts,
+        )
+
+        return [AiterInt4Experts]
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
@@ -167,6 +175,8 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         # kInt8Dynamic32Sym activation request (see _filter_by_activation).
         WNA16MoEBackend.RDNA3_INT4_INT8,
         WNA16MoEBackend.RDNA3,
+        # Gated on gfx942 by _supports_current_device().
+        *([WNA16MoEBackend.AITER] if current_platform.is_rocm() else []),
         WNA16MoEBackend.FLASHINFER_TRTLLM,
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
@@ -197,6 +207,17 @@ def _zen_cpu_num_bits(
     return None
 
 
+def _aiter_intermediate_pad(moe_config: FusedMoEConfig) -> int:
+    """The intermediate pad rocm_aiter_fused_experts passes to AITER."""
+    if moe_config.intermediate_pad is not None:
+        return moe_config.intermediate_pad
+    assert moe_config.intermediate_size_per_partition_unpadded is not None
+    return (
+        moe_config.intermediate_size_per_partition
+        - moe_config.intermediate_size_per_partition_unpadded
+    )
+
+
 def _backend_incompatibility_reason(
     backend: WNA16MoEBackend,
     moe_config: FusedMoEConfig,
@@ -219,6 +240,37 @@ def _backend_incompatibility_reason(
             return "group activation ordering is not supported"
         if quant_config.strategy != QuantizationStrategy.GROUP:
             return "only group-wise scales are supported"
+
+    if backend == WNA16MoEBackend.AITER:
+        # Checkpoint formats keep the backends they were validated on.
+        if not (
+            isinstance(quant_config, WNA16WeightFormat)
+            and quant_config.num_bits == 4
+            and quant_config.group_size == 32
+        ):
+            return "only WNA16WeightFormat int4 with group size 32 is supported"
+        if may_have_zp:
+            return "zero points are not supported"
+        if may_have_bias:
+            return "expert bias is not supported"
+        if moe_config.in_dtype != torch.bfloat16:
+            return "only bfloat16 activations are supported"
+        if (
+            moe_config.hidden_dim % 128
+            or moe_config.intermediate_size_per_partition % 128
+        ):
+            return (
+                "the hidden size and intermediate size per partition must be "
+                "multiples of 128"
+            )
+        # rocm_aiter_fused_experts handles W4A16 pads only for MXFP4, so a
+        # padded non-SiTU int4 layer would get a doubled pad at TP1 and miss
+        # the ROCm/aiter#6598 workaround.
+        if moe_config.activation != MoEActivation.SITU and (
+            _aiter_intermediate_pad(moe_config)
+            or moe_config.hidden_dim != moe_config.hidden_dim_unpadded
+        ):
+            return "padded layers are only supported with SiTU"
 
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -308,6 +360,7 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
         "emulation": WNA16MoEBackend.EMULATION,
         "rdna3": WNA16MoEBackend.RDNA3,
         "rdna3_int4_int8": WNA16MoEBackend.RDNA3_INT4_INT8,
+        "aiter": WNA16MoEBackend.AITER,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -533,6 +586,9 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
         Rdna3WNA16Experts,
     )
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterInt4Experts,
+    )
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExpertsWNA16,
     )
@@ -542,8 +598,8 @@ def make_wna16_moe_kernel(
 
     # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts,
     # BatchedMarlinExperts, XPUExpertsWNA16, CPUExpertsInt4,
-    # ZentorchExpertsWNA16, the Humming grouped/indexed experts, and
-    # Int4EmulationTritonExperts
+    # ZentorchExpertsWNA16, the Humming grouped/indexed experts,
+    # Int4EmulationTritonExperts and AiterInt4Experts
     allowed_experts: tuple[type[mk.FusedMoEExperts], ...] = (
         MarlinExperts,
         BatchedMarlinExperts,
@@ -555,6 +611,7 @@ def make_wna16_moe_kernel(
         Int4EmulationTritonExperts,
         Rdna3WNA16Experts,
         Rdna3Int4Int8Experts,
+        AiterInt4Experts,
     )
     if backend == WNA16MoEBackend.HUMMING:
         allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
@@ -958,6 +1015,81 @@ def _process_weights_rdna3(
         None,  # w13_bias
         None,  # w2_bias
     )
+
+
+# Experts are repacked in chunks of about this many weight values, so the int8
+# staging stays bounded under both TP (every expert, narrow) and EP.
+_AITER_REPACK_CHUNK_VALUES = 1 << 27
+
+
+def _aiter_int4_repack(
+    weight: torch.Tensor, scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Repack canonical `[E, N, K // 8]` int32 weights and `[E, N, K // 32]`
+    bf16 scales into AITER's preshuffled a16wi4 layout: `[E, N, K // 2]`
+    packed int4 and `[E, K // 64, N, 2]` scales."""
+    from aiter import dtypes as aiter_dtypes
+    from aiter.ops.shuffle import (
+        pack_int8_to_packed_int4,
+        shuffle_scale_for_int4,
+        shuffle_weight,
+    )
+
+    num_experts, n, packed_k = weight.shape
+    k = packed_k * 8
+    chunk = min(num_experts, max(1, _AITER_REPACK_CHUNK_VALUES // (n * k)))
+    out_weight = torch.empty(
+        (num_experts, n, k // 2), dtype=torch.int8, device=weight.device
+    )
+    out_scale = torch.empty(
+        (num_experts, k // 64, n, 2), dtype=scale.dtype, device=scale.device
+    )
+    for lo in range(0, num_experts, chunk):
+        # Shift the last chunk back so every chunk has the same shapes and
+        # reuses the cached blocks; the overlap is recomputed identically.
+        lo = min(lo, num_experts - chunk)
+        hi = lo + chunk
+        # Little-endian int32 words hold element 2i in the low nibble of
+        # byte i.
+        packed = weight[lo:hi].contiguous().view(torch.uint8)
+        codes = torch.stack((packed & 0xF, packed >> 4), dim=-1).view(chunk, n, k)
+        values = codes.to(torch.int8) - scalar_types.uint4b8.bias
+        del packed, codes
+        out_weight[lo:hi] = pack_int8_to_packed_int4(
+            shuffle_weight(values, (16, 16))
+        ).view(chunk, n, k // 2)
+        del values
+        out_scale[lo:hi] = shuffle_scale_for_int4(
+            scale[lo:hi].transpose(1, 2).contiguous(), group_size=32
+        )
+    return out_weight.view(aiter_dtypes.i4x2), out_scale
+
+
+def _process_weights_aiter(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> tuple[
+    torch.Tensor,  # w13_qweight
+    torch.Tensor,  # w2_qweight
+    torch.Tensor,  # w13_scales
+    torch.Tensor,  # w2_scales
+    torch.Tensor | None,  # w13_qzeros
+    torch.Tensor | None,  # w2_qzeros
+    torch.Tensor | None,  # w13_bias
+    torch.Tensor | None,  # w2_bias
+]:
+    """AITER (gfx942 a16wi4) weight post-processing."""
+    if sys.byteorder != "little":
+        raise NotImplementedError(
+            "The AITER WNA16 MoE repack requires a little-endian host."
+        )
+    w13, w13_scale = _aiter_int4_repack(w13, w13_scale)
+    w2, w2_scale = _aiter_int4_repack(w2, w2_scale)
+    w13.is_shuffled = True
+    w2.is_shuffled = True
+    return w13, w2, w13_scale, w2_scale, None, None, None, None
 
 
 def _process_weights_cpu(
@@ -1695,6 +1827,8 @@ def convert_to_wna16_moe_kernel_format(
             w2_scale,
             quant_config.group_size,
         )
+    elif backend == WNA16MoEBackend.AITER:
+        return _process_weights_aiter(w13, w2, w13_scale, w2_scale)
     elif backend == WNA16MoEBackend.CPU:
         return _process_weights_cpu(
             quant_config,

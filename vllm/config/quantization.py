@@ -56,7 +56,7 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     # Dynamic per-32-element int8 activations (RDNA3 MXFP4 W4A8 GEMV and
     # int4 MoE decode).
     "int8_per_group_32": kInt8Dynamic32Sym,
-    # Load-time MXFP4-to-int4 for Kimi-K3 on gfx942.
+    # Symmetric int4 with a scale per 32 input channels (MoE weights).
     "int4_per_group_32": kInt4Static32,
     # Asymmetric uint4 with a scale and zero point per 32 input channels.
     "int4_per_group_32_asym": kInt4Static32Asym,

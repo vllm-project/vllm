@@ -1,8 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
+
+import torch
+
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    dequantize_mxfp4_moe_weights,
+)
 from vllm.model_executor.utils import move_parameter
 
 _PACKED_WEIGHTS = ("w13_weight", "w2_weight")
@@ -26,6 +33,17 @@ class CompressedTensorsW4A8Mxfp4MoEMethod(Mxfp4MoEMethod):
             param = getattr(layer, name)
             delattr(layer, name)
             layer.register_parameter(f"{name}_packed", param)
+
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        return dequantize_mxfp4_moe_weights(
+            layer.w13_weight_packed,
+            layer.w13_weight_scale,
+            layer.w2_weight_packed,
+            layer.w2_weight_scale,
+            out_dtype=layer.orig_dtype,
+        )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         for name in _PACKED_WEIGHTS:

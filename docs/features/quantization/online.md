@@ -177,6 +177,7 @@ Currently supported combinations are:
 | Serialized ModelOpt NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized Quark NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized FP8 MoE with dynamic activation quantization (`fp8`, compressed-tensors, Quark; per-tensor, per-channel or block weight scales) | any online MoE method | Target-specific hardware requirements |
+| Serialized MXFP4 MoE (`mxfp4` such as Kimi-K3's, and compressed-tensors W4A8 MXFP4; not GPT-OSS) | any online MoE method | Target-specific hardware requirements |
 
 For example, serialized ModelOpt MXFP8 linears can be converted to
 per-channel-weight/per-token-activation FP8 at load time:
@@ -208,6 +209,16 @@ vllm serve ricursiveAI/Ripple-65B-Preview-NVFP4 \
 Unconverted checkpoint-quantized layers require native support for their
 checkpoint format. NVFP4-to-MXFP4 conversion can reduce accuracy; validate it
 per model or consider MXFP8 for dense and attention linears.
+
+The MoE weight `int4_per_group_32` (ROCm only) quantizes routed experts to
+symmetric int4 with one scale per 32 input channels and BF16 activations. It
+runs on AITER's a16wi4 kernels on gfx942 with `VLLM_ROCM_USE_AITER=1`, and on
+Triton otherwise:
+
+```bash
+VLLM_ROCM_USE_AITER=1 vllm serve mistralai/Mistral-Large-4-1T-A52B \
+  --tensor-parallel-size 4 --quantization-config.moe.weight int4_per_group_32
+```
 
 !!! info
 
