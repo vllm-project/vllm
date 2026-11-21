@@ -160,12 +160,8 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.platforms.rocm import on_gfx942
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
-from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-    triton_reshape_and_cache_flash,
-)
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -179,9 +175,6 @@ if TYPE_CHECKING:
     from .specialized_decode.runtime.decode import SpecializedDecode
 
 logger = init_logger(__name__)
-
-# The fused QK-norm/RoPE/KV-insert HIP op segfaults on gfx942.
-_USE_GFX942_NATIVE_QKNORM_ROPE = on_gfx942()
 
 
 def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
@@ -678,19 +671,6 @@ class MiniMaxM3Attention(nn.Module):
         hidden_states: torch.Tensor | QuantizedActivation,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        if _USE_GFX942_NATIVE_QKNORM_ROPE:
-            num_tokens = qkv.shape[0]
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            q = self.q_norm(q.view(num_tokens, self.num_heads, self.head_dim))
-            k = self.k_norm(k.view(num_tokens, self.num_kv_heads, self.head_dim))
-            q, k = self.rotary_emb.forward_native(positions, q, k)
-            assert k is not None
-            q = q.reshape(num_tokens, self.q_size)
-            k = k.reshape(num_tokens, self.kv_size)
-            attn_output = self.attn(q, k, v)
-            output, _ = self.o_proj(attn_output)
-            return output
-
         # Fused per-head Gemma QK-norm + partial NeoX RoPE on q/k, in place (dense
         # mode: no index branch, no KV-cache insert). Matches nvidia/model.py and
         # replaces the unfused split -> q_norm/k_norm -> rotary_emb chain; verified
@@ -1109,78 +1089,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             return
         minimax_m3_insert_index_cache(index_k, index_cache, index_slot_mapping)
 
-    def _native_gfx942_qknorm_rope_cache(
-        self,
-        qkv: torch.Tensor,
-        positions: torch.Tensor,
-        fwd_slot_mapping: dict[str, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Run QK norm, RoPE, and cache insertion without the fused HIP op."""
-        from vllm.models.minimax_m3.amd.ops.sparse_pa import (
-            minimax_m3_insert_index_cache,
-        )
-
-        num_tokens = qkv.shape[0]
-        q, k, v, index_q_raw, index_k_raw = qkv.split(
-            [
-                self.q_size,
-                self.kv_size,
-                self.kv_size,
-                self.index_q_size,
-                self.idx_head_dim,
-            ],
-            dim=-1,
-        )
-
-        q = self.q_norm(q.view(num_tokens, self.num_heads, self.head_dim))
-        k = self.k_norm(k.view(num_tokens, self.num_kv_heads, self.head_dim))
-        q, k = self.rotary_emb.forward_native(positions, q, k)
-        assert k is not None
-        q = q.reshape(num_tokens, self.q_size)
-
-        main_slot_mapping = fwd_slot_mapping[self.layer_name]
-        if self.kv_cache.numel() != 0:
-            # [block, head, token, 2 * dim] -> [block, token, head, dim].
-            key_cache, value_cache = self.kv_cache.transpose(1, 2).split(
-                self.head_dim, dim=-1
-            )
-            triton_reshape_and_cache_flash(
-                k,
-                v.view(num_tokens, self.num_kv_heads, self.head_dim),
-                key_cache,
-                value_cache,
-                main_slot_mapping,
-                self.kv_cache_dtype,
-                self._k_scale,
-                self._v_scale,
-            )
-
-        if self.skip_index_topk:
-            return q, None
-
-        assert self.indexer is not None
-        index_q = self.index_q_norm(
-            index_q_raw.view(num_tokens, self.num_idx_heads, self.idx_head_dim)
-        )
-        index_k = self.index_k_norm(index_k_raw.view(num_tokens, self.idx_head_dim))
-        index_q, index_k = self.index_rotary_emb.forward_native(
-            positions, index_q, index_k
-        )
-        assert index_k is not None
-        index_q = index_q.reshape(num_tokens, self.index_q_size).to(
-            self.indexer.index_cache.dtype
-        )
-
-        index_cache = self.indexer.index_cache.kv_cache
-        if index_cache.numel() != 0:
-            index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
-            minimax_m3_insert_index_cache(
-                index_k.reshape(num_tokens, self.idx_head_dim),
-                index_cache,
-                index_slot_mapping,
-            )
-        return q, index_q
-
     def _norm_rope_nvfp4_insert(
         self,
         qkv: torch.Tensor,
@@ -1251,15 +1159,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         ):
             # Memory-profiling run: caches not yet bound, slot_mapping is empty.
             return qkv.new_zeros((num_tokens, self.hidden_size))
-
-        if _USE_GFX942_NATIVE_QKNORM_ROPE:
-            q, index_q = self._native_gfx942_qknorm_rope_cache(
-                qkv, positions, fwd_slot_mapping
-            )
-            output = torch.empty_like(q)
-            gfx942_attn = self._run_attention(q, index_q, output)
-            output, _ = self.o_proj(gfx942_attn)
-            return output
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         if self.use_nvfp4_kv:
