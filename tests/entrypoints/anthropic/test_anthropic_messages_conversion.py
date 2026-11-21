@@ -1136,6 +1136,44 @@ async def test_stream_error_preserves_message_and_closes_block(block_type):
         assert events[-2][0] == "content_block_stop"
 
 
+@pytest.mark.asyncio
+async def test_stream_tool_use_when_arguments_precede_name():
+    """Parsers such as pre-v11 Mistral stream `arguments` before `name` when
+    the model emits them in that order; the tool call must not be dropped."""
+
+    async def source():
+        yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+        yield _make_stream_chunk(
+            delta=DeltaMessage(tool_calls=[_tc(id="call_1", args='{"city": ')])
+        )
+        yield _make_stream_chunk(delta=DeltaMessage(tool_calls=[_tc(args='"SF"}')]))
+        yield _make_stream_chunk(
+            delta=DeltaMessage(tool_calls=[_tc(name="get_weather", args=None)]),
+            finish_reason="tool_calls",
+        )
+        yield _make_stream_chunk(choices=[])
+
+    converter = _make_stream_converter()
+    events = _parse_sse_events(
+        [event async for event in converter.message_stream_converter(source())]
+    )
+
+    block_starts = [
+        data["content_block"] for ev, data in events if ev == "content_block_start"
+    ]
+    assert block_starts == [
+        {"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {}}
+    ]
+    arguments = "".join(
+        data["delta"]["partial_json"]
+        for _, data in events
+        if data.get("delta", {}).get("type") == "input_json_delta"
+    )
+    assert json.loads(arguments) == {"city": "SF"}
+    msg_deltas = [data for ev, data in events if ev == "message_delta"]
+    assert msg_deltas[0]["delta"]["stop_reason"] == "tool_use"
+
+
 class TestMessageStreamConverterToolUseContentBuffering:
     """Regression test for tool_use arguments being silently dropped.
 
