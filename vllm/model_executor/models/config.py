@@ -1150,11 +1150,10 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
         assert config.__class__.__name__ in ("NewConfig", "GteConfig")
         assert config.hidden_act == "gelu"
 
-        if config.__class__.__name__ == "GteConfig":
-            config.position_embedding_type = getattr(
-                config, "position_embedding_type", "rope"
-            )
         config.hidden_act = "geglu"
+
+        if getattr(config, "position_embedding_type", None) is None:
+            config.position_embedding_type = "rope"
 
         head_dim = config.hidden_size // config.num_attention_heads
         rotary_dim = getattr(config, "rotary_emb_dim", head_dim)
