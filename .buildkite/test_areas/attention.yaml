@@ -55,6 +55,7 @@ steps:
 
 - label: ":nvidia: (B200) ShardQ Metadata"
   key: shardq-metadata-b200
+  automatic_shard: true
   device: b200-k8s
   num_gpus: 2
   timeout_in_minutes: 10
