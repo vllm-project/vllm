@@ -1304,9 +1304,9 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.3.5"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84024abb104481ef6b9c55df497f941f92f49515c428afd78b990efc906f1aa6"
+checksum = "d915324fcf00aa9cade45192ffb7eb49f44a66eb9e7059914d87a2a34b58d88d"
 dependencies = [
  "aho-corasick",
  "daachorse",
