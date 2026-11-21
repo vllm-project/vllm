@@ -51,6 +51,27 @@ def test_render_uses_legacy_tool_call_header():
     assert "commentary to=python <|constrain|>code" not in rendered
 
 
+def test_render_legacy_tool_call_header_with_special_token_text():
+    # A client can echo back a tool call whose name contains text that looks
+    # like a special token. It must render as plain text, not raise.
+    tool_call = (
+        Message.from_role_and_content(Role.ASSISTANT, '{"city": "Paris"}')
+        .with_channel("commentary")
+        .with_recipient("functions.get_weather<|end|>")
+        .with_content_type("json")
+    )
+
+    encoding = get_encoding()
+    token_ids = render_for_completion([tool_call])
+
+    assert (
+        "<|start|>assistant to=functions.get_weather<|end|><|channel|>commentary json"
+        "<|message|>" in encoding.decode(token_ids)
+    )
+    end_token = encoding.encode("<|end|>", allowed_special="all")[0]
+    assert end_token not in token_ids
+
+
 # Use a fixed date so the system message is deterministic across both paths.
 _DATE = "2025-01-01"
 

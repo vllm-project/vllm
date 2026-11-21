@@ -13,8 +13,12 @@ CI sets `VLLM_TRITON_FORCE_FIRST_CONFIG=1`: Triton autotuning picks configs per
 process by timing, so two engines could otherwise run different kernels.
 """
 
+import contextlib
 import hashlib
 import math
+import os
+import sys
+import tempfile
 from functools import partial
 
 import numpy as np
@@ -30,7 +34,11 @@ from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.platforms import current_platform
 
 from ..utils import multi_gpu_test
-from .registry import _TEXT_GENERATION_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
+from .registry import (
+    _TEXT_GENERATION_EXAMPLE_MODELS,
+    HF_EXAMPLE_MODELS,
+    _HfExamplesInfo,
+)
 from .utils import dummy_hf_overrides, skip_unavailable_models
 
 # Layers per pipeline size: PP=4 has two middle stages, which receive and send.
@@ -53,12 +61,18 @@ MINIMAL_PP_ARCH_LIST = [
 # Architectures that fail on main. A fix removes its entry; `strict` fails the
 # test once the fix lands.
 KNOWN_PP_DEFECTS: dict[str, str] = {
-    "Ernie4_5_MoeForCausalLM": "No embedding to tie on the last stage; fixed by #65983",
     "Glm5NextForCausalLM": "Declares PP without implementing it; fixed by #57121",
-    "GPTBigCodeForCausalLM": "Later stages add position embeddings again; see #66290",
-    "GraniteMoeHybridForCausalLM": "Loads other stages' layers; fixed by #66007",
     "LongcatFlashNgramForCausalLM": "Later stages build n-gram embeddings; see #66290",
 }
+# Decoders that modify their input before the layers, run with the Transformers
+# modeling backend
+TRANSFORMERS_PP_ARCHS = [
+    "GPTBigCodeForCausalLM",  # Learned position embeddings
+    "GraniteForCausalLM",  # Scales its input embeddings
+    "CTRLLMHeadModel",  # Scales its input embeddings in place
+]
+# Not in the registry, because only the Transformers modeling backend supports it
+TRANSFORMERS_ONLY_EXAMPLES = {"CTRLLMHeadModel": _HfExamplesInfo("Salesforce/ctrl")}
 # The reduced configs keep each model's leading dense layers, which can fill a
 # whole stage; these models expect an MoE layer on every stage, as real configs
 # have at practical PP sizes.
@@ -81,7 +95,13 @@ SPARSE_MLA_ARCHS = (
     "DeepseekV32ForCausalLM",
     "Glm5NextForCausalLM",
     "GlmMoeDsaForCausalLM",
+    "HYV4FlashForCausalLM",
+    "HYV4ForCausalLM",
 )
+# Their CUDA attention has no path below Hopper.
+CUDA_SM90_ARCHS = {
+    "InklingForCausalLM": "Inkling's FA4 attention (SM8x support: #55078)",
+}
 
 ModelRegistry.fill_model_info_cache()
 # Examples that need remote code are left out until a CI run shows their status.
@@ -150,8 +170,7 @@ class LoaderInWorkers:
     so the load format, into the workers."""
 
 
-def _hf_overrides(hf_config, *, arch: str, num_layers: int):
-    info = HF_EXAMPLE_MODELS.get_hf_info(arch)
+def _hf_overrides(hf_config, *, arch: str, info: _HfExamplesInfo, num_layers: int):
     hf_config = dummy_hf_overrides(
         hf_config,
         model_arch=arch,
@@ -176,8 +195,10 @@ def _run(
     num_layers: int,
     *,
     perturb_layer: int | None = None,
+    model_impl: str = "auto",
+    enforce_eager: bool = True,
 ) -> list[dict]:
-    info = HF_EXAMPLE_MODELS.get_hf_info(arch)
+    info = TRANSFORMERS_ONLY_EXAMPLES.get(arch) or HF_EXAMPLE_MODELS.get_hf_info(arch)
     with vllm_runner(
         info.default,
         revision=info.revision,
@@ -185,9 +206,14 @@ def _run(
         dtype=info.dtype,
         load_format=LOAD_FORMAT,
         model_loader_extra_config={"perturb_layer": perturb_layer},
-        hf_overrides=partial(_hf_overrides, arch=arch, num_layers=num_layers),
+        hf_overrides=partial(
+            _hf_overrides, arch=arch, info=info, num_layers=num_layers
+        ),
+        model_impl=model_impl,
         pipeline_parallel_size=pp_size,
-        enforce_eager=True,
+        enforce_eager=enforce_eager,
+        # Piecewise graphs replay their inputs at the captured addresses
+        compilation_config=None if enforce_eager else {"cudagraph_mode": "PIECEWISE"},
         max_model_len=256,
         max_num_seqs=4,
         # The model's own default, which sparse MLA backends need.
@@ -199,7 +225,10 @@ def _run(
     ) as vllm_model:
         llm = vllm_model.llm
         model_config = llm.llm_engine.model_config
-        assert model_config.architecture == arch
+        if model_impl == "transformers":
+            assert model_config.using_transformers_backend()
+        else:
+            assert model_config.architecture == arch
         vocab_size = min(model_config.get_vocab_size(), 32000)
         rng = np.random.default_rng(0)
         params = SamplingParams(
@@ -243,10 +272,10 @@ def _max_logprob_diff(ref: list[dict], test: list[dict]) -> float:
     )
 
 
-def _check_equivalent(vllm_runner, arch: str, pp_size: int) -> None:
+def _check_equivalent(vllm_runner, arch: str, pp_size: int, **kwargs) -> None:
     num_layers = NUM_LAYERS[pp_size]
-    ref = _run(vllm_runner, arch, 1, num_layers)
-    test = _run(vllm_runner, arch, pp_size, num_layers)
+    ref = _run(vllm_runner, arch, 1, num_layers, **kwargs)
+    test = _run(vllm_runner, arch, pp_size, num_layers, **kwargs)
     assert all(math.isfinite(x) for r in ref for x in r["prompt_logprobs"])
     # Same weights and batch shapes: every correct layout is bitwise equal, and
     # a single changed weight can move the logprobs by as little as 0.1.
@@ -264,6 +293,14 @@ def _marks(arch: str) -> list[pytest.MarkDecorator]:
             pytest.mark.skipif(
                 not current_platform.has_device_capability(90),
                 reason="Sparse MLA needs compute capability 9.0 or newer",
+            )
+        )
+    if arch in CUDA_SM90_ARCHS:
+        marks.append(
+            pytest.mark.skipif(
+                current_platform.is_cuda()
+                and not current_platform.has_device_capability(90),
+                reason=f"{CUDA_SM90_ARCHS[arch]} needs compute capability 9.0 or newer",
             )
         )
     return marks
@@ -284,6 +321,25 @@ def test_pp_equivalence_small_subset(vllm_runner, arch: str):
 
 
 @pytest.mark.timeout(CASE_TIMEOUT_S)
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("arch", TRANSFORMERS_PP_ARCHS)
+def test_transformers_pp_decoder_preamble(vllm_runner, arch: str):
+    """Later stages must not reapply what the decoder does before its layers."""
+    _check_equivalent(vllm_runner, arch, 2, model_impl="transformers")
+
+
+@pytest.mark.timeout(CASE_TIMEOUT_S)
+@multi_gpu_test(num_gpus=2)
+def test_transformers_pp_piecewise_cudagraphs(vllm_runner):
+    """Later stages replay piecewise CUDA graphs with the received hidden states."""
+    kwargs = dict(model_impl="transformers", enforce_eager=False)
+    ref = _run(vllm_runner, "GraniteForCausalLM", 1, NUM_LAYERS[2], **kwargs)
+    test = _run(vllm_runner, "GraniteForCausalLM", 2, NUM_LAYERS[2], **kwargs)
+    # Compiled layouts are not bitwise equal, so only greedy tokens are compared
+    assert [r["tokens"] for r in ref] == [t["tokens"] for t in test]
+
+
+@pytest.mark.timeout(CASE_TIMEOUT_S)
 @multi_gpu_test(num_gpus=4)
 @pytest.mark.parametrize("arch", _params(PP_ARCHS))
 def test_pp_equivalence_middle_stages(vllm_runner, arch: str):
@@ -301,15 +357,42 @@ def test_pp_equivalence_detects_a_changed_weight(vllm_runner):
     assert ref != test
 
 
+@contextlib.contextmanager
+def _capture_stdio():
+    """Capture stdout/stderr at the FD level.
+
+    Avoid pytest `capfd`: on ROCm/XPU, `@multi_gpu_test` spawns a child and
+    cloudpickles fixtures, and `capfd` is not picklable.
+    """
+    with tempfile.TemporaryFile() as tmp:
+        out_fd, err_fd = sys.stdout.fileno(), sys.stderr.fileno()
+        saved_out, saved_err = os.dup(out_fd), os.dup(err_fd)
+        try:
+            os.dup2(tmp.fileno(), out_fd)
+            os.dup2(tmp.fileno(), err_fd)
+            yield tmp
+        finally:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.dup2(saved_out, out_fd)
+            os.dup2(saved_err, err_fd)
+            os.close(saved_out)
+            os.close(saved_err)
+
+
 @pytest.mark.timeout(CASE_TIMEOUT_S)
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("arch", SPLIT_KV_SHARING)
-def test_pp_rejects_split_kv_sharing(vllm_runner, monkeypatch, capfd, arch: str):
+def test_pp_rejects_split_kv_sharing(vllm_runner, monkeypatch, arch: str):
     """A split that separates a layer from the layer whose KV cache it reads must
     fail at startup rather than produce output."""
     num_layers, partition = SPLIT_KV_SHARING[arch]
     monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", partition)
-    with pytest.raises(RuntimeError, match="Engine core initialization failed"):
-        _run(vllm_runner, arch, 2, num_layers)
+    with _capture_stdio() as captured:
+        with pytest.raises(RuntimeError, match="Engine core initialization failed"):
+            _run(vllm_runner, arch, 2, num_layers)
+        captured.flush()
+        captured.seek(0)
+        output = captured.read().decode("utf-8", errors="replace")
     # The engine error does not carry the cause; the workers log it.
-    assert "Specified KV sharing target layer" in "".join(capfd.readouterr())
+    assert "Specified KV sharing target layer" in output

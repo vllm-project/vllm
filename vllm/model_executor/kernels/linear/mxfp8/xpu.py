@@ -68,11 +68,12 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         out_dtype = x.dtype
-        x_fp8, x_scale = quant_mxfp8(x)
+        out_shape = x.shape[:-1] + (layer.weight.shape[0],)
+        x_fp8, x_scale = quant_mxfp8(x.reshape(-1, x.shape[-1]))
         # Weight is [N, K]; .t() gives a [K, N] view without copying.
         # Scale is stored as [N, K//32]; .t() recovers the contiguous
         # [K//32, N] buffer that oneDNN expects.
-        return torch.ops._xpu_C.fp8_gemm(
+        out = torch.ops._xpu_C.fp8_gemm(
             x_fp8,
             layer.weight.t(),
             out_dtype,
@@ -80,3 +81,4 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
             layer.weight_scale.t(),
             bias,
         )
+        return out.reshape(out_shape)
