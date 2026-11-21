@@ -95,7 +95,8 @@ def _call_offline_build_chat_params(
             default_template=default_template,
             default_template_content_format=default_format,
         )
-        return chat_params_cls.call_args.kwargs
+        assert chat_params_cls.call_args is not None
+        return dict(chat_params_cls.call_args.kwargs)
 
 
 def _call_online_build_chat_params(
@@ -110,7 +111,8 @@ def _call_online_build_chat_params(
             default_template=default_template,
             default_template_content_format=default_format,
         )
-        return chat_params_cls.call_args.kwargs
+        assert chat_params_cls.call_args is not None
+        return dict(chat_params_cls.call_args.kwargs)
 
 
 # =============================================================================
@@ -309,7 +311,7 @@ class TestOnlineBuildTokParams:
         assert result.max_output_tokens == 0
         assert result.add_special_tokens is True
         assert result.do_lower_case is False
-        assert result.kwargs is None
+        assert getattr(result, "kwargs", None) is None
 
     def test_explicit_add_special_tokens_and_truncation_and_padding(self):
         req = _OnlineFixedLenRequest(
@@ -334,7 +336,7 @@ class TestOnlineBuildTokParams:
         assert result.truncate_prompt_tokens == 128
         assert result.truncation_side == "left"
         assert result.do_lower_case is True
-        assert result.kwargs == {"padding": "max_length"}
+        assert getattr(result, "kwargs", None) == {"padding": "max_length"}
 
     def test_embedding_chunked_processing_sets_max_embed_len_and_pad_tokens(self):
         pooler_cfg = MagicMock(
@@ -355,7 +357,7 @@ class TestOnlineBuildTokParams:
             result = req.build_tok_params(model_cfg, default_tp)
 
         assert result.max_total_tokens == 128
-        assert result.kwargs == {
+        assert getattr(result, "kwargs", None) == {
             "padding": "max_length",
             "pad_prompt_tokens": 128,
         }
@@ -379,8 +381,8 @@ class TestOnlineBuildTokParams:
             result = req.build_tok_params(model_cfg, default_tp)
 
         assert result.max_total_tokens == 200
-        assert result.kwargs == {"padding": "max_length"}
-        assert "pad_prompt_tokens" not in (result.kwargs or {})
+        assert getattr(result, "kwargs", None) == {"padding": "max_length"}
+        assert "pad_prompt_tokens" not in (getattr(result, "kwargs", None) or {})
 
 
 class TestOfflineBuildTokParams:
@@ -390,14 +392,17 @@ class TestOfflineBuildTokParams:
         default_tp = _make_tokenize_params()
         result = _make_offline_context().build_tok_params(default_tp)
         assert result is default_tp
-        assert result.kwargs is None
+        assert getattr(result, "kwargs", None) is None
 
     def test_tokenization_kwargs_only(self):
         default_tp = _make_tokenize_params()
         result = _make_offline_context(
             tokenization_kwargs={"max_length": 32, "truncation": True}
         ).build_tok_params(default_tp)
-        assert result.kwargs == {"max_length": 32, "truncation": True}
+        assert getattr(result, "kwargs", None) == {
+            "max_length": 32,
+            "truncation": True,
+        }
 
     def test_add_special_tokens_none_keeps_tokenization_kwargs(self):
         default_tp = _make_tokenize_params()
@@ -405,7 +410,7 @@ class TestOfflineBuildTokParams:
             tokenization_kwargs={"max_length": 32},
             add_special_tokens=None,
         ).build_tok_params(default_tp)
-        assert result.kwargs == {"max_length": 32}
+        assert getattr(result, "kwargs", None) == {"max_length": 32}
 
     @pytest.mark.parametrize("flag", [True, False])
     def test_explicit_add_special_tokens_overrides_tokenization_kwargs(
@@ -416,7 +421,7 @@ class TestOfflineBuildTokParams:
             tokenization_kwargs={"add_special_tokens": not flag, "max_length": 16},
             add_special_tokens=flag,
         ).build_tok_params(default_tp)
-        assert result.kwargs == {
+        assert getattr(result, "kwargs", None) == {
             "add_special_tokens": flag,
             "max_length": 16,
         }
