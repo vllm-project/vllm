@@ -41,6 +41,11 @@ def unconditional_to_conditional_rates(rates: list[float]) -> list[float]:
 
 def get_max_chunk_logits(vocab_size: int) -> int:
     """Largest number of logits rows one verification chunk may hold."""
+    if vocab_size == 0:
+        # Pooling-only models (e.g. Terratorch) have no vocabulary;
+        # adaptive verification is never enabled for them so this value
+        # is never used, but we must not divide by zero.
+        return 1
     return max(1, MAX_CHUNK_BYTES // (vocab_size * _FP32_BYTES))
 
 
