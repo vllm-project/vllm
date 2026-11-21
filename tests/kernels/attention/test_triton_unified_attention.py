@@ -461,6 +461,64 @@ def test_speculative_splitk_bf16_query_fp8_kv(monkeypatch):
     assert len(reduce_grids) == 1
 
 
+@pytest.mark.parametrize("scratch_rows", [8, 32])
+def test_speculative_splitk_stays_in_scratch(monkeypatch, scratch_rows):
+    """A split-K launch may use more segments than the scratch was laid out for,
+    but must not write past the scratch rows it is given."""
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    reduce_grids = _spy_reduce_segments(monkeypatch)
+    query_len, kv_len, block_size, head_size = 4, 9000, 1088, 256
+    num_blocks = triton.cdiv(kv_len, block_size)
+    query = torch.randn(query_len, 16, head_size, dtype=torch.bfloat16)
+    key_cache = torch.randn(num_blocks, block_size, 2, head_size, dtype=torch.bfloat16)
+    value_cache = torch.randn_like(key_cache)
+    block_table = torch.randperm(num_blocks, dtype=torch.int32)[None]
+    # Room for 128 segments; the launch sees the first scratch_rows rows of 16.
+    segm_output = torch.full((8 * scratch_rows, 16, 16, head_size), float("nan"))
+    segm_max = torch.full((8 * scratch_rows, 16, 16), float("nan"))
+    segm_expsum = torch.full_like(segm_max, float("nan"))
+    output = torch.empty_like(query)
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=torch.tensor([0, query_len], dtype=torch.int32),
+        seqused_k=torch.tensor([kv_len], dtype=torch.int32),
+        max_seqlen_q=query_len,
+        max_seqlen_k=kv_len,
+        softmax_scale=head_size**-0.5,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_table,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        seq_threshold_3D=2,
+        num_par_softmax_segments=16,
+        softmax_segm_output=segm_output[:scratch_rows],
+        softmax_segm_max=segm_max[:scratch_rows],
+        softmax_segm_expsum=segm_expsum[:scratch_rows],
+    )
+
+    assert len(reduce_grids) == 1
+    for scratch in (segm_output, segm_max, segm_expsum):
+        assert scratch[scratch_rows:].isnan().all()
+    ref_output = ref_paged_attn(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=[query_len],
+        kv_lens=[kv_len],
+        block_tables=block_table,
+        scale=head_size**-0.5,
+    )
+    torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)
+
+
 @triton.jit
 def _compute_clamped_mm_tile_bounds(
     output_ptr,
