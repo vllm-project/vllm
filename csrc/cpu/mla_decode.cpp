@@ -261,10 +261,10 @@ void mla_decode_kvcache_cpu_impl(
 
   // shared across threads
   const int max_threads = cpu_utils::get_max_threads();
-  const int acc_out_nbytes =
-      max_threads * num_heads * V_HEAD_DIM * sizeof(float);
+  const int64_t acc_out_nbytes =
+      static_cast<int64_t>(max_threads) * num_heads * V_HEAD_DIM * sizeof(float);
   float* acc_out = static_cast<float*>(std::aligned_alloc(64, acc_out_nbytes));
-  std::vector<float> acc_lse(max_threads * num_heads);
+  std::vector<float> acc_lse(static_cast<size_t>(max_threads) * num_heads);
 
   // allocate memory to pre-convert query to FP32 later
   float* q_f32;
@@ -272,7 +272,8 @@ void mla_decode_kvcache_cpu_impl(
       !std::is_same<scalar_t, float>::value &&
       std::is_same<qk_vec_type, vec_op::FP32Vec16>::value;
   if constexpr (PRE_CONVERT_QUERY) {
-    const int q_f32_nbytes = num_heads * HEAD_DIM * sizeof(float);
+    const int64_t q_f32_nbytes =
+        static_cast<int64_t>(num_heads) * HEAD_DIM * sizeof(float);
     q_f32 = static_cast<float*>(std::aligned_alloc(64, q_f32_nbytes));
   }
 
@@ -281,12 +282,15 @@ void mla_decode_kvcache_cpu_impl(
     const int num_threads = omp_get_num_threads();
     const int thread_id = omp_get_thread_num();
     float* __restrict__ acc_out_thread =
-        acc_out + thread_id * num_heads * V_HEAD_DIM;
-    float* __restrict__ acc_lse_thread = acc_lse.data() + thread_id * num_heads;
+        acc_out + static_cast<int64_t>(thread_id) * num_heads * V_HEAD_DIM;
+    float* __restrict__ acc_lse_thread =
+        acc_lse.data() + static_cast<int64_t>(thread_id) * num_heads;
 
     for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
       // reset accumulator
-      std::fill(acc_out_thread, acc_out_thread + num_heads * V_HEAD_DIM, 0.0f);
+      std::fill(acc_out_thread,
+                acc_out_thread + static_cast<int64_t>(num_heads) * V_HEAD_DIM,
+                0.0f);
       std::fill(acc_lse_thread, acc_lse_thread + num_heads, -FLT_MAX);
 
       const int seq_len = seq_lens[seq_idx];
@@ -297,26 +301,31 @@ void mla_decode_kvcache_cpu_impl(
       if constexpr (PRE_CONVERT_QUERY) {
 // pre-convert query to FP32 since FP16/BF16->FP32 is slow.
 #pragma omp for
-        for (int i = 0; i < num_heads * HEAD_DIM; i += QK_NUM_ELEM) {
-          qk_load_vec_type q_load_vec(q + seq_idx * q_stride + i);
+        for (int64_t i = 0; i < static_cast<int64_t>(num_heads) * HEAD_DIM;
+             i += QK_NUM_ELEM) {
+          qk_load_vec_type q_load_vec(
+              q + static_cast<int64_t>(seq_idx) * q_stride + i);
           qk_vec_type q_vec(q_load_vec);
           q_vec.save(q_f32 + i);
         }
         q_vecs = reinterpret_cast<const qk_vec_type*>(q_f32);
       } else {
-        q_vecs = reinterpret_cast<const qk_vec_type*>(q + seq_idx * q_stride);
+        q_vecs = reinterpret_cast<const qk_vec_type*>(
+            q + static_cast<int64_t>(seq_idx) * q_stride);
       }
 
 #pragma omp for
       for (int block_idx = 0; block_idx < block_num; ++block_idx) {
         const int physical_block_idx =
-            block_tables[seq_idx * max_num_blocks_per_seq + block_idx];
+            block_tables[static_cast<int64_t>(seq_idx) * max_num_blocks_per_seq +
+                         block_idx];
         const int num_tokens =
             block_idx < block_num - 1 ? BLOCK_SIZE : last_block_size;
 
         mla_decode_block<scalar_t, HEAD_DIM, V_HEAD_DIM, BLOCK_SIZE>(
-            q_vecs, kv_cache + physical_block_idx * kv_stride, acc_out_thread,
-            acc_lse_thread, num_heads, scale, num_tokens);
+            q_vecs,
+            kv_cache + static_cast<int64_t>(physical_block_idx) * kv_stride,
+            acc_out_thread, acc_lse_thread, num_heads, scale, num_tokens);
       }
 
 // merge attention states across threads
@@ -325,33 +334,43 @@ void mla_decode_kvcache_cpu_impl(
 #pragma omp for
       for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
         float* acc_lse_head = acc_lse.data() + head_idx;
-        float* acc_out_head = acc_out + head_idx * V_HEAD_DIM;
+        float* acc_out_head =
+            acc_out + static_cast<int64_t>(head_idx) * V_HEAD_DIM;
 
         float max_val = -FLT_MAX;
         for (int thread_id_ = 0; thread_id_ < num_threads; ++thread_id_) {
-          max_val = std::max(max_val, acc_lse_head[thread_id_ * num_heads]);
+          max_val = std::max(
+              max_val,
+              acc_lse_head[static_cast<int64_t>(thread_id_) * num_heads]);
         }
 
         float sum_exp = 0.0f;
         for (int thread_id_ = 0; thread_id_ < num_threads; ++thread_id_) {
-          float val = std::exp(acc_lse_head[thread_id_ * num_heads] - max_val);
-          acc_lse_head[thread_id_ * num_heads] = val;
+          float val = std::exp(
+              acc_lse_head[static_cast<int64_t>(thread_id_) * num_heads] -
+              max_val);
+          acc_lse_head[static_cast<int64_t>(thread_id_) * num_heads] = val;
           sum_exp += val;
         }
 
         float inv_sum = 1.0f / sum_exp;
         float out_head[V_HEAD_DIM] = {};
         for (int thread_id_ = 0; thread_id_ < num_threads; ++thread_id_) {
-          float scale_ = acc_lse_head[thread_id_ * num_heads] * inv_sum;
+          float scale_ =
+              acc_lse_head[static_cast<int64_t>(thread_id_) * num_heads] *
+              inv_sum;
           for (int i = 0; i < V_HEAD_DIM; ++i) {
             out_head[i] +=
-                acc_out_head[thread_id_ * num_heads * V_HEAD_DIM + i] * scale_;
+                acc_out_head[static_cast<int64_t>(thread_id_) * num_heads *
+                             V_HEAD_DIM + i] *
+                scale_;
           }
         }
 
         for (int i = 0; i < V_HEAD_DIM; ++i) {
-          vec_op::storeFP32(out_head[i], out + seq_idx * o_stride +
-                                             head_idx * V_HEAD_DIM + i);
+          vec_op::storeFP32(out_head[i],
+                            out + static_cast<int64_t>(seq_idx) * o_stride +
+                                static_cast<int64_t>(head_idx) * V_HEAD_DIM + i);
         }
       }
     }
@@ -367,6 +386,8 @@ void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
                         torch::Tensor& block_tables, torch::Tensor& seq_lens) {
   const int num_seqs = query.size(0);
   const int num_heads = query.size(1);
+  TORCH_CHECK(num_heads > 0,
+              "mla_decode_kvcache: num_heads (query.size(1)) must be > 0");
   const int head_dim = query.size(2);
   const int block_size = kv_cache.size(1);
   const int v_head_dim = out.size(2);
