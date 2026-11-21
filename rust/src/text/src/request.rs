@@ -151,9 +151,8 @@ pub struct SamplingParams {
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// `None` returns routing for the whole prompt.
     pub routed_experts_prompt_start: Option<u32>,
-    /// Whether to record and return auxiliary outputs: routed experts,
-    /// sampling masks, sample logprobs and `logprob_token_ids`. `None`
-    /// returns them.
+    /// Whether to record and return RL auxiliary outputs: routed experts and
+    /// sampling masks. `None` returns them.
     pub return_aux_outputs: Option<bool>,
     /// Additional request parameters for custom extensions.
     ///

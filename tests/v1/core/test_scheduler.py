@@ -550,7 +550,7 @@ def test_aux_outputs_flag_is_fixed_for_a_session(return_aux_outputs):
     assert session.status == RequestStatus.WAITING
     assert session.sampling_params.return_aux_outputs == return_aux_outputs
     assert update.sampling_params.return_aux_outputs != return_aux_outputs
-    assert session.sampling_params.logprobs is None
+    assert session.sampling_params.logprobs == 2
 
 
 def test_aux_outputs_opt_out_is_not_recorded():

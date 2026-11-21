@@ -165,12 +165,6 @@ pub fn lower_sampling_params(
         stream_interval,
     } = sampling_params;
 
-    let return_aux_outputs = return_aux_outputs.unwrap_or(true);
-    let (logprobs, logprob_token_ids) = if return_aux_outputs {
-        (logprobs, logprob_token_ids)
-    } else {
-        (None, None)
-    };
     validate_logprobs(
         logprobs,
         prompt_logprobs,
@@ -282,7 +276,7 @@ pub fn lower_sampling_params(
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
         routed_experts_prompt_start,
-        return_aux_outputs,
+        return_aux_outputs: return_aux_outputs.unwrap_or(true),
         stream_interval,
     };
     validate_resolved_sampling_params(&params)?;
@@ -537,12 +531,11 @@ mod tests {
     }
 
     #[test]
-    fn lower_sampling_params_skips_aux_outputs() {
-        let lower = |logprob_token_ids: Option<Vec<u32>>, return_aux_outputs: Option<bool>| {
+    fn lower_sampling_params_forwards_return_aux_outputs() {
+        let lower = |return_aux_outputs: Option<bool>| {
             lower_sampling_params_with_limits(
                 SamplingParams {
                     logprobs: Some(2),
-                    logprob_token_ids,
                     return_aux_outputs,
                     ..Default::default()
                 },
@@ -550,13 +543,10 @@ mod tests {
             )
             .unwrap()
         };
-        let kept = lower(None, None);
-        assert!(kept.return_aux_outputs);
-        assert_eq!(kept.logprobs, Some(2));
-        let skipped = lower(Some(vec![1]), Some(false));
+        assert!(lower(None).return_aux_outputs);
+        let skipped = lower(Some(false));
         assert!(!skipped.return_aux_outputs);
-        assert_eq!(skipped.logprobs, None);
-        assert_eq!(skipped.logprob_token_ids, None);
+        assert_eq!(skipped.logprobs, Some(2));
     }
 
     #[test]

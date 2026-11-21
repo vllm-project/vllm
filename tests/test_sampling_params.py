@@ -303,17 +303,10 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     ids=["init", "from_optional"],
 )
 @pytest.mark.parametrize("return_aux_outputs", [True, False])
-def test_aux_outputs_opt_out_drops_sample_logprobs(make, return_aux_outputs):
+def test_aux_outputs_opt_out_keeps_logprobs(make, return_aux_outputs):
     params = make(
-        logprobs=2,
-        logprob_token_ids=[1, 2],
-        prompt_logprobs=3,
-        return_aux_outputs=return_aux_outputs,
+        logprobs=2, logprob_token_ids=[1, 2], return_aux_outputs=return_aux_outputs
     )
-    if return_aux_outputs:
-        assert params.logprobs == 2
-        assert params.logprob_token_ids == [1, 2]
-    else:
-        assert params.logprobs is None
-        assert params.logprob_token_ids is None
-    assert params.prompt_logprobs == 3
+    assert params.return_aux_outputs == return_aux_outputs
+    assert params.logprobs == 2
+    assert params.logprob_token_ids == [1, 2]

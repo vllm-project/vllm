@@ -1932,9 +1932,6 @@ class Scheduler(SchedulerInterface):
         if params.return_aux_outputs != session.sampling_params.return_aux_outputs:
             params = params.clone()
             params.return_aux_outputs = session.sampling_params.return_aux_outputs
-            if not params.return_aux_outputs:
-                params.logprobs = None
-                params.logprob_token_ids = None
         session.sampling_params = params
         session.prefix_cache_hit_limit = session.get_prefix_cache_hit_limit()
         session.max_tokens = update.max_tokens

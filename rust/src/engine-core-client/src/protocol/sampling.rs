@@ -166,8 +166,8 @@ pub struct EngineCoreSamplingParams {
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// A value of zero returns routing data for the entire prompt.
     pub routed_experts_prompt_start: u32,
-    /// Whether to record and return the request's auxiliary outputs. `false`
-    /// also drops sample logprobs and `logprob_token_ids`.
+    /// Whether to record and return the request's RL auxiliary outputs:
+    /// routed experts and sampling masks.
     #[serde(default = "default_return_aux_outputs")]
     pub return_aux_outputs: bool,
     /// Number of newly generated tokens to batch into each streamed output.

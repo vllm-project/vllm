@@ -320,4 +320,8 @@ async def test_input_stream_keeps_first_chunk_return_aux_outputs(
 
     sent = [call.args[0] for call in llm._add_request.await_args_list]
     assert sent == [*reqs[1 : num_sent + 1], reqs[0]]
-    assert isinstance(queue.output, InputStreamError) == (num_sent < len(chunk_flags))
+    if num_sent == len(chunk_flags):
+        assert queue.output is None
+    else:
+        assert isinstance(queue.output, InputStreamError)
+        assert "return_aux_outputs cannot change" in str(queue.output.cause)

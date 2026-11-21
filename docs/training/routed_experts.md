@@ -64,7 +64,7 @@ Per-request, default `0`: drops the first N prompt-token rows (e.g. routing alre
 
 ## `return_aux_outputs`
 
-Per-request, default `true`. Set it to `false` for requests that don't need RL auxiliary outputs, such as evaluation traffic on a server that also serves rollouts. Such a request gets no `routed_experts`, no `sampling_mask` and no sample `logprobs` or `logprob_token_ids`, and vLLM does not store its routing. `prompt_logprobs` and the `top_k` sampling parameter are unaffected. Pass it inside `sampling_params` on `/inference/v1/generate` or as `SamplingParams(return_aux_outputs=False)`.
+Per-request, default `true`. Set it to `false` for requests that don't need RL auxiliary outputs, such as evaluation traffic on a server that also serves rollouts. Such a request gets no `routed_experts` and no `sampling_mask`, and vLLM does not store its routing. Logprobs are unaffected: request them or not with `logprobs`, `logprob_token_ids` and `prompt_logprobs` as usual. Pass it inside `sampling_params` on `/inference/v1/generate` or as `SamplingParams(return_aux_outputs=False)`.
 
 Requests that opt out get their own prefix-cache namespace, because their KV blocks have no stored routing. They share cached prefixes with each other but not with requests that record routing.
 

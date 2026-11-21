@@ -452,10 +452,10 @@ class SamplingParams(
     token IDs during decoding instead of sampling randomly. Real logprobs are
     still computed. Conflict checking is performed at the engine level."""
     return_aux_outputs: bool = True
-    """Set False to skip this request's auxiliary outputs: its routed experts
-    are neither recorded nor returned, and it gets no sampling masks, sample
-    logprobs or logprob_token_ids. Its prefix-cache blocks are kept apart from
-    those of requests that record routed experts."""
+    """Set False to skip this request's RL auxiliary outputs: its routed
+    experts are neither recorded nor returned, and it gets no sampling masks.
+    Its prefix-cache blocks are kept apart from those of requests that record
+    routed experts."""
 
     @staticmethod
     def from_optional(
@@ -605,10 +605,6 @@ class SamplingParams(
 
         if self.prompt_logprobs is True:
             self.prompt_logprobs = 1
-
-        if not self.return_aux_outputs:
-            self.logprobs = None
-            self.logprob_token_ids = None
 
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
