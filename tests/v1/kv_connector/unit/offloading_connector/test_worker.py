@@ -668,10 +668,9 @@ def test_register_packed_kv_caches_skips_scratch_group():
     assert canonical.group_data_refs == [[CanonicalKVCacheRef(0, 2 * page)]]
 
 
-def test_register_split_padded_pages_raises():
-    """Offloading reads each page's payload from its start, which a padded page
-    split into kernel blocks does not keep: its padding sits after every
-    kernel block."""
+@pytest.mark.parametrize("canonical_layout", [False, True])
+def test_register_split_padded_pages(canonical_layout):
+    """Canonical transfers skip kernel padding; direct transfers reject it."""
     from vllm.v1.worker.utils import allocate_kv_cache
 
     unpadded = AttentionSpec(
@@ -705,9 +704,18 @@ def test_register_split_padded_pages_raises():
         KVCacheLayout.LBNHC,
         [BLOCK_SIZE],
     )
-    worker, _ = _make_worker(kv_cache_config)
-    with pytest.raises(NotImplementedError, match="split into kernel blocks"):
-        worker.register_kv_caches(kv_caches)
+    worker, offload_spec = _make_worker(
+        kv_cache_config, canonical_layout=canonical_layout
+    )
+    if not canonical_layout:
+        with pytest.raises(NotImplementedError, match="split into kernel blocks"):
+            worker.register_kv_caches(kv_caches)
+        return
+    worker.register_kv_caches(kv_caches)
+    caches = offload_spec.get_worker.call_args[0][0]
+    ref = caches.group_data_refs[0][0]
+    assert ref.kernel_page_size_bytes == unpadded // 4
+    assert ref.kernel_page_stride_bytes == spec.page_size_bytes // 4
 
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
