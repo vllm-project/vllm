@@ -185,6 +185,28 @@ class xLAMToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
+    def _extract_complete_arguments(self, text: str) -> list[str]:
+        """Return the JSON text of every complete ``arguments`` object in ``text``.
+
+        Scanning with :class:`json.JSONDecoder` rather than a brace-matching
+        regex means arguments of any nesting depth are found and a ``{`` or
+        ``}`` inside a string value is not mistaken for a structural brace.
+        Objects are returned in the order they appear and the scan stops at the
+        first one that is not finished yet, so while streaming the list holds
+        exactly the argument objects that have arrived in full.
+        """
+        decoder = json.JSONDecoder()
+        args_texts: list[str] = []
+        for match in re.finditer(
+            r'"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*(?=\{)', text
+        ):
+            try:
+                arguments, _ = decoder.raw_decode(text, match.end())
+            except json.JSONDecodeError:
+                break
+            args_texts.append(json.dumps(arguments, ensure_ascii=False))
+        return args_texts
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -453,12 +475,11 @@ class xLAMToolParser(ToolParser):
 
                                 return delta
 
-                # Extract arguments for current tool using regex for non-empty arguments
-                args_pattern = r'"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*(\{(?:[^{}]|(?:\{[^{}]*\}))*\})'
-                args_matches = list(re.finditer(args_pattern, search_text))
+                # Extract arguments for current tool
+                args_texts = self._extract_complete_arguments(search_text)
 
-                if current_idx < len(args_matches):
-                    args_text = args_matches[current_idx].group(1)
+                if current_idx < len(args_texts):
+                    args_text = args_texts[current_idx]
 
                     # Handle transition between tools
                     is_last_tool = current_idx == tool_count - 1
