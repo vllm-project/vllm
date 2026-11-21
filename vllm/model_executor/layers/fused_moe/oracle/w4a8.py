@@ -41,17 +41,14 @@ def backend_to_kernel_cls(
 
         return [CutlassExpertsW4A8Fp8]
     elif backend == W4A8MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
-            BatchedHummingGroupedExperts,
-            HummingGroupedExperts,
-            HummingIndexedExperts,
+        from vllm.model_executor.layers.fused_moe.oracle.humming import (
+            HummingMoeBackend,
+        )
+        from vllm.model_executor.layers.fused_moe.oracle.humming import (
+            backend_to_kernel_cls as humming_backend_to_kernel_cls,
         )
 
-        return [
-            BatchedHummingGroupedExperts,
-            HummingGroupedExperts,
-            HummingIndexedExperts,
-        ]
+        return humming_backend_to_kernel_cls(HummingMoeBackend.HUMMING)
     else:
         raise ValueError(f"Unknown W4A8 MoE backend: {backend.value}")
 
@@ -235,11 +232,7 @@ def make_w4a8_moe_kernel(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
     if backend == W4A8MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming import (
-            make_humming_moe_kernel,
-        )
-
-        return make_humming_moe_kernel(
+        return make_moe_kernel(
             moe_quant_config, moe_config, experts_cls, routing_tables=routing_tables
         )
 

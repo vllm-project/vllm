@@ -51,6 +51,13 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     map_fp8_backend,
     select_fp8_moe_backend,
 )
+from vllm.model_executor.layers.fused_moe.oracle.humming import (
+    HummingMoeBackend,
+    HummingMoEKernelOracle,
+    make_humming_moe_kernel,
+    map_humming_backend,
+    select_humming_moe_backend,
+)
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     Int8MoeBackend,
     Int8MoEKernelOracle,
@@ -147,6 +154,12 @@ SELECT_CASES = {
         map_w4a8_int8_backend,
         "cpu",
         "W4A8 Int8",
+    ),
+    "humming": (
+        lambda cfg: select_humming_moe_backend(cfg, None, None),
+        map_humming_backend,
+        "humming",
+        "Humming",
     ),
 }
 
@@ -256,6 +269,15 @@ ASSEMBLY_CASES = {
         {"group_size": 128},
         None,
     ),
+    "humming": (
+        lambda quant_config, moe_config, experts_cls: make_humming_moe_kernel(
+            quant_config, moe_config, experts_cls
+        ),
+        HummingGroupedExperts,
+        {},
+        {},
+        None,
+    ),
 }
 
 
@@ -351,6 +373,7 @@ TRY_BACKEND_CASES = [
     ),
     pytest.param(W4A8Int8MoEKernelOracle, W4A8Int8MoeBackend.CPU_INT4, id="w4a8_int8"),
     pytest.param(Mxfp8MoEKernelOracle, Fp8MoeBackend.MARLIN, id="mxfp8"),
+    pytest.param(HummingMoEKernelOracle, HummingMoeBackend.HUMMING, id="humming"),
 ]
 
 
@@ -674,6 +697,32 @@ def test_make_kernel_delegates() -> None:
         moe_config,
         UnquantizedMoeBackend.TRITON,
         TritonExperts,
+        None,  # routing_tables default
+    )
+    assert built_kernel is sentinel_kernel
+
+
+def test_humming_make_kernel_delegates() -> None:
+    """`HummingMoEKernelOracle.make_kernel` delegates to the module fn."""
+    quant_config = object()
+    moe_config = object()
+    sentinel_kernel = object()
+    with patch(
+        "vllm.model_executor.layers.fused_moe.oracle.humming."
+        "make_humming_moe_kernel",
+        return_value=sentinel_kernel,
+    ) as mocked:
+        built_kernel = HummingMoEKernelOracle(make_dummy_moe_config()).make_kernel(
+            quant_config,
+            moe_config,
+            HummingMoeBackend.HUMMING,
+            HummingGroupedExperts,
+        )
+
+    mocked.assert_called_once_with(
+        quant_config,
+        moe_config,
+        HummingGroupedExperts,
         None,  # routing_tables default
     )
     assert built_kernel is sentinel_kernel

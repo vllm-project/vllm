@@ -148,17 +148,14 @@ def backend_to_kernel_cls(
 
         return [MarlinExperts]
     elif backend == NvFp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
-            BatchedHummingGroupedExperts,
-            HummingGroupedExperts,
-            HummingIndexedExperts,
+        from vllm.model_executor.layers.fused_moe.oracle.humming import (
+            HummingMoeBackend,
+        )
+        from vllm.model_executor.layers.fused_moe.oracle.humming import (
+            backend_to_kernel_cls as humming_backend_to_kernel_cls,
         )
 
-        return [
-            BatchedHummingGroupedExperts,
-            HummingGroupedExperts,
-            HummingIndexedExperts,
-        ]
+        return humming_backend_to_kernel_cls(HummingMoeBackend.HUMMING)
     elif backend == NvFp4MoeBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
             Nvfp4QuantizationEmulationTritonExperts,

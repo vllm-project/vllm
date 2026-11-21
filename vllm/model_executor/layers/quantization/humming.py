@@ -29,6 +29,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.oracle.humming import (
+    select_humming_moe_backend,
+)
 from vllm.model_executor.layers.quantization.utils.humming import (
     check_and_fallback_input_schema,
     convert_to_humming_moe_kernel_format,
@@ -648,8 +651,8 @@ class HummingMoEMethod(FusedMoEMethodBase):
         )
         activation_key = input_schema_to_quant_key(runtime_input_schema, moe.in_dtype)
 
-        # Select Humming MoE experts
-        self.experts_cls = select_humming_moe_experts(
+        # Select Humming MoE backend
+        self.humming_backend, self.experts_cls = select_humming_moe_backend(
             config=self.moe,
             weight_key=weight_key,
             activation_key=activation_key,
