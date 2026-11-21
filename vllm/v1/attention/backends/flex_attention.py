@@ -883,6 +883,18 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.max_model_len = self.model_config.max_model_len
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        chunk_sizes = [
+            chunk_size
+            for layer in layers.values()
+            if (chunk_size := getattr(layer, "attention_chunk_size", None)) is not None
+        ]
+        if chunk_sizes:
+            # Each request can add two partial windows around its full chunks.
+            max_num_seqs = min(
+                max_num_batched_tokens,
+                2 * max_num_seqs + cdiv(max_num_batched_tokens, min(chunk_sizes)),
+            )
+        self.max_num_seqs = max_num_seqs
         self.max_num_query_groups = cdiv(max_num_batched_tokens, self.q_block_size)
         max_num_pages_per_seq = cdiv(self.max_model_len, self.block_size)
         self.max_num_kv_indices = self.q_block_size * max_num_pages_per_seq
@@ -1044,9 +1056,8 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             block_table_tensor, seq_lens, block_size, num_gpu_blocks
         )
         if self.persistent_physical_to_logical is None:
-            max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
             self.persistent_physical_to_logical = torch.empty(
-                max_num_seqs,
+                self.max_num_seqs,
                 num_gpu_blocks,
                 dtype=torch.long,
                 device=self.device,
