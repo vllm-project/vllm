@@ -9,10 +9,9 @@ test covers the hybrid decode KV cache layouts: attention or MLA, each with a
 Mamba/KDA state group.
 """
 
-import socket
+import math
 import time
 from collections import OrderedDict
-from concurrent.futures import Future
 from types import SimpleNamespace
 
 import pytest
@@ -85,30 +84,6 @@ def _kv_cache_config(layout: str) -> KVCacheConfig:
     return KVCacheConfig(num_blocks=10000, kv_cache_tensors=[], kv_cache_groups=groups)
 
 
-class _InlineExecutor:
-    def submit(self, fn, *args):
-        future: Future = Future()
-        future.set_result(fn(*args))
-        return future
-
-    def shutdown(self, wait=True, cancel_futures=False):
-        pass
-
-
-class _PendingExecutor:
-    """Probes that answer only when a test sets their result."""
-
-    def __init__(self):
-        self.probes: list[Future] = []
-
-    def submit(self, fn, *args):
-        self.probes.append(Future())
-        return self.probes[-1]
-
-    def shutdown(self, wait=True, cancel_futures=False):
-        pass
-
-
 class _Clock:
     def __init__(self):
         self.now = time.monotonic()
@@ -161,15 +136,6 @@ class _Engine:
         self.num_groups = len(kv_cache_config.kv_cache_groups)
         connector = self.scheduler.connector.connector_scheduler
         monkeypatch.setattr(connector, "send_notify_block", lambda **kwargs: None)
-        # The prefill's notify socket: gone unless a test says it answers. Probes
-        # answer at once, so a deadline is decided in the step it passes.
-        self.prefill_alive = False
-        monkeypatch.setattr(
-            moriio_connector, "_peer_listening", lambda host, port: self.prefill_alive
-        )
-        if connector._write_recv_prober is not None:
-            connector._write_recv_prober.shutdown()
-            connector._write_recv_prober = _InlineExecutor()
         self.pool = self.scheduler.kv_cache_manager.block_pool
         self.workers = [_make_consumer_worker() for _ in range(TP_SIZE)]
         self.aggregator = KVOutputAggregator.from_connector(
@@ -235,9 +201,9 @@ def test_dead_prefill_does_not_leave_its_request_waiting(consumer_role, monkeypa
     clock = _Clock()
     monkeypatch.setattr(moriio_connector, "time", clock)
     config = create_moriio_config(role="kv_consumer", block_size=BLOCK_SIZE)
-    extra = config.kv_transfer_config.kv_connector_extra_config
-    # Equal timeouts make the deadline final, so there is no prefill to probe.
-    extra["write_recv_timeout"] = extra["write_recv_max_timeout"] = TIMEOUT_S
+    config.kv_transfer_config.kv_connector_extra_config["write_recv_timeout"] = (
+        TIMEOUT_S
+    )
     scheduler = create_scheduler(config)
     monkeypatch.setattr(
         scheduler.connector.connector_scheduler,
@@ -317,61 +283,17 @@ def test_blocks_freed_once_every_rank_has_its_write_done(engine):
     assert engine.pool.get_num_free_blocks() == free_before
 
 
-def test_alive_prefill_still_fails_at_the_max_timeout(engine):
-    engine.prefill_alive = True
-    request = engine.add_waiting_request()
-    held = engine.pool.get_num_free_blocks()
-
-    engine.clock.now += TIMEOUT_S + 1
-    engine.step()
-    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-
-    # write_recv_max_timeout defaults to 3 x write_recv_timeout.
-    engine.clock.now += 2 * TIMEOUT_S
-    engine.step()
-    assert request.status == RequestStatus.FINISHED_ERROR
-    assert engine.pool.get_num_free_blocks() == held
-
-
-def test_prefill_that_stops_answering_fails_at_the_next_deadline(engine):
-    """Each deadline asks the prefill again rather than reuse its last answer."""
-    engine.prefill_alive = True
-    request = engine.add_waiting_request()
-    engine.clock.now += TIMEOUT_S + 1
-    engine.step()
-    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-
-    engine.prefill_alive = False
-    engine.clock.now += TIMEOUT_S
-    engine.step()
-    assert request.status == RequestStatus.FINISHED_ERROR
-
-
-def test_probe_is_dropped_when_its_last_request_finishes(engine):
-    """A probe lives on its receive's record, so it goes when the receive
+def test_timer_is_dropped_when_its_receive_finishes(engine):
+    """The timer lives on its receive's record, so it goes when the receive
     finishes, not when the process exits."""
     connector = engine.scheduler.connector.connector_scheduler
-    connector._write_recv_prober = _PendingExecutor()
     request = engine.add_waiting_request()
-    engine.clock.now += TIMEOUT_S + 1
-    engine.step()
-    assert connector._write_recvs_in_flight[request.request_id].probe is not None
+    assert math.isfinite(connector._write_recvs_in_flight[request.request_id].deadline)
 
     engine.step(write_done=frozenset({request.request_id}))
     engine.step()
     assert request.status == RequestStatus.RUNNING
     assert request.request_id not in connector._write_recvs_in_flight
-
-
-def test_peer_listening():
-    with socket.socket() as server:
-        server.bind(("127.0.0.1", 0))
-        server.listen()
-        port = server.getsockname()[1]
-        assert moriio_connector._peer_listening("127.0.0.1", port)
-    assert not moriio_connector._peer_listening("127.0.0.1", port)
-    # IDNA rejects a label over 63 characters with UnicodeError, not OSError.
-    assert not moriio_connector._peer_listening("a" * 64 + ".invalid", 1)
 
 
 def test_request_aborted_before_its_deadline_stops_its_timer(engine):
