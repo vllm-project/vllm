@@ -142,14 +142,18 @@ class TestGemma4ChatTemplate:
         assert "}<tool_call|>" in result
         assert '<|"|>London<|"|>' in result
 
-    def test_tool_responses_openai_style(self, gemma4_template):
+    @pytest.mark.parametrize(
+        "content", ["", "I'll check.", [{"type": "text", "text": "I'll check."}]]
+    )
+    @pytest.mark.parametrize("next_user", [False, True])
+    def test_tool_responses_openai_style(self, gemma4_template, content, next_user):
         """role='tool' messages are formatted as <|tool_response> blocks
         with content dumped as-is."""
         messages = [
             {"role": "user", "content": "Weather?"},
             {
                 "role": "assistant",
-                "content": "",
+                "content": content,
                 "tool_calls": [
                     {
                         "id": "call_1",
@@ -166,11 +170,20 @@ class TestGemma4ChatTemplate:
                 "content": '{"temperature": 15, "condition": "sunny"}',
             },
         ]
+        if next_user:
+            messages.append({"role": "user", "content": "And tomorrow?"})
         result = _render(gemma4_template, messages, add_generation_prompt=True)
         assert "<|tool_response>" in result
         assert "response:get_weather{" in result
         assert "<tool_response|>" in result
         assert '"temperature": 15' in result
+        if content:
+            assert result.index("I'll check.") < result.index("<|tool_call>")
+        assert result.index("<|tool_call>") < result.index("<|tool_response>")
+        if next_user:
+            assert "<tool_response|><turn|>\n<|turn>user\n" in result
+        else:
+            assert result.endswith("<tool_response|>")
 
     def test_tool_responses_legacy_style(self, gemma4_template):
         """tool_responses embedded on the assistant message."""
