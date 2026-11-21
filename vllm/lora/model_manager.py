@@ -135,6 +135,11 @@ class LoRAModelManager:
         self._last_slot_layout: tuple[int | None, ...] | None = None
         is_moe = is_moe_model(self.model)
         self._is_moe = is_moe
+        self._is_moe_model_config = bool(
+            vllm_config is not None
+            and vllm_config.model_config is not None
+            and getattr(vllm_config.model_config, "is_moe", False)
+        )
 
         self.supported_modules_to_save = (
             {"score", "classifier"}
@@ -1322,6 +1327,90 @@ class LoRAModelManager:
                 "after removing the prefix 'model.'."
             )
         return weights
+
+    @staticmethod
+    def _expert_module_prefix(module_name: str) -> str | None:
+        prefix, separator, suffix = module_name.partition(".experts")
+        if separator and (not suffix or suffix.startswith(".")):
+            return f"{prefix}{separator}"
+        if module_name == "experts" or module_name.startswith("experts."):
+            return "experts"
+        return None
+
+    def _moe_wrapper_candidates(self, prefix: str) -> list[str]:
+        candidates = [prefix]
+        if getattr(self, "supports_mm", False):
+            lm_prefix = self.mm_mapping.language_model[0].rstrip(".") + "."
+            if not prefix.startswith(lm_prefix):
+                candidates.append(f"{lm_prefix}{prefix}")
+                if prefix.startswith("model."):
+                    # The language model may be mounted as a bare decoder.
+                    candidates.append(f"{lm_prefix}{prefix.removeprefix('model.')}")
+        return candidates
+
+    def _validate_moe_lora_targets(self, lora_model: LoRAModel) -> None:
+        expert_modules = sorted(
+            module_name
+            for module_name in lora_model.loras
+            if self._expert_module_prefix(module_name) is not None
+        )
+        if not expert_modules:
+            return
+        target_modules = self.lora_config.target_modules
+        experts_targeted = (
+            target_modules is None
+            or any("experts" in target.split(".") for target in target_modules)
+            or is_in_target_modules(
+                "experts", target_modules, self.packed_modules_mapping
+            )
+        )
+        missing_wrappers = []
+        if not self._is_moe_model_config or not experts_targeted:
+            missing_wrappers = expert_modules
+        else:
+            prefixes = {
+                self._expert_module_prefix(module_name)
+                for module_name in expert_modules
+            }
+            for prefix in sorted(prefixes):
+                assert prefix is not None
+                candidates = self._moe_wrapper_candidates(prefix)
+                if any(
+                    isinstance(self.modules.get(name), FusedMoEWithLoRA)
+                    for name in candidates
+                ):
+                    continue
+                # A decoder layer owned by another PP rank is a single
+                # PPMissingLayer placeholder rather than a local MoE module.
+                # The expert prefix may include intermediate modules such as
+                # `.mlp`, so walk up until a real module is found.
+                pp_missing = False
+                for name in candidates:
+                    layer_name = name.split(".experts", 1)[0]
+                    layer = None
+                    while layer_name:
+                        try:
+                            layer = self.model.get_submodule(layer_name)
+                            break
+                        except AttributeError:
+                            if "." not in layer_name:
+                                break
+                            layer_name = layer_name.rsplit(".", 1)[0]
+                    if isinstance(layer, PPMissingLayer):
+                        pp_missing = True
+                        break
+                if not pp_missing:
+                    missing_wrappers.append(prefix)
+        if not missing_wrappers:
+            return
+        raise ValueError(
+            f"LoRA adapter {lora_model.id} contains routed-expert LoRA weights "
+            f"without corresponding MoE LoRA wrappers: {missing_wrappers[0]!r}. "
+            "These weights would be silently ignored. Add 'experts' to "
+            "--lora-target-modules when expert LoRA is supported (for example "
+            "on the PCP-only path), or use an adapter without routed-expert "
+            "weights."
+        )
 
     def _validate_moe_lora_format(self, lora_model: LoRAModel) -> None:
         if self._enable_mixed_moe_lora_format and getattr(

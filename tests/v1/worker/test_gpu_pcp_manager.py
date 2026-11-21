@@ -12,7 +12,7 @@ from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.forward_context import set_forward_context
-from vllm.lora.layers import FusedMoE3DWithLoRA, FusedMoEWithLoRA
+from vllm.lora.layers import FusedMoEWithLoRA
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights
 from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
 from vllm.v1.worker.gpu.lora_utils import LoraState, create_lora_capture_hook
+from vllm.v1.worker.gpu.model_runner import _collect_moe_lora_layers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
@@ -89,22 +90,6 @@ def test_validate_config_accepts_lora():
     PCPManager.validate_config(config, supports_mm_inputs=False)
 
 
-def test_validate_lora_modules_rejects_expert_lora_with_ep():
-    """PCP + EP does not provide the routed-expert LoRA token mapping."""
-    attn_lora = object()
-    expert_lora = object.__new__(FusedMoE3DWithLoRA)
-    PCPManager.validate_lora_modules([attn_lora], expert_lora_supported=False)
-    with pytest.raises(NotImplementedError, match=r"PCP \+ EP expert LoRA"):
-        PCPManager.validate_lora_modules(
-            [attn_lora, expert_lora], expert_lora_supported=False
-        )
-
-
-def test_validate_lora_modules_accepts_pcp_only_expert_lora():
-    expert_lora = object.__new__(FusedMoE3DWithLoRA)
-    PCPManager.validate_lora_modules([expert_lora], expert_lora_supported=True)
-
-
 def _make_lora_adapter(adapter_id: int, module_name: str) -> LoRAModel:
     return LoRAModel(
         adapter_id,
@@ -148,6 +133,19 @@ def test_expert_lora_support_depends_on_ep():
         expert_lora_supported=False,
     )
     assert not manager.expert_lora_supported
+
+
+def test_moe_lora_layers_disabled_for_pcp_ep():
+    experts = object.__new__(FusedMoEWithLoRA)
+    torch.nn.Module.__init__(experts)
+    model = torch.nn.Module()
+    model.add_module("experts", experts)
+    model.add_module("attention", torch.nn.Identity())
+
+    assert _collect_moe_lora_layers(model, expert_lora_supported=False) == []
+    assert _collect_moe_lora_layers(model, expert_lora_supported=True) == [
+        model.experts
+    ]
 
 
 def _make_moe_mapping_manager(
@@ -214,6 +212,33 @@ def test_moe_lora_mapping_preserves_replicated_and_split_prefill_rows(monkeypatc
 
     assert mapping is not None
     assert mapping.tolist() == [-1, 0, 0, 0, 0, 0, 0, 0, 0, -1]
+
+
+@pytest.mark.parametrize("early_return", ["base_batch", "global_batch", "gather_idx"])
+def test_moe_lora_mapping_clears_static_buffer_on_early_return(
+    monkeypatch, early_return
+):
+    monkeypatch.setattr(pcp_manager_module, "async_tensor_h2d", _copy_to_cpu)
+    manager = _make_moe_mapping_manager([1, 1], [False, False])
+    global_batch = SimpleNamespace(
+        idx_mapping_np=np.arange(2, dtype=np.int32),
+        num_scheduled_tokens=np.ones(2, dtype=np.int32),
+    )
+    state = _make_mapping_lora_state([1, 1])
+    mapping = manager.build_moe_lora_mapping(state, global_batch, [1])
+    assert mapping is not None
+    assert manager._pcp_moe_lora_mapping is not None
+    assert not torch.all(manager._pcp_moe_lora_mapping == -1)
+
+    if early_return == "base_batch":
+        state.lora_ids.fill(0)
+    elif early_return == "global_batch":
+        global_batch = None
+    else:
+        manager._padded_gather_idx_np = None
+
+    assert manager.build_moe_lora_mapping(state, global_batch, [1]) is None
+    assert torch.all(manager._pcp_moe_lora_mapping == -1)
 
 
 def test_moe_lora_mapping_is_none_for_base_and_dummy_batches(monkeypatch):
@@ -508,7 +533,11 @@ def test_capture_uses_pcp_persistent_inputs():
     )
     dummy_batch.input_ids.copy_(torch.arange(4))
     dummy_batch.positions.fill_(7)
+    assert manager._pcp_moe_lora_mapping is not None
+    manager._pcp_moe_lora_mapping.fill_(1)
     input_batch = manager.prepare_inputs_for_capture_or_profile(dummy_batch)
+
+    assert torch.all(manager._pcp_moe_lora_mapping == -1)
 
     assert input_batch is not dummy_batch
     assert input_batch.req_ids == dummy_batch.req_ids

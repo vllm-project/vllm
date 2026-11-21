@@ -34,9 +34,10 @@ This configuration requires PP=DP=DCP=1 and does not support microbatching,
 speculative decoding, KV transfer, prefix caching, MegaMoE, or the ROCm
 monokernel. TP and PCP multiply, so TP=2 with PCP=2 requires four GPUs.
 
-LoRA with PCP is limited to attention-only adapters. Models whose MoE experts
-are wrapped for LoRA are rejected at startup, so pass `--lora-target-modules`
-with the attention modules to serve.
+LoRA with PCP supports attention-only adapters without requiring
+`--lora-target-modules`. Routed-expert LoRA is supported on the PCP-only path
+(EP disabled); PCP + EP still rejects adapters that contain expert weights at
+load time. Attention-only adapters work in both configurations.
 
 ## Decode Context Parallel
 

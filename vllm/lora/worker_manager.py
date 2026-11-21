@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any, Literal
 
@@ -40,6 +41,7 @@ class WorkerLoRAManager:
         lora_model_cls: type[LoRAModel] = LoRAModel,
     ):
         self._lora_model_cls = lora_model_cls
+        self._adapter_validator: Callable[[LoRAModel], None] | None = None
         self.embedding_modules = embedding_modules
         self._cached_dummy_lora: None | Literal[False] | LoRAModel = False
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
@@ -70,6 +72,9 @@ class WorkerLoRAManager:
         self.device = device
         # Lazily initialized by create_lora_manager.
         self._adapter_manager: LoRAModelManager
+
+    def set_adapter_validator(self, validator: Callable[[LoRAModel], None]) -> None:
+        self._adapter_validator = validator
 
     @contextmanager
     def dummy_lora_cache(self):
@@ -158,6 +163,9 @@ class WorkerLoRAManager:
 
             # Validate classification-head weights.
             self._adapter_manager._validate_classification_head_lora(lora)
+            if self._adapter_validator is not None:
+                self._adapter_validator(lora)
+            self._adapter_manager._validate_moe_lora_targets(lora)
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
@@ -188,9 +196,6 @@ class WorkerLoRAManager:
 
     def get_dummy_lora_warmup_rank(self, default_rank: int) -> int:
         return self._adapter_manager.get_dummy_lora_warmup_rank(default_rank)
-
-    def get_adapter(self, adapter_id: int) -> LoRAModel | None:
-        return self._adapter_manager.get_adapter(adapter_id)
 
     def pin_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.pin_adapter(adapter_id)

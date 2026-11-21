@@ -171,19 +171,6 @@ class PCPManager:
         )
 
     @staticmethod
-    def validate_lora_modules(
-        lora_modules: Iterable[torch.nn.Module], expert_lora_supported: bool = True
-    ) -> None:
-        if not expert_lora_supported and any(
-            isinstance(module, FusedMoEWithLoRA) for module in lora_modules
-        ):
-            raise NotImplementedError(
-                "PCP + EP expert LoRA is not supported yet; disable expert "
-                "parallelism or restrict --lora-target-modules to attention "
-                "modules."
-            )
-
-    @staticmethod
     def validate_lora_adapter(
         lora_model: "LoRAModel", expert_lora_supported: bool = True
     ) -> None:
@@ -196,9 +183,9 @@ class PCPManager:
         )
         if expert_modules:
             raise NotImplementedError(
-                "PCP + EP expert LoRA is not supported yet; disable expert "
-                "parallelism or restrict --lora-target-modules to attention "
-                f"modules. Adapter {lora_model.id} contains MoE expert "
+                "PCP + EP expert LoRA is not supported yet; use an "
+                "attention-only adapter or disable expert parallelism. "
+                f"Adapter {lora_model.id} contains MoE expert "
                 f"module(s): {', '.join(expert_modules)}."
             )
 
@@ -461,6 +448,10 @@ class PCPManager:
         )
         return segments_by_rank, per_rank_num_tokens
 
+    def _clear_moe_lora_mapping(self) -> None:
+        if self._pcp_moe_lora_mapping is not None:
+            self._pcp_moe_lora_mapping.fill_(-1)
+
     def build_moe_lora_mapping(
         self,
         lora_state: "LoraState",
@@ -473,6 +464,7 @@ class PCPManager:
             or self._padded_gather_idx_np is None
             or not np.any(lora_state.lora_ids[global_batch.idx_mapping_np] > 0)
         ):
+            self._clear_moe_lora_mapping()
             return None
 
         global_mapping = np.repeat(
@@ -838,6 +830,9 @@ class PCPManager:
         self, input_batch: InputBatch
     ) -> InputBatch:
         """Stage a capture or dummy batch in persistent PCP input buffers."""
+        # DP dummy steps can replay FULL graphs without a real-batch mapping
+        # rebuild; dummy tokens must not consume the previous batch's slots.
+        self._clear_moe_lora_mapping()
         input_buffers = self.input_buffers
         num_reqs = input_batch.num_reqs_after_padding
         num_tokens = input_batch.num_tokens_after_padding

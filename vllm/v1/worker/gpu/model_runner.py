@@ -54,7 +54,6 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import FusedMoEWithLoRA
-from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -206,6 +205,16 @@ from vllm.v1.worker.utils import (
 from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 
 logger = init_logger(__name__)
+
+
+def _collect_moe_lora_layers(
+    model: nn.Module, expert_lora_supported: bool
+) -> list[FusedMoEWithLoRA]:
+    if not expert_lora_supported:
+        return []
+    return [
+        module for module in model.modules() if isinstance(module, FusedMoEWithLoRA)
+    ]
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -401,23 +410,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tasks.extend(PoolingRunner.get_supported_tasks(self.model))
         return tuple(tasks)
 
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        loaded = super().add_lora(lora_request)
-        if not loaded or self.pcp_manager is None:
-            return loaded
-
-        adapter = self.lora_manager.get_adapter(lora_request.lora_int_id)
-        if adapter is None:
-            return loaded
-        try:
-            self.pcp_manager.validate_lora_adapter(
-                adapter, self.pcp_manager.expert_lora_supported
-            )
-        except NotImplementedError:
-            self.lora_manager.remove_adapter(lora_request.lora_int_id)
-            raise
-        return loaded
-
     def load_model(
         self,
         load_dummy_weights: bool = False,
@@ -445,15 +437,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model = self.load_lora_model(
                     self.model, self.vllm_config, self.device
                 )
-                if self.pcp_manager is not None:
-                    self.pcp_manager.validate_lora_modules(
-                        self.model.modules(), self.pcp_manager.expert_lora_supported
+                pcp_manager = self.pcp_manager
+                if pcp_manager is not None:
+                    self.lora_manager.set_adapter_validator(
+                        lambda adapter: pcp_manager.validate_lora_adapter(
+                            adapter, pcp_manager.expert_lora_supported
+                        )
                     )
-                self._moe_lora_layers = [
-                    module
-                    for module in self.model.modules()
-                    if isinstance(module, FusedMoEWithLoRA)
-                ]
+                self._moe_lora_layers = _collect_moe_lora_layers(
+                    self.model,
+                    pcp_manager is None or pcp_manager.expert_lora_supported,
+                )
 
             if self.use_aux_hidden_state_outputs:
                 assert self.speculative_config is not None

@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import os
 from unittest.mock import MagicMock
 
 import pytest
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 from torch import nn
 
 from vllm.config import ModelConfig, VllmConfig
@@ -33,6 +34,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.model_executor.layers.fused_moe import GateLinear
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -112,6 +114,122 @@ def test_moe_format_validation_allows_supported_layouts(
     adapter.is_3d_lora_weight = declared_3d
 
     manager._validate_moe_lora_format(adapter)
+
+
+def _make_moe_target_manager(
+    *, target_modules=None, modules=None, model=None, model_is_moe=True
+) -> LoRAModelManager:
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.modules = modules or {}
+    manager.model = model or nn.Module()
+    manager._is_moe_model_config = model_is_moe
+    manager.lora_config = LoRAConfig(target_modules=target_modules)
+    manager.packed_modules_mapping = {}
+    return manager
+
+
+def _make_module_lora(module_name: str) -> LoRAModel:
+    return LoRAModel(
+        7,
+        8,
+        {
+            module_name: LoRALayerWeights(
+                module_name, 8, 16, torch.zeros(8, 4), torch.zeros(4, 8)
+            )
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    ["model.layers.0.mlp.experts.0.gate_proj", "model.layers.9.experts.gate_up_proj"],
+)
+def test_reject_expert_lora_without_expert_target(module_name):
+    manager = _make_moe_target_manager(
+        target_modules=["gate_proj", "up_proj", "down_proj"]
+    )
+
+    with pytest.raises(ValueError, match="routed-expert LoRA weights") as exc_info:
+        manager._validate_moe_lora_targets(_make_module_lora(module_name))
+
+    message = str(exc_info.value)
+    assert "adapter 7" in message
+    assert module_name in message
+    assert "silently ignored" in message
+    assert "--lora-target-modules" in message
+
+
+def test_reject_expert_lora_without_matching_wrapper():
+    manager = _make_moe_target_manager(
+        modules={
+            "model.layers.0.mlp.experts": FusedMoEWithLoRA.__new__(FusedMoEWithLoRA)
+        }
+    )
+
+    with pytest.raises(ValueError, match="model.layers.1.mlp.experts"):
+        manager._validate_moe_lora_targets(
+            _make_module_lora("model.layers.1.mlp.experts.0.down_proj")
+        )
+
+
+def test_allow_expert_lora_with_matching_wrappers():
+    for wrapper_cls in (FusedMoEWithLoRA, FusedMoE3DWithLoRA):
+        modules = {
+            f"model.layers.{layer}.mlp.experts": wrapper_cls.__new__(wrapper_cls)
+            for layer in (0, 1)
+        }
+        manager = _make_moe_target_manager(modules=modules)
+        for layer in (0, 1):
+            manager._validate_moe_lora_targets(
+                _make_module_lora(f"model.layers.{layer}.mlp.experts.0.down_proj")
+            )
+
+
+@pytest.mark.parametrize(
+    "wrapper_prefix",
+    [
+        "language_model.model.layers.0.mlp.experts",
+        "language_model.layers.0.mlp.experts",
+    ],
+)
+def test_allow_expert_lora_with_mm_text_prefix(wrapper_prefix):
+    manager = _make_moe_target_manager(
+        modules={wrapper_prefix: FusedMoEWithLoRA.__new__(FusedMoEWithLoRA)}
+    )
+    manager.supports_mm = True
+    manager.mm_mapping = MultiModelKeys(language_model=["language_model"])
+    manager._validate_moe_lora_targets(
+        _make_module_lora("model.layers.0.mlp.experts.0.down_proj")
+    )
+
+
+@pytest.mark.parametrize("target_modules", [None, ["experts"], ["experts.w1"]])
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "model.layers.9.experts.w1",
+        "model.layers.9.mlp.experts.0.down_proj",
+    ],
+)
+def test_allow_expert_lora_on_pipeline_rank_without_moe(target_modules, module_name):
+    model = nn.Module()
+    model.add_module("model", nn.Module())
+    model.model.add_module(
+        "layers", nn.ModuleList([PPMissingLayer() for _ in range(10)])
+    )
+    manager = _make_moe_target_manager(target_modules=target_modules, model=model)
+    manager._validate_moe_lora_targets(_make_module_lora(module_name))
+
+
+def test_reject_expert_lora_on_non_moe_model():
+    manager = _make_moe_target_manager(model_is_moe=False)
+    with pytest.raises(ValueError, match="routed-expert LoRA weights"):
+        manager._validate_moe_lora_targets(_make_module_lora("experts.0.down_proj"))
+
+
+def test_allow_attention_lora_without_expert_target():
+    manager = _make_moe_target_manager(target_modules=["q_proj"])
+    manager._validate_moe_lora_targets(_make_module_lora("self_attn.q_proj"))
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -1020,6 +1138,63 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
     )
     assert punica_wrapper is not None
     assert punica_wrapper.device == device
+
+
+def test_rejected_adapter_validator_does_not_pollute_cache(tmp_path):
+    worker_manager = WorkerLoRAManager.__new__(WorkerLoRAManager)
+    adapter_manager = _make_moe_target_manager()
+    adapter_manager.supported_lora_modules = ["q_proj"]
+    adapter_manager.moe_ep_load_spec = None
+    adapter_manager.unsupported_lora_modules = set()
+    adapter_manager._enable_mixed_moe_lora_format = False
+    adapter_manager._classification_head = None
+    adapter_manager._registered_adapters = AdapterLRUCache(
+        1, adapter_manager.deactivate_adapter
+    )
+    worker_manager._adapter_manager = adapter_manager
+    worker_manager._lora_model_cls = LoRAModel
+    worker_manager.max_position_embeddings = 16
+    worker_manager.vocab_size = 16
+    worker_manager.lora_config = LoRAConfig(max_lora_rank=8, lora_dtype=DEFAULT_DTYPE)
+    worker_manager._adapter_validator = None
+
+    adapter_dir = tmp_path / "lora_adapter"
+    adapter_dir.mkdir()
+    save_file(
+        {
+            "base_model.model.q_proj.lora_A.weight": torch.zeros(8, 4),
+            "base_model.model.q_proj.lora_B.weight": torch.zeros(4, 8),
+        },
+        str(adapter_dir / "adapter_model.safetensors"),
+    )
+    (adapter_dir / "adapter_config.json").write_text(
+        json.dumps(
+            {
+                "peft_type": "LORA",
+                "r": 8,
+                "lora_alpha": 16,
+                "target_modules": ["q_proj"],
+            }
+        )
+    )
+    request = LoRARequest("adapter", 1, str(adapter_dir))
+    validated_ids = []
+
+    def reject_adapter(adapter: LoRAModel) -> None:
+        validated_ids.append(adapter.id)
+        raise ValueError("rejected by worker validation")
+
+    worker_manager.set_adapter_validator(reject_adapter)
+    with pytest.raises(ValueError, match="rejected by worker validation"):
+        worker_manager.add_adapter(request)
+    assert validated_ids == [1]
+    assert worker_manager.list_adapters() == set()
+
+    worker_manager.set_adapter_validator(lambda adapter: None)
+    loaded = worker_manager._load_adapter(request)
+    assert loaded.loras["q_proj"].lora_a.shape == (8, 4)
+    assert loaded.loras["q_proj"].lora_b.shape == (4, 8)
+    assert worker_manager.list_adapters() == set()
 
 
 @pytest.mark.parametrize("device", DEVICES)
