@@ -306,6 +306,14 @@ async def test_streaming_logprobs(client: OpenAI, model_name: str):
         "Expected at least one top_logprobs entry across all delta events"
     )
 
+    text_done_events = [e for e in events if e.type == "response.output_text.done"]
+    assert len(text_done_events) == 1
+    delta_tokens = [lp.token for e in text_delta_events for lp in e.logprobs]
+    assert [lp.token for lp in text_done_events[0].logprobs] == delta_tokens
+    for lp in text_done_events[0].logprobs:
+        assert lp.top_logprobs is not None
+        assert len(lp.top_logprobs) <= 3
+
     # Verify the completed event still has valid output
     completed = events[-1]
     assert completed.type == "response.completed"
