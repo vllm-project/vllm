@@ -62,6 +62,7 @@ class TestResponsesRequestSamplingParams:
             stop=["END", "STOP"],
             stop_token_ids=[42, 43],
             ignore_eos=True,
+            min_tokens=10,
             spaces_between_special_tokens=False,
             thinking_token_budget=128,
             vllm_xargs={"custom": "value"},
@@ -74,9 +75,21 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.stop == ["END", "STOP"]
         assert sampling_params.stop_token_ids == [42, 43]
         assert sampling_params.ignore_eos is True
+        assert sampling_params.min_tokens == 10
         assert sampling_params.spaces_between_special_tokens is False
         assert sampling_params.thinking_token_budget == 128
         assert sampling_params.extra_args == {"custom": "value"}
+
+    def test_min_tokens_mapping(self):
+        """Test that min_tokens is correctly mapped to SamplingParams."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            min_tokens=25,
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+        assert sampling_params.min_tokens == 25
 
     def test_stop_string_conversion(self):
         """Test that single stop string is converted to list."""
@@ -102,6 +115,7 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.repetition_penalty == 1.0  # None → 1.0
         assert sampling_params.stop == []  # Empty list
         assert sampling_params.thinking_token_budget is None
+        assert sampling_params.min_tokens == 0
         assert sampling_params.extra_args == {}  # Empty dict
 
     def test_null_top_logprobs_is_same_as_omitted(self):
