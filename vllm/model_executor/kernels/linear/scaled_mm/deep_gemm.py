@@ -49,6 +49,12 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return False, "DeepGEMM is only supported on cuda platform"
         if not is_deep_gemm_supported():
             return False, "Currently, only Hopper and Blackwell GPUs are supported."
+        if envs.VLLM_BATCH_INVARIANT and (
+            compute_capability // 10 == 12
+            if compute_capability is not None
+            else current_platform.is_device_capability_family(120)
+        ):
+            return False, "SM12x split K depends on M; not batch invariant"
         return True, None
 
     @classmethod

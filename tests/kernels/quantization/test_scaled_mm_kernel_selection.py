@@ -31,6 +31,13 @@ from vllm.model_executor.kernels.linear import (
     init_int8_linear_kernel,
     register_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+    DeepGemmFp8BlockScaledMMKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+    FlashInferFp8BlockScaledMMKernel,
+    FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+)
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -79,6 +86,31 @@ def test_linear_backend_override_is_quantization_specific():
         assert _get_linear_backend(quantization="nvfp4_w4a16") == "humming"
         assert _get_linear_backend(quantization="nvfp4_w4a4") == "cutlass"
         assert _get_linear_backend(quantization="fp8_w8a8") == "cutlass"
+
+
+@pytest.mark.parametrize(
+    ("capability", "batch_invariant", "expected"),
+    [(90, True, True), (120, True, False), (120, False, True)],
+)
+@patch.object(
+    FlashInferFp8BlockScaledMMKernel, "is_supported", return_value=(True, None)
+)
+@patch(
+    "vllm.model_executor.kernels.linear.scaled_mm.deep_gemm.is_deep_gemm_supported",
+    return_value=True,
+)
+@patch("vllm.model_executor.kernels.linear.scaled_mm.deep_gemm.current_platform")
+def test_deep_gemm_fp8_block_batch_invariance_support(
+    platform_mock, _, __, monkeypatch, capability, batch_invariant, expected
+):
+    """DeepGEMM on SM12x must not serve batch-invariant FP8 block linears,
+    directly or through the FlashInfer/DeepGEMM dynamic kernel."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", str(int(batch_invariant)))
+    platform_mock.is_device_capability_family.return_value = capability // 10 == 12
+    assert DeepGemmFp8BlockScaledMMKernel.is_supported()[0] is expected
+    assert DeepGemmFp8BlockScaledMMKernel.is_supported(capability)[0] is expected
+    dynamic = FlashInferFp8DeepGEMMDynamicBlockScaledKernel
+    assert dynamic.is_supported()[0] is expected
 
 
 @pytest.mark.parametrize("strict", [False, True])
