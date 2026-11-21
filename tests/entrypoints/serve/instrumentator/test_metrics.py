@@ -187,6 +187,7 @@ EXPECTED_METRICS_V1 = [
     "vllm:kv_cache_usage_perc",
     "vllm:prefix_cache_queries",
     "vllm:prefix_cache_hits",
+    "vllm:kv_cache_evictions",
     "vllm:num_preemptions_total",
     "vllm:admission_rejections_total",
     "vllm:prompt_tokens_total",
