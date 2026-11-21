@@ -30,7 +30,60 @@ from vllm.distributed.eplb.rebalance_execute import (
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
-from vllm.v1.worker.gpu.eplb_utils import draft_model_supports_eplb
+from vllm.v1.worker.gpu.eplb_utils import EPLBController, draft_model_supports_eplb
+
+
+@pytest.mark.parametrize("phase", ["all", "prefill", "decode"])
+def test_load_collection_phase_updates_shared_record_buffer(phase):
+    """Switch collection phases in place, preserving the graph-visible buffer."""
+    config = ParallelConfig(eplb_config=EPLBConfig(load_collection_phase=phase))
+    controller = EPLBController(config, torch.device("cpu"))
+    controller.state = EplbState(config, torch.device("cpu"))
+    record = torch.ones((), dtype=torch.bool)
+    controller.state.should_record_tensor = record
+    for has_prefill in (True, False, True):
+        controller.set_batch_phase(has_prefill)
+        expected = phase == "all" or (has_prefill == (phase == "prefill"))
+        assert controller.state.should_record_tensor is record
+        torch.testing.assert_close(record, torch.tensor(expected))
+
+
+def test_phase_filter_survives_nested_warmup_suppression():
+    """Warmup cannot replace the serving phase or leave its record gate stale."""
+    config = ParallelConfig(eplb_config=EPLBConfig(load_collection_phase="prefill"))
+    controller = EPLBController(config, torch.device("cpu"))
+    controller.state = EplbState(config, torch.device("cpu"))
+    record = torch.ones((), dtype=torch.bool)
+    controller.state.should_record_tensor = record
+    for has_prefill in (True, False, True):
+        controller.set_batch_phase(has_prefill)
+        with controller.suppress():
+            with controller.suppress():
+                controller.set_batch_phase(not has_prefill)
+                torch.testing.assert_close(record, torch.tensor(False))
+            torch.testing.assert_close(record, torch.tensor(False))
+        torch.testing.assert_close(record, torch.tensor(has_prefill))
+
+
+def test_matching_phase_does_not_start_sampling_early():
+    """A matching phase still respects the existing sampling window."""
+    config = ParallelConfig(
+        eplb_config=EPLBConfig(
+            window_size=1, step_interval=10, load_collection_phase="prefill"
+        )
+    )
+    state = EplbState(config, torch.device("cpu"))
+    state.expert_load_window_size = config.eplb_config.window_size
+    state.expert_rearrangement_step_interval = config.eplb_config.step_interval
+    record = torch.zeros((), dtype=torch.bool)
+    state.should_record_tensor = record
+    state.set_batch_phase(True)
+    torch.testing.assert_close(record, torch.tensor(False))
+
+
+def test_load_collection_phase_rejects_unknown_phase():
+    with pytest.raises(ValueError, match="load_collection_phase"):
+        EPLBConfig(load_collection_phase="mixed")
 
 
 @pytest.mark.parametrize(
