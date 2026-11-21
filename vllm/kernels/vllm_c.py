@@ -95,12 +95,9 @@ def rope_supported_args(
     cos_sin_cache: Tensor,
     is_neox: bool,
 ) -> bool:
-    # The C++ kernels need a [max_position, rot_dim] cache (FoPE uses 3D).
-    return (
-        cos_sin_cache.dim() == 2
-        and query.dtype == cos_sin_cache.dtype
-        and (key is None or key.dtype == query.dtype)
-    )
+    # The C++ kernels need a [max_position, rot_dim] cache (FoPE uses 3D). They
+    # read it in its own dtype, so it need not match the query's.
+    return cos_sin_cache.dim() == 2 and (key is None or key.dtype == query.dtype)
 
 
 def rotary_embedding_functional(

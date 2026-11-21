@@ -5,6 +5,7 @@ import pytest
 import torch
 
 import vllm.envs as envs
+from vllm import ir
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
@@ -66,6 +67,59 @@ def test_rotary_embedding_torch_compile_with_custom_op(monkeypatch):
     with set_current_vllm_config(vllm_config):
         model = RotaryEmbeddingCompileModule(vllm_config=vllm_config)
         model(positions, query, key)
+        assert model._compiled_bytecode is not None
+        assert "update" not in model._compiled_bytecode.co_names
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="GPU RoPE kernels")
+@pytest.mark.parametrize("provider", ["vllm_c", "aiter"])
+def test_rotary_embedding_torch_compile_keeps_fp32_table(monkeypatch, provider):
+    """A compiled BF16 model rotates with its FP32 table and leaves it as is."""
+    impl = ir.ops.rotary_embedding.impls[provider]
+    if not impl.supported:
+        pytest.skip(f"{provider} RoPE is not supported on this platform")
+    envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1")
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "0")
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    device = DEVICE_TYPE
+    positions = torch.arange(16, device=device)
+    query = torch.randn(16, 32, device=device, dtype=torch.bfloat16)
+    key = torch.randn(16, 32, device=device, dtype=torch.bfloat16)
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=torch.bfloat16),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            backend="inductor",
+            custom_ops=["+rotary_embedding"],
+            cudagraph_mode=CUDAGraphMode.NONE,
+            cudagraph_num_of_warmups=0,
+        ),
+    )
+    vllm_config.kernel_config.ir_op_priority.rotary_embedding = [provider, "native"]
+
+    with (
+        set_current_vllm_config(vllm_config),
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
+    ):
+        model = RotaryEmbeddingCompileModule(vllm_config=vllm_config).to(device)
+        rope = model.rotary_emb
+        table = rope.cos_sin_cache
+        saved_table = table.clone()
+        assert table.dtype == torch.float32
+        args = (rope.head_size, saved_table, rope.is_neox_style)
+        assert impl.supports_args(positions, query, key, *args)
+        compiled = model(positions, query.clone(), key.clone())
+        # The provider's in-place kernel on the same FP32 table.
+        ref_query, ref_key = impl.impl_fn(positions, query.clone(), key.clone(), *args)
+        expected = ref_query + ref_key
+        torch.testing.assert_close(compiled, expected, atol=1e-3, rtol=1e-3)
+        assert compiled.dtype == torch.bfloat16
+        assert rope.cos_sin_cache is table
+        assert rope.cos_sin_cache.dtype == torch.float32
+        assert torch.equal(table, saved_table)
         assert model._compiled_bytecode is not None
         assert "update" not in model._compiled_bytecode.co_names
 

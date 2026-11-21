@@ -250,7 +250,11 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             )
             return query, key
 
-        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+        # The kernel providers read the table in its own dtype and compute in
+        # FP32, so an FP32 table is passed as is instead of a query-dtype copy.
+        cos_sin_cache = self.cos_sin_cache
+        if cos_sin_cache.device != query.device:
+            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
 
         # Eager callers rely on in-place RoPE, but a non-inplace provider (e.g.
         # the native fallback) returns new tensors. Under torch.compile inputs
