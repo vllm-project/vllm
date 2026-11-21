@@ -60,7 +60,6 @@ from vllm.multimodal.inputs import (
     VideoItem,
 )
 from vllm.multimodal.parse import (
-    ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
     MultiModalDataParser,
@@ -161,7 +160,7 @@ class Molmo2MultiModalInputs(TypedDict, total=False):
     videos: Molmo2VideoInputs | None
 
 
-@dataclass
+@dataclass(slots=True)
 class VitConfig:
     """Config for a vision transformer."""
 
@@ -186,7 +185,7 @@ class VitConfig:
         return h // self.image_patch_size, w // self.image_patch_size
 
 
-@dataclass
+@dataclass(slots=True)
 class AdapterConfig:
     """Config for a vit-llm adapter."""
 
@@ -201,7 +200,7 @@ class AdapterConfig:
     text_hidden_size: int = 3584
 
 
-@dataclass
+@dataclass(slots=True)
 class TextConfig:
     """Configuration for a text model transformer."""
 
@@ -1716,16 +1715,15 @@ class Molmo2ProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
         processor = self.get_hf_processor()
         video_processor = processor.video_processor
 
         num_frames = video_processor.num_frames
-        max_videos = mm_counts.get("video", 0)
         max_total_frames = self._get_max_video_frames(seq_len, processor)
         max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1),
+            max_total_frames // max(num_videos, 1),
             num_frames,
         )
         return max(max_frames_per_video, 1)
@@ -1872,7 +1870,7 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
             processor = self.info.get_hf_processor()
             video_size = processor.video_processor.size
             target_num_frames = self.info.get_num_frames_with_most_features(
-                seq_len, mm_counts
+                seq_len, num_videos
             )
 
             video_overrides = mm_options.get("video")
@@ -1988,7 +1986,6 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             return res
 
         tokenizer = hf_processor.tokenizer
-        image_processor = hf_processor.image_processor
 
         if videos := hf_data.pop("videos", []):
             assert isinstance(videos, Sequence)
@@ -2088,25 +2085,9 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             hf_kwargs,
         )
 
-        if (images := hf_data.get("images")) is not None:
-            mm_items = self.info.parse_mm_data({"image": images}, validate=False)
-            parsed_images = mm_items.get_items("image", ImageProcessorItems)
-            image_sizes = [
-                parsed_images.get_image_size(i) for i in range(len(parsed_images))
-            ]
-
-            # For each image: tiling_h * tiling_w + global view
-            tilings = [
-                self.info.select_tiling(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
-                    image_processor=image_processor,
-                )
-                for image_size in image_sizes
-            ]
-            num_crops = torch.tensor(tilings).prod(-1) + 1
-            assert sum(num_crops) == len(processed_data["pixel_values"])
-            assert sum(num_crops) == processed_data["image_num_crops"].sum().item()
+        if hf_data.get("images") is not None:
+            num_crops = processed_data["image_num_crops"]
+            assert num_crops.sum().item() == len(processed_data["pixel_values"])
 
             image_grids = processed_data.pop("image_grids")
             image_num_pooled_patches = image_grids[:, :2].prod(dim=1) + image_grids[
@@ -2213,52 +2194,20 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         ]
 
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_use_col_tokens = processor.image_use_col_tokens
-        use_single_crop_col_tokens = processor.use_single_crop_col_tokens
-        use_single_crop_start_token = processor.use_single_crop_start_token
         video_use_col_tokens = processor.video_use_col_tokens
         use_frame_special_tokens = processor.use_frame_special_tokens
 
         tokenizer = processor.tokenizer
         vocab = tokenizer.get_vocab()
 
-        image_processor = processor.image_processor
         video_processor = processor.video_processor
 
         def get_image_replacement_molmo2(item_idx: int):
-            images = mm_items.get_items("image", ImageProcessorItems)
-            image = images.get(item_idx)
-            image = exif_transpose(image)
-
-            resize_ncols, resize_nrows = self.info.get_base_grid_size(image_processor)
-            if use_single_crop_col_tokens is not None:
-                use_col_tokens = use_single_crop_col_tokens
-            else:
-                use_col_tokens = image_use_col_tokens
-            if use_single_crop_start_token:
-                start_id = low_res_im_start_id
-            else:
-                start_id = img_start_id
-            extra_row = [img_patch_id] * resize_ncols + [img_col_id] * int(
-                use_col_tokens
+            image_tokens = out_mm_kwargs["image"][item_idx]["image_tokens"].data
+            assert isinstance(image_tokens, torch.Tensor)
+            return PromptUpdateDetails.select_token_ids(
+                image_tokens.tolist(), emb_tok_ids
             )
-            extra_joint = [start_id] + extra_row * resize_nrows + [img_end_id]
-
-            image_size = get_image_size(image)
-
-            ncols, nrows = self.info.get_patches_grid_size(
-                image_height=image_size.height,
-                image_width=image_size.width,
-                image_processor=image_processor,
-            )
-
-            joint_row = [img_patch_id] * ncols + [img_col_id] * int(
-                image_use_col_tokens
-            )
-            joint = [img_start_id] + joint_row * nrows + [img_end_id]
-            img_token_ids = extra_joint + joint
-
-            return PromptUpdateDetails.select_token_ids(img_token_ids, emb_tok_ids)
 
         def get_video_replacement_molmo2(item_idx: int):
             video, metadata = mm_items["video"][item_idx]

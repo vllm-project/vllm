@@ -19,7 +19,6 @@ def test_gemma4_mtp_acceptance_lengths(dataset: str, vllm_runner):
         vllm_runner,
         spec_config={
             "model": "google/gemma-4-E4B-it",
-            "trust_remote_code": True,
             "speculative_config": {
                 "method": "mtp",
                 "model": "google/gemma-4-E4B-it-assistant",

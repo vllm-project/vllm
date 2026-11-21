@@ -15,15 +15,14 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CrossAttentionManager,
+    MambaManager,
+    get_kv_cache_kind,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CrossAttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheConfig,
-    MambaSpec,
-    get_kv_cache_spec_kind,
-    get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -137,9 +136,7 @@ class KVCacheManager:
         hash_block_size: int,
         max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
-        use_eagle: bool = False,
         num_hash_lookahead_tokens: int = 0,
-        num_prefill_lookahead: int = 0,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
@@ -157,7 +154,6 @@ class KVCacheManager:
 
         self.enable_caching = enable_caching
         self.enable_kv_cache_events = enable_kv_cache_events
-        self.use_eagle = use_eagle
         self.log_stats = log_stats
         self.metrics_collector = metrics_collector
         # FIXME: make prefix cache stats conditional on log_stats. We still need
@@ -169,7 +165,6 @@ class KVCacheManager:
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             max_in_flight_tokens=max_in_flight_tokens,
-            use_eagle=self.use_eagle,
             num_hash_lookahead_tokens=num_hash_lookahead_tokens,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
@@ -178,18 +173,13 @@ class KVCacheManager:
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.metrics_collector,
-            num_prefill_lookahead=num_prefill_lookahead,
         )
         # One predicate, read by both sides of the feature, so the scheduler
         # cannot end a chunk at a junction the manager would refuse -- a refused
         # junction costs a forward pass and displaces the block-boundary stop.
-        # Multi-module MTP is excluded because ``cache_blocks`` then hands the
-        # manager ``num_computed - num_reprefillable`` rather than the chunk end.
         self.mamba_shared_prefix_checkpoint = (
             enable_mamba_shared_prefix_checkpoint
-            and bool(self.coordinator.eagle_group_ids)
             and self.coordinator.enable_partial_hash_hits
-            and self.coordinator.num_reprefillable_tokens == 0
         )
         if self.mamba_shared_prefix_checkpoint:
             for manager in self.coordinator.single_type_managers:
@@ -210,8 +200,8 @@ class KVCacheManager:
         self.watermark_blocks = int(watermark * kv_cache_config.num_blocks)
         self.kv_cache_event_metadata = tuple(
             (
-                get_kv_cache_spec_kind(group.kv_cache_spec).value,
-                get_kv_cache_spec_sliding_window(group.kv_cache_spec),
+                get_kv_cache_kind(group.manager_config, group.distinct_specs).value,
+                getattr(group.manager_config.params, "sliding_window", None),
             )
             for group in kv_cache_config.kv_cache_groups
         )
@@ -324,7 +314,7 @@ class KVCacheManager:
         max_cache_hit_length = request.get_max_cache_hit_length(max_cache_hit_length)
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
-                request.block_hashes, max_cache_hit_length
+                request.block_hashes, max_cache_hit_length, request.num_tokens
             )
         )
 
@@ -385,7 +375,7 @@ class KVCacheManager:
         max_cache_hit_length = request.get_max_cache_hit_length(max_cache_hit_length)
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-            request.block_hashes, max_cache_hit_length
+            request.block_hashes, max_cache_hit_length, request.num_tokens
         )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its
@@ -619,6 +609,7 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                num_tokens_main_model=num_tokens_main_model,
                 skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 
@@ -656,7 +647,7 @@ class KVCacheManager:
             request: The request to free the blocks.
 
         """
-        self.coordinator.free(request.request_id)
+        self.coordinator.free(request)
 
     def remove_skipped_blocks(
         self,
@@ -690,7 +681,7 @@ class KVCacheManager:
             The request's blocks in allocation order.
 
         """
-        return self.coordinator.pop_blocks_for_free(request.request_id)
+        return self.coordinator.pop_blocks_for_free(request)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """Evict blocks from the prefix cache by their block IDs.
@@ -762,14 +753,14 @@ class KVCacheManager:
         block_ids = self.get_block_ids(request_id)
         clipped_block_ids: list[list[int]] = []
         for group, ids in zip(self.kv_cache_config.kv_cache_groups, block_ids):
-            spec = group.kv_cache_spec
-            if not isinstance(spec, AttentionSpec) or isinstance(
-                spec, (CrossAttentionSpec, EncoderOnlyAttentionSpec)
-            ):
+            is_attention = all(
+                isinstance(spec, AttentionSpec) for spec in group.distinct_specs
+            )
+            if not is_attention or issubclass(group.manager_cls, CrossAttentionManager):
                 clipped_block_ids.append(ids)
                 continue
 
-            num_valid_blocks = cdiv(num_computed_tokens, spec.block_size)
+            num_valid_blocks = cdiv(num_computed_tokens, group.block_size)
             clipped_block_ids.append(ids[:num_valid_blocks])
         return tuple(clipped_block_ids)
 
@@ -780,13 +771,10 @@ class KVCacheManager:
             self.kv_cache_config.kv_cache_groups,
             self.get_blocks(request.request_id).blocks,
         ):
-            if not group.kv_cache_spec.prefix_cacheable:
+            if not group.prefix_cacheable:
                 continue
-            if isinstance(
-                group.kv_cache_spec,
-                (CrossAttentionSpec, EncoderOnlyAttentionSpec),
-            ):
-                # Cross-attention and encoder-only groups are not prefix cached.
+            if issubclass(group.manager_cls, CrossAttentionManager):
+                # Cross-attention groups are not prefix cached.
                 continue
 
             # Coverage grows along the block table: the last hashed block has the most.
@@ -838,7 +826,7 @@ class KVCacheManager:
             self.kv_cache_config.kv_cache_groups,
             strict=True,
         ):
-            if not group.kv_cache_spec.prefix_cacheable:
+            if not group.prefix_cacheable:
                 # Scratch groups (e.g. the CSA compressor ring) hold a fixed
                 # block covering no token range, so a lookup result never
                 # carries computed blocks for them and their block size does
@@ -848,7 +836,7 @@ class KVCacheManager:
                 continue
             assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
-            if isinstance(group.kv_cache_spec, MambaSpec):
+            if issubclass(group.manager_cls, MambaManager):
                 num_blocks = min(num_blocks, len(group_blocks))
             else:
                 assert num_blocks <= len(group_blocks)
@@ -899,9 +887,9 @@ class KVCacheManager:
         """Drain this step's boundary-state hand-offs for a KV connector.
 
         Returns `{request_id: [(group_id, block_id, boundary_tokens), ...]}`
-        for mamba "align" boundary states: the
+        for mamba boundary states: the
         request's committed boundary-state snapshots and, on a sub-block partial
-        hit, the CoW copy of its last-prompt-boundary state. Only mamba "align"
+        hit, the CoW copy of its last-prompt-boundary state. Only mamba
         groups contribute; empty otherwise. A connector reads the referenced
         blocks — never resolving them positionally — and offloads them so a
         later request can hit that prefix.

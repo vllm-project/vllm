@@ -35,6 +35,7 @@ from vllm.utils.torch_utils import PIN_MEMORY, TORCH_DTYPE_TO_NUMPY_DTYPE
 if TYPE_CHECKING:
     import numpy as np
 
+    from vllm.config import ModelConfig
     from vllm.v1.engine.coordinator import DPCoordinator
     from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
 
@@ -295,6 +296,7 @@ class RustFrontendProcessManager:
         data_parallel_size: int,
         stats_update_address: str | None = None,
         grpc_sock: Any | None = None,
+        model_config: "ModelConfig | None" = None,
     ):
         import os
         import subprocess
@@ -351,6 +353,14 @@ class RustFrontendProcessManager:
         if model_tag is not None:
             args_dict["model_tag"] = model_tag
 
+        # Object storage models (s3://, gs://, az://) have their config and
+        # tokenizer pulled into a local directory, which the Rust frontend can
+        # read; it can't read the object storage URI. Keep serving the URI as
+        # the model name, like the Python frontend.
+        if model_config is not None and model_config.model_weights:
+            args_dict["model_tag"] = model_config.model
+            args_dict.setdefault("served_model_name", [model_config.served_model_name])
+
         # The Rust `frontend` subcommand parses --args-json via serde_json,
         # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
         # declarations on SharedRuntimeArgs fields. Forward the env-driven
@@ -360,7 +370,7 @@ class RustFrontendProcessManager:
         args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
         args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
 
-        # `--log-level`, `--logging-config` and `--log-config-file` default to
+        # `--log-level` and `--logging-config` default to
         # argparse.SUPPRESS, so get_non_default_args() never sees them;
         # cli/main.py has already merged them into `args.logging_config`.
         if logging_config := getattr(args, "logging_config", None):
