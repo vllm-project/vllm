@@ -459,16 +459,11 @@ mod tests {
 
     #[test]
     fn mistral_without_args_token_parses_json_arrays() {
-        let tokenizer = TestTokenizer::new().with_special_token(TOOL_CALLS, 256);
-        let mut parser = MistralToolParser::create(&test_tools(), Arc::new(tokenizer)).unwrap();
-        let mut output = ToolParserOutput::default();
+        let tokenizer = Arc::new(TestTokenizer::new().with_special_token(TOOL_CALLS, 256));
+        let mut parser = MistralToolParser::create(&test_tools(), tokenizer.clone()).unwrap();
         let text = r#"[TOOL_CALLS] [{"name": "add", "arguments": {"x": 1}}]"#;
-        parser
-            .parse_into(vllm_tokenizer::DecodedText::unattributed(text), &mut output)
-            .unwrap();
-        output.append(parser.finish().unwrap());
-
-        let output = output.coalesce();
+        assert!(parser.preserve_special_tokens());
+        let output = collect_attributed_stream(parser.as_mut(), tokenizer.as_ref(), &[text]);
         assert_eq!(output.calls()[0].name.as_deref(), Some("add"));
         assert_eq!(output.calls()[0].arguments, r#"{"x": 1}"#);
     }
