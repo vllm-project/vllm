@@ -796,7 +796,13 @@ def request_memory(
 ) -> int:
     """Calculate the amount of memory required by vLLM, then validate
     that the current amount of free memory is sufficient for that.
+
+    A nonzero `kv_cache_memory_bytes` replaces the utilization budget, so the
+    free memory is returned without checking it against the budget.
     """
+    if cache_config.kv_cache_memory_bytes:
+        return init_snapshot.free_memory
+
     gpu_memory_utilization = cache_config.resolved_gpu_memory_utilization
     requested_memory = math.ceil(init_snapshot.total_memory * gpu_memory_utilization)
 
