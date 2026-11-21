@@ -21,6 +21,7 @@ from vllm.models.kimi_k3.amd.ops.kda_chunk import (
 )
 from vllm.models.kimi_k3.amd.ops.third_party.kda import chunk_kda_with_fused_gate
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 logger = init_logger(__name__)
 
@@ -54,6 +55,11 @@ def chunk_kda_prefill(
     state_cache: torch.Tensor | None = None,
     state_indices: torch.Tensor | None = None,
     has_initial_state: torch.Tensor | None = None,
+    out_gate: torch.Tensor | None = None,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 1e-5,
+    cu_seqlens_cpu: torch.Tensor | None = None,
+    checkpoint_rows: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run chunk KDA from raw gate and beta projections.
 
@@ -77,7 +83,7 @@ def chunk_kda_prefill(
         backend: `"triton"` (the vendored chunk path), `"fused"` (the
             two-kernel ROCm path; used only when every one of its
             preconditions holds, otherwise the Triton path runs unchanged) or
-            `"gluon"` (AITER's `chunk_kda`).
+            `"gluon"` (AITER's FlashKDA, `chunk_kimi_delta_attn`).
         out: buffer the result must land in. Honoured by both backends, so the
             caller can hand in a slice of its own output and skip a copy.
         checkpoint_state: destination for mid-prefill recurrent state
@@ -91,6 +97,13 @@ def chunk_kda_prefill(
             The returned final state is `None`.
         state_indices: per-sequence cache row.
         has_initial_state: per-sequence flag; false starts from a zero state.
+        out_gate: `"gluon"` only; gate of the fused output norm
+            `rmsnorm(o) * norm_weight * sigmoid(out_gate)`.
+        norm_weight: weight of the fused output norm.
+        norm_eps: epsilon of the fused output norm.
+        cu_seqlens_cpu: `"gluon"` only; host copy of `cu_seqlens`.
+        checkpoint_rows: `"gluon"` only; `checkpoint_state_indices` with
+            NULL_BLOCK_ID already replaced by -1.
 
     Returns:
         The output and, when requested, the final recurrent state.
@@ -116,7 +129,7 @@ def chunk_kda_prefill(
         and can_use_fused_kda_chunk(k.shape[-1], v.shape[-1], k.dtype, FLA_CHUNK_SIZE)
     )
 
-    if checkpoint_offsets is not None and not fused:
+    if checkpoint_offsets is not None and not fused and backend != "gluon":
         raise NotImplementedError(
             "The KDA prefill checkpoint export needs kda_prefill_backend=fused for ROCm"
         )
@@ -148,6 +161,23 @@ def chunk_kda_prefill(
             state_cache=state_cache,
             state_indices=state_indices,
             has_initial_state=has_initial_state,
+            out_gate=out_gate,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            checkpoint_state=checkpoint_state,
+            checkpoint_offsets=checkpoint_offsets,
+            checkpoint_state_indices=(
+                None
+                if checkpoint_offsets is None
+                else checkpoint_rows
+                if checkpoint_rows is not None
+                else torch.where(
+                    checkpoint_state_indices != NULL_BLOCK_ID,
+                    checkpoint_state_indices,
+                    -1,
+                )
+            ),
         )
 
     # Only the fused walk addresses the paged rows directly. The Triton path
