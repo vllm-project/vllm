@@ -76,29 +76,6 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
         pinned.downsample_mode = resolved
         return pinned
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        if not self._has_size_hint("image"):
-            return super().get_image_size_with_most_features()
-        # OCR-only override: source the dummy-input dimension from the image
-        # processor's `scale_resolution` (the slice resize target) rather than the
-        # top-level `config.image_size`. The top-level field is dropped from
-        # `MiniCPMOcrConfig`, and the existing default of 448 was always equal to
-        # `scale_resolution` here. `vision_config.image_size` is the ViT patch grid
-        # (980 for this checkpoint), not the preprocessed image dimension, so it is
-        # not the right value for dummy-input sizing.
-        image_size = self.get_image_processor().scale_resolution
-        max_slice_num = self.get_image_max_slice_num()
-        return ImageSize(width=image_size, height=image_size * max_slice_num)
-
-    def get_video_frame_size_with_most_features(self) -> ImageSize:
-        if not self._has_size_hint("video"):
-            return super().get_video_frame_size_with_most_features()
-        # See `get_image_size_with_most_features` for why OCR sources from
-        # `scale_resolution` instead of the (now-removed) top-level `config.image_size`.
-        image_size = self.get_image_processor().scale_resolution
-        max_slice_num = self.get_video_max_slice_num()
-        return ImageSize(width=image_size, height=image_size * max_slice_num)
-
     def _compute_visual_tokens(
         self,
         image_size: ImageSize,

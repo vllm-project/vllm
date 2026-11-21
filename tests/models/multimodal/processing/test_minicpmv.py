@@ -161,8 +161,9 @@ def _num_video_embeds(processor, video: tuple) -> int:
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "image_size", "num_tokens"),
     [
-        (None, (1265, 1112), 720),
-        ({"max_slice_nums": 4}, (2901, 139), 362),
+        (None, (84, 16726), 797),
+        ({"max_slice_nums": 4}, (6803, 60), 429),
+        ({"images_kwargs": {"max_slice_nums": 1}}, (40, 8000), 113),
     ],
 )
 def test_minicpmv4_6_image_budget_covers_largest_image(
@@ -215,6 +216,120 @@ def test_minicpmv4_6_video_budget_covers_largest_frames():
     assert budget == num_frames * 720
     assert sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"]) == budget
     assert _num_video_embeds(processor, _video_item(num_frames, 1265, 1112)) == budget
+
+
+@pytest.mark.parametrize(
+    ("modality", "size", "max_ratio"),
+    [
+        ("image", (8040, 40), 200),
+        ("image", (40, 8040), 200),
+        ("video", (2040, 40), 50),
+        ("video", (40, 2040), 50),
+    ],
+)
+def test_minicpmv4_6_rejects_aspect_ratio_above_bound(
+    modality: str,
+    size: tuple[int, int],
+    max_ratio: int,
+):
+    ctx = build_model_context(
+        "openbmb/MiniCPM-V-4_6",
+        limit_mm_per_prompt={"image": 1, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    info = processor.info
+
+    with pytest.raises(ValueError, match=f"must not exceed {max_ratio}, got"):
+        if modality == "image":
+            processor(
+                info.image_pattern,
+                mm_items=info.parse_mm_data({"image": [Image.new("RGB", size)]}),
+                hf_processor_mm_kwargs={},
+            )
+        else:
+            _num_video_embeds(processor, _video_item(2, *size))
+
+
+@pytest.mark.parametrize(
+    ("modality", "hint", "size"),
+    [
+        ("image", {"width": 32}, (32, 6331)),
+        ("image", {"height": 4}, (196, 1)),
+        ("video", {"width": 128, "num_frames": 2}, (127, 6339)),
+        ("video", {"height": 16, "num_frames": 2}, (454, 16)),
+    ],
+)
+def test_minicpmv4_6_dummy_covers_inputs_within_size_hint(
+    modality: str,
+    hint: dict[str, int],
+    size: tuple[int, int],
+):
+    limits: dict[str, object] = {"image": 0, "video": 0}
+    limits[modality] = {"count": 1, **hint}
+    ctx = build_model_context("openbmb/MiniCPM-V-4_6", limit_mm_per_prompt=limits)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    info = processor.info
+    max_tokens = info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len, mm_counts={modality: 1}
+    )
+    assert max_tokens is not None
+    dummy = processor.get_dummy_mm_inputs({modality: 1})
+    dummy_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"][modality])
+    if modality == "image":
+        processed = processor(
+            info.image_pattern,
+            mm_items=info.parse_mm_data({"image": [Image.new("RGB", size)]}),
+            hf_processor_mm_kwargs={},
+        )
+        num_embeds = processed["mm_placeholders"]["image"][0].get_num_embeds()
+    else:
+        num_embeds = _num_video_embeds(processor, _video_item(2, *size))
+
+    assert num_embeds <= dummy_embeds <= max_tokens[modality]
+
+
+@pytest.mark.parametrize(
+    ("modality", "downsample_mode", "hint", "size", "num_frames"),
+    [
+        ("video", "16x", {"width": 300, "height": 1500}, (298, 1350), 16),
+        ("image", "4x", {"width": 448, "height": 3000}, (345, 2919), 1),
+    ],
+)
+def test_minicpmv4_6_budget_ignores_size_hint(
+    modality: str,
+    downsample_mode: str,
+    hint: dict[str, int],
+    size: tuple[int, int],
+    num_frames: int,
+):
+    def build(limits: dict[str, object]):
+        ctx = build_model_context(
+            "openbmb/MiniCPM-V-4_6",
+            mm_processor_kwargs={"downsample_mode": downsample_mode},
+            limit_mm_per_prompt=limits,
+        )
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+        max_tokens = processor.info.get_mm_max_tokens_per_item(
+            seq_len=ctx.model_config.max_model_len, mm_counts={modality: 1}
+        )
+        assert max_tokens is not None
+        return processor, max_tokens[modality]
+
+    limits: dict[str, object] = {"image": 0, "video": 0}
+    _, unhinted_budget = build({**limits, modality: 1})
+    processor, budget = build({**limits, modality: {"count": 1, **hint}})
+    info = processor.info
+    if modality == "image":
+        processed = processor(
+            info.image_pattern,
+            mm_items=info.parse_mm_data({"image": [Image.new("RGB", size)]}),
+            hf_processor_mm_kwargs={},
+        )
+        num_embeds = processed["mm_placeholders"]["image"][0].get_num_embeds()
+    else:
+        num_embeds = _num_video_embeds(processor, _video_item(num_frames, *size))
+
+    assert num_embeds <= budget == unhinted_budget
 
 
 @pytest.mark.parametrize(
