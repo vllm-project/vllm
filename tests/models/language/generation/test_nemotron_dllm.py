@@ -200,7 +200,9 @@ def test_ar_mode_config(explicit_diffusion_config):
         SimpleNamespace(
             attention_config=attention,
             model_config=SimpleNamespace(
-                is_diffusion=False, override_generation_config={}
+                is_diffusion=False,
+                override_generation_config={},
+                hf_config=SimpleNamespace(),
             ),
             diffusion_config=(
                 DiffusionConfig(canvas_length=32) if explicit_diffusion_config else None
@@ -219,6 +221,138 @@ def test_ar_mode_config(explicit_diffusion_config):
         assert attention.flash_attn_version == 3
         assert scheduler.max_num_seqs == SchedulerConfig.DEFAULT_MAX_NUM_SEQS
         assert config.model_config.override_generation_config["max_new_tokens"] is None
+
+
+BIDIRECTIONAL_READS = {"ar_mode": True, "is_causal": False}
+
+
+def _engine_config(
+    tmp_path, hf_overrides, architecture="NemotronLabsDiffusionModel", **engine_args
+):
+    """The engine config of a checkpoint with only a config.json."""
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.transformers_utils.configs import NemotronLabsDiffusionConfig
+
+    NemotronLabsDiffusionConfig(architectures=[architecture]).save_pretrained(tmp_path)
+    return EngineArgs(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        hf_overrides=hf_overrides,
+        **engine_args,
+    ).create_engine_config()
+
+
+def test_bidirectional_reads_config(tmp_path):
+    user = (
+        "vllm.model_executor.models.ming_v3_asr_logits_processor:"
+        "NoRepeatNGramLogitsProcessor"
+    )
+    config = _engine_config(tmp_path, BIDIRECTIONAL_READS, logits_processors=[user])
+    # A bidirectional prompt's keys depend on later tokens, and a prompt
+    # chunk would not attend to the later chunks.
+    assert not config.cache_config.enable_prefix_caching
+    assert not config.scheduler_config.enable_chunked_prefill
+    # Requests without max_tokens read one token.
+    assert config.model_config.override_generation_config["max_new_tokens"] == 1
+    assert config.model_config.logits_processors == [
+        user,
+        "vllm.model_executor.models.nemotron_dllm:NemotronBidirectionalReadValidator",
+    ]
+
+
+@pytest.mark.parametrize("budget,expected", [(2048, 4096), (8192, 8192)])
+def test_bidirectional_reads_fit_each_prompt_in_one_step(tmp_path, budget, expected):
+    """Without chunked prefill, a prompt above the step budget would wait
+    forever, so the budget covers --max-model-len."""
+    config = _engine_config(
+        tmp_path,
+        BIDIRECTIONAL_READS,
+        max_model_len=4096,
+        max_num_batched_tokens=budget,
+    )
+    assert config.scheduler_config.long_prefill_token_threshold == 0
+    assert config.scheduler_config.max_num_batched_tokens == expected
+
+
+def test_bidirectional_reads_cap_the_step(tmp_path):
+    """Without a KV cache, compiled kernels index the gate_up activation
+    (tokens x 2 * intermediate_size) with 32-bit offsets, so a step stays
+    below 2**31 of its elements."""
+    limit = (2**31 - 1) // (2 * 9216)
+    config = _engine_config(tmp_path, BIDIRECTIONAL_READS)
+    assert config.model_config.max_model_len == limit
+    assert config.scheduler_config.max_num_batched_tokens == limit
+    with pytest.raises(ValueError, match="tokens per step"):
+        _engine_config(tmp_path, BIDIRECTIONAL_READS, max_model_len=limit + 1)
+    with pytest.raises(ValueError, match="tokens per step"):
+        _engine_config(tmp_path, BIDIRECTIONAL_READS, max_num_batched_tokens=limit + 1)
+
+
+@pytest.mark.parametrize(
+    "hf_overrides,engine_args,match",
+    [
+        # Masked diffusion needs a causal prompt KV cache.
+        ({"is_causal": False}, {}, "ar_mode=True"),
+        (
+            BIDIRECTIONAL_READS,
+            {"speculative_config": {"method": "ngram", "num_speculative_tokens": 2}},
+            "speculative decoding",
+        ),
+        (
+            BIDIRECTIONAL_READS,
+            {"max_model_len": 4096, "max_num_scheduled_tokens": 2048},
+            "max-num-scheduled-tokens",
+        ),
+        (
+            BIDIRECTIONAL_READS,
+            {"override_generation_config": {"max_new_tokens": 16}},
+            "max_new_tokens must be 1",
+        ),
+    ],
+)
+def test_bidirectional_reads_refuse_at_startup(
+    tmp_path, hf_overrides, engine_args, match
+):
+    with pytest.raises(ValueError, match=match):
+        _engine_config(tmp_path, hf_overrides, **engine_args)
+
+
+@pytest.mark.parametrize(
+    "architecture,hf_overrides,max_tokens,valid",
+    [
+        ("NemotronLabsDiffusionModel", BIDIRECTIONAL_READS, 1, True),
+        ("NemotronLabsDiffusionModel", BIDIRECTIONAL_READS, 2, False),
+        ("NemotronLabsDiffusionModel", BIDIRECTIONAL_READS, None, False),
+        ("NemotronLabsDiffusionForCausalLM", {"is_causal": False}, 4, False),
+        ("NemotronLabsDiffusionModel", {"ar_mode": True}, 4, True),
+    ],
+)
+def test_bidirectional_reads_require_one_token(
+    tmp_path, architecture, hf_overrides, max_tokens, valid
+):
+    """The engine's admission check of logits processor arguments, which
+    precedes any worker."""
+    from vllm import SamplingParams
+    from vllm.exceptions import VLLMValidationError
+    from vllm.v1.worker.gpu.sample.logits_processor import (
+        build_custom_logits_processors_params_validator,
+    )
+
+    config = _engine_config(tmp_path, hf_overrides, architecture)
+    validate = build_custom_logits_processors_params_validator(
+        config.model_config.logits_processors
+    )
+    params = SamplingParams(temperature=0, max_tokens=max_tokens)
+    if valid:
+        validate(params)
+    else:
+        with pytest.raises(VLLMValidationError, match="max_tokens=1"):
+            validate(params)
+    if hf_overrides == BIDIRECTIONAL_READS:
+        # Prompt positions attend to later tokens, so their logprobs are not
+        # next-token scores.
+        with pytest.raises(VLLMValidationError, match="prompt logprobs"):
+            validate(SamplingParams(max_tokens=1, prompt_logprobs=1))
 
 
 def test_diffusion_model_options_are_model_specific():
@@ -879,3 +1013,73 @@ def test_mixed_temperature_distribution_and_logprobs(eager_sampler):
         if temperature > 0:
             frequency = (canvas[row] == 1).float().mean()
             assert abs(frequency - distribution.probs[1]) < 0.03
+
+
+@requires_gpu
+@requires_weights
+def test_bidirectional_read_matches_hf(monkeypatch, fp32_reference):
+    """`is_causal=False` reads a trailing mask after one bidirectional pass
+    over the whole prompt, matching the HF model's bidirectional logits."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    from vllm import LLM, SamplingParams
+    from vllm.distributed import cleanup_dist_env_and_memory
+    from vllm.exceptions import VLLMValidationError
+    from vllm.inputs import TokensPrompt
+
+    tok, hf = _load_hf(dtype=torch.float32)
+    prompt_ids = _prompt_ids(tok)[0].tolist() + [MASK_TOKEN_ID]
+    candidates = sorted(
+        {tok.encode(c, add_special_tokens=False)[0] for c in "ABCD0123456789"}
+    )
+    with torch.inference_mode():
+        for layer in hf.encoder.layers:
+            layer.self_attn.diffusion_lm = True  # no causal mask anywhere
+        logits = hf(torch.tensor([prompt_ids], device="cuda")).logits[0, -1]
+        bidirectional = logits.float().log_softmax(-1).cpu()
+        for layer in hf.encoder.layers:
+            layer.self_attn.diffusion_lm = False
+        causal_logits = hf(
+            torch.tensor([prompt_ids], device="cuda"), use_causal_mask=True
+        ).logits[0, -1]
+        causal = causal_logits.float().log_softmax(-1).cpu()
+    del hf
+    torch.accelerator.empty_cache()
+    # The prompt tokens attend to later tokens, so the read must differ from
+    # a causal pass; otherwise this test could not detect a causal prefill.
+    assert (bidirectional[candidates] - causal[candidates]).abs().max() > 0.05
+
+    llm = LLM(
+        model=MODEL_PATH,
+        dtype="float32",
+        hf_overrides={"ar_mode": True, "is_causal": False},
+        max_num_batched_tokens=MAX_MODEL_LEN,
+        max_num_seqs=4,
+        trust_remote_code=True,
+        enforce_eager=True,
+        max_model_len=MAX_MODEL_LEN,
+        gpu_memory_utilization=0.6,
+    )
+    try:
+        config = llm.llm_engine.vllm_config
+        assert not config.model_config.is_diffusion
+        assert not config.cache_config.enable_prefix_caching
+        assert not config.scheduler_config.enable_chunked_prefill
+        assert llm.get_default_sampling_params().max_tokens == 1
+        params = SamplingParams(
+            temperature=0.0, max_tokens=1, logprob_token_ids=candidates
+        )
+        prompts = [TokensPrompt(prompt_token_ids=prompt_ids)] * 2
+        for output in llm.generate(prompts, params):
+            logprobs = output.outputs[0].logprobs
+            assert logprobs is not None and len(logprobs) == 1
+            for token in candidates:
+                assert logprobs[0][token].logprob == pytest.approx(
+                    bidirectional[token].item(), abs=2e-3
+                )
+        with pytest.raises(VLLMValidationError, match="max_tokens=1"):
+            llm.generate(prompts[0], SamplingParams(temperature=0.0, max_tokens=2))
+    finally:
+        llm.llm_engine.engine_core.shutdown()
+        del llm
+        cleanup_dist_env_and_memory()
