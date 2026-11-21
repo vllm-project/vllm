@@ -161,6 +161,69 @@ def test_expand_rows_repeats_each_row(tokens: int, k: int) -> None:
         assert torch.equal(out, x.repeat_interleave(k, dim=0))
 
 
+def _within_fp8_step(got: torch.Tensor, ref: torch.Tensor, head_dim: int) -> None:
+    """Every value within half an E4M3 step (2^-4 relative) of its head's max."""
+    ref = ref.float().view(ref.shape[0], -1, head_dim)
+    bound = ref.abs().amax(dim=-1, keepdim=True) * 2**-4 + 1e-6
+    assert ((got.float().view_as(ref) - ref).abs() <= bound).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton FP8 kernels")
+@pytest.mark.parametrize("world_size, num_tokens", [(2, 8), (3, 11), (4, 13)])
+@pytest.mark.parametrize("head_dim, heads_per_rank", [(64, 3), (128, 2)])
+def test_fp8_all_to_all_payloads_match_the_bf16_layouts(
+    world_size: int, num_tokens: int, head_dim: int, heads_per_rank: int
+) -> None:
+    """The FP8 payloads of both Ulysses all-to-all exchanges (`ops.fp8_a2a`, packed as
+    `a2a_tokens_to_heads` / `a2a_heads_to_tokens` pack them, the exchange done
+    in-process) land where the BF16 exchanges put each value, within the FP8
+    rounding of its (token, head) group; padding rows stay zero."""
+    from vllm.models.muse_spark.amd.ops import fp8_a2a
+
+    dev = "cuda"
+    cols = heads_per_rank * head_dim
+    rows = -(-num_tokens // world_size)
+    gen = torch.Generator(device=dev).manual_seed(0)
+
+    def exchange(sends: list[torch.Tensor]) -> list[torch.Tensor]:
+        # all_to_all_single: rank r receives chunk r of every rank's send.
+        chunks = [s.view(world_size, -1, s.shape[-1]) for s in sends]
+        return [torch.cat([c[r] for c in chunks]) for r in range(world_size)]
+
+    # Token shards [rows, W*cols] -> all tokens of the rank's columns.
+    full = torch.randn(
+        (rows * world_size, world_size * cols), device=dev, generator=gen
+    ).to(torch.bfloat16)
+    full[num_tokens:] = 0
+    sends = [
+        fp8_a2a.quant_pack(full[r * rows : (r + 1) * rows], world_size, rows, head_dim)
+        for r in range(world_size)
+    ]
+    for r, recv in enumerate(exchange(sends)):
+        got = fp8_a2a.dequant_unpack(
+            recv[None], num_tokens, cols, head_dim, torch.bfloat16
+        )
+        _within_fp8_step(got, full[:num_tokens, r * cols : (r + 1) * cols], head_dim)
+
+    # Each rank's heads [T, cols] -> the rank's token shard, all heads.
+    heads = [
+        torch.randn((num_tokens, cols), device=dev, generator=gen).to(torch.bfloat16)
+        * (1 + r)
+        for r in range(world_size)
+    ]
+    sends = [fp8_a2a.quant_pack(h, 1, rows * world_size, head_dim) for h in heads]
+    ref = torch.zeros(
+        (rows * world_size, world_size * cols), device=dev, dtype=torch.bfloat16
+    )
+    for r in range(world_size):
+        ref[:num_tokens, r * cols : (r + 1) * cols] = heads[r]
+    for r, recv in enumerate(exchange(sends)):
+        got = fp8_a2a.dequant_unpack(
+            recv.view(world_size, rows, -1), rows, cols, head_dim, torch.bfloat16
+        )
+        _within_fp8_step(got, ref[r * rows : (r + 1) * rows], head_dim)
+
+
 def _random_weights(model: torch.nn.Module) -> int:
     """Replace the BF16/FP32 weights with O(1) random ones (matrices scaled by
     1/sqrt(fan-in), vectors in [0.5, 1.5]; distinct per TP rank where TP-sharded),

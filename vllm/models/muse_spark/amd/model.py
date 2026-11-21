@@ -829,7 +829,8 @@ class MuseSparkAttention(nn.Module):
         w = self.ulysses_weights
         assert w is not None
         logger.info_once(
-            "Muse Spark Ulysses prefill active (TP world size %d, FP8 %s weights).",
+            "Muse Spark Ulysses prefill active (TP world size %d, FP8 %s weights, "
+            "FP8 all-to-all payloads).",
             shard.world,
             "O" if w.qkv is None else "QKV/O",
             scope="process",
@@ -840,14 +841,19 @@ class MuseSparkAttention(nn.Module):
         assert w.gate is not None
         xq = usp.quant_rows(hidden_states)
         qkv = usp.a2a_tokens_to_heads(
-            usp.gemm(xq, w.qkv, dtype), self.q_size + 2 * self.kv_size, shard
+            usp.gemm(xq, w.qkv, dtype),
+            self.q_size + 2 * self.kv_size,
+            shard,
+            self.head_dim,
         )
         q, k, v, _ = self._qk_norm_rope_kv_insert(qkv, positions)
         if self.fused_qk_norm_rope_kv_insert:
             attn_output = self.attn(q, None, None)
         else:
             attn_output = self.attn(q, k, v)
-        heads = usp.a2a_heads_to_tokens(attn_output.reshape(-1, self.q_size), shard)
+        heads = usp.a2a_heads_to_tokens(
+            attn_output.reshape(-1, self.q_size), shard, self.head_dim
+        )
         og = usp.gemm(xq, w.gate, dtype)
         num_heads = heads.shape[1] // self.head_dim
         gated = rms_norm_gated(
@@ -890,7 +896,9 @@ class MuseSparkAttention(nn.Module):
             "sigmoid",
             eps=self.rms_norm_eps,
         )
-        heads = usp.a2a_heads_to_tokens(gated.reshape(-1, self.q_size), shard)
+        heads = usp.a2a_heads_to_tokens(
+            gated.reshape(-1, self.q_size), shard, self.head_dim
+        )
         return usp.gemm(usp.quant_rows(heads), w.o, dtype)
 
     def back(

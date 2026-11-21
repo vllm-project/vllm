@@ -15,6 +15,9 @@ and the MoE input:
 * MoE input: the pre-expert-normed pooled rows are quantized to MXFP4 on the shard
   and gathered as FP4 bytes plus E8M0 scales instead of BF16 rows.
 
+The all-to-all payloads (QKV to heads, attention output back to tokens) are FP8 with
+one scale per token and head (`ops.fp8_a2a`), half the bytes of BF16.
+
 On these steps the QKV-gate and O projections run as FP8 W8A8 (per-channel weights,
 per-token activations) from FP8 copies of the BF16/FP16 weights. The copies stay
 resident on every rank; they are built after weight loading, so the KV cache
@@ -40,6 +43,8 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+
+from .ops import fp8_a2a
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
@@ -256,9 +261,21 @@ def expand_rows(x: torch.Tensor, k: int) -> torch.Tensor:
 
 
 def a2a_tokens_to_heads(
-    ys: torch.Tensor, cols: int, shard: "TokenShard"
+    ys: torch.Tensor, cols: int, shard: "TokenShard", head_dim: int | None = None
 ) -> torch.Tensor:
-    """[rows, W*cols] (columns grouped by owning rank) -> [T, cols] (all tokens)."""
+    """[rows, W*cols] (columns grouped by owning rank) -> [T, cols] (all tokens).
+    With `head_dim`, the payload is FP8 with one scale per token and head."""
+    if head_dim is not None:
+        send = fp8_a2a.quant_pack(ys, shard.world, shard.rows, head_dim)
+        recv = torch.empty_like(send)
+        dist.all_to_all_single(recv, send, group=_group())
+        return fp8_a2a.dequant_unpack(
+            recv.view(1, shard.world * shard.rows, -1),
+            shard.num_tokens,
+            cols,
+            head_dim,
+            ys.dtype,
+        )
     view = _wide(ys.view(shard.rows, shard.world, cols))
     send = view.transpose(0, 1).contiguous().view(ys.dtype)
     recv = torch.empty_like(send)
@@ -266,9 +283,19 @@ def a2a_tokens_to_heads(
     return recv.view(shard.rows * shard.world, cols)[: shard.num_tokens]
 
 
-def a2a_heads_to_tokens(y: torch.Tensor, shard: "TokenShard") -> torch.Tensor:
-    """[T, cols] (this rank's heads) -> [rows, W*cols] (all heads, rank order)."""
+def a2a_heads_to_tokens(
+    y: torch.Tensor, shard: "TokenShard", head_dim: int | None = None
+) -> torch.Tensor:
+    """[T, cols] (this rank's heads) -> [rows, W*cols] (all heads, rank order).
+    With `head_dim`, the payload is FP8 with one scale per token and head."""
     cols = y.shape[1]
+    if head_dim is not None:
+        send = fp8_a2a.quant_pack(y, 1, shard.rows * shard.world, head_dim)
+        recv = torch.empty_like(send)
+        dist.all_to_all_single(recv, send, group=_group())
+        return fp8_a2a.dequant_unpack(
+            recv.view(shard.world, shard.rows, -1), shard.rows, cols, head_dim, y.dtype
+        )
     send = _pad(y, shard).contiguous()
     recv = torch.empty_like(send)
     dist.all_to_all_single(recv, send, group=_group())
