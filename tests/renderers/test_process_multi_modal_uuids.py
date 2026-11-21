@@ -32,6 +32,7 @@ mary_had_lamb_audio = AudioAsset("mary_had_lamb").audio_and_sample_rate
 
 QWEN25_VL_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 QWEN25_OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
+DEEPSEEK_VL2_MODEL_ID = "deepseek-ai/deepseek-vl2-tiny"
 
 
 def _build_renderer(
@@ -55,6 +56,22 @@ def _build_renderer(
 
     return HfRenderer(
         vllm_config,
+        cached_tokenizer_from_config(model_config),
+    )
+
+
+def _build_deepseek_vl2_renderer() -> HfRenderer:
+    # DeepSeek-VL2 skips the processor cache for more than two images.
+    model_config = ModelConfig(
+        model=DEEPSEEK_VL2_MODEL_ID,
+        hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]},
+        limit_mm_per_prompt={"image": 3},
+        max_model_len=4096,
+        mm_processor_cache_gb=4,
+    )
+
+    return HfRenderer(
+        VllmConfig(model_config=model_config),
         cached_tokenizer_from_config(model_config),
     )
 
@@ -254,6 +271,54 @@ def test_uuid_only_cache_miss_is_not_retried(monkeypatch, use_async):
         _render_chat(renderer, [messages], ChatParams(), use_async)
 
     assert process.call_count == 1
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_processor_that_skips_the_cache_gets_the_media(monkeypatch, use_async):
+    """A deferred request that skips the cache is retried with its media."""
+    renderer = _build_deepseek_vl2_renderer()
+    fetch_image = _mock_media(monkeypatch, "image", cherry_pil_image, use_async)
+    process = _wrap_process_for_engine(monkeypatch, renderer, use_async)
+    messages = _media_messages(
+        "Describe", *[("image_url", f"image-{i}") for i in range(3)]
+    )
+
+    _, deferred = _render_chat(renderer, [messages], ChatParams(), use_async)
+    deferred_counts = (process.call_count, fetch_image.call_count)
+    _, upfront = _render_chat(
+        renderer, [messages], ChatParams(skip_early_mm_lookup=True), use_async
+    )
+
+    # Deferred: one render without media, then the retry. Upfront: one render.
+    assert deferred_counts == (2, 3)
+    assert (process.call_count, fetch_image.call_count) == (3, 6)
+    assert deferred[0]["prompt_token_ids"] == upfront[0]["prompt_token_ids"]
+    assert deferred[0]["mm_hashes"] == upfront[0]["mm_hashes"]
+    assert deferred[0]["mm_placeholders"] == upfront[0]["mm_placeholders"]
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    ("uuid_only_idxs", "described_idxs"),
+    [((0, 1, 2), "0, 1, 2"), ((0, 2), "0, 2")],
+    ids=["all-uuid-only", "some-uuid-only"],
+)
+def test_processor_that_skips_the_cache_rejects_items_without_data(
+    monkeypatch, use_async, uuid_only_idxs, described_idxs
+):
+    """Items without a URL fail naming every such item, after any retry."""
+    renderer = _build_deepseek_vl2_renderer()
+    fetch_image = _mock_media(monkeypatch, "image", cherry_pil_image, use_async)
+    messages = _media_messages(
+        "Describe", *[("image_url", f"image-{i}") for i in range(3)]
+    )
+    for idx in uuid_only_idxs:
+        messages[0]["content"][1 + idx]["image_url"] = None
+
+    with pytest.raises(ValueError, match=rf"image at index {described_idxs}\b"):
+        _render_chat(renderer, [messages], ChatParams(), use_async)
+
+    assert fetch_image.call_count == 3 - len(uuid_only_idxs)
 
 
 def test_batch_cache_misses_refetch_media_concurrently(monkeypatch):
