@@ -97,7 +97,7 @@ class DSparkSpeculator(DFlashSpeculator):
         # Set when the sequential sampling can be batch-sharded across TP.
         self._sharded_sequential_comm: PyNcclCommunicator | None = None
 
-        # Whether the markov bias is fused into the Gumbel sample kernel.
+        # Whether the Markov bias is fused into the sampling kernel.
         self._fuse_markov_bias: bool = False
 
     def load_model(self, target_model: torch.nn.Module) -> None:
@@ -109,8 +109,7 @@ class DSparkSpeculator(DFlashSpeculator):
             self._try_enable_sharded_sequential_sampling()
 
         self._fuse_markov_bias = (
-            self.draft_logits is not None
-            and self._d2t_scatter_index is None
+            self._d2t_scatter_index is None
             and self.draft_watermarker is None
             and self.acceptance_estimator is None
             and not hasattr(self.model, "apply_output_logit_transform")
@@ -196,11 +195,11 @@ class DSparkSpeculator(DFlashSpeculator):
         step: int,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Sample draft ids from the logits. If `bias` is provided, the Gumbel
+        """Sample draft ids from the logits. If `bias` is provided, the sampling
         kernel adds it."""
         self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
         if self.draft_logits is None:
-            draft_ids = greedy_argmax(logits)
+            draft_ids = greedy_argmax(logits, bias=bias)
             return self.model.map_draft_to_target(draft_ids)
 
         # Probabilistic sampling and rejection operate in target-vocabulary
