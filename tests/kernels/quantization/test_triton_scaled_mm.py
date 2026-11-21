@@ -179,7 +179,10 @@ def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_b
     torch.testing.assert_close(out_td, out_plain, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only azp path")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Asymmetric int8 activation quantization runs on CUDA-alike.",
+)
 @pytest.mark.parametrize("M", [1, 300])
 @pytest.mark.parametrize("static", [False, True])
 def test_triton_int8_linear_asymmetric_matches_exact(M, static):

@@ -26,8 +26,8 @@ def scaled_mm_kernel(
     scale_b_ptr,
     c_ptr,
     bias_ptr,
-    azp_ptr,
     azp_adj_ptr,
+    azp_ptr,
     M,
     N,
     K,
@@ -187,8 +187,8 @@ def scaled_mm_kernel(
 
 # input   - [M, K]
 # weight - [K, N]
-# azp     - [M, 1] int32 per-token zero points, or None
 # azp_adj - [1, N] int32 weight column sums (azp folded in when azp is None)
+# azp     - [M, 1] int32 per-token zero points, or None
 def triton_scaled_mm(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -201,8 +201,8 @@ def triton_scaled_mm(
     block_size_k: int = 32,
     use_heuristic=True,
     use_td: bool | None = None,
-    azp: torch.Tensor | None = None,
     azp_adj: torch.Tensor | None = None,
+    azp: torch.Tensor | None = None,
 ) -> torch.Tensor:
     M, K = input.shape
     N = weight.shape[1]
@@ -281,8 +281,8 @@ def triton_scaled_mm(
         scale_b,
         result,
         bias,
-        azp,
         azp_adj,
+        azp,
         M,
         N,
         K,
