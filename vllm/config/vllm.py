@@ -1667,6 +1667,21 @@ class VllmConfig:
             self.lora_config.verify_with_kernel_config(self.kernel_config)
             self.lora_config.verify_with_model_config(self.model_config)
 
+            if self.parallel_config.use_sequence_parallel:
+                # LoRA wrapper layers (e.g. ColumnParallelLinearWithLoRA)
+                # reimplement apply()/forward() without going through the
+                # base layer's forward(), so the sequence-parallel
+                # all-gather/reduce-scatter patched onto the base layer by
+                # mark_sp_region is silently skipped, leading to a shape
+                # mismatch at runtime. Until LoRA-aware SP kernels are
+                # supported, fall back to disabling sequence parallelism.
+                logger.warning_once(
+                    "Sequence parallelism (--sp-config) is "
+                    "not yet supported together with LoRA. Disabling "
+                    "sequence parallelism for this run."
+                )
+                self.parallel_config.sp_config.enable = False
+
         if (
             self.mamba_config.enable_stochastic_rounding
             and self.cache_config.mamba_ssm_cache_dtype != "float16"

@@ -63,6 +63,7 @@ from vllm.config import (
     ProfilerConfig,
     ReasoningConfig,
     SchedulerConfig,
+    SequenceParallelConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
     UVAOffloadConfig,
@@ -539,6 +540,7 @@ class EngineArgs:
     enable_batch_sharded_sampling: bool | None = (
         ParallelConfig.enable_batch_sharded_sampling
     )
+    sp_config: SequenceParallelConfig = get_field(ParallelConfig, "sp_config")
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
     moe_backend: MoEBackend = KernelConfig.moe_backend
     linear_backend: LinearBackend = KernelConfig.linear_backend
@@ -886,6 +888,8 @@ class EngineArgs:
             self.ec_manager_config = EncoderCacheManagerConfig(**self.ec_manager_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
+        if isinstance(self.sp_config, dict):
+            self.sp_config = SequenceParallelConfig(**self.sp_config)
         if isinstance(self.weight_transfer_config, dict):
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
@@ -1302,6 +1306,7 @@ class EngineArgs:
             "--enable-batch-sharded-sampling",
             **parallel_kwargs["enable_batch_sharded_sampling"],
         )
+        parallel_group.add_argument("--sp-config", **parallel_kwargs["sp_config"])
         parallel_group.add_argument(
             "--enable-ep-weight-filter",
             **parallel_kwargs["enable_ep_weight_filter"],
@@ -2589,6 +2594,7 @@ class EngineArgs:
             enable_hc_sp=self.enable_hc_sp,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
+            sp_config=self.sp_config,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,

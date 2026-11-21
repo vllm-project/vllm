@@ -19,6 +19,52 @@ INFO 07-23 13:56:04 [kv_cache_utils.py:779] Maximum concurrency for 40,960 token
 
 The `GPU KV cache size` line reports the total number of tokens that can be stored in the GPU KV cache at once. The `Maximum concurrency` line provides an estimate of how many requests can be served concurrently if each request requires the specified number of tokens (40,960 in the example above). The tokens-per-request number is taken from the model configuration's maximum sequence length, `ModelConfig.max_model_len`. If these numbers are lower than your throughput requirements, add more GPUs or nodes to your cluster.
 
+## Sequence Parallelism
+
+Sequence Parallelism (SP) reduces duplicate token-wise work across tensor
+parallel ranks. It shards tokens for norm and residual regions, while
+communication boundaries gather or scatter tensors around GEMM operations.
+
+For supported dense and MoE models, enable SP with:
+
+```bash
+vllm serve <model-path> \
+  --tensor-parallel-size 4 \
+  --sp-config '{"enable": true}'
+```
+
+SP is intended for sufficiently large batch/token counts. By default, vLLM
+enables it only when the padded token count reaches `threshold` (default:
+256). Smaller batches fall back to the normal tensor-parallel path.
+
+```bash
+vllm serve <model-path> \
+  --tensor-parallel-size 4 \
+  --sp-config '{"enable": true, "threshold": 512}'
+```
+
+### Fused GEMM-collective
+
+`fuse_gemm_comms` fuses the SP collectives with the adjacent
+GEMMs (AllGather+GEMM and GEMM+ReduceScatter) so communication overlaps with
+compute. It requires `enable`:
+
+```bash
+vllm serve <model-path> \
+  --tensor-parallel-size 4 \
+  --sp-config '{"enable": true, "threshold": 256, "fuse_gemm_comms": true}'
+```
+
+When a platform or quantization format does not provide a fused comm+GEMM
+kernel, vLLM automatically uses the unfused all-gather/GEMM and
+GEMM/reduce-scatter path. SP therefore remains usable where fused
+symmetric-memory kernels are unavailable.
+
+SP requires tensor parallelism and is not supported with pipeline
+parallelism in the initial implementation. Model support is opt-in by vendor
+and architecture; unsupported models continue with the normal tensor-parallel
+path.
+
 !!! note "Edge case: uneven GPU splits"
     If the model fits within a single node but the GPU count doesn't evenly divide the model size, enable pipeline parallelism, which splits the model along layers and supports uneven splits. In this scenario, set `tensor_parallel_size=1` and `pipeline_parallel_size` to the number of GPUs. Furthermore, if the GPUs on the node do not have NVLINK interconnect (e.g. L40S), leverage pipeline parallelism instead of tensor parallelism for higher throughput and lower communication overhead.
 
