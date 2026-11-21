@@ -279,7 +279,10 @@ def _write(
             f"casts {src.dtype} (a view of the {dtype} checkpoint tensor) "
             f"to {copy.dtype} at copy_"
         )
-    target = targets.by_storage.get(copy.storage)
+    start, stop = copy.byte_offset, copy.byte_offset
+    if 0 not in copy.shape:
+        stop = byte_span(start, copy.shape, copy.stride, copy.dtype.itemsize)[1]
+    target = targets.at(copy.storage, start, stop)
     if target is None:
         raise Fallback("copies into a tensor that is not a checkpoint tensor")
     size = (cast or dtype).itemsize

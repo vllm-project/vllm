@@ -28,6 +28,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 from vllm.logger import init_logger
 
 from .direct import loadable_tensors
+from .geometry import byte_span
 from .trace import TraceTensor
 
 if TYPE_CHECKING:
@@ -49,6 +50,7 @@ class Target:
     tensor: str
     real: torch.Tensor
     byte_offset: int  # in its storage, as `begin_direct_reload` viewed it
+    byte_stop: int  # past its last byte
 
 
 class Targets:
@@ -57,15 +59,30 @@ class Targets:
     tests; `by_name` looks it up."""
 
     def __init__(self, model: torch.nn.Module):
-        self.by_storage: dict[int, Target] = {}
+        self.by_storage: dict[int, list[Target]] = {}
         self.by_name: dict[tuple[str, str], Target] = {}
         for name, t in loadable_tensors(model):
             if hasattr(t, "_ckpt"):
                 module, _, key = name.rpartition(".")
-                target = Target(module, key, t, t.storage_offset() * t.dtype.itemsize)
-                # writes into a storage are labelled with its first target
-                self.by_storage.setdefault(t.untyped_storage()._cdata, target)
+                start = t.storage_offset() * t.dtype.itemsize
+                stop = start
+                if t.numel():
+                    stop = byte_span(start, t.shape, t.stride(), t.dtype.itemsize)[1]
+                target = Target(module, key, t, start, stop)
+                storage = t.untyped_storage()._cdata
+                self.by_storage.setdefault(storage, []).append(target)
                 self.by_name[(module, key)] = target
+
+    def at(self, storage: int, start: int, stop: int) -> Target | None:
+        """The target a write to bytes [start, stop) lands in: on a storage
+        several tensors view (e.g. a fused weight), the smallest whose bytes
+        contain it; `None` if none does."""
+        targets = [
+            t
+            for t in self.by_storage.get(storage, ())
+            if t.byte_offset <= start and stop <= t.byte_stop
+        ]
+        return min(targets, key=lambda t: t.byte_stop - t.byte_offset, default=None)
 
 
 def _storage_key(t: torch.Tensor) -> int | None:

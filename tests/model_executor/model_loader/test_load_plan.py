@@ -107,6 +107,7 @@ def _metadata(shapes: dict) -> list[ParamMeta]:
 
 def _cold_start(make, weights):
     model = make()
+    track_loaded_params(model)  # so finish checks each update is complete
     model.load_weights(weights.items())
     process_weights_after_loading(model, _MODEL_CONFIG, _CPU)
     return model
@@ -645,8 +646,8 @@ def test_copy_time_dtype_change_stays_direct(loader, sent, held, cast):
 
 
 def test_tensors_sharing_one_storage():
-    """Two checkpoint tensors on one storage: each write lands in its own
-    tensor, whichever tensor names the storage."""
+    """Two checkpoint tensors on one storage: each write lands in, and is
+    recorded as a load of, its own tensor."""
 
     def make():
         model = _Toy()
