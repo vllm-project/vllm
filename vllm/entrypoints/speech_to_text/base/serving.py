@@ -749,6 +749,12 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         completion_tokens = 0
         num_prompt_tokens = 0
+        # Prompt tokens of the audio chunks that finished streaming.
+        finished_chunks_prompt_tokens = 0
+        # Decoder-only models already have the audio placeholders in their
+        # prompt. Encoder-decoder models get an estimate of the encoder input,
+        # added once for the whole audio.
+        audio_tokens: int | None = None
 
         include_usage = self.enable_force_include_usage or request.stream_include_usage
         include_continuous_usage = (
@@ -761,14 +767,27 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             for result_generator in list_result_generator:
                 beginning_of_chunk = True
                 post_processor = self.streaming_post_processor_cls()
+                chunk_prompt_tokens = 0
                 async for res in result_generator:
                     # On first result.
                     if res.prompt_token_ids is not None:
-                        num_prompt_tokens = len(res.prompt_token_ids)
-                        if audio_tokens := self.model_cls.get_num_audio_tokens(
-                            audio_duration_s, self.asr_config, self.model_config
-                        ):
-                            num_prompt_tokens += audio_tokens
+                        chunk_prompt_tokens = len(res.prompt_token_ids)
+                        if audio_tokens is None:
+                            audio_tokens = 0
+                            if self.model_config.is_encoder_decoder:
+                                audio_tokens = (
+                                    self.model_cls.get_num_audio_tokens(
+                                        audio_duration_s,
+                                        self.asr_config,
+                                        self.model_config,
+                                    )
+                                    or 0
+                                )
+                        num_prompt_tokens = (
+                            finished_chunks_prompt_tokens
+                            + chunk_prompt_tokens
+                            + audio_tokens
+                        )
 
                     # We need to do it here, because if there are exceptions in
                     # the result_generator, it needs to be sent as the FIRST
@@ -827,6 +846,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
+                finished_chunks_prompt_tokens += chunk_prompt_tokens
 
             # Once the final token is handled, if stream_options.include_usage
             # is sent, send the usage.
