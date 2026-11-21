@@ -291,8 +291,12 @@ class Case:
         ]
     ],
 )
-@pytest.mark.parametrize("num_token", [2])
-@pytest.mark.parametrize("tp", [1, 2, 4, 8])
+# 160 tokens x top-4 = 640 rows reach the batch-sized tiles. The reference
+# gathers per-token expert weights (about 20 GiB at TP1), so run it at TP4/8.
+@pytest.mark.parametrize(
+    ("num_token", "tp"),
+    [(2, 1), (2, 2), (2, 4), (2, 8), (160, 4), (160, 8)],
+)
 def test_equiv(num_token, a_dtype, w_dtype, tp, workspace_init):
     if not hasattr(layout, "make_default_matmul_mxfp4_w_layout"):
         pytest.skip("make_default_matmul_mxfp4_w_layout not available")
