@@ -11,6 +11,7 @@ This test ensures:
 """
 
 import pytest
+from PIL import Image
 
 from tests.conftest import VllmRunner
 from tests.utils import create_new_process_for_each_test
@@ -104,3 +105,30 @@ def test_auto_fit_max_model_len_rejects_oversized_input(
         oversized_prompt = [[43] * (auto_fitted_len + 10)]
         with pytest.raises(VLLMValidationError, match="Please reduce the length"):
             vllm_model.generate_greedy(oversized_prompt, max_tokens=4)
+
+
+@create_new_process_for_each_test()
+def test_mm_item_over_encoder_compute_budget_is_rejected(
+    vllm_runner: type[VllmRunner],
+) -> None:
+    """An encoder cache larger than the per-step encoder compute budget must
+    not admit an item the encoder can never run; that request would wait
+    forever instead of failing."""
+    with vllm_runner(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        max_model_len=8192,
+        max_num_batched_tokens=2048,
+        encoder_cache_size=32768,
+        enable_chunked_prefill=True,
+        limit_mm_per_prompt={"image": 1, "video": 0},
+        mm_processor_kwargs={"max_pixels": 1024 * 28 * 28},
+        enforce_eager=True,
+    ) as vllm_model:
+        prompt = {
+            "prompt": "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+            "Describe.<|im_end|>\n<|im_start|>assistant\n",
+            "multi_modal_data": {"image": Image.new("RGB", (2240, 2240))},
+            "mm_processor_kwargs": {"max_pixels": 4096 * 28 * 28},
+        }
+        with pytest.raises(VLLMValidationError, match="encoder budget 2048"):
+            vllm_model.llm.generate(prompt)
