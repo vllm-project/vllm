@@ -6,6 +6,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.quantization.utils.quant_utils import gather_rows
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
@@ -477,27 +478,43 @@ def _shuffle_deepseek_fp8_moe_weights(
     Returns 4D weight tensors in BlockMajorK layout
     (E, K/block_k, Mn, block_k)
     """
+    return _shuffle_deepseek_fp8_moe_weights_(
+        w13.clone(memory_format=torch.contiguous_format),
+        w2.clone(memory_format=torch.contiguous_format),
+        swap_w13=False,
+    )
+
+
+def _shuffle_deepseek_fp8_moe_weights_(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    swap_w13: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """`_shuffle_deepseek_fp8_moe_weights` in place, returning BlockMajorK views
+    of the inputs' storage; with `swap_w13`, also swaps W13 to W31 first."""
     from flashinfer.utils import get_shuffle_matrix_a_row_indices
 
     epilogue_tile_m = 64
     block_k = 128
 
-    def shuffle_to_block_major_k(w: torch.Tensor) -> torch.Tensor:
-        # shuffle_matrix_a's row permutation depends only on (M,
-        # epilogue_tile_m), so it is computed once and applied to every expert
-        # in a single gather instead of once per expert. Gathering through the
-        # BlockMajorK-permuted view also folds convert_to_block_layout into
-        # that same kernel. Per-expert loops here cost minutes for a MoE this
-        # wide (~24k tiny launches plus a host round-trip each).
+    def shuffle_to_block_major_k(w: torch.Tensor, swap: bool) -> torch.Tensor:
+        # The shuffle is one row permutation for every expert; the W31 swap
+        # rotates its rows by half, so both fold into one gather.
         num_experts, m, k = w.shape
-        rows = get_shuffle_matrix_a_row_indices(
-            w[0].view(torch.uint8), epilogue_tile_m
-        ).to(w.device)
-        blocked = w.view(torch.uint8).view(num_experts, m, k // block_k, block_k)
-        out = blocked.permute(0, 2, 1, 3)[:, :, rows, :].contiguous()
-        return out.view(torch.float8_e4m3fn)
+        rows = get_shuffle_matrix_a_row_indices(w[0].view(torch.uint8), epilogue_tile_m)
+        if swap:
+            rows = (rows + m // 2) % m
+        rows = rows.to(w.device)
+        chunk = max(1, (1 << 30) // (m * k))  # bounds the scratch to ~1 GiB
+        for start in range(0, num_experts, chunk):
+            part = w[start : start + chunk]
+            part.view(torch.uint8).view(-1).copy_(
+                gather_rows(part, rows, block_k).view(-1)
+            )
+        blocked = w.view(torch.uint8).view(num_experts, k // block_k, m, block_k)
+        return blocked.view(torch.float8_e4m3fn)
 
-    return shuffle_to_block_major_k(w13), shuffle_to_block_major_k(w2)
+    return shuffle_to_block_major_k(w13, swap_w13), shuffle_to_block_major_k(w2, False)
 
 
 def _shuffle_mxfp8_moe_weights(
@@ -636,14 +653,19 @@ def prepare_fp8_moe_layer_for_fi(
         layer.moe_config.intermediate_size_per_partition = new_intermediate
 
     # FI kernels require W31 layout rather than W13.
+    is_block_major_k = is_deepseek_fp8 and is_trtllm
     if layer.moe_config.is_act_and_mul:
-        w13 = swap_w13_to_w31(w13)
+        if not is_block_major_k:
+            w13 = swap_w13_to_w31(w13)
         if block_quant:
             w13_scale = swap_w13_to_w31(w13_scale)
 
-    # DeepSeekFp8 TRT-LLM: shuffle weights into BlockMajorK layout.
-    if is_deepseek_fp8 and is_trtllm:
-        w13, w2 = _shuffle_deepseek_fp8_moe_weights(w13, w2)
+    # DeepSeekFp8 TRT-LLM: shuffle weights into BlockMajorK layout, in place
+    # (the swap to W31 is folded in).
+    if is_block_major_k:
+        w13, w2 = _shuffle_deepseek_fp8_moe_weights_(
+            w13, w2, swap_w13=layer.moe_config.is_act_and_mul
+        )
 
     # FI TRT-LLM FP8 per-tensor MoE kernel requires weight shuffle
     # and registration of alpha scales.
