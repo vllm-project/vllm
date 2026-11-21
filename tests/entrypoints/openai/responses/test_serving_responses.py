@@ -55,6 +55,7 @@ from vllm.entrypoints.openai.responses.context import (
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseFailedEvent,
     ResponseIncompleteEvent,
     ResponseRawMessageAndToken,
     ResponsesRequest,
@@ -1874,6 +1875,85 @@ async def test_background_stream_replay_stops_on_response_incomplete():
 
     assert await asyncio.wait_for(replay(), timeout=5) == events
     assert await asyncio.wait_for(replay(starting_after=0), timeout=5) == events[1:]
+
+
+def _queued_background_response(
+    serving: OpenAIServingResponses,
+) -> tuple[ResponsesRequest, ResponsesResponse]:
+    request = ResponsesRequest(input="hi", background=True, stream=True, store=True)
+    response = ResponsesResponse.from_request(
+        request,
+        SamplingParams(max_tokens=16),
+        model_name="test-model",
+        created_time=0,
+        output=[],
+        status="queued",
+    )
+    serving.response_store[response.id] = response
+    return request, response
+
+
+@pytest.mark.asyncio
+async def test_background_stream_without_terminal_event_ends_failed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A background stream whose generation stops without a terminal event,
+    e.g. after an `error` event, must end with `response.failed` and mark the
+    stored response `failed` instead of leaving consumers waiting (#66351)."""
+    serving = _make_serving_instance()
+    request, response = _queued_background_response(serving)
+
+    async def stream_generator(*args, **kwargs):
+        yield ResponseCreatedEvent(
+            type="response.created", sequence_number=0, response=response
+        )
+
+    monkeypatch.setattr(serving, "responses_stream_generator", stream_generator)
+    await serving._run_background_request_stream(request)
+
+    async def replay():
+        return [
+            event
+            async for event in serving.responses_background_stream_generator(
+                response.id
+            )
+        ]
+
+    events = await asyncio.wait_for(replay(), timeout=5)
+    assert [event.type for event in events] == ["response.created", "response.failed"]
+    assert isinstance(events[-1], ResponseFailedEvent)
+    assert events[-1].sequence_number == 1
+    assert events[-1].response.status == "failed"
+    assert response.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_background_stream_cancel_is_not_marked_failed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    serving = _make_serving_instance()
+    request, response = _queued_background_response(serving)
+    started = asyncio.Event()
+
+    async def stream_generator(*args, **kwargs):
+        yield ResponseCreatedEvent(
+            type="response.created", sequence_number=0, response=response
+        )
+        started.set()
+        await asyncio.Event().wait()  # generate until cancelled
+        yield
+
+    monkeypatch.setattr(serving, "responses_stream_generator", stream_generator)
+    task = asyncio.create_task(serving._run_background_request_stream(request))
+    serving.background_tasks[response.id] = task
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    await serving.cancel_responses(response.id)  # cancels and awaits the task
+    assert task.cancelled()
+
+    events, _ = serving.event_store[response.id]
+    assert [event.type for event in events] == ["response.created"]
+    assert response.status == "cancelled"
 
 
 @pytest.mark.asyncio

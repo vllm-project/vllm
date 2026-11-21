@@ -40,6 +40,7 @@ from openai.types.responses import (
     ResponseCompletedEvent as OpenAIResponseCompletedEvent,
 )
 from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreatedEvent
+from openai.types.responses import ResponseFailedEvent as OpenAIResponseFailedEvent
 from openai.types.responses import (
     ResponseIncompleteEvent as OpenAIResponseIncompleteEvent,
 )
@@ -1200,6 +1201,10 @@ class ResponseIncompleteEvent(OpenAIResponseIncompleteEvent):
     response: ResponsesResponse  # type: ignore[override]
 
 
+class ResponseFailedEvent(OpenAIResponseFailedEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
 class ResponseCreatedEvent(OpenAIResponseCreatedEvent):
     response: ResponsesResponse  # type: ignore[override]
 
@@ -1213,6 +1218,7 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseInProgressEvent
     | ResponseCompletedEvent
     | ResponseIncompleteEvent
+    | ResponseFailedEvent
     | ResponseOutputItemAddedEvent
     | ResponseOutputItemDoneEvent
     | ResponseContentPartAddedEvent
