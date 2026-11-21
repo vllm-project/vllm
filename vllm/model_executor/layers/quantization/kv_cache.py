@@ -29,6 +29,9 @@ class KVCacheScaleParameter(torch.nn.Parameter):
     class-level loader.
     """
 
+    # Checkpoints may omit these; dummy loading must keep the sentinel.
+    dummy_weight_value = -1.0
+
     def __new__(cls) -> "KVCacheScaleParameter":
         return super().__new__(cls, torch.tensor(-1.0), requires_grad=False)
 
