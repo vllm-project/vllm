@@ -22,6 +22,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import (
     AttentionConfig,
+    CompilationConfig,
     DiffusionConfig,
     ModelConfig,
     SpeculativeConfig,
@@ -1344,6 +1345,120 @@ def test_flashinfer_resolves_layerwise_cache_dtype(
     assert layer.kv_cache_dtype == expected
     assert builder.cache_dtype == expected
     assert config.cache_config.cache_dtype == global_dtype
+
+
+@pytest.mark.parametrize(
+    "dtype,cache_dtype,head_size,page_size,mtp,window,softcap,extra_softcap,expected",
+    [
+        ("bfloat16", "auto", 256, 16, True, None, None, None, True),
+        ("bfloat16", "auto", 128, 16, True, None, None, None, True),
+        ("bfloat16", "auto", 256, 64, True, None, None, None, True),
+        ("float16", "auto", 256, 16, True, None, None, None, False),
+        ("bfloat16", "fp8_e4m3", 256, 16, True, None, None, None, False),
+        ("bfloat16", "auto", 256, 16, False, None, None, None, False),
+        ("bfloat16", "auto", 256, 16, True, 128, None, None, False),
+        ("bfloat16", "auto", 256, 16, True, None, 30.0, None, False),
+        ("bfloat16", "auto", 512, 16, True, None, None, None, False),
+        pytest.param(
+            "bfloat16",
+            "auto",
+            256,
+            16,
+            True,
+            None,
+            None,
+            30.0,
+            False,
+            id="heterogeneous-softcap",
+        ),
+    ]
+    if current_platform.is_cuda()
+    and (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(120)
+    )
+    else [],
+)
+def test_flashinfer_xqa_mtp_decode_metadata_update_capability(
+    dist_init,
+    dtype,
+    cache_dtype,
+    head_size,
+    page_size,
+    mtp,
+    window,
+    softcap,
+    extra_softcap,
+    expected,
+):
+    """Only supported XQA MTP layers opt into persistent draft metadata."""
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backends.flashinfer import (
+        FlashInferBackend,
+        FlashInferMetadataBuilder,
+    )
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B-Base",
+        dtype=dtype,
+        max_model_len=512,
+        block_size=page_size,
+        max_num_seqs=1,
+        max_num_batched_tokens=512,
+    )
+    spec = (
+        SpeculativeConfig(
+            method="mtp",
+            num_speculative_tokens=3,
+            target_model_config=config.model_config,
+            target_parallel_config=config.parallel_config,
+        )
+        if mtp
+        else None
+    )
+    config = replace(
+        config,
+        speculative_config=spec,
+        attention_config=AttentionConfig(backend=AttentionBackendEnum.FLASHINFER),
+        cache_config=replace(config.cache_config, cache_dtype=cache_dtype),
+        compilation_config=CompilationConfig(mode=0),
+    )
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(config.model_config.dtype),
+    ):
+        softcaps = [softcap] if extra_softcap is None else [softcap, extra_softcap]
+        layer_names = []
+        for index, layer_softcap in enumerate(softcaps):
+            layer_name = f"layer{index}"
+            layer = Attention(
+                num_heads=16,
+                num_kv_heads=2,
+                head_size=head_size,
+                scale=head_size**-0.5,
+                cache_config=config.cache_config,
+                logits_soft_cap=layer_softcap,
+                per_layer_sliding_window=window,
+                prefix=layer_name,
+            )
+            assert layer.get_attn_backend() is FlashInferBackend
+            layer_names.append(layer_name)
+        layer_config = layer.get_kv_cache_config(config)
+        assert layer_config is not None
+        layouts = FlashInferBackend.supported_kv_cache_layouts()
+        resolve_kv_cache_layout(
+            config, [[layout.name for layout in layouts]], [layer_config]
+        )
+        builder = FlashInferMetadataBuilder(
+            layer_config.spec, layer_names, config, torch.device(DEVICE_TYPE)
+        )
+    assert builder.use_xqa is (head_size != 512)
+    assert builder.kv_cache_spec.dtype == layer.kv_cache_torch_dtype
+    assert builder.global_hyperparameters.has_same_all_params is (extra_softcap is None)
+    expected = expected and current_platform.is_device_capability_family(120)
+    assert builder.supports_draft_decode_metadata_update is expected
 
 
 @pytest.mark.skipif(

@@ -67,6 +67,26 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
     --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
 ```
 
+## FlashInfer XQA Draft Decoding
+
+In Model Runner V2 on NVIDIA SM12x GPUs, MTP can reuse FlashInfer XQA decode
+metadata across draft steps after the first token. Selection is automatic when
+FlashInfer XQA is active; no extra option is needed beyond the usual MTP
+configuration.
+`num_speculative_tokens` must exceed `1` to run these later draft steps.
+
+Use a BF16 model with unquantized BF16 KV caches. This path handles dense
+causal single-query draft attention, with uniform attention hyperparameters
+within each metadata group. TP, PP, PCP, and DP sizes must all be `1`,
+with no DCP, ubatching, adaptive verification, sliding window, logit soft cap,
+or attention sinks. Other configurations retain their existing backend behavior.
+
+Both eager execution and full CUDA graphs can use this metadata reuse.
+[Dynamic speculative decoding](dynamic_speculative_decoding.md) is supported;
+when its effective depth becomes `1`, drafting returns before the later-step
+loop. Reusing metadata can reduce host submission work, but deployment latency
+benefits depend on the model and workload.
+
 ## Notes
 
 - MTP only works for model families that support MTP in vLLM.

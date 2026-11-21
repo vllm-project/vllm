@@ -117,7 +117,7 @@ steps:
         v1/attention/test_mla_backends.py
         v1/attention/test_sparse_mla_backends.py
 
-- label: ":nvidia: (DGX Spark) [Nightly] FlashInfer NVFP4 XQA"
+- label: ":nvidia: (DGX Spark) [Nightly] FlashInfer XQA"
   key: flashinfer-nvfp4-xqa-dgx-spark
   automatic_shard: true
   timeout_in_minutes: 30
@@ -128,6 +128,17 @@ steps:
   - arm64-image-build
   source_file_dependencies:
   - vllm/v1/attention/backends/flashinfer.py
+  - vllm/v1/attention/backends/utils.py
   - tests/v1/attention/test_attention_backends.py
+  - vllm/v1/worker/gpu/spec_decode/
+  - tests/v1/e2e/spec_decode/mtp/qwen3_5/test_rejected_placeholders.py
   commands:
-  - pytest -v -s v1/attention/test_attention_backends.py -k nvfp4_decode_correctness
+  - >-
+    pytest -v -s
+    v1/attention/test_attention_backends.py
+    -k "nvfp4_decode_correctness or
+    test_flashinfer_xqa_mtp_decode_metadata_update_capability"
+  - >-
+    pytest -v -s
+    v1/e2e/spec_decode/mtp/qwen3_5/test_rejected_placeholders.py
+    -k xqa
