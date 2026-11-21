@@ -180,9 +180,25 @@ static PyObject* method_spinloop(PyObject* self, PyObject* args,
   Py_RETURN_FALSE;
 }
 
+// Full store-to-load fence for the MessageQueue parked-flag handshake: mfence
+// or a locked op on x86, dmb ish on Arm. Python's lock-based fences order only
+// acquire and release accesses, which does not order a store before a later
+// load of another location on weakly ordered CPUs.
+static PyObject* method_full_fence(PyObject* self, PyObject* args) {
+  (void)self;
+  (void)args;
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  // Not Py_RETURN_NONE: built against 3.12+ headers it skips the incref that
+  // a 3.11 interpreter needs, because only 3.12+ makes None immortal.
+  Py_INCREF(Py_None);
+  return Py_None;
+}
+
 static PyMethodDef spinloop_methods[] = {
     {"spinloop", (PyCFunction)method_spinloop, METH_VARARGS | METH_KEYWORDS,
      "Wait for store with callback"},
+    {"full_fence", method_full_fence, METH_NOARGS,
+     "Sequentially consistent memory fence"},
     {NULL, NULL, 0, NULL}};
 
 static struct PyModuleDef spinloop_module = {
