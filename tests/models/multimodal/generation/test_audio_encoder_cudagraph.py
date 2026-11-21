@@ -70,6 +70,7 @@ def test_qwen3_asr_audio_encoder_cudagraph(
             dtype="bfloat16",
             max_model_len=4096,
             max_num_seqs=2,
+            kv_cache_memory_bytes=512 * 1024**2,
             limit_mm_per_prompt={"audio": 1},
             attention_config={"backend": mm_encoder_attn_backend},
             mm_encoder_attn_backend=mm_encoder_attn_backend,
