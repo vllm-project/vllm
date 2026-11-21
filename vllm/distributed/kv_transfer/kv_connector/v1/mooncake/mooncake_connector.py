@@ -800,8 +800,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
-        # Registers the device KV cache with an RDMA engine.
-        return KVCacheAccess.REGISTERS
+        access = KVCacheAccess.REGISTERS
+        # The worker defaults to DMA-BUF when using the extensible cache.
+        if os.environ.get("WITH_NVIDIA_PEERMEM", "0") != "0":
+            access |= KVCacheAccess.REGISTERS_WITH_PEERMEM
+        return access
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -1389,19 +1392,9 @@ class MooncakeConnectorWorker:
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
-        # nvidia-peermem cannot pin VMM-backed memory; the transfer engine must
-        # register the extensible KV cache through DMA-BUF. Read at
-        # engine.initialize(), so settle it before constructing the engine.
-        if (
-            vllm_config.cache_config.enable_extensible_kv_cache
-            and os.environ.setdefault("WITH_NVIDIA_PEERMEM", "0") != "0"
-        ):
-            raise RuntimeError(
-                "WITH_NVIDIA_PEERMEM=1 is incompatible with the extensible KV "
-                "cache: nvidia-peermem cannot register VMM-backed memory. "
-                "Unset it to use Mooncake's DMA-BUF registration, or disable "
-                "the extensible KV cache."
-            )
+        # Keep the explicit registration mode checked during KV cache setup.
+        if vllm_config.cache_config.enable_extensible_kv_cache:
+            os.environ.setdefault("WITH_NVIDIA_PEERMEM", "0")
         # Capture device BEFORE TransferEngine init — MNNVL's NVLink allocator
         # may change the current CUDA device during engine.initialize().
         self.device_id = torch.accelerator.current_device_index()

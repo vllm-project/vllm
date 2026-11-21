@@ -26,6 +26,7 @@ from vllm.config import (
     update_config,
 )
 from vllm.config.compilation import CompilationMode
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.config.profiler import validate_profile_prefix
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
@@ -1029,7 +1030,15 @@ class Worker(WorkerBase):
     def extensible_kv_cache_unsupported_reason(self) -> str | None:
         # Every rank must reach the same decision: one that keeps the feature
         # would wait in the block-count all-reduces for one that dropped it.
-        reason = vmm_unavailable_reason(kv_cache_export_handle_types(self.vllm_config))
+        transfer = self.vllm_config.kv_transfer_config
+        require_gpudirect_rdma = (
+            transfer is not None
+            and KVCacheAccess.REGISTERS_WITH_PEERMEM in transfer.kv_cache_access()
+        )
+        reason = vmm_unavailable_reason(
+            kv_cache_export_handle_types(self.vllm_config),
+            require_gpudirect_rdma=require_gpudirect_rdma,
+        )
         if all_reduce_int(
             get_world_group().cpu_group, int(reason is not None), ReduceOp.MAX
         ):

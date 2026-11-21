@@ -69,6 +69,10 @@ class KVCacheAccess(enum.IntFlag):
     LEGACY_IPC = enum.auto()
     """Shares it through legacy CUDA IPC: the extensible KV cache is unsupported."""
 
+    REGISTERS_WITH_PEERMEM = enum.auto()
+    """Uses nvidia-peermem and requires GPUDirect RDMA-capable VMM
+    allocations. Set alongside REGISTERS."""
+
     def needs_single_chunk(self) -> bool:
         """Whether each segment must be backed by one physical allocation."""
         exports = KVCacheAccess.EXPORTS_FD | KVCacheAccess.EXPORTS_FABRIC
