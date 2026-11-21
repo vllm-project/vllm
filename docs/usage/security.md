@@ -445,6 +445,8 @@ Most cache paths default to subdirectories under a single root. Changing `VLLM_C
 | `VLLM_XLA_CACHE_PATH` | `$VLLM_CACHE_ROOT/xla_cache/` | XLA/TPU compilation cache. |
 | `VLLM_MEDIA_CACHE` | *(disabled)* | Optional cache for downloaded media (images, video, audio). Not enabled unless explicitly set. |
 
+Public example and test assets downloaded by `get_vllm_public_assets()` become visible in the asset cache only after their downloads complete, so concurrent readers receive complete files.
+
 ### Recommendations
 
 - **Restrict file permissions** on `VLLM_CACHE_ROOT` (and any other cache directories used by dependencies, such as `~/.triton` if compile caching is disabled) so that only the vLLM process owner can read and write to them.

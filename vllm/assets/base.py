@@ -3,6 +3,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import vllm.envs as envs
 from vllm.connections import global_http_connection
@@ -21,7 +22,7 @@ def get_cache_dir() -> Path:
 @lru_cache
 def get_vllm_public_assets(filename: str, s3_prefix: str | None = None) -> Path:
     """Download an asset file from `s3://vllm-public-assets`
-    and return the path to the downloaded file.
+    and return the path to the completed download in the local cache.
     """
     asset_directory = get_cache_dir() / "vllm_public_assets"
     asset_directory.mkdir(parents=True, exist_ok=True)
@@ -30,10 +31,13 @@ def get_vllm_public_assets(filename: str, s3_prefix: str | None = None) -> Path:
     if not asset_path.exists():
         if s3_prefix is not None:
             filename = s3_prefix + "/" + filename
-        global_http_connection.download_file(
-            f"{VLLM_S3_BUCKET_URL}/{filename}",
-            asset_path,
-            timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-        )
+        with TemporaryDirectory(dir=asset_path.parent) as tmp_dir:
+            tmp_path = Path(tmp_dir) / asset_path.name
+            global_http_connection.download_file(
+                f"{VLLM_S3_BUCKET_URL}/{filename}",
+                tmp_path,
+                timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+            )
+            tmp_path.replace(asset_path)
 
     return asset_path

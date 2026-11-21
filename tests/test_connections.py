@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
 import threading
 from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
@@ -11,6 +14,7 @@ import pytest
 import requests
 
 import vllm.envs as envs
+from vllm.assets import base as asset_base
 from vllm.connections import (
     HTTPConnection,
     HTTPResponseSizeExceededError,
@@ -347,3 +351,79 @@ async def test_get_bytes_retries_incomplete_response(
             await connection._async_client.close()
         if connection._sync_client is not None:
             connection._sync_client.close()
+
+
+@pytest.fixture
+def public_asset_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Generator[Path, None, None]:
+    monkeypatch.setattr(envs, "VLLM_ASSETS_CACHE", str(tmp_path))
+    asset_base.get_vllm_public_assets.cache_clear()
+    try:
+        yield tmp_path / "vllm_public_assets"
+    finally:
+        asset_base.get_vllm_public_assets.cache_clear()
+
+
+@pytest.mark.parametrize("fail_first", [False, True], ids=["complete", "interrupted"])
+def test_public_asset_cache_hides_incomplete_downloads(
+    monkeypatch: pytest.MonkeyPatch, public_asset_cache: Path, fail_first: bool
+) -> None:
+    """Readers need complete files even when an overlapping download fails."""
+    paused = threading.Event()
+    finish = threading.Event()
+    monkeypatch.setattr(envs, "VLLM_MEDIA_FETCH_MAX_RETRIES", 1)
+
+    class GatedBody(io.BytesIO):
+        def read(self, size: int | None = -1) -> bytes:
+            if self.tell() >= _CHUNK_SIZE:
+                paused.set()
+                if not finish.wait(timeout=10):
+                    raise TimeoutError("Download was not released")
+                if fail_first:
+                    raise requests.ConnectionError("Interrupted asset download")
+            return super().read(size)
+
+    responses = []
+    for stream in (GatedBody(_SMALL_BODY), io.BytesIO(_SMALL_BODY)):
+        response = requests.Response()
+        response.status_code = 200
+        response.raw = stream
+        responses.append(response)
+    response_iter = iter(responses)
+    monkeypatch.setattr(requests.Session, "get", lambda *a, **kw: next(response_iter))
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        first = executor.submit(asset_base.get_vllm_public_assets, "asset.bin")
+        try:
+            assert paused.wait(timeout=5)
+            cached_path = asset_base.get_vllm_public_assets("asset.bin")
+            assert cached_path.stat().st_size == len(_SMALL_BODY)
+            assert cached_path.read_bytes() == _SMALL_BODY
+        finally:
+            finish.set()
+        if fail_first:
+            with pytest.raises(requests.ConnectionError, match="Interrupted asset"):
+                first.result(timeout=5)
+        else:
+            assert first.result(timeout=5) == cached_path
+
+    assert cached_path == public_asset_cache / "asset.bin"
+    assert cached_path.read_bytes() == _SMALL_BODY
+    assert list(public_asset_cache.iterdir()) == [cached_path]
+    asset_base.get_vllm_public_assets.cache_clear()
+    assert asset_base.get_vllm_public_assets("asset.bin").read_bytes() == _SMALL_BODY
+
+
+def test_public_asset_cache_cleans_failed_download(
+    monkeypatch: pytest.MonkeyPatch, public_asset_cache: Path
+) -> None:
+    response = requests.Response()
+    response.status_code = 404
+    response.raw = io.BytesIO()
+    monkeypatch.setattr(requests.Session, "get", lambda *a, **kw: response)
+
+    with pytest.raises(requests.HTTPError):
+        asset_base.get_vllm_public_assets("missing.bin")
+
+    assert list(public_asset_cache.iterdir()) == []
