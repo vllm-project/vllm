@@ -6935,6 +6935,28 @@ def test_decode_match_states_key_attention_at_mamba_block_boundary():
     assert _all_blocks_free(manager)
 
 
+def test_decode_match_states_key_attention_at_prompt_end_mamba_block_boundary():
+    """A prompt that ends on a Mamba block boundary inside a larger attention
+    block, with a decode that crosses no later boundary: the follow-up turn
+    resumes at the prompt end, with the attention group keyed there."""
+    kv_cache_config = _make_hybrid_kv_cache_config(64, 200, ["full", "mamba"])
+    _replace_group(kv_cache_config, 0, block_size=128)
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=16,
+        retention_interval=0,
+        decode_match_holds=(16, 1),
+    )
+    req, _ = _decode(manager, 5, prompt_len=192)
+    manager.free(req)
+    follow_up = make_request("1", list(req.all_token_ids) + [7] * 20, 16, sha256)
+    _, num_computed_tokens, _ = manager.get_computed_blocks(follow_up)
+    assert num_computed_tokens == 192
+    assert _all_blocks_free(manager)
+
+
 def test_decode_match_states_off_keeps_block_boundary():
     manager = _decode_match_manager(decode_match_holds=(0, 0))
     req, holds = _decode(manager, 110)

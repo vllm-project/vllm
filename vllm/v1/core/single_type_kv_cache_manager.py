@@ -2645,7 +2645,9 @@ class MambaManager(SingleTypeKVCacheManager):
         """Index of the state block at the latest boundary crossed past the
         prompt, or `None` if there is none."""
         idx = processed_tokens // self.block_size - 1
-        if idx < num_prompt_tokens // self.block_size:
+        # A prompt that ends on a block boundary leaves its state there, past
+        # the replay boundary, so it counts as the first decode boundary.
+        if idx < (num_prompt_tokens - 1) // self.block_size:
             return None
         checkpoint = self._checkpoints.get(request_id)
         if (
