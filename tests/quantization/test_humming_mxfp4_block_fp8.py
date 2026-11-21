@@ -153,11 +153,13 @@ def test_checkpoint_mxfp8_runs_as_block_fp8_on_hopper(
         "is_device_capability_family",
         classmethod(lambda cls, cap: cap == capability),
     )
-    monkeypatch.setattr(mxfp4, "_user_moe_activation_override", lambda: user_override)
     monkeypatch.delenv("VLLM_HUMMING_INPUT_QUANT_CONFIG", raising=False)
 
-    schema = mxfp4._humming_input_schema(kMxfp8Dynamic)
+    schema = mxfp4._humming_input_schema(
+        kMxfp8Dynamic, activation_override_is_set=user_override is not None
+    )
 
+    assert schema is not None
     assert str(schema.a_dtype) == "float8e4m3"
     assert schema.input_scale_group_size == expected_group_size
 

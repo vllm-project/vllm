@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
     _resolve_activation_key,
+    _user_moe_activation_override_is_set,
     backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     convert_weight_to_mxfp4_moe_kernel_format,
@@ -159,6 +160,8 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.weight_dtype = "gpt_oss_mxfp4"
+        self.activation_key = _resolve_activation_key(None)
+        self.activation_override_is_set = _user_moe_activation_override_is_set()
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
 
         self.max_capture_size = moe.max_capture_size
@@ -358,6 +361,8 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
                 _cache_permute_indices=self._cache_permute_indices,
+                activation_key=self.activation_key,
+                activation_override_is_set=self.activation_override_is_set,
             )
         )
 
@@ -655,7 +660,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig, activation_key: QuantKey | None = None):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
-        self.activation_key = activation_key
+        self.activation_key = _resolve_activation_key(activation_key)
+        self.activation_override_is_set = _user_moe_activation_override_is_set()
         self.is_k3_situ_aiter = False
         self.is_k3_situ_int4_gfx942 = False
         self.mxfp4_backend, self.experts_cls = self._select_backend()
@@ -938,6 +944,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 activation=self.moe.activation,
                 use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
                 activation_key=self.activation_key,
+                activation_override_is_set=self.activation_override_is_set,
             )
         )
 
@@ -1082,8 +1089,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w2_scale = layer.w2_weight_scale
 
         if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION:
-            activation_key = _resolve_activation_key(self.activation_key)
-            if activation_key is None:
+            if self.activation_key is None:
                 return mxfp4_w4a16_moe_quant_config(
                     w1_scale=w1_scale,
                     w2_scale=w2_scale,
@@ -1091,9 +1097,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     w2_bias=w2_bias,
                     gemm1_clamp_limit=swiglu_limit,
                 )
-            if activation_key != kMxfp4Dynamic:
+            if self.activation_key != kMxfp4Dynamic:
                 raise NotImplementedError(
-                    f"MXFP4 MoE emulation does not support activation={activation_key}."
+                    "MXFP4 MoE emulation does not support "
+                    f"activation={self.activation_key}."
                 )
 
         return make_mxfp4_moe_quant_config(

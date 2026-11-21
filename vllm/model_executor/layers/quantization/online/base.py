@@ -501,6 +501,21 @@ class OnlineQuantizationConfig(QuantizationConfig):
             table,
         )
 
+    def get_activation_override(
+        self, layer_cls: type[torch.nn.Module], prefix: str
+    ) -> QuantSpec | None:
+        """Return this layer's explicit activation override, including `null`."""
+        if self.args.targets is not None:
+            matched = self._resolve_targets_quant_method_metadata(prefix, layer_cls)
+            spec = matched[3] if matched is not None else None
+        elif issubclass(layer_cls, RoutedExperts):
+            spec = self.args.moe
+        elif issubclass(layer_cls, (LinearBase, ParallelLMHead)):
+            spec = self.args.linear
+        else:
+            return None
+        return spec if spec is not None and "activation" in spec.fields_set else None
+
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
@@ -525,9 +540,13 @@ class OnlineQuantizationConfig(QuantizationConfig):
                         "VLLM_RELOAD_MODE=direct"
                     )
                 return method
-            kwargs = {}
+            kwargs: dict[str, Any] = {}
             if quant_method_cls.accepts_activation_override:
                 kwargs["activation_quant_key"] = quant_spec.activation
+            if quant_method_cls is Mxfp4OnlineMoEMethod:
+                kwargs["activation_override"] = self.get_activation_override(
+                    type(layer), prefix
+                )
             if isinstance(layer, RoutedExperts):
                 assert issubclass(quant_method_cls, OnlineMoEMethodBase)
                 return quant_method_cls(moe=layer.moe_config, **kwargs)

@@ -46,6 +46,7 @@ from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear import
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_humming
 
 MODELS = [
     pytest.param(
@@ -1078,6 +1079,52 @@ def test_mxfp4_moe_rejects_incompatible_activation_in_llm(
         ),
     ):
         pass
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_humming(),
+    reason="Requires CUDA Humming kernels",
+)
+@pytest.mark.parametrize("scope", ["global", "layer"])
+def test_mxfp4_moe_retains_bf16_override_after_model_loading(
+    vllm_runner, monkeypatch, scope
+):
+    """BF16 overrides must reach the loaded kernels, including a single layer."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    target = "model.layers.0.mlp.experts"
+    args = (
+        {"moe": {"activation": None}}
+        if scope == "global"
+        else {"targets": {target: {"activation": None}}}
+    )
+
+    def activations(model):
+        actual = {}
+        for layer in model.modules():
+            if isinstance(layer, RoutedExperts):
+                config = layer.quant_method.moe_quant_config
+                assert config is not None
+                actual[layer.layer_name] = config.quant_dtype
+        return actual
+
+    with vllm_runner(
+        "INCModel/Qwen3-30B-A3B-12L-MXFP4-test",
+        moe_backend="humming",
+        quantization_config=args,
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.3,
+    ) as llm:
+        for actual in llm.apply_model(activations):
+            assert len(actual) > 1 and target in actual
+            assert actual == {
+                name: None if scope == "global" or name == target else "float4e2m1"
+                for name in actual
+            }
+        output = llm.generate_greedy("The capital of France is", max_tokens=4)
+        assert output[0][0]
 
 
 def test_wna16_xpu_moe_routes_to_gptq_moe(monkeypatch) -> None:

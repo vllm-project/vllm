@@ -7,7 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
+from vllm.config import get_current_vllm_config_or_none
 from vllm.config.kernel import (
     FLASHINFER_MOE_EP_CUTEDSL,
     FLASHINFER_MOE_EP_DEEP_GEMM,
@@ -63,6 +63,7 @@ from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.utils.humming import BaseInputSchema
 
 
 logger = init_logger(__name__)
@@ -518,7 +519,7 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
 
 def _user_moe_activation_override() -> QuantKey | None:
     """User's MoE activation override from quantization_config, or None."""
-    return user_activation_override("moe", get_current_vllm_config())[0]
+    return user_activation_override("moe", get_current_vllm_config_or_none())[0]
 
 
 def _user_moe_activation_override_is_set() -> bool:
@@ -544,16 +545,16 @@ def _resolve_activation_key(
     return user_override
 
 
-def _humming_input_schema(model_activation_key: QuantKey | None):
-    """Humming input schema for the checkpoint activation combined with the
-    user override, or None to keep Humming's default (BF16 or the
-    VLLM_HUMMING_INPUT_QUANT_CONFIG env override, which wins)."""
-    activation_key = _resolve_activation_key(model_activation_key)
+def _humming_input_schema(
+    activation_key: QuantKey | None,
+    activation_override_is_set: bool = False,
+) -> "BaseInputSchema | None":
+    """Humming input schema for an already-resolved activation key."""
     if activation_key is None or envs.VLLM_HUMMING_INPUT_QUANT_CONFIG:
         return None
     if (
         activation_key == kMxfp8Dynamic
-        and _user_moe_activation_override() is None
+        and not activation_override_is_set
         and current_platform.is_device_capability_family(90)
     ):
         # Humming's SM90 W4A8 kernels are tuned for block FP8 activations, so
@@ -982,6 +983,8 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     w13_input_scale: torch.Tensor | None = None,
     w2_input_scale: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
+    activation_key: QuantKey | None = None,
+    activation_override_is_set: bool = False,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1022,7 +1025,9 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         convert_to_humming_moe_kernel_format(
             layer,
             quant_config={"quant_method": "gpt_oss_mxfp4"},
-            input_schema=_humming_input_schema(None),
+            input_schema=_humming_input_schema(
+                activation_key, activation_override_is_set
+            ),
             allow_input_schema_fallback=False,
         )
         return (
@@ -1611,6 +1616,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     activation: MoEActivation | None = None,
     use_separated_a4w4: bool = False,
     activation_key: QuantKey | None = None,
+    activation_override_is_set: bool = False,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1679,7 +1685,9 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         convert_to_humming_moe_kernel_format(
             layer,
             quant_config={"quant_method": "mxfp4"},
-            input_schema=_humming_input_schema(activation_key),
+            input_schema=_humming_input_schema(
+                activation_key, activation_override_is_set
+            ),
             allow_input_schema_fallback=False,
         )
         return (

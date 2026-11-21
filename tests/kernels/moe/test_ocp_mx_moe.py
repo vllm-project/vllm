@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.import_utils import has_humming, has_quark
 from vllm.utils.math_utils import next_power_of_2
 
 TRTLLM_GEN_MXFP4_AVAILABLE = (
@@ -2829,7 +2830,10 @@ def packed_mxfp4_quant_config(request):
         CompressedTensorsConfig,
     )
     from vllm.model_executor.layers.quantization.inc import INCConfig
+    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
 
+    if request.param == "native":
+        return Mxfp4Config()
     if request.param == "inc":
         quant_config = INCConfig.from_config(
             {
@@ -2852,6 +2856,9 @@ def packed_mxfp4_quant_config(request):
             "symmetric": True,
             "dynamic": False,
         }
+        activations = weights | {"dynamic": True}
+        if request.param == "compressed_tensors_w4a8":
+            activations |= {"num_bits": 8, "group_size": 128}
         quant_config = CompressedTensorsConfig.from_config(
             {
                 "format": "mxfp4-pack-quantized",
@@ -2859,7 +2866,7 @@ def packed_mxfp4_quant_config(request):
                     "group_0": {
                         "targets": ["Linear"],
                         "weights": weights,
-                        "input_activations": weights | {"dynamic": True},
+                        "input_activations": activations,
                     }
                 },
             }
@@ -3030,6 +3037,121 @@ def test_packed_mxfp4_weight_only_backends_execute(
     else:
         actual = layer.forward_modular(x, weights, ids)
     torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.02)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_humming(),
+    reason="Requires CUDA Humming kernels",
+)
+@pytest.mark.parametrize(
+    "packed_mxfp4_quant_config",
+    ["compressed_tensors", "compressed_tensors_w4a8", "inc"],
+    indirect=True,
+)
+@pytest.mark.parametrize("activation", [None, "mxfp8"])
+def test_packed_mxfp4_layer_activation_survives_weight_processing(
+    packed_mxfp4_quant_config,
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    activation,
+):
+    """Post-load processing must retain the layer's targeted activation override."""
+    from vllm.config.quantization import QuantSpec
+
+    with torch.device("cuda"):
+        layer = _make_packed_mxfp4_layer(
+            packed_mxfp4_quant_config, "humming", QuantSpec(activation=activation)
+        )
+    layer.w13_weight_packed.data.fill_(0x12)
+    layer.w2_weight_packed.data.fill_(0x34)
+    layer.w13_weight_scale.data.fill_(125)
+    layer.w2_weight_scale.data.fill_(124)
+    layer.quant_method.process_weights_after_loading(layer)
+
+    config = layer.quant_method.moe_quant_config
+    assert config is not None
+    assert config.quant_dtype == ("float8e4m3" if activation else None)
+    assert not config.is_block_quantized
+
+
+@pytest.mark.skipif(not TRTLLM_GEN_MXFP4_AVAILABLE, reason="Requires SM100")
+@pytest.mark.parametrize(
+    "packed_mxfp4_quant_config", ["compressed_tensors_w4a8"], indirect=True
+)
+def test_packed_mxfp4_w4a8_executes_block_fp8(
+    packed_mxfp4_quant_config, default_vllm_config, dist_init, workspace_init
+):
+    """A real CT W4A8 layer must execute its declared block-FP8 activation."""
+    from tests.quantization.reference_mxfp4 import dq_mxfp4_torch
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a8_mxfp4 import (  # noqa: E501
+        CompressedTensorsW4A8Mxfp4MoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        per_token_group_quant_fp8,
+    )
+
+    def quant_dequant(x):
+        q, scale = per_token_group_quant_fp8(x.contiguous(), 128)
+        return (
+            (q.float().view(-1, x.shape[-1] // 128, 128) * scale[..., None])
+            .view_as(x)
+            .to(x.dtype)
+        )
+
+    torch.manual_seed(0)
+    with torch.device("cuda"):
+        layer = _make_packed_mxfp4_layer(packed_mxfp4_quant_config, "deep_gemm")
+    method = layer.quant_method
+    assert isinstance(method, CompressedTensorsW4A8Mxfp4MoEMethod)
+    for param in (layer.w13_weight_packed, layer.w2_weight_packed):
+        param.data.random_(0, 256)
+    layer.w13_weight_scale.data.random_(122, 126)
+    layer.w2_weight_scale.data.random_(122, 126)
+    w13 = dq_mxfp4_torch(
+        layer.w13_weight_packed, layer.w13_weight_scale, torch.bfloat16
+    )
+    w2 = dq_mxfp4_torch(layer.w2_weight_packed, layer.w2_weight_scale, torch.bfloat16)
+    method.process_weights_after_loading(layer)
+    assert method.moe_quant_config is not None
+    assert method.moe_quant_config.quant_dtype == torch.float8_e4m3fn
+    assert method.moe_quant_config.block_shape == [128, 128]
+
+    x = torch.randn(4, 256, dtype=torch.bfloat16, device="cuda") / 10
+    ids = torch.tensor([[0], [1], [0], [1]], dtype=torch.int32, device="cuda")
+    weights = torch.ones(4, 1, dtype=torch.float32, device="cuda")
+    expected = torch.empty_like(x)
+    quantized_x = quant_dequant(x)
+    for expert in range(2):
+        rows = ids[:, 0] == expert
+        gate, up = (quantized_x[rows] @ w13[expert].T).float().chunk(2, dim=-1)
+        intermediate = (torch.nn.functional.silu(gate) * up).to(x.dtype)
+        expected[rows] = quant_dequant(intermediate) @ w2[expert].T
+    actual = layer.forward_modular(x, weights, ids)
+    torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.02)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike() or not has_quark(),
+    reason="Requires a GPU and Quark emulation support",
+)
+@pytest.mark.parametrize(
+    "packed_mxfp4_quant_config",
+    ["native", "compressed_tensors", "compressed_tensors_w4a8", "inc"],
+    indirect=True,
+)
+@pytest.mark.parametrize("activation", [None, "mxfp4"])
+def test_mxfp4_emulation_retains_layer_activation(
+    packed_mxfp4_quant_config, default_vllm_config, activation
+):
+    """Emulation must build its activation config outside the construction scope."""
+    from vllm.config.quantization import QuantSpec
+
+    layer = _make_packed_mxfp4_layer(
+        packed_mxfp4_quant_config, "emulation", QuantSpec(activation=activation)
+    )
+    config = layer.quant_method.get_fused_moe_quant_config(layer)
+    assert config.quant_dtype == activation
 
 
 # The emulation dequantizes only the batch's distinct experts, one per slot:
