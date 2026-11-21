@@ -213,7 +213,10 @@ def test_marlin_vs_trtllm_mxint4_moe_kimik2(monkeypatch, m, n, k, e, topk, group
         enable_pdl=None,
         output=None,
         tune_max_num_tokens=8192,
-    ).to(dtype)
+    )
+    if isinstance(trtllm_output, (tuple, list)):
+        trtllm_output = trtllm_output[0]
+    trtllm_output = trtllm_output.to(dtype)
 
     # === Path 2: Marlin INT4 MoE ===
     # Similar to: else (non-flashinfer path)
