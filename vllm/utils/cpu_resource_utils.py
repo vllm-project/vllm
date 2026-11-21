@@ -115,6 +115,39 @@ def get_cgroup_memory_usage() -> int | None:
     return None
 
 
+def get_cgroup_reclaimable_memory() -> int:
+    """Return memory charged to the cgroup that the kernel can reclaim, in
+    bytes: file-backed page cache plus reclaimable slab. 0 if unknown.
+
+    memory.current / memory.usage_in_bytes include page cache, e.g. from
+    reading model weights. The kernel reclaims it before the cgroup reaches
+    its limit, so it counts as available, the same way get_memory_node_info()
+    counts Active(file) + Inactive(file) + SReclaimable from NUMA meminfo.
+    """
+    if sys.platform != "linux":
+        return 0
+
+    if _read_int_file("/sys/fs/cgroup/memory.max") is not None:
+        stat_path = "/sys/fs/cgroup/memory.stat"
+        keys: tuple[str, ...] = ("active_file", "inactive_file", "slab_reclaimable")
+    else:
+        stat_path = "/sys/fs/cgroup/memory/memory.stat"
+        keys = ("total_active_file", "total_inactive_file")
+
+    try:
+        with open(stat_path) as f:
+            stats = dict(line.split()[:2] for line in f if line.strip())
+        return sum(int(stats.get(key, 0)) for key in keys)
+    except (OSError, ValueError):
+        return 0
+
+
+def _cgroup_available_memory(cgroup_limit: int, cgroup_usage: int | None) -> int:
+    """Memory left under the cgroup limit, counting reclaimable memory."""
+    reclaimable = get_cgroup_reclaimable_memory() if cgroup_usage else 0
+    return max(0, cgroup_limit - (cgroup_usage or 0) + reclaimable)
+
+
 def get_available_memory() -> int:
     """Return available host memory, honoring cgroup limits."""
     available = psutil.virtual_memory().available
@@ -122,7 +155,7 @@ def get_available_memory() -> int:
     if cgroup_limit is None:
         return available
     cgroup_usage = get_cgroup_memory_usage()
-    return min(available, max(0, cgroup_limit - (cgroup_usage or 0)))
+    return min(available, _cgroup_available_memory(cgroup_limit, cgroup_usage))
 
 
 def check_cgroup_memory_available(
@@ -242,8 +275,8 @@ def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
     cgroup_usage = get_cgroup_memory_usage()
     if cgroup_limit is not None and cgroup_limit < total_memory:
         total_memory = cgroup_limit
-        cgroup_available = cgroup_limit - (cgroup_usage or 0)
-        available_memory = max(0, min(available_memory, cgroup_available))
+        cgroup_available = _cgroup_available_memory(cgroup_limit, cgroup_usage)
+        available_memory = min(available_memory, cgroup_available)
 
     return MemoryNodeInfo(
         total_memory=total_memory,
