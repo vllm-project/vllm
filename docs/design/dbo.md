@@ -34,7 +34,7 @@ To enable the DBO system pass in the `--enable-dbo` argument to your vllm serve 
 * `--dbo-decode-token-threshold` the minimum number of tokens in a decode-only batch required to enable DBO for that batch
 * `--dbo-prefill-token-threshold` the minimum number of tokens in a batch containing at least one prefill required to enable DBO for that batch
 
-Currently, DBO is only supported with DeepEP, so DeepEP must be installed and the `--all2all-backend` argument must be set to `deepep_low_latency` if your workload is primarily decode requests, or `deepep_high_throughput` if your workload is primarily prefill requests.
+DBO needs an all2all backend that supports it: `deepep_low_latency` if your workload is primarily decode requests or `deepep_high_throughput` if it is primarily prefill requests (both need DeepEP installed), or `nixl_ep`. On ROCm, `allgather_reducescatter` and `mori` (when it runs MoRI EPv2, see [MoRI EP](../serving/expert_parallel_deployment.md#mori-ep-rocm)) also support it.
 
 Below is a command that will spin up a two DP rank server with expert parallelism and DBO enabled.
 EX: `vllm serve deepseek-ai/DeepSeek-V2-Lite --trust-remote-code --data-parallel-size 2 --enable-expert-parallel --enable-dbo --all2all-backend deepep_low_latency`
@@ -43,7 +43,7 @@ Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
 
 ## Limitations
 
-DBO cannot be combined with LoRA, pipeline parallelism, prefill context parallelism, multimodal, encoder-decoder or hybrid models, or encoder-only models. Multimodal models are supported under `all-reduce-overlap`. CUDA graphs must be Full or disabled: the runner rejects `PIECEWISE`.
+DBO cannot be combined with LoRA, prefill context parallelism, multimodal, encoder-decoder or hybrid models, or encoder-only models. Multimodal models are supported under `all-reduce-overlap`. CUDA graphs must be Full or disabled: the runner rejects `PIECEWISE`. With pipeline parallelism, each stage microbatches its own forward pass (non-first stages slice the received intermediate tensors per microbatch) and the stages still send and receive whole batches.
 
 ## DBO Components
 

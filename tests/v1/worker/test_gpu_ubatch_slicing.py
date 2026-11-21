@@ -28,6 +28,7 @@ from vllm.forward_context import create_forward_context
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
+from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
@@ -383,6 +384,40 @@ def test_slice_model_inputs_handles_mrope_positions():
     torch.testing.assert_close(sliced["positions"], torch.arange(24).view(3, 8)[:, 4:8])
     assert sliced["inputs_embeds"] is None
     assert sliced["intermediate_tensors"] is None
+
+
+def test_pipeline_stage_microbatches_round_trip_intermediate_tensors():
+    # A non-first pipeline stage receives the whole batch's hidden states and
+    # residual; each microbatch must see only its tokens, and the stage sends
+    # the microbatch outputs on as one batch again.
+    received = IntermediateTensors(
+        {
+            "hidden_states": torch.arange(16.0).view(8, 2),
+            "residual": torch.arange(16.0).view(8, 2) + 100,
+        }
+    )
+    model_inputs = {
+        "input_ids": None,
+        "positions": torch.arange(8),
+        "inputs_embeds": None,
+        "intermediate_tensors": received,
+    }
+    token_slices = [slice(0, 5), slice(5, 8)]
+    outputs = []
+    for token_slice in token_slices:
+        sliced = slice_model_inputs(model_inputs, token_slice)["intermediate_tensors"]
+        assert isinstance(sliced, IntermediateTensors)
+        for key, value in received.tensors.items():
+            torch.testing.assert_close(sliced[key], value[token_slice])
+            # A view: the stage's persistent receive buffer is not copied.
+            assert sliced[key].data_ptr() == value[token_slice].data_ptr()
+        outputs.append(IntermediateTensors({k: v + 1 for k, v in sliced.items()}))
+
+    merged = merge_ubatch_outputs(outputs)
+    assert isinstance(merged, IntermediateTensors)
+    assert merged.tensors.keys() == received.tensors.keys()
+    for key, value in received.tensors.items():
+        torch.testing.assert_close(merged[key], value + 1)
 
 
 def _make_dbo_config() -> VllmConfig:
