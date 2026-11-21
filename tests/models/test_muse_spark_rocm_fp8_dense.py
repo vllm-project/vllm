@@ -584,7 +584,7 @@ def test_fp8_dense_prompt_logprobs_stay_close_to_the_bf16_path(
         del llm
         return torch.tensor(values)
 
-    base = {"ulysses_prefill": True} if stream == "ulysses" else {}
+    base = {"ulysses_prefill": "full"} if stream == "ulysses" else {}
     reference = prompt_logprobs(base, [])
     names = ["feed_forward.pooler", "feed_forward.unpooler", "self_attn.qkv_proj"]
     fp8_layers = sorted(f"{layer}.{name}" for layer in range(2) for name in names)

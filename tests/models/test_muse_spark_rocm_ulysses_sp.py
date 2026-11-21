@@ -28,7 +28,9 @@ from vllm.utils.network_utils import get_open_port
 from ..utils import multi_gpu_test
 from .test_muse_spark_rocm_mono import TINY_TEXT, _checkpoint_config
 
-ON = {"ulysses_prefill": True}
+ON = {"ulysses_prefill": "full"}
+OUTPUT_ONLY = {"ulysses_prefill": "output_only"}
+MODES = [pytest.param(ON, id="qkv-o"), pytest.param(OUTPUT_ONLY, id="output-only")]
 
 
 def _config(additional_config: dict, max_num_batched_tokens: int = 8192) -> VllmConfig:
@@ -59,7 +61,9 @@ def _all_steps_captured() -> VllmConfig:
     "options, match",
     [
         ({"ulysses_prefil": True}, "Unknown additional_config key"),
-        ({"ulysses_prefill": "false"}, "JSON boolean"),
+        ({"ulysses_prefill": True}, "must be one of 'off', 'full', 'output_only'"),
+        ({"ulysses_prefill": "on"}, "must be one of"),
+        ({"ulysses_prefill_output_only": True}, "Unknown additional_config key"),
     ],
 )
 def test_ulysses_prefill_rejects_invalid_options(options: dict, match: str) -> None:
@@ -157,6 +161,69 @@ def test_expand_rows_repeats_each_row(tokens: int, k: int) -> None:
         assert torch.equal(out, x.repeat_interleave(k, dim=0))
 
 
+def _within_fp8_step(got: torch.Tensor, ref: torch.Tensor, head_dim: int) -> None:
+    """Every value within half an E4M3 step (2^-4 relative) of its head's max."""
+    ref = ref.float().view(ref.shape[0], -1, head_dim)
+    bound = ref.abs().amax(dim=-1, keepdim=True) * 2**-4 + 1e-6
+    assert ((got.float().view_as(ref) - ref).abs() <= bound).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton FP8 kernels")
+@pytest.mark.parametrize("world_size, num_tokens", [(2, 8), (3, 11), (4, 13)])
+@pytest.mark.parametrize("head_dim, heads_per_rank", [(64, 3), (128, 2)])
+def test_fp8_all_to_all_payloads_match_the_bf16_layouts(
+    world_size: int, num_tokens: int, head_dim: int, heads_per_rank: int
+) -> None:
+    """The FP8 payloads of both Ulysses all-to-all exchanges (`ops.fp8_a2a`, packed as
+    `a2a_tokens_to_heads` / `a2a_heads_to_tokens` pack them, the exchange done
+    in-process) land where the BF16 exchanges put each value, within the FP8
+    rounding of its (token, head) group; padding rows stay zero."""
+    from vllm.models.muse_spark.amd.ops import fp8_a2a
+
+    dev = "cuda"
+    cols = heads_per_rank * head_dim
+    rows = -(-num_tokens // world_size)
+    gen = torch.Generator(device=dev).manual_seed(0)
+
+    def exchange(sends: list[torch.Tensor]) -> list[torch.Tensor]:
+        # all_to_all_single: rank r receives chunk r of every rank's send.
+        chunks = [s.view(world_size, -1, s.shape[-1]) for s in sends]
+        return [torch.cat([c[r] for c in chunks]) for r in range(world_size)]
+
+    # Token shards [rows, W*cols] -> all tokens of the rank's columns.
+    full = torch.randn(
+        (rows * world_size, world_size * cols), device=dev, generator=gen
+    ).to(torch.bfloat16)
+    full[num_tokens:] = 0
+    sends = [
+        fp8_a2a.quant_pack(full[r * rows : (r + 1) * rows], world_size, rows, head_dim)
+        for r in range(world_size)
+    ]
+    for r, recv in enumerate(exchange(sends)):
+        got = fp8_a2a.dequant_unpack(
+            recv[None], num_tokens, cols, head_dim, torch.bfloat16
+        )
+        _within_fp8_step(got, full[:num_tokens, r * cols : (r + 1) * cols], head_dim)
+
+    # Each rank's heads [T, cols] -> the rank's token shard, all heads.
+    heads = [
+        torch.randn((num_tokens, cols), device=dev, generator=gen).to(torch.bfloat16)
+        * (1 + r)
+        for r in range(world_size)
+    ]
+    sends = [fp8_a2a.quant_pack(h, 1, rows * world_size, head_dim) for h in heads]
+    ref = torch.zeros(
+        (rows * world_size, world_size * cols), device=dev, dtype=torch.bfloat16
+    )
+    for r in range(world_size):
+        ref[:num_tokens, r * cols : (r + 1) * cols] = heads[r]
+    for r, recv in enumerate(exchange(sends)):
+        got = fp8_a2a.dequant_unpack(
+            recv.view(world_size, rows, -1), rows, cols, head_dim, torch.bfloat16
+        )
+        _within_fp8_step(got, ref[r * rows : (r + 1) * rows], head_dim)
+
+
 def _random_weights(model: torch.nn.Module) -> int:
     """Replace the BF16/FP32 weights with O(1) random ones (matrices scaled by
     1/sqrt(fan-in), vectors in [0.5, 1.5]; distinct per TP rank where TP-sharded),
@@ -251,9 +318,31 @@ def _prompt_logprobs(llm) -> torch.Tensor:
 @pytest.mark.skipif(
     not current_platform.is_rocm(), reason="Muse Spark Ulysses needs ROCm"
 )
+@pytest.mark.parametrize("rows", [1, 255, 256, 2096, 4096, 4100])
+def test_ulysses_gemm_matches_the_dequantized_product(rows: int) -> None:
+    """The FP8 GEMM agrees with the product of its dequantized operands, at row
+    counts on and off 256-row multiples."""
+    torch.manual_seed(rows)
+    n, k = 1024, 2048
+    x = torch.randn(rows, k, device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * 0.05
+    wq = usp._quant_weight(weight)
+    xq = usp.quant_rows(x)
+    out = usp.gemm(xq, wq, torch.bfloat16)
+    ref = (xq[0].float() * xq[1].float().view(-1, 1)) @ (
+        wq[0].float() * wq[1].float().view(-1, 1)
+    ).t()
+    assert out.shape == (rows, n) and out.dtype == torch.bfloat16
+    torch.testing.assert_close(out.float(), ref, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="Muse Spark Ulysses needs ROCm"
+)
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("options", MODES)
 def test_ulysses_prefill_matches_the_token_sharded_stream(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, options: dict
 ) -> None:
     """Prompt logprobs of one Ulysses step stay within the FP8 projection error of
     the stream without Ulysses. A wrong head or rank order moves them by far more.
@@ -263,8 +352,8 @@ def test_ulysses_prefill_matches_the_token_sharded_stream(
     assert llm.built == [0, 0]
     reference = _prompt_logprobs(llm)
     del llm
-    llm = _tiny_llm(tmp_path, monkeypatch, ON)
-    assert llm.built == [LAYERS] * 2
+    llm = _tiny_llm(tmp_path, monkeypatch, options)
+    assert llm.apply_model(_held_copies) == [[_copies(options)] * LAYERS] * 2
     llm.apply_model(_count_ulysses_exchanges)
     ulysses = _prompt_logprobs(llm)
     # Both streams can round alike, so check that the Ulysses exchange ran.
@@ -294,20 +383,39 @@ def _bits(t: torch.Tensor) -> torch.Tensor:
 
 
 def _parts(w: "usp.UlyssesWeights") -> dict[str, list[torch.Tensor]]:
-    return {part: [_bits(t) for t in getattr(w, part)] for part in ("qkv", "gate", "o")}
+    return {
+        part: [_bits(t) for t in getattr(w, part)]
+        for part in ("qkv", "gate", "o")
+        if getattr(w, part) is not None
+    }
+
+
+def _copies(options: dict) -> list[str]:
+    """The Ulysses copies a layer holds with `options`."""
+    if options["ulysses_prefill"] == "output_only":
+        return ["o"]
+    return ["gate", "o", "qkv"]
+
+
+def _held_copies(model: torch.nn.Module) -> list[list[str]]:
+    return [
+        sorted(_parts(m.ulysses_weights))
+        for m in model.modules()
+        if getattr(m, "ulysses_weights", None)
+    ]
 
 
 def _same(a: list[torch.Tensor], b: list[torch.Tensor]) -> bool:
     return all(torch.equal(x, y) for x, y in zip(a, b, strict=True))
 
 
-def _reload_attention(worker, exponent: int) -> dict:
+def _reload_attention(worker, exponent: int, output_only: bool) -> dict:
     """Reload every attention QKV and O weight (kernel format) with its columns
     scaled by 2**exponent and 2**-exponent alternately, which is exact in BF16 and
     changes the per-row FP8 payload, not only its scales. Returns the
     addresses of the Ulysses copies, the copies (qkv, gate, o) that differ from
-    ones freshly built from the reloaded weights, and those the reload left
-    unchanged."""
+    ones freshly built from the reloaded weights in the `output_only` mode, and
+    those the reload left unchanged."""
     model = worker.get_model()
     layers = [m for m in model.modules() if getattr(m, "ulysses_weights", None)]
     before = [
@@ -324,7 +432,18 @@ def _reload_attention(worker, exponent: int) -> dict:
     stale, unchanged = [], []
     for i, (m, old) in enumerate(zip(layers, before, strict=True)):
         held = _parts(m.ulysses_weights)
-        fresh = _parts(usp.build_weights(m.qkv_proj, m.o_proj, m.q_size, m.kv_size))
+        fresh = _parts(
+            usp.build_weights(
+                m.qkv_proj,
+                m.o_proj,
+                m.q_size,
+                m.kv_size,
+                output_only,
+            )
+        )
+        if held.keys() != fresh.keys():
+            stale.append(f"{i}: {sorted(held)} != {sorted(fresh)}")
+            continue
         stale += [f"{i}.{k}" for k in held if not _same(held[k], fresh[k])]
         unchanged += [f"{i}.{k}" for k in held if _same(held[k], old[k])]
     return {
@@ -347,7 +466,7 @@ def test_ulysses_prefill_follows_weight_reloads(tmp_path, monkeypatch) -> None:
     assert llm.built == [LAYERS] * 2
 
     def reload(exponent: int) -> list[int]:
-        result = llm.collective_rpc(_reload_attention, args=(exponent,))
+        result = llm.collective_rpc(_reload_attention, args=(exponent, False))
         assert [r["stale"] for r in result] == [[], []]
         if exponent:
             assert [r["unchanged"] for r in result] == [[], []]
