@@ -45,6 +45,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 is_hip_ = current_platform.is_rocm()
+_USE_CUDA_STAGE2_TILING = tl.constexpr(current_platform.is_cuda())
 
 logger = logging.getLogger(__name__)
 
@@ -679,25 +680,54 @@ def _fwd_kernel_stage2(
     window_start = 0
     if SLIDING_WINDOW > 0:
         window_start = tl.maximum(cur_batch_seq_len - SLIDING_WINDOW, 0)
-    for split_kv_id in range(0, NUM_KV_SPLITS):
-        kv_len_per_split = tl.cdiv(cur_batch_seq_len - window_start, NUM_KV_SPLITS)
-        split_kv_start = window_start + kv_len_per_split * split_kv_id
-        split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
-
-        if split_kv_end > split_kv_start:
+    if _USE_CUDA_STAGE2_TILING and NUM_KV_SPLITS > 1:
+        kv_len = cur_batch_seq_len - window_start
+        kv_len_per_split = tl.cdiv(kv_len, NUM_KV_SPLITS)
+        # Reuse the stage-1 partition and avoid overflow from a second ceil-div.
+        num_active = (kv_len - 1) // tl.maximum(kv_len_per_split, 1) + 1
+        BLOCK_S: tl.constexpr = min(triton.next_power_of_2(NUM_KV_SPLITS), 8)
+        offs_s = tl.arange(0, BLOCK_S)
+        for s0 in range(0, num_active, BLOCK_S):
+            split = s0 + offs_s
+            mask_s = split < num_active
             tv = tl.load(
-                Mid_O + offs_v + split_kv_id * stride_mid_os, mask=mask_d, other=0.0
+                Mid_O + offs_v[None, :] + split[:, None] * stride_mid_os,
+                mask=mask_s[:, None] & mask_d[None, :],
+                other=0.0,
             )
-            tlogic = tl.load(Mid_O + offs_logic + split_kv_id * stride_mid_os)
-            n_e_max = tl.maximum(tlogic, e_max)
-
+            tlogic = tl.load(
+                Mid_O + offs_logic + split * stride_mid_os,
+                mask=mask_s,
+                other=-float("inf"),
+            )
+            n_e_max = tl.maximum(tl.max(tlogic, 0), e_max)
             old_scale = tl.exp(e_max - n_e_max)
-            acc *= old_scale
             exp_logic = tl.exp(tlogic - n_e_max)
-            acc += exp_logic * tv
-
-            e_sum = e_sum * old_scale + exp_logic
+            acc = acc * old_scale + tl.sum(exp_logic[:, None] * tv, 0)
+            e_sum = e_sum * old_scale + tl.sum(exp_logic, 0)
             e_max = n_e_max
+    else:
+        for split_kv_id in range(0, NUM_KV_SPLITS):
+            kv_len_per_split = tl.cdiv(cur_batch_seq_len - window_start, NUM_KV_SPLITS)
+            split_kv_start = window_start + kv_len_per_split * split_kv_id
+            split_kv_end = tl.minimum(
+                split_kv_start + kv_len_per_split, cur_batch_seq_len
+            )
+
+            if split_kv_end > split_kv_start:
+                tv = tl.load(
+                    Mid_O + offs_v + split_kv_id * stride_mid_os, mask=mask_d, other=0.0
+                )
+                tlogic = tl.load(Mid_O + offs_logic + split_kv_id * stride_mid_os)
+                n_e_max = tl.maximum(tlogic, e_max)
+
+                old_scale = tl.exp(e_max - n_e_max)
+                acc *= old_scale
+                exp_logic = tl.exp(tlogic - n_e_max)
+                acc += exp_logic * tv
+
+                e_sum = e_sum * old_scale + exp_logic
+                e_max = n_e_max
 
     result = acc / e_sum
     if OUTPUT_FP16:

@@ -7,7 +7,10 @@ import torch
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
+from vllm.v1.attention.ops.triton_decode_attention import (
+    _decode_softmax_reducev_fwd,
+    decode_attention_fwd,
+)
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -98,6 +101,56 @@ def test_decode_attention(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE):
     )
 
     assert torch.allclose(o, o1)
+
+
+@pytest.mark.parametrize(
+    "num_splits, head_dim, window, dtype",
+    [
+        (1, 512, 0, torch.bfloat16),
+        (2, 512, 0, torch.float32),
+        (3, 80, 0, torch.float32),
+        (4, 512, 5, torch.bfloat16),
+        (8, 80, 5, torch.float32),
+        (17, 80, 0, torch.float32),
+        (32, 512, 0, torch.float16),
+        (340, 512, 0, torch.bfloat16),
+    ],
+)
+def test_decode_reduce_masks_inactive_splits(num_splits, head_dim, window, dtype):
+    """Short rows must ignore partials that stage 1 never wrote."""
+    set_random_seed(0)
+    # A near-int32-limit row only needs a small partial-results buffer here.
+    lengths = [1, 3, 70, 1027, 2**31 - 1024]
+    batch, heads = len(lengths), 4
+    seq_lens = torch.tensor(lengths, device=DEVICE_TYPE, dtype=torch.int32)
+    partials = torch.randn(batch, heads, num_splits, head_dim + 1, device=DEVICE_TYPE)
+    expected = torch.empty(batch, heads, head_dim, device=DEVICE_TYPE)
+    expected_lse = torch.empty(batch, heads, device=DEVICE_TYPE)
+    for row, length in enumerate(lengths):
+        attended = min(length, window) if window else length
+        active = cdiv(attended, cdiv(attended, num_splits))
+        values = partials[row, :, :active, :head_dim]
+        log_weights = partials[row, :, :active, head_dim]
+        expected[row] = (log_weights.softmax(-1)[..., None] * values).sum(1)
+        expected_lse[row] = log_weights.logsumexp(-1)
+        partials[row, :, active:] = float("nan")
+
+    output = torch.empty_like(expected, dtype=dtype)
+    lse = torch.empty_like(expected_lse)
+    _decode_softmax_reducev_fwd(
+        partials,
+        output,
+        output,
+        lse,
+        output,
+        seq_lens,
+        num_splits,
+        sliding_window=window,
+    )
+    # Reduce in FP32, then round once to the output dtype.
+    rtol = {torch.float32: 1e-5, torch.float16: 2**-11, torch.bfloat16: 2**-8}[dtype]
+    torch.testing.assert_close(output.float(), expected, atol=1e-6, rtol=rtol)
+    torch.testing.assert_close(lse, expected_lse, atol=1e-6, rtol=1e-5)
 
 
 def _quantize_to_fp8(tensor: torch.Tensor):
