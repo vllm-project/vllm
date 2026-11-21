@@ -83,6 +83,7 @@ def _call_offline_build_chat_params(
     *,
     params: MagicMock | None = None,
     default_template: str | None = None,
+    chat_template_kwargs: dict[str, Any] | None = None,
     default_format: str = "string",
 ) -> dict[str, Any]:
     if params is None:
@@ -93,6 +94,7 @@ def _call_offline_build_chat_params(
         ctx.build_chat_params(
             params=params,
             default_template=default_template,
+            chat_template_kwargs=chat_template_kwargs,
             default_template_content_format=default_format,
         )
         assert chat_params_cls.call_args is not None
@@ -103,12 +105,14 @@ def _call_online_build_chat_params(
     req: ChatRequestOptionsMixin,
     *,
     default_template: str | None = None,
+    chat_template_kwargs: dict[str, Any] | None = None,
     default_format: str = "string",
 ) -> dict[str, Any]:
     with patch("vllm.entrypoints.pooling.base.protocol.ChatParams") as chat_params_cls:
         chat_params_cls.return_value = MagicMock(name="ChatParams")
         req.build_chat_params(
             default_template=default_template,
+            chat_template_kwargs=chat_template_kwargs,
             default_template_content_format=default_format,
         )
         assert chat_params_cls.call_args is not None
@@ -120,7 +124,8 @@ def _call_online_build_chat_params(
 # Note:
 # - Online requests do not have `params` (`PoolingParams`) or `"auto"` format fallback.
 # - Offline additionally merges `params.extra_kwargs` (`chat_template_kwargs`)
-# below `self.chat_template_kwargs` and resolves `"auto"` format to default.
+#   above passed-in `chat_template_kwargs` (e.g. saved ST kwargs) and below
+#   context `self.chat_template_kwargs`, and resolves `"auto"` format to default.
 # =============================================================================
 
 
@@ -142,19 +147,38 @@ class TestOnlineBuildChatParams:
         }
         assert kwargs["media_io_kwargs"] is None
 
-    def test_chat_template_kwargs_overrides_defaults_when_tri_state_is_none(self):
+    def test_passed_chat_template_kwargs_override_false_defaults(self):
+        req = _make_online_request()
+        kwargs = _call_online_build_chat_params(
+            req,
+            chat_template_kwargs={
+                "add_generation_prompt": True,
+                "from_saved": 1,
+            },
+        )
+        assert kwargs["chat_template_kwargs"] == {
+            "add_generation_prompt": True,
+            "continue_final_message": False,
+            "from_saved": 1,
+        }
+
+    def test_request_chat_template_kwargs_override_passed_kwargs(self):
         req = _make_online_request(
             add_generation_prompt=None,
             continue_final_message=None,
             chat_template_kwargs={
-                "add_generation_prompt": True,
+                "add_generation_prompt": False,
                 "custom_arg": "foo",
             },
         )
-        kwargs = _call_online_build_chat_params(req)
+        kwargs = _call_online_build_chat_params(
+            req,
+            chat_template_kwargs={"add_generation_prompt": True, "from_saved": 1},
+        )
         assert kwargs["chat_template_kwargs"] == {
-            "add_generation_prompt": True,
+            "add_generation_prompt": False,
             "continue_final_message": False,
+            "from_saved": 1,
             "custom_arg": "foo",
         }
 
@@ -167,7 +191,10 @@ class TestOnlineBuildChatParams:
                 "continue_final_message": False,
             },
         )
-        kwargs = _call_online_build_chat_params(req)
+        kwargs = _call_online_build_chat_params(
+            req,
+            chat_template_kwargs={"add_generation_prompt": True},
+        )
         assert kwargs["chat_template_kwargs"]["add_generation_prompt"] is False
         assert kwargs["chat_template_kwargs"]["continue_final_message"] is True
 
@@ -201,6 +228,14 @@ class TestOnlineBuildChatParams:
         with pytest.raises(VLLMValidationError):
             _call_online_build_chat_params(req)
 
+    def test_conflict_between_passed_kwargs_and_explicit_flag_raises(self):
+        req = _make_online_request(continue_final_message=True)
+        with pytest.raises(VLLMValidationError):
+            _call_online_build_chat_params(
+                req,
+                chat_template_kwargs={"add_generation_prompt": True},
+            )
+
 
 class TestOfflineBuildChatParams:
     """Offline (`OfflineInputsContext.build_chat_params`) tests."""
@@ -220,11 +255,28 @@ class TestOfflineBuildChatParams:
         }
         assert kwargs["media_io_kwargs"] is None
 
-    def test_priority_order_explicit_over_self_kwargs_over_params_over_defaults(self):
+    def test_passed_chat_template_kwargs_override_false_defaults(self):
+        ctx = _make_offline_context()
+        kwargs = _call_offline_build_chat_params(
+            ctx,
+            chat_template_kwargs={
+                "add_generation_prompt": True,
+                "from_saved": 1,
+            },
+        )
+        assert kwargs["chat_template_kwargs"] == {
+            "add_generation_prompt": True,
+            "continue_final_message": False,
+            "from_saved": 1,
+        }
+
+    def test_priority_order(
+        self,
+    ):
         params = _make_pooling_params(
             extra_kwargs={
                 "chat_template_kwargs": {
-                    "add_generation_prompt": True,
+                    "add_generation_prompt": False,
                     "continue_final_message": True,
                     "from_params": 1,
                 }
@@ -238,10 +290,18 @@ class TestOfflineBuildChatParams:
                 "from_self": 2,
             },
         )
-        kwargs = _call_offline_build_chat_params(ctx, params=params)
+        kwargs = _call_offline_build_chat_params(
+            ctx,
+            params=params,
+            chat_template_kwargs={
+                "add_generation_prompt": True,
+                "from_passed": 0,
+            },
+        )
         assert kwargs["chat_template_kwargs"] == {
             "add_generation_prompt": False,
             "continue_final_message": False,
+            "from_passed": 0,
             "from_params": 1,
             "from_self": 2,
         }

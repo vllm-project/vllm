@@ -496,6 +496,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         )
         chat_params = request.build_chat_params(
             default_template=self._default_chat_template(),
+            chat_template_kwargs=self.saved_chat_template_kwargs,
             default_template_content_format=self.chat_template_content_format,
         )
         chat_params = self._prepare_chat_params(chat_params)
@@ -548,6 +549,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         chat_params = ctx.build_chat_params(
             ctx.pooling_params,
             default_template=self._default_chat_template(),
+            chat_template_kwargs=self.saved_chat_template_kwargs,
             default_template_content_format=self.chat_template_content_format,
         )
         chat_params = self._prepare_chat_params(chat_params)
@@ -673,15 +675,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         return self.chat_template or self.saved_chat_template
 
     def _prepare_chat_params(self, chat_params: ChatParams) -> ChatParams:
-        if (
-            self.chat_template is None
-            and self.saved_chat_template is not None
-            and chat_params.chat_template == self.saved_chat_template
-        ):
-            chat_params = chat_params.with_defaults(
-                default_chat_template_kwargs=self.saved_chat_template_kwargs,
-            )
-
         if (
             chat_params.chat_template is not None
             and chat_params.chat_template_content_format == "auto"

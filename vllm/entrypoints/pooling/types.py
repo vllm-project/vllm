@@ -177,7 +177,8 @@ class OfflineInputsContext:
         self,
         params: PoolingParams,
         default_template: str | None,
-        default_template_content_format: ChatTemplateContentFormatOption,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        default_template_content_format: ChatTemplateContentFormatOption = "auto",
     ) -> ChatParams:
         chat_template = self.chat_template or default_template
         given_format = (
@@ -185,18 +186,25 @@ class OfflineInputsContext:
             if self.chat_template_content_format != "auto"
             else default_template_content_format
         )
-        chat_template_kwargs = self.build_chat_template_kwargs(params)
+        merged_chat_template_kwargs = self.build_chat_template_kwargs(
+            params, chat_template_kwargs
+        )
         return ChatParams(
             chat_template=chat_template,
             chat_template_content_format=given_format,
-            chat_template_kwargs=chat_template_kwargs,
+            chat_template_kwargs=merged_chat_template_kwargs,
             media_io_kwargs=self.media_io_kwargs,
         )
 
-    def build_chat_template_kwargs(self, params: PoolingParams) -> dict[str, Any]:
+    def build_chat_template_kwargs(
+        self,
+        params: PoolingParams,
+        chat_template_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         # Priority: explicit `add_generation_prompt` / `continue_final_message`
         #         > `self.chat_template_kwargs`
         #         > `params.extra_kwargs["chat_template_kwargs"]`
+        #         > `chat_template_kwargs` (e.g., saved ST kwargs)
         #         > default (`add_generation_prompt=False`,
         #                    `continue_final_message=False`)
         default_flags: dict[str, Any] = {
@@ -204,14 +212,21 @@ class OfflineInputsContext:
             "continue_final_message": False,
         }
         extra_kwargs: dict[str, Any] = dict(params.extra_kwargs or {})
+
+        # Merge base defaults, passed-in kwargs (such as saved ST kwargs),
+        # `params.extra_kwargs`, and context-level `self.chat_template_kwargs`.
         merged = dict(
             merge_kwargs(
-                merge_kwargs(default_flags, extra_kwargs.get("chat_template_kwargs")),
+                merge_kwargs(
+                    merge_kwargs(default_flags, chat_template_kwargs),
+                    extra_kwargs.get("chat_template_kwargs"),
+                ),
                 self.chat_template_kwargs,
             )
             or {}
         )
 
+        # Explicit tri-state fields take highest precedence when not None.
         if self.add_generation_prompt is not None:
             merged["add_generation_prompt"] = self.add_generation_prompt
         if self.continue_final_message is not None:

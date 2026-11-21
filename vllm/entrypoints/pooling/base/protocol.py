@@ -293,8 +293,14 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
     def build_chat_params(
         self,
         default_template: str | None,
-        default_template_content_format: ChatTemplateContentFormatOption,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        default_template_content_format: ChatTemplateContentFormatOption = "auto",
     ) -> ChatParams:
+        # Priority: explicit `add_generation_prompt` / `continue_final_message`
+        #         > `self.chat_template_kwargs`
+        #         > `chat_template_kwargs` (e.g., saved ST kwargs)
+        #         > default (`add_generation_prompt=False`,
+        #                    `continue_final_message=False`)
         default_flags: dict[str, Any] = {
             "add_generation_prompt": False,
             "continue_final_message": False,
@@ -306,8 +312,13 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
         if self.continue_final_message is not None:
             explicit_flags["continue_final_message"] = self.continue_final_message
 
+        # Merge base defaults, passed-in kwargs (such as saved ST kwargs),
+        # request-level `self.chat_template_kwargs`, and explicit tri-state flags.
         merged_kwargs = merge_kwargs(
-            merge_kwargs(default_flags, self.chat_template_kwargs),
+            merge_kwargs(
+                merge_kwargs(default_flags, chat_template_kwargs),
+                self.chat_template_kwargs,
+            ),
             explicit_flags,
         )
 
