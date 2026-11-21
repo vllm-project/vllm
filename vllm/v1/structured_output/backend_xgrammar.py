@@ -14,9 +14,11 @@ from vllm.sampling_params import SamplingParams, check_json_nesting
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
+    GrammarCompileOptions,
     StructuredOutputBackend,
     StructuredOutputGrammar,
     StructuredOutputOptions,
+    resolve_disable_any_whitespace,
 )
 from vllm.v1.structured_output.utils import (
     choice_as_grammar,
@@ -121,6 +123,7 @@ class XgrammarBackend(StructuredOutputBackend):
         request_type: StructuredOutputOptions,
         grammar_spec: str,
         stop_token_ids: set[int] | None = None,
+        options: GrammarCompileOptions | None = None,
     ) -> StructuredOutputGrammar:
         # Note(arpera):
         # Our flag disable_any_whitespace does NOT map directly to
@@ -130,17 +133,20 @@ class XgrammarBackend(StructuredOutputBackend):
         # but also specify a list of separators after which
         # xgrammar must not insert spaces.
         # This is a requirement of xgrammar's API, so we must comply with it.
-        separators = (",", ":") if self.disable_any_whitespace else None
+        disable_any_whitespace = resolve_disable_any_whitespace(
+            options, self.disable_any_whitespace
+        )
+        separators = (",", ":") if disable_any_whitespace else None
         if request_type == StructuredOutputOptions.JSON:
             ctx = self.compiler.compile_json_schema(
                 grammar_spec,
-                any_whitespace=not self.disable_any_whitespace,
+                any_whitespace=not disable_any_whitespace,
                 separators=separators,
             )
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             ctx = self.compiler.compile_json_schema(
                 '{"type": "object"}',
-                any_whitespace=not self.disable_any_whitespace,
+                any_whitespace=not disable_any_whitespace,
                 separators=separators,
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
