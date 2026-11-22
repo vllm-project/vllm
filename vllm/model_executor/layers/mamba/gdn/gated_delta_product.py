@@ -16,6 +16,7 @@ that run the same weights more than once per token (looped models): one
 `forward` selects the state by index.
 """
 
+import math
 import weakref
 
 import torch
@@ -32,7 +33,12 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.abstract import (
+    MambaBase,
+    get_mamba_prefill_checkpoint_alignment,
+    get_mamba_prefill_checkpoint_grid,
+)
+from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -110,6 +116,12 @@ class GatedDeltaProductCache(nn.Module, MambaBase):
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return self.owner.get_state_shape()
+
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        return self.owner.get_prefill_checkpoint_alignment()
+
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        return self.owner.get_kv_cache_checkpoint_alignment(vllm_config)
 
     def _forward_core(self, **kwargs) -> None:
         self.owner._forward_core_on(self, **kwargs)
@@ -218,6 +230,23 @@ class GatedDeltaProductAttention(GatedDeltaNetAttention):
             [GatedDeltaProductCache(self, p) for p in self.cache_prefixes[1:]]
         )
         self._prefill_kernels_warmed_up = False
+        self._checkpoint_alignment = None
+        if vllm_config.cache_config.enable_prefix_caching:
+            self._checkpoint_alignment = FLA_CHUNK_SIZE // math.gcd(FLA_CHUNK_SIZE, m)
+        self._checkpoint_exporter = MambaPrefillCheckpointExporter(
+            state_len=self.conv_kernel_size - 1
+        )
+
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        return self._checkpoint_alignment
+
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        if (
+            self._checkpoint_alignment is None
+            or get_mamba_prefill_checkpoint_alignment(vllm_config) is None
+        ):
+            return None
+        return get_mamba_prefill_checkpoint_grid(vllm_config)
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.gated_delta_product_state_shape(
@@ -342,9 +371,30 @@ class GatedDeltaProductAttention(GatedDeltaNetAttention):
             q, k, v, g, beta = self._virtual_inputs(conv_out, b, a)
             initial_state = ssm_state[state_indices].contiguous()
             initial_state[~metadata.has_initial_state] = 0
-            out, final_state = self._chunked_prefill(
-                q, k, v, g, beta, initial_state, query_start
+            checkpoint = metadata.checkpoint
+            checkpoint_state = (
+                torch.empty_like(initial_state) if checkpoint is not None else None
             )
+            out, final_state = self._chunked_prefill(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                initial_state,
+                query_start,
+                checkpoint_state,
+                None if checkpoint is None else checkpoint.checkpoint_offsets,
+            )
+            if checkpoint is not None:
+                self._checkpoint_exporter.export(
+                    checkpoint,
+                    raw_qkv=mixed_qkv,
+                    conv_state=conv_state,
+                    cu_seqlens=query_start,
+                    recurrent_checkpoint=checkpoint_state,
+                    recurrent_state=ssm_state,
+                )
             ssm_state[state_indices] = final_state.to(ssm_state.dtype)
             core_attn_out[:num_tokens] = out.reshape(
                 num_tokens, self.num_householder, self.local_v_heads, self.head_v_dim
@@ -426,6 +476,8 @@ class GatedDeltaProductAttention(GatedDeltaNetAttention):
         beta: torch.Tensor,
         initial_state: torch.Tensor,
         query_start: torch.Tensor,
+        checkpoint_state: torch.Tensor | None = None,
+        checkpoint_offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """The chunked gated delta rule over the virtual sequences of a prefill batch.
 
@@ -438,7 +490,7 @@ class GatedDeltaProductAttention(GatedDeltaNetAttention):
         num_seqs = query_start.shape[0] - 1
         max_seqs = _GRID_AXIS_LIMIT // q.shape[-2]
 
-        def run(q, k, v, g, beta, initial_state, real_cu_seqlens):
+        def run(q, k, v, g, beta, initial_state, real_cu_seqlens, states, offsets):
             cu_seqlens = (real_cu_seqlens * m).to(torch.int32)
             return chunk_gated_delta_rule(
                 q=q,
@@ -448,13 +500,25 @@ class GatedDeltaProductAttention(GatedDeltaNetAttention):
                 beta=beta,
                 initial_state=initial_state,
                 output_final_state=True,
+                checkpoint_state=states,
+                checkpoint_offsets=None if offsets is None else offsets * m,
                 cu_seqlens=cu_seqlens,
                 chunk_indices=prepare_chunk_indices(cu_seqlens, FLA_CHUNK_SIZE),
                 chunk_offsets=prepare_chunk_offsets(cu_seqlens, FLA_CHUNK_SIZE),
             )
 
         if num_seqs <= max_seqs:
-            return run(q, k, v, g, beta, initial_state, query_start)
+            return run(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                initial_state,
+                query_start,
+                checkpoint_state,
+                checkpoint_offsets,
+            )
         bounds = query_start.tolist()
         outs, finals = [], []
         for s0 in range(0, num_seqs, max_seqs):
@@ -468,6 +532,8 @@ class GatedDeltaProductAttention(GatedDeltaNetAttention):
                 beta[:, t0:t1],
                 initial_state[s0:s1],
                 query_start[s0 : s1 + 1] - bounds[s0],
+                None if checkpoint_state is None else checkpoint_state[s0:s1],
+                None if checkpoint_offsets is None else checkpoint_offsets[s0:s1],
             )
             outs.append(out)
             finals.append(final)

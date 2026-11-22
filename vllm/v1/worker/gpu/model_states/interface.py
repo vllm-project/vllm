@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Hashable
 from typing import Any, ClassVar, cast
 
 import torch
@@ -40,6 +41,12 @@ class ModelSpecificAttnMetadata:
 
 
 class ModelState(ABC):
+    cudagraph_variant: Hashable = None
+    """Forward topology selected by prepare_inputs or prepare_dummy_inputs."""
+
+    def cudagraph_variants(self) -> tuple[Hashable, ...]:
+        return (None,)
+
     supports_prompt_embeds: ClassVar[bool] = False
     """Whether this state implements user-provided prompt embeddings."""
 

@@ -4,8 +4,10 @@
 """Inference-only Academia: recurrent gated delta product and attention layers."""
 
 import math
+import types
 from collections.abc import Iterable
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -38,6 +40,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron3_6_academia import (
     Nemotron3_6AcademiaConfig,
 )
+from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+from vllm.v1.worker.gpu.states import RequestState
 
 from .interfaces import HasInnerState, IsHybrid
 from .nemotron_h import NemotronHMLP
@@ -70,6 +76,15 @@ class AcademiaAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
         self.per_loop_kv = config.recurrent_kv_cache_mode == "per_loop"
+        stash = None
+        if not self.per_loop_kv and len(cache_prefixes) > 1:
+            stash = torch.zeros(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                2 * self.kv_size,
+                dtype=vllm_config.model_config.dtype,
+                device=self.qkv_proj.weight.device,
+            )
+        self.register_buffer("stash", stash, persistent=False)
         self.attn = nn.ModuleList(
             [
                 Attention(
@@ -84,9 +99,14 @@ class AcademiaAttention(nn.Module):
             ]
         )
 
-    def forward(self, hidden_states, loop_idx=0):
+    def forward(self, hidden_states, loop_idx=0, active=None):
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, kv = qkv.split([self.q_size, 2 * self.kv_size], dim=-1)
+        if self.stash is not None:
+            stash = self.stash[: kv.shape[0]]
+            kv = torch.where(active.unsqueeze(-1), kv, stash)
+            stash.copy_(kv)
+        k, v = kv.split(self.kv_size, dim=-1)
         # Each loop overwrites this step's KV; earlier steps retain last-loop KV.
         output, _ = self.o_proj(self.attn[loop_idx if self.per_loop_kv else 0](q, k, v))
         return output
@@ -153,7 +173,10 @@ class AcademiaLoopConditioning(nn.Module):
         )
         self.register_buffer(
             "table",
-            torch.zeros(config.n_recurrent_loops + 1, 3 * hidden + rank),
+            torch.zeros(
+                config.n_recurrent_loops * (config.n_recurrent_loops + 3) // 2,
+                3 * hidden + rank,
+            ),
             persistent=False,
         )
 
@@ -168,7 +191,7 @@ class AcademiaLoopConditioning(nn.Module):
 
     def forward(self, hidden_states, step):
         scale, shift, gate, adapter_gate = self.table[step].split(
-            [self.hidden_size] * 3 + [self.adapter_rank]
+            [self.hidden_size] * 3 + [self.adapter_rank], dim=-1
         )
         hidden_states = scale * hidden_states + shift
         if self.down_proj is not None and self.up_proj is not None:
@@ -193,15 +216,15 @@ class AcademiaLoopSeam(nn.Module):
         self.register_buffer(
             "table",
             torch.zeros(
-                config.n_recurrent_loops,
+                config.n_recurrent_loops * (config.n_recurrent_loops + 3) // 2,
                 hidden * (4 if self.input_mix is not None else 3),
             ),
             persistent=False,
         )
 
-    def update(self, conds):
+    def update(self, conds, steps):
         rows = []
-        for step, c in enumerate(conds):
+        for step, c in zip(steps, conds):
             parts = [
                 1 + self.entry_gamma(c),
                 self.entry_beta(c),
@@ -213,7 +236,7 @@ class AcademiaLoopSeam(nn.Module):
         self.table.copy_(torch.stack(rows))
 
     def entry(self, loop_input, input_h, step):
-        parts = self.table[step].split(self.hidden_size)
+        parts = self.table[step].split(self.hidden_size, dim=-1)
         hidden_states = parts[0] * self.entry_norm(loop_input) + parts[1]
         if self.input_mix is not None:
             hidden_states = hidden_states + parts[3] * input_h
@@ -281,13 +304,15 @@ class AcademiaDecoderLayer(nn.Module):
             else None
         )
 
-    def forward(self, hidden_states, loop_idx=0, cond_idx=0):
+    def forward(self, hidden_states, loop_idx=0, cond_idx=0, active=None):
         residual = hidden_states
         hidden_states = self.norm(hidden_states)
         if self.loop_conditioning is not None:
             hidden_states, gate = self.loop_conditioning(hidden_states, cond_idx)
         if self.layer_type == "mlp":
             hidden_states = self.mixer(hidden_states)
+        elif self.layer_type == "full_attention":
+            hidden_states = self.mixer(hidden_states, loop_idx, active)
         else:
             hidden_states = self.mixer(hidden_states, loop_idx)
         if self.loop_conditioning is not None:
@@ -295,7 +320,116 @@ class AcademiaDecoderLayer(nn.Module):
         return residual + hidden_states
 
 
+def _compiled_stage_class(cls: type[nn.Module], name: str) -> type[nn.Module]:
+    """A subclass of a `support_torch_compile` stage class with its own copy of
+    `forward`'s code object and qualified name. vLLM keys compiled code by both
+    (guards are not evaluated), so stage instances sharing them would all run the
+    first instance's graph, which is bound to that instance's caches."""
+    base = cls.forward
+    forward = types.FunctionType(
+        base.__code__.replace(co_qualname=f"{name}.forward"),
+        base.__globals__,
+        "forward",
+        base.__defaults__,
+        base.__closure__,
+    )
+    forward.__annotations__ = dict(base.__annotations__)
+    return type(name, (cls,), {"forward": forward})
+
+
+def loop_table_row(num_loops, step):
+    """Packed row for a budget and step; step == budget selects the output block."""
+    return (num_loops - 1) * (num_loops + 2) // 2 + step
+
+
 @support_torch_compile
+class AcademiaInputBlock(nn.Module):
+    def __init__(self, *, vllm_config, prefix, model):
+        super().__init__()
+        self.embed_tokens = model.embed_tokens
+        self.layers = model.layers[: model.config.n_input_layers]
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        h = inputs_embeds if inputs_embeds is not None else self.embed_tokens(input_ids)
+        for layer in self.layers:
+            h = layer(h)
+        return h
+
+
+@support_torch_compile
+class AcademiaLoop(nn.Module):
+    def __init__(self, *, vllm_config, prefix, model, loop):
+        super().__init__()
+        config = model.config
+        self.loop = loop
+        self.layers = model.layers[
+            config.n_input_layers : config.n_input_layers + config.n_recurrent_layers
+        ]
+        self.loop_seam = model.loop_seam
+        self.state_update = model.state_update
+
+    def forward(
+        self, state: torch.Tensor, input_h: torch.Tensor, loop_counts: torch.Tensor
+    ) -> torch.Tensor:
+        rows = loop_table_row(
+            loop_counts.long(), loop_counts.clamp(max=self.loop + 1) - 1
+        )
+        active = loop_counts > self.loop
+        loop_input = state + input_h
+        h = self.loop_seam.entry(loop_input, input_h, rows) if self.loop else loop_input
+        for layer in self.layers:
+            h = layer(h, self.loop, rows, active)
+        new_state = self.state_update(state, h, loop_input)
+        new_state = self.loop_seam.exit(state, new_state, rows)
+        return torch.where(active.unsqueeze(-1), new_state, state)
+
+
+@support_torch_compile
+class AcademiaOutputBlock(nn.Module):
+    def __init__(self, *, vllm_config, prefix, model):
+        super().__init__()
+        config = model.config
+        self.layers = model.layers[config.n_input_layers + config.n_recurrent_layers :]
+        self.norm = model.norm_f
+
+    def forward(self, state: torch.Tensor, loop_counts: torch.Tensor) -> torch.Tensor:
+        rows = loop_table_row(loop_counts.long(), loop_counts)
+        for layer in self.layers:
+            state = layer(state, cond_idx=rows)
+        return self.norm(state)
+
+
+class AcademiaStages(nn.Module):
+    """Separately compiled stages sharing physical weights and distinct loop caches."""
+
+    def __init__(self, model, vllm_config, prefix):
+        super().__init__()
+        from vllm.compilation.backends import set_model_tag
+
+        def stage(cls, name, **kwargs):
+            with set_model_tag(name):
+                return _compiled_stage_class(cls, name)(
+                    vllm_config=vllm_config,
+                    prefix=f"{prefix}.{name}",
+                    model=model,
+                    **kwargs,
+                )
+
+        self.input_block = stage(AcademiaInputBlock, "academia_input")
+        self.loops = nn.ModuleList(
+            [
+                stage(AcademiaLoop, f"academia_loop_{i}", loop=i)
+                for i in range(model.config.n_recurrent_loops)
+            ]
+        )
+        self.output_block = stage(AcademiaOutputBlock, "academia_output")
+
+
 class Nemotron3_6AcademiaModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -316,51 +450,129 @@ class Nemotron3_6AcademiaModel(nn.Module):
         )
         self.loop_seam = AcademiaLoopSeam(config)
         self.state_update = AcademiaStateUpdate(config, f"{prefix}.state_update")
+        self.stages = AcademiaStages(self, vllm_config, prefix)
+        tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.register_buffer(
+            "input_h",
+            self.embed_tokens.weight.new_zeros(tokens, config.hidden_size),
+            persistent=False,
+        )
+        self.register_buffer("state", torch.zeros_like(self.input_h), persistent=False)
 
     @torch.no_grad()
     def build_loop_tables(self):
         config = self.config
-        count = config.n_recurrent_loops
-        budget = (
-            min(count, config.loop_conditioning_max_loops)
-            / config.loop_conditioning_max_loops
-        )
-        conds = [
-            self.loop_conditioner((step + 1) / count, budget) for step in range(count)
-        ]
-        conds.append(self.loop_conditioner(1.0, budget))
+        conds, steps = [], []
+        for count in range(1, config.n_recurrent_loops + 1):
+            budget = (
+                min(count, config.loop_conditioning_max_loops)
+                / config.loop_conditioning_max_loops
+            )
+            for step in range(count + 1):
+                conds.append(
+                    self.loop_conditioner(min((step + 1) / count, 1.0), budget)
+                )
+                steps.append(step)
         for layer in self.layers:
             if layer.loop_conditioning is not None:
                 layer.loop_conditioning.update(conds)
-        self.loop_seam.update(conds[:-1])
+        self.loop_seam.update(conds, steps)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        h = inputs_embeds if inputs_embeds is not None else self.embed_tokens(input_ids)
-        config = self.config
-        n_in, n_rec = config.n_input_layers, config.n_recurrent_layers
-        for layer in self.layers[:n_in]:
-            h = layer(h)
-        input_h = state = h
-        for loop in range(config.n_recurrent_loops):
-            loop_input = state + input_h
-            h = self.loop_seam.entry(loop_input, input_h, loop) if loop else loop_input
-            for layer in self.layers[n_in : n_in + n_rec]:
-                h = layer(h, loop, loop)
-            new_state = self.state_update(state, h, loop_input)
-            state = self.loop_seam.exit(state, new_state, loop)
-        h = state
-        for layer in self.layers[n_in + n_rec :]:
-            h = layer(h, cond_idx=config.n_recurrent_loops)
-        return self.norm_f(h)
+    def forward(self, input_ids, positions, inputs_embeds, loop_counts, num_loops):
+        num_tokens = positions.shape[-1]
+        input_h, state = self.input_h[:num_tokens], self.state[:num_tokens]
+        h = self.stages.input_block(input_ids, positions, inputs_embeds)
+        input_h.copy_(h)
+        state.copy_(h)
+        for loop in range(num_loops):
+            state.copy_(self.stages.loops[loop](state, input_h, loop_counts))
+        return self.stages.output_block(state, loop_counts)
+
+
+class AcademiaModelState(MambaHybridModelState):
+    """Hybrid model state plus each request's loop count, delivered to the forward as
+    a per-token `loop_counts` tensor (persistent, so CUDA graphs see each step's
+    values)."""
+
+    def __init__(self, vllm_config: VllmConfig, model: nn.Module, *args, **kwargs):
+        super().__init__(vllm_config, model, *args, **kwargs)
+        config = vllm_config.model_config.hf_config
+        self.default_num_loops = config.n_recurrent_loops
+        self.max_loops = config.n_recurrent_loops
+        # Host copies, to pick each batch's loop count (the largest of its requests).
+        self.num_loops_by_slot_np = np.full(
+            self.max_num_reqs, self.default_num_loops, dtype=np.int32
+        )
+        self.num_loops_by_slot = torch.full(
+            (self.max_num_reqs,),
+            self.default_num_loops,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self.loop_counts = torch.full(
+            (self.max_num_tokens,),
+            self.default_num_loops,
+            dtype=torch.int32,
+            device=self.device,
+        )
+
+    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        super().add_request(req_index, new_req_data)
+        # Validated by the config hook at engine admission.
+        params = new_req_data.sampling_params
+        num_loops = self.model_config.hf_config.get_num_loops(
+            params.extra_args if params is not None else None
+        )
+        self.num_loops_by_slot[req_index].fill_(num_loops)
+        self.num_loops_by_slot_np[req_index] = num_loops
+
+    def cudagraph_variants(self) -> tuple[int, ...]:
+        # FULL graphs per loop count: a batch runs as many loops as its largest
+        # loop count needs.
+        return tuple(range(1, self.max_loops + 1))
+
+    def prepare_inputs(
+        self, input_batch: InputBatch, req_states: RequestState
+    ) -> dict[str, torch.Tensor | None]:
+        inputs = super().prepare_inputs(input_batch, req_states)
+        num_reqs, num_tokens = input_batch.num_reqs, input_batch.num_tokens
+        slots = input_batch.idx_mapping_np[:num_reqs]
+        loops = self.num_loops_by_slot_np[slots]
+        if num_reqs and loops.min() == loops.max():
+            # Every request runs the same loop count (the usual case): one fill
+            # instead of an eager repeat_interleave (cumsum + gather) per step.
+            self.loop_counts[:num_tokens].fill_(int(loops[0]))
+        else:
+            query_start_loc = input_batch.query_start_loc[: num_reqs + 1]
+            self.loop_counts[:num_tokens] = torch.repeat_interleave(
+                self.num_loops_by_slot[input_batch.idx_mapping[:num_reqs]],
+                query_start_loc[1:] - query_start_loc[:-1],
+                output_size=num_tokens,
+            )
+        # Padding tokens keep earlier (valid) loop counts.
+        inputs["loop_counts"] = self.loop_counts[: input_batch.num_tokens_after_padding]
+        self.cudagraph_variant = (
+            int(loops.max()) if num_reqs else self.default_num_loops
+        )
+        inputs["num_loops"] = self.cudagraph_variant
+        return inputs
+
+    def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict:
+        inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
+        inputs["loop_counts"] = self.loop_counts[:num_tokens]
+        num_loops = self.cudagraph_variant or self.max_loops
+        self.cudagraph_variant = num_loops
+        self.loop_counts[:num_tokens].fill_(num_loops)
+        inputs["num_loops"] = num_loops
+        return inputs
 
 
 class Nemotron3_6AcademiaForCausalLM(nn.Module, HasInnerState, IsHybrid):
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+
+    @staticmethod
+    def get_model_state_cls():
+        return AcademiaModelState
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -391,8 +603,11 @@ class Nemotron3_6AcademiaForCausalLM(nn.Module, HasInnerState, IsHybrid):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        *,
+        loop_counts: torch.Tensor,
+        num_loops: int,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions, inputs_embeds)
+        return self.model(input_ids, positions, inputs_embeds, loop_counts, num_loops)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)

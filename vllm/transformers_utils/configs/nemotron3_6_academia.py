@@ -3,8 +3,13 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 """Configuration for the recurrent Academia hybrid architecture."""
 
+import json
+from typing import Any
+
 from huggingface_hub.dataclasses import strict
 from transformers.configuration_utils import PreTrainedConfig
+
+from vllm.exceptions import VLLMValidationError
 
 
 @strict
@@ -103,3 +108,20 @@ class Nemotron3_6AcademiaConfig(PreTrainedConfig):
             )
         if self.hidden_act != "relu2" or self.rms_norm_eps <= 0:
             raise ValueError("Academia requires relu2 and positive rms_norm_eps")
+
+    def get_num_loops(self, extra_args: dict[str, Any] | None) -> int:
+        num_loops = (extra_args or {}).get("num_loops", self.n_recurrent_loops)
+        if type(num_loops) is not int or not 1 <= num_loops <= self.n_recurrent_loops:
+            raise VLLMValidationError(
+                f"num_loops must be an integer in [1, {self.n_recurrent_loops}]",
+                parameter="num_loops",
+            )
+        return num_loops
+
+    def request_cache_salt(
+        self, extra_args: dict[str, Any] | None, cache_salt: str | None
+    ) -> str | None:
+        num_loops = self.get_num_loops(extra_args)
+        if num_loops == self.n_recurrent_loops:
+            return cache_salt
+        return json.dumps((self.model_type, num_loops, cache_salt))

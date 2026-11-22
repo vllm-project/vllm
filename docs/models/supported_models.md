@@ -903,6 +903,8 @@ We have the following levels of testing for models:
 
 Native Academia checkpoints use `model_type="nemotron3_6_academia"` and `architectures=["Nemotron3_6AcademiaForCausalLM"]`. Checkpoint dimensions and `layer_types` define the model size.
 
-Run a BF16 checkpoint with `vllm serve nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF16 --dtype bfloat16 --no-enable-prefix-caching`. `n_recurrent_loops` sets the fixed inference budget. `recurrent_kv_cache_mode="per_loop"` allocates independent attention caches for each recurrent pass; `"last_loop"` reuses the attention cache and retains the last pass for earlier tokens. GDP states remain independent in both modes. The modes have different semantics and need not produce identical outputs.
+Run a BF16 checkpoint with `vllm serve nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF16 --dtype bfloat16`. `n_recurrent_loops` sets the default and maximum inference budget. Set `SamplingParams(extra_args={"num_loops": 2})` for an individual request, or `extra_body={"vllm_xargs": {"num_loops": 2}}` with the OpenAI client. Counts must be integers from 1 to the configured maximum; requests with different counts can share a batch. `recurrent_kv_cache_mode="per_loop"` allocates independent attention caches for each recurrent pass; `"last_loop"` reuses the attention cache and retains the last pass for earlier tokens. GDP states remain independent in both modes. The modes have different semantics and need not produce identical outputs.
 
 The initial implementation supports ordinary decoding without speculative decoding.
+
+Prefix caching preserves caller cache salts and isolates different loop budgets. GDP layers export convolution and recurrent states at aligned internal prefill boundaries; the alignment is `64 / gcd(64, linear_num_householder)` tokens. FULL CUDA graphs capture one variant per supported loop budget, increasing graph capture time and memory with the maximum budget.

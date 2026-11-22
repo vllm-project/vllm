@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.nemotron3_6_academia import (
     AcademiaLoopConditioning,
     AcademiaLoopSeam,
@@ -30,14 +31,21 @@ def test_loop_table_reload_preserves_captured_storage(seam):
             if seam
             else AcademiaLoopConditioning(config, "test")
         )
-    conds = [torch.randn(4) for _ in range(2 if seam else 3)]
-    module.update(conds)
+    steps = [0, 1, 0, 1, 2]
+    conds = [torch.randn(4) for _ in steps]
+    if seam:
+        module.update(conds, steps)
+    else:
+        module.update(conds)
     captured_table = module.table.view_as(module.table)
     before = captured_table.clone()
     pointer = captured_table.data_ptr()
     head = module.entry_beta if seam else module.beta_head
     head.bias.add_(1)
-    module.update(conds)
+    if seam:
+        module.update(conds, steps)
+    else:
+        module.update(conds)
     assert module.table.data_ptr() == pointer
     torch.testing.assert_close(captured_table, module.table)
     torch.testing.assert_close(captured_table[:, 8:16], before[:, 8:16] + 1)
@@ -103,3 +111,169 @@ def test_loop_cache_modes(vllm_runner, tmp_path, cache_mode):
             )
         attention_caches = 2 if cache_mode == "per_loop" else 1
         assert runner.apply_model(_cache_layout) == [(attention_caches, 2)]
+
+
+@pytest.mark.parametrize("cache_mode", ["per_loop", "last_loop"])
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_mixed_request_loops_match_separate_requests(
+    vllm_runner, cache_mode, enforce_eager
+):
+    """A graph for batch budget 3 must not run the engine's maximum budget 4."""
+    from tests.models.utils import check_logprobs_close
+    from vllm import SamplingParams
+
+    prompts = [
+        "The capital of France is",
+        "Compute 12 + 30. The answer is",
+        "Write a Python function that adds two numbers.",
+    ]
+    params = [
+        SamplingParams(
+            temperature=0,
+            max_tokens=16,
+            ignore_eos=True,
+            logprobs=5,
+            extra_args={"num_loops": count},
+        )
+        for count in (1, 2, 3)
+    ]
+    with vllm_runner(
+        "nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF16",
+        dtype="bfloat16",
+        max_model_len=512,
+        max_num_seqs=4,
+        max_num_batched_tokens=256,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        enforce_eager=enforce_eager,
+        compilation_config={"cudagraph_capture_sizes": [1, 2, 4]},
+        hf_overrides={"recurrent_kv_cache_mode": cache_mode},
+    ) as runner:
+        fixed = [
+            runner.llm.generate([prompt], param)[0]
+            for prompt, param in zip(prompts, params)
+        ]
+        mixed = runner.llm.generate(prompts, params)
+
+        def results(outputs):
+            return [
+                (list(o.outputs[0].token_ids), o.outputs[0].text, o.outputs[0].logprobs)
+                for o in outputs
+            ]
+
+        check_logprobs_close(
+            outputs_0_lst=results(fixed),
+            outputs_1_lst=results(mixed),
+            name_0="separate",
+            name_1="mixed",
+        )
+
+    with vllm_runner(
+        "nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF16",
+        dtype="bfloat16",
+        max_model_len=512,
+        max_num_seqs=4,
+        max_num_batched_tokens=256,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        enforce_eager=enforce_eager,
+        compilation_config={"cudagraph_capture_sizes": [1, 2, 4]},
+        hf_overrides={"recurrent_kv_cache_mode": cache_mode, "n_recurrent_loops": 2},
+    ) as runner:
+        from copy import deepcopy
+
+        fixed_params = deepcopy(params[1])
+        fixed_params.extra_args = None
+        fixed_engine = runner.llm.generate([prompts[1]], fixed_params)
+        check_logprobs_close(
+            outputs_0_lst=results(fixed_engine),
+            outputs_1_lst=results([mixed[1]]),
+            name_0="fixed engine",
+            name_1="request budget",
+        )
+
+
+@pytest.mark.parametrize("cache_mode", ["per_loop", "last_loop"])
+def test_request_loops_isolate_prefixes_at_engine_admission(
+    vllm_runner, monkeypatch, cache_mode
+):
+    """Cache keys depend on the budget even when a frontend supplies its own hashes."""
+    import time
+
+    from vllm import SamplingParams
+    from vllm.v1.engine import EngineCoreRequest
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    def params(count):
+        return SamplingParams(
+            temperature=0,
+            max_tokens=4,
+            ignore_eos=True,
+            extra_args={"num_loops": count},
+            logprobs=5,
+        )
+
+    with vllm_runner(
+        "nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF16",
+        dtype="bfloat16",
+        max_model_len=1024,
+        max_num_seqs=2,
+        max_num_batched_tokens=256,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+        enforce_eager=True,
+        hf_overrides={"recurrent_kv_cache_mode": cache_mode},
+    ) as runner:
+        tokens = runner.llm.get_tokenizer().encode(
+            "Explain the scientific observations. " * 100
+        )[:401]
+        prompt = {"prompt_token_ids": tokens, "cache_salt": "caller"}
+        outputs = [runner.llm.generate([prompt], params(k))[0] for k in (1, 1, 2, 2)]
+        hits = [o.num_cached_tokens for o in outputs]
+        assert hits[0] == hits[2] == 0
+        assert hits[1] > 0 and hits[3] > 0
+        if cache_mode == "per_loop":
+            from tests.models.utils import check_logprobs_close
+
+            def result(o):
+                c = o.outputs[0]
+                return (list(c.token_ids), c.text, c.logprobs)
+
+            check_logprobs_close(
+                outputs_0_lst=[result(outputs[0]), result(outputs[2])],
+                outputs_1_lst=[result(outputs[1]), result(outputs[3])],
+                name_0="cold prefix",
+                name_1="warm prefix",
+            )
+        core = runner.llm.llm_engine.engine_core.engine_core
+
+        def request(count, hashes=None):
+            return EngineCoreRequest(
+                request_id=f"budget-{count}",
+                prompt_token_ids=tokens,
+                sampling_params=params(count),
+                pooling_params=None,
+                mm_features=None,
+                arrival_time=time.time(),
+                lora_request=None,
+                cache_salt="caller",
+                data_parallel_rank=None,
+                block_hashes=hashes,
+            )
+
+        baseline, _ = core.preprocess_add_request(request(4))
+        supplied_hashes = list(baseline.block_hashes)
+        default_request = request(4, supplied_hashes)
+        default_admitted, _ = core.preprocess_add_request(default_request)
+        assert default_request.block_hashes is supplied_hashes
+        assert default_admitted.block_hashes == baseline.block_hashes
+        incoming = request(1, supplied_hashes)
+        admitted, _ = core.preprocess_add_request(incoming)
+        assert incoming.block_hashes is None
+        assert admitted.block_hashes and admitted.block_hashes != baseline.block_hashes
+        for invalid in (True, 0, 5, "2"):
+            with pytest.raises(VLLMValidationError, match="num_loops"):
+                core.preprocess_add_request(request(invalid))
+            with pytest.raises(VLLMValidationError, match="num_loops"):
+                runner.llm.generate(["test"], params(invalid))

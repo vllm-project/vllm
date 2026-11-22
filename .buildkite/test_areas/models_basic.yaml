@@ -2,20 +2,22 @@ group: Models - Basic
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200 MIG 18GB) Academia inference and GDP kernels"
+- label: ":nvidia: (H100) Academia inference and GDP kernels"
   key: academia-inference-kernels
-  timeout_in_minutes: 30
-  device: h200_18gb
+  timeout_in_minutes: 60
+  device: h100
   source_file_dependencies:
   - vllm/model_executor/models/nemotron3_6_academia.py
   - vllm/transformers_utils/configs/nemotron3_6_academia.py
   - vllm/model_executor/layers/mamba/
   - tests/models/test_nemotron3_6_academia.py
+  - vllm/v1/engine/
+  - vllm/v1/worker/gpu/
   - tests/kernels/mamba/test_gated_delta_product.py
   commands:
     - >-
       pytest -v -s
-      models/test_nemotron3_6_academia.py::test_loop_cache_modes
+      models/test_nemotron3_6_academia.py
       kernels/mamba/test_gated_delta_product.py
 
 - label: ":nvidia: (H200 MIG 18GB) Basic Models (Initialization)"

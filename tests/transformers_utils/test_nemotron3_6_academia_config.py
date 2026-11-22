@@ -9,6 +9,7 @@ from huggingface_hub.errors import (
 )
 
 from vllm.config import ModelConfig, ParallelConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.nemotron3_6_academia import (
     Nemotron3_6AcademiaConfig,
@@ -80,3 +81,22 @@ def test_nemotron3_6_academia_rejects_incompatible_architecture(overrides, match
         match=match,
     ):
         Nemotron3_6AcademiaConfig(**overrides)
+
+
+@pytest.mark.parametrize("count", [True, False, 0, 5, "2", 2.0, None])
+def test_request_loop_budget_rejects_invalid_counts(count):
+    config = Nemotron3_6AcademiaConfig(n_recurrent_loops=4)
+    with pytest.raises(VLLMValidationError, match="num_loops"):
+        config.request_cache_salt({"num_loops": count}, "caller")
+
+
+def test_request_cache_salt_preserves_default_and_isolates_budgets():
+    config = Nemotron3_6AcademiaConfig(n_recurrent_loops=4)
+    assert config.request_cache_salt(None, "caller") == "caller"
+    assert config.request_cache_salt({"num_loops": 4}, "caller") == "caller"
+    salts = {
+        config.request_cache_salt({"num_loops": count}, caller)
+        for count in range(1, 5)
+        for caller in (None, "caller", "other")
+    }
+    assert len(salts) == 12
