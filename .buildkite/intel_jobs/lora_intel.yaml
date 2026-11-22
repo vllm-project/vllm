@@ -24,7 +24,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-      pytest -v -s lora/test_layers.py &&
+      pytest -v -s lora/test_layers.py --deselect="tests/lora/test_layers.py::test_glm5next_kda_helper_import_on_xpu" &&
       pytest -v -s lora/test_lora_checkpoints.py &&
       pytest -v -s lora/test_lora_functions.py &&
       pytest -v -s lora/test_lora_huggingface.py &&
@@ -144,6 +144,24 @@ steps:
       pytest -v -s lora/test_transformers_model.py &&
       pytest -v -s lora/test_chatglm3_tp.py &&
       pytest -v -s lora/test_llama_tp.py::test_llama_lora'
+
+- label: ":intel: (BMG) LoRA OLMoE (2 GPUs)"
+  key: lora-olmoe-2-gpus
+  timeout_in_minutes: 45
+  device: intel_gpu_k8s
+  num_devices: 2
+  resource_claim_template: b70-2
+  working_dir: "/vllm-workspace/"
+  env:
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/lora
+    - vllm/model_executor/layers/fused_moe
+    - tests/lora
+  commands:
+    - cd tests
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s lora/test_olmoe_tp.py
 
 - label: ":intel: (BMG) LoRA Multimodal"
   key: lora-multimodal

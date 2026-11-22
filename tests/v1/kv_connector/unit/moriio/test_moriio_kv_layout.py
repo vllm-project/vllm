@@ -14,7 +14,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     MambaSpec,
     MLAAttentionSpec,
 )
@@ -57,8 +57,8 @@ MoRIIOWriter = moriio_engine.MoRIIOWriter
 
 def _full_spec(
     block_size: int = 4, num_kv_heads: int = 2, head_size: int = 3
-) -> FullAttentionSpec:
-    return FullAttentionSpec(
+) -> AttentionSpec:
+    return AttentionSpec(
         block_size=block_size,
         num_kv_heads=num_kv_heads,
         head_size=head_size,

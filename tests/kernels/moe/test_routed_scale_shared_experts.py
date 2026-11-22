@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedScaleMode
@@ -38,10 +39,10 @@ class SharedMLP(nn.Module):
     "routed_scale_mode",
     [RoutedScaleMode.OUTPUT, RoutedScaleMode.OUTPUT_FP16_GUARD],
 )
+@override_parallel_groups(SingleRankGroup())
 def test_routed_scale_applied_to_output_with_shared_experts(
     dtype: torch.dtype,
     routed_scale_mode: RoutedScaleMode,
-    dist_init,
     workspace_init,
 ):
     """OUTPUT gives scale * routed + shared for every dtype. OUTPUT_FP16_GUARD
@@ -134,8 +135,9 @@ def _mha_moe_config(model: str):
 
 
 @pytest.mark.parametrize("model", ["deepseek_v2", "axk1"])
+@override_parallel_groups(SingleRankGroup())
 def test_mha_decoder_layer_does_not_divide_shared_output(
-    model: str, tmp_path, dist_init, workspace_init
+    model: str, tmp_path, workspace_init
 ):
     """MHA DeepseekV2/AXK1 decoder layers skip the FP16 compensation, so their
     MoE must scale the routed output instead of dividing the shared output."""

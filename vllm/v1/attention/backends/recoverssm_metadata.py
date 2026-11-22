@@ -7,9 +7,9 @@ from dataclasses import dataclass
 import torch
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RecoverSSMPostprocessMetadata:
-    """Metadata used during postprocessing for align-mode prefix caching."""
+    """Metadata used during postprocessing for prefix caching."""
 
     num_spec_decodes: int
     request_indices: torch.Tensor | None

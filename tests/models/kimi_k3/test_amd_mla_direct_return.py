@@ -8,6 +8,8 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.config import CUDAGraphMode
+from vllm.forward_context import override_forward_context
 from vllm.models.kimi_k3.amd.linear import KimiDecoderLayer, KimiMLAAttention
 
 
@@ -44,10 +46,18 @@ def test_mla_self_attention_returns_projection_storage_directly() -> None:
 
 @pytest.mark.parametrize("quantized", [False, True])
 @pytest.mark.parametrize("fused_decode", [False, True])
+@pytest.mark.parametrize(
+    "cudagraph_mode",
+    [CUDAGraphMode.NONE, CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE],
+)
 def test_mla_forward_preserves_output_shape_with_fp8_input(
-    monkeypatch, quantized: bool, fused_decode: bool
+    monkeypatch, quantized: bool, fused_decode: bool, cudagraph_mode: CUDAGraphMode
 ) -> None:
-    """Both MLA paths accept producer-quantized input after decode fusion."""
+    """Both MLA paths accept producer-quantized input after decode fusion.
+
+    A PIECEWISE graph replays any batch shape, so it must never bake in the
+    decode-only fused path chosen from capture-time metadata.
+    """
     from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kFp8DynamicTokenSym,
@@ -96,8 +106,11 @@ def test_mla_forward_preserves_output_shape_with_fp8_input(
         g_proj=None,
         o_proj=lambda value: (value, None),
     )
+    attention.mla_attn = lambda q, kv, pe, **kwargs: attention_output(
+        "regular", kwargs["output_shape"]
+    )
     if fused_decode:
-        attention.mla_attn = SimpleNamespace(layer_name="test")
+        attention.mla_attn.layer_name = "test"
         monkeypatch.setattr(
             "vllm.models.kimi_k3.amd.mla.get_attention_context",
             lambda _: (
@@ -107,17 +120,17 @@ def test_mla_forward_preserves_output_shape_with_fp8_input(
                 torch.arange(4),
             ),
         )
-    else:
-        attention.mla_attn = lambda q, kv, pe, **kwargs: attention_output(
-            "regular", kwargs["output_shape"]
+
+    with override_forward_context(
+        SimpleNamespace(cudagraph_runtime_mode=cudagraph_mode)
+    ):
+        output = KimiK3MultiHeadLatentAttentionWrapper.forward(
+            attention, torch.arange(4), hidden_states
         )
 
-    output = KimiK3MultiHeadLatentAttentionWrapper.forward(
-        attention, torch.arange(4), hidden_states
-    )
-
+    fused = fused_decode and cudagraph_mode != CUDAGraphMode.PIECEWISE
     assert output is projected
-    assert paths == ["fused" if fused_decode else "regular"]
+    assert paths == ["fused" if fused else "regular"]
 
 
 def test_fused_decode_feeds_zero_positions_to_kernel(monkeypatch) -> None:
