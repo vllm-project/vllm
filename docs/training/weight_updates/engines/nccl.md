@@ -197,7 +197,7 @@ lists when they are equal. You only need to think about them if you build
 
 ## Trainer Without vLLM over HTTP
 
-A trainer can speak the [HTTP endpoints](README.md#api-endpoints) directly, with
+A trainer can speak the [HTTP endpoints](../README.md#api-endpoints) directly, with
 only PyTorch and an HTTP client. It mints the `ncclUniqueId` itself and is NCCL
 rank 0. Reference: [`rlhf_http_nccl_no_vllm.py`](../../../examples/rl/rlhf_http_nccl_no_vllm.py).
 
