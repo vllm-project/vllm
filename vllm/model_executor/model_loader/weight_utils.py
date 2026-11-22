@@ -662,6 +662,13 @@ def check_local_safetensors_layout(
                 "model.safetensors when both are present, so the two tools "
                 "can load different weights from the same directory."
             )
+        # The index may name shards outside the top-level glob, such as
+        # tensors/, and those are loaded too, so the duplicate check covers
+        # every indexed shard on disk.
+        listed = {os.path.normpath(f) for f in safetensors_files}
+        safetensors_files += sorted(
+            f for f in indexed if f not in listed and os.path.isfile(f)
+        )
 
     tensor_to_files: dict[str, list[str]] = {}
     for path in safetensors_files:
@@ -677,8 +684,8 @@ def check_local_safetensors_layout(
     if duplicates:
         examples: list[str] = []
         for name, files in list(duplicates.items())[:5]:
-            basenames = ", ".join(os.path.basename(f) for f in files)
-            examples.append(f"{name} in {basenames}")
+            rel_paths = ", ".join(os.path.relpath(f, hf_folder) for f in files)
+            examples.append(f"{name} in {rel_paths}")
         extra = "" if len(duplicates) <= 5 else f" ({len(duplicates) - 5} more tensors)"
         messages.append(
             f"The same tensor name appears in more than one safetensors file "

@@ -278,6 +278,34 @@ def test_strict_layout_errors_on_duplicate_tensor_names(tmp_path):
         )
 
 
+def test_strict_layout_errors_on_duplicate_across_top_level_and_subdir(tmp_path):
+    (tmp_path / "tensors").mkdir()
+    _shard(tmp_path / "model-00001-of-00002.safetensors", ["shared.weight", "a.weight"])
+    _shard(
+        tmp_path / "tensors" / "model-00002-of-00002.safetensors",
+        ["shared.weight", "b.weight"],
+    )
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "shared.weight": "model-00001-of-00002.safetensors",
+                    "a.weight": "model-00001-of-00002.safetensors",
+                    "b.weight": "tensors/model-00002-of-00002.safetensors",
+                }
+            }
+        )
+    )
+    # Only the top-level shard matches the loader's glob.
+    files = sorted(str(f) for f in tmp_path.glob("*.safetensors"))
+
+    with pytest.raises(ValueError, match="same tensor name") as exc:
+        check_local_safetensors_layout(
+            str(tmp_path), files, "model.safetensors.index.json", strict=True
+        )
+    assert os.path.join("tensors", "model-00002-of-00002.safetensors") in str(exc.value)
+
+
 def test_clean_indexed_layout_is_silent(tmp_path, caplog):
     _shard(tmp_path / "model-00001-of-00002.safetensors", ["layer.0.weight"])
     _shard(tmp_path / "model-00002-of-00002.safetensors", ["layer.1.weight"])
