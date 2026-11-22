@@ -115,8 +115,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
-    kFp8StaticTokenSym,
     kInt8Static,
     kInt8StaticGroupScale,
     kMxfp8Dynamic,
@@ -2803,7 +2803,7 @@ class KFp8StaticChannel(QuantKeyScheme):
     """Per-channel static FP8 weight (the 'PcPt' weight). Weight-role only —
     there is no static per-channel *activation* today."""
 
-    key = kFp8StaticTokenSym
+    key = kFp8StaticChannelSym
 
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not WEIGHT:
@@ -3051,7 +3051,7 @@ SCHEME_FOR: dict[QuantKey | None, QuantKeyScheme] = {
     kNvfp4Static: KNvfp4Static(),
     kNvfp4Dynamic: KNvfp4Dynamic(),
     kFp8StaticTensorSym: KFp8StaticTensor(),
-    kFp8StaticTokenSym: KFp8StaticChannel(),
+    kFp8StaticChannelSym: KFp8StaticChannel(),
     kFp8Static128BlockSym: KFp8Block128(),
     kMxfp8Static: KMxfp8Static(),
     kInt8Static: KInt8Static(),
@@ -3270,7 +3270,7 @@ class ModelOptLinearMethod(LinearMethodBase):
         return isinstance(w, QuantKey) and (
             w.dtype == FP4_DTYPE
             or (
-                w in (kFp8StaticTensorSym, kFp8StaticTokenSym)
+                w in (kFp8StaticTensorSym, kFp8StaticChannelSym)
                 and isinstance(self.kernel, CutlassFP8ScaledMMLinearKernel)
                 and type(self.fmt) is FormatScheme
             )
@@ -3342,7 +3342,7 @@ class ModelOptLinearMethod(LinearMethodBase):
                 raise RuntimeError(
                     f"{type(self.kernel).__name__} cannot use pre-processed weights"
                 )
-            if self.spec.weight in (kFp8StaticTensorSym, kFp8StaticTokenSym):
+            if self.spec.weight in (kFp8StaticTensorSym, kFp8StaticChannelSym):
                 layer.processed_weight_dims = (0, 1)
             elif self.spec.weight == kFp8Static128BlockSym:
                 logical_out = layer.output_size_per_partition
@@ -3430,7 +3430,7 @@ def resolve(algo: str, subcfg, prefix: str):
         # PcPt: per-channel static weight, dynamic per-token activation (W8A8).
         ctx = CkptCtx()
         return (
-            QuantSpec(weight=kFp8StaticTokenSym, activation=kFp8DynamicTokenSym),
+            QuantSpec(weight=kFp8StaticChannelSym, activation=kFp8DynamicTokenSym),
             ctx,
             None,
         )

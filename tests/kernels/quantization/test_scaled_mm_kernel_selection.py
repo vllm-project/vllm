@@ -279,6 +279,364 @@ def test_aiter_int8_per_tensor_weight_selection_and_loading(
     assert torch.equal(layer.weight_scale.flatten(), expected)
 
 
+@pytest.mark.parametrize(
+    "scheme_kind",
+    ["fbgemm_fp8", "modelopt_pc_pt", "online_reload"],
+    ids=["fbgemm", "modelopt", "online_reload"],
+)
+@pytest.mark.parametrize(
+    "target_kernel_name",
+    [
+        "AiterHipbMMPerTokenFp8ScaledMMLinearKernel",
+        "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
+        "AiterPerTokenFp8ScaledMMLinearKernel",
+    ],
+    ids=["hipb_mm", "preshuffled", "per_token"],
+)
+def test_fbgemm_and_modelopt_fp8_select_aiter_ptpc_kernels_and_canonicalize_scales(
+    scheme_kind: str,
+    target_kernel_name: str,
+    default_vllm_config,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """FBGEMMFp8, ModelOpt PcPt, and Online fp8_per_channel direct reload must
+    emit kFp8StaticChannelSym so all three AITER PTPC kernels select cleanly,
+    canonicalize 1-D (N,) and 2-D scales, preserve 3-D activation shapes, and
+    keep addresses across direct reloads.
+    """
+    from types import SimpleNamespace
+
+    import vllm._aiter_ops as aiter_ops_mod
+    from tests.single_rank_group import SingleRankGroup, override_parallel_groups
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import ModelConfig
+    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.model_executor.kernels.linear.scaled_mm import aiter as aiter_mod
+    from vllm.model_executor.layers.fusion.quant_activation import get_input_quant_key
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.model_executor.layers.quantization import fbgemm_fp8 as fbgemm_mod
+    from vllm.model_executor.layers.quantization import modelopt as modelopt_mod
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8DynamicTokenSym,
+        kFp8StaticChannelSym,
+    )
+    from vllm.model_executor.model_loader.reload.direct import (
+        begin_direct_reload,
+        finish_direct_reload,
+        record_checkpoint_layout,
+    )
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.platforms import current_platform
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    aiter_kernels = (
+        aiter_mod.AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+        aiter_mod.AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+        aiter_mod.AiterPerTokenFp8ScaledMMLinearKernel,
+    )
+    target_kernel = getattr(aiter_mod, target_kernel_name)
+
+    monkeypatch.setattr(current_platform, "_enum", PlatformEnum.ROCM)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(current_platform, "is_fp8_fnuz", lambda: False)
+    monkeypatch.setattr(current_platform, "fp8_dtype", lambda: torch.float8_e4m3fn)
+    monkeypatch.setattr(
+        current_platform, "has_device_capability", lambda cap, device_id=0: True
+    )
+    monkeypatch.setattr(
+        current_platform, "get_device_capability", lambda device_id=0: (9, 4)
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _d=None: SimpleNamespace(gcnArchName="gfx942"),
+    )
+    monkeypatch.setattr(aiter_ops_mod, "is_aiter_found_and_supported", lambda: True)
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR", "1")
+    monkeypatch.setenv(
+        "VLLM_ROCM_USE_AITER_LINEAR_HIPBMM",
+        "1" if target_kernel_name.startswith("AiterHipbMM") else "0",
+    )
+    rocm_aiter_ops.refresh_env_variables()
+    try:
+        for cls in aiter_kernels:
+            supported = cls is target_kernel
+            monkeypatch.setattr(
+                cls,
+                "is_supported",
+                classmethod(
+                    lambda _c, cc=None, ok=supported: (
+                        ok,
+                        None if ok else "disabled in test",
+                    )
+                ),
+            )
+        monkeypatch.setattr(
+            rocm_aiter_ops,
+            "is_shuffled_per_token_w8a8_gemm_tuned",
+            lambda n, k, dt: (
+                target_kernel
+                is aiter_mod.AiterPreshuffledPerTokenFp8ScaledMMLinearKernel
+            ),
+        )
+        monkeypatch.setattr(
+            rocm_aiter_ops,
+            "is_per_token_w8a8_gemm_tuned",
+            lambda n, k, dt: (
+                target_kernel is aiter_mod.AiterPerTokenFp8ScaledMMLinearKernel
+            ),
+        )
+
+        def _fallback_shuffle(tensor: torch.Tensor, layout=(16, 16)):
+            r, c = tensor.shape
+            br, bc = layout
+            return (
+                tensor.reshape(r // br, br, c // bc, bc)
+                .permute(0, 2, 1, 3)
+                .contiguous()
+                .view_as(tensor)
+            )
+
+        monkeypatch.setattr(rocm_aiter_ops, "shuffle_weight", _fallback_shuffle)
+
+        default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+        if scheme_kind == "fbgemm_fp8":
+            quant_config = fbgemm_mod.FBGEMMFp8Config(
+                ignore_list=[], input_scale_ub=1200.0
+            )
+        elif scheme_kind == "modelopt_pc_pt":
+            quant_config = modelopt_mod.ModelOptFp8Config(
+                quant_method="FP8_PER_CHANNEL_PER_TOKEN",
+                is_checkpoint_fp8_serialized=True,
+                kv_cache_quant_method=None,
+                exclude_modules=[],
+            )
+        else:
+            assert scheme_kind == "online_reload"
+            monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+            quant_config = OnlineQuantizationConfig(
+                QuantizationConfigArgs(linear="fp8_per_channel")
+            )
+
+        def _build_and_load(seed: int):
+            n_out, k_in = 64, 32
+            with (
+                override_parallel_groups(SingleRankGroup()),
+                set_default_torch_dtype(torch.bfloat16),
+            ):
+                layer = ReplicatedLinear(
+                    k_in,
+                    n_out,
+                    bias=False,
+                    params_dtype=torch.bfloat16,
+                    quant_config=quant_config,
+                    prefix="proj",
+                )
+            method = layer.quant_method
+            if scheme_kind == "fbgemm_fp8":
+                assert isinstance(method, fbgemm_mod.FBGEMMFp8LinearMethod)
+                selected = method.fp8_linear
+                assert selected.config.weight_quant_key == kFp8StaticChannelSym
+                assert layer.input_scale_ub.item() == 1200.0
+                assert get_input_quant_key(layer) is None
+                scale_shape = (n_out, 1)
+            else:
+                assert isinstance(method, modelopt_mod.ModelOptLinearMethod)
+                assert method.spec.weight == kFp8StaticChannelSym
+                selected = method.kernel
+                assert get_input_quant_key(layer) == kFp8DynamicTokenSym
+                scale_shape = (n_out,)
+                if scheme_kind == "online_reload":
+                    assert getattr(layer, "quantizes_on_load", False) is True
+            assert type(selected) is target_kernel
+
+            record_checkpoint_layout(layer)
+            torch.manual_seed(seed)
+            if scheme_kind == "online_reload":
+                w_bf16 = torch.randn(n_out, k_in, dtype=torch.bfloat16) * 0.5 + (
+                    seed * 0.25
+                )
+                layer.weight.weight_loader(layer.weight, w_bf16)
+                assert layer.weight_scale.shape == (n_out,)
+                w_ckpt = layer.weight.detach().clone()
+                ws_ckpt = layer.weight_scale.detach().clone()
+            else:
+                w_ckpt = (torch.randn(n_out, k_in) * 0.5).to(torch.float8_e4m3fn)
+                ws_ckpt = torch.linspace(0.1, 1.0, n_out, dtype=torch.float32).reshape(
+                    scale_shape
+                ) + (seed * 0.25)
+                layer.weight.weight_loader(layer.weight, w_ckpt)
+                layer.weight_scale.weight_loader(layer.weight_scale, ws_ckpt)
+            process_weights_after_loading(
+                layer, default_vllm_config.model_config, torch.device("cpu")
+            )
+            return layer, w_ckpt, ws_ckpt
+
+        layer, _, ws_cold = _build_and_load(seed=0)
+        expected_scale_shape = (
+            (1, 64)
+            if target_kernel is aiter_mod.AiterHipbMMPerTokenFp8ScaledMMLinearKernel
+            else (64, 1)
+        )
+        assert layer.weight_scale.shape == expected_scale_shape
+        assert layer.weight_scale.is_contiguous()
+        assert torch.equal(layer.weight_scale.flatten(), ws_cold.flatten())
+        if target_kernel is aiter_mod.AiterHipbMMPerTokenFp8ScaledMMLinearKernel:
+            assert layer.weight.shape == (32, 64)
+            assert not layer.weight.is_contiguous()
+
+        kernel = (
+            layer.quant_method.fp8_linear
+            if scheme_kind == "fbgemm_fp8"
+            else layer.quant_method.kernel
+        )
+        seen_bs_shapes: list[tuple[int, ...]] = []
+        monkeypatch.setattr(
+            kernel,
+            "quant_fp8",
+            lambda x_2d, _xs, _ub: (
+                x_2d.to(torch.float8_e4m3fn),
+                torch.ones((x_2d.shape[0], 1), dtype=torch.float32),
+            ),
+        )
+
+        def _make_fake_gemm(n_dim: int):
+            def _gemm(a, b, _as, bs, _bias, dt):
+                seen_bs_shapes.append(tuple(bs.shape))
+                return torch.zeros((a.shape[0], b.shape[n_dim]), dtype=dt)
+
+            return _gemm
+
+        monkeypatch.setattr(rocm_aiter_ops, "hipb_mm_fp8", _make_fake_gemm(1))
+        for op_name in ("preshuffled_per_token_w8a8_gemm", "w8a8_gemm"):
+            monkeypatch.setattr(rocm_aiter_ops, op_name, _make_fake_gemm(0))
+        x_3d = torch.ones((2, 4, 32), dtype=torch.bfloat16)
+        out_3d, _ = layer(x_3d)
+        out_apply_3d = layer.quant_method.apply(layer, x_3d)
+        assert out_3d.shape == (2, 4, 64)
+        assert out_apply_3d.shape == (2, 4, 64)
+        assert seen_bs_shapes == [expected_scale_shape, expected_scale_shape]
+
+        cold_w_ptr = layer.weight.data_ptr()
+        cold_ws_ptr = layer.weight_scale.data_ptr()
+
+        begin_direct_reload(layer)
+        torch.manual_seed(1)
+        if scheme_kind == "online_reload":
+            w_bf16_new = torch.randn(64, 32, dtype=torch.bfloat16) * 0.5 + 0.25
+            layer.weight.weight_loader(layer.weight, w_bf16_new)
+        else:
+            w_new = (torch.randn(64, 32) * 0.5).to(torch.float8_e4m3fn)
+            ws_new = (
+                torch.linspace(0.1, 1.0, 64, dtype=torch.float32).reshape(ws_cold.shape)
+                + 0.25
+            )
+            layer.weight.weight_loader(layer.weight, w_new)
+            layer.weight_scale.weight_loader(layer.weight_scale, ws_new)
+        finish_direct_reload(
+            layer, default_vllm_config.model_config, torch.device("cpu")
+        )
+
+        fresh_layer, _, _ = _build_and_load(seed=1)
+        assert layer.weight.data_ptr() == cold_w_ptr
+        assert layer.weight_scale.data_ptr() == cold_ws_ptr
+        assert layer.weight_scale.shape == expected_scale_shape
+        assert layer.weight_scale.is_contiguous()
+        assert torch.equal(
+            layer.weight.contiguous().view(torch.uint8),
+            fresh_layer.weight.contiguous().view(torch.uint8),
+        )
+        assert torch.equal(layer.weight_scale, fresh_layer.weight_scale)
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
+
+
+def test_fbgemm_and_modelopt_fp8_cross_backend_can_implement(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """kFp8StaticChannelSym x kFp8DynamicTokenSym keeps expected can_implement
+    contracts across all FP8 backends.
+    """
+    from dataclasses import replace
+
+    from vllm.model_executor.kernels.linear.scaled_mm import xpu as xpu_mod
+    from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
+        CPUFp8ChannelWiseScaledMMLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+        CutlassFP8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+        FlashInferFP8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
+        ChannelWiseTorchFP8ScaledMMLinearKernel,
+        RowWiseTorchFP8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.triton import (
+        TritonFP8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
+        XPUW8A8FP8LinearKernel,
+        XPUW8A16FP8LinearKernel,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8DynamicTokenSym,
+        kFp8StaticChannelSym,
+    )
+
+    cfg_bf16 = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=kFp8StaticChannelSym,
+        activation_quant_key=kFp8DynamicTokenSym,
+        weight_shape=(64, 64),
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+    )
+    cfg_fp16 = replace(cfg_bf16, out_dtype=torch.float16)
+    w_key_xpu = replace(kFp8StaticChannelSym, dtype=torch.float8_e4m3fn)
+    a_key_xpu = replace(kFp8DynamicTokenSym, dtype=torch.float8_e4m3fn)
+    cfg_xpu = replace(
+        cfg_bf16,
+        weight_quant_key=w_key_xpu,
+        activation_quant_key=a_key_xpu,
+    )
+    monkeypatch.setattr(xpu_mod, "kFp8StaticChannelSym", w_key_xpu)
+    monkeypatch.setattr(
+        XPUW8A8FP8LinearKernel,
+        "_SUPPORTED_WEIGHT_QUANT_KEYS",
+        {
+            w_key_xpu,
+            replace(xpu_mod.kFp8StaticTensorSym, dtype=torch.float8_e4m3fn),
+        },
+    )
+    monkeypatch.setattr(
+        XPUW8A8FP8LinearKernel,
+        "_SUPPORTED_ACT_QUANT_KEYS",
+        {
+            a_key_xpu,
+            replace(xpu_mod.kFp8DynamicTensorSym, dtype=torch.float8_e4m3fn),
+        },
+    )
+
+    assert CutlassFP8ScaledMMLinearKernel.can_implement(cfg_bf16)[0]
+    assert not FlashInferFP8ScaledMMLinearKernel.can_implement(cfg_bf16)[0]
+    assert TritonFP8ScaledMMLinearKernel.can_implement(cfg_bf16)[0]
+    assert RowWiseTorchFP8ScaledMMLinearKernel.can_implement(cfg_bf16)[0]
+    assert not RowWiseTorchFP8ScaledMMLinearKernel.can_implement(cfg_fp16)[0]
+    assert ChannelWiseTorchFP8ScaledMMLinearKernel.can_implement(cfg_fp16)[0]
+    assert CPUFp8ChannelWiseScaledMMLinearKernel.can_implement(cfg_bf16)[0]
+    assert XPUW8A8FP8LinearKernel.can_implement(cfg_xpu)[0]
+    assert XPUW8A16FP8LinearKernel.can_implement(cfg_xpu)[0]
+    assert HummingFP8ScaledMMLinearKernel.can_implement(cfg_bf16)[0]
+    assert cfg_bf16.weight_quant_key.scale.group_shape.is_per_channel()
+
+
 def test_cpu_kernel_accepts_all_configs():
     """Test that CPUInt8ScaledMMLinearKernel accepts all config combinations."""
     configs = [

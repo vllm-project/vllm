@@ -141,8 +141,7 @@ def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
         method = ct_fp8.CompressedTensorsW8A8Fp8MoEMethod(channel, token, moe)
         quantize = _quantize_fp8_per_channel
     elif weight == qu.kFp8StaticChannelSym:
-        token_spec = QuantSpec(weight=qu.kFp8StaticTokenSym, activation=spec.activation)
-        method = modelopt.ModelOptLinearMethod(token_spec, ckpt)
+        method = modelopt.ModelOptLinearMethod(spec, ckpt)
 
         def quantize(w):  # its channel scales are 1-D
             values, scales = _quantize_fp8_per_channel(w)

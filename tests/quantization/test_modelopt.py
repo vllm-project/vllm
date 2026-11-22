@@ -44,6 +44,8 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kMxfp8Dynamic,
     kMxfp8Static,
@@ -362,6 +364,64 @@ def test_modelopt_mixed_precision_dispatches_every_linear_algo(algo):
     )
 
     assert isinstance(method, ModelOptLinearMethod), (algo, type(method).__name__)
+
+
+def test_modelopt_fp8_pc_pt_scheme_and_preprocessed_weights(default_vllm_config):
+    """FP8_PER_CHANNEL_PER_TOKEN uses kFp8StaticChannelSym end-to-end across
+    resolve, SCHEME_FOR, pre-processed CUDA support, and weight-dims setup.
+    """
+    from vllm.config.quantization import QuantSpec
+    from vllm.model_executor.kernels.linear.scaled_mm import (
+        CutlassFP8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.layers.quantization import modelopt as m
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8StaticTokenSym,
+    )
+    from vllm.model_executor.utils import weights_already_processed
+    from vllm.platforms import PlatformEnum
+
+    cfg = ModelOptFp8Config(
+        quant_method="FP8_PER_CHANNEL_PER_TOKEN",
+        is_checkpoint_fp8_serialized=True,
+        kv_cache_quant_method=None,
+        exclude_modules=[],
+    )
+    spec, ctx, fmt = m.resolve(
+        "FP8_PER_CHANNEL_PER_TOKEN", cfg, "model.layers.0.mlp.down_proj"
+    )
+    assert spec == QuantSpec(
+        weight=kFp8StaticChannelSym, activation=kFp8DynamicTokenSym
+    )
+    assert fmt is None
+    assert m.KFp8StaticChannel.key == kFp8StaticChannelSym
+    assert isinstance(m.SCHEME_FOR[kFp8StaticChannelSym], m.KFp8StaticChannel)
+    assert kFp8StaticTokenSym not in m.SCHEME_FOR
+
+    method = ModelOptLinearMethod(spec, ctx, fmt)
+    layer = torch.nn.Module()
+    with (
+        patch.object(
+            CutlassFP8ScaledMMLinearKernel, "is_supported", return_value=(True, None)
+        ),
+        patch("vllm.model_executor.kernels.linear.current_platform") as platform_mock,
+    ):
+        platform_mock._enum = PlatformEnum.CUDA
+        platform_mock.get_device_capability.return_value = None
+        platform_mock.is_rocm.return_value = False
+        method.kernel = m.select_linear_kernel(
+            spec,
+            layer,
+            m.RuntimeDtypes(torch.bfloat16, torch.bfloat16),
+            weight_shape=(64, 32),
+            ctx=ctx,
+        )
+
+    assert isinstance(method.kernel, CutlassFP8ScaledMMLinearKernel)
+    assert method.supports_pre_processed_weights is True
+    with weights_already_processed():
+        method.process_weights_after_loading(layer)
+    assert layer.processed_weight_dims == (0, 1)
 
 
 @pytest.mark.parametrize("algo", ["FP8_PB_WO", "FP8_BLOCK_SCALES"])
@@ -1213,12 +1273,12 @@ def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
     def check_draft(worker):
         from vllm.model_executor.layers.quantization.utils.quant_utils import (
             kFp8DynamicTokenSym,
-            kFp8StaticTokenSym,
+            kFp8StaticChannelSym,
         )
 
         model = worker.get_draft_model().model
         for layer, weight_key, activation_key in (
-            (model.fc, kFp8StaticTokenSym, kFp8DynamicTokenSym),
+            (model.fc, kFp8StaticChannelSym, kFp8DynamicTokenSym),
             (model.markov_head.markov_w2, kFp8StaticTensorSym, kFp8StaticTensorSym),
             (model.layers[0].mlp.down_proj, kFp8StaticTensorSym, kFp8StaticTensorSym),
         ):
@@ -1305,9 +1365,10 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(monkeypatch, dist_init, workspace_i
 
     # Per-channel scales; activations are dynamically scaled per token.
     for projection in (qkv_proj, o_proj, gate_up_proj, down_proj):
+        assert projection.quant_method.spec.weight == kFp8StaticChannelSym
         assert hasattr(projection, "weight_scale")
         assert projection.weight_scale.dtype == torch.float32
-        assert projection.weight_scale.dim() == 1
+        assert projection.weight_scale.numel() == projection.output_size_per_partition
         assert not hasattr(projection, "input_scale")
 
     monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())

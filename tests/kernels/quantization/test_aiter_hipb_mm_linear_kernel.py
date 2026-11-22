@@ -207,8 +207,14 @@ def test_hipb_mm_kernel_can_implement_rejects_unsupported_configs(
     assert reason == expected_reason
 
 
+@pytest.mark.parametrize(
+    "scale_shape",
+    [(512, 1), (512,), (1, 512)],
+    ids=["2d_col", "1d_modelopt", "2d_row"],
+)
 def test_hipb_mm_kernel_process_weights_after_loading_shuffles_weights(
     enable_hipb_mm_kernel,
+    scale_shape: tuple[int, ...],
 ):
     weight_shape = (512, 4096)
     kernel = AiterHipbMMPerTokenFp8ScaledMMLinearKernel(
@@ -222,7 +228,7 @@ def test_hipb_mm_kernel_process_weights_after_loading_shuffles_weights(
         requires_grad=False,
     )
     layer.weight_scale = torch.nn.Parameter(
-        torch.rand((weight_shape[0], 1), dtype=torch.float32, device="cuda"),
+        torch.rand(scale_shape, dtype=torch.float32, device="cuda"),
         requires_grad=False,
     )
     layer.input_scale = None
@@ -242,8 +248,12 @@ def test_hipb_mm_kernel_process_weights_after_loading_shuffles_weights(
     ).t()
     torch.testing.assert_close(layer.weight, expected_weight)
 
-    expected_weight_scale = original_weight_scale.t().contiguous()
-    torch.testing.assert_close(layer.weight_scale, expected_weight_scale)
+    assert layer.weight_scale.shape == (1, weight_shape[0])
+    assert layer.weight_scale.is_contiguous()
+    expected_weight_scale = original_weight_scale.reshape(1, -1).contiguous()
+    torch.testing.assert_close(
+        layer.weight_scale, expected_weight_scale, rtol=0, atol=0
+    )
 
 
 def test_hipb_mm_kernel_forward_matches_raw_aiter_hipb_mm(enable_hipb_mm_kernel):
@@ -363,6 +373,72 @@ def test_hipb_mm_kernel_forward_accuracy(enable_hipb_mm_kernel):
     torch.testing.assert_close(out, expected, atol=5.0, rtol=0.1)
 
 
+def test_hipb_mm_kernel_1d_vs_2d_scale_forward_bit_exact(enable_hipb_mm_kernel):
+    """1-D (N,) and 2-D (N, 1) scales must yield bit-exact outputs and match
+    an fp32 dequantized reference."""
+    weight_shape = (512, 4096)
+    num_tokens = 32
+    _check_bpreshuffle_runtime_support(weight_shape, num_tokens=num_tokens)
+
+    fp8_dtype = current_platform.fp8_dtype()
+    fp8_max = get_fp8_min_max()[1]
+    device = torch.device("cuda")
+    gen = torch.Generator(device=device).manual_seed(0)
+
+    w_bf16 = (
+        torch.randn(weight_shape, dtype=torch.bfloat16, device=device, generator=gen)
+        * 0.5
+    )
+    w_amax = w_bf16.abs().amax(dim=1, keepdim=True).to(torch.float32)
+    w_scale = (w_amax / fp8_max).clamp(min=1e-12)
+    w_fp8 = (w_bf16.to(torch.float32) / w_scale).clamp(-fp8_max, fp8_max).to(fp8_dtype)
+    w_dequant = w_fp8.to(torch.float32) * w_scale
+
+    bias = torch.randn(
+        weight_shape[0], dtype=torch.bfloat16, device=device, generator=gen
+    )
+    bias = bias * 0.5
+
+    def _run_with_scale(ws: torch.Tensor) -> torch.Tensor:
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(w_fp8.t().clone(), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(ws.clone(), requires_grad=False)
+        layer.input_scale = None
+        layer.input_scale_ub = None
+        kernel = AiterHipbMMPerTokenFp8ScaledMMLinearKernel(
+            _make_config(weight_shape=weight_shape),
+            layer_param_names=(
+                "weight",
+                "weight_scale",
+                "input_scale",
+                "input_scale_ub",
+            ),
+        )
+        kernel.process_weights_after_loading(layer)
+        return kernel.apply_weights(layer, x, bias)
+
+    x = torch.randn(
+        num_tokens, weight_shape[1], dtype=torch.bfloat16, device=device, generator=gen
+    )
+    x = x * 0.5
+
+    try:
+        out_2d = _run_with_scale(w_scale)
+        out_1d = _run_with_scale(w_scale.squeeze(-1))
+    except RuntimeError as exc:
+        _skip_if_no_hipb_mm_solution(exc)
+        raise
+
+    assert out_1d.shape == (num_tokens, weight_shape[0])
+    assert torch.equal(out_1d, out_2d)
+
+    expected_fp32 = x.to(torch.float32) @ w_dequant.t() + bias.to(torch.float32)
+    cos = torch.nn.functional.cosine_similarity(
+        out_1d.float().flatten(), expected_fp32.flatten(), dim=0
+    ).item()
+    assert cos > 0.999
+
+
 def test_hipb_mm_kernel_online_tuning_writes_csv(
     enable_hipb_mm_kernel,
     monkeypatch: pytest.MonkeyPatch,
@@ -407,3 +483,16 @@ def test_hipb_mm_kernel_online_tuning_writes_csv(
         k=weight_shape[1],
     )
     assert row is not None
+
+
+def test_quant_fp8_forward_hip_honors_scale_ub(monkeypatch: pytest.MonkeyPatch):
+    """FBGEMMFp8 input_scale_ub must still clip scales when AITER is enabled."""
+    from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+    q = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
+    monkeypatch.setattr(q, "use_aiter", True)
+    x = torch.full((4, 64), 1000.0, dtype=torch.bfloat16, device="cuda")
+    scale_ub = torch.tensor([0.5], dtype=torch.float32, device="cuda")
+    _, out_scale = q.forward_hip(x, scale=None, scale_ub=scale_ub)
+    assert (out_scale <= scale_ub).all()

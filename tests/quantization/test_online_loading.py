@@ -102,3 +102,46 @@ def test_quantizer_gets_contiguous_tensor():
     layer.weight.weight_loader(layer.weight, transposed)
     assert torch.equal(layer.weight, transposed.to(torch.int8))
     assert layer.weight_scale.item() == 23
+
+
+def test_fp8_per_channel_checkpoint_method_uses_channel_key(
+    default_vllm_config,
+) -> None:
+    """Direct reload of fp8_per_channel must pass kFp8StaticChannelSym to ModelOpt."""
+    from tests.single_rank_group import SingleRankGroup, override_parallel_groups
+    from vllm.config import ModelConfig
+    from vllm.config.quantization import QuantSpec
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8DynamicTokenSym,
+        kFp8StaticChannelSym,
+    )
+    from vllm.platforms import current_platform
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+    spec = QuantSpec(weight=kFp8StaticChannelSym, activation=kFp8DynamicTokenSym)
+    with (
+        override_parallel_groups(SingleRankGroup()),
+        set_default_torch_dtype(torch.bfloat16),
+    ):
+        layer = ReplicatedLinear(32, 32, bias=False, params_dtype=torch.bfloat16)
+        method = loading.checkpoint_method(layer, spec, kFp8DynamicTokenSym)
+        assert isinstance(method, ModelOptLinearMethod)
+        assert method.spec.weight == kFp8StaticChannelSym
+        assert method.spec.activation == kFp8DynamicTokenSym
+
+        if torch.cuda.is_available() and current_platform.supports_fp8():
+            with torch.device("cuda"):
+                method.create_weights(layer, 32, [32], 32, 32, torch.bfloat16)
+                w_bf16 = torch.randn(32, 32, dtype=torch.bfloat16, device="cuda")
+                layer.weight.weight_loader(layer.weight, w_bf16)
+            assert layer.weight.dtype in (
+                torch.float8_e4m3fn,
+                current_platform.fp8_dtype(),
+            )
+            assert layer.weight_scale.shape == (32,)
+            assert layer.weight_scale.dtype == torch.float32
+            assert torch.isfinite(layer.weight_scale).all()
+            assert (layer.weight_scale > 0).all()
