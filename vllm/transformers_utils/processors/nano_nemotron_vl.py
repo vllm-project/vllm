@@ -882,7 +882,7 @@ class BaseNanoNemotronVLProcessor(ABC):
                 params = tiler.compute_params(
                     images, tiler.max_num_tokens_available(text_prompt_length)
                 )
-                pixel_values_lst = [_pil_to_nhwc_tensor(p.media)[0] for p in params]
+                pixel_values = [_pil_to_nhwc_tensor(p.media)[0] for p in params]
                 num_tokens_per_image = [p.num_embeddings for p in params]
                 imgs_sizes = [tiler.get_target_size(p) for p in params]
             else:
@@ -894,12 +894,22 @@ class BaseNanoNemotronVLProcessor(ABC):
                     )
                 )
                 imgs_sizes = [(pv.shape[-2], pv.shape[-1]) for pv in pixel_values_lst]
-            image_num_patches = torch.tensor([1] * len(num_tokens_per_image))
+                pixel_values = DynamicResolutionImageTiler.stack(
+                    pixel_values_lst, self.config.patch_size
+                )[0]
+            image_num_patches = torch.tensor(
+                [
+                    (height // self.config.patch_size)
+                    * (width // self.config.patch_size)
+                    for height, width in imgs_sizes
+                ]
+            )
             pixels_key = (
                 "pixel_values_raw" if self.device_resize else "pixel_values_flat"
             )
             image_inputs = {
-                pixels_key: pixel_values_lst,
+                pixels_key: pixel_values,
+                "image_num_patches": image_num_patches,
                 "imgs_sizes": imgs_sizes,
                 "num_tokens_per_image": num_tokens_per_image,
             }

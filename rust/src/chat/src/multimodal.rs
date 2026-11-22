@@ -1708,7 +1708,7 @@ mod tests {
         // patches; the 2x2 pixel shuffle turns them into 256 feature tokens.
         assert!(matches!(
             data["pixel_values_flat"].data.as_ref(),
-            Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [3, 512, 512]
+            Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [1024, 3 * 16 * 16]
         ));
         assert!(matches!(
             data["imgs_sizes"].data.as_ref(),
@@ -1758,8 +1758,7 @@ mod tests {
             else {
                 panic!("pixel_values_flat should be a tensor");
             };
-            let pixels = pixel_values.shape[1] * pixel_values.shape[2];
-            (feature.mm_position.length, pixels / (16 * 16))
+            (feature.mm_position.length, pixel_values.shape[0])
         }
 
         let info = nemotron_omni_info();
@@ -1776,8 +1775,8 @@ mod tests {
         assert_eq!(prepare(&info, Some(100)).await, (254, 1008));
     }
 
-    /// Images of different sizes reach the engine as separate items, each
-    /// with its own pixels and identifier.
+    /// One flat preprocessing batch is split into per-image engine items,
+    /// preserving each image's patch count and identifier.
     #[tokio::test]
     async fn nemotron_images_of_different_sizes_are_separate_items() {
         use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
@@ -1820,8 +1819,8 @@ mod tests {
         assert_eq!(
             summary,
             [
-                (true, 0, 258, vec![3, 512, 512]),
-                (false, 259, 302, vec![3, 480, 640]),
+                (true, 0, 258, vec![1024, 3 * 16 * 16]),
+                (false, 259, 302, vec![1200, 3 * 16 * 16]),
             ]
         );
     }
@@ -1898,7 +1897,7 @@ mod tests {
         let (mut tokens, mut features) = nemotron_prompt_with_preprocessed_image(&info).await;
         let data = features[0].data.as_mut().unwrap();
         match &mut data.get_mut("pixel_values_flat").unwrap().field {
-            MmField::Batched(field) => field.keep_on_cpu = true,
+            MmField::Flat(field) => field.dim = 1,
             other => panic!("unexpected pixel_values_flat batching: {other:?}"),
         }
 

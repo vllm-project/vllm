@@ -141,12 +141,13 @@ class NanoNemotronVLImagePixelInputs(TensorSchema):
 class NanoNemotronVLImagePixelInputsDynamic(TensorSchema):
     """Dynamic-resolution image inputs.
 
+    pixel_values_flat: `[1, total_patches, 3 * patch_size**2]`.
     imgs_sizes: per-image (height, width) in pixels.
     num_tokens_per_image: per-image number of embedding tokens (post downsample).
     """
 
     type: Literal["pixel_values_dynamic"] = "pixel_values_dynamic"
-    pixel_values_flat: Annotated[torch.Tensor, TensorShape("bn", "h", "w")]
+    pixel_values_flat: Annotated[torch.Tensor, TensorShape("bn", "np", "pp")]
     imgs_sizes: list[tuple[int, int]]
     num_tokens_per_image: list[int]
 
@@ -388,13 +389,10 @@ class NanoNemotronVLMultiModalProcessor(
         return hf_inputs
 
     def _get_image_fields_config(self, hf_inputs: BatchFeature):
-        if self.info.is_dynamic_tiler:
-            pixel_values_flat = MultiModalFieldConfig.batched("image")
-        else:
-            image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
-            pixel_values_flat = MultiModalFieldConfig.flat_from_sizes(
-                "image", image_num_patches
-            )
+        image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
+        pixel_values_flat = MultiModalFieldConfig.flat_from_sizes(
+            "image", image_num_patches
+        )
 
         return dict(
             pixel_values_flat=pixel_values_flat,
@@ -1229,9 +1227,14 @@ class NemotronH_Nano_VL_V2(
 
         if self.dynamic_resolution:
             assert isinstance(pixel_values_flat, (list, torch.Tensor))
-            pixel_values_flat = DynamicResolutionImageTiler.stack(
-                pixel_values_flat, self.patch_size
-            )
+            if isinstance(pixel_values_flat, torch.Tensor):
+                # CPU and Rust processors already return one tensor of patches.
+                pixel_values_flat = pixel_values_flat.unsqueeze(0)
+            else:
+                # device_resize still supplies resized whole images.
+                pixel_values_flat = DynamicResolutionImageTiler.stack(
+                    pixel_values_flat, self.patch_size
+                )
             imgs_sizes = kwargs.pop("imgs_sizes")
             num_tokens_per_image = kwargs.pop("num_tokens_per_image")
             assert isinstance(imgs_sizes, list)

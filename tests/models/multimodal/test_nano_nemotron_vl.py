@@ -332,6 +332,47 @@ def _sources(modality: str) -> list[np.ndarray]:
     return [rng.integers(0, 256, shape, dtype=np.uint8) for shape in shapes]
 
 
+def test_nemotron_dynamic_cpu_pixels_are_patch_flat(default_vllm_config):
+    processor = _make_processor()
+    sources = _sources("image")
+    _, inputs = _preprocess(processor, "image", sources)
+
+    tiler = processor.dynamic_tiler
+    assert tiler is not None
+    text_prompt_length = len(
+        processor.tokenizer(" Describe.", add_special_tokens=False).input_ids
+    )
+    resized, expected_tokens = tiler._images_to_pixel_values_lst(
+        text_prompt_length=text_prompt_length,
+        images=[Image.fromarray(source) for source in sources],
+        dtype=processor.dtype,
+    )
+    expected = DynamicResolutionImageTiler.stack(resized, processor.config.patch_size)[
+        0
+    ]
+    expected_num_patches = [
+        (image.shape[-2] // processor.config.patch_size)
+        * (image.shape[-1] // processor.config.patch_size)
+        for image in resized
+    ]
+
+    assert len({image.shape[-2:] for image in resized}) == len(sources)
+    assert inputs["imgs_sizes"] == [image.shape[-2:] for image in resized]
+    assert inputs["num_tokens_per_image"] == expected_tokens
+    assert inputs["image_num_patches"].tolist() == expected_num_patches
+    pixels = inputs["pixel_values_flat"]
+    assert pixels.shape == (sum(expected_num_patches), 3 * 4 * 4)
+    torch.testing.assert_close(pixels, expected, rtol=0, atol=0)
+
+    model = _uninitialized_model()
+    model.dynamic_resolution = True
+    model.patch_size = processor.config.patch_size
+    parsed = model._parse_and_validate_image_input(**inputs)
+    assert isinstance(parsed, NanoNemotronVLImagePixelInputsDynamic)
+    assert parsed.pixel_values_flat.shape == (1, *expected.shape)
+    torch.testing.assert_close(parsed.pixel_values_flat[0], pixels, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("modality", ["image", "video"])
 def test_nemotron_processor_device_resize_sends_source_pixels(
     modality: str, default_vllm_config
@@ -353,8 +394,16 @@ def test_nemotron_processor_device_resize_sends_source_pixels(
     if modality == "image":
         resized = inputs.pop("pixel_values_flat")
         raw = raw_inputs.pop("pixel_values_raw")
-        sizes = raw_inputs["imgs_sizes"]
-        assert raw_inputs == inputs
+        assert raw_inputs.keys() == inputs.keys()
+        assert raw_inputs["imgs_sizes"] == inputs["imgs_sizes"]
+        assert raw_inputs["num_tokens_per_image"] == inputs["num_tokens_per_image"]
+        torch.testing.assert_close(
+            raw_inputs["image_num_patches"], inputs["image_num_patches"]
+        )
+        assert resized.shape == (
+            inputs["image_num_patches"].sum().item(),
+            3 * 4 * 4,
+        )
     else:
         resized = [inputs["pixel_values_flat_video"]]
         raw = raw_inputs["pixel_values_raw_video"]
@@ -362,7 +411,7 @@ def test_nemotron_processor_device_resize_sends_source_pixels(
         torch.testing.assert_close(
             raw_inputs["video_num_patches"], inputs["video_num_patches"]
         )
-    assert [tuple(size) for size in sizes] == [tuple(r.shape[-2:]) for r in resized]
+        assert [tuple(size) for size in sizes] == [tuple(r.shape[-2:]) for r in resized]
     for raw_pixels, source in zip(raw, sources, strict=True):
         assert raw_pixels.dtype == torch.uint8
         assert torch.equal(raw_pixels, torch.from_numpy(source))
