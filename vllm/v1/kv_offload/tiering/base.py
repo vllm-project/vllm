@@ -132,6 +132,11 @@ class ParentManager(ABC):
     Steps 2-3 may be interleaved. Step 4 must be called even if no
     chunks were found, to avoid leaking async lookup state (e.g. in
     the fs tier's AsyncLookupManager).
+
+    Lookups for one request must be contiguous until its
+    create_store_job(): the manager pins the HITs it reported for the
+    request being served and releases them at the next request's first
+    lookup.
     """
 
     @abstractmethod
