@@ -3,27 +3,36 @@
 """Tests for `speculative_config.draft_top_k`: the fused draft sampler
 (`sample_draft_topk_fused`) and sparse verification (`rejection_sample_topk`)."""
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
-from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
-from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
+from vllm.config import SpeculativeConfig
+from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.draft_topk_cache import (
     SparseDraftCache,
     sample_draft_topk_fused,
 )
-from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
-from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
-from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
-    MultiModuleMTPSpeculator,
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.dspine.config import DSpineSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.eagle.config import (
+    Eagle3SpeculatorConfig,
+    EagleSpeculatorConfig,
+)
+from vllm.v1.worker.gpu.spec_decode.lilicorr.config import LiLiCorrSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.config import (
+    MultiModuleMTPSpeculatorConfig,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
     rejection_sample_topk,
 )
+from vllm.v1.worker.gpu.spec_decode.standalone_ar.config import (
+    StandaloneARSpeculatorConfig,
+)
+from vllm.v1.worker.gpu.spec_decode.xpress.config import XPressSpeculatorConfig
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA required for draft_top_k tests", allow_module_level=True)
@@ -289,27 +298,48 @@ def test_sample_draft_topk_fused_is_cudagraph_safe():
     torch.testing.assert_close(cache.logq[:256, 2], expected_logq)
 
 
+def test_sample_draft_topk_fused_reads_broadcast_draft_step():
+    """Autoregressive drafters pass one scalar step for the batch, expanded with
+    stride 0; every row must use it."""
+    torch.manual_seed(5)
+    x = _draft_inputs(1024, 300, 24, 0.8)
+    expanded = {**x, "draft_step": torch.tensor(2, device=DEVICE).expand(1024)}
+    materialized = {**x, "draft_step": torch.full((1024,), 2, device=DEVICE)}
+    cache_a = SparseDraftCache(1024, 4, 24, device=DEVICE)
+    cache_b = SparseDraftCache(1024, 4, 24, device=DEVICE)
+    a = sample_draft_topk_fused(cache_a, **expanded)
+    b = sample_draft_topk_fused(cache_b, **materialized)
+    assert torch.equal(a, b)
+    assert torch.equal(cache_a.ids, cache_b.ids)
+    assert torch.equal(cache_a.logq, cache_b.logq)
+
+
+def test_draft_top_k_is_rejected_for_methods_without_support():
+    with pytest.raises(ValueError, match="draft_top_k is not supported"):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=3,
+            draft_sample_method="probabilistic",
+            draft_top_k=64,
+        )
+
+
 @pytest.mark.parametrize(
-    "speculator_cls,supported",
+    "config_cls,supported",
     [
-        (DFlashSpeculator, True),
-        (EagleSpeculator, True),
-        (DSparkSpeculator, False),
-        (DFlash2Speculator, False),
-        (MultiModuleMTPSpeculator, False),
+        (DFlashSpeculatorConfig, True),
+        (EagleSpeculatorConfig, True),
+        (Eagle3SpeculatorConfig, True),
+        (MTPSpeculatorConfig, True),
+        (StandaloneARSpeculatorConfig, True),
+        # These sample drafts outside sample_draft, or use per-step heads.
+        (DFlash2SpeculatorConfig, False),
+        (DSpineSpeculatorConfig, False),
+        (LiLiCorrSpeculatorConfig, False),
+        (DSparkSpeculatorConfig, False),
+        (XPressSpeculatorConfig, False),
+        (MultiModuleMTPSpeculatorConfig, False),
     ],
 )
-def test_draft_top_k_rejects_speculators_bypassing_sample_draft(
-    speculator_cls, supported
-):
-    """Speculators that sample drafts outside `sample_draft` would never write
-    the sparse cache, so draft_top_k must be rejected for them at load time."""
-    speculator = object.__new__(speculator_cls)
-    speculator.draft_top_k = 64
-    speculator.draft_watermarker = None
-    speculator.model = SimpleNamespace(get_top_k_tokens=lambda *args: None)
-    if supported:
-        speculator._validate_draft_top_k()
-    else:
-        with pytest.raises(ValueError, match="not supported"):
-            speculator._validate_draft_top_k()
+def test_draft_top_k_supported_speculators(config_cls, supported):
+    assert ("draft_top_k" in config_cls.supported_options) == supported

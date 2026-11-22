@@ -16,10 +16,6 @@ logger = init_logger(__name__)
 class XPressSpeculator(DFlashSpeculator):
     _speculator_name = "XPress"
 
-    def supports_draft_top_k(self) -> bool:
-        # Drafts come from greedy Jacobi refinement, not sample_draft.
-        return False
-
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         hf = self.draft_model_config.hf_config

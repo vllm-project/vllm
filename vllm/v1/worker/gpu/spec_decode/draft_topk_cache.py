@@ -47,6 +47,7 @@ def _topk_draft_sample_kernel(
     logits_stride,
     expanded_idx_mapping_ptr,
     draft_step_ptr,
+    draft_step_stride,
     temp_ptr,
     seeds_ptr,
     pos_ptr,
@@ -70,7 +71,7 @@ def _topk_draft_sample_kernel(
     temp = tl.load(temp_ptr + req_state_idx, mask=is_valid, other=0.0).to(tl.float32)
     seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid, other=0)
     pos = tl.load(pos_ptr + token_idx)
-    step = tl.load(draft_step_ptr + token_idx)
+    step = tl.load(draft_step_ptr + token_idx * draft_step_stride)
     seed = spec_step_seed(seed, step)
 
     ids = tl.load(ids_ptr + token_idx * ids_stride + block, mask=mask, other=0)
@@ -128,7 +129,8 @@ def sample_draft_topk_fused(
     top-K (token id, logit) pairs from `get_top_k_tokens`, shape
     [num_tokens, K]; the logits need not be normalized (q' is renormalized
     over the K entries here, so any per-row shift cancels). `draft_step` is
-    each row's draft slot, an int tensor of shape [num_tokens]."""
+    each row's draft slot, an int tensor of shape [num_tokens] (a scalar
+    expanded with stride 0 is fine)."""
     num_tokens, K = ids.shape
     assert logits.shape == (num_tokens, K)
     ids, logits = ids.contiguous(), logits.contiguous()
@@ -148,6 +150,7 @@ def sample_draft_topk_fused(
         logits.stride(0),
         idx_mapping,
         draft_step,
+        draft_step.stride(0),
         temperature,
         seeds,
         positions,

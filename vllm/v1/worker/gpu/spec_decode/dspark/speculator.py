@@ -177,10 +177,6 @@ class DSparkSpeculator(DFlashSpeculator):
         # A model's own sample_sequential kernels write the full-size cache.
         return not hasattr(self.model, "sample_sequential")
 
-    def supports_draft_top_k(self) -> bool:
-        # Drafts are sampled by _sample_logits, not sample_draft.
-        return False
-
     def _sample_logits(
         self,
         logits: torch.Tensor,

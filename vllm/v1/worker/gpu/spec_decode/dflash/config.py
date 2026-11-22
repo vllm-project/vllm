@@ -16,6 +16,7 @@ class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.dflash.speculator.DFlashSpeculator"
     )
+    supported_options = frozenset({"draft_top_k"})
     uses_target_hidden_states = True
     parallel_drafting = True
     supports_watermarking = True

@@ -381,11 +381,6 @@ class DraftModelSpeculator(BaseSpeculator):
         DraftLogitsCache.row_mapping."""
         return False
 
-    def supports_draft_top_k(self) -> bool:
-        """Whether every probabilistic draft on this speculator's path is
-        sampled by `sample_draft`, which writes the sparse draft_top_k cache."""
-        return False
-
     def _init_draft_logits(self, target_model: nn.Module) -> None:
         """Allocate the draft logits cache.
 
@@ -633,12 +628,6 @@ class DraftModelSpeculator(BaseSpeculator):
     def _validate_draft_top_k(self) -> None:
         if self.draft_top_k is None:
             return
-        if not self.supports_draft_top_k():
-            raise ValueError(f"draft_top_k is not supported by {type(self).__name__}.")
-        if self.draft_watermarker is not None:
-            raise ValueError(
-                "draft_top_k is not yet compatible with draft watermarking."
-            )
         if not hasattr(self.model, "get_top_k_tokens"):
             raise ValueError(
                 "draft_top_k is enabled but draft model "
@@ -682,14 +671,10 @@ class DraftModelSpeculator(BaseSpeculator):
         cache = self.draft_topk_cache
         assert cache is not None
         ids, logits = self.get_draft_top_k_tokens(hidden_states, spec_step_idx)
-        if torch.is_tensor(draft_step):
-            slot = (
-                draft_step
-                if draft_step.dim() > 0
-                else draft_step.expand_as(idx_mapping)
-            ).long()
-        else:
-            slot = torch.full_like(idx_mapping, int(draft_step)).long()
+        # Autoregressive drafters pass one scalar step for the whole batch; the
+        # kernel reads it through a zero stride.
+        if draft_step.dim() == 0:
+            draft_step = draft_step.expand_as(idx_mapping)
         return sample_draft_topk_fused(
             cache,
             ids,
@@ -698,7 +683,7 @@ class DraftModelSpeculator(BaseSpeculator):
             temperature,
             seeds,
             sample_src_positions,
-            slot,
+            draft_step,
             use_fp64=self.use_fp64_gumbel,
         )
 

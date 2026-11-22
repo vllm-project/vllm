@@ -124,6 +124,7 @@ DraftSampleMethod = Literal["greedy", "probabilistic"]
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
+    "draft_top_k",
     "dspark_draft_topk",
     "draft_lm_head_quantization",
     "index_share_for_mtp_iteration",

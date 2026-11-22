@@ -12,6 +12,7 @@ class StandaloneARSpeculatorConfig(DraftModelSpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator.StandaloneARSpeculator"
     )
+    supported_options = frozenset({"draft_top_k"})
     draft_has_own_vocab = True
     one_token_draft_decodes = True
     # An independent model with its own positional limit.
