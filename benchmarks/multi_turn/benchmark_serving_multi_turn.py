@@ -6,6 +6,7 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import queue
 import random
 import time
 from collections import Counter, deque
@@ -799,7 +800,9 @@ async def client_main(
             if args.request_rate > 0:
                 await poisson_sleep(args.request_rate, args.verbose)
 
-    # Send indication that the client is done
+    # Send indication that the client is done on both output queues so the
+    # parent can drain result_queue deterministically without racing on empty().
+    result_queue.put(TERM_SIGNAL)
     conv_queue.put((TERM_SIGNAL, TERM_SIGNAL))
 
     logger.info(
@@ -974,130 +977,181 @@ async def main_mp(
 
     # Collect the updated conversations from all clients
     num_clients_finished = 0
+    num_result_sentinels = 0
     total_convs = len(input_conv)
 
     debug_stats = DebugStats(logger, min(15 * bench_args.num_clients, 500))
 
-    while num_clients_finished < bench_args.num_clients:
-        # Collect updated conversation
-        conv_id, messages = conv_queue.get()
-
-        # Collect results (measurements)
-        while not result_queue.empty():
-            new_data = result_queue.get()
+    def _record_result(new_data: RequestStats | None) -> None:
+        nonlocal num_result_sentinels
+        if new_data is TERM_SIGNAL:
+            num_result_sentinels += 1
+        else:
             client_metrics.append(new_data)
             debug_stats.update(new_data)
 
-        if conv_id is TERM_SIGNAL:
-            num_clients_finished += 1
-            logger.info(
-                f"{Color.CYAN}{num_clients_finished} out of "
-                f"{bench_args.num_clients} clients finished{Color.RESET}"
-            )
+    def _drain_result_queue_nowait() -> None:
+        while True:
+            try:
+                _record_result(result_queue.get_nowait())
+            except queue.Empty:
+                break
 
-            if bench_args.early_stop and not stop_event.is_set():
-                # Once one client finished, stop all other clients.
-                # there is no reason to continue the benchmark with fewer clients.
+    try:
+        while num_clients_finished < bench_args.num_clients:
+            # Drain available results continuously so result_queue's OS pipe
+            # cannot fill up while waiting for conversations to finish.
+            _drain_result_queue_nowait()
+
+            # Collect updated conversation
+            try:
+                conv_id, messages = conv_queue.get(timeout=0.1)
+            except queue.Empty:
+                if not any(client.is_alive() for client in clients):
+                    # One final non-blocking check in case a worker wrote to
+                    # conv_queue and exited right after the timeout elapsed.
+                    try:
+                        conv_id, messages = conv_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                else:
+                    continue
+
+            # Collect results (measurements)
+            _drain_result_queue_nowait()
+
+            if conv_id is TERM_SIGNAL:
+                num_clients_finished += 1
                 logger.info(
-                    f"{Color.YELLOW}Sending termination signal to clients{Color.RESET}"
-                )
-                stop_event.set()
-        else:
-            output_conv[conv_id] = messages
-
-            finished_convs = len(output_conv)
-            percent = finished_convs / total_convs
-
-            # Tuned to control the print rate (can be changed if required)
-            print_cycle = max(3, int(bench_args.num_clients / 4))
-
-            if finished_convs % print_cycle == 0:
-                runtime_sec = nanosec_to_sec(time.perf_counter_ns() - start_time)
-                logger.info(
-                    f"{Color.CYAN}Finished {finished_convs} out of {total_convs} conversations ({percent:.0%}), "  # noqa: E501
-                    f"{num_clients_finished} out of {bench_args.num_clients} clients finished, collected {len(client_metrics)} measurements, runtime {runtime_sec:.3f} sec{Color.RESET}"  # noqa: E501
+                    f"{Color.CYAN}{num_clients_finished} out of "
+                    f"{bench_args.num_clients} clients finished{Color.RESET}"
                 )
 
-                rps: str | float = round(len(client_metrics) / runtime_sec, 3)
-                if len(client_metrics) < (5 * bench_args.num_clients):
-                    # Do not estimate the RPS if the number of samples is very low
-                    # (threshold can be tuned if needed)
-                    rps = "N/A"
+                if bench_args.early_stop and not stop_event.is_set():
+                    # Once one client finished, stop all other clients.
+                    # there is no reason to continue the benchmark with fewer clients.
+                    logger.info(
+                        f"{Color.YELLOW}Sending termination signal "
+                        f"to clients{Color.RESET}"
+                    )
+                    stop_event.set()
+            else:
+                output_conv[conv_id] = messages
 
-                runtime_left_sec: str | float = round(
-                    (runtime_sec / finished_convs) * (total_convs - finished_convs), 3
-                )
-                if percent < 0.05:
-                    # If less than 5% of the conversations were not finished,
-                    # the estimation will probably be very inaccurate
-                    # (threshold can be tuned if needed).
-                    runtime_left_sec = "N/A"
+                finished_convs = len(output_conv)
+                percent = finished_convs / total_convs
 
-                logger.info(
-                    f"{Color.CYAN}Estimated req/sec {rps}, estimated runtime left {runtime_left_sec} sec{Color.RESET}"  # noqa: E501
-                )
-                debug_stats.print()
+                # Tuned to control the print rate (can be changed if required)
+                print_cycle = max(3, int(bench_args.num_clients / 4))
 
-    logger.info(
-        f"{Color.CYAN}All {bench_args.num_clients} clients finished{Color.RESET}"
-    )
+                if finished_convs % print_cycle == 0:
+                    runtime_sec = nanosec_to_sec(time.perf_counter_ns() - start_time)
+                    logger.info(
+                        f"{Color.CYAN}Finished {finished_convs} out of {total_convs} conversations ({percent:.0%}), "  # noqa: E501
+                        f"{num_clients_finished} out of {bench_args.num_clients} clients finished, collected {len(client_metrics)} measurements, runtime {runtime_sec:.3f} sec{Color.RESET}"  # noqa: E501
+                    )
 
-    # At this point all the clients finished,
-    # collect results (TTFT, TPOT, etc.) from all the clients.
-    # This needs to happen before calling join on the clients
-    # (result_queue should be emptied).
-    while not result_queue.empty():
-        client_metrics.append(result_queue.get())
+                    rps: str | float = round(len(client_metrics) / runtime_sec, 3)
+                    if len(client_metrics) < (5 * bench_args.num_clients):
+                        # Do not estimate the RPS if the number of samples is very low
+                        # (threshold can be tuned if needed)
+                        rps = "N/A"
 
-    logger.info(f"Collected {len(client_metrics)} samples from all the clients")
+                    runtime_left_sec: str | float = round(
+                        (runtime_sec / finished_convs) * (total_convs - finished_convs),
+                        3,
+                    )
+                    if percent < 0.05:
+                        # If less than 5% of the conversations were not finished,
+                        # the estimation will probably be very inaccurate
+                        # (threshold can be tuned if needed).
+                        runtime_left_sec = "N/A"
 
-    # Wait for all clients to finish
-    for client in clients:
+                    logger.info(
+                        f"{Color.CYAN}Estimated req/sec {rps}, estimated runtime left {runtime_left_sec} sec{Color.RESET}"  # noqa: E501
+                    )
+                    debug_stats.print()
+
         logger.info(
-            f"{Color.CYAN}Waiting for client {client.name} "
-            f"(is alive: {client.is_alive()}){Color.RESET}"
+            f"{Color.CYAN}All {bench_args.num_clients} clients finished{Color.RESET}"
         )
 
-        client.join(timeout=req_args.timeout_sec + 1)
+        # Drain result_queue until every client's sentinel has arrived (or all
+        # clients have exited). Draining with `while not result_queue.empty()`
+        # races with exiting workers whose feeder threads have not yet flushed
+        # to the OS pipe, while joining before draining can deadlock on a full
+        # pipe buffer.
+        drain_deadline = time.monotonic() + req_args.timeout_sec + 1
+        while num_result_sentinels < bench_args.num_clients:
+            remaining = drain_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                _record_result(result_queue.get(timeout=min(0.05, remaining)))
+            except queue.Empty:
+                if not any(client.is_alive() for client in clients):
+                    _drain_result_queue_nowait()
+                    break
 
-        if client.is_alive():
-            logger.warning(
-                f"{Color.YELLOW}Client {client.name} will be terminated{Color.RESET}"
+        # Wait for all clients to finish
+        for client in clients:
+            logger.info(
+                f"{Color.CYAN}Waiting for client {client.name} "
+                f"(is alive: {client.is_alive()}){Color.RESET}"
             )
-            client.terminate()
 
-        exitcode = client.exitcode
-        if exitcode != 0:
-            logger.error(
-                f"{Color.RED}Client {client.name} exited "
-                f"with exit code {exitcode}{Color.RESET}"
-            )
+            client.join(timeout=req_args.timeout_sec + 1)
 
-    logger.info(
-        f"All {bench_args.num_clients} clients exited (successfully "
-        f"finished {len(output_conv)} out of {total_convs} conversations)"
-    )
+            if client.is_alive():
+                logger.warning(
+                    f"{Color.YELLOW}Client {client.name} will be terminated"
+                    f"{Color.RESET}"
+                )
+                client.terminate()
+                client.join(timeout=5)
 
-    # Queues should be closed, required to avoid hang at interpreter shutdown
-    unfinished_tasks = 0
-    while not task_queue.empty():
-        task_queue.get()
-        unfinished_tasks += 1
+            exitcode = client.exitcode
+            if exitcode != 0:
+                logger.error(
+                    f"{Color.RED}Client {client.name} exited "
+                    f"with exit code {exitcode}{Color.RESET}"
+                )
 
-    if unfinished_tasks > 0:
-        # Can happen if not all tasks (conversations) have finished.
-        # May happen if --max-num-requests was used,
-        # or if an error occurred in one of the clients.
-        logger.debug(f"Discarding {unfinished_tasks} unfinished tasks")
+        # Final post-join sweep for any results flushed right before worker exit.
+        _drain_result_queue_nowait()
 
-    task_queue.close()
-    task_queue.join_thread()
+        logger.info(f"Collected {len(client_metrics)} samples from all the clients")
+        logger.info(
+            f"All {bench_args.num_clients} clients exited (successfully "
+            f"finished {len(output_conv)} out of {total_convs} conversations)"
+        )
+    finally:
+        for client in clients:
+            if client.is_alive():
+                client.terminate()
+                client.join(timeout=5)
 
-    result_queue.close()
-    result_queue.join_thread()
+        unfinished_tasks = 0
+        while True:
+            try:
+                task_queue.get_nowait()
+                unfinished_tasks += 1
+            except queue.Empty:
+                break
 
-    conv_queue.close()
-    conv_queue.join_thread()
+        if unfinished_tasks > 0:
+            # Can happen if not all tasks (conversations) have finished.
+            # May happen if --max-num-requests was used,
+            # or if an error occurred in one of the clients.
+            logger.debug(f"Discarding {unfinished_tasks} unfinished tasks")
+
+        # Cancel background feeder threads before closing queues: if clients
+        # exited early (e.g., --max-num-requests, --early-stop, or error) while
+        # unconsumed items remain buffered behind a full OS pipe, join_thread()
+        # would block indefinitely because no consumer remains.
+        for q in (task_queue, result_queue, conv_queue):
+            q.cancel_join_thread()
+            q.close()
 
     return output_conv, client_metrics
 
