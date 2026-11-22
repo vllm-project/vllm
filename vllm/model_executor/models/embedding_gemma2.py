@@ -3,6 +3,7 @@
 """EmbeddingGemma2: bidirectional Gemma4-derived multimodal embedding model."""
 
 import dataclasses
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, cast
 
@@ -20,6 +21,7 @@ from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.config.multimodal import VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
@@ -69,6 +71,7 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageProcessorItems,
+    ImageSize,
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
@@ -77,6 +80,8 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.dummy_inputs import MIN_DUMMY_SIDE
+from vllm.multimodal.video import EmbeddingGemma2VideoBackend
 from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
@@ -84,7 +89,6 @@ logger = init_logger(__name__)
 _WINDOW_OFFSET = 1  # HF masks |q-k| <= W; vLLM ENCODER_ONLY masks <= W-1.
 _VIDEO_FRAME_WIDTH = 672
 _VIDEO_FRAME_HEIGHT = 480
-_VIDEO_MAX_FRAMES = 32
 _VIDEO_MAX_SOFT_TOKENS = 140
 
 
@@ -422,6 +426,47 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
         # Base-class behavior: add_special_tokens=True (BOS + EOS)
         return BaseProcessingInfo.get_default_tok_params(self)
 
+    def get_max_video_frames(self) -> int:
+        video_kwargs = self._get_effective_mm_processor_kwargs({}).get(
+            "videos_kwargs", {}
+        )
+        mm_config = self.ctx.model_config.get_multimodal_config()
+
+        # The loader's max_frames cap is 128 when media_io_kwargs can raise it
+        video_media_io = (
+            getattr(mm_config, "media_io_kwargs", {}).get("video", {})
+            if mm_config
+            else {}
+        )
+        loader_max_frames = video_media_io.get("max_frames")
+        if loader_max_frames is None:
+            _, loader_max_frames = EmbeddingGemma2VideoBackend._get_processor_defaults()
+        max_frames = int(loader_max_frames)
+        if (processor_max_frames := video_kwargs.get("max_frames")) is not None:
+            max_frames = max(max_frames, int(processor_max_frames))
+        max_frames = min(max_frames, 128)
+
+        video_opts = mm_config.limit_per_prompt.get("video") if mm_config else None
+        if video_opts is not None:
+            num_frames_opt = getattr(video_opts, "num_frames", None)
+            if isinstance(num_frames_opt, int):
+                max_frames = min(max_frames, num_frames_opt)
+        return max_frames
+
+    def get_video_max_soft_tokens(self) -> int:
+        video_kwargs = self._get_effective_mm_processor_kwargs({}).get(
+            "videos_kwargs", {}
+        )
+        video_max_soft = video_kwargs.get("max_soft_tokens", _VIDEO_MAX_SOFT_TOKENS)
+        if video_max_soft is not None and video_max_soft not in _SUPPORTED_SOFT_TOKENS:
+            raise ValueError(
+                f"Unsupported max_soft_tokens={video_max_soft} for video. "
+                f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
+            )
+        if not isinstance(video_max_soft, int):
+            video_max_soft = _VIDEO_MAX_SOFT_TOKENS
+        return video_max_soft
+
     def get_mm_max_tokens_per_item(
         self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int] | None:
@@ -439,52 +484,64 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
             processor = self.get_hf_processor()
             tokens["audio"] = processor.audio_seq_length + 2
 
-        processor = self.get_hf_processor()
-        video_proc = getattr(processor, "video_processor", None)
-        max_frames = getattr(video_proc, "max_frames", 32)
-        mm_config = self.ctx.model_config.get_multimodal_config()
-
-        # The loader's max_frames cap is 128 when media_io_kwargs can raise it
-        video_media_io = (
-            getattr(mm_config, "media_io_kwargs", {}).get("video", {})
-            if mm_config
-            else {}
+        video_kwargs = self._get_effective_mm_processor_kwargs({}).get(
+            "videos_kwargs", {}
         )
-        media_io_max_frames = video_media_io.get("max_frames")
-        if media_io_max_frames is not None:
-            max_frames = min(int(media_io_max_frames), 128)
-        elif "max_frames" in merged_kwargs:
-            max_frames = min(int(merged_kwargs["max_frames"]), 128)
-
-        video_opts = mm_config.limit_per_prompt.get("video") if mm_config else None
-        if video_opts is not None:
-            num_frames_opt = getattr(video_opts, "num_frames", None)
-            if isinstance(num_frames_opt, int):
-                max_frames = min(max_frames, num_frames_opt)
-
-        video_max_soft = merged_kwargs.get(
-            "max_soft_tokens",
-            getattr(video_proc, "max_soft_tokens", _VIDEO_MAX_SOFT_TOKENS),
-        )
-        if video_max_soft is not None and video_max_soft not in _SUPPORTED_SOFT_TOKENS:
-            raise ValueError(
-                f"Unsupported max_soft_tokens={video_max_soft} for video. "
-                f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
-            )
-        if not isinstance(video_max_soft, int):
-            video_max_soft = _VIDEO_MAX_SOFT_TOKENS
+        max_frames = self.get_max_video_frames()
+        video_max_soft = self.get_video_max_soft_tokens()
 
         # Token allocation per video frame verified against HF EmbeddingGemma2Processor:
         # - Without timestamps: boi (1) + video_token * num_soft_tokens + eoi (1)
         #   Total = num_soft_tokens + 2
         # - With timestamps: timestamp prefix string (e.g. ' 01:23 ' = up to 7 tokens)
         #   Total = num_soft_tokens + 2 + 7
-        add_ts = getattr(video_proc, "add_timestamps", False) or merged_kwargs.get(
-            "add_timestamps", False
-        )
+        add_ts = video_kwargs.get("add_timestamps", False)
         ts_slack = 7 if add_ts else 0
         tokens["video"] = max_frames * (video_max_soft + 2 + ts_slack)
         return tokens
+
+    def get_video_frame_size_with_most_features(
+        self, overrides: VideoDummyOptions | None = None
+    ) -> ImageSize:
+        vision_config = self.get_hf_config().vision_config
+        unit = vision_config.patch_size * vision_config.pooling_kernel_size
+        max_soft_tokens = self.get_video_max_soft_tokens()
+        sizes = [
+            ImageSize(width=unit * (max_soft_tokens // h), height=unit * h)
+            for h in range(1, max_soft_tokens + 1)
+            if max_soft_tokens % h == 0
+        ]
+        if overrides is not None and (overrides.width or overrides.height):
+            max_width = overrides.width or unit * max_soft_tokens
+            max_height = overrides.height or unit * max_soft_tokens
+            sizes = [
+                ImageSize(
+                    width=min(size.width, max_width),
+                    height=min(size.height, max_height),
+                )
+                for size in sizes
+            ]
+            sizes.append(ImageSize(width=max_width, height=max_height))
+            for h in range(1, max_soft_tokens + 1):
+                w = max_soft_tokens // h
+                if unit * h <= max_height and (w_fit := min(w, max_width // unit)):
+                    sizes.append(ImageSize(width=unit * w_fit, height=unit * h))
+                divisor = math.gcd(w, h)
+                aspect_w, aspect_h = w // divisor, h // divisor
+                k = min(max_width // aspect_w, max_height // aspect_h)
+                if k * min(aspect_w, aspect_h) >= MIN_DUMMY_SIDE:
+                    sizes.append(ImageSize(width=k * aspect_w, height=k * aspect_h))
+
+        return max(
+            sizes,
+            key=lambda size: (
+                self._compute_num_soft_tokens(size.width, size.height, max_soft_tokens),
+                -abs(
+                    size.width / size.height - _VIDEO_FRAME_WIDTH / _VIDEO_FRAME_HEIGHT
+                ),
+                -size.width * size.height,
+            ),
+        )
 
     def get_image_repl(  # type: ignore[override]
         self,
@@ -580,6 +637,8 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
 class EmbeddingGemma2DummyInputsBuilder(Gemma4DummyInputsBuilder):
     """Dummy input builder for EmbeddingGemma2 profiling and testing."""
 
+    info: EmbeddingGemma2ProcessingInfo
+
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         num_audios = mm_counts.get("audio", 0)
@@ -601,9 +660,8 @@ class EmbeddingGemma2DummyInputsBuilder(Gemma4DummyInputsBuilder):
         num_videos: int,
         overrides=None,
     ) -> list[VideoItem]:
-        num_frames = _VIDEO_MAX_FRAMES
-        width = _VIDEO_FRAME_WIDTH
-        height = _VIDEO_FRAME_HEIGHT
+        num_frames = self.info.get_max_video_frames()
+        width, height = self.info.get_video_frame_size_with_most_features(overrides)
         videos = super(Gemma4DummyInputsBuilder, self)._get_dummy_videos(
             width=width,
             height=height,
@@ -660,6 +718,9 @@ class EmbeddingGemma2MultiModalProcessor(Gemma4MultiModalProcessor):
             video_timestamps_per_video: list[list[float]] = []
             video_frame_counts: list[int] = []
 
+            add_ts = self.info._get_effective_mm_processor_kwargs(hf_kwargs)[
+                "videos_kwargs"
+            ]["add_timestamps"]
             for item in videos:
                 video_array, metadata = item
 
@@ -764,10 +825,6 @@ class EmbeddingGemma2MultiModalProcessor(Gemma4MultiModalProcessor):
                     ret_meta[0] if (ret_meta and len(ret_meta) > 0) else metadata_obj
                 )
 
-                add_ts = hf_kwargs.get(
-                    "add_timestamps",
-                    getattr(processor.video_processor, "add_timestamps", False),
-                )
                 if add_ts:
                     try:
                         ts = meta_for_ts.timestamps
@@ -891,6 +948,10 @@ class EmbeddingGemma2MultiModalProcessor(Gemma4MultiModalProcessor):
             video_token_id = hf_processor.video_token_id
             assert video_token_id is not None
 
+            add_ts = self.info._get_effective_mm_processor_kwargs(
+                hf_processor_mm_kwargs
+            )["videos_kwargs"]["add_timestamps"]
+
             def get_replacement_video(item_idx: int):
                 out_item = out_mm_kwargs["video"][item_idx]
                 raw_ts = out_item["video_timestamps"].data
@@ -911,10 +972,6 @@ class EmbeddingGemma2MultiModalProcessor(Gemma4MultiModalProcessor):
                     soft_list = [raw_soft]
                 num_soft = [int(n) for n in soft_list]
 
-                add_ts = hf_processor_mm_kwargs.get(
-                    "add_timestamps",
-                    getattr(hf_processor.video_processor, "add_timestamps", False),
-                )
                 return self.info.get_video_repl(
                     timestamps=timestamps,
                     num_soft_tokens_per_frame=num_soft,

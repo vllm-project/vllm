@@ -451,6 +451,13 @@ def test_max_video_tokens_fills_context(
     assert dummy_video_tokens == max_video_tokens
 
 
+_SCOPED_HALF_VIDEO_SIZE = {
+    "videos_kwargs": {
+        "size": {"shortest_edge": 56 * 56, "longest_edge": 8192 * 28 * 28}
+    }
+}
+
+
 def _count_video_tokens(processor_inputs) -> int:
     return sum(
         placeholder.get_num_embeds()
@@ -458,23 +465,35 @@ def _count_video_tokens(processor_inputs) -> int:
     )
 
 
-def test_dummy_video_follows_size_hint() -> None:
-    width, height, num_frames = 1400, 2800, 2
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "hint", "frame_size"),
+    [
+        (None, {"width": 1400, "height": 2800}, (1400, 2800)),
+        (_SCOPED_HALF_VIDEO_SIZE, {"width": 1792, "height": 2520}, (1792, 2520)),
+        (_SCOPED_HALF_VIDEO_SIZE, {"width": 1792}, (1792, 3584)),
+        (_SCOPED_HALF_VIDEO_SIZE, {"height": 1792}, (3584, 1792)),
+        (_SCOPED_HALF_VIDEO_SIZE, {"width": 2357, "height": 2726}, (2357, 2726)),
+        (_SCOPED_HALF_VIDEO_SIZE, {"width": 192, "height": 108}, (192, 108)),
+    ],
+)
+def test_dummy_video_follows_size_hint(
+    mm_processor_kwargs: dict[str, object] | None,
+    hint: dict[str, int],
+    frame_size: tuple[int, int],
+) -> None:
+    num_frames = 2
     ctx = build_model_context(
         "Qwen/Qwen2.5-VL-3B-Instruct",
+        mm_processor_kwargs=mm_processor_kwargs,
         model_config_kwargs={"max_model_len": 40000},
         limit_mm_per_prompt={
             "image": 0,
-            "video": {
-                "count": 1,
-                "width": width,
-                "height": height,
-                "num_frames": num_frames,
-            },
+            "video": {"count": 1, "num_frames": num_frames, **hint},
         },
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
+    width, height = frame_size
     video = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
     metadata = {
         "fps": 2.0,
@@ -525,6 +544,28 @@ def test_max_video_tokens_matches_dummy_video(
     assert (
         _count_video_tokens(processor.get_dummy_mm_inputs({"video": 1}))
         == max_video_tokens
+    )
+
+
+def test_max_video_tokens_reads_scoped_video_size() -> None:
+    size = _SCOPED_HALF_VIDEO_SIZE["videos_kwargs"]["size"]
+
+    def video_tokens(mm_processor_kwargs: dict[str, object]) -> tuple[int, int]:
+        ctx = build_model_context(
+            "Qwen/Qwen2.5-VL-3B-Instruct",
+            mm_processor_kwargs=mm_processor_kwargs,
+            limit_mm_per_prompt={"image": 0, "video": 1},
+        )
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+        max_tokens = processor.info.get_mm_max_tokens_per_item(
+            ctx.model_config.max_model_len, {"video": 1}
+        )
+        assert max_tokens is not None
+        dummy = processor.get_dummy_mm_inputs({"video": 1})
+        return max_tokens["video"], _count_video_tokens(dummy)
+
+    assert video_tokens({"videos_kwargs": {"size": size}}) == video_tokens(
+        {"size": size}
     )
 
 
