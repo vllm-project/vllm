@@ -358,7 +358,7 @@ class SamplingParams(
     [num_rows, num_ids] or nested lists; -1 entries (padding) score -inf.
     Row i scores its IDs as predictions of prompt token
     prompt_logprob_start + i + 1, so the last prompt row is excluded.
-    See docs/training/prompt_token_id_logprobs.md."""
+    See docs/training/rollout_artifacts/prompt_token_id_logprobs.md."""
     prompt_logprob_start: int | None = None
     """First causal prompt row to score with prompt_logprobs and
     prompt_logprob_token_ids; defaults to the first row. Earlier prompt
