@@ -41,6 +41,11 @@ supports the device and can implement the layer. The selected kernel class is
 logged at startup for most quantization types, and that log is the
 authoritative answer for a deployment.
 
+On SM80 GPUs (A100, A800), Humming is tried before Marlin for int4
+group-128 weights with 16-bit activations, with or without zero points (GPTQ,
+AWQ, and compressed-tensors W4A16). Pass `--linear-backend marlin` to keep
+Marlin.
+
 A layer that requests quantized activations can be given a kernel that runs
 16-bit activations when no other kernel is available.
 `VLLM_STRICT_QUANT_SCHEME=1` forbids this; see

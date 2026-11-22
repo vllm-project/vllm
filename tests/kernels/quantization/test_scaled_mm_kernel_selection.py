@@ -21,11 +21,15 @@ from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
     HummingFP8ScaledMMLinearKernel,
+    HummingLinearKernel,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
+    MarlinLinearKernel,
+    MPLinearLayerConfig,
     ScaledMMLinearKernel,
     TritonInt8ScaledMMLinearKernel,
     _get_linear_backend,
+    _prefer_humming_for_int4_g128,
     _resolve_backend_kernels,
     init_fp8_linear_kernel,
     init_int8_linear_kernel,
@@ -38,6 +42,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import PlatformEnum
+from vllm.scalar_type import scalar_types
 
 pytestmark = pytest.mark.cpu_test
 
@@ -431,3 +436,47 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
     del names[humming]
     assert names == [k.__name__ for k in original if "Humming" not in k.__name__]
     assert kernels == original
+
+
+@pytest.mark.parametrize(
+    "weight_type,group_size,zero_points,act_type,expected",
+    [
+        (scalar_types.uint4b8, 128, False, torch.bfloat16, True),
+        (scalar_types.uint4b8, 128, False, torch.float16, True),
+        (scalar_types.uint4, 128, True, torch.float16, True),
+        (scalar_types.uint4b8, 32, False, torch.bfloat16, False),
+        (scalar_types.uint4b8, -1, False, torch.bfloat16, False),
+        (scalar_types.uint8b128, 128, False, torch.bfloat16, False),
+    ],
+)
+def test_humming_priority_int4_g128_sm80(
+    weight_type, group_size, zero_points, act_type, expected
+):
+    """On SM80, Humming moves directly ahead of Marlin only for int4 group-128
+    weights. No other kernel moves, other devices are unchanged, and a single
+    forced backend is kept."""
+    kernels = _POSSIBLE_KERNELS[PlatformEnum.CUDA]
+    original = list(kernels)
+    config = MPLinearLayerConfig(
+        full_weight_shape=(4096, 4096),
+        partition_weight_shape=(4096, 4096),
+        weight_type=weight_type,
+        act_type=act_type,
+        group_size=group_size,
+        zero_points=zero_points,
+    )
+
+    for capability in (75, 86, 89, 90, 100, 120):
+        assert _prefer_humming_for_int4_g128(kernels, config, capability) == original
+    for forced in ([MarlinLinearKernel], [HummingLinearKernel]):
+        assert _prefer_humming_for_int4_g128(forced, config, 80) == forced
+
+    reordered = _prefer_humming_for_int4_g128(kernels, config, 80)
+    assert kernels == original
+    names = [k.__name__ for k in reordered]
+    humming = names.index("HummingLinearKernel")
+    assert (humming == names.index("MarlinLinearKernel") - 1) == expected
+    if not expected:
+        assert reordered == original
+    del names[humming]
+    assert names == [k.__name__ for k in original if k is not HummingLinearKernel]
