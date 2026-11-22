@@ -44,6 +44,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from .mega_moe import finalize_mega_moe_weights
 from .model import (
     DeepseekV4DecoderLayer,
+    DeepseekV4ForCausalLM,
 )
 
 logger = init_logger(__name__)
@@ -262,10 +263,8 @@ def _insert_context_kv(
             block_size,
         )
     else:  # per-tensor fp8 (torch.float8_e4m3fn)
-        # NOTE(rocm): unreachable on ROCm/aiter, where the SWA cache dtype is
-        # uint8 (fp8_ds_mla) or bfloat16. This branch relies on FlashInfer-only
-        # attributes (``_flashinfer_fp8_*``) that the aiter attention layer does
-        # not define; kept for parity with the nvidia path.
+        # --kv-cache-dtype fp8_e4m3; the aiter layer registers the same
+        # ``_flashinfer_fp8_*`` scales as FlashInfer.
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
         dummy_q_fp8 = torch.zeros_like(dummy_q, dtype=torch.float8_e4m3fn)
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
@@ -290,6 +289,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     has_own_lm_head = False
     # Full-vocab draft: draft ids are target ids, no remapping needed.
     draft_id_to_target_id = None
+
+    packed_modules_mapping = DeepseekV4ForCausalLM.packed_modules_mapping
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

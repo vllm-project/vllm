@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -8,6 +9,7 @@ import torch
 import torch.nn as nn
 from transformers import AutoConfig, PreTrainedConfig
 
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import (
     ModelConfig,
     ParallelConfig,
@@ -167,16 +169,20 @@ def test_glm52_mtp_eh_proj_gets_low_latency_plan(default_vllm_config):
         (None, False),
         ("ngram", False),
         ("mtp", True),
-        ("eagle3", True),
-        ("draft_model", True),
+        ("eagle", True),
+        ("eagle3", False),
+        ("draft_model", False),
         ("dspark", False),
     ],
 )
-def test_deepseek_v4_mtp_hidden_buffer_skips_dspark(method, expected):
-    """Only drafters that read DeepSeek V4's pre-hc_head residual get the
-    buffer; DSpark drafts from the target's aux hidden states."""
+def test_deepseek_v4_mtp_hidden_buffer_skips_aux_drafters(method, expected):
+    """Only drafters of the target's final hidden states get DeepSeek V4's
+    pre-hc_head residual buffer; DSpark and EAGLE3 draft from its aux hidden
+    states, and draft models don't read target hidden states."""
     spec_config = None
     if method is not None:
-        spec_config = SpeculativeConfig.__new__(SpeculativeConfig)
-        object.__setattr__(spec_config, "method", method)
+        spec_config = fake_speculative_config(
+            method=method,
+            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        )
     assert needs_mtp_hidden_buffer(spec_config) is expected
