@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
 
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.peft_helper import PEFTHelper
@@ -100,6 +101,21 @@ def test_load_checkpoints(
                 device="cpu",
                 model_vocab_size=64000,
             )
+
+
+@pytest.mark.parametrize("expected", [{"gate_proj"}, {"experts.0.gate_proj"}])
+def test_load_indexed_expert_checkpoint_names(tmp_path, expected):
+    module = "model.layers.0.mlp.experts.0.gate_proj"
+    weights = {
+        f"base_model.model.{module}.lora_A.weight": torch.ones((2, 4)),
+        f"base_model.model.{module}.lora_B.weight": torch.ones((4, 2)),
+    }
+    torch.save(weights, tmp_path / "adapter_model.bin")
+    peft = PEFTHelper(r=2, lora_alpha=2, target_modules=["gate_proj"])
+    adapter = LoRAModel.from_local_checkpoint(
+        str(tmp_path), expected, peft, lora_model_id=1, device="cpu"
+    )
+    assert set(adapter.loras) == {module}
 
 
 def test_lora_weights_mapping(baichuan_lora_files):
