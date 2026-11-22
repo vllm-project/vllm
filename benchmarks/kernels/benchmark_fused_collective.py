@@ -730,19 +730,24 @@ def prepare_results_with_speedups(results_dict):
     # Determine the fastest baseline for each operation type
     def get_fastest_baseline(op_name, results_dict):
         """Get the fastest baseline between standard and native_compiled versions."""
-        if "fp8_quant" in op_name:
+        if "fp8_quant" in op_name or op_name.endswith("_quant_fp8"):
             candidates = [
-                "standard_allreduce_rmsnorm_fp8_quant",
+                "standard_allreduce_native_rms_norm_native_quant_fp8",
+                "standard_allreduce_native_rms_norm_custom_quant_fp8",
+                "standard_allreduce_custom_rms_norm_native_quant_fp8",
+                "standard_allreduce_custom_rms_norm_custom_quant_fp8",
                 "standard_allreduce_rmsnorm_fp8_quant_native_compiled",
             ]
         elif "fp4_quant" in op_name:
             candidates = [
-                "standard_allreduce_rmsnorm_fp4_quant",
+                "standard_allreduce__native_rms_norm_fp4_quant",
+                "standard_allreduce__custom_rms_norm_fp4_quant",
                 "standard_allreduce_rmsnorm_fp4_quant_native_compiled",
             ]
         else:
             candidates = [
-                "standard_allreduce_rmsnorm",
+                "standard_allreduce__native_rms_norm",
+                "standard_allreduce__custom_rms_norm",
                 "standard_allreduce_rmsnorm_native_compiled",
             ]
 
@@ -764,11 +769,7 @@ def prepare_results_with_speedups(results_dict):
     # Create dynamic baseline mapping
     dynamic_baseline_mapping = {}
     for op_name in results_dict:
-        if (
-            op_name.startswith("flashinfer_")
-            or op_name.startswith("standard_")
-            and not op_name.endswith("_native_compiled")
-        ):
+        if op_name.startswith("flashinfer_"):
             dynamic_baseline_mapping[op_name] = get_fastest_baseline(
                 op_name, results_dict
             )
