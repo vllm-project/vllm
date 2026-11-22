@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
+from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -663,6 +664,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         shard_size = (
             embedding.org_vocab_size + self.split_ngram_parts - 1
         ) // self.split_ngram_parts
+        if isinstance(embedding, Qwen4ExpPLEPinnedHostEmbedding):
+            # Materialize the reloaded table in host memory, not on the accelerator.
+            get_layerwise_info(embedding).restore_device = torch.device("cpu")
 
         for name, loaded_weight in weights:
             leaf_name = name.rsplit(".", 1)[-1]
@@ -708,17 +712,26 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                         f"NVFP4 PLE shard {shard_index} {suffix} requires "
                         f"{parameter.dtype}, got {loaded_weight.dtype}"
                     )
+                loaded.add(f"ngram_embedding.{suffix}")
                 if isinstance(embedding, Qwen4ExpPLEDiskOffloadEmbedding):
                     embedding.accept_checkpoint_shard(
                         shard_index, loaded_weight, shard_size, suffix
                     )
-                else:
-                    parameter.weight_loader(
-                        parameter,
-                        loaded_weight,
-                        checkpoint_start=checkpoint_start,
-                    )
-                loaded.add(f"ngram_embedding.{suffix}")
+                    continue
+                # Skip a shard outside this rank's vocabulary range before the
+                # loader, so layerwise reload does not buffer it.
+                tp_range = embedding.shard_indices
+                if (
+                    checkpoint_start >= tp_range.org_vocab_end_index
+                    or checkpoint_start + expected_rows
+                    <= tp_range.org_vocab_start_index
+                ):
+                    continue
+                parameter.weight_loader(
+                    parameter,
+                    loaded_weight,
+                    checkpoint_start=checkpoint_start,
+                )
                 continue
             if nvfp4_method is not None and name in (
                 "ngram_embedding.weight",
