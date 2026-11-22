@@ -133,8 +133,13 @@ class LRUCachePolicy(CachePolicy):
     def on_request_access(
         self,
         keys: Iterable[OffloadKey],
-        req_context: ReqContext,
+        req_context: ReqContext | None,
     ) -> None:
+        if req_context is None:
+            # The store runs after the request finished, so no position is
+            # available and the chunk becomes the newest.
+            self._update_recency(keys)
+            return
         request_rank = self._get_request_rank(req_context)
         updated_evictable = []
         for key in keys:

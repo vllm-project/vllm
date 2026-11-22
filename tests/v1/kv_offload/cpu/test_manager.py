@@ -2436,6 +2436,23 @@ def test_lru_insert_orders_positioned_chunks_without_followup_access(ready_on_in
     assert policy.get(head) is not None
 
 
+def test_lru_offer_without_a_request_makes_the_chunk_newest():
+    """An ON_OVERWRITE offer names the chunks that this tier holds, so it is
+    an access."""
+    policy = LRUCachePolicy(cache_capacity=2)
+    first, second = to_keys([1, 2])
+    for chunk_id, key in enumerate([first, second]):
+        chunk = ChunkStatus(chunk_id)
+        chunk.ref_cnt = 0
+        policy.insert(key, chunk, None)
+
+    policy.on_request_access([first], None)
+
+    evicted = policy.evict(1, set())
+    assert evicted is not None
+    assert [key for key, _ in evicted] == [second]
+
+
 def test_store_trigger_and_success_are_keyword_only():
     manager = CPUOffloadingManager(num_chunks=4)
     keys = to_keys([1])
@@ -2462,9 +2479,9 @@ def test_overwrite_store_needs_no_request_context():
     assert manager.lookup(keys[0], _EMPTY_REQ_CTX) == LookupResult.HIT
 
 
-def test_a_held_chunk_that_gets_new_data_keeps_its_rank():
-    """A resident chunk whose GPU copy dies keeps its rank, so the older
-    chunk is still the one that leaves first."""
+def test_a_held_chunk_that_gets_new_data_becomes_the_newest():
+    """A resident chunk whose GPU copy dies again was served by this tier, so
+    the offer makes it the newest chunk."""
     manager = make_cpu_manager(
         num_chunks=2, store_triggers=(StoreTrigger.ON_OVERWRITE,)
     )
@@ -2479,7 +2496,7 @@ def test_a_held_chunk_that_gets_new_data_keeps_its_rank():
 
     output = manager.prepare_store([third], None, trigger=StoreTrigger.ON_OVERWRITE)
     assert output is not None
-    assert output.evicted_keys == [first]
+    assert output.evicted_keys == [second]
 
 
 def test_on_overwrite_refuses_a_store_threshold():

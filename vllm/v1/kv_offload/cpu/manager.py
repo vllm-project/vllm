@@ -354,6 +354,12 @@ class CPUOffloadingManager(OffloadingManager):
                 req_context,
                 reused_keys=ready_existing_keys,
             )
+        elif ready_existing_keys:
+            # A store without a request can name chunks that this tier already
+            # holds. Such a store runs when the KV cache hands a block to a new
+            # owner, often after the storing request finished. HBM held these
+            # chunks again, so they served a load and were used again.
+            self._policy.on_request_access(ready_existing_keys, req_context)
 
         if not keys_to_store:
             return PrepareStoreOutput(

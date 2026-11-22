@@ -87,13 +87,18 @@ class CachePolicy(ABC):
     def on_request_access(
         self,
         keys: Iterable[OffloadKey],
-        req_context: ReqContext,
+        req_context: ReqContext | None,
     ) -> None:
         """Observe first accesses without allocating new chunks.
 
         Keys first observed here may not yet be resident. This hook can
         maintain prefix order during a request without committing the
         frequency access handled by `on_request_finished`.
+
+        req_context is None for a store that belongs to no request, such as
+        `StoreTrigger.ON_OVERWRITE`, which runs when the KV cache hands a
+        block to a new owner, often after the storing request finished. The
+        policy then gets no position.
         """
         return
 

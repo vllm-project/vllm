@@ -123,8 +123,12 @@ class ARCCachePolicy(CachePolicy):
 
     @override
     def on_request_access(
-        self, keys: Iterable[OffloadKey], req_context: ReqContext
+        self, keys: Iterable[OffloadKey], req_context: ReqContext | None
     ) -> None:
+        if req_context is None:
+            # A request-free access has no position and no running request, so
+            # ARC keeps T1 in insertion order in the lazy mode.
+            return
         for key in keys:
             if key not in self.t1 or key in self._running:
                 continue
