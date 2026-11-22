@@ -1753,13 +1753,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # The hidden states must be gathered in rank-owner-sorted order
             # before computing the partial-vocab logits, so that the all-to-all
             # produces full-vocab logits for just the locally-owned requests.
-            sample_hidden_states = hidden_states[sorted_logits_indices]
-            local_logits = self.model.compute_logits_local(sample_hidden_states)
-            logits = all_to_all_vocab_shards(
-                local_logits,
-                shard_metadata.num_logits_per_rank,
-                shard_metadata.num_local_logits,
-            )
+            compute_logits_owned = getattr(self.model, "compute_logits_owned", None)
+            if compute_logits_owned is not None:  # the model's own kernels
+                logits = compute_logits_owned(
+                    hidden_states, sorted_logits_indices, shard_metadata
+                )
+            else:
+                sample_hidden_states = hidden_states[sorted_logits_indices]
+                local_logits = self.model.compute_logits_local(sample_hidden_states)
+                logits = all_to_all_vocab_shards(
+                    local_logits,
+                    shard_metadata.num_logits_per_rank,
+                    shard_metadata.num_local_logits,
+                )
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
@@ -1803,7 +1809,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Gather the sharded sampler outputs from the TP ranks into a single
             # sampler output.
             assert self.sampler is not None
-            sampler_output = gather_sampler_output(
+            gather = getattr(
+                self.model, "gather_sampler_output_owned", gather_sampler_output
+            )
+            sampler_output = gather(
                 sampler_output,
                 shard_metadata,
                 device=self.device,

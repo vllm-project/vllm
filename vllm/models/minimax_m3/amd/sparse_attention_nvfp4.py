@@ -13,6 +13,7 @@ import torch
 
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
+from vllm.models.minimax_m3.amd import akr_attn, akr_config
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
@@ -117,7 +118,9 @@ class MiniMaxM3SparseRocmNvfp4Impl(MiniMaxM3SparseImpl):
         query: torch.Tensor,
         kv_cache: torch.Tensor,
         output: torch.Tensor,
+        quant_out: tuple[torch.Tensor, torch.Tensor, int] | None = None,
     ) -> torch.Tensor:
+        """`quant_out` (`akr_attn.oproj_quant`): the decode's MXFP8 output."""
         from vllm.models.minimax_m3.amd.ops.nvfp4_prefill.host import (
             minimax_m3_nvfp4_sparse_prefill,
         )
@@ -125,6 +128,8 @@ class MiniMaxM3SparseRocmNvfp4Impl(MiniMaxM3SparseImpl):
             minimax_m3_nvfp4_sparse_decode_fly,
         )
 
+        if akr_config.on("attention"):  # amd_kernels, the same call contract
+            minimax_m3_nvfp4_sparse_prefill = akr_attn.kernels().sparse_prefill
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
             return output  # profiling run; caches unbound
@@ -140,7 +145,20 @@ class MiniMaxM3SparseRocmNvfp4Impl(MiniMaxM3SparseImpl):
         k_scale = layer._k_scale  # type: ignore[attr-defined]
         v_scale = layer._v_scale  # type: ignore[attr-defined]
 
-        if md.num_decodes > 0:
+        if md.num_decodes > 0 and akr_config.on("attention"):
+            akr_attn.decode(
+                layer,
+                q[:nd].contiguous(),
+                kv_cache,
+                topk[:, :nd, :],
+                md.decode,
+                self.scale,
+                out[:nd],
+                k_scale,
+                v_scale,
+                quant_out,
+            )
+        elif md.num_decodes > 0:
             d = md.decode
             assert d is not None
             minimax_m3_nvfp4_sparse_decode_fly(

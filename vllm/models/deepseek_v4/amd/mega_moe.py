@@ -7,10 +7,12 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.online.base import (
     ONLINE_SHARED_EXPERT_QUANTIZERS,
 )
@@ -55,10 +57,18 @@ def _append_shared_expert_kernel(
     )
 
 
+def _expert_perm_set(vllm_config: VllmConfig) -> bool:
+    kernel_config = getattr(vllm_config, "kernel_config", None)
+    akr = getattr(kernel_config, "amd_kernels", None)
+    return bool(getattr(akr, "expert_perm", ""))
+
+
 class DeepseekV4AiterMegaMoEExperts(nn.Module):
     # MegaMoEV2 owns large symmetric-heap buffers, so every layer shares one
     # instance and passes its own weights per call.
     _runtime_cache: dict[tuple, Any] = {}
+    # DeepSeek-V4.1 amd_kernels fused EP8 route (akr_experts), set at load
+    akr: Any = None
 
     def __init__(
         self,
@@ -76,7 +86,28 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
         ep_group = get_ep_group()
         self.ep_rank = ep_group.rank_in_group
         self.ep_size = ep_group.world_size
-        self.num_routed_local_experts = num_experts // self.ep_size
+        # DeepSeek-V4.1 static expert placement (akr_eplb): None is the identity
+        # placement; with a plan each rank holds S >= num_experts / ep slots.
+        self._perm: Any = None
+        if _expert_perm_set(vllm_config):
+            from vllm.models.deepseek_v41.amd import akr_eplb
+
+            self._perm = akr_eplb.layer_perm(
+                vllm_config, prefix, num_experts, self.ep_rank, self.ep_size
+            )
+            if self._perm is not None:
+                akr_eplb.register_aiter_profile(
+                    self._perm.slots_per_rank, hidden_size, intermediate_size
+                )
+        # the router's (logical) expert count
+        self.num_logical_experts = num_experts
+        # DeepSeek-V4.1 expert-load counting (akr_expert_counts), opt-in
+        self._count_experts = bool(envs.VLLM_AKR_EXPERT_COUNTS)
+        self.num_routed_local_experts = (
+            num_experts // self.ep_size
+            if self._perm is None
+            else self._perm.slots_per_rank
+        )
         self.experts_start_idx = self.ep_rank * self.num_routed_local_experts
         # A fused shared expert is one extra local expert per rank and one
         # extra route per token, to the token's own rank.
@@ -120,16 +151,30 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        local_expert_id = expert_id - self.experts_start_idx
-        if not 0 <= local_expert_id < self.num_routed_local_experts:
+        if self._perm is not None:
+            # every local slot holding this logical expert gets a copy
+            slots = self._perm.local_slots(
+                expert_id, self.experts_start_idx, self.num_routed_local_experts
+            )
+        else:
+            local_expert_id = expert_id - self.experts_start_idx
+            slots = (
+                [local_expert_id]
+                if 0 <= local_expert_id < self.num_routed_local_experts
+                else []
+            )
+        if not slots:
             return False if return_success else None
-        expert_data = param.data[local_expert_id]
-        if shard_id in ("w1", "w3"):
-            shard_offset = 0 if shard_id == "w1" else self.intermediate_size
-            expert_data = expert_data.narrow(0, shard_offset, self.intermediate_size)
-        elif shard_id != "w2":
+        if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"Unsupported expert shard id: {shard_id}")
-        expert_data.copy_(loaded_weight.view(torch.uint8))
+        for slot in slots:
+            expert_data = param.data[slot]
+            if shard_id in ("w1", "w3"):
+                shard_offset = 0 if shard_id == "w1" else self.intermediate_size
+                expert_data = expert_data.narrow(
+                    0, shard_offset, self.intermediate_size
+                )
+            expert_data.copy_(loaded_weight.view(torch.uint8))
         return True if return_success else None
 
     def load_shared_expert(self, shared_experts: nn.Module) -> None:
@@ -148,6 +193,9 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
     def finalize_weights(self) -> None:
         if self._runtimes:
             return
+        if self._perm is not None:
+            # the id tables live on the device before graph capture
+            self._perm.tables(self.w13_weight.device)
         n = self.num_local_experts
         self.w13_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(
             self.w13_weight.data, 16, True
@@ -269,8 +317,20 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        x_quant: QuantizedActivation | None = None,
     ) -> torch.Tensor:
         assert self._runtimes
+        if self._count_experts:
+            from vllm.models.deepseek_v41.amd import akr_expert_counts
+
+            akr_expert_counts.count(self.prefix, self.num_logical_experts, topk_ids)
+        if self._perm is not None:
+            # the routers' logical ids -> physical slots (owner = id // S)
+            topk_ids = self._perm.remap(topk_ids)
+        if self.akr is not None:
+            out = self.akr.forward(hidden_states, topk_weights, topk_ids, x_quant)
+            if out is not None:
+                return out
         runtime = self.select_runtime(hidden_states.shape[0])
         if self.fuse_shared_expert:
             topk_weights, topk_ids = self.append_shared_expert(topk_weights, topk_ids)

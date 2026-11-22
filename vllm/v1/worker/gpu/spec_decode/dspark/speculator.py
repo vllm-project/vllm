@@ -27,6 +27,7 @@ across TP ranks: each rank runs the Markov loop only for the requests it owns
 (the same owners as verification), see `_sample_sequential_sharded`.
 """
 
+from contextlib import nullcontext
 from typing import Any
 
 import torch
@@ -91,6 +92,10 @@ class DSparkSpeculator(DFlashSpeculator):
 
     def load_model(self, target_model: torch.nn.Module) -> None:
         super().load_model(target_model)
+        # A draft model may set up its own kernels (a TP collective) before capture.
+        akr_setup = getattr(self.model, "akr_setup", None)
+        if akr_setup is not None:
+            akr_setup(self, target_model)
         tp_size = get_tp_group().world_size
         if tp_size > 1 and batch_sharded_sampling_enabled(
             self.vllm_config, target_model
@@ -176,6 +181,28 @@ class DSparkSpeculator(DFlashSpeculator):
     def supports_batch_sharded_draft_logits(self) -> bool:
         # A model's own sample_sequential kernels write the full-size cache.
         return not hasattr(self.model, "sample_sequential")
+
+    def capture(self) -> None:
+        # A draft model's collectives may register the graphs' inputs.
+        capture_context = getattr(self.model, "akr_draft_capture", None)
+        with capture_context() if capture_context is not None else nullcontext():
+            super().capture()
+
+    def _store_hidden_states(
+        self,
+        num_tokens: int,
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_graph_tokens: int = 0,
+    ) -> None:
+        # A draft model can apply its input fc to the target's taps in place.
+        fc_into = getattr(self.model, "akr_fc_into", None)
+        if fc_into is not None and aux_hidden_states:
+            fc_into(aux_hidden_states, num_tokens, self.hidden_states)
+            return
+        super()._store_hidden_states(
+            num_tokens, last_hidden_states, aux_hidden_states, num_graph_tokens
+        )
 
     def _sample_logits(
         self,
@@ -372,6 +399,11 @@ class DSparkSpeculator(DFlashSpeculator):
         the drafts in batch order. All shapes depend only on num_reqs, so the
         step can be captured.
         """
+        # A draft model may run this loop on its own kernels.
+        sample_sharded = getattr(self.model, "sample_sequential_sharded", None)
+        if sample_sharded is not None:
+            sample_sharded(self, num_reqs, head_hidden)
+            return
         assert self._sharded_sequential_comm is not None
         tp_group = get_tp_group()
         tp_size, tp_rank = tp_group.world_size, tp_group.rank_in_group

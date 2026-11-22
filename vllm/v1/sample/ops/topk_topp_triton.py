@@ -8,6 +8,7 @@ using Pivot-based Truncation and Selection" By Park et al.
 
 """
 
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -993,6 +994,10 @@ _SPLIT_ROUNDS = 5
 _SPLIT_MIN_SLICE = 7168
 
 _TRITON_SPLIT_CACHE: dict[torch.device, dict[str, torch.Tensor]] = {}
+# A platform kernel set by a model's set-up (vllm.models.minimax_m3.amd.top_p_akr):
+# masks (logits, p, mask_value) as `_apply_topp_split` does, bit for bit, and returns
+# True, or returns False and leaves the rows to it.
+split_top_p_override: Callable[[torch.Tensor, torch.Tensor, float], bool] | None = None
 
 
 def _topp_split_count(batch_size: int, vocab_size: int, num_sm: int) -> int:
@@ -1682,7 +1687,9 @@ def apply_top_k_top_p_triton(
         topp_enabled and batch_size <= _SPLIT_MAX_BATCH and logits.device.type == "cuda"
     )
     if use_split and not topk_enabled:
-        _apply_topp_split(logits, None, p_ptr, mask_value, num_sm)
+        override = split_top_p_override
+        if override is None or not override(logits, p_ptr, mask_value):
+            _apply_topp_split(logits, None, p_ptr, mask_value, num_sm)
         return logits
 
     NUM_PROGRAMS = min(num_sm, batch_size)

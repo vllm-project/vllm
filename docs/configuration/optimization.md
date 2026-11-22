@@ -173,6 +173,8 @@ Expert parallelism is a specialized form of parallelism for Mixture of Experts (
 Expert parallelism is enabled by setting `enable_expert_parallel=True`, which will use expert parallelism instead of tensor parallelism for MoE layers.
 It will use the same degree of parallelism as what you have set for tensor parallelism.
 
+For DeepSeek-V4.1-Flash on ROCm (DEP8 with the AITER MegaMoE experts), a static expert placement with replicas evens out the per-rank expert load; see [amd_kernels routes on ROCm](../features/amd_kernels.md#static-expert-placement-expert_perm).
+
 ### Data Parallelism (DP)
 
 Data parallelism replicates the entire model across multiple GPU sets and processes different batches of requests in parallel.

@@ -141,6 +141,14 @@ def test_disk_mode_rejects_non_positive_capacity() -> None:
         )
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("extra_config", [{}, {"cpu_lru_eviction": True}])
+def test_cpu_lru_eviction_is_opt_in(extra_config: dict) -> None:
+    connector = _make_connector(extra_config=extra_config)
+    assert connector.scheduler_manager is not None
+    assert connector.scheduler_manager._cpu_lru_eviction == bool(extra_config)
+
+
 def _make_ring_kv_cache_config(num_blocks: int = 16) -> KVCacheConfig:
     """A paged full-attention group beside a per-request ring group."""
     full = AttentionSpec(

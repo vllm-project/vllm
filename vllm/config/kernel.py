@@ -17,6 +17,99 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+MiniMaxM3AmdKernelsRoute = Literal[
+    "gemm",
+    "moe",
+    "qkv",
+    "attention",
+    "indexer",
+    "norm",
+    "draft",
+    "sampling",
+    "top_p",
+    "sp_prefill",
+]
+
+DeepseekV41AmdKernelsRoute = Literal[
+    # attention input
+    "rope_insert",
+    "norm_dual",
+    "compressor",
+    "kv_score",
+    "dense_gemm",
+    "wq_b",
+    # indexer, sparse attention, output projection
+    "indexer",
+    "sparse_mla",
+    "wo_a",
+    "wo_b",
+    # MoE block
+    "router",
+    "shared_expert",
+    "fused_ep8",
+    # mHC
+    "mhc_seam",
+    "mhc_tail",
+    "mhc_wo_b",
+    "mhc_ffn",
+    # lm_head, DSpark draft and sampling
+    "lm_head",
+    "main_proj",
+    "draft_router",
+    "markov",
+]
+
+AmdKernelsRoute = Literal[MiniMaxM3AmdKernelsRoute, DeepseekV41AmdKernelsRoute]
+
+
+@config
+class AmdKernelsConfig:
+    """MiniMax-M3.1 (TP4) and DeepSeek-V4.1-Flash (DEP8) layers on `amd_kernels`
+    (ROCm gfx950). Each model reads only its own routes."""
+
+    enabled: bool = True
+    """Use `amd_kernels` where it is installed and the shapes fit."""
+
+    disabled_routes: list[AmdKernelsRoute] = Field(default_factory=list)
+    """Routes that keep the stock kernels."""
+
+    indexer_max_ctx: int = 0
+    """DeepSeek-V4.1 `indexer` route: the longest row (compressed entries) the
+    kernel is sized for. 0 derives it from `max_model_len` and each layer's
+    compress ratio; a layer whose bound exceeds the kernel's limit stays on the
+    stock indexer."""
+
+    prefill_warmup: bool = True
+    """DeepSeek-V4.1: before CUDA graph capture, run every linear layer at each
+    AITER tuned-GEMM token bucket above the captured sizes plus a few
+    prefill-sized dummy steps, so that FlyDSL kernel variants only prefill steps
+    select are built at startup instead of stalling every DP rank while
+    serving."""
+
+    serving_transient_gib: float = Field(default=20.0, ge=0)
+    """DeepSeek-V4.1: with routes on, the KV cache sizing keeps at least this
+    much torch memory growth (GiB) free for serving transients, since the
+    routes' graphs and workspaces leave less headroom than the stock kernels
+    (a 32k-token prefill chunk beside a large decode batch otherwise ran out of
+    memory). 0 keeps the measured value."""
+
+    expert_perm: str = ""
+    """DeepSeek-V4.1 MegaMoE experts on EP: static expert placement with
+    replicas. Path of a plan `.npz` (`phys2log [L, ep * S]` with the logical
+    expert of every physical slot, `layer_ids [L]`, optional
+    `draft_phys2log` / `draft_layer_ids` for the DSpark draft layers); a bare
+    file name names a plan in `vllm/models/deepseek_v41/amd/configs/`
+    (`expert_plan_S49.npz`, fitted on one agentic workload's expert load, so
+    off by default). Each rank holds S slots per layer and the routers' ids
+    are remapped to a replica before dispatch. Empty: the identity placement
+    (nothing runs). Independent of `enabled`. To fit a plan to a workload,
+    count its expert load with `VLLM_AKR_EXPERT_COUNTS` and run
+    `python -m vllm.models.deepseek_v41.amd.akr_eplb_plan`."""
+
+    def compile_factors(self) -> CompileFactors:
+        return get_compile_factors(self, {"prefill_warmup", "serving_transient_gib"})
+
+
 @config
 class IrOpPriorityConfig:
     """Configuration for vLLM IR op priority for dispatching/lowering during the
@@ -335,6 +428,9 @@ class KernelConfig:
     Same switch as `--additional-config '{"decode_backend":
     "latency_specialized"}'`, the specialized decode of RFC #60904: setting
     either one enables the model's specialized decode, whichever it reads."""
+
+    amd_kernels: AmdKernelsConfig = Field(default_factory=AmdKernelsConfig)
+    """MiniMax-M3.1 and DeepSeek-V4.1 on `amd_kernels`; see `AmdKernelsConfig`."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:

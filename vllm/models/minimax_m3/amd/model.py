@@ -38,6 +38,7 @@ from vllm.config import (
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.mxfp8 import rocm_akr
 from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
     AiterFlyDSLMxfp8LinearKernel,
 )
@@ -108,6 +109,15 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+from vllm.models.minimax_m3.amd import (
+    akr_arnorm,
+    akr_attn,
+    akr_config,
+    akr_moe,
+    sample_akr,  # amd_kernels sampling
+    sp_prefill_akr,
+    top_p_akr,  # amd_kernels top-p
+)
 from vllm.models.minimax_m3.amd.glue import M3Glue
 from vllm.models.minimax_m3.amd.glue.carry import Mxfp8Carry
 from vllm.models.minimax_m3.amd.indexer_msa import (
@@ -577,6 +587,14 @@ class MiniMaxM3MoE(nn.Module):
             prefix=f"{prefix}.experts",
         )
 
+        self.use_akr_moe = akr_moe.setup(self, config, prefix)
+        self._akr_weights = None
+
+    def process_weights_after_loading(self) -> None:
+        # after the quant methods' passes (finalize_model_weights: children first)
+        if self.use_akr_moe:
+            self._akr_weights = akr_moe.build_weights(self)
+
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
         assert param.size() == loaded_weight.size()
@@ -591,6 +609,8 @@ class MiniMaxM3MoE(nn.Module):
         the shared expert's gate_up_proj (the routed path needs the bf16 rows)."""
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        if self.use_akr_moe:
+            return akr_moe.forward(self, hidden_states).view(num_tokens, hidden_dim)
         if shared_prequant is not None:
             assert self.shared_experts is not None
             self.shared_experts.set_prequant(hidden_states, shared_prequant)
@@ -869,6 +889,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # One fused kernel inserts both caches, so NVFP4 K/V needs an NVFP4
         # index cache.
         self.use_nvfp4_kv = get_kv_quant_mode(self.kv_cache_dtype).is_nvfp4
+        self.akr_qkv_insert = akr_attn.qkv_on(self)
         # Whether the attention can emit MXFP8 for o_proj; resolved on first use.
         self._o_proj_mxfp8: bool | None = None
         # Indexer and main attention are separate impls. This indexer is
@@ -1228,9 +1249,63 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         positions: torch.Tensor,
         hidden_states: torch.Tensor | QuantizedActivation,
     ) -> torch.Tensor:
-        # Single fused projection emitting [q | k | v | index_q | index_k].
-        qkv, _ = self.qkv_proj(hidden_states)
+        fwd_slot_mapping = get_forward_context().slot_mapping
+        if (
+            self.akr_qkv_insert
+            and isinstance(fwd_slot_mapping, dict)
+            and self.layer_name in fwd_slot_mapping
+        ):
+            # the QKV GEMM (its split-K partials where amd_kernels defers the
+            # reduce) and the norm / RoPE / NVFP4 inserts in one library call
+            assert self.indexer is not None
+            q, index_q = akr_attn.qkv_norm_rope_nvfp4_insert(
+                self,
+                hidden_states,
+                positions,
+                fwd_slot_mapping[self.layer_name],
+                fwd_slot_mapping[self.indexer.index_cache.prefix],
+            )
+            attn_output = self._attend_nvfp4(q, index_q)
+        else:
+            # Single fused projection emitting [q | k | v | index_q | index_k].
+            qkv, _ = self.qkv_proj(hidden_states)
+            attn_output = self.attend(positions, qkv)
+        output, _ = self.o_proj(attn_output)
+        return output
 
+    def _attend_nvfp4(
+        self, q: torch.Tensor, index_q: torch.Tensor
+    ) -> torch.Tensor | QuantizedActivation:
+        """The NVFP4 attention -> o_proj's input: on pure decode steps the decode's
+        MXFP8 output, from amd_kernels (`akr_attn.oproj_quant`) or, with its
+        attention route off, from the in-tree decode (`_emits_o_proj_mxfp8`)."""
+        index_arg = None if self.skip_index_topk else index_q
+        quant = akr_attn.oproj_quant(self, q.shape[0])
+        if (
+            quant is None
+            and not akr_config.on("attention")
+            and self._emits_o_proj_mxfp8()
+        ):
+            out_q = q.new_empty((q.shape[0], self.q_size), dtype=MXFP8_VALUE_DTYPE)
+            out_scale = q.new_empty(
+                (q.shape[0], self.q_size // MXFP8_BLOCK_SIZE),
+                dtype=MXFP8_SCALE_DTYPE,
+            )
+            self._run_attention(q, index_arg, None, out_q=out_q, out_scale=out_scale)
+            return QuantizedActivation(
+                out_q, out_scale, q.dtype, out_q.shape, kMxfp8Dynamic
+            )
+        output = torch.empty_like(q)
+        self._run_attention(q, index_arg, output, quant)
+        if quant is None:
+            return output
+        return akr_attn.oproj_input(quant, q.shape[0], self.q_size)
+
+    def attend(
+        self, positions: torch.Tensor, qkv: torch.Tensor
+    ) -> torch.Tensor | QuantizedActivation:
+        """The attention of this rank's heads, before o_proj. Returns the output buffer
+        itself: under breakable capture `_run_attention` returns a weak view of it."""
         # Horizontally-fused per-head Gemma QK-norm + partial NeoX RoPE on the
         # main (q/k) and index (index_q/index_k) branches, all read straight out
         # of the single fused ``qkv`` tensor. Once the paged caches are bound the
@@ -1250,15 +1325,14 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             or self.layer_name not in fwd_slot_mapping
         ):
             # Memory-profiling run: caches not yet bound, slot_mapping is empty.
-            return qkv.new_zeros((num_tokens, self.hidden_size))
+            return qkv.new_zeros((num_tokens, self.q_size))
 
         if _USE_GFX942_NATIVE_QKNORM_ROPE:
             q, index_q = self._native_gfx942_qknorm_rope_cache(
                 qkv, positions, fwd_slot_mapping
             )
             output = torch.empty_like(q)
-            gfx942_attn = self._run_attention(q, index_q, output)
-            output, _ = self.o_proj(gfx942_attn)
+            self._run_attention(q, index_q, output)
             return output
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
@@ -1270,26 +1344,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 main_slot_mapping,
                 fwd_slot_mapping[self.indexer.index_cache.prefix],
             )
-            index_arg = None if self.skip_index_topk else index_q
-            attn_output: torch.Tensor | QuantizedActivation
-            if self._emits_o_proj_mxfp8():
-                # Decode-only: the attention kernel writes MXFP8 for o_proj.
-                out_q = q.new_empty((q.shape[0], self.q_size), dtype=MXFP8_VALUE_DTYPE)
-                out_scale = q.new_empty(
-                    (q.shape[0], self.q_size // MXFP8_BLOCK_SIZE),
-                    dtype=MXFP8_SCALE_DTYPE,
-                )
-                self._run_attention(
-                    q, index_arg, None, out_q=out_q, out_scale=out_scale
-                )
-                attn_output = QuantizedActivation(
-                    out_q, out_scale, q.dtype, out_q.shape, kMxfp8Dynamic
-                )
-            else:
-                output = torch.empty_like(q)
-                attn_output = self._run_attention(q, index_arg, output)
-            output, _ = self.o_proj(attn_output)
-            return output
+            return self._attend_nvfp4(q, index_q)
         q = qkv.new_empty((num_tokens, self.q_size))
         key_cache = value_cache = page16_slot_mapping = None
         k_scale = v_scale = None
@@ -1486,8 +1541,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 )
 
         output = torch.empty_like(q)
-        attn_output = self._run_attention(q, index_q, output)
-        output, _ = self.o_proj(attn_output)
+        self._run_attention(q, index_q, output)
         return output
 
     def _emits_o_proj_mxfp8(self) -> bool:
@@ -1518,6 +1572,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         query: torch.Tensor,
         index_query: torch.Tensor | None,
         output: torch.Tensor | None,
+        quant_out: tuple[torch.Tensor, torch.Tensor, int] | None = None,
         out_q: torch.Tensor | None = None,
         out_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
@@ -1596,7 +1651,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 output,
                 decode_sparse_table=decode_sparse_table,
             )
-        return self.impl.forward(self, query, self.kv_cache, output)
+        kw = {} if quant_out is None else {"quant_out": quant_out}  # the NVFP4 impl's
+        return self.impl.forward(self, query, self.kv_cache, output, **kw)
 
 
 def _mxfp8_linear_kernel(linear: nn.Module):
@@ -1699,7 +1755,11 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.post_attention_layernorm = MiniMAXGemmaRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.fuse_input_norm_mxfp8 = _can_fuse_input_norm_mxfp8(self.self_attn.qkv_proj)
+        self.akr_qkv = rocm_akr.mark_akr_linear(self.self_attn.qkv_proj)
+        rocm_akr.mark_akr_linear(self.self_attn.o_proj)
+        self.fuse_input_norm_mxfp8 = not self.akr_qkv and _can_fuse_input_norm_mxfp8(
+            self.self_attn.qkv_proj
+        )
         if self.fuse_input_norm_mxfp8:
             logger.info_once("Fusing input_layernorm with qkv_proj's MXFP8 input quant")
         # The FFN's first projection: the dense MLP's, or the MoE shared
@@ -1707,6 +1767,11 @@ class MiniMaxM3DecoderLayer(nn.Module):
         ffn_mlp = (
             self.block_sparse_moe.shared_experts if self.is_moe_layer else self.mlp
         )
+        if self.is_moe_layer and self.block_sparse_moe.use_akr_moe:
+            ffn_mlp = None  # the amd_kernels MoE block runs its shared expert itself
+        elif ffn_mlp is not None:
+            rocm_akr.mark_akr_linear(ffn_mlp.gate_up_proj)
+            rocm_akr.mark_akr_linear(ffn_mlp.down_proj)
         self.fuse_post_norm_mxfp8 = ffn_mlp is not None and _can_fuse_input_norm_mxfp8(
             ffn_mlp.gate_up_proj
         )
@@ -1717,6 +1782,12 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 "Fusing post_attention_layernorm with the FFN gate_up_proj's "
                 "MXFP8 input quant"
             )
+        # the sequence-parallel prefill's whole o_proj (None: no SP prefill)
+        self.self_attn.o_proj_full = sp_prefill_akr.make_o_proj_full(
+            self, quant_config, prefix
+        )
+        # the FFN all-reduce deferred into the next norm (MiniMaxM3Model plans it)
+        self.akr_defer_ffn: str | None = None
 
     def forward(
         self,
@@ -1741,6 +1812,11 @@ class MiniMaxM3DecoderLayer(nn.Module):
         elif residual is None:
             residual = hidden_states
             attn_input = self.input_layernorm(hidden_states)
+        elif self.akr_qkv:
+            # the previous FFN's deferred all-reduce, if any, + add + norm + quant
+            attn_input, residual = akr_arnorm.input_norm(
+                hidden_states, residual, self.input_layernorm, self.self_attn.qkv_proj
+            )
         elif self.fuse_input_norm_mxfp8:
             x_q, x_scale, residual = gemma_fused_add_rmsnorm_mxfp8(
                 hidden_states,
@@ -1758,6 +1834,11 @@ class MiniMaxM3DecoderLayer(nn.Module):
             hidden_states=attn_input,
         )
 
+        if self.akr_defer_ffn is not None:
+            # None outside the kernels' rows and DBO microbatches: the stock path runs
+            tail = akr_arnorm.layer_tail(self, hidden_states, residual)
+            if tail is not None:
+                return tail
         # the glue: the whole MoE half from the o_proj partial, when this
         # forward's plan selected it (glue/runtime.py)
         if self._m3_glue is not None:
@@ -1896,8 +1977,16 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             )
             if use_nvfp4_kv:
                 # A TP collective (IPC buffers), outside graph capture.
-                init_rocm_nvfp4_indexer_decode_cp(
-                    vllm_config.model_config.max_model_len
+                if not akr_config.on("indexer"):
+                    init_rocm_nvfp4_indexer_decode_cp(
+                        vllm_config.model_config.max_model_len
+                    )
+                # the decode scorer (a TP collective) and every variant's warm-up
+                akr_attn.init_and_warm_up(
+                    vllm_config,
+                    config.num_attention_heads // tp_size,
+                    num_kv_heads,
+                    num_index_heads,
                 )
         else:
             self.topk_indices_buffer = None
@@ -1944,6 +2033,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self._mono: MonoDecode | None = None
         if vllm_config.kernel_config.monokernel:
             self._init_monokernel(vllm_config)
+        # amd_kernels norm planning reads the specialized decode set up above
+        self.akr_arnorm = False
+        if akr_config.on("norm"):
+            self._plan_akr_arnorm(vllm_config)
 
         # MiniMax-M3.1 TP4 glue paths (glue/): None where they do not apply
         self.m3_glue = M3Glue.create(self, vllm_config)
@@ -2010,6 +2103,31 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         )
         return None
 
+    def _plan_akr_arnorm(self, vllm_config: VllmConfig) -> None:
+        layers = self.layers[self.start_layer : self.end_layer]
+        reason = akr_arnorm.unsupported_reason(vllm_config)
+        if reason is None and self.specialized_decode_config is not None:
+            reason = "the specialized decode owns the layers"
+        if reason is not None:
+            logger.warning("amd_kernels norm off: %s", reason)
+            return
+        # each FFN all-reduce runs in the next norm, the last one in the final norm
+        for layer in layers:
+            layer.akr_defer_ffn = "next"
+        layers[-1].akr_defer_ffn = "final"
+        self.akr_arnorm = True
+        logger.info(
+            "amd_kernels norm: %d attention sites and %d deferred FFN "
+            "all-reduces on amd_kernels",
+            len(layers),
+            len(layers),
+        )
+
+    def process_weights_after_loading(self) -> None:
+        # after every layer's own processing (children first)
+        if self.akr_arnorm:
+            akr_arnorm.init(self)
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -2049,6 +2167,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self._maybe_add_hidden_state(
                 aux_hidden_states, self.start_layer, hidden_states, residual
             )
+            if akr_config.on("sp_prefill") and sp_prefill_akr.plan_model(
+                self, hidden_states
+            ):
+                return sp_prefill_akr.forward(
+                    self, positions, hidden_states, aux_hidden_states
+                )
         layers = self.layers[self.start_layer : self.end_layer]
         # one glue plan for the whole forward (the MoE layers read it)
         glue = self.m3_glue
@@ -2061,6 +2185,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             if decode is None:
                 for idx, layer in enumerate(layers, start=self.start_layer):
                     hidden_states, residual = layer(positions, hidden_states, residual)
+                    if isinstance(hidden_states, akr_arnorm.DeferredFfn):
+                        # the next layer's residual exists only after the next
+                        # norm's all-reduce: the norm appends the tap
+                        if idx + 1 in self.aux_hidden_state_layers:
+                            hidden_states.taps = aux_hidden_states
+                        continue
                     self._maybe_add_hidden_state(
                         aux_hidden_states, idx + 1, hidden_states, residual
                     )
@@ -2092,7 +2222,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 }
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        if isinstance(hidden_states, akr_arnorm.DeferredFfn):
+            hidden_states, _ = akr_arnorm.deferred_norm(
+                hidden_states, residual, self.norm
+            )
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
@@ -2164,10 +2299,17 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
             redirect = partial(_redirect_fused_shared_experts, model=self.model)
             transforms = WeightsMapper(weights_transforms=[redirect])
             self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
+        if full_layers := sp_prefill_akr.full_o_proj_layers(self.model):
+            # the sequence-parallel prefill's whole o_proj loads the o_proj tensors
+            copy = partial(sp_prefill_akr.load_o_proj_full, layers=full_layers)
+            transforms = WeightsMapper(weights_transforms=[copy])
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
+        sample_akr.configure(vllm_config, self)
+        top_p_akr.configure(vllm_config)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -2284,6 +2426,8 @@ class MiniMaxM3SparseForConditionalGeneration(
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.language_model.make_empty_intermediate_tensors
         )
+        sample_akr.configure(vllm_config, self)
+        top_p_akr.configure(vllm_config)
 
     def _parse_and_validate_image_input(self, **kwargs: object) -> dict | None:
         pixel_values = kwargs.pop("pixel_values", None)
