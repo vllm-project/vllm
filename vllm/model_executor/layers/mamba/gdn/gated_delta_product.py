@@ -38,7 +38,9 @@ from vllm.model_executor.layers.mamba.abstract import (
     get_mamba_prefill_checkpoint_alignment,
     get_mamba_prefill_checkpoint_grid,
 )
-from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
+)
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -49,8 +51,15 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.causal_conv1d_prefill import (
+    causal_conv1d_prefill,
+)
 from vllm.model_executor.layers.mamba.ops.gated_delta_product import (
     fused_recurrent_gated_delta_product,
+)
+from vllm.model_executor.layers.mamba.ops.gdp_chunk_prefill import (
+    gdp_chunk_prefill,
+    gdp_chunk_prefill_supported,
 )
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
@@ -66,6 +75,7 @@ from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
+    async_tensor_h2d,
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -82,6 +92,47 @@ def _set_weight_loader(weight: torch.Tensor, loader) -> None:
 
 # CUDA limits grid axes 1 and 2 to this many blocks.
 _GRID_AXIS_LIMIT = 65535
+
+
+# Virtual-sequence chunk metadata of the latest prefill batches, shared by every layer
+# of a forward (each layer has its own metadata object, built from the same query
+# starts): [(query starts on the host, m, device, (cu_seqlens, chunk_indices,
+# chunk_offsets))], keyed by value.
+_virtual_chunk_metadata_cache: list[tuple] = []
+_VIRTUAL_CHUNK_METADATA_CACHE_SIZE = 4
+
+
+def virtual_chunk_metadata(
+    query_start_cpu: torch.Tensor | None, device: torch.device, m: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """(cu_seqlens, chunk_indices, chunk_offsets) of a prefill batch's virtual
+    sequences, built once per batch from the host copy of the query starts (no
+    device-to-host sync) and reused by every layer. None without the host copy.
+    """
+    if query_start_cpu is None:
+        return None
+    for cached_query_start, cached_m, cached_device, cached in reversed(
+        _virtual_chunk_metadata_cache
+    ):
+        if (
+            cached_m == m
+            and cached_device == device
+            and torch.equal(cached_query_start, query_start_cpu)
+        ):
+            return cached
+    cu_seqlens_cpu = (query_start_cpu * m).to(torch.int32)
+    result = (
+        async_tensor_h2d(cu_seqlens_cpu, device=device),
+        async_tensor_h2d(
+            prepare_chunk_indices(cu_seqlens_cpu, FLA_CHUNK_SIZE), device=device
+        ),
+        async_tensor_h2d(
+            prepare_chunk_offsets(cu_seqlens_cpu, FLA_CHUNK_SIZE), device=device
+        ),
+    )
+    _virtual_chunk_metadata_cache.append((query_start_cpu.clone(), m, device, result))
+    del _virtual_chunk_metadata_cache[:-_VIRTUAL_CHUNK_METADATA_CACHE_SIZE]
+    return result
 
 
 class GatedDeltaProductCache(nn.Module, MambaBase):
@@ -229,6 +280,9 @@ class GatedDeltaProductAttention(GatedDeltaNetAttention):
         self.extra_caches = nn.ModuleList(
             [GatedDeltaProductCache(self, p) for p in self.cache_prefixes[1:]]
         )
+        self.fast_prefill = gdp_chunk_prefill_supported(
+            m, self.head_k_dim, self.head_v_dim
+        )
         self._prefill_kernels_warmed_up = False
         self._checkpoint_alignment = None
         if vllm_config.cache_config.enable_prefix_caching:
@@ -355,50 +409,16 @@ class GatedDeltaProductAttention(GatedDeltaNetAttention):
         state_indices = metadata.non_spec_state_indices_tensor
         assert state_indices is not None
         if metadata.num_prefills > 0:
-            query_start = metadata.non_spec_query_start_loc
-            assert query_start is not None and metadata.has_initial_state is not None
-            conv_out = causal_conv1d_fn(
-                mixed_qkv.contiguous().transpose(0, 1),
+            self._prefill(
+                metadata,
+                mixed_qkv,
+                b,
+                a,
+                conv_state,
+                ssm_state,
                 conv_weights,
-                None,
-                activation=self.activation,
-                conv_states=conv_state,
-                has_initial_state=metadata.has_initial_state,
-                cache_indices=state_indices,
-                query_start_loc=query_start,
-                metadata=metadata,
-            ).transpose(0, 1)
-            q, k, v, g, beta = self._virtual_inputs(conv_out, b, a)
-            initial_state = ssm_state[state_indices].contiguous()
-            initial_state[~metadata.has_initial_state] = 0
-            checkpoint = metadata.checkpoint
-            checkpoint_state = (
-                torch.empty_like(initial_state) if checkpoint is not None else None
+                core_attn_out[:num_tokens],
             )
-            out, final_state = self._chunked_prefill(
-                q,
-                k,
-                v,
-                g,
-                beta,
-                initial_state,
-                query_start,
-                checkpoint_state,
-                None if checkpoint is None else checkpoint.checkpoint_offsets,
-            )
-            if checkpoint is not None:
-                self._checkpoint_exporter.export(
-                    checkpoint,
-                    raw_qkv=mixed_qkv,
-                    conv_state=conv_state,
-                    cu_seqlens=query_start,
-                    recurrent_checkpoint=checkpoint_state,
-                    recurrent_state=ssm_state,
-                )
-            ssm_state[state_indices] = final_state.to(ssm_state.dtype)
-            core_attn_out[:num_tokens] = out.reshape(
-                num_tokens, self.num_householder, self.local_v_heads, self.head_v_dim
-            )[:, -1]
         else:
             conv_out = causal_conv1d_update(
                 mixed_qkv,
@@ -424,6 +444,118 @@ class GatedDeltaProductAttention(GatedDeltaNetAttention):
                 head_dim=self.head_v_dim,
                 ssm_state_indices=state_indices[:num_tokens],
             )
+
+    def _prefill(
+        self, metadata, mixed_qkv, b, a, conv_state, ssm_state, conv_weights, out
+    ):
+        query_start = metadata.non_spec_query_start_loc
+        state_indices = metadata.non_spec_state_indices_tensor
+        has_initial = metadata.has_initial_state
+        assert (
+            query_start is not None
+            and state_indices is not None
+            and has_initial is not None
+        )
+        checkpoint = metadata.checkpoint
+        fast_conv = self.fast_prefill and self.conv_kernel_size == 4
+        if fast_conv:
+            conv_out = causal_conv1d_prefill(
+                mixed_qkv,
+                conv_weights,
+                conv_state,
+                query_start,
+                state_indices,
+                has_initial,
+                checkpoint_offsets=None
+                if checkpoint is None
+                else checkpoint.checkpoint_offsets,
+                checkpoint_indices=None
+                if checkpoint is None
+                else checkpoint.state_indices,
+            )
+        else:
+            conv_out = causal_conv1d_fn(
+                mixed_qkv.contiguous().transpose(0, 1),
+                conv_weights,
+                None,
+                activation=self.activation,
+                conv_states=conv_state,
+                has_initial_state=has_initial,
+                cache_indices=state_indices,
+                query_start_loc=query_start,
+                metadata=metadata,
+            ).transpose(0, 1)
+        chunks = virtual_chunk_metadata(
+            metadata.non_spec_query_start_loc_cpu,
+            query_start.device,
+            self.num_householder,
+        )
+        if self.fast_prefill:
+            gdp_chunk_prefill(
+                conv_out,
+                b,
+                a,
+                self.A_log,
+                self.dt_bias,
+                ssm_state,
+                query_start,
+                state_indices,
+                has_initial,
+                num_householder=self.num_householder,
+                num_heads=self.local_v_heads,
+                num_groups=self.local_k_heads,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                chunk_metadata=chunks,
+                checkpoint_offsets=None
+                if checkpoint is None
+                else checkpoint.checkpoint_offsets,
+                checkpoint_indices=None
+                if checkpoint is None
+                else checkpoint.state_indices,
+                out=out,
+            )
+            if checkpoint is not None and not fast_conv:
+                self._checkpoint_exporter.export(
+                    checkpoint,
+                    raw_qkv=mixed_qkv,
+                    conv_state=conv_state,
+                    cu_seqlens=query_start,
+                )
+        else:
+            q, k, v, g, beta = self._virtual_inputs(conv_out, b, a)
+            initial = ssm_state[state_indices].contiguous()
+            initial.masked_fill_(~has_initial.view(-1, 1, 1, 1), 0)
+            checkpoint_state = (
+                torch.empty_like(initial) if checkpoint is not None else None
+            )
+            virtual_out, final = self._chunked_prefill(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                initial,
+                query_start,
+                checkpoint_state,
+                None if checkpoint is None else checkpoint.checkpoint_offsets,
+                chunks,
+            )
+            ssm_state[state_indices] = final.to(ssm_state.dtype)
+            out.copy_(
+                virtual_out.reshape(
+                    -1, self.num_householder, self.local_v_heads, self.head_v_dim
+                )[:, -1]
+            )
+            if checkpoint is not None:
+                self._checkpoint_exporter.export(
+                    checkpoint,
+                    raw_qkv=mixed_qkv,
+                    conv_state=conv_state,
+                    cu_seqlens=query_start,
+                    recurrent_checkpoint=checkpoint_state,
+                    recurrent_state=ssm_state,
+                )
 
     def _virtual_inputs(
         self, conv_out: torch.Tensor, b: torch.Tensor, a: torch.Tensor
@@ -478,6 +610,7 @@ class GatedDeltaProductAttention(GatedDeltaNetAttention):
         query_start: torch.Tensor,
         checkpoint_state: torch.Tensor | None = None,
         checkpoint_offsets: torch.Tensor | None = None,
+        chunk_metadata: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """The chunked gated delta rule over the virtual sequences of a prefill batch.
 
@@ -492,6 +625,11 @@ class GatedDeltaProductAttention(GatedDeltaNetAttention):
 
         def run(q, k, v, g, beta, initial_state, real_cu_seqlens, states, offsets):
             cu_seqlens = (real_cu_seqlens * m).to(torch.int32)
+            if chunk_metadata is not None and num_seqs <= max_seqs:
+                cu_seqlens, indices, offsets_by_chunk = chunk_metadata
+            else:
+                indices = prepare_chunk_indices(cu_seqlens, FLA_CHUNK_SIZE)
+                offsets_by_chunk = prepare_chunk_offsets(cu_seqlens, FLA_CHUNK_SIZE)
             return chunk_gated_delta_rule(
                 q=q,
                 k=k,
@@ -503,8 +641,8 @@ class GatedDeltaProductAttention(GatedDeltaNetAttention):
                 checkpoint_state=states,
                 checkpoint_offsets=None if offsets is None else offsets * m,
                 cu_seqlens=cu_seqlens,
-                chunk_indices=prepare_chunk_indices(cu_seqlens, FLA_CHUNK_SIZE),
-                chunk_offsets=prepare_chunk_offsets(cu_seqlens, FLA_CHUNK_SIZE),
+                chunk_indices=indices,
+                chunk_offsets=offsets_by_chunk,
             )
 
         if num_seqs <= max_seqs:
@@ -539,6 +677,79 @@ class GatedDeltaProductAttention(GatedDeltaNetAttention):
             finals.append(final)
         return torch.cat(outs, dim=1), torch.cat(finals)
 
+    def _warmup_fast_prefill(
+        self, dtype: torch.dtype, state_dtype: torch.dtype, device: torch.device
+    ) -> None:
+        """Compile the fast path's kernels (fixed configurations, no autotuning) on a
+        one-chunk sequence, with and without a checkpoint."""
+        m, heads = self.num_householder, self.local_v_heads
+        tokens = FLA_CHUNK_SIZE
+        conv_dim = m * self.local_value_dim + (m + 1) * self.local_key_dim
+        cu_seqlens = torch.tensor([0, tokens], dtype=torch.int32, device=device)
+        slot = torch.ones(1, dtype=torch.int32, device=device)
+        has_state = torch.zeros(1, dtype=torch.bool, device=device)
+        virtual_cu = (cu_seqlens * m).to(torch.int32)
+        chunk_metadata = (
+            virtual_cu,
+            prepare_chunk_indices(virtual_cu, FLA_CHUNK_SIZE),
+            prepare_chunk_offsets(virtual_cu, FLA_CHUNK_SIZE),
+        )
+        try:
+            for checkpoints in ((None, None), (torch.zeros_like(slot), slot + 1)):
+                conv_out = torch.randn(tokens, conv_dim, dtype=dtype, device=device)
+                if self.conv_kernel_size == 4:
+                    shape = (
+                        (3, conv_dim, 3)
+                        if is_conv_state_dim_first()
+                        else (3, 3, conv_dim)
+                    )
+                    conv_state = torch.zeros(shape, dtype=dtype, device=device)
+                    if not is_conv_state_dim_first():
+                        conv_state = conv_state.transpose(-1, -2)
+                    conv_out = causal_conv1d_prefill(
+                        conv_out,
+                        torch.zeros(conv_dim, 4, dtype=dtype, device=device),
+                        conv_state,
+                        cu_seqlens,
+                        slot,
+                        has_state,
+                        checkpoint_offsets=checkpoints[0],
+                        checkpoint_indices=checkpoints[1],
+                    )
+                gdp_chunk_prefill(
+                    conv_out,
+                    torch.zeros(tokens, m * heads, dtype=dtype, device=device),
+                    torch.zeros(tokens, heads, dtype=dtype, device=device),
+                    torch.zeros(heads, dtype=torch.float32, device=device),
+                    torch.zeros(heads, dtype=self.dt_bias.dtype, device=device),
+                    torch.zeros(
+                        3,
+                        heads,
+                        self.head_v_dim,
+                        self.head_k_dim,
+                        dtype=state_dtype,
+                        device=device,
+                    ),
+                    cu_seqlens,
+                    slot,
+                    has_state,
+                    num_householder=m,
+                    num_heads=heads,
+                    num_groups=self.local_k_heads,
+                    head_k_dim=self.head_k_dim,
+                    head_v_dim=self.head_v_dim,
+                    chunk_metadata=chunk_metadata,
+                    checkpoint_offsets=checkpoints[0],
+                    checkpoint_indices=checkpoints[1],
+                )
+        except Exception:
+            logger.warning(
+                "Gated delta product prefill kernel warmup failed for %s; the first "
+                "prefill will compile its kernels.",
+                self.prefix,
+                exc_info=True,
+            )
+
     def _warmup_prefill_kernels(self, dtype: torch.dtype, device: torch.device) -> None:
         """Autotune the chunked kernels on a one-chunk sequence during the profile run,
         so the first real prefill does not need autotuning memory after the caches are
@@ -549,6 +760,9 @@ class GatedDeltaProductAttention(GatedDeltaNetAttention):
         self._prefill_kernels_warmed_up = True
         heads, tokens = self.local_v_heads, FLA_CHUNK_SIZE * self.num_householder
         _, state_dtype = self.get_state_dtype()
+        if self.fast_prefill:
+            self._warmup_fast_prefill(dtype, state_dtype, device)
+            return
         q = torch.randn(1, tokens, heads, self.head_k_dim, dtype=dtype, device=device)
         k = l2norm_fwd(torch.randn_like(q))
         v = torch.randn(1, tokens, heads, self.head_v_dim, dtype=dtype, device=device)

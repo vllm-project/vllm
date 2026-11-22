@@ -13,6 +13,7 @@ steps:
   - tests/models/test_nemotron3_6_academia.py
   - vllm/v1/engine/
   - vllm/v1/worker/gpu/
+  - vllm/v1/attention/backends/gdn_attn.py
   - tests/kernels/mamba/test_gated_delta_product.py
   commands:
     - >-

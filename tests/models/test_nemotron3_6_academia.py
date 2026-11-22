@@ -64,7 +64,8 @@ def _cache_layout(model):
 
 @pytest.mark.usefixtures("enable_pickle")
 @pytest.mark.parametrize("cache_mode", ["per_loop", "last_loop"])
-def test_loop_cache_modes(vllm_runner, tmp_path, cache_mode):
+@pytest.mark.parametrize("gdp_dims", [(64, 32), (128, 64)])
+def test_loop_cache_modes(vllm_runner, tmp_path, cache_mode, gdp_dims):
     """Last-loop attention must retain independent GDP state through decoding."""
     from vllm import SamplingParams
 
@@ -84,6 +85,8 @@ def test_loop_cache_modes(vllm_runner, tmp_path, cache_mode):
         head_dim=64,
         linear_num_value_heads=4,
         linear_num_key_heads=2,
+        linear_key_head_dim=gdp_dims[0],
+        linear_value_head_dim=gdp_dims[1],
         loop_conditioning_hidden_size=8,
         loop_adapter_rank=0,
     ).save_pretrained(tmp_path)
