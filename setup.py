@@ -1639,6 +1639,8 @@ package_data = {
         "model_executor/layers/mamba/ops/configs/selective_state_update/*.json",
         "kernels/helion/configs/*/*.json",
         "model_executor/layers/quantization/utils/configs/*.json",
+        # DeepSeek-V4.1 EP8 expert placement plan (amd_kernels.expert_perm)
+        "models/deepseek_v41/amd/configs/*.npz",
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",

@@ -93,6 +93,16 @@ class AmdKernelsConfig:
     (a 32k-token prefill chunk beside a large decode batch otherwise ran out of
     memory). 0 keeps the measured value."""
 
+    expert_perm: str = ""
+    """DeepSeek-V4.1 MegaMoE experts on EP: static expert placement with
+    replicas. Path of a plan `.npz` (`phys2log [L, ep * S]` with the logical
+    expert of every physical slot, `layer_ids [L]`, optional
+    `draft_phys2log` / `draft_layer_ids` for the DSpark draft layers); a bare
+    file name is looked up in `vllm/models/deepseek_v41/amd/configs/`
+    (`expert_plan_S49.npz`). Each rank holds S slots per layer and the
+    routers' ids are remapped to a replica before dispatch. Empty: the
+    identity placement (nothing runs). Independent of `enabled`."""
+
     def compile_factors(self) -> CompileFactors:
         return get_compile_factors(self, {"prefill_warmup", "serving_transient_gib"})
 

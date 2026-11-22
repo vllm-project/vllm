@@ -92,6 +92,17 @@ def post_load(model) -> None:
             akr_config.fail("fused_ep8", "no eligible MegaMoE layer")
         return
     first = layers[0]
+    # one context per process serves every layer: with a placement plan the
+    # slots per rank must agree
+    mismatched = [e for e in layers if e.num_local_experts != first.num_local_experts]
+    for experts in mismatched:
+        logger.warning(
+            "amd_kernels fused_ep8 off for %s: %d experts per rank, not %d",
+            experts.prefix,
+            experts.num_local_experts,
+            first.num_local_experts,
+        )
+    layers = [e for e in layers if e.num_local_experts == first.num_local_experts]
     key = (
         first.hidden_size,
         first.intermediate_size,
