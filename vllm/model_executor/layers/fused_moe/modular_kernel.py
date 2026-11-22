@@ -1512,14 +1512,7 @@ class FusedMoEKernelModularImpl:
 
         # If caller's output buffer already matches fused_out shape/dtype, alias
         # to skip the redundant copy in TopKWeightAndReduceNoOP.apply downstream.
-        # This eliminates ~94% of __amd_rocclr_copyBuffer events (Copy 2 of the
-        # double-copy MoE write-back path).
-        if current_platform.is_rocm():
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            if use_output_alias and rocm_aiter_ops.is_fused_moe_enabled():
-                fused_out = output_alias
-        elif use_output_alias:
+        if use_output_alias:
             fused_out = output_alias
 
         unfinalized = self.fused_experts.apply(
