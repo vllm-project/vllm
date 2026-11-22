@@ -1667,7 +1667,9 @@ class VllmConfig:
                     logger.warning_once(
                         "DeepGemm is auto-disabled for model_type=%s on this "
                         "GPU, but --linear-backend deep_gemm requests it. "
-                        "Using DeepGemm for the FP8 linear layers.",
+                        "Using DeepGemm for the FP8 linear layers. The "
+                        "weights are requantized to E8M0 scales, which is "
+                        "lossy.",
                         model_type,
                     )
                 else:
