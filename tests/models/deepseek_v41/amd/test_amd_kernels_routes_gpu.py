@@ -226,6 +226,62 @@ def test_wo_b_on_bf16_matches_stock(vllm_config, m):
     assert cos(out, ref) > 0.9999
 
 
+@pytest.mark.parametrize("m", [768, 769, 848, 1024])
+def test_wo_a_wo_b_chain_matches_stock(vllm_config, m):
+    """The full `wo_b` route through `akr_mla.wo_a_wo_b` (wo_a's bf16 output,
+    then the dense entry) against the stock chain (stock grouped wo_a, stock
+    wo_b) and against the route's neighbour below 769 rows (wo_a's MXFP8
+    epilogue + the stock wo_b on its codes); None, having launched nothing,
+    outside 769-1024 rows."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+    from vllm.models.deepseek_v41.amd import akr_config, akr_kernels, akr_mla
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_mxfp8_wo_a_bmm
+
+    wo_a = _mxfp8_linear(
+        vllm_config, 8 * 1024, 4096, "model.layers.0.attn.wo_a", 7, bmm_batch_size=8
+    )
+    wo_b = _mxfp8_linear(vllm_config, 5120, 8192, "model.layers.0.attn.wo_b", 8)
+    grouped = akr_kernels.mxfp8_grouped_weight(wo_a, 8, 1024)
+    dense = akr_kernels.mxfp8_dense_weight(wo_b)
+    if grouped is None or dense is None:
+        pytest.skip("the stock wo_a / wo_b kept no preshuffled MXFP8 weight")
+    layer = types.SimpleNamespace(
+        akr=types.SimpleNamespace(wo_a=grouped, wo_b=dense, want_codes=False),
+        gemm_rs=None,
+    )
+    x = torch.randn(m, 8 * 4096, device="cuda", dtype=torch.bfloat16)
+    codes, scale = mxfp8_e4m3_quantize(x)
+    qx = akr_config.quant_activation(codes, scale.view(torch.uint8), x.dtype)
+    out = akr_mla.wo_a_wo_b(layer, qx)
+    assert (out is not None) == akr_config.serves("wo_b", m)
+    if out is None:
+        return
+    assert out.shape == (m, 5120) and out.dtype == torch.bfloat16
+    z = rocm_mxfp8_wo_a_bmm(codes, scale.view(torch.uint8), wo_a, 8, 1024)
+    ref, _ = wo_b(z.flatten(1).contiguous())
+    assert cos(out, ref) > 0.999
+    z_codes = akr_mla.wo_a(layer, qx)
+    assert z_codes is not None
+    epilogue, _ = wo_b(z_codes)
+    assert cos(out, epilogue) > 0.999
+    # captured once, replayed on new codes: same result as an eager call
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        akr_mla.wo_a_wo_b(layer, qx)
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        replayed = akr_mla.wo_a_wo_b(layer, qx)
+    new_codes, new_scale = mxfp8_e4m3_quantize(torch.randn_like(x))
+    codes.copy_(new_codes)
+    scale.copy_(new_scale)
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert torch.equal(replayed, akr_mla.wo_a_wo_b(layer, qx))
+
+
 @pytest.mark.parametrize("m", [16, 192, 1024])
 def test_grouped_wo_a_matches_stock(vllm_config, m):
     """wo_a with the MXFP8 epilogue vs the stock grouped GEMM (bf16 out)."""
