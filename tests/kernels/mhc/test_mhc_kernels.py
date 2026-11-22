@@ -902,7 +902,7 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
 @pytest.mark.parametrize("num_tokens", [1, 17, 98, 128, 196, 197, 252, 336])
 def test_mhc_boundary_correctness(num_tokens):
     if mhc_boundary_weight(5120, 4, torch.device(DEVICE)) is None:
-        pytest.skip("The CuTe DSL mHC boundary needs SM100 and CuTe DSL")
+        pytest.skip("The CuTe DSL mHC boundary needs SM90 or SM100 and CuTe DSL")
     set_random_seed(0)
     from vllm.models.deepseek_v41.nvidia.ops.mhc_boundary import (
         mhc_shifted_post_pre_boundary,
@@ -915,6 +915,60 @@ def test_mhc_boundary_correctness(num_tokens):
     actual = mhc_shifted_post_pre_boundary(*boundary_args)
     assert actual is not None
     for i, (result, ref) in enumerate(zip(actual, expected, strict=True)):
+        atol, rtol = (1.6e-2, 1e-2) if i in (0, 3) else (1e-6, 1e-3)
+        torch.testing.assert_close(result, ref, atol=atol, rtol=rtol)
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC or not current_platform.is_device_capability(90),
+    reason="SM90 dispatch",
+)
+@pytest.mark.parametrize("num_tokens", [98, 336, 337])
+def test_mhc_shifted_post_pre_runs_the_boundary_on_sm90(num_tokens, monkeypatch):
+    """On SM90 the dispatcher runs batches above the SM80 kernels' rows on the
+    CuTe DSL boundary, and falls back to TileLang above its rows."""
+    import vllm.models.deepseek_v41.nvidia.ops.mhc as mhc_ops
+
+    if mhc_boundary_weight(5120, 4, torch.device(DEVICE)) is None:
+        pytest.skip("CuTe DSL required")
+    from vllm.models.deepseek_v41.nvidia.ops.mhc_boundary import (
+        MAX_TOKENS,
+        prepare_boundary_weight,
+    )
+
+    set_random_seed(0)
+    args, expected = _shifted_post_pre_case(num_tokens, 5120)
+    (x, residual, prev_mix, post_mix, res_mix, fn, scale, base) = args[:8]
+    rms_eps, pre_eps, post_scale, sinkhorn_eps, iters, norm_weight, norm_eps = args[8:]
+    kernel = mhc_ops._mhc_shifted_post_pre_boundary()
+    results = []
+
+    def spy(*a):
+        out = kernel(*a)
+        results.append(out is not None)
+        return out
+
+    monkeypatch.setattr(mhc_ops, "_mhc_shifted_post_pre_boundary", lambda: spy)
+    actual = mhc_ops.mhc_shifted_post_pre(
+        x,
+        residual,
+        post_mix,
+        res_mix,
+        fn,
+        scale,
+        base,
+        rms_eps,
+        pre_eps,
+        sinkhorn_eps,
+        post_scale,
+        iters,
+        pre_mix=prev_mix,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
+        boundary_weight=prepare_boundary_weight(fn),
+    )
+    assert results == [num_tokens <= MAX_TOKENS]
+    for i, (result, ref) in enumerate(zip(actual[:5], expected, strict=True)):
         atol, rtol = (1.6e-2, 1e-2) if i in (0, 3) else (1e-6, 1e-3)
         torch.testing.assert_close(result, ref, atol=atol, rtol=rtol)
 

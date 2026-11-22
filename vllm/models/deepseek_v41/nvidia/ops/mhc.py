@@ -531,8 +531,12 @@ def mhc_boundary_weight(
     hidden_size: int, hc_mult: int, device: torch.device
 ) -> torch.Tensor | None:
     """An empty `prepare_boundary_weight` buffer, or None where the CuTe DSL mHC
-    boundary (`mhc_boundary.py`) cannot run."""
-    if not (current_platform.is_device_capability_family(100) and has_cutedsl()):
+    boundary (`mhc_boundary.py`) cannot run: SM100, or SM90 above the rows of the
+    SM80 kernels (`SM90_MHC_MAX_TOKENS`)."""
+    if not has_cutedsl() or not (
+        current_platform.is_device_capability_family(100)
+        or current_platform.is_device_capability(90)
+    ):
         return None
     from .mhc_boundary import MhcBoundaryKernel, boundary_weight_shape
 
@@ -848,6 +852,36 @@ def mhc_shifted_post_pre(
         if outputs is None:
             outputs = mhc_shifted_post_pre_deep_gemm(*args)
         return *outputs, x.new_empty(0, x.shape[1])
+
+    if (
+        boundary_weight is not None
+        and pre_mix is not None
+        and norm_weight is not None
+        and not capture_aux
+        and current_platform.is_device_capability(90)
+    ):
+        # SM90 has no Mega mHC: decode-size batches the SM80 kernels above do not
+        # take run on the CuTe DSL boundary; None (too many rows, or a token tile
+        # not compiled before graph capture) falls through to TileLang.
+        outputs = _mhc_shifted_post_pre_boundary()(
+            x,
+            residual,
+            pre_mix,
+            post_layer_mix,
+            comb_res_mix,
+            boundary_weight,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_post_mult_value,
+            hc_sinkhorn_eps,
+            sinkhorn_repeat,
+            norm_weight,
+            norm_eps,
+        )
+        if outputs is not None:
+            return *outputs, x.new_empty(0, x.shape[1])
 
     return mhc_fused_post_pre_delayed_tilelang(
         x,

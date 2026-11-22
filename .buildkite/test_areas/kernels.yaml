@@ -146,9 +146,14 @@ steps:
   - vllm/v1/attention/backends/mla/indexer.py
   - tests/model_executor/layers/test_mla_short_prefill_indexer.py
   - tests/models/deepseek_v41/nvidia/test_candidate_indexer.py
+  - vllm/models/deepseek_v41/nvidia/ops/mhc.py
+  - vllm/models/deepseek_v41/nvidia/ops/mhc_boundary.py
+  - tests/kernels/mhc/test_mhc_kernels.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
     - pytest -v -s kernels/test_top_k_per_row.py
+    # DeepSeek V4.1 CuTe DSL mHC boundary on SM90.
+    - pytest -v -s kernels/mhc/test_mhc_kernels.py -k boundary
     - >-
       pytest -v -s
       model_executor/layers/test_mla_short_prefill_indexer.py
