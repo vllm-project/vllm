@@ -372,6 +372,9 @@ class MultiModalFeatureSpec:
     mm_hash: str | None = None
     """The hash for caching processor outputs (without LoRA prefix)."""
 
+    is_metadata_only: bool = False
+    """Explicit token handoff: `data` is layout metadata, not encoder input."""
+
     @staticmethod
     def gather_kwargs(features: list["MultiModalFeatureSpec"], keys: set[str]):
         kwargs = defaultdict[str, list[NestedTensors]](list)

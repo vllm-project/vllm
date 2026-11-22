@@ -86,6 +86,45 @@ media rather than mixing raw and metadata-only inputs.
 This does not add `/v1/audio/transcriptions` or realtime routes to the example
 proxy.
 
+### Token-level HTTP handoff
+
+Enable `--enable-scale-out` on each worker to use
+`POST /inference/v1/generate`. Send the Python EPD proxy a Generate request
+with `token_ids` containing unexpanded media markers and `content_parts`
+in marker order. Each part has a `type` (for example, `image_url`), a
+`url`, and an optional `uuid`. The final response has the regular Generate
+format, including streaming when requested. For inline audio, use an
+`input_audio` part with `input_audio: {"data": "...", "format": "wav"}`.
+Workers handling raw media accept `mm_processor_kwargs` and `media_io_kwargs`
+when started with `--trust-request-mm-kwargs`, including `use_audio_in_video`
+on models that support it. In metadata-only mode, the proxy sends those
+overrides only to E.
+
+The proxy asks E for `return_prompt_features`. It forwards the expanded
+tokens, layout-only `features`, and EC parameters to P or PD. In E/P/D,
+it sends the same token layout to D with P's remote-prefill KV parameters
+and no EC parameters. E and P use their usual EC connector roles; D needs
+only a KV consumer. Use dynamic registration to advertise P's control
+address when using Mooncake EC with separate P and D.
+
+To distribute media in one request across multiple E instances, set the
+corresponding `--image-fanout-token-id`, `--audio-fanout-token-id`, or
+`--video-fanout-token-id` to the model's unexpanded marker ID. For example,
+Qwen3-VL uses `151655` for images, and Qwen2.5-Omni uses `151646` for audio
+and `151656` for video. The model's processor must declare that it can
+expand the marker independently. The proxy batches images sent to the same
+E, but sends each audio clip or video intact in its own subrequest. It
+reassembles results in input order, including repeated media. An audio
+track extracted from a video stays with that video's fragment. Mixed
+media or requests with per-item option lists go to a single E.
+
+`--decode-retries` also applies to Generate: on a decode HTTP 500 before
+the response starts, the proxy reruns the worker stages from the original
+input with fresh transfer handles. It does not retry an in-progress stream
+or a request supplied with externally prepared features or transfer handles.
+For debugging, `--no-rewrite` forwards raw media to P/PD; an independent D
+still receives the expanded layout and KV parameters.
+
 ---
 
 ## 3  Test Script

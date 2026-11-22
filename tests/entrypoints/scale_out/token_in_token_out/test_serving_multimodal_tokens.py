@@ -58,6 +58,29 @@ async def client(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mm_processor_kwargs", {"do_resize": True}),
+        ("media_io_kwargs", {"video": {"num_frames": 2}}),
+    ],
+)
+async def test_generate_rejects_untrusted_raw_media_options(client, field, value):
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "token_ids": [151655],
+            "content_parts": [{"type": "image_url", "url": "not-a-media-url"}],
+            "sampling_params": {"max_tokens": 1},
+            field: value,
+        },
+    )
+    assert response.status_code == 400
+    assert "--trust-request-mm-kwargs" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_render_to_generate_roundtrip(client, test_image):
     """End-to-end: render a multimodal chat -> feed into generate -> decode.
 

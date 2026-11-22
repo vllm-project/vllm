@@ -362,6 +362,10 @@ class ECMooncakeScheduler:
         for item in items:
             if item.get("mm_hash") == mm_hash and item.get("transfer_id"):
                 return str(item["transfer_id"])
+        prefix = params.get("transfer_id_prefix")
+        if params.get("consumer_zmq") and isinstance(prefix, str) and prefix:
+            # Token-level EPD numbers the actual processed features.
+            return f"{prefix}:{index}"
         return None
 
     def ensure_cache_available(self, request: Any, num_computed_tokens: int) -> bool:

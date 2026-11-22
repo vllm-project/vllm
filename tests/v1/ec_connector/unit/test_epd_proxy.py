@@ -8,8 +8,10 @@ from unittest.mock import AsyncMock, Mock
 
 import msgspec
 import pytest
+from aiohttp import web
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from examples.disaggregated.disaggregated_encoder import (
     disagg_epd_proxy as proxy_module,
@@ -30,6 +32,243 @@ DECODE = InstanceRole.DECODE
 PD = InstanceRole.PREFILL_DECODE
 
 IMAGE_ITEM = {"type": "image_url", "image_url": {"url": "http://img/0.png"}}
+
+
+@pytest.mark.parametrize("modality", ["image", "video"])
+def test_generate_splice_preserves_source_order_and_duplicate_hash(modality):
+    continuations = [
+        ([1], [21, 22, 23], ["blue"], ["m1"], [3]),
+        ([0, 2], [11, 12, 11, 12], ["red", "red"], ["m0", "m2"], [2, 2]),
+    ]
+    paired = modality == "video"
+    if paired:
+        continuations[1:] = [
+            ([0], [11, 12], ["red"], ["m0"], [2]),
+            ([2], [11, 12], ["red"], ["m2"], [2]),
+        ]
+    fragments = []
+    for indices, ids, hashes, metadata, lengths in continuations:
+        if paired:
+            ids = [90, *ids, 91]  # Structural tokens are part of the replacement.
+        spans = [
+            {
+                "offset": sum(lengths[:i]) + int(paired),
+                "length": n,
+                "is_embed": [True] * (n - 1) + [not paired],
+            }
+            for i, n in enumerate(lengths)
+        ]
+        placeholders = {modality: spans}
+        feature_hashes = {modality: hashes}
+        feature_metadata = {modality: metadata}
+        if paired:
+            placeholders["audio"] = [
+                {**span, "is_embed": [False] * (n - 1) + [True]}
+                for span, n in zip(spans, lengths, strict=True)
+            ]
+            feature_hashes["audio"] = [f"a-{h}" for h in hashes]
+            feature_metadata["audio"] = [f"a-{m}" for m in metadata]
+            if indices == [1]:
+                # Equal-offset features have the opposite local transfer order.
+                placeholders = {"audio": placeholders["audio"], modality: spans}
+        fragments.append(
+            (
+                indices,
+                f"e{indices[0]}",
+                {
+                    "prompt_token_ids": ids,
+                    "features": {
+                        "mm_hashes": feature_hashes,
+                        "mm_placeholders": placeholders,
+                        "mm_metadata": feature_metadata,
+                    },
+                },
+            )
+        )
+
+    result = proxy_module._splice_media_fragments(
+        [1, 9, 2, 9, 3, 9, 4], [1, 3, 5], fragments
+    )
+    assert result is not None
+    ids, features, transfers = result
+    assert features["mm_hashes"][modality] == ["red", "blue", "red"]
+    assert features["mm_metadata"][modality] == ["m0", "m1", "m2"]
+    if paired:
+        assert ids == [1, 90, 11, 12, 91, 2, 90, 21, 22, 23, 91, 3, 90, 11, 12, 91, 4]
+        assert features["mm_placeholders"]["video"] == [
+            {"offset": 2, "length": 2, "is_embed": [True, False]},
+            {"offset": 7, "length": 3, "is_embed": [True, True, False]},
+            {"offset": 13, "length": 2, "is_embed": [True, False]},
+        ]
+        assert features["mm_hashes"]["audio"] == ["a-red", "a-blue", "a-red"]
+        assert [p["offset"] for p in features["mm_placeholders"]["audio"]] == [2, 7, 13]
+        assert transfers == ["e0:0", "e0:1", "e1:1", "e1:0", "e2:0", "e2:1"]
+    else:
+        assert ids == [1, 11, 12, 2, 21, 22, 23, 3, 11, 12, 4]
+        assert features["mm_placeholders"]["image"] == [
+            {"offset": 1, "length": 2, "is_embed": [True, True]},
+            {"offset": 4, "length": 3, "is_embed": [True, True, True]},
+            {"offset": 8, "length": 2, "is_embed": [True, True]},
+        ]
+        assert transfers == ["e0:0", "e1:0", "e0:1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("modality", "fragment_status"),
+    [("image", status) for status in [200, 501, 503, 500, "raw", "batch-gap"]]
+    + [("audio", 200), ("video", 200)],
+)
+async def test_generate_proxy_hands_d_only_kv(
+    monkeypatch, unused_tcp_port, modality, fragment_status
+):
+    monkeypatch.setenv("ADMIN_API_KEY", "test-key")
+    monkeypatch.setattr(proxy_module, "NO_REWRITE", fragment_status == "raw")
+    keys = ["a", "b", "c"] if fragment_status == "batch-gap" else ["a", "b"]
+    prompt_ids = [1, 9, 2, 9, 3, 9, 4] if len(keys) == 3 else [1, 9, 2, 9, 3]
+    calls = []
+
+    async def worker(request):
+        stage = request.match_info["stage"]
+        body = await request.json()
+        calls.append((stage, body))
+        if stage.startswith("e"):
+            fragment = body.get("encode_media_fragment")
+            if fragment and fragment_status in (501, 503):
+                return web.json_response(
+                    {"error": {"type": "MediaFragmentUnsupported"}},
+                    status=fragment_status,
+                )
+            token_ids = body["token_ids"]
+            if fragment and fragment_status == "batch-gap" and len(token_ids) == 2:
+                token_ids = [9, 99, 9]  # Token 99 cannot be assigned to one image.
+            offsets = [i for i, token in enumerate(token_ids) if token == 9]
+            hashes = [part["uuid"] for part in body["content_parts"]]
+            return web.json_response(
+                {
+                    "media_fragment": fragment is not None,
+                    "prompt_token_ids": token_ids,
+                    "features": {
+                        "mm_hashes": {modality: hashes},
+                        "mm_placeholders": {
+                            modality: [{"offset": i, "length": 1} for i in offsets],
+                        },
+                        "mm_metadata": {modality: ["metadata"] * len(offsets)},
+                    },
+                    "ec_transfer_params": {
+                        key: {"handle": request.headers["x-request-id"]}
+                        for key in hashes
+                    },
+                }
+            )
+        if stage == "p":
+            return web.json_response(
+                {
+                    "kv_transfer_params": {
+                        "do_remote_prefill": True,
+                        "handoff": sum(s == "p" for s, _ in calls),
+                    }
+                }
+            )
+        if fragment_status == 500:
+            if sum(s == "d" for s, _ in calls) == 1:
+                return web.Response(status=500)
+            return web.Response(
+                text="data: [DONE]\n\n", content_type="text/event-stream"
+            )
+        return web.json_response({"choices": [{"token_ids": [42]}]})
+
+    upstream = web.Application()
+    upstream.router.add_post("/{stage}/inference/v1/generate", worker)
+    runner = web.AppRunner(upstream)
+    await runner.setup()
+    try:
+        await web.TCPSite(runner, "127.0.0.1", unused_tcp_port).start()
+        app = build_app(
+            EPDProxyConfig(probe_interval=0, media_fanout_token_ids={modality: 9})
+        )
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(transport=ASGITransport(app=app), base_url="http://proxy") as c,
+        ):
+            for stage, role in [
+                ("e0", "encode"),
+                ("e1", "encode"),
+                ("p", "prefill"),
+                ("d", "decode"),
+            ]:
+                response = await c.post(
+                    "/instances",
+                    json={
+                        "role": role,
+                        "url": f"http://127.0.0.1:{unused_tcp_port}/{stage}",
+                    },
+                    headers={"X-API-Key": "test-key"},
+                )
+                assert response.is_success, response.text
+            response = await c.post(
+                proxy_module.GENERATE_PATH,
+                json={
+                    "token_ids": prompt_ids,
+                    "content_parts": [
+                        {
+                            "type": f"{modality}_url",
+                            "uuid": key,
+                            "url": f"http://media/{key}",
+                        }
+                        for key in keys
+                    ],
+                    "sampling_params": {"max_tokens": 20},
+                    "mm_processor_kwargs": {"do_resize": True},
+                    "media_io_kwargs": {"image": {"example": True}},
+                    "stream": fragment_status == 500,
+                },
+            )
+    finally:
+        await runner.cleanup()
+
+    stages = [stage for stage, _ in calls]
+    assert set(stages[:2]) == {"e0", "e1"}
+    assert all(b["encode_media_fragment"] == modality for _, b in calls[:2])
+    assert sorted(len(b["content_parts"]) for _, b in calls[:2]) == [1, len(keys) - 1]
+    if fragment_status == 503:
+        assert response.status_code == 502
+        assert len(stages) == 2
+        return
+
+    for stage, body in calls:
+        if stage.startswith("e"):
+            assert body["mm_processor_kwargs"] == {"do_resize": True}
+            assert body["media_io_kwargs"] == {"image": {"example": True}}
+        elif stage != "p" or fragment_status != "raw":
+            assert "mm_processor_kwargs" not in body
+            assert "media_io_kwargs" not in body
+
+    if fragment_status == 500:
+        assert response.text == "data: [DONE]\n\n"
+        assert set(stages[4:6]) == {"e0", "e1"}
+        assert stages[2:4] == stages[6:8] == ["p", "d"]
+        assert calls[2][1]["ec_transfer_params"] != calls[6][1]["ec_transfer_params"]
+        assert calls[3][1]["kv_transfer_params"]["handoff"] == 1
+    else:
+        assert response.json()["choices"] == [{"token_ids": [42]}]
+        assert len(stages) == (5 if fragment_status in (501, "batch-gap") else 4)
+    assert stages[-2:] == ["p", "d"]
+    prefill, decode = calls[-2][1], calls[-1][1]
+    if fragment_status == "raw":
+        assert "features" not in prefill
+        assert [p["uuid"] for p in prefill["content_parts"]] == keys
+        assert "content_parts" not in decode
+    else:
+        assert prefill["features"] == decode["features"]
+    assert decode["features"]["mm_hashes"][modality] == keys
+    assert decode["token_ids"] == prompt_ids
+    assert "ec_transfer_params" in prefill and "ec_transfer_params" not in decode
+    assert decode["kv_transfer_params"] == {
+        "do_remote_prefill": True,
+        "handoff": 2 if fragment_status == 500 else 1,
+    }
+    assert decode["sampling_params"]["max_tokens"] == 20
 
 
 @pytest.fixture

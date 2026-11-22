@@ -229,8 +229,8 @@ def test_metadata_payload_matches_tensors_without_kwargs(audio_keep_on_cpu):
     assert metadata_only.mm_placeholders == full.mm_placeholders
 
 
-def test_metadata_payload_requires_ec_on_generate_not_render():
-    """Render can return metadata-only items; generate needs EC params for them."""
+def test_metadata_payload_requires_transfer_on_generate_not_render():
+    """P needs EC parameters; an independent D can receive only KV parameters."""
     engine_input, _pixel_values, _image_grid_thw = _image_engine_input()
     features = extract_mm_features(engine_input, mm_payload="metadata")
     body = {"token_ids": [1, 2, 3], "features": features, "sampling_params": {}}
@@ -244,6 +244,15 @@ def test_metadata_payload_requires_ec_on_generate_not_render():
     GenerateRequest.model_validate(
         {**forwarded, "ec_transfer_params": {"do_remote": True}}
     )
+    decode_request = GenerateRequest.model_validate(
+        {**forwarded, "kv_transfer_params": {"do_remote_prefill": True}}
+    )
+    assert decode_request.ec_transfer_params is None
+    assert decode_request.features.metadata_only_indices() == {"image": {0}}
+    with pytest.raises(ValidationError, match="remote-prefill KV transfer"):
+        GenerateRequest.model_validate(
+            {**forwarded, "kv_transfer_params": {"do_remote_decode": True}}
+        )
 
 
 def test_metadata_payload_rejects_modality_without_metadata():
@@ -434,7 +443,10 @@ def test_mixed_items_require_ec_only_for_metadata_only(
         with pytest.raises(ValidationError, match="ec_transfer_params"):
             GenerateRequest.model_validate(payload)
     else:
-        GenerateRequest.model_validate(payload)
+        request = GenerateRequest.model_validate(payload)
+        assert request.features.metadata_only_indices() == (
+            {modality: {int(modality == "image")}} if has_metadata else {}
+        )
 
 
 def test_kwargs_and_metadata_generate_does_not_require_ec():

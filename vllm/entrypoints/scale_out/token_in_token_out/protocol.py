@@ -128,14 +128,6 @@ class PlaceholderRangeInfo(BaseModel):
         return self
 
 
-def _has_serialized_mm_items(
-    payload: dict[str, list[str | None]] | None,
-) -> bool:
-    if not payload:
-        return False
-    return any(item is not None for items in payload.values() for item in items)
-
-
 class MultiModalFeatures(BaseModel):
     """Lightweight multimodal metadata produced by the render step.
 
@@ -165,11 +157,23 @@ class MultiModalFeatures(BaseModel):
     Each value is a list parallel to `mm_hashes[modality]`. A `str`
     entry is a base64-encoded `MultiModalKwargsItem` containing only
     placeholder-metadata and `keep_on_cpu` fields. `None` means that
-    the metadata is unavailable for that item. Prefill can use this
-    instead of `kwargs_data` only when `ec_transfer_params` is also
-    set, so embeddings arrive through the EC connector rather than from
-    `pixel_values`.
+    the metadata is unavailable for that item. Without `kwargs_data`,
+    the item needs external EC on prefill or external KV on decode.
     """
+
+    def metadata_only_indices(self) -> dict[str, set[int]]:
+        """Distinguish layout-only items from raw data and cache handles."""
+        result: dict[str, set[int]] = {}
+        for modality, items in (self.mm_metadata or {}).items():
+            tensors = (self.kwargs_data or {}).get(modality, [None] * len(items))
+            indices = {
+                i
+                for i, (metadata, tensor) in enumerate(zip(items, tensors, strict=True))
+                if metadata is not None and tensor is None
+            }
+            if indices:
+                result[modality] = indices
+        return result
 
     @model_validator(mode="after")
     def _validate_parallel_fields(self) -> "MultiModalFeatures":
@@ -183,7 +187,6 @@ class MultiModalFeatures(BaseModel):
         if self.mm_metadata is not None and set(self.mm_metadata) != modalities:
             raise ValueError("mm_metadata must use the same modalities as mm_hashes")
 
-        flattened_ranges: list[tuple[int, int]] = []
         for modality in modalities:
             num_hashes = len(self.mm_hashes[modality])
             num_placeholders = len(self.mm_placeholders[modality])
@@ -206,17 +209,27 @@ class MultiModalFeatures(BaseModel):
                 raise ValueError(
                     f"{modality} mm_metadata and mm_hashes must have the same length"
                 )
-            flattened_ranges.extend(
-                (placeholder.offset, placeholder.offset + placeholder.length)
-                for placeholder in self.mm_placeholders[modality]
-            )
-
-        flattened_ranges.sort()
-        for (_, end), (next_offset, _) in zip(flattened_ranges, flattened_ranges[1:]):
-            if next_offset < end:
-                raise ValueError(
-                    "mm_placeholders must be globally non-overlapping and sorted"
-                )
+        ranges = sorted(
+            (span for spans in self.mm_placeholders.values() for span in spans),
+            key=lambda span: span.offset,
+        )
+        active: list[PlaceholderRangeInfo] = []
+        for span in ranges:
+            start = span.offset
+            active = [prev for prev in active if prev.offset + prev.length > start]
+            # Interleaved audio and video can share a span but must not
+            # both provide an embedding for the same token.
+            for prev in active:
+                end = min(start + span.length, prev.offset + prev.length)
+                if any(
+                    (span.is_embed is None or span.is_embed[pos - start])
+                    and (prev.is_embed is None or prev.is_embed[pos - prev.offset])
+                    for pos in range(start, end)
+                ):
+                    raise ValueError(
+                        "Multimodal embedding positions must be non-overlapping"
+                    )
+            active.append(span)
         return self
 
 
@@ -264,27 +277,32 @@ class GenerateRequest(BaseModel):
     placeholders. With `features`, these placeholders must follow the
     last `features` range, which is left as is."""
 
-    _metadata_only_requires_ec: ClassVar[bool] = True
+    mm_processor_kwargs: dict[str, Any] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    """Overrides used when processing raw content_parts."""
+
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    """Per-modality media loading overrides for raw content_parts."""
+
+    _metadata_only_requires_transfer: ClassVar[bool] = True
 
     @model_validator(mode="after")
-    def _require_ec_for_metadata_only(self) -> "GenerateRequest":
+    def _require_transfer_for_metadata_only(self) -> "GenerateRequest":
         features = self.features
-        if features is None or not self._metadata_only_requires_ec:
-            return self
-        if not _has_serialized_mm_items(features.mm_metadata):
-            return self
-        if self.ec_transfer_params:
-            return self
-        kwargs_data = features.kwargs_data or {}
-        for modality, metadata_items in (features.mm_metadata or {}).items():
-            kwargs_items = kwargs_data.get(modality, [None] * len(metadata_items))
-            if any(
-                metadata is not None and kwargs is None
-                for metadata, kwargs in zip(metadata_items, kwargs_items, strict=True)
-            ):
-                raise ValueError(
-                    "metadata-only multimodal items require ec_transfer_params"
-                )
+        if (
+            self._metadata_only_requires_transfer
+            and features is not None
+            and not self.ec_transfer_params
+            and (self.kv_transfer_params or {}).get("do_remote_prefill") is not True
+            and features.metadata_only_indices()
+        ):
+            raise ValueError(
+                "metadata-only multimodal items require ec_transfer_params "
+                "or a remote-prefill KV transfer"
+            )
         return self
 
     sampling_params: SamplingParams
@@ -317,6 +335,11 @@ class GenerateRequest(BaseModel):
             "prompt token IDs and metadata-only features for an EC consumer."
         ),
     )
+
+    encode_media_fragment: Literal["image", "audio", "video"] | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
+    """Modality of the independent markers in an encoder fan-out fragment."""
 
     output_mode: OutputMode = Field(
         default="tokens",
@@ -487,7 +510,7 @@ class RenderedGenerateRequest(GenerateRequest):
     still validates the request it receives as a `GenerateRequest`.
     """
 
-    _metadata_only_requires_ec: ClassVar[bool] = False
+    _metadata_only_requires_transfer: ClassVar[bool] = False
 
 
 class GenerateLogProb(BaseModel):
@@ -676,6 +699,10 @@ class GenerateResponseBase(BaseModel):
     features: MultiModalFeatures | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    media_fragment: Literal[True] | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
+    """The worker accepted independent markers; the caller assembles the layout."""
 
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
