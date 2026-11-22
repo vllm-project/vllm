@@ -152,7 +152,7 @@ def _echo_request(stream: bool) -> CompletionRequest:
     )
 
 
-@pytest.mark.parametrize("prompt_logprobs", [[None, _logprobs(0)], None])
+@pytest.mark.parametrize("prompt_logprobs", [[None], [None, _logprobs(0)], None])
 def test_echo_logprobs_of_request_aborted_mid_prefill(prompt_logprobs):
     response = _serving().request_output_to_completion_response(
         [_aborted_output(prompt_logprobs)],
@@ -173,7 +173,7 @@ def test_echo_logprobs_of_request_aborted_mid_prefill(prompt_logprobs):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("prompt_logprobs", [[None, _logprobs(0)], None])
+@pytest.mark.parametrize("prompt_logprobs", [[None], [None, _logprobs(0)], None])
 async def test_stream_echo_logprobs_of_request_aborted_mid_prefill(prompt_logprobs):
     async def results():
         yield 0, _aborted_output(prompt_logprobs)
