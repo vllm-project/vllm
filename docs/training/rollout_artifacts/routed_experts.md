@@ -117,4 +117,4 @@ Rows per token take `num_hidden_layers × num_experts_per_tok × itemsize` bytes
 
 For Qwen3-30B-A3B the rows are 0.4% of the bfloat16 KV of the same tokens (96 KiB per token), so host memory is never the limit; the same holds for every row of the table on a node with hundreds of GB of host memory. What limits reuse is the KV cache capacity and replica affinity, not the row store.
 
-Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2e.py).
+Example: [examples/rl/routed_experts_e2e.py](../../../examples/rl/routed_experts_e2e.py).

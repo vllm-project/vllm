@@ -1152,6 +1152,9 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
 
         config.hidden_act = "geglu"
 
+        if getattr(config, "position_embedding_type", None) is None:
+            config.position_embedding_type = "rope"
+
         head_dim = config.hidden_size // config.num_attention_heads
         rotary_dim = getattr(config, "rotary_emb_dim", head_dim)
         config.rope_parameters["partial_rotary_factor"] = rotary_dim / head_dim
