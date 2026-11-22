@@ -69,6 +69,7 @@ def run_build(
     FAILURE=merge-base the lookup of main. FAKE_CLOCK=<file> makes every `date` call
     advance a minute; REAL_SLEEP=1 makes `sleep` real."""
     (tmp_path / "docker").symlink_to(ROOT / "docker")
+    (tmp_path / ".buildkite").symlink_to(ROOT / ".buildkite")
     fake = tmp_path / "bin"
     fake.mkdir()
     calls = tmp_path / "calls"
@@ -77,7 +78,10 @@ def run_build(
     registry.write_text("".join(f"{ref}\n" for ref in existing))
     (tmp_path / "registry.beats").touch()
     # The merge base with main has the checkout's files, except where CHANGED names a
-    # file (Dockerfile.rocm_base or requirements/rocm.txt) this branch changed.
+    # file (Dockerfile.rocm_base or requirements/rocm.txt) this branch changed, and
+    # BUILD_SH_EDIT, a sed script this branch applied to build.sh. Main's tip has them
+    # too, except where MAIN_CHANGED names a file main changed: to MAIN_BLOB, or to a
+    # blob of its own.
     (fake / "git").write_text(
         """#!/bin/bash
 case $1 in
@@ -87,11 +91,17 @@ case $1 in
   archive) tar -ch docker ;;
   fetch) [[ $FAILURE == fetch-main && " $* " == *" main "* ]] && exit 1 ;;
   merge-base) [[ $FAILURE == merge-base ]] && exit 1; echo mb ;;
-  show) cat "${2#*:}" ;;
-  diff) exit "${RECIPE_DIFF:-0}" ;;
+  show)
+    if [[ $2 == HEAD:*/build.sh && -n $BUILD_SH_EDIT ]]; then
+      sed "$BUILD_SH_EDIT" "${2#*:}"
+    else
+      cat "${2#*:}"
+    fi ;;
   ls-tree)
     for f in "${@:4}"; do
       [[ $2 == HEAD && " $CHANGED " == *" $f "* ]] && echo "100644 blob changed $f"
+      [[ $2 == FETCH_HEAD && " $MAIN_CHANGED " == *" $f "* ]] \
+        && echo "100644 blob ${MAIN_BLOB:-main} $f"
     done ;;
 esac
 exit 0
@@ -132,8 +142,8 @@ case $2 in
       echo "Digest: $digest"
     else
       echo "create ${@: -1}" >> "$CALLS"
-      src=${@: -1}
-      echo "$5 ${src##*@}" >> "$REGISTRY"
+      src=${@: -1} tag=${@: -2:1}
+      echo "$tag ${src##*@}" >> "$REGISTRY"
     fi ;;
   bake)
     echo "bake ${*:5}" >> "$CALLS"
@@ -192,6 +202,9 @@ echo $((1000000000 + n * 60))
         "REGISTRY": str(registry),
         "FAILURE": "",
         "CHANGED": "",
+        "MAIN_CHANGED": "",
+        "MAIN_BLOB": "",
+        "BUILD_SH_EDIT": "",
         "APPEARS": "",
         "APPEAR_AFTER": "3",
         "BEAT_AGE": "",
@@ -747,7 +760,6 @@ def test_promote_skips_tags_main_already_has(tmp_path):
     ("images", "env", "message"),
     [
         ([PR_STACK], {}, "recorded no"),
-        ([PR_WHEELS, PR_STACK], {"RECIPE_DIFF": "1"}, "another build.sh or bake file"),
         ([PR_WHEELS, PR_STACK], {"ROCM_CI_REPO": "rocm/vllm-dev"}, "only pushes"),
         ([PR_WHEELS, PR_STACK], {"ROCM_PROMOTE_PR": "7 x"}, "malformed"),
         ([PR_WHEELS, PR_STACK], {"ROCM_PROMOTE_SHA": "a" * 39}, "malformed"),
@@ -811,21 +823,57 @@ def test_check_passes_builds_that_are_not_prs_to_main(tmp_path, env):
     assert not (tmp_path / ".rocm-src").exists()
 
 
-def test_check_passes_a_pr_that_keeps_mains_stack(tmp_path):
-    # Requirements change the runtime only: main's stack is the PR's.
-    status, stderr, calls = check(
-        tmp_path, CHANGED="requirements/rocm.txt", FAILURE="registry"
-    )
-    assert status == 0, stderr
-    assert not any(a.startswith("annotate") for a in annotations(calls))
-
-
-def test_check_passes_a_pr_that_changes_the_recipe(tmp_path):
-    # promote would refuse its images: main rebuilds the stack after the merge.
-    status, stderr, calls = check(tmp_path, RECIPE_DIFF="1", FAILURE="registry")
+@pytest.mark.parametrize(
+    "edit", ["s/layers: zstd-3/layers: zstd-5/", "s|rocm) SDF=docker/|rocm) SDF=x/|"]
+)
+def test_check_passes_a_pr_that_changes_how_the_stack_is_keyed(tmp_path, edit):
+    # promote keys with main's build.sh: main rebuilds the stack after the merge.
+    status, stderr, calls = check(tmp_path, BUILD_SH_EDIT=edit, FAILURE="registry")
     assert status == 0, stderr
     (note,) = annotations(calls)
-    assert "--style info" in note and "recipe differs from main" in note
+    assert "--style info" in note and "changes how images are keyed" in note
+
+
+def test_check_holds_a_pr_that_changes_only_the_runtime_key(tmp_path):
+    # promote gives the stack the PR's key: only main's runtime differs.
+    edit = "s|tools/install_torchcodec_rocm.sh|tools/other.sh|"
+    status, stderr, calls = check(tmp_path, BUILD_SH_EDIT=edit)
+    assert status == 3, stderr
+
+
+@pytest.mark.parametrize(
+    ("env", "notes"),
+    [
+        # Requirements change the runtime only: main's stack is the PR's.
+        ({"CHANGED": "requirements/rocm.txt"}, []),
+        (
+            {"MAIN_CHANGED": STACK_CHANGE, "MAIN_BLOB": "changed"},
+            ["annotation remove --context rocm-image-cache"],
+        ),
+    ],
+)
+def test_check_passes_a_pr_whose_stack_main_already_has(tmp_path, env, notes):
+    status, stderr, calls = check(tmp_path, FAILURE="registry", **env)
+    assert status == 0, stderr
+    assert annotations(calls) == notes
+
+
+@pytest.mark.parametrize(
+    "main_changed", [STACK_CHANGE, "tools/vllm-rocm/therock_wheels.py"]
+)
+def test_check_fails_a_pr_behind_a_stack_change_on_main(tmp_path, main_changed):
+    # Even when it is cached: the merge gets a stack no build of this PR made.
+    status, stderr, calls = check(
+        tmp_path,
+        MAIN_CHANGED=main_changed,
+        existing=(
+            f"rocm/vllm-ci:stack-rocm-{PR_KS}-wheels",
+            f"rocm/vllm-ci:stack-rocm-{PR_KS}",
+        ),
+    )
+    assert status == 4, stderr
+    (note,) = annotations(calls)
+    assert "--style error" in note and "Merge main into this branch" in note
 
 
 def test_check_passes_a_pr_whose_stack_main_has(tmp_path):
@@ -839,6 +887,8 @@ def test_check_passes_a_pr_whose_stack_main_has(tmp_path):
     assert status == 0, stderr
     # A retry after promote clears the failed attempt's note.
     assert annotations(calls) == ["annotation remove --context rocm-image-cache"]
+    # The bot checks it again when main changes the stack.
+    assert "meta rocm-stack-cached true" in calls
     assert not any(c.startswith(("builder", "bake", "create")) for c in calls)
 
 
@@ -864,7 +914,7 @@ def test_check_fails_a_pr_whose_stack_is_not_cached(tmp_path, existing):
     ("env", "status"),
     [
         ({"FAILURE": "fetch-main"}, 1),
-        ({"RECIPE_DIFF": "128"}, 1),
+        ({"FAILURE": "merge-base"}, 1),
         ({"FAILURE": "registry"}, 75),
     ],
 )

@@ -33,7 +33,11 @@ steps:
       - bash .buildkite/scripts/rocm/build.sh rocm check
     timeout_in_minutes: 20
     retry:
+      manual:
+        permit_on_passed: true  # the bot retries it when main changes the stack
       automatic:
+        - exit_status: 75  # Registry error (build.sh)
+          limit: 1
         - exit_status: -1  # Agent was lost
           limit: 1
         - exit_status: -10  # Agent was lost

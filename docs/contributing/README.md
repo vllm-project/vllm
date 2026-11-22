@@ -382,7 +382,8 @@ review process:
   image is cached for `main`, which its `ROCm image cache` CI step checks. A
   maintainer or trusted reviewer comments `/ci run` (or approves the commit,
   then someone comments `/ci run`), and when that commit's CI build finishes,
-  the bot caches the image and retries the step.
+  the bot caches the image and retries the step. If `main` changes those files
+  after the PR's merge base, the step fails until the PR merges `main`.
 - Retrying or cancelling builds does not check branch freshness.
 - Apart from that merge, these commands do not modify your branch or enforce
   merge requirements. Direct Buildkite launches are outside this workflow.

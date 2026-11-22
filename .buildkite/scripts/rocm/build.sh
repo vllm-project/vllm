@@ -14,9 +14,9 @@
 #   release  Release image + wheels from source into the release repo (release pipeline, AWS agents).
 #   release-base  Only the release stack and runtime (a serialized step, so one run builds a new key).
 #   promote  Copy the stack, runtime and test-deps images a PR's CI built into the trusted repo
-#            (after a trusted /ci run or approval), so main reuses them after the merge
-#            instead of rebuilding them.
-#   check    Fail (exit 3) a PR to main whose new stack is not in the trusted repo yet.
+#            (after a trusted /ci run or approval), so main reuses them instead of rebuilding them.
+#   check    Fail a PR to main whose new stack is not in the trusted repo yet (exit 3), or
+#            whose merge base is behind a stack change on main (exit 4: merge main).
 #
 # Stack: rocm (TheRock ROCm 10). Force a stack rebuild: bump ARG REFRESH
 #        in docker/Dockerfile.rocm_base
@@ -454,7 +454,7 @@ case $MODE in
     # stack into $TRUSTED, so main need not rebuild it after the merge. A convenience gate, not a
     # security boundary.
     git fetch -q --filter=tree:0 origin "$MAIN" \
-      && mb=$(git merge-base HEAD FETCH_HEAD) && [[ -n $mb ]] \
+      && main=$(git rev-parse FETCH_HEAD) && mb=$(git merge-base HEAD "$main") && [[ -n $mb ]] \
       || { echo "cannot read main's merge base" >&2; exit 1; }
     keys=$(keys_at "$mb") || { echo "cannot compute the keys of $mb" >&2; exit 1; }
     read -r mKs _ <<<"$keys"
@@ -469,15 +469,31 @@ case $MODE in
     if [[ $Ks == "$mKs" ]]; then
       echo "This PR does not change the ROCm stack" >&2; exit 0
     fi
-    rc=0; git diff --quiet "$mb" HEAD -- .buildkite/scripts/rocm/build.sh docker/docker-bake-rocm.hcl \
-      || rc=$?
-    if ((rc == 1)); then
-      note info "ROCm image cache: recipe differs from main: main rebuilds the stack after merge"
+    keys=$(keys_at "$main") || { echo "cannot compute the keys of $main" >&2; exit 1; }
+    read -r tKs _ <<<"$keys"
+    if [[ $tKs == "$Ks" ]]; then
+      echo "$MAIN already has this PR's stack" >&2; note; exit 0
+    fi
+    # Main changed the stack too: the merge gets a stack that no build of this PR made.
+    if [[ $tKs != "$mKs" ]]; then
+      note error "ROCm image cache: $MAIN changed the ROCm stack since this branch did. Merge $MAIN into this branch (a maintainer's /ci run does it), so CI builds and caches the combined stack."
+      exit 4
+    fi
+    # promote keys the stack with main's build.sh, so a PR that changes how it computes Ks is never
+    # cached. rocm_key_format in run_ci_command.py reads the same lines.
+    keyfmt() {
+      # shellcheck disable=SC2016  # sed matches a literal $STACK
+      git show "$1:.buildkite/scripts/rocm/build.sh" | sed -n '/^case \$STACK in/,/^esac/p;/^_trw=/,/^  Kr=/p'
+    }
+    if ! kf=$(keyfmt "$mb") || ! hf=$(keyfmt HEAD); then echo "cannot read keys_at" >&2; exit 1; fi
+    if [[ $kf != "$hf" ]]; then
+      note info "ROCm image cache: this PR changes how images are keyed: $MAIN rebuilds the stack after merge"
       exit 0
     fi
-    ((rc == 0)) || { echo "cannot diff the recipe against $mb" >&2; exit 1; }
     if d=$(digest "$TRUSTED:stack-$STACK-$Ks") && d=$(digest "$TRUSTED:stack-$STACK-$Ks-wheels"); then
-      echo "$TRUSTED has this PR's stack" >&2; note; exit 0
+      echo "$TRUSTED has this PR's stack" >&2; note
+      meta set rocm-stack-cached true || true   # run_ci_command.py rechecks it when main moves
+      exit 0
     else
       rc=$?; ((rc == 1)) || exit $rc   # a registry error is not a miss
     fi
@@ -487,14 +503,13 @@ case $MODE in
 
   promote)
     # ROCM_PROMOTE_IMAGES are the digests #ROCM_PROMOTE_PR's CI build of
-    # ROCM_PROMOTE_SHA pushed. Copy them here under the keys main's keys_at gives that commit, if
-    # it was built with main's recipe; main reuses each once it gets that key. The runtime and
-    # test-deps are copied only over a parent of #ROCM_PROMOTE_PR's, never over one main built: an
-    # existing tag holding the recorded digest is an earlier attempt's copy, so a retry finishes the
-    # chain instead of stopping at it.
+    # ROCM_PROMOTE_SHA pushed. Copy them here under the keys main's keys_at gives that commit;
+    # main reuses each once it gets that key. Like main's own images, they are keyed on their
+    # inputs, not on build.sh or the bake file: a recipe change that must rebuild the stack bumps
+    # ARG REFRESH. The runtime and test-deps are copied only over a parent of #ROCM_PROMOTE_PR's,
+    # never over one main built: an existing tag holding the recorded digest is an earlier
+    # attempt's copy, so a retry finishes the chain instead of stopping at it.
     git fetch -q origin "${ROCM_PROMOTE_SHA:?}"
-    git diff --quiet HEAD "$ROCM_PROMOTE_SHA" -- .buildkite/scripts/rocm/build.sh docker/docker-bake-rocm.hcl \
-      || { echo "$ROCM_PROMOTE_SHA builds with another build.sh or bake file than main" >&2; exit 1; }
     keys=$(keys_at "$ROCM_PROMOTE_SHA") || { echo "cannot compute the keys of $ROCM_PROMOTE_SHA" >&2; exit 1; }
     read -r pKs pKr <<<"$keys"
     copied=0
@@ -519,7 +534,7 @@ case $MODE in
         echo "#$ROCM_PROMOTE_PR's CI recorded no $tag" >&2; exit 1
       fi
       echo "--- :docker: Copying $ref to $TRUSTED:$tag" >&2
-      docker buildx imagetools create -t "$TRUSTED:$tag" "$ref" || exit 75
+      docker buildx imagetools create --prefer-index=false -t "$TRUSTED:$tag" "$ref" || exit 75
       copied=1
     done
     ;;

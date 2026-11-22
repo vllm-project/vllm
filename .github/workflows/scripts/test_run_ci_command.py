@@ -3,6 +3,7 @@
 
 import io
 import json
+import subprocess
 import unittest
 import urllib.error
 from pathlib import Path
@@ -23,6 +24,7 @@ from run_ci_command import (
     COMMAND_RUN_CI_ALL,
     COMMAND_RUN_CI_NIGHTLY,
     RETRY_STATES,
+    ROCM_BUILD_SH,
     ROCM_CACHE_CHECK_KEY,
     ROCM_CACHE_STEP_KEY,
     ROCM_CACHE_YAML,
@@ -46,9 +48,11 @@ from run_ci_command import (
     parse_command,
     parse_trusted_users,
     pipeline_for_command,
+    recheck_rocm_stack_prs,
     reconcile_rocm_cache,
     reply_unrecognized_command,
     resolve_workflow_run_pr,
+    rocm_key_format,
     run,
     select_latest_build,
 )
@@ -1821,6 +1825,14 @@ def promote_build(**overrides: Any) -> dict[str, Any]:
     }
 
 
+def head_ci(checks: list[dict[str, Any]], *builds: Any, **kwargs: Any) -> Any:
+    """CI with source build 10, the given builds, and PR head build 20."""
+    head = rocm_build(number=20, commit="0123456789abcdef", meta_data={})
+    return FakeRocmBuildkite(
+        [rocm_build(), *builds, head], {10: [REFRESH_PASSED], 20: checks}, **kwargs
+    )
+
+
 class RocmImageCacheTest(unittest.TestCase):
     def reconcile(
         self,
@@ -1849,10 +1861,16 @@ class RocmImageCacheTest(unittest.TestCase):
 
     def test_ci_run_by_a_trusted_user_starts_caching(self) -> None:
         """Write access and CI_TRUSTED_USERS both make a /ci run cacheable."""
-        cases = {"write": ("write", ""), "trusted users": ("read", "Reviewer")}
-        for name, (permission, trusted_users) in cases.items():
+        bake = [*STACK_PR_FILES, "docker/docker-bake-rocm.hcl"]
+        cases = {
+            "write": ("write", "", STACK_PR_FILES),
+            "trusted users": ("read", "Reviewer", STACK_PR_FILES),
+            # Like main's own, its images are keyed on their inputs, not the recipe.
+            "recipe change": ("write", "", bake),
+        }
+        for name, (permission, trusted_users, files) in cases.items():
             with self.subTest(name):
-                github = FakeRocmGitHub(permission=permission)
+                github = FakeRocmGitHub(permission=permission, files=files)
                 # An earlier build this reviewer requested already pushed the stack.
                 ci = FakeRocmBuildkite([rocm_build()], {10: [REFRESH_PASSED]})
 
@@ -1868,6 +1886,25 @@ class RocmImageCacheTest(unittest.TestCase):
                 self.assertEqual(promote["branch"], "main")
                 self.assertIn("cached into `main` automatically", github.comments[0])
                 self.assertIn("`ROCm image cache` step", github.comments[0])
+
+    def test_ci_run_after_an_approval_caches_the_build_ci_already_ran(self) -> None:
+        head = "0123456789abcdef"
+        approval = {"commit_id": head, "state": "APPROVED", "user": {"login": "x"}}
+        github = FakeRocmGitHub(
+            permission="read",
+            permissions={"x": "write"},
+            review_decision="APPROVED",
+            reviews=[approval],
+        )
+        build = rocm_build(commit=head, env={"VLLM_CI_TRIGGERED_BY": "author"})
+        ci = FakeRocmBuildkite([build], {10: [REFRESH_PASSED]})
+
+        run(make_event(COMMAND_RUN_CI, "author"), github, ci, ci_buildkite=ci)
+
+        # The repeat run is refused, but the approval vouches for the build.
+        self.assertIn("already ran on this commit", github.comments[0])
+        (promote,) = ci.created_builds
+        self.assertEqual(promote["env"]["ROCM_PROMOTE_SHA"], head)
 
     def test_ci_run_by_an_untrusted_author_asks_for_approval_or_a_run(self) -> None:
         github = FakeRocmGitHub(
@@ -1997,9 +2034,6 @@ class RocmImageCacheTest(unittest.TestCase):
 
     def test_reconcile_leaves_prs_it_cannot_cache_alone(self) -> None:
         cases = {
-            "recipe": FakeRocmGitHub(
-                files=[*STACK_PR_FILES, "docker/docker-bake-rocm.hcl"]
-            ),
             "closed": FakeRocmGitHub(pr=make_pr(state="closed")),
             "stack unchanged": FakeRocmGitHub(files=["vllm/foo.py"]),
         }
@@ -2011,24 +2045,124 @@ class RocmImageCacheTest(unittest.TestCase):
 
                 self.assertEqual(ci.created_builds, [])
 
-    def test_reconcile_waits_for_a_running_promote_build(self) -> None:
-        github = FakeRocmGitHub()
-        head = rocm_build(number=20, commit="0123456789abcdef", meta_data={})
-        ci = FakeRocmBuildkite(
-            [rocm_build(), promote_build(state="running", finished_at=None), head],
-            {10: [REFRESH_PASSED], 20: [gate_job()]},
+    def test_key_format_reads_the_lines_build_sh_check_compares(self) -> None:
+        build_sh = (REPO_ROOT / ROCM_BUILD_SH).read_text()
+        keyfmt = r"/^case \$STACK in/,/^esac/p;/^_trw=/,/^  Kr=/p"
+        self.assertIn(keyfmt, build_sh)
+        sed = subprocess.run(
+            ["sed", "-n", keyfmt],
+            input=build_sh,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(
+            sorted(rocm_key_format(build_sh)), sorted(sed.stdout.split("\n")[:-1])
+        )
+        self.assertIn(
+            '  Ks=$( { echo "layers: zstd-3, mtimes kept"',
+            "\n".join(rocm_key_format(build_sh)),
         )
 
-        self.reconcile(github, ci)
+    def test_stack_inputs_are_the_files_build_sh_keys_the_stack_on(self) -> None:
+        def paths(text: str) -> set[str]:
+            for char in "=\"'();":
+                text = text.replace(char, " ")
+            return {w for w in text.split() if w.startswith(("docker/", "tools/"))}
 
-        self.assertEqual((ci.created_builds, ci.retried_jobs), ([], []))
+        build_sh = (REPO_ROOT / ROCM_BUILD_SH).read_text()
+        workflow = (REPO_ROOT / ".github/workflows/rocm-image-cache.yml").read_text()
+        key_paths = paths("\n".join(rocm_key_format(build_sh)))
+        self.assertEqual(key_paths, set(ROCM_STACK_INPUTS))
+        self.assertEqual(paths(workflow), set(ROCM_STACK_INPUTS))
+
+    def test_pr_that_changes_how_the_stack_is_keyed_is_not_cached(self) -> None:
+        build_sh = (REPO_ROOT / ROCM_BUILD_SH).read_text()
+        cases = {
+            "stack key": (build_sh.replace("zstd-3", "zstd-5"), False),
+            "runtime key only": (
+                build_sh.replace("rust-toolchain.toml", "x.toml"),
+                True,
+            ),
+        }
+        for name, (head_build_sh, cached) in cases.items():
+            with self.subTest(name):
+                github = FakeRocmGitHub(
+                    files=[*STACK_PR_FILES, ROCM_BUILD_SH],
+                    pr=make_pr(labels=[{"name": "ready"}]),
+                )
+                github.file_texts.update(
+                    {
+                        (ROCM_BUILD_SH, "merge-base-of-0123456789abcdef"): build_sh,
+                        (ROCM_BUILD_SH, "0123456789abcdef"): head_build_sh,
+                    }
+                )
+                ci = FakeRocmBuildkite([rocm_build()], {10: [REFRESH_PASSED]})
+
+                self.reconcile(github, ci)
+                run(make_event(COMMAND_RUN_CI, "author"), github, ci, ci_buildkite=ci)
+
+                promotes = [b for b in ci.created_builds if b["branch"] == "main"]
+                self.assertEqual(len(promotes), int(cached))
+                promise = "cached into `main` automatically"
+                self.assertEqual(promise in github.comments[0], cached)
+
+    def test_main_stack_change_rechecks_open_prs_whose_check_passed(self) -> None:
+        head = "0123456789abcdef"
+        github = FakeRocmGitHub()
+        github.prs.update(
+            {
+                7: make_pr(number=7, state="closed"),
+                8: make_pr(number=8, head={"sha": "moved"}),
+                9: make_pr(number=9, base={"ref": "release"}),
+            }
+        )
+        cached = {"rocm-stack-cached": "true"}
+
+        def marked(number: int, pr: int, **overrides: Any) -> dict[str, Any]:
+            return rocm_build(
+                number=number,
+                commit=head,
+                meta_data=cached,
+                pull_request={"id": str(pr)},
+                **overrides,
+            )
+
+        passed = [gate_job(state="passed")]
+        ci = FakeRocmBuildkite(
+            [
+                marked(20, 42),
+                marked(19, 42),  # older build of the same PR
+                marked(21, 7),
+                marked(22, 8),
+                marked(23, 9),
+                marked(24, 42, source="webhook"),
+                rocm_build(number=25, commit=head),  # not marked
+            ],
+            {n: passed for n in range(19, 26)},
+        )
+
+        recheck_rocm_stack_prs(github, ci)
+
+        self.assertEqual(ci.retried_jobs, [(20, "gate")])
+        for jobs, error in (
+            ([gate_job()], None),
+            (passed, ApiError(422, "Job cannot be retried")),
+        ):
+            with self.subTest(jobs=jobs, error=error):
+                ci = FakeRocmBuildkite([marked(20, 42)], {20: jobs}, error)
+
+                self.assertEqual(recheck_rocm_stack_prs(github, ci), [])
+        # A deleted PR does not stop the others.
+        ci = FakeRocmBuildkite([marked(21, 404), marked(20, 42)], {20: passed})
+        self.assertEqual(recheck_rocm_stack_prs(github, ci), [rocm_build()["web_url"]])
 
     def test_reconcile_retries_only_a_gate_that_failed_before_the_promote(
         self,
     ) -> None:
         github = FakeRocmGitHub()
-        head = rocm_build(number=20, commit="0123456789abcdef", meta_data={})
         other = {**gate_job(), "id": "other", "step_key": "basic-correctness"}
+        running = promote_build(state="running", finished_at=None)
         cases = {
             "before": ([gate_job(), other], [(20, "gate")]),
             # It read the registry before the promote pushed, but ended after.
@@ -2036,13 +2170,14 @@ class RocmImageCacheTest(unittest.TestCase):
             "after": ([gate_job(started_at="6", finished_at="7")], []),
             "passed": ([gate_job(state="passed")], []),
             "none": ([], []),
+            # main would never use this stack: the merge gets another one.
+            "main moved": ([gate_job(exit_status=4)], []),
+            "promote running": ([gate_job()], [], [running]),
+            "passed, no promote": ([gate_job(state="passed")], [], []),
         }
-        for name, (jobs, retried) in cases.items():
+        for name, (jobs, retried, *promotes) in cases.items():
             with self.subTest(name):
-                ci = FakeRocmBuildkite(
-                    [rocm_build(), promote_build(), head],
-                    {10: [REFRESH_PASSED], 20: jobs},
-                )
+                ci = head_ci(jobs, *(promotes[0] if promotes else [promote_build()]))
 
                 self.reconcile(github, ci)
 
@@ -2051,12 +2186,8 @@ class RocmImageCacheTest(unittest.TestCase):
 
     def test_reconcile_tolerates_an_already_retried_gate(self) -> None:
         github = FakeRocmGitHub()
-        head = rocm_build(number=20, commit="0123456789abcdef", meta_data={})
-        ci = FakeRocmBuildkite(
-            [rocm_build(), promote_build(), head],
-            {10: [REFRESH_PASSED], 20: [gate_job()]},
-            retry_error=ApiError(422, "Job has already been retried"),
-        )
+        error = ApiError(422, "Job has already been retried")
+        ci = head_ci([gate_job()], promote_build(), retry_error=error)
 
         self.assertIn("Could not retry", self.reconcile(github, ci))
 
@@ -2087,10 +2218,12 @@ class RocmImageCacheTest(unittest.TestCase):
             ),
             "old branch": (STACK_PR_FILES, "steps: []\n", ["basic-test"]),
             "stack unchanged": (["vllm/foo.py"], head_yaml, ["basic-test"]),
+            "not to main": (STACK_PR_FILES, head_yaml, ["basic-test"], "v0.20"),
         }
-        for name, (files, pipeline_yaml, step_keys) in cases.items():
+        for name, (files, pipeline_yaml, step_keys, *base) in cases.items():
             with self.subTest(name):
-                github = FakeRocmGitHub(files=files)
+                pr = make_pr(base={"ref": base[0] if base else "main"})
+                github = FakeRocmGitHub(files=files, pr=pr)
                 github.file_texts[(ROCM_CACHE_YAML, "0123456789abcdef")] = pipeline_yaml
                 buildkite = FakeBuildkite([[], [source_build]], [failed])
 
@@ -2110,21 +2243,6 @@ class RocmImageCacheTest(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertTrue(defines_step_key(pipeline_yaml, key))
         self.assertFalse(defines_step_key(pipeline_yaml, "rocm-image-cache"))
-
-    def test_ci_run_on_a_recipe_change_promises_no_cache(self) -> None:
-        for permission in ("write", "read"):
-            with self.subTest(permission=permission):
-                github = FakeRocmGitHub(
-                    files=[*STACK_PR_FILES, "docker/docker-bake-rocm.hcl"],
-                    permission=permission,
-                    pr=make_pr(labels=[{"name": "ready"}]),
-                )
-                ci = FakeRocmBuildkite()
-
-                run(make_event(COMMAND_RUN_CI, "author"), github, ci, ci_buildkite=ci)
-
-                self.assertIn("`main` rebuilds the ROCm base image", github.comments[0])
-                self.assertNotIn("@tjtanaa", github.comments[0])
 
     def test_reconcile_ignores_promote_builds_the_bot_did_not_create(self) -> None:
         cases = {
@@ -2165,18 +2283,18 @@ class RocmImageCacheTest(unittest.TestCase):
                 [review("reviewer", "APPROVED"), review("reviewer", "COMMENTED")],
                 1,
             ),
+            "CI_TRUSTED_USERS build": ([], 1, "Helper"),
+            "read user's build": ([], 0, "Random"),
         }
-        for name, (reviews, created) in cases.items():
+        for name, (reviews, created, *actor) in cases.items():
             with self.subTest(name):
                 github = FakeRocmGitHub(
                     permission="read",
                     permissions={"reviewer": "write"},
                     reviews=reviews,
                 )
-                ci = FakeRocmBuildkite(
-                    [rocm_build(env={"VLLM_CI_TRIGGERED_BY": "author"})],
-                    {10: [REFRESH_PASSED]},
-                )
+                env = {"VLLM_CI_TRIGGERED_BY": (actor or ["author"])[0]}
+                ci = FakeRocmBuildkite([rocm_build(env=env)], {10: [REFRESH_PASSED]})
 
                 self.reconcile(github, ci, trusted_users={"helper"})
 
@@ -2202,19 +2320,6 @@ class RocmImageCacheTest(unittest.TestCase):
                 promotes = [b["env"]["ROCM_PROMOTE_IMAGES"] for b in ci.created_builds]
                 self.assertEqual(promotes, ["s@d1 w@d2"] * created)
 
-    def test_reconcile_trusts_ci_trusted_users_builds(self) -> None:
-        for trusted_users, created in (({"helper"}, 1), (set(), 0)):
-            with self.subTest(trusted_users=trusted_users):
-                github = FakeRocmGitHub(permission="read")
-                ci = FakeRocmBuildkite(
-                    [rocm_build(env={"VLLM_CI_TRIGGERED_BY": "Helper"})],
-                    {10: [REFRESH_PASSED]},
-                )
-
-                self.reconcile(github, ci, trusted_users=trusted_users)
-
-                self.assertEqual(len(ci.created_builds), created)
-
     def test_status_of_a_pr_build_reconciles_its_pr(self) -> None:
         github = FakeRocmGitHub()
         ci = FakeRocmBuildkite([rocm_build()], {10: [REFRESH_PASSED]})
@@ -2230,11 +2335,7 @@ class RocmImageCacheTest(unittest.TestCase):
 
     def test_status_of_a_promote_build_retries_its_prs_check(self) -> None:
         github = FakeRocmGitHub()
-        head = rocm_build(number=20, commit="0123456789abcdef", meta_data={})
-        ci = FakeRocmBuildkite(
-            [rocm_build(), promote_build(), head],
-            {10: [REFRESH_PASSED], 20: [gate_job()]},
-        )
+        ci = head_ci([gate_job()], promote_build())
         event = {
             "sha": "merge-base-of-fedcba9876543210",
             "target_url": "https://buildkite.com/vllm/ci/builds/501",
@@ -2274,10 +2375,7 @@ class RocmImageCacheTest(unittest.TestCase):
 
     def test_reconcile_restarts_a_failed_promote_then_asks_for_help(self) -> None:
         github = FakeRocmGitHub()
-        head = rocm_build(number=20, commit="0123456789abcdef", meta_data={})
-        ci = FakeRocmBuildkite(
-            [rocm_build(), head], {10: [REFRESH_PASSED], 20: [gate_job()]}
-        )
+        ci = head_ci([gate_job()])
 
         for state in ("failed", "canceled", "failed", "failed"):
             self.reconcile(github, ci)
@@ -2288,41 +2386,6 @@ class RocmImageCacheTest(unittest.TestCase):
         self.assertEqual(ci.retried_jobs, [])
         (comment,) = github.comments
         self.assertIn("failed 3 times, last in https://buildkite.example/", comment)
-
-    def test_reconcile_stops_once_the_head_check_passed(self) -> None:
-        github = FakeRocmGitHub()
-        head = rocm_build(number=20, commit="0123456789abcdef", meta_data={})
-        ci = FakeRocmBuildkite(
-            [rocm_build(), head],
-            {10: [REFRESH_PASSED], 20: [gate_job(state="passed")]},
-        )
-
-        self.assertIn("check passed", self.reconcile(github, ci))
-
-        self.assertEqual(ci.created_builds, [])
-
-    def test_ci_retry_on_a_pr_to_another_branch_skips_the_gate(self) -> None:
-        source_build = {
-            "commit": "old-commit",
-            "finished_at": "2",
-            "number": 122,
-            "pull_request": {"id": 42},
-            "state": "failed",
-            "web_url": "https://buildkite.example/builds/122",
-        }
-        failed = [{"state": "failed", "step_key": "basic-test", "type": "script"}]
-        github = FakeRocmGitHub(pr=make_pr(base={"ref": "v0.20"}))
-        github.file_texts[(ROCM_CACHE_YAML, "0123456789abcdef")] = (
-            "steps:\n  - key: rocm-image-cache-check\n"
-        )
-        buildkite = FakeBuildkite([[], [source_build]], [failed])
-
-        run(make_event(COMMAND_RETRY_FAILED), github, buildkite)
-
-        (payload,) = buildkite.created_builds
-        self.assertEqual(
-            json.loads(payload["env"]["VLLM_CI_ONLY_STEP_KEYS"]), ["basic-test"]
-        )
 
     def test_build_pagination_is_bounded(self) -> None:
         full = FakeBuildkite([[rocm_build()] * 100] * 101)
