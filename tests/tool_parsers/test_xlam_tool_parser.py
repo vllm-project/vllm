@@ -6,7 +6,11 @@ from collections.abc import Generator
 
 import pytest
 
-from tests.tool_parsers.utils import get_function_delta
+from tests.tool_parsers.utils import (
+    get_function_delta,
+    run_tool_extraction,
+    run_tool_extraction_streaming,
+)
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
@@ -105,6 +109,62 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content == model_output
+
+
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        "[1] Paris is the capital of France.",
+        "[See the docs](https://docs.vllm.ai) for details.",
+        "[ 1] spaced citation",
+        "[TOOL] Paris is nice.",
+        "[1, 2, 3]",
+        "[]",
+        '[\u00a0{"name": "f"}] uses a no-break space.',
+    ],
+)
+@pytest.mark.parametrize("streaming", [False, True])
+def test_plain_text_starting_with_bracket(xlam_tool_parser, model_output, streaming):
+    """A reply that starts with "[" but not with an array of objects is content."""
+    content, tool_calls = run_tool_extraction(
+        xlam_tool_parser, model_output, streaming=streaming
+    )
+    assert tool_calls == []
+    assert content == model_output
+
+
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        '[ {"name": "f", "arguments": {"a": 1}}]',
+        '[\n  {"name": "f", "arguments": {"a": 1}}\n]',
+        '[TOOL_CALLS][{"name": "f", "arguments": {"a": 1}}]',
+    ],
+)
+@pytest.mark.parametrize("streaming", [False, True])
+def test_tool_call_array_prefixes(xlam_tool_parser, model_output, streaming):
+    """Whitespace after "[" and a [TOOL_CALLS] prefix still open a tool call."""
+    content, tool_calls = run_tool_extraction(
+        xlam_tool_parser,
+        model_output,
+        streaming=streaming,
+        assert_one_tool_per_delta=False,
+    )
+    assert not content
+    assert [
+        (t.function.name, json.loads(t.function.arguments)) for t in tool_calls
+    ] == [("f", {"a": 1})]
+
+
+def test_streaming_content_after_tool_call_is_not_resent(xlam_tool_parser):
+    """Content that follows a streamed tool call does not repeat the call text."""
+    reconstructor = run_tool_extraction_streaming(
+        xlam_tool_parser,
+        ['</think>{"name": "f", "arguments": {}}', " ok"],
+        assert_one_tool_per_delta=False,
+    )
+    assert [t.function.name for t in reconstructor.tool_calls] == ["f"]
+    assert reconstructor.other_content == " ok"
 
 
 @pytest.mark.parametrize(

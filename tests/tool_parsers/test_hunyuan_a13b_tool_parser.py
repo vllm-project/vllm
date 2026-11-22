@@ -179,6 +179,57 @@ def test_hunyuan_a13b_tool_parser_streaming(model_deltas, expected_tool_calls):
     assert reconstructor.tool_calls == expected_tool_calls
 
 
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        "[1] Paris is the capital of France.",
+        "[See the docs](https://docs.vllm.ai) for details.",
+        "[ 1] spaced citation",
+        "[\n\nSee the list below.",
+        "[1, 2, 3]",
+        "[]",
+        "<tool_calls>[1] text",
+        '[\u00a0{"name": "f"}] uses a no-break space.',
+    ],
+)
+@pytest.mark.parametrize("streaming", [False, True])
+def test_hunyuan_a13b_tool_parser_plain_text_starting_with_bracket(
+    default_tokenizer, model_output, streaming
+):
+    """A reply that starts with "[" but not with an array of objects is content."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("hunyuan_a13b")(
+        default_tokenizer
+    )
+    content, tool_calls = run_tool_extraction(
+        tool_parser, model_output, streaming=streaming
+    )
+    assert tool_calls == []
+    assert content == model_output
+
+
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        '<tool_calls>[ {"name": "f", "arguments": {"a": 1}}]</tool_calls>',
+        '<tool_calls>[\n  {"name": "f", "arguments": {"a": 1}}\n]</tool_calls>',
+    ],
+)
+@pytest.mark.parametrize("streaming", [False, True])
+def test_hunyuan_a13b_tool_parser_whitespace_after_bracket(
+    default_tokenizer, model_output, streaming
+):
+    """Whitespace between "[" and "{" still opens a tool call."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("hunyuan_a13b")(
+        default_tokenizer
+    )
+    _, tool_calls = run_tool_extraction(
+        tool_parser, model_output, streaming=streaming, assert_one_tool_per_delta=False
+    )
+    assert [
+        (t.function.name, json.loads(t.function.arguments)) for t in tool_calls
+    ] == [("f", {"a": 1})]
+
+
 def test_hunyuan_a13b_tool_parser_non_ascii():
     mock_tokenizer = MagicMock()
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("hunyuan_a13b")(
