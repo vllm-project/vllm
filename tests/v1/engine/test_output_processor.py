@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 import math
 import time
 from unittest.mock import MagicMock, Mock
@@ -214,6 +215,35 @@ def test_incremental_detokenization(
 
     assert output_processor.get_num_unfinished_requests() == 0
     assert not output_processor.has_unfinished_requests()
+
+
+def test_request_lists_are_untracked():
+    """A request's prompt and output token lists live as long as the request
+    and grow with it, so they are hidden from the cyclic GC."""
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    prompt_tokens = [1, 2, 3, 4]
+    request = EngineCoreRequest(
+        request_id="request-0-int",
+        external_req_id="request-0",
+        prompt_token_ids=prompt_tokens,
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(detokenize=False),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, prompt=None)
+    state = output_processor.request_states["request-0-int"]
+    output_processor.process_outputs(
+        [EngineCoreOutput(request_id="request-0-int", new_token_ids=[42])]
+    )
+
+    assert state.prompt_token_ids is prompt_tokens
+    assert not gc.is_tracked(prompt_tokens)
+    assert state.detokenizer.token_ids == [42]
+    assert not gc.is_tracked(state.detokenizer.token_ids)
 
 
 @pytest.mark.parametrize("do_remote_prefill", [True, False])

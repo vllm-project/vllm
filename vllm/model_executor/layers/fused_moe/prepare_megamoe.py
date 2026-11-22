@@ -39,7 +39,8 @@ def _quantize_fp8_groups(
     amax = tl.max(hidden_groups, axis=2)
     amax = tl.maximum(amax, 1.0e-4)
 
-    scale = amax / 448.0
+    # Divide correctly rounded like DeepGEMM's cast, so FP32 scales match bit for bit.
+    scale = tl.math.div_rn(amax, 448.0)
     if USE_UE8M0:
         scale_bits = scale.to(tl.uint32, bitcast=True)
         scale_exp = ((scale_bits >> 23) & 0xFF) + ((scale_bits & 0x7FFFFF) != 0).to(
@@ -52,21 +53,21 @@ def _quantize_fp8_groups(
         quant_scale = scale
 
     hidden_groups = tl.reshape(hidden, [BLOCK_M, num_groups, GROUP_K])
-    scaled = hidden_groups * (1.0 / quant_scale)[:, :, None]
+    scaled = hidden_groups * tl.math.div_rn(1.0, quant_scale)[:, :, None]
     scaled = tl.reshape(scaled, [BLOCK_M, BLOCK_K])
     return scaled.to(tl.float8e4nv), quant_scale, scale_exp
 
 
 @triton.jit
 def _pack_bytes(values, NUM_BYTES: tl.constexpr):
-    """Pack the last dim of ``[..., NUM_BYTES]`` byte values into int32 words."""
+    """Pack the last dim of `[..., NUM_BYTES]` byte values into int32 words."""
     offsets = tl.arange(0, NUM_BYTES)
     return tl.sum(values.to(tl.uint32) << (offsets * 8), axis=-1).to(tl.int32)
 
 
 @triton.jit
 def _shared_sf_row(token_id, SHARED_BLOCK_M: tl.constexpr):
-    """Row of ``token_id`` in the shared-expert MN-major UTCCP scale pages."""
+    """Row of `token_id` in the shared-expert MN-major UTCCP scale pages."""
     m_block_id = token_id // SHARED_BLOCK_M
     m_in_block = token_id % SHARED_BLOCK_M
     aligned_block_m: tl.constexpr = triton.cdiv(SHARED_BLOCK_M, 128) * 128
@@ -250,27 +251,32 @@ def _prepare_megamoe_inputs_kernel(
                 mask=token_mask,
             )
         else:
+            # FP32 scales; the bitcast fits a float32 or int32 buffer.
             sf_offset = tl.arange(0, num_groups)
             tl.store(
                 x_sf
                 + token_id[:, None] * x_sf_stride_m
                 + k_block_id * x_sf_stride_k
                 + sf_offset[None, :],
-                quant_scale,
+                quant_scale.to(x_sf.dtype.element_ty, bitcast=True),
                 mask=token_mask[:, None],
             )
 
-        # DeepGEMM's SM100 shared-expert TMA loads require the activation scales
-        # in an MN-major layout whose row permutation depends on the MegaMoE
-        # scheduler's runtime BLOCK_M. Write that view while the packed UE8M0 scale
-        # is already resident, avoiding another kernel and temporary tensor.
-        if USE_UE8M0 and shared_x_sf is not None:
+        # Shared-expert TMA loads need MN-major scales permuted by the runtime
+        # BLOCK_M; write them here while resident to skip an extra kernel.
+        if shared_x_sf is not None:
+            if USE_UE8M0:
+                shared_scale = packed_scale
+            else:
+                shared_scale = tl.reshape(quant_scale, [BLOCK_M]).to(
+                    shared_x_sf.dtype.element_ty, bitcast=True
+                )
             shared_row = _shared_sf_row(token_id, SHARED_BLOCK_M)
             tl.store(
                 shared_x_sf
                 + shared_row * shared_x_sf_stride_m
                 + k_block_id * shared_x_sf_stride_k,
-                packed_scale,
+                shared_scale,
                 mask=token_mask,
             )
 
@@ -481,7 +487,7 @@ def _prepare_megamoe_nvfp4_inputs_kernel(
 
 
 def _resolve_hidden_quant(hidden_quant: QuantKey, block_k: int) -> tuple[int, bool]:
-    """Map a hidden-state ``QuantKey`` to the kernel's ``(GROUP_K, USE_UE8M0)``."""
+    """Map a hidden-state `QuantKey` to the kernel's `(GROUP_K, USE_UE8M0)`."""
     scale = hidden_quant.scale
     group_shape = scale.group_shape
     if (
@@ -541,21 +547,21 @@ def prepare_megamoe_inputs(
     """Quantize hidden states and repack top-k routing for DeepGEMM MegaMoE.
 
     Args:
-        hidden_states: Input activations of shape ``[num_tokens, hidden_dim]``.
-        topk_weights: Router top-k weights of shape ``[num_tokens, top_k]``.
-        topk_ids: Router top-k expert ids of shape ``[num_tokens, top_k]``.
+        hidden_states: Input activations of shape `[num_tokens, hidden_dim]`.
+        topk_weights: Router top-k weights of shape `[num_tokens, top_k]`.
+        topk_ids: Router top-k expert ids of shape `[num_tokens, top_k]`.
         x: Output buffer for the dispatched hidden states.
-        x_sf: Output buffer for the hidden-state scale factors; ``None`` when
-            ``hidden_quant`` is ``None``.
+        x_sf: Output buffer for the hidden-state scale factors; `None` when
+            `hidden_quant` is `None`.
         topk_idx_out: Output buffer for the repacked top-k expert ids.
         topk_weights_out: Output buffer for the repacked top-k weights.
         is_padding: Optional per-token mask; padded tokens are not routed.
         shared_x_sf: Optional output buffer for shared-expert scale factors.
-            Must be given together with ``shared_block_m``.
-        shared_block_m: Block M used to lay out ``shared_x_sf``.
+            Must be given together with `shared_block_m`.
+        shared_block_m: Block M used to lay out `shared_x_sf`.
         hidden_quant: Hidden-state quantization scheme. E8M0 scales are packed
-            four per int32 into ``x_sf``; fp32 scales are stored directly.
-            ``None`` copies the hidden states into ``x`` unquantized.
+            four per int32 into `x_sf`; fp32 scales are stored as their bits.
+            `None` copies the hidden states into `x` unquantized.
         eplb_state: Optional EPLB layer state; maps ids to replicas and records load.
 
     """
@@ -585,10 +591,10 @@ def prepare_megamoe_inputs(
         raise ValueError(
             "MegaMoE shared input staging requires both shared_x_sf and shared_block_m."
         )
-    if shared_x_sf is not None and not use_ue8m0:
+    if shared_x_sf is not None and not use_ue8m0 and group_k != block_k:
         raise ValueError(
             "MegaMoE shared input staging currently requires "
-            "UE8M0-packed hidden scales."
+            f"UE8M0-packed or per-{block_k} fp32 hidden scales."
         )
     if shared_x_sf is not None:
         assert shared_block_m is not None
@@ -608,8 +614,9 @@ def prepare_megamoe_inputs(
                 f"{required_rows}, got {shared_x_sf.shape[0]}."
             )
 
-    # On GB200, eight-row tiles win from 64 tokens; keep smaller batches untiled.
-    block_m = 8 if num_tokens >= 64 else 1
+    # On GB200, 8-row tiles win from 64 tokens and 32-row tiles from 1024 (1.3-1.6x
+    # over 8 rows); smaller batches stay untiled.
+    block_m = 32 if num_tokens >= 1024 else 8 if num_tokens >= 64 else 1
     grid = (triton.cdiv(num_tokens, block_m), triton.cdiv(hidden_size, block_k))
     block_topk = triton.next_power_of_2(top_k)
     padding_stride_m = is_padding.stride(0) if is_padding is not None else 0
@@ -673,28 +680,28 @@ def prepare_megamoe_nvfp4_inputs(
     l2_activation_scale: float = 1.0,
     eplb_state: EplbLayerState | None = None,
 ) -> None:
-    """Stage DeepGEMM NVFP4 MegaMoE inputs (``kNvfp4DynamicToken``).
+    """Stage DeepGEMM NVFP4 MegaMoE inputs (`kNvfp4DynamicToken`).
 
-    Each token is scaled by its own fp32 ``x_scales`` (row amax / 2688) and
+    Each token is scaled by its own fp32 `x_scales` (row amax / 2688) and
     quantized to E2M1 with one E4M3 scale per 16 values.
 
     Args:
-        hidden_states: BF16 activations of shape ``[num_tokens, hidden_dim]``.
-        topk_weights: Router top-k weights of shape ``[num_tokens, top_k]``.
-        topk_ids: Router top-k expert ids of shape ``[num_tokens, top_k]``.
-        x: Packed E2M1 output, ``[num_tokens, hidden_dim // 2]``.
-        x_sf: E4M3 scales packed four per int32, ``[num_tokens, hidden_dim // 64]``.
-        x_scales: Per-token fp32 dequantization scales, ``[num_tokens]``.
+        hidden_states: BF16 activations of shape `[num_tokens, hidden_dim]`.
+        topk_weights: Router top-k weights of shape `[num_tokens, top_k]`.
+        topk_ids: Router top-k expert ids of shape `[num_tokens, top_k]`.
+        x: Packed E2M1 output, `[num_tokens, hidden_dim // 2]`.
+        x_sf: E4M3 scales packed four per int32, `[num_tokens, hidden_dim // 64]`.
+        x_scales: Per-token fp32 dequantization scales, `[num_tokens]`.
         topk_idx_out: Output buffer for the repacked top-k expert ids.
         topk_weights_out: Output buffer for the repacked top-k weights.
         is_padding: Optional per-token mask; padded tokens are not routed.
-        shared_x: Optional shared-expert input, fp8 (MXFP8 with ``shared_x_sf``)
+        shared_x: Optional shared-expert input, fp8 (MXFP8 with `shared_x_sf`)
             or a BF16 copy of the hidden states.
-        shared_x_sf: UE8M0 scales of an fp8 ``shared_x`` in the shared-expert
-            TMA layout for ``shared_block_m``.
-        shared_block_m: Block M used to lay out ``shared_x_sf``.
+        shared_x_sf: UE8M0 scales of an fp8 `shared_x` in the shared-expert
+            TMA layout for `shared_block_m`.
+        shared_block_m: Block M used to lay out `shared_x_sf`.
         w2_global_scale: Per-local-expert L2 weight global scales.
-        l2_alpha: Output ``w2_global_scale * l2_activation_scale``, the L2
+        l2_alpha: Output `w2_global_scale * l2_activation_scale`, the L2
             dequantization scale of each local expert. Written even without
             local tokens, as other ranks' tokens still reach these experts.
         l2_activation_scale: Global scale the kernel quantizes L2 inputs with.

@@ -10,7 +10,7 @@ import shutil
 import socket
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from math import lcm
 from uuid import uuid4
@@ -25,9 +25,9 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 # Official Kimi-K3 config with 8 layers and no weights.
-MODEL = "riverclouds/Kimi-K3-8L-dummy"
+MODEL = "vllm-project/Kimi-K3-8L-dummy"
 # The recipe's DSpark draft, reading target layers that exist in MODEL.
-DRAFT = "riverclouds/Kimi-K3-DSpark-for-8L-dummy"
+DRAFT = "vllm-project/Kimi-K3-DSpark-for-8L-dummy"
 
 # Conversation: the first prompt spans FIRST_PROMPT_BLOCKS blocks plus an
 # unaligned tail, and each later turn appends TURN_TOKENS random tokens.
@@ -95,7 +95,7 @@ NIXL_OFFLOAD = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Mode:
     # A finer prefix_match_unit enables partial hits inside a Mamba block.
     prefix_match_unit: int | None
@@ -110,7 +110,7 @@ class Mode:
 MODES = [Mode(unit, spec) for spec in (False, True) for unit in (None, 128)]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Instance:
     tp: int = 1
     dp: int = 1
@@ -140,7 +140,7 @@ class Instance:
         return args
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Deployment:
     decode: Instance
     prefill: Instance | None = None
@@ -175,19 +175,10 @@ DEPLOYMENTS = {
 }
 
 
-def _known_failure(name: str, mode: Mode) -> str | None:
-    deployment = DEPLOYMENTS[name]
-    if mode.spec and deployment.decode.dcp > 1 and current_platform.is_cuda():
-        return "FlashInfer MLA DCP decode breaks on ragged spec batches (#59392)"
-    return None
-
-
 def _case(name: str, mode: Mode):
     marks = []
     if (num_gpus := DEPLOYMENTS[name].num_gpus) > 1:
         marks += multi_gpu_marks(num_gpus=num_gpus)
-    if reason := _known_failure(name, mode):
-        marks.append(pytest.mark.xfail(reason=reason, strict=True))
     return pytest.param(name, mode, marks=marks, id=f"{name}-{mode.name}")
 
 
@@ -274,7 +265,7 @@ def _reset_gpu_prefix_cache(url: str) -> None:
         time.sleep(0.1)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Turn:
     prompt_len: int
     cached: int
@@ -288,19 +279,15 @@ class Turn:
         return self.output[0] == self.recompute[0]
 
 
-def _expected_cached(prev_prompt_len: int, hit_unit: int, spec: bool) -> int:
-    """A turn must reuse the previous prompt up to its last checkpoint.
-
-    EAGLE-style drafts drop the trailing unit, so the checkpoint is one earlier.
-    """
+def _expected_cached(prev_prompt_len: int, hit_unit: int) -> int:
+    """A turn reuses the previous prompt up to its last checkpoint."""
     if not prev_prompt_len:
         return 0
-    checkpoint = (prev_prompt_len - 1) // hit_unit * hit_unit
-    return max(checkpoint - hit_unit, 0) if spec else checkpoint
+    return (prev_prompt_len - 1) // hit_unit * hit_unit
 
 
 @contextlib.contextmanager
-def _serve(deployment: Deployment, mode: Mode) -> Iterator[list[RemoteOpenAIServer]]:
+def _serve(deployment: Deployment, mode: Mode) -> Generator[list[RemoteOpenAIServer]]:
     with contextlib.ExitStack() as stack:
         # Sequential shutdown waits on memory still held by sibling servers.
         servers: list[RemoteOpenAIServer] = []
@@ -358,7 +345,7 @@ def _run_conversation(
             Turn(
                 prompt_len=len(prompt),
                 cached=_cached(computed),
-                expected_cached=_expected_cached(prev_len, hit_unit, mode.spec),
+                expected_cached=_expected_cached(prev_len, hit_unit),
                 recompute_cached=_cached(recompute),
                 output=_tokens_text_logprobs(output),
                 recompute=_tokens_text_logprobs(recompute),

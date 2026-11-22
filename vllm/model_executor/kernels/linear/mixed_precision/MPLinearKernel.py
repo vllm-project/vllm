@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -9,18 +9,21 @@ import torch
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.utils import retire_parameter
+from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
+
+from ..base import LinearKernel
 
 
 def _shallow_copy(param: torch.Tensor) -> torch.Tensor:
-    """A new object of ``param``'s class sharing its data, with its own copy of
+    """A new object of `param`'s class sharing its data, with its own copy of
     the attributes (e.g. dim tags) for a transform to retag."""
     copy = torch.Tensor._make_subclass(type(param), param.data, param.requires_grad)
     copy.__dict__.update(param.__dict__)
     return copy
 
 
-@dataclass
+@dataclass(slots=True)
 class MPLinearLayerConfig:
     full_weight_shape: tuple[int, int]  # [in, out]
     partition_weight_shape: tuple[int, int]
@@ -31,16 +34,27 @@ class MPLinearLayerConfig:
     out_type: torch.dtype | None = None
 
 
-class MPLinearKernel(ABC):
+class MPLinearKernel(LinearKernel[MPLinearLayerConfig]):
     @classmethod
     @abstractmethod
     def get_min_capability(cls) -> int:
         raise NotImplementedError
 
     @classmethod
-    @abstractmethod
-    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        raise NotImplementedError
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if compute_capability is None:
+            capability = current_platform.get_device_capability()
+            if capability is not None:
+                compute_capability = capability.to_int()
+        min_capability = cls.get_min_capability()
+        if compute_capability is not None and min_capability > compute_capability:
+            return False, (
+                f"requires capability {min_capability}, current compute "
+                f" capability is {compute_capability}"
+            )
+        return True, None
 
     def __init__(
         self,
@@ -56,19 +70,6 @@ class MPLinearKernel(ABC):
         if c.zero_points:
             assert w_zp_param_name is not None
         self.w_zp_name: str | None = w_zp_param_name
-
-    @abstractmethod
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        raise NotImplementedError
 
     def _retire_unused_zp(self, layer: torch.nn.Module) -> None:
         name = self.w_zp_name
