@@ -587,7 +587,8 @@ def dequant_mxfp4(
     exponent = scale.view(torch.uint8)
     if (exponent == 255).any():
         raise ValueError("MXFP4 weights have NaN (0xFF) E8M0 scales.")
-    lut = torch.tensor(_E2M1_VALUES, dtype=torch.float32, device=weight.device)
+    compute_dtype = torch.float64 if out_dtype == torch.float64 else torch.float32
+    lut = torch.tensor(_E2M1_VALUES, dtype=compute_dtype, device=weight.device)
     lut = torch.cat((lut, -lut))
     lut[8] = 0.0
     raw = weight.view(torch.uint8)
@@ -597,6 +598,44 @@ def dequant_mxfp4(
         torch.ones_like(values[..., :1]), exponent.int().unsqueeze(-1) - 127
     )
     return (values * factor).flatten(-2).to(out_dtype)
+
+
+def repack_mxfp4_fnuz_checkpoint_blocks(
+    weight: torch.Tensor, scale: torch.Tensor, *, empty_partition: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Match checkpoint block-FP8 conversion and its ROCm normalization."""
+    from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+        normalize_e4m3fn_to_e4m3fnuz,
+    )
+
+    experts, rows, packed_cols = weight.shape
+    cols = 2 * packed_cols
+    grid = (rows // 128, 128, cols // 128, 128)
+    encoded = torch.zeros(
+        (experts, rows, cols), dtype=torch.float8_e4m3fn, device=weight.device
+    )
+    factors = torch.ones(
+        (experts, rows // 128, cols // 128), dtype=torch.float32, device=weight.device
+    )
+    # Offline loading fills an absent FP8 block with zeros and unit FN scales.
+    if not empty_partition:
+        for expert in range(experts):
+            src_scale = scale[expert].view(torch.uint8)
+            ref = dequant_mxfp4(weight[expert], src_scale, torch.float64).view(grid)
+            # The published converter uses the source E8M0 scale maximum,
+            # including groups whose payload is entirely zero.
+            max_exp = src_scale.view(rows // 128, 128, cols // 128, 4).amax((1, 3))
+            factor = torch.exp2(max_exp.double() - (127 + 6))
+            expanded = factor[:, None, :, None]
+            codes = (ref / expanded).to(torch.float8_e4m3fn)
+            if not torch.equal(codes.double() * expanded, ref):
+                raise ValueError(
+                    "MXFP4 expert cannot be represented exactly in block FP8"
+                )
+            encoded[expert] = codes.reshape(rows, cols)
+            factors[expert] = factor.float()
+    fnuz, factors, _ = normalize_e4m3fn_to_e4m3fnuz(encoded, factors)
+    return fnuz, factors
 
 
 def dequantize_mxfp4_moe_weights(

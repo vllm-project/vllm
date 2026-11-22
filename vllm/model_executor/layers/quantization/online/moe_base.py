@@ -33,6 +33,9 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
 
+    def _source_intermediate_width(self, layer: torch.nn.Module) -> int:
+        return layer.moe_config.intermediate_size_per_partition_unpadded
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -53,7 +56,7 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
                 layer,
                 num_experts - layer.expert_map_manager.num_fused_shared_experts,
                 layer.moe_config.hidden_dim_unpadded,
-                layer.moe_config.intermediate_size_per_partition_unpadded,
+                self._source_intermediate_width(layer),
                 params_dtype,
                 **extra_weight_attrs,
             )
@@ -212,7 +215,7 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         config = layer.moe_config
         hidden_size = config.hidden_dim_unpadded
-        intermediate_size = config.intermediate_size_per_partition_unpadded
+        intermediate_size = self._source_intermediate_width(layer)
         target_hidden_size = config.hidden_dim
         target_intermediate_size = config.intermediate_size_per_partition
 
@@ -272,7 +275,7 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         w13_weight = layer.w13_weight if w13_weight is None else w13_weight
         w2_weight = layer.w2_weight if w2_weight is None else w2_weight
         hidden_size = layer.moe_config.hidden_dim_unpadded
-        intermediate_size = layer.moe_config.intermediate_size_per_partition_unpadded
+        intermediate_size = self._source_intermediate_width(layer)
 
         w13_shard = w13_weight.shape[1] // self.moe.w13_num_shards
         if w13_shard > intermediate_size:

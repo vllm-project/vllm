@@ -452,6 +452,12 @@ class RoutedExperts(PluggableLayer):
             start = min(tp_rank * shard_size, expected_size)
             size = min(shard_size, expected_size - start)
             loaded_weight = loaded_weight.narrow(shard_dim, start, size)
+            if size == 0 and getattr(self.quant_method, "_whole_tp_blocks", False):
+                # The online loader counts copied elements before materializing
+                # a layer. Account for an empty rank's entire assigned shard.
+                padding = destination.new_full((), 1 if is_scale else 0)
+                destination.copy_(padding.expand_as(destination))
+                return
             destination.fill_(1 if is_scale else 0)
 
         if shard_id == "w2":

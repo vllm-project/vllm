@@ -60,6 +60,25 @@ def test_dequant_mxfp4_rejects_nan_scale() -> None:
         dequant_mxfp4(weight, scale, torch.bfloat16)
 
 
+@pytest.mark.parametrize("empty_partition", [False, True])
+def test_repack_fnuz_scales_follow_checkpoint(empty_partition: bool) -> None:
+    # The largest source scale belongs to a group with no nonzero payload.
+    packed = torch.full((1, 128, 64), 0x11, dtype=torch.uint8)
+    scales = torch.full((1, 128, 4), 127, dtype=torch.uint8)
+    packed[:, :, :16] = 0
+    scales[:, :, 0] = 131
+    if empty_partition:
+        packed.zero_()
+
+    codes, factors = mxfp4_utils.repack_mxfp4_fnuz_checkpoint_blocks(
+        packed, scales, empty_partition=empty_partition
+    )
+
+    assert codes.dtype == torch.float8_e4m3fnuz
+    assert factors.item() == (2.0 if empty_partition else 0.5)
+    assert torch.equal(codes.double() * factors.item(), _reference(packed, scales))
+
+
 def test_dequantize_mxfp4_moe_weights_covers_every_expert(monkeypatch) -> None:
     monkeypatch.setattr(mxfp4_utils, "_DEQUANT_CHUNK_BYTES", 1)
     w13, w13_scale = _mxfp4(3 * 2 * 64, 128, 110, 130)
