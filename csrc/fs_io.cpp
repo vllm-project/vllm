@@ -6,6 +6,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
+
+#include <atomic>
+#include <cstdio>
+#include <cstring>
 
 #include <filesystem>
 #include <string>
@@ -20,6 +25,36 @@ constexpr int kODirectFlag = 0;
 extern "C" {
 
 namespace {
+
+// Metadata failures must not fail a successful cache transfer.
+inline void report_access_time_error(int error) {
+  if (error == ENOENT) return;
+  static std::atomic<size_t> failures{0};
+  const size_t count = failures.fetch_add(1) + 1;
+  if ((count & (count - 1)) == 0) {
+    fprintf(stderr,
+            "Could not refresh cache access time (%zu failures): %s; "
+            "recently used files may be evicted\n",
+            count, strerror(error));
+  }
+}
+
+inline void refresh_file_access(int fd) {
+  struct timespec times[2]{};
+  times[0].tv_nsec = UTIME_NOW;
+  times[1].tv_nsec = UTIME_OMIT;
+  if (futimens(fd, times) != 0) report_access_time_error(errno);
+}
+
+inline void refresh_existing_file(const char* path) {
+  const int fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    report_access_time_error(errno);
+    return;
+  }
+  refresh_file_access(fd);
+  close(fd);
+}
 
 // Returns 0 on success, or the std::error_code's POSIX-compatible value on
 // failure, mirroring the errno convention used by the syscalls below.
@@ -47,8 +82,10 @@ constexpr int kShortWrite = -2;
 // subsequent cleanup call can overwrite it. On failure, the temp file is
 // removed.
 inline int _store_block(const char* tmp_path, const char* dest_path,
-                        const char* src, size_t size, bool use_o_direct) {
+                        const char* src, size_t size, bool use_o_direct,
+                        bool track_file_access) {
   if (access(dest_path, F_OK) == 0) {
+    if (track_file_access) refresh_existing_file(dest_path);
     return kAlreadyPresent;
   }
 
@@ -99,7 +136,7 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
 // transient/ambiguous and leave the file untouched; a close failure after a
 // full read is harmless and does not fail the load.
 inline int _load_block(const char* source_path, char* dst, size_t size,
-                       bool use_o_direct) {
+                       bool use_o_direct, bool track_file_access) {
   const int o_direct_flag = use_o_direct ? kODirectFlag : 0;
   const int fd = open(source_path, O_RDONLY | o_direct_flag, 0);
   if (fd < 0) {
@@ -119,6 +156,8 @@ inline int _load_block(const char* source_path, char* dst, size_t size,
     unlink(source_path);
     return EIO;
   }
+
+  if (track_file_access) refresh_file_access(fd);
 
   // A close error after a successful full read is harmless: the data is
   // already in the destination buffer, so the load succeeds.
@@ -221,10 +260,11 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
   PyObject* dest_paths_obj = nullptr;
   PyObject* buffers_obj = nullptr;
   int use_o_direct = 1;
+  int track_file_access = 0;
 
-  if (!PyArg_ParseTuple(args, "O!O!O!|p", &PyList_Type, &tmp_paths_obj,
+  if (!PyArg_ParseTuple(args, "O!O!O!|pp", &PyList_Type, &tmp_paths_obj,
                         &PyList_Type, &dest_paths_obj, &PyList_Type,
-                        &buffers_obj, &use_o_direct)) {
+                        &buffers_obj, &use_o_direct, &track_file_access)) {
     return nullptr;
   }
 
@@ -254,9 +294,9 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
   {
     Py_BEGIN_ALLOW_THREADS for (Py_ssize_t i = 0; i < n; i++) {
       const char* buf = static_cast<const char*>(buffers[i].buf);
-      const int err =
-          _store_block(tmp_paths[i], dest_paths[i], buf,
-                       static_cast<size_t>(buffers[i].len), use_o_direct);
+      const int err = _store_block(tmp_paths[i], dest_paths[i], buf,
+                                   static_cast<size_t>(buffers[i].len),
+                                   use_o_direct, track_file_access);
       if (err == kAlreadyPresent) {
         continue;
       }
@@ -302,9 +342,11 @@ static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
   PyObject* source_paths_obj = nullptr;
   PyObject* buffers_obj = nullptr;
   int use_o_direct = 1;
+  int track_file_access = 0;
 
-  if (!PyArg_ParseTuple(args, "O!O!|p", &PyList_Type, &source_paths_obj,
-                        &PyList_Type, &buffers_obj, &use_o_direct)) {
+  if (!PyArg_ParseTuple(args, "O!O!|pp", &PyList_Type, &source_paths_obj,
+                        &PyList_Type, &buffers_obj, &use_o_direct,
+                        &track_file_access)) {
     return nullptr;
   }
 
@@ -331,7 +373,7 @@ static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
       char* buf = static_cast<char*>(buffers[i].buf);
       const int err =
           _load_block(source_paths[i], buf, static_cast<size_t>(buffers[i].len),
-                      use_o_direct);
+                      use_o_direct, track_file_access);
       if (err != 0) {
         failed_index = i;
         failure_errno = err;
@@ -374,7 +416,8 @@ static PyMethodDef fs_io_C_methods[] = {
     {"batch_store_block", batch_store_block, METH_VARARGS,
      "batch_store_block(tmp_paths: list[str], dest_paths: list[str],\n"
      "                  buffers: list[bytes-like],\n"
-     "                  use_o_direct: bool = True) -> int\n"
+     "                  use_o_direct: bool = True, track_file_access: bool = "
+     "False) -> int\n"
      "\n"
      "Store a batch of blocks, each from its own buffer, to disk. Returns the "
      "number transferred; blocks already on disk are skipped. Raises on first "
@@ -382,7 +425,8 @@ static PyMethodDef fs_io_C_methods[] = {
     {"batch_load_block", batch_load_block, METH_VARARGS,
      "batch_load_block(source_paths: list[str],\n"
      "                 buffers: list[writable bytes-like],\n"
-     "                 use_o_direct: bool = True) -> None\n"
+     "                 use_o_direct: bool = True, track_file_access: bool = "
+     "False) -> None\n"
      "\n"
      "Load a batch of blocks from disk into corresponding buffers. "
      "Raises on first error."},

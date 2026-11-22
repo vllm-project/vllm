@@ -7,6 +7,7 @@ import mmap
 import os
 import random
 import threading
+import time
 
 try:
     from vllm.fs_io_C import (  # pyright: ignore[reportMissingImports]
@@ -27,6 +28,48 @@ O_DIRECT = getattr(os, "O_DIRECT", 0)
 
 # Thread-local storage for unique temporary file suffixes
 _thread_local = threading.local()
+
+
+_access_time_failures = 0
+_access_time_lock = threading.Lock()
+
+
+def _report_access_time_error(exc: OSError) -> None:
+    global _access_time_failures
+    if isinstance(exc, FileNotFoundError):
+        return
+    with _access_time_lock:
+        _access_time_failures += 1
+        failures = _access_time_failures
+    if failures & (failures - 1) == 0:
+        logger.warning(
+            "Could not refresh cache access time (%d failures): %s; "
+            "recently used files may be evicted",
+            failures,
+            exc,
+        )
+
+
+def _refresh_file_access(fd: int) -> None:
+    """Update the opened immutable block, preserving its modification time."""
+    try:
+        st = os.fstat(fd)
+        os.utime(fd, ns=(time.time_ns(), st.st_mtime_ns))
+    except OSError as exc:
+        _report_access_time_error(exc)
+
+
+def _refresh_existing_file(path: str) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError as exc:
+        _report_access_time_error(exc)
+        return
+    try:
+        _refresh_file_access(fd)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 def _get_tmp_suffix() -> str:
@@ -93,6 +136,7 @@ def _store_block(
     offset: int,
     block_size: int,
     use_o_direct: bool = True,
+    track_file_access: bool = False,
 ) -> bool:
     """Write to a temp file then atomically replace the target.
 
@@ -102,6 +146,8 @@ def _store_block(
     """
     # Check if block already exists to avoid redundant writes
     if os.path.exists(dest_path):
+        if track_file_access:
+            _refresh_existing_file(dest_path)
         return False
 
     tmp_path = dest_path + _get_tmp_suffix()
@@ -154,6 +200,7 @@ def _load_block(
     offset: int,
     block_size: int,
     use_o_direct: bool = True,
+    track_file_access: bool = False,
 ) -> None:
     """Read one KV block from disk; remove the file only on a provable short
     read (a too-short file is genuine corruption) and leave it untouched on any
@@ -176,6 +223,8 @@ def _load_block(
                     cleanup_exc,
                 )
             raise OSError(f"Short read: expected {block_size} bytes, read {bytes_read}")
+        if track_file_access:
+            _refresh_file_access(fd)
     finally:
         if fd is not None:
             os.close(fd)
@@ -187,6 +236,7 @@ def batch_store_block(
     offsets: list[int],
     block_size: int,
     use_o_direct: bool = True,
+    track_file_access: bool = False,
 ) -> int:
     """Store a batch of KV blocks from a shared buffer to disk in one call.
 
@@ -205,9 +255,11 @@ def batch_store_block(
         view_B = view.cast("B")
         view_slices = [view_B[x : x + block_size] for x in offsets]
         tmp_paths = [p + _get_tmp_suffix() for p in paths]
-        return batch_store_block_C(tmp_paths, paths, view_slices, use_o_direct)
+        return batch_store_block_C(
+            tmp_paths, paths, view_slices, use_o_direct, track_file_access
+        )
     return sum(
-        _store_block(path, view, offset, block_size, use_o_direct)
+        _store_block(path, view, offset, block_size, use_o_direct, track_file_access)
         for path, offset in zip(paths, offsets)
     )
 
@@ -218,6 +270,7 @@ def batch_load_block(
     offsets: list[int],
     block_size: int,
     use_o_direct: bool = True,
+    track_file_access: bool = False,
 ) -> None:
     """Load a batch of KV blocks from disk into a shared buffer in one call.
 
@@ -231,11 +284,13 @@ def batch_load_block(
     if _HAS_FSIO_C:
         view_B = view.cast("B")
         view_slices = [view_B[x : x + block_size] for x in offsets]
-        return batch_load_block_C(paths, view_slices, use_o_direct)
+        return batch_load_block_C(paths, view_slices, use_o_direct, track_file_access)
     else:
         for i, (path, offset) in enumerate(zip(paths, offsets)):
             try:
-                _load_block(path, view, offset, block_size, use_o_direct)
+                _load_block(
+                    path, view, offset, block_size, use_o_direct, track_file_access
+                )
             except OSError as exc:
                 # Blocks 0..i-1 loaded fine; record the count for partial keep.
                 # The C path sets the same attribute via PyObject_SetAttrString.

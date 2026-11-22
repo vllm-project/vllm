@@ -118,6 +118,7 @@ class FileSystemTierManager(SecondaryTierManager):
         locality: str | None = None,
         backpressure_detector: BackpressureDetector | None = None,
         access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
+        track_file_access: bool = False,
     ):
         """Args:
         offloading_spec: Contains normalized offloading configuration and
@@ -130,6 +131,8 @@ class FileSystemTierManager(SecondaryTierManager):
         enable_kv_events: Emit BlockStored KV events for blocks
             successfully stored to this tier. Effective only when KV
             cache events are enabled globally (kv_events_config).
+        track_file_access: Refresh atime after successful loads and existing-file
+            store reuse for external access-age eviction. Defaults to False.
         locality: Whether this tier's storage is LOCAL or REMOTE relative
             to the publishing vLLM instance.
         backpressure_detector: Optional backpressure detector.
@@ -138,6 +141,9 @@ class FileSystemTierManager(SecondaryTierManager):
             does both.
 
         """
+        if not isinstance(track_file_access, bool):
+            raise ValueError("track_file_access must be a boolean")
+        self._track_file_access = track_file_access
         super().__init__(
             offloading_spec,
             primary_kv_view,
@@ -250,6 +256,7 @@ class FileSystemTierManager(SecondaryTierManager):
                 offsets,
                 self._block_size,
                 self._use_o_direct,
+                self._track_file_access,
             )
 
         self._pool.enqueue_store(job_id, 1, [store_task])
@@ -273,6 +280,7 @@ class FileSystemTierManager(SecondaryTierManager):
                     offsets,
                     self._block_size,
                     self._use_o_direct,
+                    self._track_file_access,
                 )
             except OSError as exc:
                 # Runs on the pool worker thread. Record how many blocks loaded
