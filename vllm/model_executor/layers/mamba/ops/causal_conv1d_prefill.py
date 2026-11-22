@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 """Device-driven width-four causal convolution with SiLU activation.
 
 One launch computes outputs, updates each sequence's convolution state, and

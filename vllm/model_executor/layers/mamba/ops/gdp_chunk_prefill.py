@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 # SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
 #
 # The chunked gated delta rule math in this file follows the flash-linear-attention
