@@ -46,9 +46,9 @@ def _env_on() -> bool:
 
 def _impl() -> str | None:
     """VLLM_KIMI_AKR_KDA_PREFILL_IMPL: auto (default: the kernel's uses_mega choice),
-    mega or v1 (staged)."""
+    mega or staged."""
     v = os.environ.get("VLLM_KIMI_AKR_KDA_PREFILL_IMPL", "auto").strip().lower()
-    return v if v in ("mega", "v1") else None
+    return v if v in ("mega", "staged") else None
 
 
 def chunk_counts_of(query_lens_cpu: torch.Tensor, chunk: int = 64) -> list[int]:
