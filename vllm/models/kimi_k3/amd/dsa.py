@@ -550,6 +550,22 @@ direct_register_custom_op(
 )
 
 
+_DCP_SCORES: dict[tuple[int, int, torch.device], torch.Tensor] = {}
+
+
+def _shared_dcp_scores(rows: int, topk: int, device: torch.device) -> torch.Tensor:
+    """The DCP local top-k scores buffer, one for all layers: like the shared
+    `topk_indices_buffer` it is written by a layer's indexer and read by that layer's
+    score merge before the next layer's indexer runs (both on the same stream)."""
+    key = (rows, topk, torch.device(device))
+    buf = _DCP_SCORES.get(key)
+    if buf is None:
+        buf = _DCP_SCORES[key] = torch.empty(
+            (rows, topk), dtype=torch.float32, device=device
+        )
+    return buf
+
+
 class KimiK3DSAIndexer(nn.Module):
     """wq/wk/wv indexer projections with FP8 or MXFP4 scoring on ROCm.
 
@@ -655,10 +671,8 @@ class KimiK3DSAIndexer(nn.Module):
                 * (1 + (spec.num_speculative_tokens if spec else 0)),
                 vllm_config.compilation_config.max_cudagraph_capture_size or 0,
             )
-            self.dcp_scores = torch.empty(
-                (rows, self.topk_tokens),
-                dtype=torch.float32,
-                device=topk_indices_buffer.device,
+            self.dcp_scores = _shared_dcp_scores(
+                rows, self.topk_tokens, topk_indices_buffer.device
             )
         self.indexer_op = (
             None

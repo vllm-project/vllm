@@ -9,9 +9,12 @@ sliding-window draft (`Qwen3DSparkForCausalLM`, a `DFlashQwen3Model` backbone).
   7168, 514 MB replicated GEMM) + its RMSNorm as a sharded GEMM (this rank's columns,
   64 MB at TP8) + gather over the TP ranks + RMSNorm in two launches. The target aux
   hidden states are packed into the kernel's tile layout (`linear_gather_pack_aux`)
-  instead of `torch.cat`. Rows <= 256 (the whole decode graph's context); the
-  original weight stays for larger prefill chunks. Extra memory: the packed shard
-  64 MB + slabs 29 MB per rank. The preview's `context_proj` + `context_norm` (its
+  instead of `torch.cat`. Every context row: calls of <= 256 rows (the whole
+  decode graph's context in one; prefill chunks in 256-row calls, `combine_rows`), so
+  the replicated weight is released (-514 MB). Extra memory: the packed shard
+  64 MB + slabs 29 MB per rank; the stock FULL-graph staging `_aux_staging` (the
+  graph's context rows x 35840 bf16) is emptied, its readers bypassed. The preview's
+  `context_proj` + `context_norm` (its
   `combine_hidden_states` norms); the release's `fc` + `hidden_norm`, whose stock
   norm runs in `precompute_and_store_context_kv` (`_normalize_context_states`): the
   stored rows are normed here instead (by the kernel, or by that stock norm for rows
@@ -20,9 +23,10 @@ sliding-window draft (`Qwen3DSparkForCausalLM`, a `DFlashQwen3Model` backbone).
 * `DMLP`     `decoder/bf16_dense_mlp_common.bf16_dense_mlp`: every layer's dense MLP
   (gate_up + SwiGLU, down) through the op `vllm.kimi_akr_draft_dense_mlp` (opaque to
   torch.compile); the weights are replaced in place by their packed layout (no extra
-  memory). An MLP whose down projection all-reduces (the release's `Qwen2MLP`) keeps
-  that all-reduce after the op. Needs `max_num_seqs` x the query rows a request (k)
-  <= 256 (checked at set-up; the stock weights are gone).
+  memory; one workspace and one activation staging for all layers, which run one after
+  another on one stream). An MLP whose down projection all-reduces (the release's
+  `Qwen2MLP`) keeps that all-reduce after the op. Needs `max_num_seqs` x the query rows
+  a request (k) <= 256 (checked at set-up; the stock weights are gone).
 * `DAR`      the all-reduce + residual add + RMSNorm pairs. The preview: AITER's fused
   op (`fused_allreduce_rms_norm`). The release (uncompiled under breakable CUDA graphs,
   so vLLM's fusion pass never sees it): `norm/attnres_rmsnorm_common`
@@ -130,8 +134,9 @@ def _ctx_dims(model) -> tuple[int, int, int]:
 
 
 class ContextProj:
-    def __init__(self, model, device: torch.device):
-        """Collective on the TP group (the communicator)."""
+    def __init__(self, model, device: torch.device, graph_rows: int = CTX_MAX_ROWS):
+        """Collective on the TP group (the communicator). `graph_rows`: the context rows
+        of the largest FULL graph (its staging holds no more)."""
         lib = _gemm()
         self.lib = lib
         r, n_shard, k = _ctx_dims(model)
@@ -154,11 +159,17 @@ class ContextProj:
             else _identity
         )
         self._model = model.model
-        n = self._numel(CTX_MAX_ROWS)
         # zero once: rows past a call's rows keep their (finite) previous content,
         # as the stock staging does
-        self.graph_stage = torch.zeros(n, dtype=torch.bfloat16, device=device)
-        self.tmp_stage = torch.zeros(n, dtype=torch.bfloat16, device=device)
+        rows = min(graph_rows, CTX_MAX_ROWS)
+        self.graph_stage = torch.zeros(
+            max(self._numel(r) for r in range(1, rows + 1)),
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        self.tmp_stage = torch.zeros(
+            self._numel(CTX_MAX_ROWS), dtype=torch.bfloat16, device=device
+        )
 
     def _numel(self, rows: int) -> int:
         tiles = self.lib.linear_gather_packed_tiles(rows, w_packed=self.w_packed)
@@ -245,6 +256,16 @@ def _identity(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
+def combine_rows(
+    ctx: ContextProj, aux: list[torch.Tensor], start: int, end: int, out: torch.Tensor
+) -> None:
+    """The normed context projection of rows [start, end) of `aux` into `out`, any
+    row count: calls of at most CTX_MAX_ROWS rows on the packed shard."""
+    for s in range(start, end, CTX_MAX_ROWS):
+        e = min(s + CTX_MAX_ROWS, end)
+        ctx.combine_eager(aux, s, e, out[s - start : e - start])
+
+
 def _ctx_reason(spec, model) -> str | None:
     from vllm.model_executor.layers.linear import ReplicatedLinear
 
@@ -279,6 +300,27 @@ def _ctx_reason(spec, model) -> str | None:
     return None
 
 
+def _drop_stock_staging(spec) -> None:
+    """With the packed context projection on, the stock FULL-graph staging
+    `_aux_staging` is neither written nor read (`store_hidden_states` packs into
+    `ContextProj.graph_stage`, which `prepare_graph_forward` reads, and both stock
+    counterparts are bypassed while `spec._akr_ctx` is set); only its presence (a FULL
+    graph's context step) is tested, so it becomes an empty tensor of its width."""
+    st = spec._aux_staging
+    if st is not None and st.numel():
+        spec._aux_staging = st.new_empty((0, st.shape[1]))
+
+
+def _free_stock_weight(model) -> int:
+    """The replicated projection weight is no longer read once every context row runs
+    on the packed shard (`combine_rows`): its storage is released. Returns its bytes."""
+    proj, _, _ = _ctx_modules(model)
+    w = proj.weight
+    freed = w.numel() * w.element_size()
+    w.data = w.data.new_empty((0, w.shape[1]))
+    return freed
+
+
 def _context_proj(spec, model) -> ContextProj | None:
     """Collective: the sharded context projection, or None (warned once)."""
     if akr_nonlayer.blocked("CTXPROJ", _ctx_reason(spec, model)):
@@ -292,7 +334,9 @@ def _context_proj(spec, model) -> ContextProj | None:
         ),
     ):
         return None
-    ctx = ContextProj(model, spec.device)
+    ctx = ContextProj(
+        model, spec.device, spec._num_graph_context_tokens(spec.max_num_reqs)
+    )
     if akr_nonlayer.blocked("CTXPROJ", ctx.reason(spec.device)):
         ctx.comm.close()
         return None
@@ -307,7 +351,7 @@ def _dense():
 
 
 class _Mlp:
-    def __init__(self, mlp, ws, device):
+    def __init__(self, mlp, ws, x_stage: torch.Tensor):
         lib = _dense()
         self.ws, self.lib = ws, lib
         self.gate_up = lib.dense_mlp_pack_gate_up(mlp.gate_up_proj.weight.data)
@@ -315,9 +359,9 @@ class _Mlp:
         # in place: the stock weights are not kept (no extra memory)
         mlp.gate_up_proj.weight.data = self.gate_up
         mlp.down_proj.weight.data = self.down
-        self.x_stage = torch.zeros(
-            _x_numel(self.down, MLP_MAX_ROWS), dtype=torch.bfloat16, device=device
-        )
+        # shared by the layers like `ws`: a layer's dense MLP consumes its packed rows
+        # before the next layer packs (one stream)
+        self.x_stage = x_stage
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         from vllm.models.kimi_k3.amd.akr_draft_ops import pack_tiles
@@ -430,7 +474,8 @@ def _mlp_reason(spec, model) -> str | None:
 def _install_mlp(spec, model) -> int:
     lib = _dense()
     device = spec.device
-    hidden, inter = model.model.layers[0].mlp.down_proj.weight.shape
+    layers = model.model.layers
+    hidden, inter = layers[0].mlp.down_proj.weight.shape
     kw = dict(hidden=hidden, inter=inter)
     if akr_nonlayer.blocked(
         "DMLP", lib.dense_mlp_workspace_unsupported_reason(device, **kw)
@@ -439,7 +484,7 @@ def _install_mlp(spec, model) -> int:
     ws = lib.dense_mlp_workspace(device, **kw)
     # the largest call of every layer, on the raw weights (the packed ones keep their
     # shapes), before any weight is replaced
-    for layer in model.model.layers:
+    for layer in layers:
         gu, dn = layer.mlp.gate_up_proj.weight.data, layer.mlp.down_proj.weight.data
         stage = torch.empty(
             _x_numel(dn, MLP_MAX_ROWS), dtype=torch.bfloat16, device=device
@@ -449,10 +494,17 @@ def _install_mlp(spec, model) -> int:
         )
         if akr_nonlayer.blocked("DMLP", reason):
             return 0
+    x_stage = torch.zeros(
+        max(
+            _x_numel(layer.mlp.down_proj.weight.data, MLP_MAX_ROWS) for layer in layers
+        ),
+        dtype=torch.bfloat16,
+        device=device,
+    )
     n = 0
-    for layer in model.model.layers:
+    for layer in layers:
         key = len(_MLPS)
-        _MLPS[key] = m = _Mlp(layer.mlp, ws, device)
+        _MLPS[key] = m = _Mlp(layer.mlp, ws, x_stage)
         layer.mlp = AkrDenseMlp(layer.mlp, key)
         n += 1
     # compile every tier (first call of the mode warms them all)
@@ -671,9 +723,13 @@ def setup(spec, target_model) -> None:
                 ctx.warm_up(spec.device)
                 ctx.install()
                 spec._akr_ctx = ctx
+                _drop_stock_staging(spec)
+                freed = _free_stock_weight(model)
                 logger.info(
-                    "amd_kernels drafter: sharded context projection (+%.0f MB a rank)",
+                    "amd_kernels drafter: sharded context projection (+%.0f MB a "
+                    "rank, the replicated %.0f MB weight released)",
                     ctx.w_packed.numel() * 2 / 2**20,
+                    freed / 2**20,
                 )
         if akr_nonlayer.switch("DMLP") and not akr_nonlayer.blocked(
             "DMLP", _mlp_reason(spec, model)
@@ -711,13 +767,12 @@ def store_hidden_states(
     if start == num_tokens:
         return True
     out = spec.hidden_states[start:num_tokens]
-    if packed and num_tokens - start <= CTX_MAX_ROWS:
-        ctx.combine_eager(aux, start, num_tokens, out)
-    elif aux:
-        hidden = spec.model.combine_hidden_states(
-            torch.cat([h[start:num_tokens] for h in aux], dim=-1)
+    if aux:
+        # the replicated projection weight is gone (`_free_stock_weight`)
+        assert packed, (
+            f"{len(aux)} aux hidden states, the projection takes {ctx.num_aux}"
         )
-        out.copy_(ctx.post_norm(hidden))
+        combine_rows(ctx, aux, start, num_tokens, out)
     else:
         out.copy_(ctx.post_norm(last_hidden_states[start:num_tokens]))
     return True

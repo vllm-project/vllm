@@ -270,11 +270,11 @@ def test_ctx(rank):
         cos, rel = _cos_rel(out, exact(aux))
         assert cos > 0.99999 and rel < 1e-3, (i, cos, rel)
     # the speculator hooks: graph rows packed eagerly + projected in the graph step,
-    # the remaining rows eagerly (<= 256) or by the stock combine (> 256)
+    # the remaining rows eagerly (in calls of <= 256 rows)
     spec = SimpleNamespace(
         _akr_ctx=ctx,
         _aux_staging=object(),
-        hidden_states=torch.zeros(512, HIDDEN, dtype=torch.bfloat16, device="cuda"),
+        hidden_states=torch.zeros(1200, HIDDEN, dtype=torch.bfloat16, device="cuda"),
         _num_graph_context_tokens=lambda n: n * 4,
         prepare_context_anchor=lambda *a: None,
         target_input_buffers=SimpleNamespace(query_start_loc=None),
@@ -291,6 +291,7 @@ def test_ctx(rank):
         (300, 48),
         (400, 0),
         (60, 0),
+        (1100, 40),
     ):
         aux = [
             torch.randn(num_tokens, HIDDEN, device="cuda").to(torch.bfloat16)
@@ -371,8 +372,8 @@ def test_ctx_release(rank):
         (30, 40),
         (300, 45),
         (60, 0),
-        # the kernel's row cap (256) on the eager and the graph path: 257 eager rows
-        # take the stock combine + norm
+        # the kernel's row cap (256) on the eager and the graph path: more eager rows
+        # run in 256-row calls
         (1, 0),
         (192, 0),
         (193, 0),
@@ -385,18 +386,22 @@ def test_ctx_release(rank):
         (240, 240),
         (496, 240),
         (497, 240),
+        (1037, 240),
     ):
         aux = [
             torch.randn(num_tokens, HIDDEN, device="cuda").to(torch.bfloat16)
             for _ in range(5)
         ]
         cases.append((num_tokens, num_graph, aux, stock_kv(aux)))
+    w = w.clone()  # `exact`'s copy: the stock weight is released below
     ctx.install()
     probe = w[:2]
     assert m._normalize_context_states(probe) is probe
+    assert akr_draft._free_stock_weight(model) == HIDDEN * 5 * HIDDEN * 2
+    assert m.fc.weight.numel() == 0
     vars(spec).update(
         _akr_ctx=ctx,
-        hidden_states=torch.zeros(512, HIDDEN, dtype=torch.bfloat16, device="cuda"),
+        hidden_states=torch.zeros(1200, HIDDEN, dtype=torch.bfloat16, device="cuda"),
         prepare_context_anchor=lambda *a: None,
         target_input_buffers=SimpleNamespace(query_start_loc=None),
         _num_rejected=None,

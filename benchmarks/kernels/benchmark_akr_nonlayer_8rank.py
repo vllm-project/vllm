@@ -181,7 +181,57 @@ def bench_ctx(rank):
         )
 
 
-BENCH = {"embed": bench_embed, "lmhead": bench_lmhead, "ctx": bench_ctx}
+def bench_ctx_prefill(rank):
+    """Prefill-sized context rows (above the decode graph's 256): the replicated GEMM
+    (cat + GEMM + norm) vs the packed shard in 256-row calls (no cat, no replicated
+    weight)."""
+    from vllm.model_executor.layers.layernorm import RMSNorm
+    from vllm.models.kimi_k3.amd import akr_draft
+
+    if rank == 0:
+        print(
+            "drafter context_proj + norm, prefill rows (replicated GEMM vs "
+            "sharded + gather in 256-row calls)"
+        )
+    w = (torch.randn(HIDDEN, 35840, device="cuda") * 0.01).to(torch.bfloat16)
+    norm = RMSNorm(HIDDEN, eps=1e-5).to(torch.bfloat16).cuda()
+    model = SimpleNamespace(
+        model=SimpleNamespace(
+            context_proj=SimpleNamespace(weight=SimpleNamespace(data=w)),
+            context_norm=norm,
+        )
+    )
+    ctx = akr_draft.ContextProj(model, torch.device("cuda"))
+    ctx.warm_up(torch.device("cuda"))
+    for rows in (257, 384, 512, 1024, 2048, 4096, 8192, 10240):
+        aux = [
+            torch.randn(rows, HIDDEN, device="cuda").to(torch.bfloat16)
+            for _ in range(5)
+        ]
+        out = torch.empty(rows, HIDDEN, dtype=torch.bfloat16, device="cuda")
+
+        def stock_fn():
+            out.copy_(norm(torch.cat(aux, dim=-1) @ w.t()))
+
+        def new_fn():
+            akr_draft.combine_rows(ctx, aux, 0, rows, out)
+
+        n1, n2 = (2, 6) if rows > 2048 else (4, 20)
+        show(
+            rank,
+            f"R={rows} (cat+GEMM+norm+copy)",
+            per_call(stock_fn, n1, n2),
+            per_call(new_fn, n1, n2),
+        )
+        torch.accelerator.empty_cache()
+
+
+BENCH = {
+    "embed": bench_embed,
+    "lmhead": bench_lmhead,
+    "ctx": bench_ctx,
+    "ctx_prefill": bench_ctx_prefill,
+}
 
 
 def worker(rank, port, names):

@@ -414,7 +414,10 @@ def test_dense_mlp_vs_stock(rows):
     mlp = SimpleNamespace(gate_up_proj=_Proj(gu.clone()), down_proj=_Proj(dn.clone()))
     from amd_kernels.decoder.bf16_dense_mlp_common import dense_mlp_workspace
 
-    m = akr_draft._Mlp(mlp, dense_mlp_workspace(dev, hidden=7168, inter=1792), dev)
+    stage = torch.zeros(
+        akr_draft._x_numel(dn, akr_draft.MLP_MAX_ROWS), dtype=torch.bfloat16, device=dev
+    )
+    m = akr_draft._Mlp(mlp, dense_mlp_workspace(dev, hidden=7168, inter=1792), stage)
     out = m(x).float()
     cos = torch.nn.functional.cosine_similarity(out.flatten(), ref.flatten(), dim=0)
     rel = (out - ref).norm() / ref.norm()
@@ -484,6 +487,41 @@ def test_dense_mlp_module_both_drafts(dist_init, draft):
     graph.replay()
     torch.accelerator.synchronize()
     assert torch.equal(out, layer.mlp(x))
+
+
+def test_dense_mlp_layers_share_staging(dist_init):
+    """Two installed layers share one workspace and one activation staging, and the
+    two-layer chain (each layer's packed rows consumed before the next packs) is the
+    stock chain's, eager and in a graph replay."""
+    _need_akr()
+    from vllm.models.kimi_k3.amd import akr_draft
+
+    layers = []
+    for _ in range(2):
+        layer = torch.nn.Module()
+        layer.mlp = _draft_mlp("release")
+        layers.append(layer)
+    x = torch.randn(80, 7168, device="cuda").to(torch.bfloat16)
+    stock = layers[1].mlp(layers[0].mlp(x)).float()
+    model = SimpleNamespace(model=SimpleNamespace(layers=layers))
+    spec = SimpleNamespace(device=torch.device("cuda"), max_num_reqs=20)
+    first = len(akr_draft._MLPS)
+    assert akr_draft._install_mlp(spec, model) == 2
+    a, b = akr_draft._MLPS[first], akr_draft._MLPS[first + 1]
+    assert a.x_stage is b.x_stage and a.ws is b.ws
+
+    def chain(x):
+        return layers[1].mlp(layers[0].mlp(x))
+
+    out = chain(x)
+    rel = float((out.float() - stock).norm() / stock.norm())
+    assert rel < 1.2e-2, rel
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        replayed = chain(x)
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert torch.equal(replayed, out)
 
 
 # ---------------------------------------------------------------- final attn_res + norm

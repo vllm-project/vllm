@@ -34,8 +34,9 @@ views of vLLM's aiter-layout parameters (`moe_weights`).
 
 Extra memory per rank (measured, test_akr_moe_layer_ranks8.py): ~170 MiB of main-stream
 workspaces (experts slot buffer 118 MB + q 30 MB, router slabs, aux tuples per row
-count) and the same again for the graph-capture stream, plus the 8-rank comm buffers
-(AttnRes mailboxes 14 MiB, latent tail 3.5 MiB).
+count), lent to each graph-capture stream (`swap_stream_workspaces`,
+akr_runtime.register_stream_workspaces) instead of a set per stream, plus the 8-rank
+comm buffers (AttnRes mailboxes 14 MiB, latent tail 3.5 MiB).
 """
 
 import dataclasses
@@ -464,6 +465,13 @@ def tail_stock_experts(
         return False
     lib.allreduce_latent_rmsnorm_up_proj(*args)
     return True
+
+
+def swap_stream_workspaces(dev: int, a: int, b: int) -> None:
+    """Exchange the router / experts / down-projection workspaces of streams `a` and
+    `b` on device `dev` (the entries' dict keys only: nothing allocated or copied)."""
+    _moe().swap_stream_workspaces(dev, a, b)
+    _gemm().latent_down_swap_stream_workspaces(dev, a, b)
 
 
 def prewarm_capture_stream(moe) -> None:

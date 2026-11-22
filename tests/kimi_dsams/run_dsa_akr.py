@@ -24,6 +24,7 @@ import sys
 import time
 
 os.environ["VLLM_ROCM_DSA_MULTISTREAM"] = "1"
+os.environ.setdefault("VLLM_ROCM_USE_AITER", "1")
 os.environ.setdefault("VLLM_ROCM_DCP_AITER_ALLGATHER", "1")
 os.environ.setdefault("VLLM_ROCM_DCP_VUP_RS", "1")
 os.environ.setdefault("VLLM_USE_DIRECT_DCP_A2A", "0")
@@ -566,6 +567,13 @@ def stage_qgather(ha, hs, rank, M):
     from vllm.distributed import get_dcp_group
     from vllm.models.kimi_k3.amd import akr_dsa as A
 
+    cap = A.ensure_q_buffer(ha.wrapper).shape[0]
+    if cap < M:
+        with akr_env(True):
+            declined = not A.qgather_runtime_ok(ha.wrapper, M)
+        check(rank, declined, f"qgather M={M}: above the decode rows {cap}, taken")
+        log(rank, f"[stage] qgather M={M}: above the decode rows {cap}, declined")
+        return
     dev = ha.device
     g = torch.Generator(device=dev).manual_seed(5 + M)
     q_c = (torch.randn((M, 1536), generator=g, device=dev) * 1.5).bfloat16()
@@ -672,6 +680,15 @@ def stage_sparse_combine(ha, hs, rank, M, reqs_empty=1):
     seq = torch.randint(1, 5000, (nreq,), device=dev, generator=g).to(torch.int32)
     seq[::5] = 0
     gate = torch.randn((M, 1536), device=dev, generator=g).bfloat16()
+    cap = A._decode_shape()[0]
+    if cap < M:
+        res_plain = torch.empty((M, 12, 128), dtype=torch.bfloat16, device=dev)
+        with akr_env(True):
+            ha.layer._akr_ms_state.reset_akr()
+            taken = A.combine(ha.layer, out, lse, res_plain, seq, qsl)
+        check(rank, not taken, f"combine M={M}: above the decode rows {cap}, taken")
+        log(rank, f"[stage] combine M={M}: above the decode rows {cap}, declined")
+        return
     hst = hs.layer
     ref_out = torch.empty((M, 12, 128), dtype=torch.bfloat16, device=dev)
     done = hst.dcp_manager.vup_rs_combine(

@@ -1566,6 +1566,8 @@ class KimiLinearForCausalLM(
         if ok_moe:
             # one layer's weights are enough to allocate the shared stream workspaces
             akr_moe.prewarm_capture_stream(ok_moe[0])
+            # the capture streams borrow this stream's set: no set per stream
+            akr_runtime.register_stream_workspaces(akr_moe.swap_stream_workspaces)
             akr_runtime.register_prewarm(
                 lambda m=ok_moe[0]: akr_moe.prewarm_capture_stream(m)
             )

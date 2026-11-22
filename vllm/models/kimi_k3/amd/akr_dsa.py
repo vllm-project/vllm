@@ -48,7 +48,8 @@ SWITCHES: dict[str, str] = {
     "COMBINE": "attention",
 }
 
-# rows of the shared gathered-query buffer (``ensure_q_buffer``)
+# rows of the shared gathered-query buffer at most (``ensure_q_buffer``: the server's
+# decode rows)
 Q_BUFFER_ROWS = 256
 # the sparse MLA kernel's partials feed the combine kernel, whose communicator takes
 # 256 rows (c48 with 4 speculative tokens: 48 x 5 = 240); past them the stock decode
@@ -89,6 +90,22 @@ def _call_fallback(name: str, reason: str | None) -> bool:
 def _meta(*shape, dtype) -> torch.Tensor:
     """Stand-in of an operand that does not exist yet, for a host-only reason check."""
     return torch.empty(shape, dtype=dtype, device="meta")
+
+
+def _decode_shape() -> tuple[int, int] | None:
+    """(rows, query rows a request) of the server's largest decode batch: `max_num_seqs`
+    requests of `max_decode_query_len` (1 + k) rows, the builders' decode / prefill
+    split; rows capped at 256. The decode-only kernels (score + top-k, query gather,
+    combine) never see more rows, so their buffers are sized by it (the entries'
+    reasons guard the bound). None outside a server config."""
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.v1.attention.backend import max_decode_query_len
+
+    cfg = get_current_vllm_config_or_none()
+    if cfg is None:
+        return None
+    q = max_decode_query_len(cfg)
+    return max(1, min(256, cfg.scheduler_config.max_num_seqs * q)), q
 
 
 # ---------------------------------------------------------------------------
@@ -181,10 +198,12 @@ def _create_comms(want, rank, group, device, attn, world) -> None:
     if want["COMBINE"]:
         from amd_kernels.attention import mla_decode_common as mla
 
+        shape = _decode_shape()
         kw = dict(
             heads=attn.num_local_heads * world,
             v_head=attn.v_head_dim,
             kv_lora=attn.kv_lora_rank,
+            max_tokens=None if shape is None else shape[0],
             is_lse_base_on_e=True,
         )
         if not _fallback(
@@ -292,19 +311,64 @@ def _zero_ready_counts() -> bool:
     return os.environ.get("VLLM_KIMI_AKR_SCORE_TOPK_ZERO_COUNTS", "1") != "0"
 
 
-def preallocate_score_topk_scratch(device, cache, out_indices) -> None:
-    """The kernel's ~145 MB scratch is one set per (device, stream): create the
-    main and aux sets now, not inside a graph capture."""
+def preallocate_score_topk_scratch(w, device, cache, out_indices) -> None:
+    """The kernel's scratch is one set per (device, stream) (0.59 MB a row): create it
+    now, not inside a graph capture, for the server's decode rows.
+
+    With the multi-stream wrapper only the aux stream's set is kept: every decode batch
+    it runs (all the captured ones) launches the kernel there, and the set the warm-up's
+    host calls made on the load stream is released (an eager serial decode on another
+    stream makes its own set later, after the KV cache is sized). No set at all when no
+    decode batch of the server is the kernel's (e.g. 8 query rows a request); a shorter
+    batch (fewer drafts) that the kernel takes then makes a set of the decode rows."""
     from amd_kernels.indexer.mxfp4_indexer_common import paged_score_topk_preallocate
 
     from vllm.utils.torch_utils import aux_stream
 
+    ms = getattr(w, "ms_comm", None) is not None
+    shape = _decode_shape()
+    kw = dict(cache=cache, out_indices=out_indices)
+    if shape is not None and _decode_reason(w, cache, out_indices, shape[1]):
+        paged_score_topk_preallocate(
+            device, [], **kw, rows=shape[0], release_others=True
+        )
+        return
+    streams = (
+        [aux_stream()] if ms else [torch.cuda.current_stream(device), aux_stream()]
+    )
     paged_score_topk_preallocate(
         device,
-        (torch.cuda.current_stream(device), aux_stream()),
-        cache=cache,
-        out_indices=out_indices,
+        streams,
+        **kw,
+        rows=None if shape is None else shape[0],
+        release_others=ms,
     )
+
+
+def _decode_reason(w, cache, out_indices, qlen: int) -> str | None:
+    """The entry's reason for one request of `qlen` decode rows (warned once)."""
+    from amd_kernels.indexer.mxfp4_indexer_common import (
+        mxfp4_paged_score_topk_unsupported_reason,
+    )
+
+    d = _dims(w)
+    z = lambda *s, dtype: torch.zeros(s, dtype=dtype, device=cache.device)  # noqa: E731
+    reason = mxfp4_paged_score_topk_unsupported_reason(
+        z(qlen, d["index_h"], d["index_d"] // 2, dtype=torch.uint8),
+        z(qlen, 1, 4, 16, 4, dtype=torch.uint8),
+        z(qlen, d["index_h"], dtype=torch.float32),
+        cache,
+        z(1, 1, dtype=torch.int32),
+        z(2, dtype=torch.int32),
+        z(qlen, dtype=torch.int32),
+        qlen,
+        z(qlen, out_indices.shape[1], dtype=torch.int32),
+        z(qlen, out_indices.shape[1], dtype=torch.float32),
+    )
+    _fallback(
+        "SCORE_TOPK", reason and f"decode batches of {qlen} rows a request: {reason}"
+    )
+    return reason
 
 
 # ---------------------------------------------------------------------------
@@ -639,7 +703,7 @@ def warm_up(w, lw: LayerWeights) -> None:
             "SCORE_TOPK", ix.mxfp4_paged_score_topk_unsupported_reason(*args)
         ):
             prewarm(ix.mxfp4_paged_score_topk_kernel, *args)
-            preallocate_score_topk_scratch(dev, cache, args[8])
+            preallocate_score_topk_scratch(w, dev, cache, args[8])
     if on("SPARSE_MLA") and _eligible_deployment() is None:
         args = (
             z(1, d["heads"], d["kv_lora"] + d["rope"], dtype=bf),
@@ -816,14 +880,19 @@ _q_buffer: torch.Tensor | None = None
 
 
 def ensure_q_buffer(w) -> torch.Tensor:
-    """The one gathered-query buffer [Q_BUFFER_ROWS, heads, kv_lora + rope] shared by
-    all layers (a layer's query is consumed by its sparse MLA before the next layer's
-    gather)."""
+    """The one gathered-query buffer [decode rows, heads, kv_lora + rope] shared by all
+    layers (a layer's query is consumed by its sparse MLA before the next layer's
+    gather); the gather runs on decode batches only."""
     global _q_buffer
     if _q_buffer is None:
         d = _dims(w)
+        shape = _decode_shape()
         _q_buffer = torch.empty(
-            (Q_BUFFER_ROWS, d["heads"], d["kv_lora"] + d["rope"]),
+            (
+                Q_BUFFER_ROWS if shape is None else shape[0],
+                d["heads"],
+                d["kv_lora"] + d["rope"],
+            ),
             dtype=torch.bfloat16,
             device=w.fused_qkv_a_proj.weight.device,
         )
@@ -839,7 +908,7 @@ def qgather_runtime_ok(w, rows: int) -> bool:
         or not on("QGATHER")
         or lw.w_qb is None
         or comm is None
-        or not 0 < rows <= Q_BUFFER_ROWS
+        or not 0 < rows <= ensure_q_buffer(w).shape[0]
     ):
         return False
     from amd_kernels.attention.mla_decode_common import (

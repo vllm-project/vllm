@@ -10,11 +10,12 @@
 * the batch-sharded sampler (`compute_logits_owned`: owner mode, the rows sorted by
   owner; each rank receives only the rows it samples), switch `SHARDED`.
 
-Two communicators (target, draft), each with two receive buffers that the calls of the
-communicator alternate (a fast sender never overwrites rows a slow rank still reads).
-The returned logits are a view of the receive buffer: valid until the second next
-exchange of the same communicator (the draft's, captured in a graph, always uses buffer
-0: its logits are consumed by the Markov chain before the next target step). Above the
+Two communicators (target, draft). The target's has two receive buffers that its calls
+alternate (a fast sender never overwrites rows a slow rank still reads); the returned
+logits are a view of the receive buffer, valid until the second next exchange. The
+draft's, captured in a graph, always uses buffer 0 (its logits are consumed by the
+Markov chain before the next target step, whose collectives order every rank's read
+before any rank's next draft exchange) and has that one buffer only. Above the
 communicator's rows (prefill steps, prompt logprobs), for a call the entry rejects
 (`logits_gemm_exchange_unsupported_reason`) or for a scaled / soft-capped / non-bf16
 head the stock path runs. The split-K GEMM bands share one workspace per device and
@@ -55,9 +56,10 @@ class _Exchange:
         self.buf ^= 1
         return b
 
-    def warm_up(self, w: torch.Tensor) -> None:
-        """Collective: compile every variant of both modes (rows <= / > the push
-        crossovers) and take the first-use allocations of the library."""
+    def warm_up(self, w: torch.Tensor, owner: bool) -> None:
+        """Collective: compile every variant of the all-gather mode and, with `owner`
+        (the batch-sharded sampler can call it), of the owner mode (rows <= / > the push
+        crossovers), and take the first-use allocations of the library."""
         x = torch.zeros(
             self.max_rows, w.shape[1], dtype=torch.bfloat16, device=w.device
         )
@@ -66,7 +68,7 @@ class _Exchange:
             {min(8, self.max_rows), min(32, self.max_rows), self.max_rows}
         ):
             self.comm.gemm_exchange(x[:rows], w, self.arange[:rows], None, 0)
-        for rows in sorted({min(8, self.max_rows), self.max_rows}):
+        for rows in sorted({min(8, self.max_rows), self.max_rows} if owner else ()):
             world = akr_nonlayer.tp_group().world_size
             counts = torch.tensor(
                 [rows // world + int(r < rows % world) for r in range(world)],
@@ -142,6 +144,12 @@ def _rows_for_draft(vllm_config) -> int:
     return min(MAX_ROWS, vllm_config.scheduler_config.max_num_seqs * max(k, 1))
 
 
+def _buffers_for(kind: str) -> int:
+    """Receive buffers of the `kind` communicator: the draft's exchanges all take buffer
+    0 (`logits`), so it has one."""
+    return 1 if kind == "draft" else 2
+
+
 def setup(kind: str, lm_head, logits_processor, vllm_config) -> bool:
     """Collective (every TP rank, same order, after the weights load and before
     capture): build the `kind` ('target' or 'draft') communicator and compile its GEMM
@@ -161,7 +169,9 @@ def setup(kind: str, lm_head, logits_processor, vllm_config) -> bool:
     g = akr_nonlayer.tp_group()
     w = lm_head.weight
     lib = _lib()
-    kw = dict(n_shard=w.shape[0], k=w.shape[1], max_rows=rows)
+    kw = dict(
+        n_shard=w.shape[0], k=w.shape[1], max_rows=rows, buffers=_buffers_for(kind)
+    )
     if akr_nonlayer.blocked(
         "LMHEAD",
         lib.logits_exchange_comm_unsupported_reason(
@@ -171,9 +181,9 @@ def setup(kind: str, lm_head, logits_processor, vllm_config) -> bool:
         return False
     comm = lib.logits_exchange_comm(g.rank_in_group, g.cpu_group, w.device, **kw)
     ex = _Exchange(kind, comm, rows, w.device)
-    ex.warm_up(w)
+    ex.warm_up(w, owner=kind == "target" and akr_nonlayer.switch("SHARDED"))
     _state[kind] = ex
-    gb = 2 * ex.max_rows * lm_head.org_vocab_size * 2 / 2**30
+    gb = kw["buffers"] * ex.max_rows * lm_head.org_vocab_size * 2 / 2**30
     logger.info(
         "amd_kernels lm_head exchange (%s): max %d rows, %.3f GB receive buffers per "
         "rank",

@@ -221,12 +221,25 @@ def test_context_layout_and_reasons(_env):
     )
 
 
-def _ctx_shell(model):
+def _ctx_shell(model, combine=None):
     """A `ContextProj` without its communicator (the 8-rank test runs the kernel):
-    the norm bookkeeping only."""
+    the norm bookkeeping and the row split only. Its eager call computes what the
+    kernel does (the projection and its norm) with `combine` (the model's
+    `combine_hidden_states` by default) and records its row ranges."""
     from vllm.models.kimi_k3.amd import akr_draft
 
-    ctx = akr_draft.ContextProj.__new__(akr_draft.ContextProj)
+    combine = combine or model.combine_hidden_states
+
+    class Shell(akr_draft.ContextProj):
+        def __init__(self):
+            self.calls: list[tuple[int, int]] = []
+
+        def combine_eager(self, aux, start, end, out):
+            self.calls.append((start, end))
+            x = torch.cat([h[start:end] for h in aux], dim=-1)
+            out.copy_(self.post_norm(combine(x)))
+
+    ctx = Shell()
     _, _, ctx.norm_in_precompute = akr_draft._ctx_modules(model)
     ctx.post_norm = (
         model.model._normalize_context_states
@@ -249,7 +262,7 @@ def test_release_context_norm_moves_to_the_store(_env):
     m._fused_kv_weight = (torch.randn(L * 2 * nkv * hd, H) * 0.1).to(torch.bfloat16)
     m._fused_kv_bias = None
     m._context_kv_proj = None
-    rows = akr_draft.CTX_MAX_ROWS + 8  # past the kernel: the store's stock combine
+    rows = akr_draft.CTX_MAX_ROWS + 8  # two kernel calls
     aux = [torch.randn(rows, H).to(torch.bfloat16) for _ in range(NUM_AUX)]
     raw = model.combine_hidden_states(torch.cat(aux, dim=-1))
     ref = m._project_context_kv_token_major(raw, rows, L, nkv, hd)
@@ -264,6 +277,7 @@ def test_release_context_norm_moves_to_the_store(_env):
         hidden_states=torch.zeros(rows + 4, H, dtype=torch.bfloat16),
     )
     assert akr_draft.store_hidden_states(spec, rows, None, aux, 0)
+    assert ctx.calls == [(0, akr_draft.CTX_MAX_ROWS), (akr_draft.CTX_MAX_ROWS, rows)]
     got = m._project_context_kv_token_major(spec.hidden_states[:rows], rows, L, nkv, hd)
     assert torch.equal(got, ref)
     # no aux hidden states: the target's last hidden states, normed the same way
@@ -274,22 +288,25 @@ def test_release_context_norm_moves_to_the_store(_env):
     )
 
 
-def test_preview_store_keeps_its_combine(_env):
+def test_preview_store_runs_every_row_on_the_kernel(_env):
+    """Past CTX_MAX_ROWS the preview's rows still take the packed projection (the
+    replicated weight is released), in CTX_MAX_ROWS-row calls, with no norm after it
+    (the preview's combine norms)."""
     from vllm.models.kimi_k3.amd import akr_draft
 
     model = _preview()
-    ctx = _ctx_shell(model)
+    ctx = _ctx_shell(model, combine=lambda x: x[:, :H] * 2)
     ctx.install()  # nothing to move: the preview's combine norms
     rows = akr_draft.CTX_MAX_ROWS + 1
     aux = [torch.randn(rows, H).to(torch.bfloat16) for _ in range(NUM_AUX)]
-    combine = SimpleNamespace(combine_hidden_states=lambda x: x[:, :H] * 2)
     spec = SimpleNamespace(
         _akr_ctx=ctx,
         _aux_staging=None,
-        model=combine,
+        model=model,
         hidden_states=torch.zeros(rows, H, dtype=torch.bfloat16),
     )
     assert akr_draft.store_hidden_states(spec, rows, None, aux, 0)
+    assert ctx.calls == [(0, akr_draft.CTX_MAX_ROWS), (akr_draft.CTX_MAX_ROWS, rows)]
     assert torch.equal(spec.hidden_states, aux[0] * 2)
 
 
