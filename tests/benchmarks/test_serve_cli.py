@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
+import json
+import re
 import subprocess
 import tempfile
 import time
@@ -8,7 +11,12 @@ from pathlib import Path
 import pytest
 import requests
 import urllib3
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from prometheus_client.parser import text_string_to_metric_families
+
+from vllm.benchmarks.serve import add_cli_args, main_async
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from ..utils import RemoteOpenAIServer
 
@@ -192,7 +200,51 @@ def test_bench_serve_insecure(ssl_server):
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
     # Probes use their own session, which must also honor --insecure.
-    assert "Probe requests completed" in result.stdout
+    assert re.search(r"Probe requests completed:\s+[1-9]\d*", result.stdout)
+
+
+@pytest.mark.benchmark
+@pytest.mark.asyncio
+async def test_bench_serve_reports_failed_probes(tmp_path, capsys):
+    probe_seen = asyncio.Event()
+    failed_probes = 0
+
+    async def completions(request):
+        nonlocal failed_probes
+        if (await request.json())["prompt"] == "Hi":
+            failed_probes += 1
+            probe_seen.set()
+            raise web.HTTPServiceUnavailable()
+        await asyncio.wait_for(probe_seen.wait(), timeout=10)
+        return web.Response(
+            content_type="text/event-stream",
+            text='data: {"choices":[{"text":"x"}]}\n\n'
+            'data: {"usage":{"completion_tokens":1}}\n\ndata: [DONE]\n\n',
+        )
+
+    app = web.Application()
+    app.router.add_post("/v1/completions", completions)
+    dataset = tmp_path / "prompts.jsonl"
+    dataset.write_text('{"prompt":"main workload"}\n')
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    async with TestServer(app) as server:
+        args = ["--base-url", str(server.make_url("")).rstrip("/"), "--model", "stub"]
+        args += ["--dataset-name", "custom", "--dataset-path", str(dataset)]
+        args += ["--skip-tokenizer-init", "--skip-chat-template", "--num-prompts", "1"]
+        args += ["--ready-check-timeout-sec", "0", "--probe-request-rate", "1"]
+        args += ["--save-result", "--result-dir", str(tmp_path)]
+        args += ["--result-filename", "result.json"]
+        await main_async(parser.parse_args(args))
+
+    stats = json.loads((tmp_path / "result.json").read_text())
+    assert stats["completed"] == 1
+    assert stats["probe_completed"] == 0
+    assert stats["probe_failed"] == failed_probes > 0
+    assert not any(key.startswith("probe_") and key.endswith("_ms") for key in stats)
+    assert re.search(
+        rf"Probe requests failed:\s+{failed_probes}\b", capsys.readouterr().out
+    )
 
 
 @pytest.mark.benchmark

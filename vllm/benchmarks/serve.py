@@ -1346,24 +1346,24 @@ async def benchmark(
     probe_stats: dict[str, Any] | None = None
     if probe_task is not None:
         probe_lats = [o.latency for o in probe_outputs if o.success]
-        if probe_lats:
-            probe_stats = {
-                "probe_completed": len(probe_lats),
-                "probe_failed": len(probe_outputs) - len(probe_lats),
-                "probe_median_e2el_ms": float(np.median(probe_lats)) * 1000,
-                "probe_p99_e2el_ms": float(np.percentile(probe_lats, 99)) * 1000,
-                "probe_max_e2el_ms": float(max(probe_lats)) * 1000,
-            }
-            print("{s:{c}^{n}}".format(s="Probe Requests", n=50, c="-"))
-            print(
-                "{:<40} {:<10}".format(
-                    "Probe requests completed:", probe_stats["probe_completed"]
-                )
+        probe_stats = {
+            "probe_completed": len(probe_lats),
+            "probe_failed": len(probe_outputs) - len(probe_lats),
+        }
+        print("{s:{c}^{n}}".format(s="Probe Requests", n=50, c="-"))
+        print("{:<40} {:<10}".format("Probe requests completed:", len(probe_lats)))
+        print(
+            "{:<40} {:<10}".format(
+                "Probe requests failed:", probe_stats["probe_failed"]
             )
-            print(
-                "{:<40} {:<10}".format(
-                    "Probe requests failed:", probe_stats["probe_failed"]
-                )
+        )
+        if probe_lats:
+            probe_stats.update(
+                {
+                    "probe_median_e2el_ms": float(np.median(probe_lats)) * 1000,
+                    "probe_p99_e2el_ms": float(np.percentile(probe_lats, 99)) * 1000,
+                    "probe_max_e2el_ms": float(max(probe_lats)) * 1000,
+                }
             )
             print(
                 "{:<40} {:<10.2f}".format(
