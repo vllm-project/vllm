@@ -49,7 +49,7 @@ class GDSOffloadingWorker(ThreadPoolFSWorker):
             raise RuntimeError("GDS offloading requires an NVIDIA CUDA GPU.")
         super().__init__(
             file_mapper=file_mapper,
-            block_size_factor=blocks_per_file,
+            blocks_per_file=blocks_per_file,
             device=device,
             max_io_threads=int(extra_config.get("gds_max_io_threads", 32)),
         )

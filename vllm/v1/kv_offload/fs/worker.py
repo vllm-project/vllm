@@ -54,9 +54,9 @@ class FSOffloadingWorker(OffloadingWorker):
     submit_io().
     """
 
-    def __init__(self, file_mapper: FileMapper, block_size_factor: int):
+    def __init__(self, file_mapper: FileMapper, blocks_per_file: int):
         self._file_mapper = file_mapper
-        self._block_size_factor = block_size_factor
+        self._blocks_per_file = blocks_per_file
         self._transfers: dict[int, _Transfer] = {}
 
     @abstractmethod
@@ -177,14 +177,14 @@ class FSOffloadingWorker(OffloadingWorker):
         total_bytes = 0
         key_idx = 0
 
-        for g in iter_pointer_groups(device_ptrs, self._block_size_factor):
+        for g in iter_pointer_groups(device_ptrs, self._blocks_per_file):
             dev_blk = 0
             for i in range(g.n_chunks):
                 key = keys[key_idx]
                 key_idx += 1
 
                 file_blk_start = g.skip if i == 0 else 0
-                capacity = self._block_size_factor - file_blk_start
+                capacity = self._blocks_per_file - file_blk_start
                 n_blks = min(capacity, g.group_size - dev_blk)
 
                 ops: list[FileOp] = []
@@ -194,7 +194,7 @@ class FSOffloadingWorker(OffloadingWorker):
                     for b in range(n_blks):
                         idx = base + b
                         file_offset = (
-                            d * self._block_size_factor + file_blk_start + b
+                            d * self._blocks_per_file + file_blk_start + b
                         ) * blk_size
                         ops.append(
                             FileOp(
@@ -225,12 +225,12 @@ class ThreadPoolFSWorker(FSOffloadingWorker):
     def __init__(
         self,
         file_mapper: FileMapper,
-        block_size_factor: int,
+        blocks_per_file: int,
         device: torch.device | None = None,
         max_io_threads: int = DEFAULT_MAX_THREADS,
         pool_initializer=None,
     ):
-        super().__init__(file_mapper=file_mapper, block_size_factor=block_size_factor)
+        super().__init__(file_mapper=file_mapper, blocks_per_file=blocks_per_file)
 
         def _init() -> None:
             if device is not None:

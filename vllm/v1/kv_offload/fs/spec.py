@@ -27,7 +27,6 @@ class FSOffloadingSpec(OffloadingSpec):
         root_dir = self.extra_config.get("root_dir")
         if not root_dir:
             raise ValueError("root_dir must be specified in kv_connector_extra_config")
-        self.read_only: bool = bool(self.extra_config.get("read_only", True))
         self.index_size = int(
             self.extra_config.get("fs_index_size", DEFAULT_INDEX_SIZE)
         )
@@ -49,7 +48,6 @@ class FSOffloadingSpec(OffloadingSpec):
             self._manager = FSOffloadingManager(
                 file_mapper=self.file_mapper,
                 index_size=self.index_size,
-                read_only=self.read_only,
             )
         return self._manager
 

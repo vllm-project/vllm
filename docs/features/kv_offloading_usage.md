@@ -123,13 +123,12 @@ vllm serve <model> \
       "spec_name": "FSOffloadingSpec",
       "fs_backend": "gds",
       "root_dir": "/mnt/nvme/kv_cache",
-      "block_size": 64,
-      "read_only": true
+      "block_size": 64
     }
   }'
 ```
 
-Files are named by block content hash, so blocks written by an earlier run or by another instance with the same model and parallel configuration are found by an asynchronous on-disk lookup. With `read_only` (the default), the instance only loads existing files and never writes. Keys found on disk are remembered in an in-memory LRU index of `fs_index_size` entries so later requests skip the disk lookup; dropping a key from the index does not delete its file.
+Files are named by block content hash, so blocks written by an earlier run or by another instance with the same model and parallel configuration are found by an asynchronous on-disk lookup. Set `access_mode` to `read` for an instance that only loads files written elsewhere and never writes; the default, `readwrite`, also stores the blocks it computes. Keys found on disk are remembered in an in-memory LRU index of `fs_index_size` entries so later requests skip the disk lookup; dropping a key from the index does not delete its file.
 
 ## `kv_connector_extra_config` Reference
 
@@ -141,7 +140,6 @@ Files are named by block content hash, so blocks written by an earlier run or by
 | `root_dir` | yes | — | direct storage | Directory holding the block files for `FSOffloadingSpec`. |
 | `fs_backend` | no | `gds` | direct storage | Worker backend for `FSOffloadingSpec`. The only built-in backend is `gds`. |
 | `fs_backend_module_path` | no | — | direct storage | Python import path for a custom `FSOffloadingWorker` class named by `fs_backend`. Required only when `fs_backend` is not built-in (advanced). |
-| `read_only` | no | `true` | direct storage | If `true`, `FSOffloadingSpec` only loads existing files and never stores. |
 | `gds_max_io_threads` | no | `32` | direct storage | Thread pool size for the `gds` backend's cuFile calls. |
 | `block_size` | no | GPU block size | both | Offloaded block size in tokens; must be a multiple of the GPU block size. Mutually exclusive with `blocks_per_chunk`. |
 | `blocks_per_chunk` | no | `1` | both | Offloaded chunk size in GPU blocks; must be > 0. Alternative to `block_size` for models whose KV cache groups have different block sizes. |
@@ -154,7 +152,7 @@ Files are named by block content hash, so blocks written by an earlier run or by
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
-| `access_mode` | no | `readwrite` | both | Direction(s) in which this connector's managers may transfer data: `read` serves loads but never accepts stores, `write` accepts stores but never serves loads, `readwrite` does both. Secondary tiers take their own `access_mode` field. |
+| `access_mode` | no | `readwrite` | all | Direction(s) in which this connector's managers may transfer data: `read` serves loads but never accepts stores, `write` accepts stores but never serves loads, `readwrite` does both. Applies to every built-in spec, including `FSOffloadingSpec`. Secondary tiers take their own `access_mode` field. |
 | `sync_load_budget_bytes` | no | `0` | both | Per-step budget of KV bytes (per GPU) loaded within the same step, so those requests run immediately instead of waiting a step for an async load. Hits that don't fit the remaining budget, or would leave nothing to compute, stay async. `0` disables. |
 | `self_describing_kv_events` | no | `false` | both | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. With `TieringOffloadingSpec`, a CPU promotion is self-describing when a local request observes its primary-tier `HIT` before event translation; otherwise its stored event may retain the placeholder, while a later `HIT` can backfill metadata for removal. Pending-removal/re-promotion races and externally initiated promotions may also produce placeholders, and consumers must ignore removals for unknown hashes. Recurrent (Mamba / linear-attention) state groups announce state checkpoints, with `kv_cache_spec_kind` `mamba`: an offloaded chunk or partial tail holds one recurrent state, valid at its last hash, so its `BlockStored` carries that single hash, its parent hash and an empty `token_ids`. Consumers align it by hash with the attention group's blocks; a hybrid prefix is reusable only up to a boundary where every group has a residency. Sliding-window and chunked-local attention chunks keep the placeholder fallback. In chunk mode (`block_size` > GPU block size, or `blocks_per_chunk` > 1), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |

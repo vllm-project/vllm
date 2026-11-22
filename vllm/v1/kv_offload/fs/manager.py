@@ -17,6 +17,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+    StoreTrigger,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.fs.common import FSLoadStoreSpec
@@ -42,12 +43,10 @@ class FSOffloadingManager(OffloadingManager):
         self,
         file_mapper: FileMapper,
         index_size: int = DEFAULT_INDEX_SIZE,
-        read_only: bool = True,
     ):
         assert index_size > 0
         self.medium = Medium.STORAGE
         self._index_size = index_size
-        self._read_only = read_only
         self._index: OrderedDict[OffloadKey, None] = OrderedDict()
         # Keys whose store is in flight; their files may be incomplete.
         self._storing: set[OffloadKey] = set()
@@ -107,13 +106,15 @@ class FSOffloadingManager(OffloadingManager):
 
     @override
     def prepare_store(
-        self, keys: Collection[OffloadKey], req_context: ReqContext
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        *,
+        trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
-        keys_to_store = (
-            []
-            if self._read_only
-            else [k for k in keys if k not in self._index and k not in self._storing]
-        )
+        keys_to_store = [
+            k for k in keys if k not in self._index and k not in self._storing
+        ]
         self._storing.update(keys_to_store)
         # Empty, not None: None counts as an allocation failure.
         return PrepareStoreOutput(
@@ -127,6 +128,8 @@ class FSOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
+        trigger: StoreTrigger,
         success: bool = True,
     ) -> None:
         for key in keys:
