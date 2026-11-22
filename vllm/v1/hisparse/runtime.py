@@ -103,8 +103,12 @@ class PagedCacheView:
             # Blocks whole rows apart: kernels read the strided cache as flat rows.
             assert block_stride % row_bytes == 0
             return cls(cache, cache, block_size, block_stride // row_bytes)
+        # Other cache regions may follow the strided layer in the arena.
+        # Expose only the pages that its own physical page table can address.
+        page_bytes = block_size * row_bytes
+        extent = (num_blocks - 1) * block_stride + page_bytes if num_blocks else 0
         attention_cache = (
-            raw_tensor[byte_offset:].view(dtype).view(-1, block_size, row_width)
+            raw_tensor[byte_offset : byte_offset + extent].view(dtype).view(-1, block_size, row_width)
         )
         return cls(cache, attention_cache, block_size, block_stride // row_bytes)
 
