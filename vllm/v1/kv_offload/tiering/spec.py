@@ -67,7 +67,10 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    REGION_SEGMENTS,
+    SharedOffloadRegion,
+)
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
@@ -76,6 +79,7 @@ from vllm.v1.kv_offload.tiering.base import (
 )
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
+    DEFAULT_TIER_POLL_INTERVAL_S,
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
 )
@@ -96,6 +100,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     """
 
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    SHARED_REGION_PER_RANK = False
 
     @classmethod
     @override
@@ -158,7 +163,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.READ_TIME] = OffloadingCounterMetadata(
             documentation=(
                 "Total time spent reading from secondary tiers into the primary "
-                "tier, in seconds, labeled by tier."
+                "tier, in seconds, labeled by tier. Tiers that do not report "
+                "per-job transfer time have no series here. Use "
+                "vllm:kv_offload_tiering_promotion_latency_seconds for "
+                "tier-independent promotion timing."
             ),
             labelnames=(TIER_LABEL,),
         )
@@ -172,7 +180,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.WRITE_TIME] = OffloadingCounterMetadata(
             documentation=(
                 "Total time spent writing from the primary tier to secondary "
-                "tiers, in seconds, labeled by tier."
+                "tiers, in seconds, labeled by tier. Tiers that do not report "
+                "per-job transfer time have no series here."
             ),
             labelnames=(TIER_LABEL,),
         )
@@ -242,6 +251,54 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             ),
             labelnames=(TIER_LABEL,),
         )
+        metrics[TieringOffloadingMetrics.DEFERRED_RELEASE_CHUNKS] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Number of primary-tier chunks of failed promotions whose release "
+                    "to the free pool is deferred until the tier confirms its I/O can "
+                    "no longer write to them, labeled by tier."
+                ),
+                labelnames=(TIER_LABEL,),
+            )
+        )
+        metrics[TieringOffloadingMetrics.DEFERRED_RELEASE_HOLD] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of how long a failed promotion's primary-tier "
+                    "chunks were held before their deferred release completed, "
+                    "observed at release, labeled by tier, in seconds."
+                ),
+                labelnames=(TIER_LABEL,),
+                buckets=(0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120),
+            )
+        )
+        metrics[TieringOffloadingMetrics.PROMOTION_LATENCY] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of per-job latency for secondary-tier promotion "
+                    "attempts, measured from job creation until the tiering "
+                    "manager observes completion so that tier queueing is "
+                    "included, labeled by tier and result, in seconds. Includes "
+                    "failed attempts."
+                ),
+                labelnames=(TIER_LABEL, "result"),
+                buckets=(
+                    0.005,
+                    0.01,
+                    0.025,
+                    0.05,
+                    0.1,
+                    0.25,
+                    0.5,
+                    1,
+                    2.5,
+                    5,
+                    10,
+                    30,
+                    60,
+                ),
+            )
+        )
 
         for tier_config, tier_cls in cls._get_secondary_tiers(extra_config):
             metrics.update(tier_cls.build_metric_definitions(tier_config))
@@ -279,11 +336,24 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
+        if self.async_init:
+            logger.warning(
+                "async_init is not supported with TieringOffloadingSpec yet; "
+                "setting the CPU tier up now"
+            )
+            self.async_init = False
 
         # Parse secondary tier configurations
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
+
+        # Pause between tier-poll rounds for tiers that need servicing
+        # between engine steps. Zero or negative disables the thread, which
+        # restores per-step servicing.
+        self.tier_poll_interval_s = float(
+            self.extra_config.get("tier_poll_interval_s", DEFAULT_TIER_POLL_INTERVAL_S)
+        )
 
         # Backpressure config is merged field-by-field in priority order
         # (highest first):
@@ -354,6 +424,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     rank=None,
                     kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
+                    num_segments=REGION_SEGMENTS,
+                    populate=False,
                 )
                 self._scheduler_mmap = scheduler_mmap
 
@@ -364,6 +436,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     cache_policy_module_path=self.cache_policy_module_path,
                     enable_events=self.kv_events_config.enable_kv_cache_events,
                     mmap_region=scheduler_mmap,
+                    info=self.cpu_info,
                 )
 
                 # Create secondary tiers
@@ -385,6 +458,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 tiering_manager = TieringOffloadingManager(
                     primary_tier=primary_tier,
                     secondary_tiers=secondary_tiers,
+                    tier_poll_interval_s=self.tier_poll_interval_s,
                 )
                 self._manager = tiering_manager
             except Exception:
@@ -422,6 +496,19 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 self.num_chunks,
                 len(secondary_tiers),
             )
+            if secondary_tiers and not (
+                self.config.replicated_layout
+                or (
+                    self.config.canonical_layout
+                    and self.config.parallel.is_parallelism_agnostic
+                )
+            ):
+                logger.warning(
+                    "Secondary-tier KV is only valid for engines with the same "
+                    "parallel configuration; sharing it across TP sizes needs "
+                    "canonical_layout=true in kv_connector_extra_config, "
+                    "parallelism-agnostic KV cache layers, and no PP, DCP or PCP."
+                )
 
         return self._manager
 
@@ -478,13 +565,22 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        rank = 0 if self.replicated_layout else self.config.parallel.rank
+        if self.secondary_tier_configs and self.config.parallel.world_size > 1:
+            _reject_workers_across_nodes()
+        world_size = self.config.parallel.world_size
+        worker_index = self.config.parallel.rank
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
             num_chunks=self.num_chunks,
-            rank=rank,
+            rank=0 if self.replicated_layout else worker_index,
             kv_bytes_per_chunk=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
+            num_segments=REGION_SEGMENTS,
+            # Every worker maps the same bytes in the replicated layout, so
+            # each pre-faults only its share.
+            populate_shard=(
+                (worker_index, world_size) if self.replicated_layout else None
+            ),
         )
         try:
             if self.config.canonical_layout:
@@ -536,4 +632,32 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         logger.info(
             "Canonical KV layout enabled (all_layers_portable=%s)",
             self.all_layers_portable,
+        )
+
+
+def _reject_workers_across_nodes() -> None:
+    """Reject secondary tiers on an engine whose workers span nodes.
+
+    Secondary tiers run in the engine core and read only its node's CPU
+    region, which lacks the slots of workers on other nodes (#54415). An
+    engine's workers form a grid of TP, PP and PCP groups, so they share one
+    node if every such group does. Collective over each group.
+    """
+    from vllm.distributed.parallel_state import (
+        get_pcp_group,
+        get_pp_group,
+        get_tp_group,
+        in_the_same_node_as,
+    )
+
+    # Every rank must join every collective before any of them raises.
+    spans = [
+        group.world_size > 1
+        and not all(in_the_same_node_as(group.cpu_group, source_rank=0))
+        for group in (get_tp_group(), get_pp_group(), get_pcp_group())
+    ]
+    if any(spans):
+        raise NotImplementedError(
+            "TieringOffloadingSpec secondary tiers are not supported on "
+            "engines whose workers span several nodes."
         )

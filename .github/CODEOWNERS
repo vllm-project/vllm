@@ -8,11 +8,10 @@
 /vllm/distributed/kv_transfer/kv_connector/v1/hisparse @MatthewBonanni @LucasWilkinson
 /vllm/lora @jeejeelee
 /vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
-/vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye @wzhao18
+/vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye @wzhao18 @bnellnm
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety @zyongye
 /vllm/model_executor/layers/mamba @tdoublep @tomeras91 @ZJY0516
 /vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
-/vllm/model_executor/model_loader @22quinn
 /vllm/model_executor/determinism/ @yewentao256
 /vllm/model_executor/custom_op.py @shen-shanshan
 /vllm/ir @ProExpertProg
@@ -31,8 +30,7 @@
 
 # Config utils
 /vllm/config/utils.py @hmellor
-/vllm/engine/arg_utils.py @hmellor
-/vllm/utils/argparse_utils.py
+/vllm/utils/argparse_utils.py @hmellor
 
 # Entrypoints
 /vllm/entrypoints/anthropic @chaunceyjiang @mgoin @DarkLight1337
@@ -104,8 +102,8 @@
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
 /vllm/v1/attention/backends/gdn_attn.py @ZJY0516 @vadiklyutiy
 /vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium @ZJY0516
-/vllm/v1/sample @22quinn @houseroad @njhill
-/vllm/v1/spec_decode @benchislett @luccafong @MatthewBonanni
+/vllm/v1/sample @houseroad @njhill
+/vllm/v1/spec_decode @benchislett @MatthewBonanni
 /vllm/v1/structured_output @mgoin @aarnphm @benchislett @arpera
 /vllm/v1/kv_cache_interface.py @heheda12345 @ivanium @ZJY0516
 /vllm/v1/kv_offload @ApostaC @orozery
@@ -115,7 +113,6 @@
 /vllm/v1/executor @njhill
 /vllm/v1/worker @njhill
 /vllm/v1/worker/mamba_utils.py @njhill @ZJY0516
-/vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery @NickLucche @ivanium
 /vllm/v1/worker/encoder_cudagraph.py @shen-shanshan
 /vllm/v1/worker/encoder_cudagraph_defs.py @shen-shanshan
 
@@ -123,6 +120,7 @@
 /vllm/v1/worker/gpu @WoosukKwon @njhill @yewentao256
 /vllm/v1/worker/gpu/kv_connector.py @orozery
 /vllm/v1/worker/gpu/model_states/mamba_hybrid.py @WoosukKwon @njhill @yewentao256 @ZJY0516
+/vllm/v1/worker/gpu/spec_decode @WoosukKwon @njhill @yewentao256 @TheEpicDolphin
 
 # CI & building
 /.buildkite @Harry-Chen @khluu
@@ -138,6 +136,7 @@
 /tests/evals @mgoin @vadiklyutiy @AndreasKaratzas @ZJY0516
 /tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256 @zyongye @AndreasKaratzas
 /tests/kernels/ir @ProExpertProg @tjtanaa
+/tests/kernels/moe @bnellnm
 /tests/models @DarkLight1337 @ywang96 @AndreasKaratzas
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche @shen-shanshan
 /tests/multimodal/media @Isotr0py
@@ -164,10 +163,14 @@
 .readthedocs.yaml @hmellor
 mkdocs.yaml @hmellor
 
+# Model recipes
+/recipes @esmeetu
+
 # Linting
 /tools/pre_commit/.markdownlint.yaml @hmellor
 .pre-commit-config.yaml @hmellor
 /tools/pre_commit @hmellor
+/tools/pre_commit/*_allowlist.txt
 
 # CPU
 /vllm/v1/worker/cpu* @bigPYJ1151 @xuechendi
@@ -187,12 +190,9 @@ mkdocs.yaml @hmellor
 /tests/**/*nemotron* @tomeras91
 
 # Qwen-specific files
-/vllm/model_executor/models/qwen* @sighingnow @vadiklyutiy
-/vllm/transformers_utils/configs/qwen* @sighingnow @vadiklyutiy
+/vllm/model_executor/models/qwen* @vadiklyutiy
+/vllm/transformers_utils/configs/qwen* @vadiklyutiy
 /vllm/models/qwen4_exp @gau-nernst
-
-# MTP-specific files
-/vllm/model_executor/models/deepseek_mtp.py @luccafong
 
 # DeepseekV4-specific files
 /vllm/models/deepseek_v4 @zyongye
@@ -214,7 +214,8 @@ mkdocs.yaml @hmellor
 /vllm/v1/attention/ops/triton_unified_attention.py @tdoublep
 /vllm/third_party/flash_linear_attention @ZJY0516 @vadiklyutiy
 /vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl @gau-nernst
-/vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_cutedsl.py @gau-nernst
+/vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm100.py @gau-nernst
+/vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm90.py @gau-nernst
 /vllm/model_executor/kernels/linear/cute_dsl/gemm_rs_ar.py @gau-nernst
 /vllm/cute_utils @gau-nernst
 

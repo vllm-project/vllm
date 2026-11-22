@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton attention backend with different K/V head dimensions (DiffKV).
 
-The KV cache layout is identical to ``FlashAttentionDiffKVBackend``: K and V
+The KV cache layout is identical to `FlashAttentionDiffKVBackend`: K and V
 are packed along the last dim in the logical shape
-``[num_blocks, num_kv_heads, block_size, head_size_qk + head_size_v]``.
+`[num_blocks, num_kv_heads, block_size, head_size_qk + head_size_v]`.
 """
 
 from typing import ClassVar
@@ -15,7 +15,6 @@ from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.utils.math_utils import next_power_of_2
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, AttentionType
 from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionBackend,
@@ -29,7 +28,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
 from vllm.v1.attention.ops.triton_unified_attention_diffkv import (
     unified_attention_diffkv,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 
 logger = init_logger(__name__)
 
@@ -37,10 +36,10 @@ logger = init_logger(__name__)
 class TritonAttentionDiffKVMetadataBuilder(TritonAttentionMetadataBuilder):
     """Override the parent's softmax buffer last-dim to head_size_v.
 
-    The parent allocates ``softmax_segm_output`` with last-dim sized to
-    ``next_power_of_2(head_size)`` (== Q/K head size).  For DiffKV the
+    The parent allocates `softmax_segm_output` with last-dim sized to
+    `next_power_of_2(head_size)` (== Q/K head size).  For DiffKV the
     accumulator and per-segment partial outputs are V-shaped, so we
-    re-allocate with ``next_power_of_2(head_size_v)`` instead.
+    re-allocate with `next_power_of_2(head_size_v)` instead.
     """
 
     def __init__(
@@ -69,6 +68,10 @@ class TritonAttentionDiffKVMetadataBuilder(TritonAttentionMetadataBuilder):
 class TritonAttentionDiffKVBackend(TritonAttentionBackend):
     # V head dim — set per layer via ``set_head_size_v`` before instantiation.
     head_size_v: int = 128
+
+    @classmethod
+    def supports_head_size_v(cls, head_size: int, head_size_v: int) -> bool:
+        return True
 
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",

@@ -3,8 +3,8 @@
 """UltraQuant inherits TurboQuant's forward/do_kv_cache_update orchestration.
 
 UltraQuant only overrides the store/decode/prefill seams, so a TurboQuant-side
-change to a seam signature, to an inherited helper, or to the ``layer._tq_*``
-attributes ``forward`` reads will break UltraQuant at serve time without
+change to a seam signature, to an inherited helper, or to the `layer._tq_*`
+attributes `forward` reads will break UltraQuant at serve time without
 touching any UltraQuant kernel test. These checks pin that contract.
 """
 
@@ -24,7 +24,7 @@ def _method_ast(cls: type, name: str) -> ast.AST:
 
 
 def _tq_attrs_read(cls: type, name: str) -> set[str]:
-    """``_tq_*`` attribute names read (not assigned) in ``cls.name``."""
+    """`_tq_*` attribute names read (not assigned) in `cls.name`."""
     tree = _method_ast(cls, name)
     assigned = {
         t.attr

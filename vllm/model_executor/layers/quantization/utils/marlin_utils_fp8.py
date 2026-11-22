@@ -8,7 +8,6 @@ import vllm._custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
-    get_marlin_input_dtype,
     marlin_moe_padded_intermediate,
     marlin_pad_dim,
     marlin_pad_qweight,
@@ -53,7 +52,6 @@ def apply_fp8_marlin_linear(
     size_n: int,
     size_k: int,
     bias: torch.Tensor | None,
-    input_dtype: torch.dtype | None = None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
 ) -> torch.Tensor:
     # For GPUs that lack FP8 hardware support, we can leverage the
@@ -73,18 +71,11 @@ def apply_fp8_marlin_linear(
         dtype=input.dtype,
     )
 
-    inputs = reshaped_x
-    a_scales = None
-    if input_dtype is not None and input_dtype.itemsize == 1:
-        # inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
-        raise RuntimeError("Marlin W8A8 is not supported.")
-
     output = torch.ops.vllm.marlin_gemm(
-        a=inputs,
+        a=reshaped_x,
         b_q_weight=weight,
         b_bias=bias,
         b_scales=weight_scale,
-        a_scales=a_scales,
         global_scale=None,
         b_zeros=None,
         workspace=workspace,
@@ -103,7 +94,6 @@ def apply_fp8_marlin_linear(
 def prepare_fp8_layer_for_marlin(
     layer: torch.nn.Module,
     size_k_first: bool = True,
-    input_dtype: torch.dtype | None = None,
 ) -> None:
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
@@ -111,9 +101,6 @@ def prepare_fp8_layer_for_marlin(
         "be used leveraging the Marlin kernel. This may degrade "
         "performance for compute-heavy workloads."
     )
-    if input_dtype is not None and input_dtype.itemsize == 1:
-        raise RuntimeError("Marlin W8A8 is not supported.")
-
     part_size_n = layer.output_size_per_partition
     part_size_k = layer.input_size_per_partition
     weight_block_size = getattr(layer, "weight_block_size", None)
@@ -193,8 +180,7 @@ def prepare_fp8_layer_for_marlin(
     marlin_scales = marlin_permute_scales(
         s=scales, size_k=padded_k, size_n=padded_n, group_size=group_size
     )
-    if input_dtype != torch.float8_e4m3fn:
-        marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
+    marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
     if hasattr(layer, "weight_scale"):
         replace_parameter(layer, "weight_scale", marlin_scales)
     elif hasattr(layer, "weight_scale_inv"):
@@ -207,7 +193,7 @@ def prepare_fp8_layer_for_marlin(
 
 
 def _moe_pad_shard_rows(x: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
-    """Zero-pad each gate/up shard of a ``(E, 2 * n, ...)`` tensor to padded_n
+    """Zero-pad each gate/up shard of a `(E, 2 * n, ...)` tensor to padded_n
     rows. FP8 zero decodes to 0.0, so the padded rows contribute nothing."""
     if padded_n == n:
         return x
@@ -219,7 +205,7 @@ def _moe_pad_shard_rows(x: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
 
 
 def _moe_pad_last(x: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
-    """Zero-pad the last dim of a ``(E, ..., n)`` tensor to padded_n."""
+    """Zero-pad the last dim of a `(E, ..., n)` tensor to padded_n."""
     if padded_n == n:
         return x
     return torch.nn.functional.pad(x, (0, padded_n - n))
@@ -239,10 +225,6 @@ def prepare_fp8_moe_layer_for_marlin(
         "be used leveraging the Marlin kernel. This may degrade "
         "performance for compute-heavy workloads."
     )
-    input_dtype = get_marlin_input_dtype()
-    if input_dtype is not None and input_dtype.itemsize == 1:
-        raise NotImplementedError("Marlin W8A8 is not supported.")
-
     e = layer.num_experts
     k = layer.hidden_size
     n = layer.intermediate_size_per_partition
@@ -337,8 +319,7 @@ def prepare_fp8_moe_layer_for_marlin(
             tensor_list.append(marlin_scales)
 
         scales = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
-        if input_dtype != torch.float8_e4m3fn:
-            scales = fp8_fused_exponent_bias_into_scales(scales)
+        scales = fp8_fused_exponent_bias_into_scales(scales)
         return scales
 
     w13_weight_scale = permute_scales(w13_weight_scale, "w13")
@@ -401,7 +382,6 @@ def apply_mxfp8_marlin_linear(
         b_q_weight=weight,
         b_bias=bias,
         b_scales=weight_scale,
-        a_scales=None,
         global_scale=None,
         b_zeros=None,
         workspace=workspace,
@@ -562,11 +542,7 @@ def prepare_mxfp8_moe_layer_for_marlin(
     return w13, w2, w13_scale, w2_scale
 
 
-def marlin_quant_fp8_torch(weight, group_size, input_dtype=None):
-    is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
-    if is_a_8bit:
-        assert input_dtype == torch.float8_e4m3fn
-
+def marlin_quant_fp8_torch(weight, group_size):
     size_n, size_k = weight.shape
     if group_size != -1:
         scales = weight.view(size_n, -1, group_size).abs().max(-1)[0] / 448
@@ -585,7 +561,6 @@ def marlin_quant_fp8_torch(weight, group_size, input_dtype=None):
         size_k=size_k,
         size_n=size_n,
         num_bits=8,
-        is_a_8bit=is_a_8bit,
     )
 
     marlin_scales = marlin_permute_scales(
@@ -593,7 +568,6 @@ def marlin_quant_fp8_torch(weight, group_size, input_dtype=None):
         size_k=size_k,
         size_n=size_n,
         group_size=group_size,
-        is_a_8bit=is_a_8bit,
     )
 
     marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
