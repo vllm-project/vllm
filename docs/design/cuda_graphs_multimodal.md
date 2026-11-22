@@ -44,6 +44,8 @@ Audio encoders use the same manager and protocol:
 
 For these audio towers the conv frontend runs eagerly before each replay; token budgets count encoder output tokens, and the smallest budget is one attention window (104 tokens, 8 s of audio). Other attention backends keep the audio tower eager. `encoder_cudagraph_max_vision_items_per_batch` also caps the number of audio clips per graph.
 
+The audio frontend builds chunk lengths and unpadding indices on the CPU. Equal-length chunks use one packed copy; on CUDA devices, large batches of varied-length chunks gather from a zero-padded source, avoiding a separate padding copy per chunk. Other varied-length batches keep sequence padding. These paths preserve per-clip chunk boundaries and the CNN input layout, and also apply when encoder graphs are disabled.
+
 !!! note
     Encoder CUDA Graph has currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
     For Qwen2-VL and Qwen2.5-VL only FA2 and FA3 has been tested.
@@ -169,7 +171,7 @@ Five fields in `CompilationConfig` control encoder CUDA Graphs:
 * `cudagraph_mm_encoder` (`bool`, default `False`) — enable CUDA Graph capture for multimodal encoder. When enabled, captures the full encoder forward as a CUDA Graph for each token budget level.
 * `encoder_cudagraph_token_budgets` (`list[int]`, default `[]`) — token budget levels for capture. If empty (default), auto-inferred from model architecture on the subdivided grid (see above). User-provided values override auto-inference.
 * `encoder_cudagraph_max_token_budget` (`int | None`, default `5120`) — largest auto-generated token budget. Must be positive or `None`. A batch with more tokens runs eagerly. `None` captures up to the model's largest budget. Ignored when `encoder_cudagraph_token_budgets` is set.
-* `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`. A batch with more items runs eagerly in one forward.
+* `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of encoder items (images, videos, or audio clips) per batch during capture. If 0 (default), inferred from the **model-provided** budget range as `max_budget // min_budget`, capped by the smallest captured token budget. `encoder_cudagraph_max_token_budget` does not replace the model's maximum in this calculation: an audio model range of `[104, 8192]` yields 78 items even with the default 5120-token capture cap. A batch with more items runs eagerly in one forward.
 * `encoder_cudagraph_max_frames_per_batch` (`int`, default `None`) — maximum number of video frames per batch during capture. If `None` (default), auto-inferred as `encoder_cudagraph_max_vision_items_per_batch * max_frames_per_video` (`max_frames_per_video` is a model-specific value from `EncoderCudaGraphConfig`, computed by `get_max_frames_per_video()` on the model). If we limit the video count per prompt to `0`, it will also be set to `0` (i.e., fall back to image-only mode).
 
 Multi-path mode is configured at the model level through `EncoderCudaGraphConfig.paths`. Each `EncoderCudaGraphPathConfig` can set a path-specific minimum budget and whether zero-token batches are allowed. The manager automatically generates separate budget lists and uses the same execution loop for single- and multi-path models.

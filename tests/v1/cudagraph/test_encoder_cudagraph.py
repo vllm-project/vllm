@@ -2262,7 +2262,7 @@ def _make_qwen3_omni_audio_host(device: torch.device, dtype: torch.dtype):
             self.audio_tower = audio_tower
             self.config = config
 
-    # Real defaults for the chunk/window sizes; small widths and depth.
+    # Real audio windows; small widths, depth, and convolution batches.
     audio_config = Qwen3OmniMoeAudioEncoderConfig(
         d_model=128,
         encoder_layers=2,
@@ -2270,6 +2270,7 @@ def _make_qwen3_omni_audio_host(device: torch.device, dtype: torch.dtype):
         encoder_ffn_dim=256,
         downsample_hidden_size=32,
         output_dim=96,
+        conv_chunksize=4,
     )
     torch.manual_seed(0)
     with set_default_torch_dtype(dtype), torch.device(device):
@@ -2414,7 +2415,44 @@ class TestQwen3OmniAudioEncoderCudaGraphReplay:
         torch.testing.assert_close(result[0], self._eager(small)[0])
 
     @pytest.mark.parametrize(
-        "feature_lens", [[10000], [100, 10000, 250], [100, 250] * 5]
+        "feature_lens",
+        [[37] * 9, [100] * 9, [37, 99] * 15 + [37], [37, 99] * 16, [401, 37]],
+    )
+    def test_frontend_preserves_per_clip_chunk_padding(self, feature_lens):
+        """Packed padding must match padding independent per-clip chunks."""
+        mm_kwargs = _make_audio_mm_kwargs(feature_lens, self.device, self.dtype)
+        features = mm_kwargs["input_audio_features"]
+        tower = self.host.audio_tower
+        cnn_inputs = []
+        hook = tower.conv2d1.register_forward_pre_hook(
+            lambda module, args: cnn_inputs.append(args[0])
+        )
+        try:
+            tower.embed_audio_features(features, mm_kwargs["audio_feature_lengths"])
+        finally:
+            hook.remove()
+        chunks = [
+            chunk
+            for clip in features.T.split(feature_lens)
+            for chunk in clip.split(tower.n_window * 2)
+        ]
+        expected = (
+            torch.nn.utils.rnn.pad_sequence(chunks, batch_first=True)
+            .transpose(1, 2)
+            .unsqueeze(1)
+        )
+        torch.testing.assert_close(torch.cat(cnn_inputs), expected, rtol=0, atol=0)
+
+    @pytest.mark.parametrize(
+        "feature_lens",
+        [
+            [10000],
+            [100, 10000, 250],
+            [100, 250] * 5,
+            [100] * 9,
+            [37, 99] * 15 + [37],
+            [37, 99] * 16,
+        ],
     )
     def test_oversized_batch_falls_back_to_eager(self, feature_lens):
         """Fallback preserves input order and lets cache items be freed separately."""
@@ -2422,6 +2460,7 @@ class TestQwen3OmniAudioEncoderCudaGraphReplay:
         expected = self._eager(mm_kwargs)
         misses = self.mgr.graph_misses
         input_storage = mm_kwargs["input_audio_features"].untyped_storage().data_ptr()
+        output_width = self.mgr.config.out_hidden_size
 
         class CheckFallbackCopies(TorchDispatchMode):
             def __torch_dispatch__(self, func, types, args=(), kwargs=None):
@@ -2430,11 +2469,21 @@ class TestQwen3OmniAudioEncoderCudaGraphReplay:
                         tensor.untyped_storage().data_ptr() != input_storage
                         for tensor in args[0]
                     ), "Eager fallback must not concatenate the packed audio input"
+                elif func == torch.ops.aten._foreach_clone.default:
+                    assert all(
+                        tensor.untyped_storage().nbytes() > tensor.nbytes
+                        for tensor in args[0]
+                    ), "Eager fallback must not copy outputs with bounded storage"
                 elif func == torch.ops.aten._foreach_copy_.default:
                     assert all(
                         tensor.untyped_storage().nbytes() > tensor.nbytes
                         for tensor in args[1]
                     ), "Eager fallback must not copy outputs with bounded storage"
+                elif func == torch.ops.aten.clone.default:
+                    source = args[0]
+                    assert not (
+                        source.ndim == 2 and source.shape[-1] == output_width
+                    ), "Eager fallback must compact output views in one batch"
                 return func(*args, **(kwargs or {}))
 
         with CheckFallbackCopies():

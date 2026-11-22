@@ -717,15 +717,15 @@ class EncoderCudaGraphManager:
         outputs = [outputs_by_orig_idx[i] for i in range(num_items)]
         if all_eager:
             # Do not retain a whole batch for one cached item.
-            sources, destinations = [], []
-            for i, output in enumerate(outputs):
-                if output.untyped_storage().nbytes() > output.nbytes:
-                    copied = torch.empty_like(output)
-                    sources.append(output)
-                    destinations.append(copied)
-                    outputs[i] = copied
-            if sources:
-                torch._foreach_copy_(destinations, sources)
+            copy_indices = [
+                i
+                for i, output in enumerate(outputs)
+                if output.untyped_storage().nbytes() > output.nbytes
+            ]
+            if copy_indices:
+                copied = torch._foreach_clone([outputs[i] for i in copy_indices])
+                for i, output in zip(copy_indices, copied):
+                    outputs[i] = output
         return outputs
 
     def _dp_shard(
