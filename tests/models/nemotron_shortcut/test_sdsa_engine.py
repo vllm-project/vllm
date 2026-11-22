@@ -33,6 +33,7 @@ def run(path, index_topk, **kwargs) -> tuple[list, dict]:
     attention (None), and the engine's metrics."""
     with VllmRunner(
         str(path),
+        trust_remote_code=True,  # the checkpoint's config is remote code
         load_format="dummy",
         skip_tokenizer_init=True,
         hf_overrides={"text_config": {"index_topk": index_topk}},

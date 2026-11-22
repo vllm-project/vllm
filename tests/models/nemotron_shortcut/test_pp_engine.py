@@ -26,6 +26,7 @@ PROMPTS = [[rng.randrange(VOCAB - 1) for _ in range(n)] for n in (7, 300)]
 def run(path, pipeline_parallel_size: int) -> list:
     with VllmRunner(
         str(path),
+        trust_remote_code=True,  # the checkpoint's config is remote code
         load_format="dummy",
         skip_tokenizer_init=True,
         pipeline_parallel_size=pipeline_parallel_size,
