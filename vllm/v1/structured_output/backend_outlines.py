@@ -37,7 +37,15 @@ else:
 @dataclass
 class OutlinesBackend(StructuredOutputBackend):
     def __post_init__(self):
-        self.vocabulary = get_outlines_vocabulary(self.tokenizer)
+        eos_token_id = self.tokenizer.eos_token_id
+        if eos_token_id is None and self.vllm_config.model_config is not None:
+            # Some tokenizers (e.g. Inkling) define no EOS token; the model's
+            # stop token is in the generation config, as SamplingParams uses.
+            eos_ids = self.vllm_config.model_config.try_get_generation_config().get(
+                "eos_token_id"
+            )
+            eos_token_id = eos_ids[0] if isinstance(eos_ids, list) else eos_ids
+        self.vocabulary = get_outlines_vocabulary(self.tokenizer, eos_token_id)
         self.cache = get_outlines_cache()
 
     def _compile_index(
