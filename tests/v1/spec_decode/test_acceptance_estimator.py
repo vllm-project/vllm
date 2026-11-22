@@ -510,6 +510,27 @@ def test_circuit_breaker_resets_the_shared_slope():
     assert estimator.slope_stuck.item() == 0.0
 
 
+def test_circuit_breaker_ignores_unobserved_windows():
+    """Empty refits preserve learned coefficients and their stuck counters."""
+    device = current_platform.device_type
+    estimator = OnlineAcceptanceEstimator(MAX_NUM_REQS, NUM_STEPS, device)
+    estimator.REFIT_INTERVAL = 1
+    estimator.intercepts[-1] = 2.5
+    estimator.slope.fill_(0.9)
+    before_intercepts = estimator.intercepts.clone()
+    before_slope = estimator.slope.clone()
+    empty = torch.empty(0, dtype=torch.int32, device=device)
+
+    for _ in range(int(_STUCK_LIMIT) + 2):
+        estimator.step(empty, empty, empty)
+        torch.testing.assert_close(
+            estimator.intercepts, before_intercepts, rtol=0, atol=0
+        )
+        torch.testing.assert_close(estimator.slope, before_slope, rtol=0, atol=0)
+        assert torch.count_nonzero(estimator.pos_stuck).item() == 0
+        assert estimator.slope_stuck.item() == 0
+
+
 def test_step_clip_bounds_a_single_refit_at_near_zero_information():
     """Before the circuit breaker's reset can ever trigger, the floor and
     clip must already bound a single refit's step on their own -- this is
