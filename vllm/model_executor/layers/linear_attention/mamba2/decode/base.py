@@ -117,6 +117,18 @@ class MambaSSUKernel(LinearAttnKernel):
         return reasons
 
     @classmethod
+    def needs_autotune(cls) -> bool:
+        """Whether `autotune` tunes anything."""
+        return False
+
+    @classmethod
+    def autotune(cls, layer: SSULayer, num_reqs: int) -> None:
+        """Tune this kernel for decode batches of up to `num_reqs` requests,
+        within the caller's FlashInfer autotune context. It may run one step on
+        the layer's state slots 1..num_reqs, which the caller commits
+        beforehand and zeroes afterwards."""
+
+    @classmethod
     def uses_rand_seed_slot(cls, mamba_config: MambaConfig) -> bool:
         """Whether the layer reads its stochastic-rounding seed from a slot of
         a buffer the model runner binds and refreshes once per step."""

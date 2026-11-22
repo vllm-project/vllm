@@ -766,33 +766,16 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 max_query_len=1 + self.num_spec,
             )
 
-            hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
-                hidden_states_B_C_d
-            )
-
             # 3. State Space Model sequence transformation
-            n_groups = self.n_groups // self.tp_size
-            A_d = (
-                self.A[:, None, ...][:, :, None]
-                .expand(-1, self.head_dim, self.ssm_state_size)
-                .to(dtype=torch.float32)
-            )
-            dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
-            dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
-            D_d = self.D[:, None, ...].expand(-1, self.head_dim)
-            B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
-            C_d = C_d.view(-1, n_groups, C_d.shape[1] // n_groups)
-            hidden_states_d = hidden_states_d.view(
-                -1, self.num_heads // self.tp_size, self.head_dim
-            )
-
             assert preallocated_ssm_out_d is not None
-            # - the hidden is reshaped into (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected
             #   using state_indices_tensor_d
             # NOTE: final output is an in-place update of out tensor
             preallocated_ssm_out_d = preallocated_ssm_out_d.view(
                 num_decode_tokens, -1, self.head_dim
+            )
+            hidden_states_d, dt_d, A_d, B_d, C_d, D_d, dt_bias = self._ssu_inputs(
+                hidden_states_B_C_d, dt_d
             )
             self.ssu_kernel.forward(
                 self,
@@ -807,6 +790,35 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 dt_bias,
                 preallocated_ssm_out_d,
             )
+
+    def _ssu_inputs(
+        self, hidden_states_B_C: torch.Tensor, dt: torch.Tensor
+    ) -> tuple[torch.Tensor, ...]:
+        """The SSU kernel's `(x, dt, A, B, C, D, dt_bias)` for decode tokens,
+        from the convolution's output and the projected `dt`."""
+        x, B, C = self.split_hidden_states_B_C_fn(hidden_states_B_C)
+        n_groups = self.n_groups // self.tp_size
+        return (
+            x.view(-1, self.tped_dt_size, self.head_dim),
+            dt[:, :, None].expand(-1, -1, self.head_dim),
+            self.A[:, None, None]
+            .expand(-1, self.head_dim, self.ssm_state_size)
+            .to(dtype=torch.float32),
+            B.view(-1, n_groups, B.shape[1] // n_groups),
+            C.view(-1, n_groups, C.shape[1] // n_groups),
+            self.D[:, None].expand(-1, self.head_dim),
+            self.dt_bias[:, None].expand(-1, self.head_dim),
+        )
+
+    def warmup_ssu_inputs(self, num_tokens: int) -> tuple[torch.Tensor, ...]:
+        """Random SSU kernel inputs shaped like `num_tokens` decode tokens, for
+        kernels that tune on them (`MambaSSUKernel.autotune`)."""
+        assert self.model_config is not None
+        dtype, device = self.model_config.dtype, self.A.device
+        return self._ssu_inputs(
+            torch.randn(num_tokens, self.tped_conv_size, dtype=dtype, device=device),
+            torch.randn(num_tokens, self.tped_dt_size, dtype=dtype, device=device),
+        )
 
     def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         # The block-boundary state can be exported from inside one forward

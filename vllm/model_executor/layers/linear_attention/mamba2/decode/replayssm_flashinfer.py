@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, replace
 from functools import cache
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear_attention.kernel import LinearAttnSelectorConfig
 from vllm.platforms.interface import PlatformEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -19,6 +20,8 @@ from .replayssm_tracker import TrackerBuffers, TrackerReplaySSMKernel
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadata
+
+logger = init_logger(__name__)
 
 # FlashInfer's checkpointing_ssu replays at most this many cached tokens.
 MAX_BUFFER_LEN = 16
@@ -34,6 +37,13 @@ def flashinfer_replayssm_autotune_supported() -> bool:
     except ImportError:
         return False
     return True
+
+
+class TunableReplaySSMLayer(ReplaySSMLayer, Protocol):
+    def warmup_ssu_inputs(self, num_tokens: int) -> tuple[torch.Tensor, ...]:
+        """Random `(x, dt, A, B, C, D, dt_bias)` shaped like `num_tokens`
+        decode tokens."""
+        ...
 
 
 @dataclass
@@ -104,6 +114,53 @@ class FlashInferReplaySSMKernel(TrackerReplaySSMKernel):
         return mamba_config.enable_stochastic_rounding
 
     @classmethod
+    def needs_autotune(cls) -> bool:
+        if flashinfer_replayssm_autotune_supported():
+            return True
+        logger.info_once(
+            "Skipping FlashInfer ReplaySSM autotuning because "
+            "flashinfer.mamba.checkpointing_ssu.CheckpointingSSURunner "
+            "is unavailable."
+        )
+        return False
+
+    @classmethod
+    def autotune(cls, layer: SSULayer, num_reqs: int) -> None:
+        # FlashInfer tunes only dense calls with scratch, and profiles every
+        # smaller batch bucket from one call at the largest.
+        from flashinfer.mamba.checkpointing_ssu import (
+            allocate_checkpointing_ssu_scratch,
+        )
+
+        layer = cast(TunableReplaySSMLayer, layer)
+        query_len = 1 + layer.ssu_state.num_spec
+        x, dt, A, B, C, D, dt_bias = layer.warmup_ssu_inputs(num_reqs * query_len)
+        scratch = allocate_checkpointing_ssu_scratch(
+            batch_size=num_reqs,
+            num_heads=x.size(1),
+            num_predicted_tokens=query_len,
+            max_window=layer.ssu_state.buffer_len,
+            dtype=x.dtype,
+            device=x.device,
+        )
+        indices = torch.arange(1, num_reqs + 1, dtype=torch.int32, device=x.device)
+        cls._run(
+            layer,
+            layer.kv_cache[1],
+            x,
+            dt,
+            A,
+            B,
+            C,
+            D,
+            dt_bias,
+            torch.empty_like(x),
+            indices,
+            scratch,
+            cu_seqlens=None,
+        )
+
+    @classmethod
     def allocate_buffers(
         cls,
         vllm_config: "VllmConfig",
@@ -172,10 +229,41 @@ class FlashInferReplaySSMKernel(TrackerReplaySSMKernel):
         out: torch.Tensor,
         z: torch.Tensor | None = None,
     ) -> None:
-        layer = cast(ReplaySSMLayer, layer)
         indices = metadata.replayssm_state_indices_d
         assert indices is not None and metadata.replayssm_scratch is not None
-        cu_seqlens = metadata.query_start_loc_d
+        cls._run(
+            cast(ReplaySSMLayer, layer),
+            state,
+            x,
+            dt,
+            A,
+            B,
+            C,
+            D,
+            dt_bias,
+            out,
+            indices,
+            metadata.replayssm_scratch,
+            metadata.query_start_loc_d,
+        )
+
+    @classmethod
+    def _run(
+        cls,
+        layer: ReplaySSMLayer,
+        state: torch.Tensor,
+        x: torch.Tensor,
+        dt: torch.Tensor,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        D: torch.Tensor,
+        dt_bias: torch.Tensor,
+        out: torch.Tensor,
+        indices: torch.Tensor,
+        scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        cu_seqlens: torch.Tensor | None,
+    ) -> None:
         max_seqlen = None
         if layer.ssu_state.num_spec > 0:
             query_len = 1 + layer.ssu_state.num_spec
@@ -204,7 +292,7 @@ class FlashInferReplaySSMKernel(TrackerReplaySSMKernel):
                     0, 2**32, (1,), device=state.device, dtype=torch.int64
                 )
         x_cache, dt_cache, B_cache = layer.kv_cache[2:5]
-        cb_scaled, cumAdt_vec, cb_old = metadata.replayssm_scratch
+        cb_scaled, cumAdt_vec, cb_old = scratch
         cls._fn()(
             state,
             x_cache,

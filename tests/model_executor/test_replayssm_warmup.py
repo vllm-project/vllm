@@ -9,7 +9,12 @@ import torch
 
 from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import CacheConfig
-from vllm.config.mamba import MambaBackendEnum
+from vllm.model_executor.layers.linear_attention.mamba2.decode import (
+    replayssm_flashinfer,
+)
+from vllm.model_executor.layers.linear_attention.mamba2.decode.base import (
+    MambaSSUKernel,
+)
 from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_base import (
     MambaReplaySSMLayerState,
 )
@@ -19,28 +24,21 @@ from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_flashin
 from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_triton import (
     TritonReplaySSMKernel,
 )
+from vllm.model_executor.layers.linear_attention.mamba2.decode.triton import (
+    TritonSSUKernel,
+)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup import replayssm_warmup as warmup
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import KVCacheLayout, MambaSpec
 from vllm.v1.worker.utils import allocate_kv_cache
 
-PREFILL_KWARGS = {
-    "num_tokens": 128,
-    "skip_eplb": True,
-    "is_profile": True,
-    "randomize_inputs": True,
-}
 
-
-def _replayssm_mixer(backend: MambaBackendEnum) -> MambaMixer2:
+def _mamba_mixer(kernel: type[MambaSSUKernel]) -> MambaMixer2:
     mixer = MambaMixer2.__new__(MambaMixer2)
     torch.nn.Module.__init__(mixer)
-    mixer.ssu_kernel = (
-        FlashInferReplaySSMKernel
-        if backend == MambaBackendEnum.FLASHINFER
-        else TritonReplaySSMKernel
-    )
+    mixer.ssu_kernel = kernel
+    mixer.kv_cache = ()
     return mixer
 
 
@@ -50,8 +48,8 @@ def _autotune_runner(
     max_num_seqs: int = 32,
     num_blocks: int = 17,
     max_num_tokens: int = 100,
-    use_replayssm: bool = True,
-    backend: MambaBackendEnum = MambaBackendEnum.FLASHINFER,
+    kernel: type[MambaSSUKernel] = FlashInferReplaySSMKernel,
+    num_layers: int = 1,
     committable_blocks: int | None = None,
 ) -> SimpleNamespace:
     extensible_kv_cache = None
@@ -59,20 +57,15 @@ def _autotune_runner(
         extensible_kv_cache = SimpleNamespace(
             warmup_committable_blocks=committable_blocks, commit=Mock()
         )
+    layers = {f"layers.{i}.mixer": _mamba_mixer(kernel) for i in range(num_layers)}
     return SimpleNamespace(
         extensible_kv_cache=extensible_kv_cache,
         vllm_config=SimpleNamespace(
-            cache_config=SimpleNamespace(use_replayssm=use_replayssm),
-            compilation_config=SimpleNamespace(
-                static_forward_context={"layers.0.mixer": _replayssm_mixer(backend)}
-            ),
+            compilation_config=SimpleNamespace(static_forward_context=layers),
         ),
-        uniform_decode_query_len=query_len,
         decode_query_len=query_len,
         max_num_tokens=max_num_tokens,
-        scheduler_config=SimpleNamespace(
-            max_num_seqs=max_num_seqs, max_num_batched_tokens=max_num_tokens
-        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
         kv_cache_config=SimpleNamespace(num_blocks=num_blocks),
     )
 
@@ -89,75 +82,87 @@ def _autotune_runner(
     ],
     ids=["default", "clamped_to_state_capacity", "clamped_to_committable"],
 )
-def test_replayssm_autotune_decode_kwargs(runner_kwargs, expected_num_reqs):
-    query_len = runner_kwargs["query_len"]
-    with patch.object(
-        warmup, "flashinfer_replayssm_autotune_supported", return_value=True
+def test_ssu_autotune_tunes_the_largest_decode_batch_on_real_slots(
+    runner_kwargs, expected_num_reqs
+):
+    """Slot 0 is the null block, so the batch is bounded by the slots after it
+    that warmup may commit, besides the decode batch limits."""
+    runner = _autotune_runner(**runner_kwargs)
+    with (
+        patch.object(FlashInferReplaySSMKernel, "needs_autotune", return_value=True),
+        patch.object(FlashInferReplaySSMKernel, "autotune") as autotune,
     ):
-        result = warmup._replayssm_autotune_kwargs(
-            _autotune_runner(**runner_kwargs), PREFILL_KWARGS
-        )
-
-    assert result is not None
-    max_num_reqs, decode_kwargs = result
-    assert max_num_reqs == expected_num_reqs
-    expected_kwargs = {
-        **PREFILL_KWARGS,
-        "num_tokens": expected_num_reqs * query_len,
-        "uniform_decode": True,
-        "valid_dummy_state_slots": True,
-    }
-    assert decode_kwargs == expected_kwargs
+        warmup.mamba_ssu_autotune_warmup(runner)
+    autotune.assert_called_once_with(
+        runner.vllm_config.compilation_config.static_forward_context["layers.0.mixer"],
+        expected_num_reqs,
+    )
 
 
 @pytest.mark.parametrize(
-    ("runner_kwargs", "flashinfer_supported"),
+    ("runner_kwargs", "fi_autotune_supported"),
     [
-        (dict(use_replayssm=False), True),
-        (dict(backend=MambaBackendEnum.TRITON), True),
+        (dict(kernel=TritonReplaySSMKernel), True),
+        (dict(kernel=TritonSSUKernel), True),
         ({}, False),
-        (dict(num_blocks=1), True),
+        (dict(committable_blocks=1), True),
     ],
     ids=[
-        "replayssm_disabled",
-        "non_flashinfer_backend",
-        "kernel_unavailable",
+        "triton_replayssm",
+        "plain_triton",
+        "flashinfer_autotune_unavailable",
         "zero_non_padding_slots",
     ],
 )
-def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
-    with patch.object(
-        warmup,
-        "flashinfer_replayssm_autotune_supported",
-        return_value=flashinfer_supported,
-    ):
-        result = warmup._replayssm_autotune_kwargs(
-            _autotune_runner(**runner_kwargs), PREFILL_KWARGS
-        )
-    assert result is None
-
-
-def test_replayssm_autotune_warmup_commits_dummy_slots_first():
-    """The dummy slots 1..max_num_reqs must be committed memory before the
-    autotune run and its cleanup touch them."""
-    runner = _autotune_runner(
-        query_len=1, max_num_tokens=128, num_blocks=64, committable_blocks=4
-    )
-    events: list[str] = []
-    runner.extensible_kv_cache.commit = lambda n: events.append(f"commit {n}")
-    runner._dummy_run = lambda **kwargs: events.append("dummy_run")
+def test_ssu_autotune_skipped(runner_kwargs, fi_autotune_supported):
+    runner = _autotune_runner(**{"committable_blocks": 4, **runner_kwargs})
     with (
         patch.object(
-            warmup, "flashinfer_replayssm_autotune_supported", return_value=True
+            replayssm_flashinfer,
+            "flashinfer_replayssm_autotune_supported",
+            return_value=fi_autotune_supported,
         ),
-        patch.object(warmup, "_temporary_replayssm_autotune_state"),
+        patch.object(FlashInferReplaySSMKernel, "autotune") as autotune,
     ):
-        warmup.replayssm_autotune_warmup(runner)
-    assert events == ["commit 4", "dummy_run"]
+        warmup.mamba_ssu_autotune_warmup(runner)
+    autotune.assert_not_called()
+    runner.extensible_kv_cache.commit.assert_not_called()
+
+
+def test_ssu_autotune_commits_slots_before_tuning_each_layer():
+    """Slots 1..num_reqs must be committed memory before any layer tunes on
+    them."""
+    runner = _autotune_runner(
+        query_len=1,
+        max_num_tokens=128,
+        num_blocks=64,
+        committable_blocks=4,
+        num_layers=2,
+    )
+    layers = list(runner.vllm_config.compilation_config.static_forward_context.values())
+    events: list[tuple] = []
+    runner.extensible_kv_cache.commit = lambda n: events.append(("commit", n))
+    with (
+        patch.object(FlashInferReplaySSMKernel, "needs_autotune", return_value=True),
+        patch.object(
+            FlashInferReplaySSMKernel,
+            "autotune",
+            side_effect=lambda layer, n: events.append(("autotune", layer, n)),
+        ),
+        patch.object(warmup, "_zero_state_slots_after"),
+    ):
+        warmup.mamba_ssu_autotune_warmup(runner)
+    assert events == [
+        ("commit", 4),
+        ("autotune", layers[0], 3),
+        ("autotune", layers[1], 3),
+    ]
 
 
 @pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLHNC])
-def test_replayssm_autotune_slots_restore_state_and_trackers(layout):
+def test_warmup_slots_restore_state_and_trackers(layout):
+    """Warmup zeroes the slots it ran on, even when it fails, and only those:
+    overlaid groups share pages, so each layer's views are cleared."""
     spec = MambaSpec(
         block_size=16,
         shapes=((2,), (2,), (2, 11), (2, 11), (2, 11)),
@@ -198,20 +203,14 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(layout):
         trackers.extend((mixer.ssu_state.ring_start, mixer.ssu_state.prev_num_accepted))
         mixers.append(mixer)
     assert mixers[0].kv_cache[0].data_ptr() == mixers[2].kv_cache[0].data_ptr()
-    runner = SimpleNamespace(
-        block_tables=SimpleNamespace(get_dummy_block_tables=Mock()),
-        get_model=lambda: SimpleNamespace(modules=lambda: mixers),
-    )
-
     with (
         pytest.raises(RuntimeError, match="warmup failed"),
-        warmup._temporary_replayssm_autotune_state(runner, 2),
+        warmup._zero_state_slots_after(mixers, 2),
     ):
         for tensor in (*states, *trackers):
             tensor[1:3].fill_(9)
         raise RuntimeError("warmup failed")
 
-    runner.block_tables.get_dummy_block_tables.assert_called_once_with(2)
     for tensor in states:
         assert torch.count_nonzero(tensor[1:3]) == 0
         assert torch.all(tensor[0] == 3)

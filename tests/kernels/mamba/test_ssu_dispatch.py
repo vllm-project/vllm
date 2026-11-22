@@ -27,6 +27,7 @@ from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_base im
 )
 from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_flashinfer import (  # noqa: E501
     FlashInferReplaySSMKernel,
+    flashinfer_replayssm_autotune_supported,
 )
 from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_triton import (
     TritonReplaySSMKernel,
@@ -957,6 +958,145 @@ def test_flashinfer_replayssm_selects_mtp_layout(
     else:
         assert kernel.call_args.kwargs["cu_seqlens"] is query_start_loc_d
     assert kernel.call_args.kwargs["max_seqlen"] == expected_max_seqlen
+
+
+def _tunable_replayssm_layer(num_spec, stochastic_rounding, num_slots=9):
+    nheads, head_dim, ngroups, dstate = 4, 8, 1, 16
+    ring_len = FlashInferReplaySSMKernel.ring_len(16, num_spec)
+    dtype = torch.bfloat16
+
+    def warmup_ssu_inputs(num_tokens):
+        x = torch.randn(num_tokens, nheads, head_dim, dtype=dtype)
+        B = torch.randn(num_tokens, ngroups, dstate, dtype=dtype)
+        return (
+            x,
+            torch.randn(num_tokens, nheads, dtype=dtype)[..., None].expand_as(x),
+            torch.randn(nheads, dtype=torch.float32)[:, None, None].expand(
+                -1, head_dim, dstate
+            ),
+            B,
+            torch.randn_like(B),
+            torch.randn(nheads, dtype=torch.float32)[:, None].expand(-1, head_dim),
+            torch.randn(nheads, dtype=dtype)[:, None].expand(-1, head_dim),
+        )
+
+    return SimpleNamespace(
+        mamba_config=MambaConfig(
+            backend=MambaBackendEnum.FLASHINFER,
+            enable_stochastic_rounding=stochastic_rounding,
+        ),
+        model_config=SimpleNamespace(dtype=dtype),
+        kv_cache=(
+            torch.zeros(num_slots, 1),
+            torch.zeros(num_slots, nheads, head_dim, dstate, dtype=torch.float16),
+            torch.zeros(num_slots, nheads, ring_len, head_dim, dtype=dtype),
+            torch.zeros(num_slots, nheads, ring_len, dtype=torch.float32),
+            torch.zeros(num_slots, ngroups, ring_len, dstate, dtype=dtype),
+        ),
+        ssu_state=MambaReplaySSMLayerState(
+            buffer_len=16,
+            num_spec=num_spec,
+            ring_start=torch.zeros(num_slots, dtype=torch.int32),
+            prev_num_accepted=torch.zeros(num_slots, dtype=torch.int32),
+        ),
+        warmup_ssu_inputs=warmup_ssu_inputs,
+    )
+
+
+def _tuning_signature(call):
+    """What FlashInfer's tuner keys `checkpointing_ssu` on: dtypes, sizes past
+    the batch dimension, which optional inputs are present, and the scalars."""
+
+    def signature(value):
+        if isinstance(value, torch.Tensor):
+            return (value.dtype, tuple(value.shape[1:]))
+        return value
+
+    return (
+        [signature(arg) for arg in call.args],
+        {name: signature(value) for name, value in call.kwargs.items()},
+    )
+
+
+@pytest.mark.skipif(
+    not flashinfer_replayssm_autotune_supported(),
+    reason="flashinfer.mamba.checkpointing_ssu.CheckpointingSSURunner unavailable",
+)
+@pytest.mark.parametrize("stochastic_rounding", [False, True], ids=["rn", "sr"])
+@pytest.mark.parametrize("num_spec", [0, 3], ids=["standard", "mtp"])
+def test_flashinfer_replayssm_autotune_tunes_the_serving_call(
+    monkeypatch, num_spec, stochastic_rounding
+):
+    """FlashInfer tunes `checkpointing_ssu` only for dense calls with its
+    scratch, and one call at the largest batch tunes every smaller one with the
+    same signature. The autotune must make that call on slots 1..num_reqs."""
+    kernel = Mock()
+    monkeypatch.setattr(FlashInferReplaySSMKernel, "_fn", staticmethod(lambda: kernel))
+    layer = _tunable_replayssm_layer(num_spec, stochastic_rounding)
+    query_len = 1 + num_spec
+
+    FlashInferReplaySSMKernel.autotune(layer, 4)
+    tuned = kernel.call_args
+    kernel.reset_mock()
+
+    buffers = FlashInferReplaySSMKernel.allocate_buffers(
+        SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_seqs=8),
+            num_speculative_tokens=num_spec,
+            cache_config=SimpleNamespace(replayssm_buffer_len=16),
+            model_config=layer.model_config,
+        ),
+        SimpleNamespace(shapes=tuple(t.shape[1:] for t in layer.kv_cache)),
+        max_cudagraph_decodes=8,
+        device=torch.device("cpu"),
+    )
+    metadata = FlashInferReplaySSMKernel.prepare_metadata(
+        buffers,
+        Mamba2AttentionMetadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decodes=2,
+            num_decode_tokens=2 * query_len,
+            num_reqs=2,
+            has_initial_states_p=None,
+            query_start_loc_p=None,
+            state_indices_tensor_p=None,
+            state_indices_tensor_d=torch.tensor([[5], [7]], dtype=torch.int32),
+            query_start_loc_d=(
+                torch.tensor([0, query_len, 2 * query_len], dtype=torch.int32)
+                if num_spec
+                else None
+            ),
+            num_accepted_tokens=None,
+            seq_lens=torch.tensor([104, 102], dtype=torch.int32),
+        ),
+        2,
+        padded=False,
+    )
+    x, dt, A, B, C, D, dt_bias = layer.warmup_ssu_inputs(2 * query_len)
+    FlashInferReplaySSMKernel.forward(
+        layer,
+        metadata,
+        layer.kv_cache[1],
+        x,
+        dt,
+        A,
+        B,
+        C,
+        D,
+        dt_bias,
+        torch.empty_like(x),
+    )
+    serving = kernel.call_args
+
+    assert tuned.kwargs["cu_seqlens"] is None
+    assert serving.kwargs["cu_seqlens"] is None
+    assert tuned.args[6].shape[0] == 4
+    assert tuned.kwargs["state_batch_indices"].tolist() == [1, 2, 3, 4]
+    assert all(
+        tuned.kwargs[name] is not None for name in ("cb_scaled", "cumAdt_vec", "cb_old")
+    )
+    assert _tuning_signature(tuned) == _tuning_signature(serving)
 
 
 def test_replayssm_ring_shape_extends_groups_for_head_shards():
