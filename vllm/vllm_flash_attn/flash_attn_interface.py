@@ -470,8 +470,8 @@ def flash_attn_varlen_func(
         # strides are (0, 0), so explicitly clone incompatible layouts.
         # SM90 native FP8 (FP8 Q) reads broadcast descales without a copy.
         if not (
-            torch.cuda.get_device_capability()[0] == 9
-            and q.dtype == torch.float8_e4m3fn
+            q.dtype == torch.float8_e4m3fn
+            and torch.cuda.get_device_capability()[0] == 9
         ):
             q_descale, k_descale, v_descale = (
                 t.clone(memory_format=torch.contiguous_format)

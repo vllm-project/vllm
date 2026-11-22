@@ -16,7 +16,7 @@ from vllm.v1.attention.backends.cpu_attn import (
     CPUAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadataBuilder
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
 
 requires_cpu = pytest.mark.skipif(
     not current_platform.is_cpu(), reason="CPU attention backend"
@@ -209,6 +209,7 @@ def test_flash_attention_geometry_comes_from_the_group():
         num_kv_heads=2,
         head_size=64,
         dtype=torch.bfloat16,
+        kv_quant_mode=KVQuantMode.NONE,
         dcp_sharded=True,
     )
 

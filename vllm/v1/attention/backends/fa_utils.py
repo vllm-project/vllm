@@ -10,6 +10,10 @@ from vllm.v1.kv_cache_interface import KVQuantMode, get_kv_quant_mode
 
 logger = init_logger(__name__)
 
+# Equal Q/K/V head sizes that FA4 runs natively in FP8 on SM90. SM90 FA4 also
+# reads an FP8 KV cache with head size 512, with a BF16/FP16 query.
+FA4_SM90_FP8_HEAD_SIZES = (64, 96, 128, 192, 256)
+
 # Track whether upstream flash-attn is available on ROCm.
 # Set during module initialization and never modified afterwards.
 # This module-level flag avoids repeated import attempts and ensures
@@ -160,7 +164,7 @@ def get_flash_attn_version(
                     vllm_config is None
                     or vllm_config.attention_config.flash_attn_version is None
                 )
-                and head_size in (64, 96, 128, 192, 256)
+                and head_size in FA4_SM90_FP8_HEAD_SIZES
                 and head_size_v in (None, head_size)
                 and not requires_softcap
                 and not envs.VLLM_BATCH_INVARIANT
@@ -247,7 +251,7 @@ def flash_attn_supports_kv_cache_dtype(
     is_sm90 = current_platform.is_device_capability_family(90)
     sm90_fp8_kv_supported = fa_version == 3 or (
         fa_version == 4
-        and head_size in (None, 64, 96, 128, 192, 256, 512)
+        and head_size in (None, *FA4_SM90_FP8_HEAD_SIZES, 512)
         and head_size_v in (None, head_size)
     )
     return (sm90_fp8_kv_supported and is_sm90) or (

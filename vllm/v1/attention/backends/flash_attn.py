@@ -24,6 +24,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import (
+    FA4_SM90_FP8_HEAD_SIZES,
     flash_attn_supports_kv_cache_dtype,
     flash_attn_supports_quant_query_input,
     get_flash_attn_version,
@@ -32,6 +33,7 @@ from vllm.v1.attention.backends.fa_utils import (
 )
 from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
+    find_attention_impl_variant,
     get_dcp_local_seq_lens,
     get_num_attention_heads_from_layers,
 )
@@ -472,9 +474,10 @@ class FlashAttentionBackend(AttentionBackend):
                 has_sinks=has_sink,
             )
         ):
+            head_sizes = ", ".join(map(str, FA4_SM90_FP8_HEAD_SIZES))
             return (
-                "FP8 KV requires FA3 (SM90), FA4 with equal head sizes 64, 96, 128, "
-                "192, 256 or 512 (SM90), or FA4 (SM100)."
+                f"FP8 KV requires FA3 (SM90), FA4 with equal head sizes {head_sizes} "
+                "or 512 (SM90), or FA4 (SM100)."
             )
         if (
             use_mm_prefix
@@ -683,18 +686,33 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.block_size = kv_cache_spec.block_size
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
-        head_size_v = getattr(kv_cache_spec, "head_size_v", None)
-        fa_version = get_flash_attn_version(
-            head_size=self.headdim,
-            head_size_v=head_size_v,
-            fp8_kv_cache=kv_cache_spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR,
-        )
-        self.aot_schedule = fa_version == 3
+        # Use the FA versions the layers' impls run: they also account for
+        # softcap and sinks, which can keep a layer on FA3.
+        fa_versions = {
+            impl.vllm_flash_attn_version
+            for layer in get_layers_from_vllm_config(
+                vllm_config, Attention, layer_names
+            ).values()
+            if (impl := find_attention_impl_variant(layer.impl, FlashAttentionImpl))
+            is not None
+        }
+        if not fa_versions:  # No registered layers, e.g. in unit tests.
+            fa_versions = {
+                get_flash_attn_version(
+                    head_size=self.headdim,
+                    head_size_v=getattr(kv_cache_spec, "head_size_v", None),
+                    fp8_kv_cache=(
+                        kv_cache_spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+                    ),
+                )
+            }
+        # FA3 layers need the AOT scheduler metadata under full CUDA graphs.
+        self.aot_schedule = 3 in fa_versions
 
         if (
             vllm_config.kernel_config.enable_jit_warmup
             and self.model_config.hf_config.model_type in ("gemma4", "gemma4_unified")
-            and fa_version == 4
+            and fa_versions == {4}
         ):
             window_sizes = {
                 getattr(layer.impl, "sliding_window", None)
@@ -1155,11 +1173,13 @@ class FlashAttentionImpl(AttentionImpl):
     def _descale(
         self, scale: torch.Tensor, scale_float: float, shape: tuple[int, int]
     ) -> torch.Tensor | None:
-        # FA4 reads a missing descale as 1.0, and it copies every expanded view
-        # into a contiguous tensor: three copy kernels per layer and step. The
-        # scales are fixed once weights are loaded, so a per-tensor scale of 1.0
-        # (FP8 KV cache without calibrated scales) needs none. Per-head scales
-        # keep their tensor: their float mirror holds only the maximum.
+        # FA4 reads a missing descale as 1.0. Except on the SM90 native FP8 path
+        # (FP8 Q), which reads broadcast descales in place, the FA4 wrapper copies
+        # every expanded view into a contiguous tensor: three copy kernels per
+        # layer and step. The scales are fixed once weights are loaded, so a
+        # per-tensor scale of 1.0 (FP8 KV cache without calibrated scales) needs
+        # none. Per-head scales keep their tensor: their float mirror holds only
+        # the maximum.
         if (
             self.vllm_flash_attn_version == 4
             and scale.numel() == 1
