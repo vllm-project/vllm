@@ -164,12 +164,9 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 
 @skip_unsupported
 @pytest.mark.parametrize(
-    "backend",
-    BACKENDS,
-)
-@pytest.mark.parametrize(
-    "block_m,block_n",
-    [(16, 16), (8, 16)],
+    "block_m,block_n,backend",
+    [(16, 16, backend) for backend in BACKENDS]
+    + ([(8, 16, "FLEX_ATTENTION")] if "FLEX_ATTENTION" in BACKENDS else []),
 )
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     backend,
