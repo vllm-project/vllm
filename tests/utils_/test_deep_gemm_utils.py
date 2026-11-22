@@ -6,11 +6,18 @@ from pathlib import Path
 import pytest
 
 import vllm.utils.deep_gemm as dg
+from vllm.platforms.interface import DeviceCapability
 
 
 def _make_exe(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch(mode=0o755)
+
+
+def _make_nvcc(cuda_home: Path, release: str) -> None:
+    nvcc = cuda_home / "bin" / "nvcc"
+    _make_exe(nvcc)
+    nvcc.write_text(f"#!/bin/sh\necho 'Cuda compilation tools, release {release}'\n")
 
 
 @pytest.fixture
@@ -29,9 +36,18 @@ def default_cuda_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return home
 
 
+def _set_capability(monkeypatch: pytest.MonkeyPatch, major: int, minor: int):
+    monkeypatch.setattr(
+        type(dg.current_platform),
+        "get_device_capability",
+        classmethod(lambda cls, device_id=0: DeviceCapability(major, minor)),
+    )
+
+
 @pytest.fixture(autouse=True)
 def deep_gemm_installed(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pretend DeepGEMM is importable on a GPU it supports."""
+    """Pretend DeepGEMM is importable on a Hopper GPU."""
+    _set_capability(monkeypatch, 9, 0)
     monkeypatch.setattr(dg.current_platform, "support_deep_gemm", lambda: True)
     monkeypatch.setattr(dg, "has_deep_gemm", lambda: True)
     monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
@@ -67,7 +83,23 @@ def test_deep_gemm_needs_nvcc_12_9(
     default_cuda_home: Path, release: str, supported: bool
 ):
     """DeepGEMM's JIT aborts the engine below nvcc 12.9."""
-    nvcc = default_cuda_home / "bin" / "nvcc"
-    _make_exe(nvcc)
-    nvcc.write_text(f"#!/bin/sh\necho 'Cuda compilation tools, release {release}'\n")
+    _make_nvcc(default_cuda_home, release)
+    assert dg.is_deep_gemm_supported() is supported
+
+
+@pytest.mark.parametrize(
+    ("capability", "release", "supported"),
+    [((12, 0), "12.9", False), ((12, 1), "12.9", False), ((12, 0), "13.0", True)],
+)
+def test_deep_gemm_needs_nvcc_13_on_sm12x(
+    default_cuda_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
+    release: str,
+    supported: bool,
+):
+    """DeepGEMM's SM120 kernels fail to compile below CUDA 13, which aborts
+    the engine when a block FP8 model loads on RTX 50 / RTX PRO / DGX Spark."""
+    _set_capability(monkeypatch, *capability)
+    _make_nvcc(default_cuda_home, release)
     assert dg.is_deep_gemm_supported() is supported
