@@ -14,12 +14,12 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
-from vllm.models.hy_v4.amd.base_model import (
+from vllm.models.hy_v4.amd.hc import HYV4HCHeadLayer, HYV4HCLayer, HYV4HCPreLayer
+from vllm.models.hy_v4.amd.model import (
     HYV4DecoderLayer,
     HYV4ForCausalLM,
     HYV4Model,
 )
-from vllm.models.hy_v4.amd.hc import HYV4HCHeadLayer, HYV4HCLayer, HYV4HCPreLayer
 from vllm.models.hy_v4.amd.triton_ihc import (
     triton_ihc_post_pre_rms_norm,
     triton_ihc_supported,

@@ -45,7 +45,7 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
 
 from .aiter_mla_sparse import HYV4AiterMLASparseBackend
 from .attention import HYV4MLAAttention
-from .base_model import HYV4DecoderLayer
+from .model import HYV4DecoderLayer
 from .moe import HYV4FeedForward
 from .mrope import set_token_rope
 

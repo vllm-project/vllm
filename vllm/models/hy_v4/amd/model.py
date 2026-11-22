@@ -40,6 +40,7 @@ from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_ma
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -62,16 +63,14 @@ from vllm.models.hy_v4.weight_utils import HYV4_MLP_MAPPER, HYV4_WEIGHTS_MAPPER
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from ..nvidia.attention import (
+from .attention import (
     HYV4MLAAttention,
     is_skip_topk_indexer_weight,
     sparse_layer_ids,
 )
-from ..nvidia.moe import HYV4FeedForward, HYV4MoEFused
-from .hc import (
-    HYV4HCHeadLayer,
-    HYV4HCLayer,
-)
+from .hc import HYV4HCHeadLayer, HYV4HCLayer
+from .moe import HYV4FeedForward, HYV4MoEFused
+from .mrope import set_token_rope
 from .triton_ihc import triton_ihc_post_pre_rms_norm, triton_ihc_supported
 
 logger = init_logger(__name__)
@@ -95,6 +94,9 @@ class HYV4DecoderLayer(nn.Module):
     otherwise it uses the standard single-stream residual.
     """
 
+    attention_cls = HYV4MLAAttention
+    feed_forward_cls = HYV4FeedForward
+
     def __init__(
         self,
         config: PreTrainedConfig,
@@ -112,7 +114,7 @@ class HYV4DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        self.self_attn = HYV4MLAAttention(
+        self.self_attn = self.attention_cls(
             vllm_config=vllm_config,
             config=config,
             hidden_size=self.hidden_size,
@@ -131,7 +133,7 @@ class HYV4DecoderLayer(nn.Module):
         )
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         if config.mlp_layer_types[layer_idx] == "dense":
-            self.mlp = HYV4FeedForward(
+            self.mlp = self.feed_forward_cls(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
@@ -235,6 +237,8 @@ class HYV4DecoderLayer(nn.Module):
 class HYV4Model(nn.Module):
     """HY V4 backbone."""
 
+    decoder_layer_cls: type[HYV4DecoderLayer] = HYV4DecoderLayer
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -246,6 +250,10 @@ class HYV4Model(nn.Module):
         self.num_redundant_experts = eplb_config.num_redundant_experts
         self.device = current_platform.device_type
         self.vocab_size = config.vocab_size
+        self.dfly_enabled = (
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.method == "dfly"
+        )
         self.is_sparse = hasattr(config, "index_topk")
         if self.is_sparse:
             self.topk_indices_buffer = torch.empty(
@@ -271,7 +279,7 @@ class HYV4Model(nn.Module):
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: HYV4DecoderLayer(
+            lambda prefix: self.decoder_layer_cls(
                 config=config,
                 vllm_config=vllm_config,
                 cache_config=cache_config,
@@ -346,6 +354,9 @@ class HYV4Model(nn.Module):
         self.num_redundant_experts = example_layer.n_redundant_experts
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if self.dfly_enabled:
+            # Preserve -1 in the original batch for forced draft rejection.
+            input_ids = input_ids.clamp_min(0)
         return self.embed_tokens(input_ids)
 
     def update_physical_experts_metadata(
@@ -402,6 +413,13 @@ class HYV4Model(nn.Module):
             # prepare_input, and residual is unused.
             residual = None if self.enable_ihc else intermediate_tensors["residual"]
             copy_pp_buffers(intermediate_tensors, self.pp_buffers)
+
+        if self.start_layer < self.end_layer:
+            set_token_rope(
+                self.layers[self.start_layer].self_attn.rotary_emb,
+                positions,
+                hidden_states,
+            )
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
@@ -519,6 +537,16 @@ class HYV4Model(nn.Module):
             if is_expert or is_pp_missing_parameter(name, self):
                 continue
 
+            if (
+                isinstance(self.quant_config, Fp8Config)
+                and self.quant_config.weight_block_size is not None
+                and name.endswith(".scale")
+            ):
+                name = name.removesuffix(".scale") + ".weight_scale_inv"
+                if weight.dtype == torch.uint8:
+                    # UINT8 stores UE8M0 exponents, not numeric scales.
+                    weight = weight.view(torch.float8_e8m0fnu)
+
             if name not in params_dict:
                 if ".indexer." not in name:
                     logger.warning_once("Skipping unknown checkpoint weight: %s", name)
@@ -539,6 +567,8 @@ class HYV4Model(nn.Module):
 
 
 class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+    model_cls = HYV4Model
+
     hf_to_vllm_mapper = HYV4_MLP_MAPPER | WeightsMapper(
         orig_to_new_stacked={
             ".q_a_proj": (".fused_qkv_a_proj", 0),
@@ -564,7 +594,7 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
-        self.model = HYV4Model(
+        self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         if get_pp_group().is_last_rank:
@@ -617,7 +647,10 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         # MTP layers are loaded by the MTP head, not by the target model. They
         # appear as model.mtp_layers.<i>.* and as the layer ids past the backbone.
         mtp_start = self.config.num_hidden_layers
-        drop_prefixes: dict[str, str | None] = {"model.mtp_layers.": None}
+        drop_prefixes: dict[str, str | None] = {
+            "model.mtp_layers.": None,
+            "model.dfly_layers.": None,
+        }
         for i in range(getattr(self.config, "num_nextn_predict_layers", 0)):
             drop_prefixes[f"model.layers.{mtp_start + i}."] = None
         if self.config.tie_word_embeddings:

@@ -209,13 +209,6 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
 
             if not on_gfx950():
                 raise NotImplementedError("HYV4 DFly on ROCm requires gfx950")
-            # The text-only ROCm HYV4ForCausalLM uses the NVIDIA attention
-            # layers, which the AMD DFly target reuse cannot share.
-            if (
-                "HYV4VLForConditionalGeneration"
-                not in spec.target_model_config.architectures
-            ):
-                raise NotImplementedError("HYV4 DFly on ROCm requires a HYV4 VL target")
         for field in (
             "pipeline_parallel_size",
             "prefill_context_parallel_size",

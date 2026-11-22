@@ -21,6 +21,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    init_vllm_registered_model,
     maybe_prefix,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -31,12 +32,12 @@ from vllm.transformers_utils.processors.hy_v4 import (
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .base_model import HYV4ForCausalLM
 from .mm_preprocess import (
     HYV4VLDummyInputsBuilder,
     HYV4VLMultiModalProcessor,
     HYV4VLProcessingInfo,
 )
+from .model import HYV4ForCausalLM
 from .vision import HYV4VisionTransformer
 from .vl_cudagraph import HYV4VLEncoderCudaGraphMixin
 
@@ -72,9 +73,6 @@ class HYV4VLForConditionalGeneration(
 
     supports_mm_device_do_normalize = True
     language_model_architecture = "HYV4ForCausalLM"
-    # Not resolved through the registry: on ROCm, the registered
-    # HYV4ForCausalLM is the text-only model in amd/model.py.
-    language_model_cls: type[nn.Module] = HYV4ForCausalLM
 
     packed_modules_mapping = {
         **HYV4ForCausalLM.packed_modules_mapping,
@@ -118,22 +116,12 @@ class HYV4VLForConditionalGeneration(
                     prefix=maybe_prefix(prefix, "visual"),
                     input_norm=build_mm_input_norm(vllm_config.model_config),
                 )
-        from vllm.model_executor.model_loader.utils import (
-            convert_model_cls,
-            initialize_model,
-        )
-
         with self._mark_language_model(vllm_config):
-            text_vllm_config = vllm_config.with_hf_config(
-                self.config.text_config,
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=self.config.text_config,
                 architectures=[self.language_model_architecture],
-            )
-            self.language_model = initialize_model(
-                vllm_config=text_vllm_config,
                 prefix=maybe_prefix(prefix, "language_model"),
-                model_class=convert_model_cls(
-                    self.language_model_cls, text_vllm_config.model_config
-                ),
             )
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors

@@ -16,9 +16,8 @@ if not current_platform.is_rocm():
     pytest.skip("HYV4 ROCm sparse MLA", allow_module_level=True)
 
 from vllm.models.hy_v4.amd import aiter_mla_sparse
-from vllm.models.hy_v4.amd.base_model import HYV4DecoderLayer
-from vllm.models.hy_v4.amd.base_model import HYV4ForCausalLM as AMDHYV4ForCausalLM
-from vllm.models.hy_v4.amd.vl_model import HYV4VLForConditionalGeneration
+from vllm.models.hy_v4.amd.model import HYV4DecoderLayer
+from vllm.models.hy_v4.amd.model import HYV4ForCausalLM as AMDHYV4ForCausalLM
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseImpl,
 )
@@ -88,9 +87,10 @@ def test_packed_impl_rebuilds_indptr_from_live_counts(monkeypatch):
     torch.testing.assert_close(buffer[num_tokens:], original[num_tokens:])
 
 
-def test_vl_language_model_uses_amd_attention():
-    """The VL text model must share the AMD attention class DFly reuses."""
+def test_registered_text_model_uses_amd_attention():
+    """The ROCm text model, also built by VL, shares the attention DFly reuses."""
+    from vllm.models.hy_v4 import HYV4ForCausalLM
     from vllm.models.hy_v4.amd.attention import HYV4MLAAttention
 
-    assert HYV4VLForConditionalGeneration.language_model_cls is AMDHYV4ForCausalLM
+    assert HYV4ForCausalLM is AMDHYV4ForCausalLM
     assert HYV4DecoderLayer.attention_cls is HYV4MLAAttention
