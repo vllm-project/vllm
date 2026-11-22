@@ -28,6 +28,7 @@ from .model import (
 )
 from .ops.attn_res import attn_res
 from .ops.linear import linear_k_groups
+from .ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
 from .ops.loop import blend_rms_norm, pair_rms_norm
 from .sconv import conv_metadata
 
@@ -121,12 +122,14 @@ class Inkling2LoopDecoderLayer(Inkling2DecoderLayer):
         broadcast over streams) and `message`, each output RMS-normalized
         with its row of `norm_weight` `(S, D)`: bf16 `(S, T, D)`."""
         pair = pair_rms_norm(dest, message)
-        hidden = torch.bmm(pair, self.controller_down[streams].transpose(1, 2))
-        gain_forget = torch.bmm(
-            hidden,
-            self.controller_gain_forget[streams].transpose(1, 2),
-            out_dtype=torch.float32,
-        )
+        down = self.controller_down[streams]
+        up = self.controller_gain_forget[streams]
+        if use_sm12x_bf16_ll_gemm(pair, down):
+            hidden = sm12x_bf16_ll_gemm(pair, down)
+            gain_forget = sm12x_bf16_ll_gemm(hidden, up, out_dtype=torch.float32)
+        else:
+            hidden = torch.bmm(pair, down.transpose(1, 2))
+            gain_forget = torch.bmm(hidden, up.transpose(1, 2), out_dtype=torch.float32)
         return blend_rms_norm(dest, message, gain_forget, norm_weight, norm_eps)
 
 
