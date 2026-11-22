@@ -67,7 +67,7 @@ def test_resolve_routes():
     "route,last_on",
     [
         ("mhc_seam", 288),
-        ("mhc_wo_b", 128),
+        ("mhc_wo_b", 64),
         ("mhc_ffn", 192),
         ("sparse_mla", 768),
         ("router", 1024),
@@ -85,10 +85,11 @@ def test_row_gates(routes, route, last_on):
 
 
 def test_mhc_seam_gate(routes):
-    # AITER's MXFP8 seam wins at 385-512 and above 768 rows (ties at 289-384)
+    # AITER's MXFP8 seam wins at 385-512 and from about 744 rows (ties at
+    # 289-384 and 721-736)
     assert akr_config.serves("mhc_seam", 288) and not akr_config.serves("mhc_seam", 512)
-    assert akr_config.serves("mhc_seam", 513) and akr_config.serves("mhc_seam", 768)
-    assert not akr_config.serves("mhc_seam", 769)
+    assert akr_config.serves("mhc_seam", 513) and akr_config.serves("mhc_seam", 720)
+    assert not akr_config.serves("mhc_seam", 721)
 
 
 def test_decode_scaling_gates(routes):

@@ -59,12 +59,16 @@ GATES: dict[str, Callable[[int], bool]] = {
     "shared_expert": _rows(1, 192),
     "fused_ep8": _rows(1, 1024),
     # attention + FFN seam with their MXFP8 outputs vs AITER's MXFP8 mega-mHC
-    # seam (dev1133), each with the first GEMM: 0.2-5.4 us faster per layer at
-    # 16-288 and 528-768 rows; ties at 289-384, AITER ahead at 385-512 (its
-    # 512-row variant) and above 768
-    "mhc_seam": lambda m: 1 <= m <= 288 or 513 <= m <= 768,
+    # seam (dev1133), each with the first GEMM: 0.4-5.4 us faster per layer at
+    # 16-288 and 516-720 rows; ties at 289-384 and 721-736, AITER ahead at
+    # 385-512 (its 512-row variant) and from about 744 rows
+    "mhc_seam": lambda m: 1 <= m <= 288 or 513 <= m <= 720,
     "mhc_tail": _rows(1, 1024),
-    "mhc_wo_b": _rows(1, 128),
+    # vs the stock wo_b on wo_a's codes + the amd_kernels FFN seam (dev1133):
+    # 0.4-2.1 us faster at 1-64 rows, 4.4 us slower from 72 rows
+    "mhc_wo_b": _rows(1, 64),
+    # vs the stock down + routed add + the amd_kernels attention seam: 1.2-5.6
+    # us faster at 1-192 rows
     "mhc_ffn": _rows(1, 192),
     # vs vLLM's lm_head dispatch: wins 9-13% at 113-128, 3-4% at 496-512 rows
     "lm_head": lambda m: 113 <= m <= 128 or 496 <= m <= 512,
