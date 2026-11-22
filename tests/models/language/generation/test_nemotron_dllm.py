@@ -646,14 +646,22 @@ def test_greedy_generation(monkeypatch):
         max_model_len=MAX_MODEL_LEN,
         gpu_memory_utilization=0.6,
     )
-    out = llm.generate(
-        TokensPrompt(prompt_token_ids=prompt_ids),
-        SamplingParams(temperature=0.0, max_tokens=CANVAS_LENGTH),
-    )
+    params = [
+        SamplingParams(temperature=0.0, max_tokens=CANVAS_LENGTH, logprobs=n)
+        for n in (None, 0, 5)
+    ]
+    outs = llm.generate([TokensPrompt(prompt_token_ids=prompt_ids)] * 3, params)
     del llm
     cleanup_dist_env_and_memory()
-    text = out[0].outputs[0].text
-    assert "4" in text, f"unexpected generation: {text!r}"
+    for o in outs:
+        text = o.outputs[0].text
+        assert "4" in text, f"unexpected generation: {text!r}"
+    # Batched with a top-k request, logprobs=0 still reports each greedy token
+    # at the step it was revealed.
+    seq = outs[1].outputs[0]
+    assert seq.logprobs is not None
+    ranks = [lp[t].rank if lp else None for lp, t in zip(seq.logprobs, seq.token_ids)]
+    assert ranks == [1] * len(ranks), ranks
 
 
 # ---------------------------------------------------------------------------

@@ -379,7 +379,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             backend_name = kernel_type.__name__
 
         if backend_name not in self._kernel_backends_being_used:
-            logger.info("Using %s for AutoGPTQLinearMethod", backend_name)
+            logger.debug("Using %s for AutoGPTQLinearMethod", backend_name)
             self._kernel_backends_being_used.add(backend_name)
 
         # Normalize group_size

@@ -165,5 +165,10 @@ def unsupported(vllm_config) -> list[str]:
             or vllm_config.cache_config.use_kda_recoverssm,
             "ReplaySSM / RecoverSSM (--use-replayssm)",
         ),
+        # The KDA decode reads its projection weights directly as BF16.
+        (
+            getattr(quant, "online_quantization_config", None) is not None,
+            "online quantization (--quantization-config)",
+        ),
     )
     return [reason for failed, reason in checks if failed]
