@@ -262,7 +262,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         if kernel_cls is None:
             reason = rejected[-1][1] if rejected else None
             raise ValueError(self.make_log_unsupported(backend, reason, is_lora))
-        logger.info_once(self.make_log_backend(backend, available_backends, is_lora))
+        logger.debug_once(self.make_log_backend(backend, available_backends, is_lora))
         return backend, kernel_cls
 
 
@@ -313,7 +313,7 @@ def make_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
     if experts_log is not None:
-        logger.info_once(experts_log, experts_cls.__name__)
+        logger.debug_once(experts_log, experts_cls.__name__)
 
     extra_kwargs = dict(experts_kwargs or {})
     if prepare_finalize.activation_format.is_batched:

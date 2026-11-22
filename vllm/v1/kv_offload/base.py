@@ -205,6 +205,11 @@ class PrepareStoreOutput:
     keys_to_store: list[OffloadKey]
     store_spec: LoadStoreSpec
     evicted_keys: list[OffloadKey]
+    # Offered keys to offer again because the manager had no room. Within a
+    # group (get_offload_group_idx), they are the offered keys from the first
+    # one that did not fit on, by token position, including keys that are
+    # already stored. Disjoint from keys_to_store.
+    keys_to_retry: list[OffloadKey] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -427,7 +432,9 @@ class OffloadingManager(ABC):
         Returns:
             A PrepareStoreOutput indicating which blocks need storing,
             where to store them (LoadStoreSpec), and list of blocks that
-            were evicted as a result.
+            were evicted as a result. A manager short on room may store
+            only some of the keys and report the rest in keys_to_retry,
+            under the constraints documented on that field.
             None is returned if the blocks cannot be stored.
 
         """

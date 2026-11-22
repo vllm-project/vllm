@@ -22,6 +22,7 @@ import regex as re
 import torch
 from PIL import Image
 from transformers import BatchFeature, PreTrainedConfig, TensorType
+from transformers.image_transforms import to_pil_image
 
 from vllm.logger import init_logger
 from vllm.model_executor.models.parakeet import ParakeetExtractor
@@ -379,6 +380,8 @@ def video_to_pixel_values(
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Convert video ndarray (T, H, W, C) to normalized pixel tensor (T, C, H, W)."""
+    if isinstance(video, torch.Tensor):
+        video = video.cpu().numpy()
     orig_h, orig_w = video.shape[1], video.shape[2]
     size: tuple[int, int] | None = None
 
@@ -870,6 +873,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         if len(images) == 0:
             return text, {}
 
+        images = [to_pil_image(image) for image in images]
         image_inputs: dict[str, Any]
         if tiler := self.dynamic_tiler:
             sans_images = text[0].replace("<image>", "")
