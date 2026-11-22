@@ -27,6 +27,11 @@ engine drives on your behalf:
 3. **Weight Update** (`update_weights`): transfers updated weights. May be called one or more times (e.g. for chunked transfers).
 4. **Finish** (`finish_weight_update`): finalizes the update (e.g. runs post-processing for checkpoint-format weights). Called once after all weights have been transferred.
 
+Each round's start → finish runs between `pause_generation` and
+`resume_generation`, which the trainer engine also drives. Backends that fetch
+from slow sources can also [stage](staging.md) the next version before the
+pause, while the engine keeps serving.
+
 Checkpoint-format backends reload in the mode set by the `VLLM_RELOAD_MODE`
 environment variable: by default [direct reload](../direct_reload.md) where it
 applies, else [layerwise reload](../layerwise.md).
@@ -103,6 +108,12 @@ data-plane transfer, including any concurrency the backend needs (NCCL, for
 example, must run the workers' `update_weights` at the same time as the
 trainer's broadcast, since both rendezvous inside the same NCCL calls).
 
+`send_weights()` also pauses generation, only around the inference-side apply
+(start → finish), and resumes it afterward. Trainer-side work before the apply
+keeps overlapping with serving. Set `pause_mode` on the init info to `"keep"`
+(default), `"wait"` or `"abort"`. A failed update leaves generation paused until
+a retry succeeds or the caller calls `client.resume_generation()`.
+
 There is no `backend=` argument on the trainer side: each `TrainerInitInfo`
 subclass declares its own `backend`, and the factory dispatches on it.
 
@@ -171,11 +182,12 @@ and start from `tools/state_transition_verifier/README.md`.
 
 ## API Endpoints
 
-When running vLLM as an HTTP server, the following endpoints are available for weight transfer. `HTTPVLLMWeightSyncClient` speaks the first five for you. A trainer may also implement the protocol directly without importing vLLM: see the wire contracts in [NCCL](nccl.md#trainer-without-vllm-over-http) and [IPC](ipc.md#trainer-without-vllm-over-http). This keeps the trainer decoupled from vLLM: it needs no vLLM install or version pin, only this documented HTTP and wire contract, so trainer and server can upgrade independently (non-PyTorch trainers such as JAX can use it too).
+When running vLLM as an HTTP server, the following endpoints are available for weight transfer. `HTTPVLLMWeightSyncClient` speaks the first six, plus `/pause` and `/resume`, for you. A trainer may also implement the protocol directly without importing vLLM: see the wire contracts in [NCCL](nccl.md#trainer-without-vllm-over-http) and [IPC](ipc.md#trainer-without-vllm-over-http). This keeps the trainer decoupled from vLLM: it needs no vLLM install or version pin, only this documented HTTP and wire contract, so trainer and server can upgrade independently (non-PyTorch trainers such as JAX can use it too).
 
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
 | `/init_weight_transfer_engine` | POST | Initialize the weight transfer engine with backend-specific info |
+| `/stage_weights` | POST | Prepare the next version while serving; returns when staging is done ([Staging](staging.md)) |
 | `/start_weight_update` | POST | Start a weight update |
 | `/update_weights` | POST | Transfer a batch of weights with backend-specific metadata |
 | `/finish_weight_update` | POST | Finish the update and optionally commit its `weight_version` |

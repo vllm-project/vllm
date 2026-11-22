@@ -215,6 +215,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             is_sender=init_info.is_sender,
             rank=init_info.rank,
         )
+        engine._apply_pause_config(init_info)
         engine._initialize(init_info, source)
         return engine
 
@@ -446,24 +447,25 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             return
 
         try:
-            self.client.start_weight_update()
-            executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="m2n-weight-sync"
-            )
-            try:
-                update = executor.submit(
-                    self.client.update_weights,
-                    {"names": [m.name for m in self._metas]},
+            with self._pause_for_update():
+                self.client.start_weight_update()
+                executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="m2n-weight-sync"
                 )
-                # Surface an immediate worker-side rejection before trainers
-                # enter the collective sequence.
-                if update.done():
+                try:
+                    update = executor.submit(
+                        self.client.update_weights,
+                        {"names": [m.name for m in self._metas]},
+                    )
+                    # Surface an immediate worker-side rejection before trainers
+                    # enter the collective sequence.
+                    if update.done():
+                        update.result()
+                    self._send()
                     update.result()
-                self._send()
-                update.result()
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
-            self.client.finish_weight_update()
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                self.client.finish_weight_update()
         except BaseException as exc:
             try:
                 self._publish_round_outcome(exc)

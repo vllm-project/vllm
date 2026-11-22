@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
+
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -29,6 +31,17 @@ class RLOfflineMixin(OfflineInferenceMixin):
     def shutdown_weight_transfer_engine(self) -> None:
         """Release the trainer connection without shutting down inference."""
         self.llm_engine.collective_rpc("shutdown_weight_transfer_engine")
+
+    def stage_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
+        """Stage the next version on every worker; returns when staging is done."""
+        update_info_dict = (
+            request["update_info"] if isinstance(request, dict) else request.update_info
+        )
+        self.llm_engine.collective_rpc(
+            "stage_weights", kwargs={"update_info": update_info_dict}
+        )
+        while not all(self.llm_engine.collective_rpc("staging_done")):
+            time.sleep(0.1)
 
     def start_weight_update(self) -> None:
         """Start a new weight update."""

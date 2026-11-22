@@ -25,7 +25,7 @@ Steps:
   1. Launch the vLLM HTTP server (EP+DP, dummy weights) on GPUs 0-3.
   2. Launch 4 FSDP training workers (Ray) on GPUs 4-7.
   3. Generate from prompts over HTTP → gibberish (random weights).
-  4. Pause generation, transfer weights FSDP → server over NCCL, resume.
+  4. Transfer weights FSDP → server over NCCL (send_weights pauses/resumes).
   5. Generate from prompts → sensible output (synced weights).
 
 Assumes a single-node cluster with 8 GPUs.
@@ -333,18 +333,12 @@ def main():
         )
         print("[transfer] NCCL groups initialized.")
 
-        # --- Pause, transfer weights, resume ---
-        print("[sync] Pausing generation...")
-        requests.post(f"{BASE_URL}/pause", timeout=60).raise_for_status()
-
         # All ranks participate in the FSDP all-gather; rank 0 additionally
-        # drives start/update/finish on the server and the NCCL broadcast.
+        # pauses generation, drives start/update/finish on the server and the
+        # NCCL broadcast, then resumes.
         print("[sync] Broadcasting weights from FSDP → vLLM...")
         ray.get([w.gather_and_broadcast_weights.remote() for w in fsdp_workers])
         print("[sync] Weight broadcast complete.")
-
-        print("[sync] Resuming generation...")
-        requests.post(f"{BASE_URL}/resume", timeout=60).raise_for_status()
 
         # Generate with synced weights — expect sensible output.
         print("[generate] Generating with synced weights...")

@@ -10,7 +10,9 @@ from typing import Literal
 
 from prometheus_client import REGISTRY, CollectorRegistry, Gauge, Histogram
 
-Operation = Literal["init", "shutdown", "start", "start_draft", "update", "finish"]
+Operation = Literal[
+    "init", "shutdown", "stage", "start", "start_draft", "update", "finish"
+]
 
 
 class WeightOperationMetrics:

@@ -178,6 +178,18 @@ async def shutdown_weight_transfer_engine(raw_request: Request):
     return JSONResponse(content={"message": "Weight transfer shut down"})
 
 
+@router.post("/stage_weights")
+async def stage_weights(
+    raw_request: Request,
+    update_info: Annotated[WeightTransferUpdatePayload, Body(embed=True)],
+):
+    with weight_operation_metrics().record("stage"):
+        await engine_client(raw_request).stage_weights(
+            request=WeightTransferUpdateRequest(update_info=update_info)
+        )
+    return JSONResponse(content={"message": "Weights staged"})
+
+
 @router.post("/start_weight_update")
 async def start_weight_update(raw_request: Request):
     with weight_operation_metrics().record("start"):

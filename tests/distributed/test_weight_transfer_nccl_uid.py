@@ -296,6 +296,15 @@ def trainer_broadcast_tensor_uid(
         def finish_weight_update(self, weight_version=None):
             pass
 
+        def pause_generation(self, mode="keep", clear_cache=True):
+            pass
+
+        def resume_generation(self):
+            pass
+
+        def stage_weights(self, update_info):
+            pass
+
     dtype = getattr(torch, tensor_dtype)
     model = torch.nn.Module()
     test_module = torch.nn.Module()
