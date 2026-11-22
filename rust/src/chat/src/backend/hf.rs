@@ -101,7 +101,10 @@ impl HfChatBackend {
             RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new(
                 options.default_chat_template_kwargs,
             )?),
-            RendererSelection::Inkling if model_type == RendererSelection::INKLING2_MODEL_TYPE => {
+            RendererSelection::Inkling
+                if model_type == RendererSelection::INKLING2_MODEL_TYPE
+                    || model_type == RendererSelection::INKLING2_LOOP_MODEL_TYPE =>
+            {
                 Arc::new(InklingChatRenderer::new_inkling2(
                     tokenizer.clone(),
                     options.default_chat_template_kwargs,
