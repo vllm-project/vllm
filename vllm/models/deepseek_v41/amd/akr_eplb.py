@@ -4,8 +4,9 @@
 DeepSeek-V4.1-Flash on EP8 (EPLB without the runtime rebalancer).
 
 `kernel_config.amd_kernels.expert_perm` names a plan `.npz` (a bare file name
-is looked up in `configs/` next to this module); unset, nothing here is
-imported or run. Per MoE layer the plan holds `phys2log[8 * S]`, the logical
+that `configs/` next to this module holds is that shipped plan, anything else
+a path); unset, nothing here is imported or run. Per MoE layer the plan holds
+`phys2log[8 * S]` (one S per expert family: a 2-D array), the logical
 expert of each physical slot; slot `p` lives on EP rank `p // S`, the rank-major
 physical id that MegaMoE (`dest = id // experts_per_rank`), the fused EP8
 kernel and vLLM's EPLB use. A logical expert may hold several slots
@@ -56,7 +57,8 @@ def plan_path(vllm_config) -> str:
         path = str(vllm_config.kernel_config.amd_kernels.expert_perm or "")
     except AttributeError:
         return ""
-    if path and not os.path.isabs(path) and not os.path.exists(path):
+    if path and os.path.basename(path) == path:
+        # a bare file name is a shipped plan; a path names the user's file
         shipped = os.path.join(CONFIG_DIR, path)
         if os.path.exists(shipped):
             return shipped

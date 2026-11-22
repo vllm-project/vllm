@@ -46,13 +46,18 @@ def _plan(L=3, E=384, seed=0, S=48):
     return dict(phys2log=np.stack(rows).astype(np.int16), layer_ids=np.arange(L))
 
 
-def test_shipped_plan_valid():
+def test_shipped_plan_valid(tmp_path, monkeypatch):
     plan = P.Plan(SHIPPED)
     assert sorted(plan.layers[384]) == list(range(40))
     assert sorted(plan.layers[128]) == [40, 41, 42]
     assert plan.slots == {384: 49, 128: 17} and plan.world == 8
-    # a bare name resolves to the shipped file
+    # a bare name resolves to the shipped file, even where the working
+    # directory holds a file of that name; a path names the user's file
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "expert_plan_S49.npz", **_plan())
     assert P.plan_path(_cfg("expert_plan_S49.npz")) == SHIPPED
+    assert P.plan_path(_cfg("./expert_plan_S49.npz")) == "./expert_plan_S49.npz"
+    assert P.plan_path(_cfg("mine.npz")) == "mine.npz"
     assert P.plan_path(_cfg("")) == "" and P.plan_path(None) == ""
 
 

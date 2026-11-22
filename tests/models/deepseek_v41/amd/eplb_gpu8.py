@@ -14,10 +14,14 @@ Not a pytest module (needs 8 GPUs, torchrun, mori, amd_kernels):
 
     torchrun --nproc-per-node 8 tests/models/deepseek_v41/amd/eplb_gpu8.py \\
         [plan.npz (default: the shipped S=49 plan)] [--layer 20] [--draft]
-        [--no-fused] [--no-staged]
+        [--no-fused] [--no-staged] [--max-num-batched-tokens 32768]
 
-`--draft`: the DSpark draft shape (128 experts, top 3, staged only). Rank 0
-prints the summary; the exit code is 1 on any mismatch.
+`--draft`: the DSpark draft shape (128 experts, top 3, staged only).
+`--max-num-batched-tokens`: the scheduler budget that sizes the MegaMoE
+capacity (default 32768, the serving value). The staged cases include ranks
+with few local rows under a large DP-group maximum (the runtime is picked by
+the DP maximum) and a CUDA graph replay of remap + staged MegaMoE (the draft's
+decode path). Rank 0 prints the summary; the exit code is 1 on any mismatch.
 """
 
 import argparse
@@ -83,6 +87,7 @@ def main() -> None:
     ap.add_argument("--draft", action="store_true")
     ap.add_argument("--no-fused", action="store_true")
     ap.add_argument("--no-staged", action="store_true")
+    ap.add_argument("--max-num-batched-tokens", type=int, default=32768)
     args = ap.parse_args()
     draft = args.draft
     n_exp, topk = (128, 3) if draft else (384, 6)
@@ -112,13 +117,26 @@ def main() -> None:
     vllm.distributed.get_ep_group = lambda: ep
     rows_max = {"m": 0}
     akr_config.dp_rows = lambda m: max(m, rows_max["m"])
+    # the staged runtime is picked by the DP-group maximum, as under serving
+    dp_md = types.SimpleNamespace(
+        dp_metadata=types.SimpleNamespace(num_tokens_across_dp_cpu=torch.zeros(1))
+    )
+
+    def forward_context():
+        dp_md.dp_metadata.num_tokens_across_dp_cpu = torch.tensor([rows_max["m"]])
+        return dp_md
+
+    mega_moe.is_forward_context_available = lambda: True
+    mega_moe.get_forward_context = forward_context
 
     def build(path: str):
         cfg = types.SimpleNamespace(
             kernel_config=types.SimpleNamespace(
                 amd_kernels=types.SimpleNamespace(expert_perm=path)
             ),
-            scheduler_config=types.SimpleNamespace(max_num_batched_tokens=4096),
+            scheduler_config=types.SimpleNamespace(
+                max_num_batched_tokens=args.max_num_batched_tokens
+            ),
         )
         # parameters on the GPU, as under the model loader's device context
         with torch.device(dev):
@@ -271,21 +289,26 @@ def main() -> None:
             cmp(f"fused graph replay {seed}", run(ident, x, tw, ids), gout.clone())
         ident.akr = placed.akr = None
     if not args.no_staged:
-        rows_max["m"] = 0
-        for i, (m, kind) in enumerate(
+        for i, (m, dp_max, kind) in enumerate(
             [
-                (1, "uniform"),
-                (16, "uniform"),
-                (192, "skew"),
-                (768, "uniform"),
-                (2048, "skew"),
-                (4096, "skew"),
+                (1, 0, "uniform"),
+                (16, 0, "uniform"),
+                (192, 0, "skew"),
+                (768, 0, "uniform"),
+                (2048, 0, "skew"),
+                (4096, 0, "skew"),
+                # few local rows under a large DP-group maximum
+                (1 if rank % 2 else 3, 2048, "uniform"),
+                (16, 4096, "skew"),
+                (192, 1536, "skew"),
             ]
         ):
+            rows_max["m"] = dp_max
             ids, tw, x = inputs(m, i, kind)
             b = run(placed, x, tw, ids)
-            cap_i = next(c for c, _ in ident._runtimes if m <= c)
-            cap_p = next(c for c, _ in placed._runtimes if m <= c)
+            pick = max(m, dp_max)
+            cap_i = next(c for c, _ in ident._runtimes if pick <= c)
+            cap_p = next(c for c, _ in placed._runtimes if pick <= c)
             if cap_i != cap_p:
                 # AITER's fixed-slot dispatch (<= 255 tokens per rank) exists
                 # for 48 experts per rank only: S != 48 runs the indexed
@@ -307,7 +330,25 @@ def main() -> None:
                     ident._runtimes = saved
             else:
                 a = run(ident, x, tw, ids)
-            cmp(f"staged rows {m} {kind} (capacity {cap_p})", a, b)
+            cmp(f"staged rows {m} dp-max {dp_max} {kind} (capacity {cap_p})", a, b)
+        # remap + staged MegaMoE captured in one graph, replayed on new routes
+        m = 64
+        rows_max["m"] = 1024  # one runtime for both placements
+        ids, tw, x = inputs(m, 98, "uniform")
+        run(placed, x, tw, ids)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            gout = placed.forward(x, tw, ids, None)
+        for seed in (1, 2):
+            nids, ntw, nx = inputs(m, 300 + seed, "skew")
+            x.copy_(nx)
+            ids.copy_(nids)
+            tw.copy_(ntw)
+            graph.replay()
+            torch.accelerator.synchronize()
+            if not torch.equal(gout, run(placed, x, tw, ids)):
+                errors.append(f"rank {rank}: staged graph replay differs from eager")
+            cmp(f"staged graph replay {seed}", run(ident, x, tw, ids), gout.clone())
     all_err: list = [None] * WORLD
     dist.all_gather_object(all_err, errors)
     if rank == 0:

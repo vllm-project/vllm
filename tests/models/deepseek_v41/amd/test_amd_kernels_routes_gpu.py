@@ -5,7 +5,9 @@ on one gfx950 GPU: the router, the shared expert and the mHC seam, at row
 counts inside and outside each route's range, eager and under graph replay.
 
 These check the glue (argument order, layouts, fallbacks) through the
-`amd_kernels` op entries; the kernels' own numerics are amd-kernels' tests."""
+`amd_kernels` op entries; the kernels' own numerics are amd-kernels' tests.
+The stock references are the served ROCm path, so the module needs
+`VLLM_ROCM_USE_AITER=1` in the environment (read at import time)."""
 
 import types
 
@@ -33,9 +35,21 @@ def _entries_available() -> bool:
     return hasattr(moe, "router_topk_shapes") and hasattr(norm, "mhc_pack_gate_weight")
 
 
+def _aiter_enabled() -> bool:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    return bool(rocm_aiter_ops.is_enabled())
+
+
 pytestmark = [
     pytest.mark.skipif(
         not _entries_available(), reason="needs gfx950 and the amd_kernels op entries"
+    ),
+    # without AITER the stock MXFP8 linears keep no preshuffled weight (the
+    # GEMM chain tests would skip one by one) and the stock routers and
+    # shared-expert activation take paths DSv4.1 on ROCm does not serve
+    pytest.mark.skipif(
+        not _aiter_enabled(), reason="needs VLLM_ROCM_USE_AITER=1 (the served path)"
     ),
     # the module fixture owns the distributed state for all its tests
     pytest.mark.skip_global_cleanup,

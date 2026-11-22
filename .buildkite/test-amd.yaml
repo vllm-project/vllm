@@ -6277,7 +6277,8 @@ steps:
   - VLLM_ROCM_USE_AITER_MOE=0 pytest -v -s models/test_deepseek_v4_vl_rocm.py
   - pytest -v -s models/test_deepseek_v4_aiter_mega_moe.py
   - pytest -v -s models/deepseek_v41/amd/test_amd_kernels_routes.py
-  - pytest -v -s models/deepseek_v41/amd/test_amd_kernels_routes_gpu.py
+  - VLLM_ROCM_USE_AITER=1 pytest -v -s models/deepseek_v41/amd/test_amd_kernels_routes_gpu.py
+  - pytest -v -s models/deepseek_v41/amd/test_akr_eplb.py
   dind: false
   working_dir: /vllm-workspace/tests
   agent_pool: mi355_1
