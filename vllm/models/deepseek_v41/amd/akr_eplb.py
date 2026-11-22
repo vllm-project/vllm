@@ -29,9 +29,9 @@ import dataclasses
 import functools
 import hashlib
 import os
-import re
 
 import numpy as np
+import regex as re
 import torch
 
 from vllm.logger import init_logger

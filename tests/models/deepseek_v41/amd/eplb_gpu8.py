@@ -28,6 +28,7 @@ import argparse
 import os
 import sys
 import types
+from typing import Any
 
 os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "64G")
 
@@ -107,7 +108,7 @@ def main() -> None:
     from vllm.models.deepseek_v4.amd import mega_moe
     from vllm.models.deepseek_v41.amd import akr_config, akr_experts
 
-    ep = types.SimpleNamespace(
+    ep: Any = types.SimpleNamespace(
         rank_in_group=rank,
         world_size=WORLD,
         cpu_group=dist.group.WORLD,
