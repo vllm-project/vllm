@@ -2437,8 +2437,7 @@ def test_lru_insert_orders_positioned_chunks_without_followup_access(ready_on_in
 
 
 def test_lru_offer_without_a_request_makes_the_chunk_newest():
-    """An ON_OVERWRITE offer names the chunks that this tier holds, so it is
-    an access."""
+    """A store with no request that names a resident chunk is an access."""
     policy = LRUCachePolicy(cache_capacity=2)
     first, second = to_keys([1, 2])
     for chunk_id, key in enumerate([first, second]):
@@ -2451,6 +2450,38 @@ def test_lru_offer_without_a_request_makes_the_chunk_newest():
     evicted = policy.evict(1, set())
     assert evicted is not None
     assert [key for key, _ in evicted] == [second]
+
+
+def test_arc_offer_without_a_request_promotes_to_t2():
+    """A store with no request that names a resident chunk is a second
+    observation, so ARC moves it to the frequent list."""
+    policy = ARCCachePolicy(cache_capacity=4)
+    first, second = to_keys([1, 2])
+    for chunk_id, key in enumerate([first, second]):
+        chunk = ChunkStatus(chunk_id)
+        chunk.ref_cnt = 0
+        policy.insert(key, chunk, None)
+
+    policy.on_request_access([first], None)
+
+    assert first in policy.t2
+    assert second in policy.t1
+
+
+def test_arc_offer_without_a_request_keeps_the_prefix_newest():
+    """The handler offers the deepest chunk first, so the prefix must end up
+    last, and evict last, in the frequent list."""
+    policy = ARCCachePolicy(cache_capacity=4)
+    prefix, deep = to_keys([1, 2])
+    for chunk_id, key in enumerate([prefix, deep]):
+        chunk = ChunkStatus(chunk_id)
+        chunk.ref_cnt = 0
+        policy.insert(key, chunk, None)
+
+    policy.on_request_access([deep, prefix], None)
+
+    assert list(policy.t2) == [deep, prefix]
+    assert not policy.t1
 
 
 def test_store_trigger_and_success_are_keyword_only():

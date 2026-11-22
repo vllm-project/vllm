@@ -126,8 +126,16 @@ class ARCCachePolicy(CachePolicy):
         self, keys: Iterable[OffloadKey], req_context: ReqContext | None
     ) -> None:
         if req_context is None:
-            # A request-free access has no position and no running request, so
-            # ARC keeps T1 in insertion order in the lazy mode.
+            # The store runs after the request finished, so no position is
+            # available. A chunk that this tier already holds was in HBM again,
+            # so it was used again: promote it, as a request reuse does. The
+            # keys come deepest first, so the prefix keeps the newest rank.
+            for key in keys:
+                if key in self.t1:
+                    self._release_running(key)
+                    self.t2[key] = self.t1.pop(key)
+                elif key in self.t2:
+                    self.t2.move_to_end(key)
             return
         for key in keys:
             if key not in self.t1 or key in self._running:
