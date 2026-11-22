@@ -412,7 +412,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     add_library(octave_rdna4 OBJECT
       "csrc/attention/octave_rdna4/geometry.hip"
       "csrc/attention/octave_rdna4/decode.hip"
-      "csrc/attention/octave_rdna4/prefill.hip")
+      "csrc/attention/octave_rdna4/prefill.hip"
+      "csrc/attention/octave_rdna4/prefix.hip")
     set_target_properties(octave_rdna4 PROPERTIES
       HIP_STANDARD 20
       HIP_STANDARD_REQUIRED ON

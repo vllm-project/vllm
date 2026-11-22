@@ -50,6 +50,37 @@ int launch_prefill(float* out, float* partials, Activation query,
                    int splits, float scale, int dtype, int format,
                    hipStream_t stream);
 
+__host__ __device__ inline int prefix_splits(int ctx, int splits) {
+  const int used = ctx <= 0 ? 0 : 1 + (ctx - 1) / 256;
+  return used < splits ? used : splits;
+}
+
+__host__ __device__ inline int bounded_prefix(int length, int chunk,
+                                              int64_t capacity) {
+  const int64_t prefix = int64_t(length) - chunk;
+  return prefix <= 0 ? 0 : int(prefix < capacity ? prefix : capacity);
+}
+
+int launch_prefix_tiles(const int8_t* query, const float* query_scale,
+                        PagedCache cache, const int32_t* table,
+                        int64_t table_stride, int64_t prefix_capacity,
+                        const int32_t* starts, const int32_t* lengths,
+                        float* partials, float scale, int requests, int heads,
+                        int tokens, int splits, int format, hipStream_t stream);
+int launch_chunk_only(float* out, Activation query, Activation keys,
+                      Activation values, void* packed_chunk, float* chunk_lse,
+                      const int32_t* starts, int requests, int tokens,
+                      int kv_heads, float scale, int dtype, hipStream_t stream);
+int launch_prefill_streamed(float* out, Activation query, Activation key,
+                            Activation value, PagedCache cache,
+                            const int32_t* table, int64_t table_stride,
+                            int64_t prefix_capacity, const int32_t* starts,
+                            const int32_t* lengths, int requests,
+                            const uint32_t* signs, int tokens, int heads,
+                            float scale, int dtype, int format, int splits,
+                            float* partials, int8_t* staging, float* chunk_lse,
+                            uint8_t* repair, hipStream_t stream);
+
 int launch_prefill_expanded(float* out, void* keys, void* values,
                             const void* query_fp16, Activation query,
                             Activation key, Activation value, PagedCache cache,
@@ -57,7 +88,8 @@ int launch_prefill_expanded(float* out, void* keys, void* values,
                             const int32_t* starts, const int32_t* lengths,
                             int requests, int capacity, const uint32_t* signs,
                             int tokens, int heads, float scale, int dtype,
-                            int format, hipStream_t stream);
+                            int format, void* correction, uint8_t* repair,
+                            hipStream_t stream);
 
 namespace geometry {
 

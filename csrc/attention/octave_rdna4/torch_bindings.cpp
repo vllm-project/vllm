@@ -2,10 +2,12 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 #include <ATen/core/Tensor.h>
+#include <ATen/ops/empty.h>
 #include <c10/hip/HIPGuard.h>
 #include <c10/hip/HIPStream.h>
 #include <torch/library.h>
 
+#include <algorithm>
 #include <cmath>
 #include <optional>
 
@@ -219,7 +221,9 @@ void prefill_expanded(const Tensor& out, const Tensor& query, const Tensor& key,
                       const Tensor& block_table, const Tensor& starts,
                       const Tensor& lengths, const Tensor& key_tmp,
                       const Tensor& value_tmp, const Tensor& query_tmp,
-                      const Tensor& signs, double scale, int64_t fmt) {
+                      const Tensor& signs, double scale, int64_t fmt,
+                      const std::optional<Tensor>& repair_buffer,
+                      const std::optional<Tensor>& correction_buffer) {
   const auto x = attention_inputs(out, query, cache, block_table, std::nullopt,
                                   signs, 1, fmt, 1);
   const auto device = query.device();
@@ -248,12 +252,76 @@ void prefill_expanded(const Tensor& out, const Tensor& query, const Tensor& key,
   const auto* start_data = vector_data<int32_t>(starts, requests + 1, device);
   const auto* length_data = vector_data<int32_t>(lengths, requests, device);
   const c10::cuda::CUDAGuard guard(device);
+  const auto repair =
+      repair_buffer
+          ? *repair_buffer
+          : at::empty({x.tokens, x.heads, 2}, query.options().dtype(at::kByte));
+  check_buffer(repair, {x.tokens, x.heads, 2}, at::kByte, device);
+  // Half-precision key residuals followed by 32 FP32 maxima per KV head.
+  const int64_t correction_bytes =
+      (capacity * kHeadDim * 2 + 32 * sizeof(float)) * requests * x.cache.heads;
+  const auto correction =
+      correction_buffer
+          ? *correction_buffer
+          : at::empty({correction_bytes}, query.options().dtype(at::kByte));
+  check_buffer(correction, {correction_bytes}, at::kByte, device);
+  TORCH_CHECK_VALUE(
+      reinterpret_cast<uintptr_t>(correction.data_ptr()) % 16 == 0,
+      "Expected aligned expanded key correction buffer");
   query_tmp.copy_(query);
   check_launch(launch_prefill_expanded(
       x.out, key_tmp.data_ptr(), value_tmp.data_ptr(),
       query_tmp.const_data_ptr(), x.query, k, v, x.cache, x.table,
       block_table.stride(0), start_data, length_data, requests, capacity,
-      x.signs, x.tokens, x.heads, scale, x.dtype, fmt,
+      x.signs, x.tokens, x.heads, scale, x.dtype, fmt, correction.data_ptr(),
+      repair.data_ptr<uint8_t>(), c10::cuda::getCurrentCUDAStream().stream()));
+}
+
+void prefill_streamed(const Tensor& out, const Tensor& query, const Tensor& key,
+                      const Tensor& value, const Tensor& cache,
+                      const Tensor& table, const Tensor& starts,
+                      const Tensor& lengths, const Tensor& partials,
+                      const Tensor& staging, const Tensor& chunk_lse,
+                      const Tensor& repair, const Tensor& signs, double scale,
+                      int64_t fmt) {
+  const auto x = attention_inputs(out, query, cache, table, std::nullopt, signs,
+                                  1, fmt, 1);
+  const auto device = query.device();
+  const auto k = activation(key, device, query.scalar_type());
+  const auto v = activation(value, device, query.scalar_type());
+  const int requests = lengths.numel();
+  check_chunk(key, value, table, x, requests);
+  TORCH_CHECK_VALUE(partials.dim() == 4 && partials.size(0) >= 1 &&
+                        partials.size(0) <= 32 && x.cache.page_size % 16 == 0 &&
+                        x.heads == x.cache.heads * 6 && std::isfinite(scale) &&
+                        scale > 0,
+                    "Invalid streamed prefill geometry");
+  const int splits = partials.size(0);
+  check_buffer(partials, {splits, x.tokens, x.heads, kHeadDim + 2}, at::kFloat,
+               device);
+  const int64_t query_bytes = int64_t(x.tokens) * x.heads * 2 * kHeadDim;
+  const int64_t chunk_bytes =
+      int64_t(x.tokens / 32 + requests) * 32 * x.cache.heads * kHeadDim * 4;
+  check_buffer(staging, {std::max(query_bytes, chunk_bytes)}, at::kChar,
+               device);
+  if (chunk_lse.dim() == 3)
+    check_buffer(chunk_lse, {2, x.tokens, x.heads}, at::kFloat, device);
+  else
+    check_buffer(chunk_lse, {x.tokens, x.heads}, at::kFloat, device);
+  check_buffer(repair, {x.tokens, x.heads}, at::kByte, device);
+  TORCH_CHECK_VALUE(reinterpret_cast<uintptr_t>(staging.data_ptr()) % 16 == 0 &&
+                        reinterpret_cast<uintptr_t>(x.out) % 32 == 0,
+                    "Expected aligned streamed prefill buffers");
+  const auto* start_data = vector_data<int32_t>(starts, requests + 1, device);
+  const auto* length_data = vector_data<int32_t>(lengths, requests, device);
+  if (!x.tokens) return;
+  const c10::cuda::CUDAGuard guard(device);
+  check_launch(launch_prefill_streamed(
+      x.out, x.query, k, v, x.cache, x.table, table.stride(0),
+      table.size(1) * x.cache.page_size, start_data, length_data, requests,
+      x.signs, x.tokens, x.heads, scale, x.dtype, fmt, splits,
+      partials.data_ptr<float>(), staging.data_ptr<int8_t>(),
+      chunk_lse.data_ptr<float>(), repair.data_ptr<uint8_t>(),
       c10::cuda::getCurrentCUDAStream().stream()));
 }
 
@@ -337,8 +405,17 @@ TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "octave_rdna4_prefill_expanded(Tensor(a!) out, Tensor query, Tensor key, "
       "Tensor value, Tensor cache, Tensor block_table, Tensor starts, "
       "Tensor lengths, Tensor(b!) key_tmp, Tensor(c!) value_tmp, "
-      "Tensor(d!) query_tmp, Tensor signs, float scale, int fmt) -> ()");
+      "Tensor(d!) query_tmp, Tensor signs, float scale, int fmt, Tensor(e!)? "
+      "repair=None, Tensor(f!)? correction=None) -> ()");
   ops.impl("octave_rdna4_prefill_expanded", at::kCUDA, &prefill_expanded);
+  ops.def(
+      "octave_rdna4_prefill_streamed(Tensor(a!) out, Tensor query, Tensor key, "
+      "Tensor value, Tensor cache, Tensor table, Tensor starts, Tensor "
+      "lengths, "
+      "Tensor(b!) partials, Tensor(c!) q8, Tensor(d!) stats, Tensor(e!) "
+      "repair, "
+      "Tensor signs, float scale, int fmt) -> ()");
+  ops.impl("octave_rdna4_prefill_streamed", at::kCUDA, &prefill_streamed);
   ops.def(
       "octave_rdna4_window_store(Tensor key, Tensor value, Tensor "
       "slot_mapping, "

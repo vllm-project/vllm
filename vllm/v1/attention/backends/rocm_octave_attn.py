@@ -194,6 +194,7 @@ class RocmOctaveMetadata:
     q_to_req: torch.Tensor
     q_to_klen: torch.Tensor
     max_seq_len: int = 0
+    uniform_prefill_prefix: int = 0
 
 
 class RocmOctaveMetadataBuilder(AttentionMetadataBuilder[RocmOctaveMetadata]):

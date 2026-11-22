@@ -357,26 +357,28 @@ def test_rdna4_geometry_rejects_unsupported_head_and_rope(head_dim, rope_dim):
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
-    "cache_dtype,query_lens,group,expanded",
+    "cache_dtype,query_lens,group,path",
     [
-        (cache_dtype, query_lens, group, False)
+        (cache_dtype, query_lens, group, "packed")
         for cache_dtype in CACHE_DTYPES
         for query_lens in ([256], [512], [129, 1, 517])
         for group in (1, 2, 6)
     ]
     + [
-        ("octave_k3v3_compact", [256], 4, False),
-        ("octave_k3v3_compact", [256], 8, False),
+        ("octave_k3v3_compact", [256], 4, "packed"),
+        ("octave_k3v3_compact", [256], 8, "packed"),
     ]
     + (
-        [(cache_dtype, [129, 1, 517], 6, True) for cache_dtype in CACHE_DTYPES]
+        [
+            (cache_dtype, [129, 1, 517], 6, path)
+            for cache_dtype in CACHE_DTYPES
+            for path in ("expanded", "streamed")
+        ]
         if ARCH == "rdna4"
         else []
     ),
 )
-def test_prefill_matches_reference(
-    cache_dtype, query_lens, dtype, group, expanded, kernel
-):
+def test_prefill_matches_reference(cache_dtype, query_lens, dtype, group, path, kernel):
     """Chunked prefill: each request's chunk attends causally to itself
     (unquantized K/V) and to its cached prefix (packed cache), in the rotated
     space the backend runs it in."""
@@ -405,8 +407,8 @@ def test_prefill_matches_reference(
     qsl = torch.tensor([0, *query_lens], device=dev).cumsum(0).int()
     total = int(qsl[-1])
     q = (torch.randn(total, hkv * group, HEAD, device=dev) * 2).to(dtype)
-    if expanded:
-        q[0, 0].fill_(1000)  # Exercise the packed FP32 repair.
+    if path != "packed":
+        q[0, 0, HEAD // 2 :].fill_(1000)  # Exercise the packed FP32 repair.
     k_new = torch.cat([k[c:] for k, c in zip(ks, ctx_lens)])
     v_new = torch.cat([v[c:] for v, c in zip(vs, ctx_lens)])
     out = _prefill(
@@ -420,7 +422,7 @@ def test_prefill_matches_reference(
         ksg,
         fmt,
         kernel,
-        expanded=expanded,
+        path=path,
     )
 
     ref = torch.empty(total, hkv * group, HEAD, device=dev)
@@ -442,9 +444,280 @@ def test_prefill_matches_reference(
         p = torch.softmax(s.masked_fill(mask, float("-inf")), -1)
         ref[int(qsl[i]) : int(qsl[i + 1])] = torch.einsum("hqt,thd->qhd", p, v_all)
     # Only attention arithmetic and output rounding differ.
-    assert _rel(out, ref) < (1e-3 if expanded else 2e-2)
-    if expanded:
+    assert _rel(out, ref) < (1e-3 if path != "packed" else 2e-2)
+    if path != "packed":
         assert _rel(out[0, 0], ref[0, 0]) < 1e-3
+
+
+@pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 cached prefill")
+@pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("tokens", [129, 513])
+def test_cached_prefill_sharp_keys_preserve_attention_weights(
+    cache_dtype, dtype, tokens, kernel
+):
+    """FP16 rounding of QK can change the weights of competing cached keys."""
+    torch.manual_seed(127421)
+    device, prefix, heads = "cuda", 1027, 6
+    fmt = kernel.layout(cache_dtype)
+    signs = sq.sign_bits(HEAD).to(device)
+    pages = math.ceil((prefix + tokens) / BLOCK)
+    cache = torch.empty(
+        pages, 1, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=device
+    )
+    table = torch.randperm(pages, device=device).int()[None]
+    k = (8 * torch.randn(prefix + tokens, 1, HEAD, device=device)).to(dtype)
+    v = torch.randn(prefix + tokens, 1, HEAD, device=device).to(dtype)
+    q = torch.randn(tokens, heads, HEAD, device=device).to(dtype)
+    pk, pv = sq.reference_dequantize(
+        _token_slots(
+            cache,
+            _fill(cache, table[0], k[:prefix], v[:prefix], signs, signs, fmt, kernel),
+        ),
+        fmt,
+    )
+    starts = torch.tensor([0, tokens], device=device, dtype=torch.int32)
+    lengths = starts[-1:] + prefix
+    path, shapes = kernel.prefill_workspace(
+        q, cache, table, prefix + tokens, 1 / 16, 2 << 30, prefix
+    )
+    scratch = [torch.empty(sh, dtype=dt, device=device) for sh, dt in shapes]
+    out = torch.empty_like(q, dtype=torch.float32)
+    args = (
+        q,
+        k[prefix:],
+        v[prefix:],
+        cache,
+        table,
+        starts,
+        lengths,
+        signs,
+        cache_dtype,
+    )
+    if path == "streamed":
+        kernel.prefill_streamed(*args, buffers=scratch, out=out, scale=1 / 16)
+    else:
+        assert path == "expanded"
+        kt, vt, qt, flags, correction = scratch
+        kernel.prefill_expanded(
+            *args,
+            key_tmp=kt,
+            value_tmp=vt,
+            query_tmp=qt,
+            repair=flags,
+            correction=correction,
+            out=out,
+            scale=1 / 16,
+        )
+    keys = torch.cat((pk[:, 0].double(), k[prefix:, 0].double()))
+    values = torch.cat((pv[:, 0].double(), v[prefix:, 0].double()))
+    causal = torch.arange(len(keys), device=device) > (
+        prefix + torch.arange(tokens, device=device)[:, None]
+    )
+    scores = (q.double() @ keys.T) / 16
+    ref = scores.masked_fill(causal[:, None], -torch.inf).softmax(-1) @ values
+    errors = (out - ref).norm(dim=-1) / ref.norm(dim=-1)
+    assert errors.amax().item() < 1.2e-3
+
+
+@pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 expanded prefill")
+@pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
+def test_expanded_prefill_keeps_small_weights_on_large_values(cache_dtype, kernel):
+    device, prefix, tokens = "cuda", 1025, 32
+    fmt = kernel.layout(cache_dtype)
+    signs = sq.sign_bits(HEAD).to(device)
+    pages = math.ceil((prefix + tokens) / BLOCK)
+    cache = torch.empty(
+        pages, 1, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=device
+    )
+    table = torch.arange(pages, device=device, dtype=torch.int32)[None]
+    k = torch.zeros(prefix, 1, HEAD, device=device, dtype=torch.float16)
+    k[0] = 1
+    v = torch.full_like(k, 4096)
+    v[0] = 1
+    slots = _fill(cache, table[0], k, v, signs, signs, fmt, kernel)
+    keys, values = sq.reference_dequantize(_token_slots(cache, slots[:2]), fmt)
+    # Put the winning key first. Later tiles must retain the other keys'
+    # small probabilities to account for their large contribution to PV.
+    first = keys[0, 0].double()
+    q0 = (first * (17 * 16 / first.square().sum())).half()
+    q = q0.repeat(tokens, 6, 1)
+    live = torch.zeros_like(k[:tokens])
+    starts = torch.tensor([0, tokens], device=device, dtype=torch.int32)
+    out = _prefill(
+        cache,
+        q,
+        live,
+        live,
+        table,
+        starts,
+        starts[-1:] + prefix,
+        signs,
+        fmt,
+        kernel,
+        path="expanded",
+    )
+    weights = (keys[:, 0].double() @ q0.double() / 16).exp()
+    weights[1] *= prefix - 1
+    mass = weights.sum() + torch.arange(1, tokens + 1, device=device)
+    ref = (weights @ values[:, 0].double()) / mass.double()[:, None]
+    error = (out.double() - ref[:, None]).norm(dim=-1) / ref.norm(dim=-1)[:, None]
+    assert error.amax().item() < 1.5e-3
+
+
+@pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 packed-prefix dispatch")
+def test_uniform_cached_prefill_dispatch_uses_shortest_prefix(kernel):
+    from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+    from vllm.config import SchedulerConfig, VllmConfig
+    from vllm.v1.attention.backends.rocm_octave_rdna4_attn import (
+        RocmOctaveRdna4MetadataBuilder,
+    )
+    from vllm.v1.kv_cache_interface import AttentionSpec
+
+    cfg = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_model_len=32768, max_num_batched_tokens=8192, is_encoder_decoder=False
+        )
+    )
+    spec = AttentionSpec(
+        block_size=3264, num_kv_heads=2, head_size=HEAD, dtype=torch.bfloat16
+    )
+    builder = RocmOctaveRdna4MetadataBuilder(spec, ["layer"], cfg, torch.device("cpu"))
+    slot_bytes = kernel.layout("octave_k3v4").slot_bytes
+    cache = torch.empty((12, 2, 3264, slot_bytes), device="meta", dtype=torch.uint8)
+    for chunks, lengths, prefix, path in (
+        ([1, 2112, 2112], [16, 18432, 18432], 16320, "expanded"),
+        ([1, 512, 512], [16, 131584, 131584], 131072, "streamed"),
+        ([2112, 2112], [2112, 18432], 0, "expanded"),
+        ([2111, 2112], [18432, 18432], 0, "expanded"),
+    ):
+        common = create_common_attn_metadata(BatchSpec(lengths, chunks), 3264, "cpu")
+        md = builder.build(0, common)
+        assert md.uniform_prefill_prefix == prefix
+        query = torch.empty(
+            (sum(chunks) - md.num_decode_tokens, 12, HEAD), device="meta"
+        )
+        table = md.block_table[md.num_decodes :]
+        assert (
+            kernel.prefill_workspace(
+                query,
+                cache,
+                table,
+                md.max_seq_len,
+                1 / 16,
+                2 << 30,
+                md.uniform_prefill_prefix,
+            )[0]
+            == path
+        )
+
+
+@pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 chunked prefill")
+@pytest.mark.parametrize("path", ["expanded", "streamed"])
+def test_prefill_replay_changes_live_prefix_and_repair_rows(path, kernel):
+    torch.manual_seed(22)
+    device, dtype = "cuda", torch.bfloat16
+    fmt = kernel.layout("octave_k3v4")
+    tokens, heads, max_prefix = 64, 6, 528
+    signs = sq.sign_bits(HEAD).to(device)
+
+    # Strided activations and padded table rows, as in mixed batches.
+    def sample(n, h):
+        return torch.randn(n, h + 1, HEAD, device=device, dtype=dtype)[:, :h]
+
+    q, k, v = sample(tokens, heads), sample(tokens, 1), sample(tokens, 1)
+    pages = (
+        max_prefix // BLOCK
+        if path == "streamed"
+        else math.ceil((max_prefix + tokens) / BLOCK)
+    )
+    table = torch.randperm(2 * (pages + 1), device=device).int().view(2, -1)[:, :pages]
+    cache = torch.zeros(
+        2 * (pages + 1), 1, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=device
+    )
+    pos = torch.arange(max_prefix, device=device)
+    prefix_kv = []
+    for row in table:
+        slots = row[pos // BLOCK].long() * BLOCK + pos % BLOCK
+        kernel.store(
+            sample(max_prefix, 1),
+            sample(max_prefix, 1),
+            cache,
+            slots,
+            signs,
+            "octave_k3v4",
+        )
+        prefix_kv.append(
+            sq.reference_dequantize(cache[row[pos // BLOCK], :, pos % BLOCK], fmt)
+        )
+
+    starts = torch.tensor([0, 24, tokens], device=device, dtype=torch.int32)
+    lengths = torch.tensor([24, tokens - 24], device=device, dtype=torch.int32)
+    out = torch.empty(q.shape, device=device, dtype=torch.float32)
+    args = (q, k, v, cache, table, starts, lengths, signs, "octave_k3v4")
+    if path == "expanded":
+        # The second replay exceeds this capacity for only one request.
+        tmp = torch.empty((2, 1, 128, HEAD), device=device, dtype=torch.float16)
+        flags = torch.empty((tokens, heads, 2), device=device, dtype=torch.uint8)
+        kw = dict(
+            key_tmp=tmp,
+            value_tmp=torch.empty_like(tmp),
+            repair=flags,
+            query_tmp=torch.empty(q.shape, device=device, dtype=torch.float16),
+        )
+        op = kernel.prefill_expanded
+    else:
+        shapes = kernel.streamed_workspace(q, cache, 2, max_prefix, 2 << 30)
+        buffers = [torch.empty(sh, dtype=dt, device=device) for sh, dt in shapes]
+        flags = buffers[-1]
+        kw = dict(buffers=buffers)
+        op = kernel.prefill_streamed
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        op(*args, out=out, scale=1 / 16, **kw)
+    replays = [(24, [33, 0]), (31, [0, 519])]
+    if path == "streamed":
+        # Row padding has a valid physical page outside the logical table.
+        # Both the WMMA result and the repaired row must stop at its width.
+        replays.append((23, [max_prefix + 11, -7]))
+    replays.append((17, [30, 7]))
+    for cut, prefixes in replays:
+        starts[1] = cut
+        lengths.copy_(
+            torch.tensor(
+                [cut + prefixes[0], tokens - cut + prefixes[1]],
+                device=device,
+                dtype=torch.int32,
+            )
+        )
+        # A previously valid finite output and stale partials must be ignored.
+        out.fill_(7)
+        sharp = cut in (31, 23)
+        q[0, 0, HEAD // 2 :] = 1000 if sharp else 1
+        graph.replay()
+        if sharp:
+            assert flags[0, 0].any()
+        else:
+            assert not flags[0, 0].any()
+        for i, (begin, end) in enumerate(((0, cut), (cut, tokens))):
+            prefix = max(0, min(max_prefix, prefixes[i]))
+            pk, pv = prefix_kv[i]
+            keys = torch.cat((pk[:prefix, 0], k[begin:end, 0].float()))
+            vals = torch.cat((pv[:prefix, 0], v[begin:end, 0].float()))
+            logits = q[begin:end].float() @ keys.T / 16
+            causal = torch.arange(len(keys), device=device) > (
+                prefix + torch.arange(end - begin, device=device)[:, None]
+            )
+            ref = logits.masked_fill(causal[:, None], -torch.inf).softmax(-1) @ vals
+            assert _rel(out[begin:end], ref) < 1e-3
+
+    # A genuine data NaN survives numerical repair; it is never the route flag.
+    v[0, 0, 3] = torch.nan
+    graph.replay()
+    assert not flags[0].any()
+    assert out[0, :, 3].isnan().all()
+    assert out[0, :, 4:].isfinite().all()
 
 
 def _decode(
@@ -509,11 +782,28 @@ def _prefill(
     fmt,
     kernel=None,
     *,
-    expanded=False,
+    path="packed",
 ):
     if kernel is not None:
         cache_dtype = _cache_dtype(fmt)
-        if expanded:
+        if path == "streamed":
+            shapes = kernel.streamed_workspace(q, cache, len(seq_lens), 4096, 2 << 30)
+            buffers = [torch.empty(s, device=q.device, dtype=d) for s, d in shapes]
+            return kernel.prefill_streamed(
+                q,
+                k,
+                v,
+                cache,
+                block_table,
+                qsl,
+                seq_lens,
+                signs,
+                cache_dtype,
+                buffers=buffers,
+                out=torch.empty_like(q, dtype=torch.float32),
+                scale=1 / 16,
+            )
+        if path == "expanded":
             capacity = math.ceil(block_table.shape[1] * cache.shape[2] / 32) * 32
             shape = (block_table.shape[0], cache.shape[1], capacity, HEAD)
             key_tmp = torch.empty(shape, device=q.device, dtype=torch.float16)

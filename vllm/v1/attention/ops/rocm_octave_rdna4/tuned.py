@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dense attention dispatch for RDNA4 Octave."""
 
+from math import gcd, isfinite, prod
+
 import torch
+
+from vllm.utils.math_utils import cdiv, round_up
 
 from .geometry import OctaveGeometry
 from .hip import HipOctave
@@ -109,6 +113,142 @@ class TunedHipOctave(HipOctave):
             specialized_fast=not self._use_geometry(query, cache, block_table, prefill),
         )
 
+    def streamed_workspace(self, query, cache, requests, capacity, budget):
+        """Bound the prefix partials by the existing per-layer scratch budget."""
+        tokens, heads, dim = query.shape
+        kv = cache.shape[1]
+        rows = tokens * heads
+        # The two INT8 query digits share staging with the later raw K/V tiles.
+        staging = max(2 * rows * dim, (tokens // 32 + requests) * 32 * kv * dim * 4)
+        overhead = sum(round_up(n, 256) for n in (staging, 4 * rows, rows))
+        per_split = rows * (dim + 2) * 4
+        # The occupancy targets below are calibrated in units of 128 query vectors.
+        work_units = cdiv(cdiv(tokens, requests) * (heads // kv), 128) * kv
+        # Short chunks need more independent prefix tiles to fill the GPU.
+        target = 512 if capacity >= 32768 else 256 if capacity >= 8192 else 64
+        # Long single-request chunks already have enough query parallelism.
+        max_splits = 4 if requests == 1 and tokens >= 512 and capacity >= 32768 else 16
+        splits = min(max_splits, cdiv(target, work_units))
+        if requests == 1 and 128 <= tokens <= 448:
+            groups = cdiv(tokens * (heads // kv), 160) * kv
+            if groups <= 32:
+                # A short final block of groups still scans its prefix. Use
+                # the smallest split count that fills a wave of 32 groups.
+                full = 32 // gcd(groups, 32)
+                if groups >= 28 or (
+                    groups >= 20 and capacity <= round_up(tokens + 512, 32)
+                ):
+                    splits = 1
+                elif full <= 4 or capacity >= 32768:
+                    splits = min(16, full)
+                else:
+                    first = 32 // groups
+                    splits = first if first * groups >= 28 else 64 // groups
+        splits = min(
+            splits,
+            cdiv(capacity, 256),
+            (budget - overhead) // round_up(per_split, 256),
+        )
+        if splits < 1:
+            return ()
+        return (
+            ((splits, tokens, heads, dim + 2), torch.float32),
+            ((staging,), torch.int8),
+            ((tokens, heads), torch.float32),
+            ((tokens, heads), torch.uint8),
+        )
+
+    def prefill_workspace(
+        self, query, cache, table, context_capacity, scale, budget, uniform_prefix=None
+    ):
+        tokens, heads, dim = query.shape
+        requests, pages = table.shape
+        kv = cache.shape[1]
+        if (
+            heads != 6 * kv
+            or tokens < 32
+            or not requests
+            or not pages
+            or not context_capacity
+            or context_capacity < 0
+            or not isfinite(scale)
+            or scale <= 0
+        ):
+            return "packed", ()
+
+        capacity = round_up(min(context_capacity, pages * cache.shape[2]), 32)
+        expanded = (requests, kv, capacity, dim)
+        correction_bytes = 2 * prod(expanded) + 32 * 4 * requests * kv
+        fits = (
+            4 * prod(expanded)
+            + round_up(correction_bytes, 256)
+            + 2 * query.numel()
+            + round_up(2 * tokens * heads, 256)
+            <= budget
+        )
+        chunk = tokens // requests
+        # Short batches underfill expanded attention. Long, thin requests can
+        # also use less scratch by reading the quantized pages directly.
+        prefix = uniform_prefix or max(0, capacity - chunk)
+        long_prefix = requests > 1 and (
+            prefix >= max(32768, 192 * chunk) or prefix >= max(98304, 128 * chunk)
+        )
+        short_single = (
+            requests == 1
+            and tokens <= 448
+            and cdiv(tokens * (heads // kv), 160) * kv <= 32
+        )
+        if (
+            cache.shape[2] % 16 == 0
+            and tokens >= 16 * requests
+            and (tokens <= 384 or short_single or not fits or long_prefix)
+        ):
+            shapes = self.streamed_workspace(query, cache, requests, capacity, budget)
+            if shapes:
+                return "streamed", shapes
+        if tokens >= 256 and fits:
+            return "expanded", (
+                (expanded, torch.float16),
+                (expanded, torch.float16),
+                (tuple(query.shape), torch.float16),
+                ((tokens, heads, 2), torch.uint8),
+                ((correction_bytes,), torch.uint8),
+            )
+        return "packed", ()
+
+    def prefill_streamed(
+        self,
+        query,
+        key,
+        value,
+        cache,
+        table,
+        starts,
+        lengths,
+        signs,
+        cache_dtype,
+        *,
+        buffers,
+        out,
+        scale,
+    ):
+        """Attend to the paged prefix in place and merge the causal raw chunk."""
+        torch.ops._C.octave_rdna4_prefill_streamed(
+            out,
+            query,
+            key,
+            value,
+            cache,
+            table,
+            starts,
+            lengths,
+            *buffers,
+            signs,
+            scale,
+            self.layout(cache_dtype).kernel_code,
+        )
+        return out
+
     def prefill_expanded(
         self,
         query,
@@ -124,6 +264,8 @@ class TunedHipOctave(HipOctave):
         key_tmp,
         value_tmp,
         query_tmp,
+        repair=None,
+        correction=None,
         out,
         scale,
     ):
@@ -143,5 +285,7 @@ class TunedHipOctave(HipOctave):
             signs,
             scale,
             self.layout(cache_dtype).kernel_code,
+            repair,
+            correction,
         )
         return out

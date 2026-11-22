@@ -603,12 +603,15 @@ __device__ __forceinline__ void attention_row(
     Activation value, PagedCache cache, const int32_t* table,
     int64_t table_stride, const int32_t* map_or_starts, const int32_t* lengths,
     int requests, const uint32_t* signs, float scale, int q, int head,
-    int split, int heads, int splits, int lane, int query_tokens) {
+    int split, int heads, int splits, int lane, int query_tokens,
+    int prefix_override = -1) {
   int req = 0, prefix = 0, length = 0, chunk_start = 0;
   if constexpr (Prefill) {
     req = request_for_query(map_or_starts, requests, q);
     chunk_start = map_or_starts[req];
-    prefix = lengths[req] - (map_or_starts[req + 1] - chunk_start);
+    prefix = prefix_override >= 0
+                 ? prefix_override
+                 : lengths[req] - (map_or_starts[req + 1] - chunk_start);
     length = prefix + q - chunk_start + 1;
   } else {
     length = max(0, lengths[q]);
@@ -1610,10 +1613,11 @@ __device__ __forceinline__ void expand_prefill_row(
 
 template <typename T, typename F>
 __device__ __forceinline__ void expand_prefill_tile(
-    _Float16* key_out, _Float16* value_out, _Float16 (&transposed)[kHead][24],
-    Activation key, Activation value, PagedCache cache, const int32_t* table,
-    int64_t table_stride, const int32_t* starts, const int32_t* lengths,
-    int capacity, const uint32_t* signs) {
+    _Float16* key_out, _Float16* residual, float* errors, _Float16* value_out,
+    _Float16 (&transposed)[kHead][24], Activation key, Activation value,
+    PagedCache cache, const int32_t* table, int64_t table_stride,
+    const int32_t* starts, const int32_t* lengths, int capacity,
+    const uint32_t* signs) {
   constexpr int Tile = 16;
   constexpr int Threads = 128;
   const int req = blockIdx.z, kv_head = blockIdx.y, first = blockIdx.x * Tile;
@@ -1625,12 +1629,17 @@ __device__ __forceinline__ void expand_prefill_tile(
       first >= ((length + 31) / 32) * 32)
     return;
 
+  // Residuals use the WMMA lane order. The last 32-key tile can straddle
+  // the prefix boundary, so its live and padding rows also get initialized.
+  __shared__ float wave_maxima[Threads / kWave];
+  float max_error = 0.f;
   const int64_t head_offset =
       (int64_t(req) * cache.heads + kv_head) * capacity * kHead;
 #pragma unroll
   for (int t = wave; t < Tile; t += Threads / kWave) {
     float k[kLaneValues] = {}, v[kLaneValues] = {};
     const int pos = first + t;
+    float err2 = 0.f;
     if (pos < length)
       expand_prefill_row<T, F>(k, v, key, value, cache, table, table_stride,
                                signs, req, kv_head, pos, prefix, chunk_start,
@@ -1638,11 +1647,34 @@ __device__ __forceinline__ void expand_prefill_tile(
 #pragma unroll
     for (int i = 0; i < kLaneValues; ++i) {
       const int dim = dim_at(lane, i);
-      key_out[head_offset + int64_t(pos) * kHead + dim] = (_Float16)k[i];
+      const _Float16 high = (_Float16)k[i];
+      key_out[head_offset + int64_t(pos) * kHead + dim] = high;
+      if (first / 32 * 32 < prefix) {
+        const int fragment = dim / 16, half = dim % 16 / 8;
+        const int64_t index = head_offset + int64_t(first) * kHead +
+                              (fragment * 32 + half * 16 + t) * 8 + dim % 8;
+        const float delta = k[i] - float(high);
+        residual[index] = (_Float16)(delta * 1024.f);
+        err2 = fmaf(delta, delta, err2);
+      }
       transposed[dim][t] = (_Float16)v[i];
     }
+    if (first / 32 * 32 < prefix) {
+      err2 = sum_lanes<kWave>(err2);
+      max_error = fmaxf(max_error, err2);
+    }
   }
+  if (lane == 0) wave_maxima[wave] = max_error;
   __syncthreads();
+  if (tid == 0 && first < prefix) {
+    float peak = fmaxf(fmaxf(wave_maxima[0], wave_maxima[1]),
+                       fmaxf(wave_maxima[2], wave_maxima[3]));
+    // Distribute maxima over 32 locations to avoid a hot atomic on long
+    // prefixes.
+    atomicMax(reinterpret_cast<unsigned*>(errors) +
+                  (int64_t(req) * cache.heads + kv_head) * 32 + blockIdx.x % 32,
+              __float_as_uint(peak));
+  }
   // Store V in the vector layout consumed by the attention producer.
   _Float16* dst = value_out + head_offset + int64_t(first) * kHead;
 #pragma unroll
@@ -1654,16 +1686,16 @@ __device__ __forceinline__ void expand_prefill_tile(
 }
 
 __global__ __launch_bounds__(128) void expand_prefill(
-    _Float16* key_out, _Float16* value_out, Activation key, Activation value,
-    PagedCache cache, const int32_t* table, int64_t table_stride,
-    const int32_t* starts, const int32_t* lengths, int capacity,
-    const uint32_t* signs, int dtype, int format) {
+    _Float16* key_out, _Float16* residual, float* errors, _Float16* value_out,
+    Activation key, Activation value, PagedCache cache, const int32_t* table,
+    int64_t table_stride, const int32_t* starts, const int32_t* lengths,
+    int capacity, const uint32_t* signs, int dtype, int format) {
   __shared__ alignas(16) _Float16 transposed[kHead][24];
   // Uniform per-workgroup dispatch keeps a single packaged kernel entry.
-#define EXPAND_PREFILL(T, Compact, Bits)                                      \
-  expand_prefill_tile<T, Format<Compact, Bits>>(                              \
-      key_out, value_out, transposed, key, value, cache, table, table_stride,   \
-      starts, lengths, capacity, signs)
+#define EXPAND_PREFILL(T, Compact, Bits)                                   \
+  expand_prefill_tile<T, Format<Compact, Bits>>(                           \
+      key_out, residual, errors, value_out, transposed, key, value, cache, \
+      table, table_stride, starts, lengths, capacity, signs)
   if (dtype == 0) {
     if (format == 3) EXPAND_PREFILL(__half, false, 3);
     else if (format == 4) EXPAND_PREFILL(__half, false, 4);
@@ -2660,12 +2692,148 @@ int octave_rdna4::launch_prefill(
                                 format, stream);
 }
 
+namespace {
+
+// Round each rotated query element once. Two signed base-256 digits let the
+// integer matrix cores accumulate the score before applying the wire scale.
+template <typename T, bool Compact>
+__global__ void prepare_prefix_query(Activation query, const uint32_t* signs,
+                                     int8_t* q8, float* qscale, uint8_t* repair,
+                                     float scale, const int32_t* starts,
+                                     const int32_t* lengths, int requests) {
+  const int q = blockIdx.x, head = blockIdx.y, lane = threadIdx.x;
+  const int64_t row = int64_t(q) * gridDim.y + head;
+  float x[kLaneValues], raw_max = 0.f, rotated_max = 0.f;
+  load_activation<T>(x, query, q, head, lane);
+  bool safe = true;
+#pragma unroll
+  for (float v : x) {
+    safe &= __builtin_isfinite(v);
+    raw_max = fmaxf(raw_max, fabsf(v));
+  }
+  const int req = requests == 1 ? 0 : request_for_query(starts, requests, q);
+  if (int64_t(lengths[req]) <= int64_t(starts[req + 1]) - starts[req]) {
+    const bool tiny = !__any(raw_max >= 1.e-4f) && __any(raw_max > 0.f);
+    const bool ok =
+        __all(safe && raw_max <= 65504.f && raw_max * scale <= 2.f) && !tiny;
+    if (!lane) repair[row] = !ok;
+    return;
+  }
+  flip_signs(x, signs, lane);
+  hadamard<Compact>(x, lane);
+#pragma unroll
+  for (float v : x) {
+    safe &= __builtin_isfinite(v);
+    rotated_max = fmaxf(rotated_max, fabsf(v));
+  }
+#pragma unroll
+  for (int d = 16; d; d >>= 1) {
+    rotated_max = fmaxf(rotated_max, octave_xor<false>(rotated_max, d, 32));
+    raw_max = fmaxf(raw_max, octave_xor<false>(raw_max, d, 32));
+  }
+  safe = __all(safe) && raw_max <= 65504.f &&
+         fmaxf(raw_max, rotated_max) * scale <= 2.f &&
+         (raw_max == 0.f || raw_max >= 1.e-4f);
+  const float inv = safe && rotated_max > 0.f ? 127.f / rotated_max : 0.f;
+  if (!lane) {
+    repair[row] = !safe;
+    qscale[row] = safe ? rotated_max / (127.f * 256.f) : 0.f;
+  }
+#pragma unroll
+  for (int i = 0; i < kLaneValues; ++i) {
+    const float scaled = safe ? x[i] * inv : 0.f;
+    const int fixed = __float2int_rn(scaled * 256.f);
+    const int main = (fixed + 128) >> 8;
+    const int residual = fixed - main * 256;
+    const int64_t off = row * 2 * kHead + dim_at(lane, i);
+    q8[off] = main;
+    q8[off + kHead] = residual;
+  }
+}
+
+// Merge prefix splits in the rotated V basis, invert once per row, then
+// combine with the raw causal chunk using its log2 normalizer.
+template <typename T, typename F, bool Streamed>
+__global__ void finish_prefill(float* out, const float* partials,
+                               const float* chunk_lse, const uint8_t* repair,
+                               Activation query, Activation key,
+                               Activation value, PagedCache cache,
+                               const int32_t* table, int64_t stride,
+                               const int32_t* starts, const int32_t* lengths,
+                               int requests, const uint32_t* signs, int splits,
+                               float scale, int64_t prefix_capacity) {
+  const int q = blockIdx.x, head = blockIdx.y, lane = threadIdx.x;
+  const int64_t row = int64_t(q) * gridDim.y + head;
+  bool safe =
+      Streamed ? !repair[row] : !(repair[2 * row] | repair[2 * row + 1]);
+  int used = 0, prefix_length = -1;
+  if constexpr (Streamed) {
+    const int req = request_for_query(starts, requests, q);
+    prefix_length = octave_rdna4::bounded_prefix(
+        lengths[req], starts[req + 1] - starts[req], prefix_capacity);
+    used = octave_rdna4::prefix_splits(prefix_length, splits);
+  }
+  float combined[kLaneValues];
+  if (safe) {
+    float prefix[kLaneValues] = {}, weight = 1.f, inv_mass = 1.f;
+    if constexpr (Streamed) {
+      if (used) {
+        const int64_t step = int64_t(gridDim.x) * gridDim.y * kPartialSize;
+        const float* p = partials + row * kPartialSize;
+        const float lse = chunk_lse[row];
+        float m = lse;
+        for (int s = 0; s < used; ++s) m = fmaxf(m, p[s * step + kHead]);
+        weight = __builtin_amdgcn_exp2f(lse - m);
+        float mass = weight;
+        for (int s = 0; s < used; ++s) {
+          const float w = __builtin_amdgcn_exp2f(p[kHead] - m);
+          mass = fmaf(w, p[kHead + 1], mass);
+#pragma unroll
+          for (int i = 0; i < kLaneValues; ++i)
+            prefix[i] = fmaf(w, p[dim_at(lane, i)], prefix[i]);
+          p += step;
+        }
+        inv_mass = 1.f / mass;
+        hadamard<true>(prefix, lane);
+        flip_signs(prefix, signs, lane);
+      }
+    }
+    float largest = 0.f;
+#pragma unroll
+    for (int i = 0; i < kLaneValues; ++i) {
+      float v = out[row * kHead + dim_at(lane, i)];
+      if constexpr (Streamed) v = fmaf(weight, v, prefix[i]) * inv_mass;
+      safe &= __builtin_isfinite(v);
+      largest = fmaxf(largest, fabsf(v));
+      combined[i] = v;
+    }
+#pragma unroll
+    for (int d = 16; d; d >>= 1)
+      largest = fmaxf(largest, octave_xor<false>(largest, d, 32));
+    if (__all(safe) && largest >= 1.e-4f) {
+      if constexpr (Streamed) {
+#pragma unroll
+        for (int i = 0; i < kLaneValues; ++i)
+          out[row * kHead + dim_at(lane, i)] = combined[i];
+      }
+      return;
+    }
+  }
+  attention_row<T, F, true>(out, nullptr, query, key, value, cache, table,
+                            stride, starts, lengths, requests, signs, scale, q,
+                            head, 0, gridDim.y, 1, lane, gridDim.x,
+                            prefix_length);
+}
+
+}  // namespace
+
 namespace octave_rdna4 {
-int launch_dense_prefill(
-    float* out, const _Float16* query, const _Float16* keys,
-    const _Float16* values, const int32_t* starts, const int32_t* lengths,
-    int requests, int tokens, int kv_heads, int capacity, float scale,
-    hipStream_t stream);
+int launch_dense_prefill(float* out, const _Float16* query,
+                         const _Float16* keys, const _Float16* residual,
+                         const float* errors, const _Float16* values,
+                         const int32_t* starts, const int32_t* lengths,
+                         int requests, int tokens, int kv_heads, int capacity,
+                         float scale, uint8_t* repair, hipStream_t stream);
 }  // namespace octave_rdna4
 
 int octave_rdna4::launch_prefill_expanded(
@@ -2673,30 +2841,69 @@ int octave_rdna4::launch_prefill_expanded(
     Activation query, Activation key, Activation value, PagedCache cache,
     const int32_t* table, int64_t table_stride, const int32_t* starts,
     const int32_t* lengths, int requests, int capacity, const uint32_t* signs,
-    int tokens, int heads, float scale, int dtype, int format,
-    hipStream_t stream) {
+    int tokens, int heads, float scale, int dtype, int format, void* correction,
+    uint8_t* repair, hipStream_t stream) {
   if (requests <= 0 || tokens <= 0 || capacity <= 0 || capacity % 32 ||
       cache.heads <= 0 || heads != cache.heads * 6 || !(scale > 0.f) ||
       (dtype != 0 && dtype != 1) || (format != 3 && format != 4 && format != 19))
     return hipErrorInvalidValue;
   auto* keys_fp16 = static_cast<_Float16*>(keys);
+  auto* residual = static_cast<_Float16*>(correction);
+  auto* errors = reinterpret_cast<float*>(
+      residual + int64_t(requests) * cache.heads * capacity * kHead);
   auto* values_fp16 = static_cast<_Float16*>(values);
-  expand_prefill<<<dim3(capacity / 16, cache.heads, requests), 128, 0, stream>>>(
-      keys_fp16, values_fp16, key, value, cache, table, table_stride, starts, lengths,
-      capacity, signs, dtype, format);
+  const auto cleared = hipMemsetAsync(
+      errors, 0, int64_t(requests) * cache.heads * 32 * sizeof(float), stream);
+  if (cleared != hipSuccess) return cleared;
+  expand_prefill<<<dim3(capacity / 16, cache.heads, requests), 128, 0,
+                   stream>>>(keys_fp16, residual, errors, values_fp16, key,
+                             value, cache, table, table_stride, starts, lengths,
+                             capacity, signs, dtype, format);
   int status = hipGetLastError();
   if (status != hipSuccess) return status;
   status = octave_rdna4::launch_dense_prefill(
-      out, static_cast<const _Float16*>(query_fp16), keys_fp16, values_fp16,
-      starts, lengths, requests, tokens, cache.heads, capacity, scale, stream);
+      out, static_cast<const _Float16*>(query_fp16), keys_fp16, residual,
+      errors, values_fp16, starts, lengths, requests, tokens, cache.heads,
+      capacity, scale, repair, stream);
   if (status != hipSuccess) return status;
 
-  // A single-split merge checks the result and recomputes flagged rows
-  // directly from the packed cache using the original FP32 calculation.
   return dispatch(dtype, format, [&](auto scalar, auto layout) {
-    merge_splits_safe<decltype(scalar), decltype(layout), true>
+    finish_prefill<decltype(scalar), decltype(layout), false>
         <<<dim3(tokens, heads), kWave, 0, stream>>>(
-            out, nullptr, 1, query, key, value, cache, table, table_stride,
-            starts, lengths, requests, signs, scale);
+            out, nullptr, nullptr, repair, query, key, value, cache, table,
+            table_stride, starts, lengths, requests, signs, 1, scale, 0);
+  });
+}
+
+int octave_rdna4::launch_prefill_streamed(
+    float* out, Activation query, Activation key, Activation value,
+    PagedCache cache, const int32_t* table, int64_t table_stride,
+    int64_t prefix_capacity, const int32_t* starts, const int32_t* lengths,
+    int requests, const uint32_t* signs, int tokens, int heads, float scale,
+    int dtype, int format, int splits, float* partials, int8_t* staging,
+    float* chunk_lse, uint8_t* repair, hipStream_t stream) {
+  // Query scales share storage with the later causal chunk normalizers.
+  const dim3 rows(tokens, heads);
+  int status = dispatch(dtype, format, [&](auto scalar, auto layout) {
+    prepare_prefix_query<decltype(scalar), decltype(layout)::compact>
+        <<<rows, kWave, 0, stream>>>(query, signs, staging, chunk_lse, repair,
+                                     scale, starts, lengths, requests);
+  });
+  if (status != hipSuccess) return status;
+  status =
+      launch_prefix_tiles(staging, chunk_lse, cache, table, table_stride,
+                          prefix_capacity, starts, lengths, partials, scale,
+                          requests, heads, tokens, splits, format, stream);
+  if (status != hipSuccess) return status;
+  status =
+      launch_chunk_only(out, query, key, value, staging, chunk_lse, starts,
+                        requests, tokens, cache.heads, scale, dtype, stream);
+  if (status != hipSuccess) return status;
+  return dispatch(dtype, format, [&](auto scalar, auto layout) {
+    finish_prefill<decltype(scalar), decltype(layout), true>
+        <<<rows, kWave, 0, stream>>>(out, partials, chunk_lse, repair, query,
+                                     key, value, cache, table, table_stride,
+                                     starts, lengths, requests, signs, splits,
+                                     scale, prefix_capacity);
   });
 }

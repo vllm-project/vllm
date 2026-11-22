@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-#include <hip/hip_runtime.h>
+#include "kernels.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <type_traits>
 
 namespace {
 
@@ -15,13 +17,10 @@ constexpr int kHead = 256;
 constexpr int kGroup = 6;
 constexpr int kFragment = 16;
 constexpr int kWave = 32;
-// A workgroup handles ten tokens of a GQA6 request. Pairs of waves share
-// score computation and cover disjoint halves of the value dimensions.
-constexpr int kRowWaves = 4;
-constexpr int kDimParts = 2;
+// Each expanded-prefill wave owns 16 query/head rows and their full output.
 constexpr int kKeyTile = 32;
-constexpr int kThreads = kWave * kRowWaves * kDimParts;
-constexpr int kQueries = kRowWaves * kFragment / kGroup;
+
+constexpr float kProbabilityScale = 16384.f;
 constexpr float kLog2e = 1.4426950408889634f;
 
 __device__ inline __attribute__((convergent)) void prefill_lds_barrier() {
@@ -37,12 +36,13 @@ __device__ __forceinline__ float other_half(float value) {
                  0x76543210u, 0xFEDCBA98u, true, false));
 }
 
-__device__ __forceinline__ int prefill_request(
-    int block, const int32_t* starts, int requests) {
+template <int BatchTile>
+__device__ __forceinline__ int prefill_request(int block, const int32_t* starts,
+                                               int requests) {
   int low = 0, high = requests;
   while (low + 1 < high) {
     const int mid = (low + high) / 2;
-    if (starts[mid] / kQueries + mid <= block) {
+    if (starts[mid] / BatchTile + mid <= block) {
       low = mid;
     } else {
       high = mid;
@@ -51,24 +51,76 @@ __device__ __forceinline__ int prefill_request(
   return low;
 }
 
+using octave_rdna4::Activation;
+
+template <typename T>
+__device__ __forceinline__ Half8 read8(const T* ptr) {
+  using Vec = T __attribute__((ext_vector_type(8)));
+  Vec x;
+  __builtin_memcpy(&x, ptr, sizeof(x));
+  return __builtin_convertvector(__builtin_convertvector(x, Float8), Half8);
+}
+
+// Only the live chunk is converted and transposed. Its storage reuses the
+// fixed-point query buffer once the prefix kernel has consumed it.
+template <typename T>
+__global__ __launch_bounds__(128) void stage_chunk(
+    _Float16* k_out, _Float16* v_out, Activation key, Activation value,
+    const int32_t* starts, int requests) {
+  const int tile = blockIdx.x, kv = blockIdx.y;
+  const int req = prefill_request<kKeyTile>(tile, starts, requests);
+  const int start = starts[req], end = starts[req + 1];
+  const int base = start + (tile - start / kKeyTile - req) * kKeyTile;
+  if (base >= end) return;
+  const int64_t offset = (int64_t(tile) * gridDim.y + kv) * kKeyTile * kHead;
+  __shared__ alignas(16) _Float16 v_tile[2][kHead][24];
+  const int tid = threadIdx.x;
+#pragma unroll
+  for (int u = tid; u < kKeyTile * kHead / 8; u += 128) {
+    const int t = u / (kHead / 8), d = 8 * (u % (kHead / 8));
+    Half8 k = {}, v = {};
+    if (base + t < end) {
+      k = read8(static_cast<const T*>(key.data) +
+                (base + t) * key.token_stride + kv * key.head_stride + d);
+      v = read8(static_cast<const T*>(value.data) +
+                (base + t) * value.token_stride + kv * value.head_stride + d);
+    }
+    *reinterpret_cast<Half8*>(k_out + offset + 8 * u) = k;
+#pragma unroll
+    for (int e = 0; e < 8; ++e) v_tile[t / 16][d + e][t % 16] = v[e];
+  }
+  prefill_lds_barrier();
+#pragma unroll
+  for (int u = tid; u < kKeyTile * kHead / 8; u += 128)
+    *reinterpret_cast<Half8*>(v_out + offset + 8 * u) =
+        *reinterpret_cast<const Half8*>(
+            &v_tile[u / (2 * kHead)][(u / 2) % kHead][(u % 2) * 8]);
+}
+
 // Q and output are token-major. Expanded K is token-major within a KV head.
 // V is stored as [KV tile of 16, output dimension, key within tile].
-__global__ __launch_bounds__(kThreads) void dense_prefill(
-    float* out, const _Float16* query, const _Float16* keys,
-    const _Float16* values, const int32_t* starts, const int32_t* lengths,
+template <typename T, bool ChunkOnly, bool Precise, int RowWaves>
+__global__
+__launch_bounds__(kWave * RowWaves * (ChunkOnly ? 2 : 1)) void dense_prefill(
+    float* out, Activation query, Activation keys, Activation values,
+    const _Float16* residual, const float* errors, float* chunk_lse,
+    uint8_t* repair, const int32_t* starts, const int32_t* lengths,
     int requests, int kv_heads, int capacity, float scale) {
+  constexpr int kDimParts = ChunkOnly ? 2 : 1;
+  constexpr int kQueries = RowWaves * kFragment / kGroup;
+  constexpr int kThreads = RowWaves * kDimParts * kWave;
   constexpr int Keys = kKeyTile / kFragment;
   constexpr int Steps = kHead / (kDimParts * kFragment);
   constexpr int Vectors = kHead / 8;
 
-
   const int block = blockIdx.x;
-  const int req = prefill_request(block, starts, requests);
+  const int req = prefill_request<kQueries>(block, starts, requests);
   const int start = starts[req], end = starts[req + 1];
   const int q_base = start + (block - start / kQueries - req) * kQueries;
   if (q_base >= end) return;
   const int q_count = min(kQueries, end - q_base);
-  const int length = lengths[req], prefix = length - (end - start);
+  const int length = ChunkOnly ? end - start : lengths[req];
+  const int prefix = length - (end - start);
   const int key_end = prefix + q_base - start + q_count;
   const int kv_head = blockIdx.y;
 
@@ -82,56 +134,98 @@ __global__ __launch_bounds__(kThreads) void dense_prefill(
   const int query_end = prefix + q - start + 1;
   const int64_t head_offset = int64_t(req * kv_heads + kv_head) * capacity * kHead;
   const int64_t row_offset = (int64_t(q) * kv_heads * kGroup + q_head) * kHead;
-  if (prefix < 0 || length > capacity) {
-    // A replay can outgrow its temporary buffer. Mark these rows for the
-    // packed path without reading the expanded allocations.
-    if (row < q_count * kGroup && part == 0 && half == 0)
-      out[row_offset] = __builtin_nanf("");
-    return;
+  if constexpr (!ChunkOnly) {
+    if (prefix < 0 || length > capacity) {
+      if (row < q_count * kGroup && half == 0) {
+        repair[2 * (row_offset / kHead)] = 1;
+        repair[2 * (row_offset / kHead) + 1] = 0;
+      }
+      return;
+    }
   }
-  const _Float16* key_base = keys + head_offset;
-  const _Float16* value_base = values + head_offset;
-  const _Float16* q_row = query + row_offset;
+  const T* q_row =
+      static_cast<const T*>(query.data) +
+      (ChunkOnly ? q * query.token_stride + q_head * query.head_stride
+                 : row_offset);
 
   __shared__ alignas(16) _Float16 key_tile[kKeyTile][kHead];
   __shared__ alignas(16) _Float16 value_tile[Keys][kHead][kFragment];
-  __shared__ alignas(16) Float4 exchange[kRowWaves * kDimParts][Keys][2][kWave];
 
+  __shared__ alignas(16)
+      Float4 exchange[ChunkOnly ? RowWaves * 2 : 1][Keys][2][kWave];
   Half8 q_fragment[Steps];
-  float query_max = 0.f;
+  float query_max = 0.f, query_energy = 0.f;
 #pragma unroll
   for (int d = 0; d < Steps; ++d) {
-    q_fragment[d] = *reinterpret_cast<const Half8*>(
-        q_row + (part * Steps + d) * kFragment + half * 8);
+    const T* fragment = q_row + (part * Steps + d) * kFragment + half * 8;
+    if constexpr (ChunkOnly)
+      q_fragment[d] = read8(fragment);
+    else
+      q_fragment[d] = *reinterpret_cast<const Half8*>(fragment);
 #pragma unroll
-    for (int e = 0; e < 8; ++e)
-      query_max = fmaxf(query_max, fabsf(float(q_fragment[d][e])));
+    for (int e = 0; e < 8; ++e) {
+      const float x = float(q_fragment[d][e]);
+      query_max = fmaxf(query_max, fabsf(x));
+      if constexpr (!ChunkOnly) query_energy = fmaf(x, x, query_energy);
+    }
+  }
+  if constexpr (!ChunkOnly) {
+    query_energy = (query_energy + other_half(query_energy)) * scale * scale;
+    if (prefix > 0) {
+      // scale^2 * ||Q||^2 * max(||K - half(K)||^2) bounds squared logit
+      // error. Both launches make the same workgroup-wide choice on replay.
+      float bound = errors[(int64_t(req) * kv_heads + kv_head) * 32 + lane];
+#pragma unroll
+      for (int d = 16; d; d /= 2) bound = fmaxf(bound, __shfl_xor(bound, d));
+      constexpr float max_logit_error = 1.f / 64.f;
+      const int precise = __syncthreads_or(query_energy * bound >
+                                           max_logit_error * max_logit_error);
+      if (bool(precise) != Precise) return;
+    } else if constexpr (Precise) {
+      return;
+    }
   }
   query_max = fmaxf(query_max, other_half(query_max));
   const bool query_safe = query_max == 0.f ||
       (query_max >= 1.e-4f && query_max * scale <= 2.f);
+  if constexpr (!ChunkOnly) {
+    if (row < q_count * kGroup && half == 0) {
+      repair[2 * (row_offset / kHead)] = !query_safe;
+      repair[2 * (row_offset / kHead) + 1] = 0;
+    }
+  }
   Float8 accum[Steps] = {};
   float running_max = -INFINITY;
   float running_mass = 0.f;
   const float log2_scale = scale * kLog2e;
 
   for (int key_start = 0; key_start < key_end; key_start += kKeyTile) {
+    const int64_t tile_offset =
+        ChunkOnly ? (int64_t(start / kKeyTile + req + key_start / kKeyTile) *
+                         kv_heads +
+                     kv_head) *
+                        kKeyTile * kHead
+                  : head_offset;
     // Swizzle the 16-byte vector addresses to distribute the LDS reads
     // across banks. Expansion has already zeroed the last partial tile.
 #pragma unroll
     for (int unit = tid; unit < kKeyTile * Vectors; unit += kThreads) {
       const int token = unit / Vectors;
       const int col = unit % Vectors;
-      const int pos = key_start + token;
+      const auto* key_base =
+          static_cast<const _Float16*>(keys.data) + tile_offset;
+      const auto* value_base =
+          static_cast<const _Float16*>(values.data) + tile_offset;
+      const int pos = ChunkOnly ? token : key_start + token;
       const auto* k_src = reinterpret_cast<const Half8*>(key_base + pos * kHead + col * 8);
       *reinterpret_cast<Half8*>(&key_tile[token][(col ^ (token & 7)) * 8]) = *k_src;
-
       const int sub_tile = unit / (2 * kHead);
       const int v_dim = unit / 2 % kHead;
       const int key = unit % 2;
       const auto* v_src = reinterpret_cast<const Half8*>(
-          value_base + (key_start + sub_tile * kFragment) * kHead
-          + v_dim * kFragment + key * 8);
+          value_base +
+          ((ChunkOnly ? 0 : key_start) + sub_tile * kFragment) * kHead +
+          v_dim * kFragment + key * 8);
       const int swizzled_key = key ^ ((v_dim >> 2) & 1);
       *reinterpret_cast<Half8*>(&value_tile[sub_tile][v_dim][swizzled_key * 8]) = *v_src;
     }
@@ -150,7 +244,7 @@ __global__ __launch_bounds__(kThreads) void dense_prefill(
             key, q_fragment[d], scores[k]);
       }
     }
-    {
+    if constexpr (ChunkOnly) {
 #pragma unroll
       for (int k = 0; k < Keys; ++k) {
         const Float8 x = scores[k];
@@ -163,6 +257,24 @@ __global__ __launch_bounds__(kThreads) void dense_prefill(
         const Float4 lo = exchange[wave ^ 1][k][0][lane];
         const Float4 hi = exchange[wave ^ 1][k][1][lane];
         scores[k] += __builtin_shufflevector(lo, hi, 0, 1, 2, 3, 4, 5, 6, 7);
+      }
+    }
+    if constexpr (Precise) {
+      if (key_start < prefix) {
+#pragma unroll
+        for (int k = 0; k < Keys; ++k) {
+          Float8 correction = {};
+#pragma unroll
+          for (int d = 0; d < Steps; ++d) {
+            const int64_t base =
+                head_offset + int64_t(key_start + k * kFragment) * kHead;
+            const Half8 lo = *reinterpret_cast<const Half8*>(
+                residual + base + ((part * Steps + d) * 32 + lane) * 8);
+            correction = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(
+                lo, q_fragment[d], correction);
+          }
+          scores[k] += correction * (1.f / 1024.f);
+        }
       }
     }
     if (key_start + kKeyTile > prefix + q_base - start + 1) {
@@ -182,9 +294,9 @@ __global__ __launch_bounds__(kThreads) void dense_prefill(
       for (int e = 0; e < 8; ++e) tile_max = fmaxf(tile_max, scores[k][e]);
     }
     tile_max = fmaxf(tile_max, other_half(tile_max)) * log2_scale;
-    // Keep the exponent base fixed for small changes to the running maximum.
-    // Exp2 of an offset up to eight remains well within FP16's range.
-    const bool update = tile_max > running_max + 8.f;
+    // An exact power of two keeps small probabilities representable in FP16
+    // even when they multiply large V. The lazy maximum limits p to two.
+    const bool update = tile_max > running_max + 1.f;
     float alpha = 1.f;
     if (__builtin_amdgcn_ballot_w32(update)) {
       const float next_max = update ? tile_max : running_max;
@@ -205,7 +317,7 @@ __global__ __launch_bounds__(kThreads) void dense_prefill(
         p[e] = __builtin_amdgcn_exp2f(fmaf(scores[k][e], log2_scale, -safe_max));
         tile_mass += p[e];
       }
-      probabilities[k] = __builtin_convertvector(p, Half8);
+      probabilities[k] = __builtin_convertvector(p * kProbabilityScale, Half8);
     }
     running_mass = fmaf(running_mass, alpha, tile_mass + other_half(tile_mass));
 #pragma unroll
@@ -221,8 +333,11 @@ __global__ __launch_bounds__(kThreads) void dense_prefill(
     prefill_lds_barrier();
   }
   if (row >= q_count * kGroup) return;
-  // The existing packed FP32 path repairs rows marked by the producer.
-  const float inv_mass = query_safe ? 1.f / running_mass : __builtin_nanf("");
+  if constexpr (ChunkOnly) {
+    if (half == 0 && part == 0)
+      chunk_lse[row_offset / kHead] = running_max + log2f(running_mass);
+  }
+  const float inv_mass = (1.f / kProbabilityScale) / running_mass;
 #pragma unroll
   for (int d = 0; d < Steps; ++d) {
     const int dim = (part * Steps + d) * kFragment + half * 8;
@@ -234,14 +349,75 @@ __global__ __launch_bounds__(kThreads) void dense_prefill(
 
 namespace octave_rdna4 {
 
-int launch_dense_prefill(
-    float* out, const _Float16* query, const _Float16* keys,
-    const _Float16* values, const int32_t* starts, const int32_t* lengths,
-    int requests, int tokens, int kv_heads, int capacity, float scale,
-    hipStream_t stream) {
-  dense_prefill<<<dim3(tokens / kQueries + requests, kv_heads), kThreads,
-                  0, stream>>>(out, query, keys, values, starts, lengths,
-                                requests, kv_heads, capacity, scale);
+int launch_dense_prefill(float* out, const _Float16* query,
+                         const _Float16* keys, const _Float16* residual,
+                         const float* errors, const _Float16* values,
+                         const int32_t* starts, const int32_t* lengths,
+                         int requests, int tokens, int kv_heads, int capacity,
+                         float scale, uint8_t* repair, hipStream_t stream) {
+  const Activation q{query, int64_t(kv_heads) * kGroup * kHead, kHead};
+  auto launch = [&](auto waves) {
+    constexpr int W = decltype(waves)::value;
+    const dim3 grid(tokens / (W * kFragment / kGroup) + requests, kv_heads);
+    auto issue = [&](auto kernel) {
+      kernel<<<grid, W * kWave, 0, stream>>>(
+          out, q, {keys, 0, 0}, {values, 0, 0}, residual, errors, nullptr,
+          repair, starts, lengths, requests, kv_heads, capacity, scale);
+    };
+    issue(dense_prefill<_Float16, false, false, W>);
+    issue(dense_prefill<_Float16, false, true, W>);
+  };
+  if (tokens >= 1536 || (requests > 1 && tokens >= 512)) {
+    launch(std::integral_constant<int, 20>{});
+  } else {
+    // For a single request a partial final workgroup still scans the whole
+    // prefix. Prefer the narrowest tile that fills the fewest 32-group waves.
+    const int groups_per_head = std::max(1, 32 / kv_heads);
+    auto passes = [&](int waves) {
+      const int width = groups_per_head * (waves * kFragment / kGroup);
+      return (tokens + width - 1) / width;
+    };
+    if (requests > 1 || passes(12) <= passes(20))
+      launch(std::integral_constant<int, 12>{});
+    else if (passes(16) <= passes(20))
+      launch(std::integral_constant<int, 16>{});
+    else
+      launch(std::integral_constant<int, 20>{});
+  }
+  return hipGetLastError();
+}
+
+int launch_chunk_only(float* out, Activation query, Activation keys,
+                      Activation values, void* packed_chunk, float* chunk_lse,
+                      const int32_t* starts, int requests, int tokens,
+                      int kv_heads, float scale, int dtype,
+                      hipStream_t stream) {
+  constexpr int RowWaves = 4;
+  const dim3 grid(tokens / (RowWaves * kFragment / kGroup) + requests,
+                  kv_heads);
+  const int tiles = tokens / kKeyTile + requests;
+  auto* k = static_cast<_Float16*>(packed_chunk);
+  auto* v = k + int64_t(tiles) * kv_heads * kKeyTile * kHead;
+  auto stage = [&](auto scalar) {
+    stage_chunk<decltype(scalar)><<<dim3(tiles, kv_heads), 128, 0, stream>>>(
+        k, v, keys, values, starts, requests);
+  };
+  if (dtype == 0)
+    stage(_Float16{});
+  else
+    stage(__bf16{});
+  const int status = hipGetLastError();
+  if (status != hipSuccess) return status;
+  auto launch = [&](auto scalar) {
+    dense_prefill<decltype(scalar), true, false, RowWaves>
+        <<<grid, RowWaves * 2 * kWave, 0, stream>>>(
+            out, query, {k, 0, 0}, {v, 0, 0}, nullptr, nullptr, chunk_lse,
+            nullptr, starts, nullptr, requests, kv_heads, 0, scale);
+  };
+  if (dtype == 0)
+    launch(_Float16{});
+  else
+    launch(__bf16{});
   return hipGetLastError();
 }
 

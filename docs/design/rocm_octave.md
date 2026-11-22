@@ -46,12 +46,24 @@ The scheduler's host maximum sequence length guides prefill split selection
 within the 2 GiB split workspace budget. Native kernels resolve live lengths
 on the device.
 
-For sufficiently large GQA-6 prefill batches, one HIP kernel expands the prefix
-and lays out the new K/V in temporary FP16 buffers. A second HIP kernel uses
-WMMA with FP32 softmax and accumulation. The existing packed FP32 kernel
-recomputes unsafe output rows. The expansion uses the same reserved workspace
-as split attention. Prefill uses the packed path when the temporary buffers
-would exceed that reservation.
+GQA-6 prefill reads short batches and long, thin prefixes directly from packed
+pages. Loader waves stage 16 cached keys at a time. Each rotated query uses two
+signed base-256 digits. Integer WMMA accumulates their dot products with the
+original codebook entries before applying the stored K scale. A partner wave
+computes PV using FP16 WMMA and FP32 accumulation. The live chunk uses its raw
+K/V and the finish kernel combines both softmax normalizers.
+
+When the expanded buffers fit, larger batches can expand the prefix once and
+reuse it across query positions. Each compute wave covers the full head
+dimension. For short single requests, dispatch selects 12, 16 or 20 waves per
+workgroup to avoid an extra pass over the prefix for a partial query tile.
+Expansion preserves the FP16 key rounding residual and measures
+its squared norm. A query workgroup includes the residual in QK when the
+Cauchy–Schwarz bound on the absolute logit error exceeds 1/64. Dispatch
+charges the residuals and their bounds to the same workspace budget. Both
+routes retain the FP32 row repair for numerically unsafe outputs. Dense PV
+scales probabilities by a power of two before FP16 conversion so small weights
+on large values survive, then removes that factor from the normalized output.
 
 Sliding windows, ALiBi, attention sinks, soft caps, unequal QK/V dimensions
 and fused output quantization are unsupported. Runtime validation was on

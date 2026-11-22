@@ -3,16 +3,15 @@
 """Independent gfx1200/gfx1201 Octave kernels and vLLM serving adapter."""
 
 from functools import lru_cache
-from math import isfinite, prod
 
 import torch
 
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
-from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
     AttentionImpl,
     AttentionLayer,
+    CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.rocm_octave_attn import (
     _DECODE_MAX_QUERY_LEN,
@@ -56,6 +55,30 @@ class RocmOctaveRdna4MetadataBuilder(RocmOctaveMetadataBuilder):
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         _reserve_workspace(vllm_config, kv_cache_spec.head_size)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> RocmOctaveMetadata:
+        md = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        requests = md.query_start_loc.numel() - 1
+        prefills = requests - md.num_decodes
+        if (
+            md.max_query_len > _DECODE_MAX_QUERY_LEN
+            and prefills > 0
+            and md.num_actual_tokens - md.num_decode_tokens
+            == prefills * md.max_query_len
+        ):
+            # Host estimates choose a kernel. Device lengths still bound every tile.
+            if requests == 1:
+                md.uniform_prefill_prefix = md.max_seq_len - md.max_query_len
+            elif (lens := common_attn_metadata.seq_lens_cpu_upper_bound) is not None:
+                md.uniform_prefill_prefix = (
+                    int(lens[md.num_decodes : requests].min()) - md.max_query_len
+                )
+        return md
 
 
 class RocmOctaveRdna4AttentionImpl(AttentionImpl):
@@ -155,37 +178,22 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
         key=None,
         value=None,
         context_capacity=None,
+        uniform_prefix=None,
     ) -> None:
         q_shape = tuple(query.shape)
-        kv_shape = None
-        if (
-            key is not None
-            and self.num_heads == 6 * self.num_kv_heads
-            and query.shape[0] >= 256
-            and context_capacity is not None
-            and context_capacity > 0
-            and table.shape[1] > 0
-            and self.scale > 0
-            and isfinite(self.scale)
-        ):
-            capacity = round_up(
-                min(context_capacity, table.shape[1] * cache.shape[2]), 32
+        workspace: tuple[tuple[tuple[int, ...], torch.dtype], ...]
+        path, workspace = "packed", ()
+        if key is not None:
+            path, workspace = self.engine.prefill_workspace(
+                query,
+                cache,
+                table,
+                context_capacity,
+                self.scale,
+                self._scratch_workspace_bytes,
+                uniform_prefix,
             )
-            expanded = (table.shape[0], self.num_kv_heads, capacity, self.head_size)
-            # The FP16 views are already aligned by their 256-element rows.
-            if (
-                2 * prod(expanded) + query.numel()
-            ) * 2 <= self._scratch_workspace_bytes:
-                kv_shape = expanded
-        shapes: tuple[tuple[tuple[int, ...], torch.dtype], ...]
-        if kv_shape is not None:
-            shapes = (
-                (q_shape, torch.float32),
-                (kv_shape, torch.float16),
-                (kv_shape, torch.float16),
-                (q_shape, torch.float16),
-            )
-        else:
+        if not workspace:
             splits = self.engine.suggest_splits(
                 query,
                 cache,
@@ -195,10 +203,8 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
                 context_capacity=context_capacity if key is not None else None,
             )
             scratch_shape = (*query.shape[:2], splits, self.head_size + 2)
-            shapes = (
-                (q_shape, torch.float32),
-                (scratch_shape if splits > 1 else (0,), torch.float32),
-            )
+            workspace = ((scratch_shape if splits > 1 else (0,), torch.float32),)
+        shapes = ((q_shape, torch.float32), *workspace)
         if is_workspace_manager_initialized():
             buffers = current_workspace_manager().get_simultaneous(*shapes)
         else:
@@ -209,7 +215,18 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
         fp32 = buffers[0]
         signs = self._signs(query.device)
         args = (cache, table, mapping, lengths, signs, self.kv_cache_dtype)
-        if kv_shape is not None:
+        if path == "streamed":
+            logger.info_once("ROCM_OCTAVE (RDNA4) prefill reads packed prefix tiles")
+            self.engine.prefill_streamed(
+                query,
+                key,
+                value,
+                *args,
+                buffers=buffers[1:],
+                out=fp32,
+                scale=self.scale,
+            )
+        elif path == "expanded":
             logger.info_once("ROCM_OCTAVE (RDNA4) prefill uses native FP16 WMMA")
             self.engine.prefill_expanded(
                 query,
@@ -219,6 +236,8 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
                 key_tmp=buffers[1],
                 value_tmp=buffers[2],
                 query_tmp=buffers[3],
+                repair=buffers[4],
+                correction=buffers[5],
                 out=fp32,
                 scale=self.scale,
             )
@@ -296,5 +315,6 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
                 key=key[ndt:n].view(n - ndt, self.num_kv_heads, self.head_size),
                 value=value[ndt:n].view(n - ndt, self.num_kv_heads, self.head_size),
                 context_capacity=md.max_seq_len,
+                uniform_prefix=md.uniform_prefill_prefix,
             )
         return output
