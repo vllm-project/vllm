@@ -951,6 +951,11 @@ class EplbState:
                     top_k = self.parallel_config.eplb_config.expert_metrics_top_k
                     for layer, layer_load in enumerate(layer_loads):
                         expert_tokens = layer_load.flatten().tolist()
+                        # Empty phases are common in short sampling windows;
+                        # emitting them as zero load skews histograms and
+                        # resets per-rank gauges to zero.
+                        if not any(expert_tokens):
+                            continue
                         rank_tokens = layer_load.sum(dim=1).tolist()
                         active_experts_per_rank = (layer_load > 0).sum(dim=1).tolist()
                         expert_skew, expert_excess = _load_skew(expert_tokens)

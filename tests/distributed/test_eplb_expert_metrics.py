@@ -206,6 +206,44 @@ def test_sample_expert_metrics_emits_layer_skew_and_excess():
     assert layer1.rank_tokens == [4, 4]
     assert layer1.rank_excess_tokens == 0
     assert layer1.rank_skew == pytest.approx(1.0)
+    # Empty phases must not produce zero-valued load samples.
+    assert all(load.phase == EPLB_PHASE_DECODE for load in state._pending_eplb_loads)
+
+
+def test_sample_expert_metrics_skips_empty_layers():
+    state = EplbState.__new__(EplbState)
+    state.parallel_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(enable_expert_metrics=True, expert_metrics_top_k=2)
+    )
+    state.expert_metrics_window_step = 4
+    state._pending_expert_tokens = []
+    state._pending_eplb_loads = []
+    phase_load = {
+        phase: torch.zeros((2, 4), dtype=torch.int32)
+        for phase in (EPLB_PHASE_PREFILL, EPLB_PHASE_DECODE, EPLB_PHASE_MIXED)
+    }
+    # Only layer 1 of the prefill phase has load; everything else is empty.
+    phase_load[EPLB_PHASE_PREFILL][1] = torch.tensor([1, 1, 1, 1])
+    model_state = SimpleNamespace(
+        phase_load_accum=phase_load,
+        metrics=EplbModelMetricsState(
+            model_name="model",
+            ep_rank=0,
+            num_ep_ranks=2,
+            num_local_experts=2,
+        ),
+        physical_to_logical_map=torch.tensor([[0, 1, 0, 1], [0, 1, 0, 1]]),
+    )
+    state.model_states = {"model": model_state}
+    state._allreduce_list = lambda tensors: tensors
+
+    state._sample_expert_metrics(rearranged=False)
+
+    assert len(state._pending_eplb_loads) == 1
+    sample = state._pending_eplb_loads[0]
+    assert (sample.phase, sample.layer) == (EPLB_PHASE_PREFILL, 1)
+    assert sample.expert_topk_share == pytest.approx(0.5)
+    assert sample.active_experts_per_rank == [2, 2]
 
 
 def test_rearrangement_stall_is_attributed_to_each_model():

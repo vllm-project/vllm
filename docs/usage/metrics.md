@@ -76,7 +76,10 @@ one series per MoE layer and physical expert:
 
 Samples are taken every `expert_metrics_interval` steps (default `100`). Set it
 to `1` for per-step samples; each sample then costs one EP-group all-reduce per
-step. Rearrangement stalls are recorded per event, so they are not thinned by
+step. A phase or layer with no tokens in the sampling window is skipped rather
+than exported as an all-zero load sample, so `gini`, `topk_token_share`,
+`load_skew`, and `active_experts_per_rank` only reflect windows with real load.
+Rearrangement stalls are recorded per event, so they are not thinned by
 the sampling interval or by Prometheus scrape loss.
 
 ```promql

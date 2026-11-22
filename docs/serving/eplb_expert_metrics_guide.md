@@ -64,7 +64,8 @@ tokens held by the top `expert_metrics_top_k` experts (default `8`); its `top_k`
 label records the configured value. Both include zero-load experts.
 `vllm:eplb_active_experts_per_rank` reports how many expert slots each rank
 actually touched, which distinguishes sparse routing from a rank that is simply
-idle.
+idle. Windows with no tokens for a phase or layer are not exported at all, so
+these metrics always describe a window with real load.
 
 ## Why the sampling interval matters
 
