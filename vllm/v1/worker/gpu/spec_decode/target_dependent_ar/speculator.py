@@ -9,6 +9,8 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
@@ -213,9 +215,24 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             else None
         )
 
-        self._prepare_eplb_forward(num_tokens)
+        # A drafter that writes no KV keeps only each request's last row of
+        # draft step 0, so unless a FULL graph replays the target batch anyway,
+        # run that step on those rows alone.
+        last_tokens_only = (
+            not self.advance_draft_positions
+            and prefill_batch_desc.cg_mode != CUDAGraphMode.FULL
+            and not dummy_run
+            and self.dp_size == 1
+            and self.pcp_manager is None
+            and mm_inputs is None
+        )
+        self._prepare_eplb_forward(num_reqs if last_tokens_only else num_tokens)
 
-        if not skip_attn_for_dummy_run:
+        if last_tokens_only:
+            prefill_batch_desc, attn_metadata, slot_mappings = (
+                self._prepare_last_token_prefill(input_batch, num_reqs)
+            )
+        elif not skip_attn_for_dummy_run:
             attn_metadata, slot_mappings = self._build_drafter_attn_metadata(
                 input_batch,
                 attn_metadata,
@@ -268,6 +285,41 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         )
 
         return self.draft_tokens[:num_reqs]
+
+    def _prepare_last_token_prefill(
+        self, input_batch: InputBatch, num_reqs: int
+    ) -> tuple[BatchExecutionDescriptor, dict[str, Any], dict[str, torch.Tensor]]:
+        compact_prefill_inputs(
+            self.last_token_indices[:num_reqs], self.input_buffers, self.hidden_states
+        )
+        assert self.prefill_cudagraph_manager is not None
+        batch_desc = self.prefill_cudagraph_manager.dispatch(
+            num_reqs, num_reqs, uniform_token_count=None, num_active_loras=0
+        )
+        if batch_desc.cg_mode != CUDAGraphMode.PIECEWISE:
+            # FULL prefill graphs replay the target batch's attention metadata.
+            batch_desc = BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE, num_tokens=num_reqs, num_reqs=num_reqs
+            )
+        slot_mappings = self.block_tables.compute_slot_mappings(
+            self.idx_mapping[:num_reqs],
+            self.input_buffers.query_start_loc[: num_reqs + 1],
+            self.input_buffers.positions[:num_reqs],
+            batch_desc.num_tokens,
+        )
+        attn_metadata = self._build_uniform_attn_metadata(
+            batch_desc=batch_desc,
+            num_reqs=num_reqs,
+            num_query_per_req=1,
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            step=0,
+        )
+        assert attn_metadata is not None
+        return (
+            batch_desc,
+            attn_metadata,
+            build_slot_mappings_by_layer(slot_mappings, self.kv_cache_config),
+        )
 
     @torch.inference_mode()
     def _run_model(
@@ -559,6 +611,28 @@ def prepare_prefill_inputs(
         BLOCK_SIZE=1024,
     )
     return last_token_indices
+
+
+def compact_prefill_inputs(
+    # [num_reqs]
+    last_token_indices: torch.Tensor,
+    input_buffers: InputBuffers,
+    # [max_num_tokens, hidden_size]
+    hidden_states: torch.Tensor,
+) -> None:
+    """Move each request's last-token row of the draft prefill inputs to row
+    `req_idx`, as a one-token query that attends up to its own position."""
+    num_reqs = last_token_indices.shape[0]
+    positions = input_buffers.positions[last_token_indices]
+    input_buffers.input_ids[:num_reqs] = input_buffers.input_ids[last_token_indices]
+    input_buffers.positions[:num_reqs] = positions
+    hidden_states[:num_reqs] = hidden_states[last_token_indices]
+
+    query_start_loc = input_buffers.query_start_loc
+    arange = torch.arange(query_start_loc.shape[0], device=query_start_loc.device)
+    query_start_loc.copy_(arange.clamp(max=num_reqs))
+    input_buffers.seq_lens[:num_reqs] = positions + 1
+    last_token_indices.copy_(arange[:num_reqs])
 
 
 @triton.jit
