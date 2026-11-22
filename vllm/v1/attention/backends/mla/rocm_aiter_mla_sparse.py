@@ -1112,9 +1112,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 self.use_aiter_sparse_mla = True
                 # The Triton kernel reads an e4m3 query with layer._q_scale, so
                 # the layer may hand it the query already quantized.
-                self.supports_quant_query_input = self.kv_cache_dtype.startswith(
-                    "fp8"
-                )
+                self.supports_quant_query_input = self.kv_cache_dtype.startswith("fp8")
             else:
                 logger.warning_once(
                     "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is set, but %s; "
