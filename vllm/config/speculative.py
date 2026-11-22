@@ -642,7 +642,8 @@ class SpeculativeConfig:
 
     enable_adaptive_verification: bool = False
     """Whether to adaptively size the draft-verification budget from per-request
-    confidence. Currently only supported for method="dspark"."""
+    confidence. Requires full CUDA graphs and an attention backend that accepts
+    device-side query lengths."""
 
     prefill_context_kv_only: bool = False
     """Set on a P/D prefill instance (Model Runner V2, DFlash-based speculators)
