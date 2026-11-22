@@ -30,12 +30,14 @@ class SamplingStates:
         self.vocab_size = vocab_size
 
         self.temperature = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
-        self.speculative_config = speculative_config
-        self.draft_temperature = self.temperature
-        if speculative_config is not None and (
-            speculative_config.draft_temperature is not None
-            or speculative_config.draft_temperature_mapping is not None
+        self.draft_temperature_scale = 1.0
+        if (
+            speculative_config is not None
+            and speculative_config.draft_temperature_scale is not None
         ):
+            self.draft_temperature_scale = speculative_config.draft_temperature_scale
+        self.draft_temperature = self.temperature
+        if self.draft_temperature_scale != 1.0:
             self.draft_temperature = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.top_k = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.top_p = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
@@ -63,9 +65,8 @@ class SamplingStates:
 
         self.temperature.np[req_idx] = temperature
         if self.draft_temperature is not self.temperature:
-            assert self.speculative_config is not None
             self.draft_temperature.np[req_idx] = (
-                self.speculative_config.resolve_draft_temperature(temperature)
+                temperature * self.draft_temperature_scale
             )
         self.top_p.np[req_idx] = top_p
         if top_k <= 0 or top_k > self.vocab_size:

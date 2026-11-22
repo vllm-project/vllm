@@ -3,7 +3,6 @@
 
 import copy
 import functools
-import math
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import field
@@ -126,8 +125,7 @@ DraftSampleMethod = Literal["greedy", "probabilistic"]
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
-    "draft_temperature",
-    "draft_temperature_mapping",
+    "draft_temperature_scale",
     "dspark_draft_topk",
     "draft_lm_head_quantization",
     "index_share_for_mtp_iteration",
@@ -441,49 +439,6 @@ _DRAFT_VLLM_CONFIG_OVERRIDES = (
 
 
 @config
-class DraftTemperatureSegment:
-    """A quadratic draft-temperature mapping on one target-temperature interval."""
-
-    target_temperature_lt: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-    """Exclusive upper bound. The final segment must leave this unset."""
-    quadratic: float = Field(default=0.0, allow_inf_nan=False)
-    """Coefficient of the squared target temperature."""
-    linear: float = Field(default=0.0, allow_inf_nan=False)
-    """Coefficient of the target temperature."""
-    constant: float = Field(default=0.0, allow_inf_nan=False)
-    """Constant term."""
-
-    def evaluate(self, temperature: float) -> float:
-        return (
-            self.quadratic * temperature + self.linear
-        ) * temperature + self.constant
-
-    def validate_interval(self, lower: float) -> None:
-        upper = self.target_temperature_lt
-        if upper is not None and upper <= lower:
-            raise ValueError("draft_temperature_mapping bounds must strictly increase.")
-        if upper is None and (
-            self.quadratic < 0 or (self.quadratic == 0 and self.linear < 0)
-        ):
-            raise ValueError(
-                "draft_temperature_mapping becomes negative above its range."
-            )
-        points = [lower]
-        if upper is not None:
-            points.append(upper)
-        if self.quadratic > 0:
-            minimum = -0.5 * (self.linear / self.quadratic)
-            if minimum > lower and (upper is None or minimum < upper):
-                points.append(minimum)
-        if any(
-            not math.isfinite(value := self.evaluate(t)) or value < 0 for t in points
-        ):
-            raise ValueError(
-                "draft_temperature_mapping must return finite, nonnegative values."
-            )
-
-
-@config
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
 
@@ -737,22 +692,15 @@ class SpeculativeConfig:
     during rejection sampling. This comes at the cost of additional GPU memory
     usage."""
 
-    draft_temperature: float | None = Field(default=None, ge=0, allow_inf_nan=False)
-    """Temperature for draft proposals, independent of the target's sampling
-    temperature. Unset preserves the sampling method's behavior: greedy drafts
-    use argmax, probabilistic drafts inherit each request's temperature.
-    A positive value requires draft_sample_method='probabilistic'; zero selects
-    greedy drafting without caching draft logits. Only valid for model-based
-    speculators."""
-
-    draft_temperature_mapping: list[DraftTemperatureSegment] | None = None
-    """Piecewise quadratic mapping from target to draft temperature. Each segment
-    defines `quadratic * T**2 + linear * T + constant`, with zero coefficients
-    by default, and an exclusive `target_temperature_lt` upper bound. Segments
-    cover increasing intervals starting at zero; the final bound is unset.
-    Requires probabilistic drafting and is mutually exclusive with
-    `draft_temperature`. A mapped zero uses greedy proposals for that request.
-    Only valid for model-based speculators. Unset preserves existing behavior."""
+    draft_temperature_scale: float | None = Field(
+        default=None, ge=0, allow_inf_nan=False
+    )
+    """Scale each request's target temperature for draft proposals:
+    `T_draft = draft_temperature_scale * T_target`. Unset preserves existing
+    behavior: greedy drafts use argmax and probabilistic drafts inherit the
+    target temperature. Positive scales require draft_sample_method='probabilistic';
+    zero selects greedy drafting without caching draft logits. Only valid for
+    model-based speculators. Target sampling parameters are unchanged."""
 
     dspark_draft_topk: int | None = Field(default=None, ge=1)
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
@@ -818,8 +766,7 @@ class SpeculativeConfig:
             "synthetic_acceptance_length",
             "enable_adaptive_verification",
             "draft_sample_method",
-            "draft_temperature",
-            "draft_temperature_mapping",
+            "draft_temperature_scale",
             "dspark_draft_topk",
             "xpress_topc",
             "fly_window_size",
@@ -1534,59 +1481,15 @@ class SpeculativeConfig:
             )
         return None
 
-    def resolve_draft_temperature(self, target_temperature: float) -> float:
-        """Resolve a request's draft temperature without changing its target."""
-        value = target_temperature
-        if self.draft_temperature_mapping is not None:
-            for segment in self.draft_temperature_mapping:
-                upper = segment.target_temperature_lt
-                if upper is None or target_temperature < upper:
-                    value = segment.evaluate(target_temperature)
-                    break
-        elif self.draft_temperature is not None:
-            value = self.draft_temperature
-        if not math.isfinite(value) or value < 0:
-            raise ValueError(
-                "Resolved draft temperature must be finite and nonnegative."
-            )
-        return value
-
     def __post_init__(self):
-        if self.draft_temperature_mapping is not None:
-            if self.draft_temperature is not None:
-                raise ValueError(
-                    "draft_temperature and draft_temperature_mapping are "
-                    "mutually exclusive."
-                )
-            if self.draft_sample_method != "probabilistic":
-                raise ValueError(
-                    "draft_temperature_mapping requires "
-                    "draft_sample_method='probabilistic'."
-                )
-            segments = self.draft_temperature_mapping
-            if not segments or segments[-1].target_temperature_lt is not None:
-                raise ValueError(
-                    "draft_temperature_mapping must end with an unbounded segment."
-                )
-            lower = 0.0
-            for index, segment in enumerate(segments):
-                segment.validate_interval(lower)
-                if segment.target_temperature_lt is None:
-                    if index != len(segments) - 1:
-                        raise ValueError(
-                            "Only the final draft_temperature_mapping segment "
-                            "may be unbounded."
-                        )
-                else:
-                    lower = segment.target_temperature_lt
-        if self.draft_temperature == 0.0:
+        if self.draft_temperature_scale == 0.0:
             self.draft_sample_method = "greedy"
         elif (
-            self.draft_temperature is not None
+            self.draft_temperature_scale is not None
             and self.draft_sample_method != "probabilistic"
         ):
             raise ValueError(
-                "A positive draft_temperature requires "
+                "A positive draft_temperature_scale requires "
                 "draft_sample_method='probabilistic'."
             )
 

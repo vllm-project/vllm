@@ -74,7 +74,7 @@ def some_high_acceptance_metrics() -> dict:
 
 
 @single_gpu_only
-@pytest.mark.parametrize("draft_temperature", [0.0, 0.7])
+@pytest.mark.parametrize("draft_temperature_scale", [0.0, 0.5])
 @pytest.mark.parametrize(
     "method,model",
     [
@@ -82,15 +82,10 @@ def some_high_acceptance_metrics() -> dict:
         ("mtp", "Qwen/Qwen3.5-0.8B-Base"),
     ],
 )
-def test_draft_temperature_preserves_greedy_target(
-    vllm_runner, monkeypatch, draft_temperature, method, model
+def test_draft_temperature_scale_preserves_greedy_target(
+    vllm_runner, monkeypatch, draft_temperature_scale, method, model
 ):
-    """Stochastic drafts change acceptance while the target remains greedy.
-
-    Independent drafts must preserve greedy tokens while changing acceptance.
-    MTP compares target logprobs because GDN does not support batch invariance.
-    Both paths exercise CUDA graphs.
-    """
+    """Scaling draft temperatures preserves greedy target tokens and logprobs."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1" if method == "draft_model" else "0")
     prompts = [
         "The capital of France is",
@@ -101,15 +96,15 @@ def test_draft_temperature_preserves_greedy_target(
     results = []
     logprob_results = []
     acceptance_rates = []
-    for override in (None, draft_temperature):
+    for scale in (None, draft_temperature_scale):
         spec_config: dict[str, Any] = {
             "method": method,
             "model": model,
             "num_speculative_tokens": 3,
-            "draft_sample_method": "greedy" if override is None else "probabilistic",
+            "draft_sample_method": "greedy" if scale is None else "probabilistic",
         }
-        if override is not None:
-            spec_config["draft_temperature"] = override
+        if scale is not None:
+            spec_config["draft_temperature_scale"] = scale
         with vllm_runner(
             model,
             block_size=None,
@@ -152,19 +147,15 @@ def test_draft_temperature_preserves_greedy_target(
             outputs_0_lst=logprob_results[0],
             outputs_1_lst=logprob_results[1],
             name_0="greedy_draft",
-            name_1=f"draft_temperature={draft_temperature}",
+            name_1=f"draft_temperature_scale={draft_temperature_scale}",
         )
-    if draft_temperature > 0 and method == "draft_model":
-        assert acceptance_rates[1] < acceptance_rates[0]
-    elif draft_temperature == 0:
-        assert acceptance_rates[1] == acceptance_rates[0]
 
 
 @single_gpu_only
-def test_draft_temperature_mapping_handles_mixed_target_temperatures(
+def test_draft_temperature_scale_handles_mixed_target_temperatures(
     vllm_runner, monkeypatch
 ):
-    """A mixed mapping matches fixed overrides for the same seeded requests."""
+    """Identity scaling preserves seeded output; half scaling changes acceptance."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     model = "Qwen/Qwen3-0.6B"
     prompts = [
@@ -178,20 +169,9 @@ def test_draft_temperature_mapping_handles_mixed_target_temperatures(
         for i, t in enumerate((0.0, 0.5, 1.0, 1.5))
     ]
     results = []
-    cases: list[tuple[dict[str, Any], slice]] = [
-        ({"draft_temperature": 0.0}, slice(0, 2)),
-        ({"draft_temperature": 0.5}, slice(2, 4)),
-        (
-            {
-                "draft_temperature_mapping": [
-                    {"target_temperature_lt": 1.0},
-                    {"constant": 0.5},
-                ]
-            },
-            slice(0, 4),
-        ),
-    ]
-    for options, group in cases:
+    acceptance_rates = []
+    for scale in (None, 1.0, 0.5):
+        options = {} if scale is None else {"draft_temperature_scale": scale}
         with vllm_runner(
             model,
             max_model_len=256,
@@ -205,10 +185,12 @@ def test_draft_temperature_mapping_handles_mixed_target_temperatures(
             },
             disable_log_stats=False,
         ) as runner:
-            outputs = runner.llm.generate(prompts[group], params[group])
+            outputs = runner.llm.generate(prompts, params)
             results.append([list(out.outputs[0].token_ids) for out in outputs])
-            assert compute_acceptance_rate(runner.llm.get_metrics()) > 0
-    assert results[2] == results[0] + results[1]
+            acceptance_rates.append(compute_acceptance_rate(runner.llm.get_metrics()))
+    assert results[0] == results[1]
+    assert acceptance_rates[0] == acceptance_rates[1]
+    assert 0 < acceptance_rates[2] < acceptance_rates[0]
     assert [p.temperature for p in params] == [0.0, 0.5, 1.0, 1.5]
 
 

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from math import nextafter
 from types import SimpleNamespace
 
 import numpy as np
@@ -16,7 +15,6 @@ if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip("CUDA or XPU required for sampler flag tests", allow_module_level=True)
 
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
-from vllm.config.speculative import DraftTemperatureSegment
 from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.sample.logits_processor import (
     LogitsContext,
@@ -57,8 +55,9 @@ def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> S
     )
 
 
-def test_draft_temperature_mapping_preserves_boundaries_and_reused_slots(tmp_path):
-    """Selecting a mapping segment precedes rounding the target to float32."""
+@pytest.mark.parametrize("scale", [None, 0.0, 0.5, 1.0, 1.5])
+def test_draft_temperature_scale_preserves_target_and_reused_slots(tmp_path, scale):
+    """Scaling changes only draft temperatures, including when a slot is reused."""
     from transformers import LlamaConfig
 
     LlamaConfig(
@@ -82,32 +81,31 @@ def test_draft_temperature_mapping_preserves_boundaries_and_reused_slots(tmp_pat
         target_model_config=target,
         target_parallel_config=ParallelConfig(),
         draft_sample_method="probabilistic",
-        draft_temperature_mapping=[
-            DraftTemperatureSegment(target_temperature_lt=1.0, linear=0.5),
-            DraftTemperatureSegment(linear=1.0),
-        ],
+        draft_temperature_scale=scale,
     )
     states = SamplingStates(2, VOCAB_SIZE, spec)
-    for index, temperature in enumerate((nextafter(1.0, 0.0), 1.0)):
+    effective_scale = 1.0 if scale is None else scale
+    assert (states.draft_temperature is states.temperature) == (effective_scale == 1.0)
+    for index, temperature in enumerate((0.0, 1.5)):
         states.add_request(index, SamplingParams(temperature=temperature, seed=42))
     states.apply_staged_writes()
     torch.testing.assert_close(
-        states.temperature.gpu, torch.ones(2, device=DEVICE), rtol=0, atol=0
+        states.temperature.gpu, torch.tensor([0.0, 1.5], device=DEVICE), rtol=0, atol=0
     )
     torch.testing.assert_close(
         states.draft_temperature.gpu,
-        torch.tensor([0.5, 1.0], device=DEVICE),
+        torch.tensor([0.0, 1.5], device=DEVICE) * effective_scale,
         rtol=0,
         atol=0,
     )
     states.add_request(0, SamplingParams(temperature=0.5, seed=42))
     states.apply_staged_writes()
     torch.testing.assert_close(
-        states.temperature.gpu, torch.tensor([0.5, 1.0], device=DEVICE), rtol=0, atol=0
+        states.temperature.gpu, torch.tensor([0.5, 1.5], device=DEVICE), rtol=0, atol=0
     )
     torch.testing.assert_close(
         states.draft_temperature.gpu,
-        torch.tensor([0.25, 1.0], device=DEVICE),
+        torch.tensor([0.5, 1.5], device=DEVICE) * effective_scale,
         rtol=0,
         atol=0,
     )
