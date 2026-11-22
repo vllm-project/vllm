@@ -360,6 +360,7 @@ class DraftModelSpeculator(BaseSpeculator):
         return
 
     def _init_draft_topk_cache(self) -> None:
+        assert self.draft_top_k is not None
         if self.vllm_config.parallel_config.prefill_context_parallel_size != 1:
             raise ValueError(
                 "draft_top_k is not yet compatible with prefill context parallelism."
