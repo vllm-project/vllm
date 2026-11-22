@@ -2171,9 +2171,10 @@ guide: |
     jq -e '
       .choices[0] as $choice
       | ($choice.finish_reason == "tool_calls")
+        and (($choice.message.tool_calls | length) == 1)
         and ($choice.message.tool_calls[0].function.name == "get_weather")
-        and (($choice.message.tool_calls[0].function.arguments | fromjson | .city)
-             == "Singapore")
+        and (($choice.message.tool_calls[0].function.arguments | fromjson)
+             == {"city":"Singapore"})
     '
   ```
 
