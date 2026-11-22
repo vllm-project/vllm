@@ -648,6 +648,13 @@ class BaseRenderer(ABC, Generic[_T]):
             and not prompt.get("multi_modal_uuids")
         )
 
+    def _can_produce_special_tokens_mask(self) -> bool:
+        """Whether this renderer's tokenizer can return `special_tokens_mask`.
+
+        Defaults to False; renderers backed by an HF tokenizer override this.
+        """
+        return False
+
     @staticmethod
     def _build_tokens_prompt(
         token_ids: Sequence[int],
@@ -699,14 +706,14 @@ class BaseRenderer(ABC, Generic[_T]):
         want_offsets = self._wants_offsets(prompt, params)
         # With an explicit side, the tokenizer does not truncate the prompt (see
         # `TokenizeParams.get_encode_kwargs`), so truncate it here and keep the
-        # tokens that the tokenizer added, as its own truncation does. Only HF
-        # tokenizers can flag those tokens; `MistralRenderer` keeps BOS itself.
-        # Multimodal prompts are sliced again after placeholder expansion (see
-        # `_truncate_expanded_prompt`), which would cut these tokens anyway.
+        # tokens that the tokenizer added, as its own truncation does.
+        # `MistralRenderer` keeps BOS itself. Multimodal prompts are sliced again
+        # after placeholder expansion (see `_truncate_expanded_prompt`), which
+        # would cut these tokens anyway.
         want_mask = (
             params.truncation_side is not None
             and params.add_special_tokens
-            and isinstance(tokenizer, HfTokenizer)
+            and self._can_produce_special_tokens_mask()
             and not prompt.get("multi_modal_data")
             and not prompt.get("multi_modal_uuids")
         )

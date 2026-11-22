@@ -1108,6 +1108,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         # Only fast tokenizers expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
 
+    def _can_produce_special_tokens_mask(self) -> bool:
+        # `kimi_audio` also uses this renderer, and its tokenizer returns no mask.
+        return isinstance(self.tokenizer, HfTokenizer)
+
     def _resolve_content_format(self, params: ChatParams) -> ChatTemplateContentFormat:
         return resolve_chat_template_content_format(
             chat_template=params.chat_template,
