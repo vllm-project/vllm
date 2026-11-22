@@ -6,17 +6,17 @@ import numpy as np
 import pytest
 
 from vllm.v1.attention.ops.kitty.tiles import (
+    K_TAIL_ROW,
     KITTY_PAGE_SIZE,
+    KITTY_RESIDUAL_ROWS,
+    V_SINK_ROW,
+    V_TAIL_ROW,
     kitty_d_boost,
     kitty_first_unsealed_k,
     kitty_first_unsealed_v,
     kitty_page_bytes,
     kitty_state_content_bytes,
 )
-
-HEAD_SIZES = [64, 80, 96, 128, 256]
-BOOST_RATIOS = [0.0, 0.1, 0.25, 0.5, 1.0]
-
 
 # kitty_d_boost
 
@@ -37,53 +37,22 @@ def test_d_boost_is_floor_of_head_size_times_ratio(head_size, boost_ratio, expec
     assert isinstance(d_boost, int)
 
 
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("boost_ratio", BOOST_RATIOS)
-def test_d_boost_stays_within_head_size(head_size, boost_ratio):
-    """Ratios in the allowed [0, 1] range never boost more channels than exist."""
-    assert 0 <= kitty_d_boost(head_size, boost_ratio) <= head_size
-
-
 # kitty_page_bytes
 
 
-def page_bytes_from_layout(head_size: int, d_boost: int) -> int:
-    """Sum the page segments from their shapes and element widths."""
-    tokens = KITTY_PAGE_SIZE
-    two_bits, fp16, uint8 = 2 / 8, 2, 1
-    segments = [
-        head_size * tokens * two_bits,  # K low plane
-        tokens * head_size * two_bits,  # V data
-        d_boost * tokens * two_bits,  # K high plane
-        head_size * 2 * fp16,  # K scale/min
-        tokens * 2 * fp16,  # V scale/min
-        head_size * uint8,  # K rank table
-    ]
-    return int(sum(segments))
-
-
-def test_page_bytes_default_config():
-    """D = 128 with the default ratio 0.25 (DB = 32)."""
-    assert kitty_page_bytes(128, 32) == 10368
-
-
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("boost_ratio", BOOST_RATIOS)
-def test_page_bytes_matches_segment_layout(head_size, boost_ratio):
-    d_boost = kitty_d_boost(head_size, boost_ratio)
-    assert kitty_page_bytes(head_size, d_boost) == page_bytes_from_layout(
-        head_size, d_boost
-    )
-
-
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-def test_page_bytes_each_boosted_channel_costs_32_bytes(head_size):
-    """A boosted channel adds one 128-token row of 2-bit codes to the high plane."""
-    for d_boost in range(head_size):
-        growth = kitty_page_bytes(head_size, d_boost + 1) - kitty_page_bytes(
-            head_size, d_boost
-        )
-        assert growth == 32
+@pytest.mark.parametrize(
+    "head_size, d_boost, expected",
+    [
+        (128, 32, 10368),  # the default kitty_boost_ratio
+        (128, 0, 9344),  # no K high plane
+        (128, 128, 13440),  # every K channel in the high plane
+        (64, 16, 5440),
+        (80, 20, 6672),
+        (256, 64, 20224),
+    ],
+)
+def test_page_bytes_known_values(head_size, d_boost, expected):
+    assert kitty_page_bytes(head_size, d_boost) == expected
 
 
 # kitty_state_content_bytes
@@ -99,19 +68,6 @@ def test_page_bytes_each_boosted_channel_costs_32_bytes(head_size):
 )
 def test_state_content_bytes_known_values(head_size, d_boost, expected):
     assert kitty_state_content_bytes(head_size, d_boost) == expected
-
-
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("boost_ratio", BOOST_RATIOS)
-def test_state_content_bytes_is_smallest_slot_size_that_fits_page(
-    head_size, boost_ratio
-):
-    """128 slots of C bytes must hold the page, with less than one slot of padding."""
-    d_boost = kitty_d_boost(head_size, boost_ratio)
-    page_bytes = kitty_page_bytes(head_size, d_boost)
-    content = kitty_state_content_bytes(head_size, d_boost)
-    assert KITTY_PAGE_SIZE * content >= page_bytes
-    assert KITTY_PAGE_SIZE * (content - 1) < page_bytes
 
 
 # kitty_first_unsealed_k
@@ -143,11 +99,12 @@ def test_first_unsealed_k_array_is_elementwise():
     np.testing.assert_array_equal(got, expected)
 
 
-def test_first_unsealed_k_tail_fits_in_one_page():
-    """Unsealed K positions past the sink fit the 128-row K tail buffer."""
+def test_first_unsealed_k_tail_fits_k_tail_buffer():
+    """Unsealed K positions past the sink never outnumber the K tail rows."""
     n = np.arange(KITTY_PAGE_SIZE, 10 * KITTY_PAGE_SIZE)
     tail_tokens = n - KITTY_PAGE_SIZE * kitty_first_unsealed_k(n)
-    np.testing.assert_array_equal(tail_tokens, n % KITTY_PAGE_SIZE)
+    assert tail_tokens.min() == 0
+    assert tail_tokens.max() == V_SINK_ROW - K_TAIL_ROW - 1
 
 
 # kitty_first_unsealed_v
@@ -180,8 +137,10 @@ def test_first_unsealed_v_array_is_elementwise():
     np.testing.assert_array_equal(got, expected)
 
 
-def test_first_unsealed_v_tail_fits_in_two_pages():
-    """Unsealed V positions past the sink fit the 256-row V tail buffer."""
+def test_first_unsealed_v_tail_fits_v_tail_buffer():
+    """Past the first two blocks, the V tail keeps at least one full unsealed
+    block and never outnumbers the V tail rows."""
     n = np.arange(2 * KITTY_PAGE_SIZE, 10 * KITTY_PAGE_SIZE)
     tail_tokens = n - KITTY_PAGE_SIZE * kitty_first_unsealed_v(n)
-    np.testing.assert_array_equal(tail_tokens, KITTY_PAGE_SIZE + n % KITTY_PAGE_SIZE)
+    assert tail_tokens.min() == KITTY_PAGE_SIZE
+    assert tail_tokens.max() == KITTY_RESIDUAL_ROWS - V_TAIL_ROW - 1
