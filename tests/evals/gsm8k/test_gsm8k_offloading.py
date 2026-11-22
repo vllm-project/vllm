@@ -148,6 +148,7 @@ class OffloadingModelConfig:
     startup_timeout: int = 600
     spec_name: str = "CPUOffloadingSpec"
     assert_reload: bool = False
+    num_shots: int = NUM_FEWSHOT
 
 
 MODELS = [
@@ -156,8 +157,12 @@ MODELS = [
         id="offloading-nemotron-h-8b",
         model="nvidia/Nemotron-H-8B-Base-8K",
         connector="OffloadingConnector",
-        # Baseline ~0.49 on 200 questions (measured on GB200).
-        accuracy_threshold=0.39,
+        # Block size is 1088 (Mamba align): 5-shot prompts (~730 tokens) never
+        # fill a block, so nothing is offloaded. 12 shots (~2.5k tokens) share
+        # two blocks. Scores 0.715-0.755 on H200.
+        num_shots=12,
+        accuracy_threshold=0.68,
+        assert_reload=True,
         cpu_offload_gib=1,
     ),
     OffloadingModelConfig(
@@ -217,7 +222,11 @@ MODELS = [
         id="simple-nemotron-h-8b",
         model="nvidia/Nemotron-H-8B-Base-8K",
         connector="SimpleCPUOffloadConnector",
-        accuracy_threshold=0.45,
+        # Same as offloading-nemotron-h-8b: needs 12 shots to fill a 1088 block.
+        # Scores 0.720-0.740 on H200.
+        num_shots=12,
+        accuracy_threshold=0.68,
+        assert_reload=True,
     ),
     OffloadingModelConfig(
         id="simple-gemma-4-e4b-it",
@@ -292,7 +301,6 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         "--no-disable-hybrid-kv-cache-manager",
         "--kv-transfer-config",
         _kv_transfer_config(cfg.connector, cfg.cpu_offload_gib, cfg.spec_name),
-        "--trust-remote-code",
         "--disable-uvicorn-access-log",
         *cfg.extra_server_args,
     ]
@@ -309,7 +317,7 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         for run_idx in range(1, 3):
             results = evaluate_gsm8k(
                 num_questions=NUM_QUESTIONS,
-                num_shots=NUM_FEWSHOT,
+                num_shots=cfg.num_shots,
                 host=f"http://{server.host}",
                 port=server.port,
             )
