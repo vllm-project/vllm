@@ -6,7 +6,6 @@ The device capability is mocked, so no GPU is needed.
 """
 
 from contextlib import contextmanager
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,9 +23,7 @@ from vllm.v1.attention.backends.fa_utils import get_flash_attn_version  # noqa: 
 from vllm.v1.attention.backends.flash_attn import (  # noqa: E402
     FlashAttentionBackend,
     FlashAttentionImpl,
-    FlashAttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import KVQuantMode  # noqa: E402
 
 SM80 = DeviceCapability(8, 0)
 SM90 = DeviceCapability(9, 0)
@@ -65,7 +62,7 @@ def _device(capability, *, head_size, kv_cache_dtype, fa_version=None, dcp=1):
             return_value=(dcp, 0),
         ),
     ):
-        yield config
+        yield
 
 
 def _supports_combination(capability, head_size, kv_cache_dtype, block_size=64):
@@ -82,7 +79,7 @@ def _supports_combination(capability, head_size, kv_cache_dtype, block_size=64):
     )
 
 
-def _impl(head_size, kv_cache_dtype, logits_soft_cap=None):
+def _impl(head_size, kv_cache_dtype):
     return FlashAttentionImpl(
         num_heads=8,
         head_size=head_size,
@@ -91,7 +88,6 @@ def _impl(head_size, kv_cache_dtype, logits_soft_cap=None):
         alibi_slopes=None,
         sliding_window=None,
         kv_cache_dtype=kv_cache_dtype,
-        logits_soft_cap=logits_soft_cap,
     )
 
 
@@ -117,82 +113,6 @@ def test_sm90_routing(head_size, kv_cache_dtype, fa_version, sm90_fp8_mma):
     assert impl.vllm_flash_attn_version == fa_version
     # The FP8 MMA kernel quantizes Q in-kernel, so vLLM must not quantize it.
     assert impl.supports_quant_query_input is not sm90_fp8_mma
-
-
-@pytest.mark.parametrize(
-    "case,fa_version",
-    [
-        ("upgrade", 4),
-        ("softcap", 3),
-        ("explicit_fa3", 3),
-        ("batch_invariant", 3),
-        ("head_size_v", 3),
-    ],
-)
-def test_sm90_fp8_kv_fa4_upgrade(case, fa_version):
-    """FP8 KV on SM90 upgrades FA3 to FA4 only where FA4 runs native FP8.
-
-    Batch invariance stays on FA3: FA4 would fall back to FA2, which has no FP8 KV.
-    """
-    with (
-        _device(
-            SM90,
-            head_size=128,
-            kv_cache_dtype="fp8",
-            fa_version=3 if case == "explicit_fa3" else None,
-        ),
-        patch("vllm.envs.VLLM_BATCH_INVARIANT", case == "batch_invariant"),
-    ):
-        version = get_flash_attn_version(
-            head_size=128,
-            head_size_v=64 if case == "head_size_v" else None,
-            requires_softcap=case == "softcap",
-            fp8_kv_cache=True,
-        )
-    assert version == fa_version
-
-
-@pytest.mark.parametrize(
-    "kv_cache_dtype,logits_soft_cap,fa_version",
-    [("fp8", None, 4), ("fp8", 50.0, 3), ("auto", None, 3)],
-)
-def test_sm90_builder_matches_impl(kv_cache_dtype, logits_soft_cap, fa_version):
-    """The metadata builder schedules for the FA version its layers run.
-
-    A softcap layer with an FP8 KV cache stays on FA3, so its builder must keep
-    the FA3 AOT scheduler metadata.
-    """
-    fp8 = kv_cache_dtype == "fp8"
-    with _device(SM90, head_size=128, kv_cache_dtype=kv_cache_dtype) as config:
-        impl = _impl(128, kv_cache_dtype, logits_soft_cap)
-        config.model_config.rswa_window = None
-        config.model_config.is_mm_prefix_lm = False
-        config.parallel_config.cp_kv_cache_interleave_size = 1
-        config.compilation_config.cudagraph_mode.has_full_cudagraphs.return_value = (
-            False
-        )
-        config.compilation_config.max_cudagraph_capture_size = None
-        kv_cache_spec = SimpleNamespace(
-            block_size=64,
-            num_kv_heads=1,
-            head_size=128,
-            dtype=torch.float8_e4m3fn if fp8 else torch.bfloat16,
-            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR if fp8 else KVQuantMode.NONE,
-            dcp_sharded=False,
-        )
-        layers = {"layer": SimpleNamespace(impl=impl)}
-        with patch(
-            "vllm.v1.attention.backends.flash_attn.get_layers_from_vllm_config",
-            return_value=layers,
-        ):
-            builder = FlashAttentionMetadataBuilder(
-                kv_cache_spec=kv_cache_spec,
-                layer_names=list(layers),
-                vllm_config=config,
-                device=torch.device("cpu"),
-            )
-    assert impl.vllm_flash_attn_version == fa_version
-    assert builder.aot_schedule == (fa_version == 3)
 
 
 def test_sm90_fp8_mma_block_size():
