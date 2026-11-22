@@ -444,6 +444,10 @@ std::tuple<at::Tensor, at::Tensor> biased_topk_cpu(
 
   // The actual routed topk (excluding fused shared experts)
   int64_t routed_topk = topk - num_fused_shared_experts;
+  TORCH_CHECK(routed_topk >= 0, "topk must be >= num_fused_shared_experts");
+  TORCH_CHECK(topk <= num_experts,
+              "biased_topk_cpu: topk (", topk, ") exceeds num_experts (",
+              num_experts, ")");
 
   CPU_DISPATCH_FLOATING_TYPES_EXT(st, correction_bias.scalar_type(), "biased_topk_kernel", [&] {
     // dispatch on num_experts and routed_topk. For DeepSeek V4: 256 experts,
