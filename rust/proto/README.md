@@ -16,7 +16,7 @@ the schemas on pull requests, including on forks.
 
 ```toml
 [dependencies]
-vllm-proto = "0.7"
+vllm-proto = "0.8"
 ```
 
 For example, import `vllm_proto::inference_client::InferenceClient`,

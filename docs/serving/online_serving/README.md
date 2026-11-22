@@ -143,7 +143,10 @@ Scale-out APIs are disabled by default on `vllm serve`. Set `--enable-scale-out`
 Renderer APIs preprocess completion, chat, and Responses requests without running
 inference. They handle tokenization, model-specific prompt formatting, and
 multimodal preprocessing, returning prompt token IDs, sampling parameters, and
-any processed multimodal inputs for generation.
+any processed multimodal inputs for generation. The experimental
+[Rust raw-JSON gRPC renderer](renderer.md#rust-raw-json-grpc-rendering) does not
+yet return lowered sampling or stopping parameters; callers must supply those
+separately for inference.
 
 See the [renderer guide](renderer.md) for setup instructions and examples.
 
