@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from vllm.config.speculative import (
@@ -95,7 +96,11 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             return _get_minimax_m3_dspark_draft(
                 target, load_config.download_dir if load_config else None
             )
-        # DeepSeek DSpark can ship the weights inside the target checkpoint.
+        # DeepSeek DSpark's embedded weights must follow a pinned target.
+        if target.hf_config.model_type in ("deepseek_v4", "deepseek_v41"):
+            if spec.revision is None:
+                spec.revision = target.revision
+            return target.model
         # Mistral Large 4 DSpark drafts ship in BF16.
         if (
             not spec.quantization
@@ -103,6 +108,29 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
         ):
             spec.quantization = target.quantization
         return target.model
+
+    @classmethod
+    def configure(cls, spec: "SpeculativeConfig") -> None:
+        target = spec.target_model_config
+        inherit = (
+            target.hf_config.model_type in ("deepseek_v4", "deepseek_v41")
+            and spec.model == target.model
+            and spec.quantization is None
+        )
+        if inherit:
+            spec.quantization = target.quantization
+        super().configure(spec)
+
+        draft = spec.draft_model_config
+        if (
+            inherit
+            and draft.speculator_config_class is None
+            and getattr(draft.revision, "resolved", draft.revision)
+            == getattr(target.revision, "resolved", target.revision)
+            and draft.quantization_config is None
+        ):
+            # Embedded experts use the target's online quantization policy.
+            draft.quantization_config = deepcopy(target.quantization_config)
 
     @classmethod
     def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:
@@ -116,7 +144,7 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             draft.hf_config.architectures = [
                 "DSparkV41DraftModel" if is_v41 else "DSparkDraftModel"
             ]
-            draft.quantization = target.quantization
+            draft.quantization = spec.quantization or target.quantization
             spec.update_arch_()
         elif (
             "MistralLarge4DSparkModel" in draft.architectures
