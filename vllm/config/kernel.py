@@ -102,7 +102,9 @@ class AmdKernelsConfig:
     (`expert_plan_S49.npz`, fitted on one agentic workload's expert load, so
     off by default). Each rank holds S slots per layer and the routers' ids
     are remapped to a replica before dispatch. Empty: the identity placement
-    (nothing runs). Independent of `enabled`."""
+    (nothing runs). Independent of `enabled`. To fit a plan to a workload,
+    count its expert load with `VLLM_AKR_EXPERT_COUNTS` and run
+    `python -m vllm.models.deepseek_v41.amd.akr_eplb_plan`."""
 
     def compile_factors(self) -> CompileFactors:
         return get_compile_factors(self, {"prefill_warmup", "serving_transient_gib"})
