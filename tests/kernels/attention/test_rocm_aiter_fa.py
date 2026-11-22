@@ -1056,12 +1056,13 @@ _PREFILL_QUERY_QUANT_CASES = [
 @pytest.mark.skipif(get_cdna_version() not in (3, 4), reason="MI300/MI350 ROCm only")
 @pytest.mark.parametrize("head_size, num_heads, layer_kind", _PREFILL_QUERY_QUANT_CASES)
 @pytest.mark.parametrize("q_scale", [1.0, 4.0])
-@pytest.mark.parametrize("prefill_first", [False, True])
+@pytest.mark.parametrize("batch", ["prefill_last", "prefill_first", "extends_only"])
 def test_aiter_fa_fp8_query_extend_matches_reference(
-    monkeypatch, head_size, num_heads, layer_kind, q_scale, prefill_first
+    monkeypatch, head_size, num_heads, layer_kind, q_scale, batch
 ):
     """With `use_prefill_query_quantization` on, a batch with a decode, extends
-    and a pure prefill matches the reference attention of the layer: full
+    and a pure prefill, or without the prefill, matches the reference attention
+    of the layer: full
     attention, sliding window, sinks, a BF16 KV cache or the shuffled KV
     layout. Each extend and prefill matches, by relative L2, a float32
     reference computed from the BF16 query or from the query quantized to FP8
@@ -1090,14 +1091,16 @@ def test_aiter_fa_fp8_query_extend_matches_reference(
     sliding_window = 32 if layer_kind == "sliding_window" else None
     set_random_seed(0)
     # A decode, the extends and a pure prefill, which may precede the extends.
-    if prefill_first:
+    if batch == "prefill_first":
         batch_spec = BatchSpec(
             seq_lens=[500, 64, 700, 333, 90], query_lens=[1, 64, 96, 40, 24]
         )
-    else:
+    elif batch == "prefill_last":
         batch_spec = BatchSpec(
             seq_lens=[500, 700, 333, 90, 64], query_lens=[1, 96, 40, 24, 64]
         )
+    else:
+        batch_spec = BatchSpec(seq_lens=[500, 700, 333, 90], query_lens=[1, 96, 40, 24])
     num_blocks = 256
     num_q_heads, num_kv_heads = num_heads
     # Sinks comparable to the softmax mass of the real keys.
