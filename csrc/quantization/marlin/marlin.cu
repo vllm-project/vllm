@@ -237,6 +237,10 @@ exec_config_t determine_exec_config(
   return exec_cfg;
 }
 
+// See the K-split cap in marlin_mm.
+constexpr int kMaxSlicesPerTile = 16;
+constexpr int kCappedSlicesPerTile = 4;
+
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                void* b_s, void* g_s, void* zp, int prob_m, int prob_n,
                int prob_k, int lda, void* workspace,
@@ -347,6 +351,19 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     thread_k = thread_tfg.thread_k;
     thread_n = thread_tfg.thread_n;
     int blocks = sms * exec_cfg.blocks_per_sm;
+    {
+      // With few output tiles (small n, e.g. Qwen3.5's 64-wide GDN in_proj_ba),
+      // a full grid splits each tile's K across dozens of blocks, and those
+      // blocks then reduce through the workspace locks one after another.
+      // Cap the split there; larger problems keep the full grid, which they
+      // need for memory bandwidth.
+      int mn_tiles = div_ceil(prob_m_split, thread_m_blocks * 16) *
+                     (prob_n / thread_tfg.thread_n);
+      if (mn_tiles * kMaxSlicesPerTile < sms) {
+        blocks = min(blocks,
+                     mn_tiles * kCappedSlicesPerTile * exec_cfg.blocks_per_sm);
+      }
+    }
     if (exec_cfg.blocks_per_sm > 1)
       max_shared_mem_new = max_shared_mem / exec_cfg.blocks_per_sm - 1024;
 
