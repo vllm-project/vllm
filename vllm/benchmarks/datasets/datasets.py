@@ -4191,7 +4191,8 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self._rng = np.random.default_rng(self.random_seed)
+        random.seed(self.random_seed)
+        np.random.seed(self.random_seed)
 
     def sample(
         self,
@@ -4213,39 +4214,59 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
                 f"to num_prefixes ({num_prefixes})"
             )
 
-        def generate_prompt(
-            prefix: list[int], num_new_tokens: int
-        ) -> tuple[str, list[int]]:
-            target_len = len(prefix) + num_new_tokens
-            max_attempts = 32
-            for _ in range(max_attempts):
-                suffix = self._rng.integers(vocab_size, size=num_new_tokens).tolist()
-                prompt, ids, mismatch = gen_prompt_decode_to_target_len(
-                    tokenizer, prefix + suffix, target_len, rng=self._rng
-                )
-                # Tokenization can change across the prefix/suffix boundary.
-                if mismatch == 0 and ids[: len(prefix)] == prefix:
-                    return prompt, ids
-            raise ValueError(
-                f"Could not generate a {target_len}-token prompt preserving "
-                f"{len(prefix)} prefix tokens after {max_attempts} attempts."
+        def _generate_exact_length_tokens(target_length: int) -> tuple[list[int], int]:
+            """Generate tokens that decode and re-encode to exactly
+            target_length."""
+            # Generate random tokens
+            tokens = np.random.randint(0, vocab_size, size=target_length).tolist()
+
+            _, adjusted_tokens, token_mismatch = gen_prompt_decode_to_target_len(  # noqa: E501
+                tokenizer=tokenizer,
+                token_sequence=tokens,
+                target_token_len=target_length,
+                add_special_tokens=False,
             )
+            return adjusted_tokens, token_mismatch
 
         requests = []
+        max_attempts = 32
         for _ in range(num_prefixes):
-            _, prefix_tokens = generate_prompt([], prefix_len)
+            for _ in range(max_attempts):
+                prefix_tokens, _ = _generate_exact_length_tokens(prefix_len)
+                if len(prefix_tokens) == prefix_len:
+                    break
+            else:
+                raise ValueError(
+                    f"No {prefix_len}-token prefix found in {max_attempts} attempts."
+                )
+
             for _ in range(prompts_per_prefix):
-                prompt, ids = generate_prompt(prefix_tokens, suffix_len)
+                for _ in range(max_attempts):
+                    suffix_tokens, _ = _generate_exact_length_tokens(suffix_len)
+                    combined_tokens = prefix_tokens + suffix_tokens
+                    prompt = tokenizer.decode(combined_tokens)
+                    prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
+                    prompt_len = len(prompt_tokens)
+                    if (
+                        prompt_len == prefix_len + suffix_len
+                        and prompt_tokens[:prefix_len] == prefix_tokens
+                    ):
+                        break
+                else:
+                    raise ValueError(
+                        f"No prompt with {prefix_len} prefix and {suffix_len} suffix "
+                        f"tokens found in {max_attempts} attempts."
+                    )
                 requests.append(
                     SampleRequest(
                         prompt=prompt,
-                        prompt_len=len(ids),
+                        prompt_len=prompt_len,
                         expected_output_len=output_len,
                     )
                 )
 
-        if not self.disable_shuffle:
-            self._rng.shuffle(requests)
+        if not getattr(self, "disable_shuffle", False):
+            random.shuffle(requests)
         return requests
 
 
