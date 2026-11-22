@@ -459,6 +459,7 @@ th {
 | `MistralLarge3ForCausalLM` | Mistral-Large-3-675B-Base-2512, Mistral-Large-3-675B-Instruct-2512 | `mistralai/Mistral-Large-3-675B-Base-2512`, `mistralai/Mistral-Large-3-675B-Instruct-2512`, etc. | ✅︎ | ✅︎ |
 | `MixtralForCausalLM` | Mixtral-8x7B, Mixtral-8x7B-Instruct | `mistralai/Mixtral-8x7B-v0.1`, `mistralai/Mixtral-8x7B-Instruct-v0.1`, `mistral-community/Mixtral-8x22B-v0.1`, etc. | ✅︎ | ✅︎ |
 | `NemotronForCausalLM` | Nemotron-3, Nemotron-4, Minitron | `nvidia/Minitron-8B-Base`, `mgoin/Nemotron-4-340B-Base-hf-FP8`, etc. | ✅︎ | ✅︎ |
+| `Nemotron3_6AcademiaForCausalLM` | Nemotron 3.6 Academia | `nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF16` | | |
 | `NemotronHForCausalLM` | Nemotron-H | `nvidia/Nemotron-H-8B-Base-8K`, `nvidia/Nemotron-H-47B-Base-8K`, `nvidia/Nemotron-H-56B-Base-8K`, etc. | ✅︎ | ✅︎ |
 | `NemotronLabsDiffusionModel`, `NemotronLabsDiffusionForCausalLM` | Nemotron Labs Diffusion | `nvidia/Nemotron-Labs-Diffusion-3B`, `nvidia/Nemotron-Labs-Diffusion-8B` | | |
 | `OlmoHybridForCausalLM` | OLMo Hybrid | `allenai/Olmo-Hybrid-7B` | ✅︎ | ✅︎ |
@@ -897,3 +898,11 @@ We have the following levels of testing for models:
 2. **Output Sensibility**: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
 3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. Please refer to [functionality tests](../../tests) and [examples](../../examples) for the models that have passed this test.
 4. **Community Feedback**: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it. The rest of the models fall under this category.
+
+### Nemotron 3.6 Academia
+
+Native Academia checkpoints use `model_type="nemotron3_6_academia"` and `architectures=["Nemotron3_6AcademiaForCausalLM"]`. Checkpoint dimensions and `layer_types` define the model size.
+
+Run a BF16 checkpoint with `vllm serve nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF16 --dtype bfloat16 --no-enable-prefix-caching`. `n_recurrent_loops` sets the fixed inference budget. `recurrent_kv_cache_mode="per_loop"` allocates independent attention caches for each recurrent pass; `"last_loop"` reuses the attention cache and retains the last pass for earlier tokens. GDP states remain independent in both modes. The modes have different semantics and need not produce identical outputs.
+
+The initial implementation supports ordinary decoding without speculative decoding.

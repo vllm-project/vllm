@@ -453,6 +453,19 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "tiny-random": "TitanML/tiny-mixtral",
         },
     ),
+    "Nemotron3_6AcademiaForCausalLM": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF16",
+        use_original_num_layers=True,
+        max_model_len=128,
+        hf_overrides={
+            "num_hidden_layers": 9,
+            "n_input_layers": 3,
+            "n_recurrent_layers": 3,
+            "n_output_layers": 3,
+            "n_recurrent_loops": 2,
+            "layer_types": ["linear_attention", "full_attention", "mlp"] * 3,
+        },
+    ),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
     "NemotronHForCausalLM": _HfExamplesInfo("nvidia/Nemotron-H-8B-Base-8K"),
     "NemotronHPuzzleForCausalLM": _HfExamplesInfo(

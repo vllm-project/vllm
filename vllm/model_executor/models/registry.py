@@ -186,6 +186,10 @@ _TEXT_GENERATION_MODELS = {
     "MiMoV2FlashForCausalLM": ("mimo_v2", "MiMoV2FlashForCausalLM"),
     "MiMoV2ForCausalLM": ("mimo_v2", "MiMoV2ForCausalLM"),
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
+    "Nemotron3_6AcademiaForCausalLM": (
+        "nemotron3_6_academia",
+        "Nemotron3_6AcademiaForCausalLM",
+    ),
     "NemotronHForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "NemotronHPuzzleForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "NemotronLabsDiffusionForCausalLM": (

@@ -2,6 +2,22 @@ group: Models - Basic
 depends_on:
   - image-build
 steps:
+- label: ":nvidia: (H200 MIG 18GB) Academia inference and GDP kernels"
+  key: academia-inference-kernels
+  timeout_in_minutes: 30
+  device: h200_18gb
+  source_file_dependencies:
+  - vllm/model_executor/models/nemotron3_6_academia.py
+  - vllm/transformers_utils/configs/nemotron3_6_academia.py
+  - vllm/model_executor/layers/mamba/
+  - tests/models/test_nemotron3_6_academia.py
+  - tests/kernels/mamba/test_gated_delta_product.py
+  commands:
+    - >-
+      pytest -v -s
+      models/test_nemotron3_6_academia.py::test_loop_cache_modes
+      kernels/mamba/test_gated_delta_product.py
+
 - label: ":nvidia: (H200 MIG 18GB) Basic Models (Initialization)"
   key: basic-models-tests-initialization
   automatic_shard: true
@@ -591,6 +607,8 @@ steps:
   - tests/models/test_qwen3_5_mtp_config.py
   - tests/models/test_qwen3_5.py
   - tests/models/test_dory.py
+  - tests/models/test_nemotron3_6_academia.py
+  - tests/transformers_utils/test_nemotron3_6_academia_config.py
   - tests/models/test_alice_ai.py
   - tests/models/test_alice_ai_config.py
   - tests/models/test_indexer_logits_dtype_config.py
@@ -628,6 +646,8 @@ steps:
       models/test_dspark_mla.py
       models/transformers/test_layer_registry.py
       models/test_dory.py
+      models/test_nemotron3_6_academia.py::test_loop_table_reload_preserves_captured_storage
+      transformers_utils/test_nemotron3_6_academia_config.py
       models/test_alice_ai.py
       models/test_alice_ai_config.py
       models/test_indexer_logits_dtype_config.py
