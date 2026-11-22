@@ -109,7 +109,10 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         return
 
     from vllm.model_executor.layers.mamba.abstract import MambaBase
-    from vllm.v1.core.kv_cache_utils import is_mamba_align_group, is_mamba_group
+    from vllm.v1.core.kv_cache_utils import (
+        is_mamba_group,
+        is_mamba_prefix_caching_group,
+    )
     from vllm.v1.worker.mamba_utils import _get_mamba_spec_for_layer
     from vllm.v1.worker.replayssm_utils import ReplaySSMModelContext
 
@@ -129,7 +132,7 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         if not names:
             continue
         spec = _get_mamba_spec_for_layer(group, names[0])
-        align = is_mamba_align_group(group)
+        prefix_caching = is_mamba_prefix_caching_group(group)
         mixers = [
             config.compilation_config.static_forward_context[name] for name in names
         ]
@@ -159,14 +162,16 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
                 mixer._replayssm_prev_num_accepted.zero_()
 
         context = ReplaySSMModelContext.create(
-            grouped, runner.max_num_reqs, materialize_prefixes=align
+            grouped, runner.max_num_reqs, materialize_prefixes=prefix_caching
         )
         device = grouped[0][2].device
         block_size = grouped[0][1].block_size
         query_len = runner.decode_query_len
         idx_mapping = torch.zeros(1, dtype=torch.int64, device=device)
-        live_cols = torch.ones(1, dtype=torch.int32, device=device) if align else None
-        if align:
+        live_cols = (
+            torch.ones(1, dtype=torch.int32, device=device) if prefix_caching else None
+        )
+        if prefix_caching:
             context.reset_new_slots(
                 idx_mapping=idx_mapping,
                 src_cols=torch.full((1,), -1, dtype=torch.int32, device=device),
@@ -302,5 +307,5 @@ def gdn_replayssm_warmup(runner: "GPUModelRunner") -> None:
     with _temporary_replayssm_autotune_state(runner, max_decode_reqs):
         for num_reqs in sorted(capture_reqs):
             runner._dummy_run(num_tokens=num_reqs * query_len, **decode_kwargs)
-        if config.cache_config.mamba_cache_mode == "align":
+        if config.cache_config.enable_prefix_caching:
             _warm_gdn_replayssm_materializer(runner, max_num_reqs)
