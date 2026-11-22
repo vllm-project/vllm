@@ -1593,9 +1593,15 @@ class TestStrayImStartInToolCall:
         cities = [json.loads(tc.function.arguments)["city"] for tc in result.tool_calls]
         assert cities == ["Tokyo", "Paris"]
 
-    def test_streaming_with_token_ids(self, mock_request):
-        parser = self._parser(thinking=False)
+    @pytest.mark.parametrize("thinking", [False, True])
+    def test_streaming_with_token_ids(self, mock_request, thinking):
+        parser = self._parser(thinking=thinking)
         chunks = [
+            *(
+                [("I should call get_weather.\n", [7]), ("</think>", [201])]
+                if thinking
+                else []
+            ),
             ("<tool_call>", [100]),
             ("\n", [198]),
             ("<|im_start|>", [151644]),
@@ -1625,6 +1631,18 @@ class TestStrayImStartInToolCall:
             previous_text, previous_ids = current_text, previous_ids + ids
         assert name == "get_weather"
         assert json.loads(args) == {"city": "Paris"}
+
+    def test_function_eq_inside_argument_is_kept(self, mock_request):
+        text = (
+            "<tool_call>\n<function=write_file>\n"
+            "<parameter=content>\nresult = df.apply(function=np.sum)\n</parameter>\n"
+            "</function>\n</tool_call>"
+        )
+        result = self._parser(thinking=False).extract_tool_calls(text, mock_request)
+        assert [tc.function.name for tc in result.tool_calls] == ["write_file"]
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "content": "result = df.apply(function=np.sum)"
+        }
 
     def test_outside_tool_call_is_not_a_call(self, mock_request):
         text = "Write <|im_start|>function=get_weather> to call it."
