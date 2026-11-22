@@ -88,6 +88,22 @@ def test_rms_norm(
         )
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_rms_norm_weight_multiply_before_rounding(dtype: torch.dtype, device: str):
+    x = torch.tensor([[1, 1, 1, 3]], dtype=dtype, device=device)
+    weight = torch.full_like(x[0], 7)
+    epsilon = 1e-6
+    out = torch.empty_like(x)
+    torch.ops._C.rms_norm(out, x, weight, epsilon)
+
+    # The mean square is exactly 3. Rounding before the weight multiply
+    # changes the first three outputs by one ULP in both dtypes.
+    x64 = x.double()
+    expected = (x64 * torch.rsqrt(x64.square().mean() + epsilon) * weight).to(dtype)
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
