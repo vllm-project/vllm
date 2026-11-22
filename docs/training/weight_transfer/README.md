@@ -35,24 +35,28 @@ applies, else [layerwise reload](../layerwise.md).
 
 Drain or abort queued and running requests before starting a target or draft
 weight update. Starting an update with outstanding requests is rejected before
-the workers change model weights.
+the workers change model weights. With a KV or encoder-cache connector, the
+engine can still have transfers to finish after the request queues empty.
+Allow those transfers to complete before starting the update.
 
-Once an update has started, new inference requests receive the retryable
-`weight_update_incomplete` error, and scheduling cannot resume until the update
-finishes successfully. A transfer or finalization failure keeps inference
-blocked. Start a new update and resend the complete checkpoint to recover;
-finishing a draft update does not repair a failed target update, or vice versa.
+While target or draft weights are incomplete, new inference requests receive
+the retryable `weight_update_incomplete` error. If generation is already
+paused in `abort` or `wait` mode, new requests receive the usual
+`engine_paused` error. After a transfer or finalization failure, resend the
+complete checkpoint for the affected model. The guard clears that model's
+pending state when finalization succeeds.
 
 Offline `LLM.generate()` returns the rejection in `RequestOutput.error`, with no
 generated tokens. Async generation raises the corresponding retryable exception.
 
-For MoE data parallelism, await a completed pause on every rank before starting
-an update. Resume must also be called on every rank: it collectively refuses
-while any rank has an incomplete update. The existing pause consensus prevents
-dummy forwards from reading weights during an update. Serialize these control
-operations across the replicas. In-process data-parallel weight updates are
-rejected before changing weights; use the multiprocessing engine for coordinated
-updates.
+For MoE data parallelism, use the multiprocessing engine and await
+`pause_generation(mode="wait")` on all replicas to drain requests, or
+`pause_generation(mode="abort")` to cancel them. An update started after a
+`keep` pause is rejected because that mode still accepts new requests. Keep
+the replicas paused throughout the weight transfer so that dummy forwards
+cannot read incomplete weights. Call resume on all replicas after finalization.
+They collectively refuse to resume while any rank still has an incomplete
+update. Serialize these control operations across replicas.
 
 ## Available Backends
 

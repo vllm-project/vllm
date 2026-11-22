@@ -422,16 +422,11 @@ class InprocClient(EngineCoreClient):
         # otherwise. The callback must not reference self, or self would stay
         # reachable and the finalizer would never run.
         self._finalizer = weakref.finalize(self, self.engine_core.shutdown)
-        self._rejected_requests: list[EngineCoreOutput] = []
 
     def get_output(self) -> EngineCoreOutputs:
-        if self._rejected_requests:
-            rejected, self._rejected_requests = self._rejected_requests, []
+        if self.engine_core.inproc_pending_outputs:
             self.last_step_model_executed = False
-            return EngineCoreOutputs(
-                outputs=rejected,
-                finished_requests={output.request_id for output in rejected},
-            )
+            return self.engine_core.inproc_pending_outputs.popleft()
         outputs, model_executed = self.engine_core.step_fn()
         self.engine_core.post_step(model_executed=model_executed)
         # Read by LLMEngine.step() to keep the DP ranks' collectives aligned.
@@ -445,12 +440,17 @@ class InprocClient(EngineCoreClient):
         req, request_wave = self.engine_core.preprocess_add_request(request)
         error = self.engine_core.add_request(req, request_wave)
         if error is not None:
-            self._rejected_requests.append(
-                EngineCoreOutput(
-                    request_id=req.request_id,
-                    new_token_ids=[],
-                    finish_reason=FinishReason.ERROR,
-                    error=error,
+            self.engine_core.inproc_pending_outputs.append(
+                EngineCoreOutputs(
+                    outputs=[
+                        EngineCoreOutput(
+                            request_id=req.request_id,
+                            new_token_ids=[],
+                            finish_reason=FinishReason.ERROR,
+                            error=error,
+                        )
+                    ],
+                    finished_requests={req.request_id},
                 )
             )
             if req.kv_transfer_params:

@@ -145,6 +145,7 @@ class EngineCore:
         self._kv_cache_reclaimable = False
         # Query workers only after a weight-update control call, not per decode.
         self._weights_may_be_incomplete = False
+        self.inproc_pending_outputs: deque[EngineCoreOutputs] = deque()
 
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
@@ -1292,18 +1293,27 @@ class EngineCore:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
     def _prepare_weight_update(self) -> None:
-        # Pausing hides requests from has_unfinished_requests(), not their KV.
-        if any(self.scheduler.get_request_counts()):
-            raise RuntimeError(
-                "Cannot start a weight update with queued or running requests. "
-                "Drain or abort requests before updating weights."
-            )
-        # Async scheduling can leave cleanup batches after the final user
-        # output. Retire those responses before changing the model layout.
-        while self.scheduler.has_requests() or self.batch_queue:
-            _, model_executed = self.step_fn()
-            self.post_step(model_executed)
+        while True:
+            # Paused requests still hold state. An ADD may also arrive while
+            # EngineCoreProc waits for an async cleanup step to complete.
+            if any(self.scheduler.get_request_counts()):
+                raise RuntimeError(
+                    "Cannot start a weight update with queued or running requests. "
+                    "Drain or abort requests before updating weights."
+                )
+            if not (self.scheduler.has_requests() or self.batch_queue):
+                break
+            self._process_engine_step()
         self.model_executor.collective_rpc("synchronize_device")
+
+    def _process_engine_step(self) -> bool:
+        # InprocClient pulls its outputs, unlike EngineCoreProc which sends
+        # them to clients as part of its normal step.
+        outputs, model_executed = self.step_fn()
+        if outputs and (output := outputs.get(0)) is not None:
+            self.inproc_pending_outputs.append(output)
+        self.post_step(model_executed)
+        return model_executed
 
     def _has_incomplete_weight_update(self) -> bool:
         if self._weights_may_be_incomplete:
@@ -2679,6 +2689,7 @@ class DPEngineCoreProc(EngineCoreProc):
         # START_DP_WAVE messages cannot re-wake the engines.
         self.pending_pause = False
         self.ignore_start_dp_wave = False
+        self._weight_update_pause_ready = False
 
         from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
 
@@ -2733,6 +2744,7 @@ class DPEngineCoreProc(EngineCoreProc):
         """
         self.pending_pause = True
         self.engines_running = True
+        self._weight_update_pause_ready = False
 
         return False
 
@@ -2757,10 +2769,16 @@ class DPEngineCoreProc(EngineCoreProc):
         return None
 
     def _prepare_weight_update(self) -> None:
-        if not self.ignore_start_dp_wave or self.pending_pause or self.engines_running:
+        if (
+            not self._weight_update_pause_ready
+            or not self.ignore_start_dp_wave
+            or self.pending_pause
+            or self.engines_running
+        ):
             raise RuntimeError(
                 "Data-parallel weight updates require a completed pause on all "
-                "ranks. Await pause_generation() before updating weights."
+                "ranks with no outstanding requests. Use pause_generation() "
+                "with mode='abort' or 'wait' before updating weights."
             )
         super()._prepare_weight_update()
 
@@ -2788,6 +2806,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
         super().resume_scheduler()
         self.ignore_start_dp_wave = False
+        self._weight_update_pause_ready = False
 
         # Barrier: wait for all DP ranks to have resumed (and cleared
         # ignore_start_dp_wave) before any rank starts stepping. Uses
@@ -2912,6 +2931,15 @@ class DPEngineCoreProc(EngineCoreProc):
             )
 
             if not self.engines_running:
+                if self.ignore_start_dp_wave:
+                    # Decide together at the end of the pause wave. Later
+                    # repairs can target just one external-LB rank.
+                    unsafe = not self.reject_new_requests or any(
+                        self.scheduler.get_request_counts()
+                    )
+                    self._weight_update_pause_ready = (
+                        not ParallelConfig.has_unfinished_dp(self.dp_group, unsafe)
+                    )
                 if self.dp_rank == 0 or not self.has_coordinator:
                     # Notify client that we are pausing the loop.
                     logger.debug(

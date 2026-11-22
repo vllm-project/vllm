@@ -89,6 +89,19 @@ async def test_dp_weight_update_requires_pause_and_collective_recovery(monkeypat
         expected = await asyncio.wait_for(generate_tokens(engine, "before"), 60)
         with pytest.raises(Exception, match="completed pause"):
             await engine.start_weight_update()
+        await asyncio.wait_for(engine.pause_generation(mode="keep"), 60)
+        queued = await engine.add_request(
+            "retained", "Hello", SamplingParams(max_tokens=1), data_parallel_rank=1
+        )
+        with pytest.raises(Exception, match="weight update"):
+            await asyncio.wait_for(engine.start_weight_update(), 30)
+        assert isinstance(engine.engine_core, DPLBAsyncMPClient)
+        pending = await engine.engine_core.call_utility_all_async(
+            "collective_rpc", "has_incomplete_weight_update"
+        )
+        assert len(pending) == DP_SIZE and all(not any(rank) for rank in pending)
+        await asyncio.wait_for(engine.resume_generation(), 30)
+        assert (await asyncio.wait_for(queued.get(), 60)).finished
         await asyncio.wait_for(engine.pause_generation(mode="abort"), 60)
         await engine.start_weight_update()
         with pytest.raises(Exception, match="Invalid update_info"):
@@ -99,7 +112,7 @@ async def test_dp_weight_update_requires_pause_and_collective_recovery(monkeypat
         with pytest.raises(Exception, match="all data-parallel ranks"):
             await asyncio.wait_for(engine.resume_generation(), 30)
         assert await engine.is_paused()
-        with pytest.raises(RetryableRequestError):
+        with pytest.raises(RetryableRequestError, match="Generation is paused"):
             await asyncio.wait_for(generate_tokens(engine, "pending"), 30)
         await engine.collective_rpc(repair_one_rank, args=(0,))
         await asyncio.wait_for(engine.resume_generation(), 30)

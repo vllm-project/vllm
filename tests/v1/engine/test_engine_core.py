@@ -197,6 +197,45 @@ def test_weight_update_refuses_outstanding_requests(monkeypatch, running, paused
     assert len(output.outputs[0].token_ids) == 8
 
 
+@create_new_process_for_each_test()
+def test_weight_update_preserves_streaming_cleanup_output(monkeypatch):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    llm = LLM(
+        model=MODEL_NAME,
+        enforce_eager=True,
+        async_scheduling=False,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=1,
+        kv_cache_memory_bytes=64 * 1024 * 1024,
+        weight_transfer_config={"backend": "ipc"},
+    )
+    client = llm.llm_engine.engine_core
+    request = make_request()
+    request.resumable = True
+    request.sampling_params = SamplingParams(
+        temperature=0, max_tokens=1, ignore_eos=True
+    )
+    client.add_request(request)
+    first = client.get_output().outputs
+    assert len(first) == 1 and len(first[0].new_token_ids) == 1
+
+    # The scheduler owes a LENGTH output for this oversized next chunk,
+    # even after the client closes the input session.
+    chunk = copy.copy(request)
+    chunk.prompt_token_ids = [1] * 128
+    client.add_request(chunk)
+    end = copy.copy(request)
+    end.resumable = False
+    client.add_request(end)
+
+    llm.collective_rpc("start_weight_update")
+    (dropped,) = client.get_output().outputs
+    assert dropped.request_id == request.request_id
+    assert dropped.finish_reason == FinishReason.LENGTH
+    assert dropped.new_token_ids == []
+
+
 def make_request() -> EngineCoreRequest:
     global _REQUEST_COUNTER
     _REQUEST_COUNTER += 1
