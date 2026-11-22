@@ -246,7 +246,6 @@ def _share_942_experts(layer) -> None:
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
         weight_mx_scale,
     )
-    from vllm.model_executor.utils import replace_parameter
 
     qm = layer.quant_method
     w13, w13_s, w2, w2_s = layer.mono942
@@ -259,8 +258,11 @@ def _share_942_experts(layer) -> None:
         w_t, s_t = w.transpose(1, 2), s.transpose(1, 2)
         tri.storage.data = w_t
         weight_mx_scale(precision).storage.data = s_t
-        replace_parameter(layer, f"{name}_weight", w_t)
-        replace_parameter(layer, f"{name}_weight_scale", s_t)
+        # Rebind, not `replace_parameter`: that keeps the loaded storage when
+        # the new tensor is smaller (it copies into it), which would keep the
+        # padded copy alive and defeat the point.
+        getattr(layer, f"{name}_weight").data = w_t
+        getattr(layer, f"{name}_weight_scale").data = s_t
         # read by aiter_mxfp4_w4a16_moe as moe_gemm_a16w4 keyword arguments
         tri.storage.aiter_layout = {
             "w_layout": "GFX942_TILE_MAJOR",
