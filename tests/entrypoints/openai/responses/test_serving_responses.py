@@ -2719,3 +2719,35 @@ class TestBackgroundResponseStatus:
         # A late in-progress/completed transition must not resurrect it.
         release.set()
         assert serving.response_store[response_id].status == "cancelled"
+
+    @pytest.mark.asyncio
+    @pytest.mark.cpu_test
+    async def test_background_cancelled_before_task_starts_stays_cancelled(
+        self, serving_responses
+    ):
+        # Cancel without first waiting for the background task, so the
+        # queued -> in_progress transition may not have run yet, and then
+        # apply that transition explicitly: a late update arriving after
+        # cancellation must leave the stored response cancelled.
+        serving = serving_responses
+        self._prepare_for_create(serving)
+        started, release = asyncio.Event(), asyncio.Event()
+        self._install_blocked_generators(serving, started, release)
+
+        raw_request = Request({"type": "http", "headers": []})
+        request = ResponsesRequest(input="hi", background=True)
+        await serving._create_responses(request, raw_request)
+
+        response_id = request.request_id
+        cancelled = await serving.cancel_responses(response_id)
+        assert cancelled.status == "cancelled"
+
+        # Let any task steps queued before cancellation finish, then replay
+        # the transition the task would have made if it started late.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        await serving._mark_background_response_in_progress(response_id)
+        assert serving.response_store[response_id].status == "cancelled"
+
+        release.set()
+        assert serving.response_store[response_id].status == "cancelled"
