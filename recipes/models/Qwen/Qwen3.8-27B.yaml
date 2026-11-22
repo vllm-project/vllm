@@ -26,6 +26,11 @@ meta:
     # --enforce-eager; rtx_5090_2x covers FP8 and both NVFP4 builds at TP2.
     rtx_5090: verified
     rtx_5090_2x: verified
+    # Single RTX 3090 (SM86, 24GB), verified 2026-11-23 on vLLM 0.34.0 with
+    # RedHatAI/Qwen3.8-27B-INT4: answered text and a 64x64 image at 8K with the
+    # full checkpoint; a 32,652-token text prompt ran at 32K (text-only).
+    # See the guide.
+    rtx_3090: verified
     rtx_pro_6000: verified
     dgx_spark_gb10: verified
     arc_pro_b60: verified
@@ -251,8 +256,19 @@ variants:
     precision: int4
     label: "INT4 (W4A16)"
     vram_minimum_gb: 24
-    supported_hardware: [h100, h200, b200, b300, gb200, gb300, rtx_5090, rtx_5090_2x]
-    description: "Red Hat AI compressed-tensors W4A16 INT4 build — 19.5 GB: 1 GPU, runs on Hopper too."
+    supported_hardware: [h100, h200, b200, b300, gb200, gb300, rtx_5090, rtx_5090_2x, rtx_3090]
+    description: "Red Hat AI compressed-tensors W4A16 INT4 build — 19.5 GB: 1 GPU, runs on Hopper too; 8K on a 24GB RTX 3090, text-only leaves room for 32K."
+    hardware_overrides:
+      rtx_3090:
+        extra_args:
+          - "--attention-backend"
+          - "FLASH_ATTN"
+          - "--kv-cache-dtype"
+          - "bfloat16"
+          - "--max-model-len"
+          - "8192"
+          - "--max-num-seqs"
+          - "8"
   mxfp4:
     model_id: "RedHatAI/Qwen3.8-27B-MXFP4"
     precision: mxfp4
@@ -285,6 +301,15 @@ hardware_overrides:
       - "--enforce-eager"
 
 strategy_overrides: {}
+
+troubleshooting:
+  - title: "Could not find nvcc / CUDA_HOME on a pip install"
+    when: { hardware: [rtx_3090] }
+    body: |
+      The pip wheel does not bundle FlashInfer cubins. The RTX 3090 override
+      selects FLASH_ATTN for attention; if sampling still attempts a JIT build,
+      set `VLLM_USE_FLASHINFER_SAMPLER=0` or use the Docker image, which ships
+      the kernels.
 
 guide: |
   ## Overview
@@ -404,6 +429,28 @@ guide: |
   instead of fp8 — so fp8 KV is a choice here, not a requirement. The MTP head still fits
   (90,112 tokens, 0.754 acceptance). Those two flags are levers for a bigger pool, not fixes
   for the OOM: only `--enforce-eager` decides whether the server starts.
+
+  ### 1x RTX 3090 (24 GB) — INT4, BF16 KV cache
+
+  The INT4 checkpoint fits one 24 GB RTX 3090 with the full model at 8K context
+  (12,288 KV tokens, 1.50x concurrency) and answers text requests at about
+  44 tok/s in a 64-token smoke test; the same server answered a 64x64 red image
+  correctly. The 3090 has no native FP8, so the checkpoint's default FP8 KV
+  cache must be replaced with `--kv-cache-dtype bfloat16`; the override also
+  pins FlashAttention, which avoids the pip-install FlashInfer JIT path.
+
+  The override pins `--max-num-seqs 8`: vLLM's default for under-70 GB GPUs is
+  256, but the hybrid allocator only has 75 Mamba cache blocks here (one per
+  decode sequence), so the CUDA-graph check fails before serving. Eight is a
+  conservative recipe default, not a hard requirement: the engine accepts any
+  value up to 75. Raising it buys short-context concurrency but costs KV
+  headroom (64 left 8,704 KV tokens, 1.06x at 8K, and 0.46 GiB of graphs).
+
+  Enabling the text-only feature skips the vision tower and grows the pool to
+  44,877 tokens; raise `--max-model-len` to 32768 to use it (1.37x concurrency).
+  A 32,652-token prompt completed in 29.6 s (prefill plus 8 output tokens).
+  Without text-only, 32K does not fit. CUDA graphs are on by default and add
+  about 0.15 GiB; leave them enabled for decode throughput.
 
   ### Intel XPU B60 / B70
 
