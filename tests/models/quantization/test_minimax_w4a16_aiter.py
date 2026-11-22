@@ -177,10 +177,10 @@ def test_aiter_w4a16_matches_minimax_m3_reference(
     weights = weights / weights.sum(dim=-1, keepdim=True) * routed_scaling_factor
     w13_ref = _dequantize_mxfp4(w13_packed, w13_scale)
     w2_ref = _dequantize_mxfp4(w2_packed, w2_scale)
-    gate, up = torch.einsum("tenk,tk->ten", w13_ref[ids], x.float()).chunk(2, dim=-1)
+    gate, up = torch.einsum("bsnk,bk->bsn", w13_ref[ids], x.float()).chunk(2, dim=-1)
     gate, up = gate.clamp(max=LIMIT), up.clamp(min=-LIMIT, max=LIMIT)
     act = gate * torch.sigmoid(ALPHA * gate) * (up + BETA)
-    ref = torch.einsum("tehn,ten,te->th", w2_ref[ids], act, weights)
+    ref = torch.einsum("bshn,bsn,bs->bh", w2_ref[ids], act, weights)
 
     backend = Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16
     activation = MoEActivation.SWIGLUOAI_UNINTERLEAVE
