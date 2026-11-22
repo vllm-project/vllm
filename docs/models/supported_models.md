@@ -898,28 +898,3 @@ We have the following levels of testing for models:
 2. **Output Sensibility**: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
 3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. Please refer to [functionality tests](../../tests) and [examples](../../examples) for the models that have passed this test.
 4. **Community Feedback**: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it. The rest of the models fall under this category.
-
-### Nemotron 3.6 Academia
-
-Native Academia checkpoints use `model_type="nemotron3_6_academia"` and `architectures=["Nemotron3_6AcademiaForCausalLM"]`. Checkpoint dimensions and `layer_types` define the model size.
-
-Run a BF16 checkpoint with `vllm serve nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF16 --dtype bfloat16`. `n_recurrent_loops` sets the default and maximum inference budget. Set `SamplingParams(extra_args={"num_loops": 2})` for an individual request, or `extra_body={"vllm_xargs": {"num_loops": 2}}` with the OpenAI client. Counts must be integers from 1 to the configured maximum; requests with different counts can share a batch. `recurrent_kv_cache_mode="per_loop"` allocates independent attention caches for each recurrent pass; `"last_loop"` reuses the attention cache and retains the last pass for earlier tokens. GDP states remain independent in both modes. The modes have different semantics and need not produce identical outputs.
-
-The initial implementation supports ordinary decoding without speculative decoding.
-
-Prefix caching preserves caller cache salts and isolates different loop budgets. GDP layers export convolution and recurrent states at aligned internal prefill boundaries; the alignment is `64 / gcd(64, linear_num_householder)` tokens. FULL CUDA graphs capture one variant per supported loop budget, increasing graph capture time and memory with the maximum budget.
-
-Quantized Academia checkpoints can mix BF16, MXFP8 and NVFP4 matrix weights while retaining BF16 activations. Run `vllm serve nvidia/NVIDIA-Nemotron-3.6-Academia-4B-NVFP4 --dtype bfloat16` on a Marlin-capable CUDA GPU with tensor and pipeline parallel size 1 and untied embeddings. The checkpoint selects each matrix's format; the `--quantization` override is unsupported.
-
-The configuration names the allocation file with:
-
-```json
-{
-  "per_tensor_quantization": {
-    "version": 1,
-    "allocation": "quantization_allocation.json"
-  }
-}
-```
-
-The allocation file's `formats` mapping assigns canonical checkpoint tensor names to `BF16`, `MXFP8` or `NVFP4`. Packed matrices retain their block scales and, for NVFP4, individual tensor scales. Projections with different formats or scales remain separate.
