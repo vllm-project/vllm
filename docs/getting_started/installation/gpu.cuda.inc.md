@@ -450,31 +450,24 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
 
 Set `INSTALL_RUBIN_PRERELEASE=true` to enable the Rubin build path.
 
-Triton must currently be installed from source for Rubin compatibility.
-Specify its repository with `TRITON_INSTALL_FROM_SOURCE_REPO`; an empty
-`TRITON_INSTALL_FROM_SOURCE_REVISION` selects the repository's latest `main`,
-while a commit, branch, or tag selects that revision. The tested revision
-lowers SM107 through LLVM's SM100 target and uses the final CUDA image's
-version-matched `ptxas` for SM107 assembly. This enables vLLM's default compiled
-mode on VR200 and R100.
-
-BuildKit does not automatically invalidate cached layers when a mutable Git
-ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
-branch, or tag revision.
+Triton is the version that the pinned PyTorch nightly requires
+(`triton==3.9.0+gitb7ddcf86`, the Triton 3.9.0 release), installed from
+PyTorch's nightly index. It lowers SM107 through LLVM's SM100 target, which
+enables vLLM's default compiled mode on VR200 and R100. See the warning on
+ptxas 13.5.37 below.
 
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
 `nvidia/cuda:13.5.0-base-ubuntu24.04` image. Set `NCCL_VERSION` to 2.32.3 or
 newer, the first NCCL release with Rubin (SM107) support.
 For `BUILD_BASE_IMAGE`, use:
 
-- `pytorch/manylinux2_28-builder:cuda13.4` for x86_64 CPUs.
-- `pytorch/manylinuxaarch64-builder:cuda13.4` for ARM64/AArch64 CPUs.
+- `pytorch/manylinux2_28-builder:cuda13.5` for x86_64 CPUs.
+- `pytorch/manylinuxaarch64-builder:cuda13.5` for ARM64/AArch64 CPUs.
 
-PyTorch does not publish CUDA 13.5 builder images or cu135 wheels yet, so the
-build stage and the prerelease PyTorch wheels in
-`requirements/rubin-prerelease.txt` stay on CUDA 13.4. Set `CUDA_VERSION` to
-the final image's CUDA version (13.5): the runtime stage installs the matching
-CUDA packages, including the `ptxas` above.
+`requirements/rubin-prerelease.txt` pins PyTorch's cu135 nightly. PyTorch does
+not publish cu135 torchvision or torchaudio yet, so they use the cu134
+nightlies of the same date. Set `CUDA_VERSION` to the final image's CUDA
+version (13.5): the runtime stage installs the matching CUDA packages.
 
 ??? console "ARM64/AArch64 build command"
 
@@ -488,10 +481,8 @@ CUDA packages, including the `ptxas` above.
       --build-arg nvcc_threads=2 \
       --build-arg RUN_WHEEL_CHECK=false \
       --build-arg INSTALL_RUBIN_PRERELEASE=true \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.5 \
-      --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.4" \
+      --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.5" \
       --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.5.0-base-ubuntu24.04" \
       --build-arg NCCL_VERSION=2.32.3 \
       .
@@ -509,10 +500,8 @@ CUDA packages, including the `ptxas` above.
       --build-arg nvcc_threads=2 \
       --build-arg RUN_WHEEL_CHECK=false \
       --build-arg INSTALL_RUBIN_PRERELEASE=true \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.5 \
-      --build-arg BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.4" \
+      --build-arg BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.5" \
       --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.5.0-base-ubuntu24.04" \
       --build-arg NCCL_VERSION=2.32.3 \
       .
@@ -534,6 +523,20 @@ CUDA packages, including the `ptxas` above.
     fusion fall back to NCCL, and serving performance differs from a native
     R620 driver. The image's `NVIDIA_REQUIRE_CUDA` does not list R570 or R590
     drivers, so the toolkit refuses to start it on those.
+
+!!! warning
+    CUDA 13.5.0's ptxas (13.5.37) silently miscompiles some `sm_107a` code,
+    which can corrupt model output on VR200 and R100. Importing FlashInfer
+    points Triton at the `ptxas` on `PATH`, which in these images is that
+    version. Until a fixed ptxas ships, run the image with this option, which
+    keeps Triton on the `ptxas-blackwell` 13.4 that its wheel bundles:
+
+    ```bash
+    --env "TRITON_PTXAS_BLACKWELL_PATH=/usr/local/lib/python3.14/dist-packages/triton/backends/nvidia/bin/ptxas-blackwell"
+    ```
+
+    The path is for the default `PYTHON_VERSION` (3.14). Triton uses this
+    ptxas for every SM90-and-newer GPU.
 
 #### Use the custom-built vLLM Docker image**
 
