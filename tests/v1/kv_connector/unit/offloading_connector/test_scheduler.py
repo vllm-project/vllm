@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
+from itertools import chain, repeat
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, call, patch
@@ -11,6 +12,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+    _make_kv_cache_config,
     _make_mamba_hybrid_kv_cache_config,
     _make_vllm_config,
 )
@@ -119,6 +121,7 @@ from vllm.v1.kv_offload.base import (
     get_offload_group_idx,
     make_offload_key,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
@@ -252,6 +255,7 @@ def test_swa_offload_window_covers_unaligned_hit(
         offload_prompt_only=True,
         async_init=False,
         extra_config={},
+        access_mode=OffloadAccessMode.READWRITE,
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=False, self_describing_kv_events=False
         ),
@@ -2538,6 +2542,92 @@ def test_scheduler_reports_allocation_failure(request_runner):
     # Two attempts: once while running (block becomes full during prefill),
     # once from finished_req_ids on the next step.
     assert reduced[_ConnectorMetricName.ALLOCATION_FAILURE] == 2
+
+
+def _consume_at_most(capacities: Iterable[int]):
+    """A prepare_store that stores only as many leading keys as fit."""
+    capacities = iter(capacities)
+
+    def prepare_store(keys, req_context, trigger):
+        capacity = next(capacities)
+        output = generate_store_output(keys[:capacity])
+        output.keys_to_retry = list(keys[capacity:])
+        return output
+
+    return prepare_store
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_store_beyond_manager_capacity_continues_on_later_steps(
+    request_runner, async_scheduling: bool
+):
+    """A request with more unstored chunks than the manager can hold is still
+    offloaded: the manager takes what fits and later steps offer the rest.
+
+    A step on which nothing fits is not a failure while the request runs.
+    """
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=10,
+        async_scheduling=async_scheduling,
+    )
+    runner.new_request(token_ids=[0] * (6 * block_size))
+    runner.manager.prepare_store.side_effect = _consume_at_most(
+        chain([2, 0], repeat(2))
+    )
+
+    runner.run(
+        decoded_tokens=[0, 0, 0, EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2, 3, 4, 5),
+    )
+
+    reduced = _reduce_kv_connector_stats(runner)
+    assert not reduced.get(_ConnectorMetricName.ALLOCATION_FAILURE)
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_chunks_left_unstored_by_a_finished_request_are_reported(
+    request_runner, async_scheduling: bool
+):
+    """A finished request is not offered again, so its leftover is a loss."""
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=10,
+        async_scheduling=async_scheduling,
+    )
+    runner.new_request(token_ids=[0] * (6 * block_size))
+    runner.manager.prepare_store.side_effect = _consume_at_most(chain([2], repeat(0)))
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1))
+
+    reduced = _reduce_kv_connector_stats(runner)
+    assert reduced[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
+
+
+def test_partially_stored_handoff_is_reported():
+    """A hand-off is offered once, so keys the manager leaves are a loss."""
+    scheduler = _make_partial_tail_scheduler()
+    _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.group_states[0].block_ids[:] = [11, 12]
+    req_status.group_states[1].block_ids[:] = [0, 21]
+    _as_mock(scheduler.manager.prepare_store).side_effect = _consume_at_most([1])
+
+    output = SimpleNamespace(
+        kv_connector_block_state=KVConnectorBlockState(
+            req_ids=set(),
+            resolve_block_ids={}.__getitem__,
+            boundary_state_offloads={"req": [(1, 99, 28)]},
+        )
+    )
+    jobs = _partial_tail_store_jobs(scheduler, output)
+
+    [job] = jobs.values()
+    assert job.src_spec.block_ids.tolist() == [12]
+    reduced = scheduler._connector_stats.reduce()
+    assert reduced[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -5343,6 +5433,83 @@ def test_offload_prompt_only(request_runner, async_scheduling: bool):
         for key in call.args[0]
     }
     assert len(offered_keys) == num_prompt_blocks
+
+
+def _make_access_mode_scheduler(
+    access_mode: str,
+) -> tuple[OffloadingConnectorScheduler, MockOffloadingSpec]:
+    vllm_config = _make_vllm_config(extra_config={"access_mode": access_mode})
+    kv_cache_config = _make_kv_cache_config()
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    return (
+        OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config),
+        spec,
+    )
+
+
+def _empty_scheduler_output() -> SchedulerOutput:
+    return SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData(
+            req_ids=[],
+            new_token_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            num_output_tokens=[],
+        ),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+
+@pytest.mark.parametrize(
+    "access_mode, reads",
+    [("readwrite", True), ("read", True), ("write", False)],
+)
+def test_read_access_mode_gates_lookups(access_mode: str, reads: bool):
+    """A connector that cannot read (write mode) never queries the tiers, so it
+    serves no external hit; read and readwrite still look up."""
+    scheduler, spec = _make_access_mode_scheduler(access_mode)
+    request = create_request(num_tokens=49, block_size=16)
+    scheduler.on_new_request(request)
+
+    num_hit_tokens, _ = scheduler.get_num_new_matched_tokens(request, 0)
+
+    if reads:
+        spec.manager.lookup.assert_called()
+    else:
+        spec.manager.lookup.assert_not_called()
+        assert num_hit_tokens == 0
+
+
+@pytest.mark.parametrize(
+    "access_mode, writes",
+    [("readwrite", True), ("write", True), ("read", False)],
+)
+def test_write_access_mode_gates_store_handlers(
+    access_mode: str, writes: bool, monkeypatch
+):
+    """A connector that cannot write (read mode) runs no store handler, so the
+    manager receives no store and no GPU block is fenced."""
+    scheduler, spec = _make_access_mode_scheduler(access_mode)
+    calls: list[StoreTrigger] = []
+    for handler in scheduler._store_handlers.values():
+        monkeypatch.setattr(
+            handler, "build_store_jobs", lambda *a, **kw: calls.append(True)
+        )
+
+    meta = scheduler.build_connector_meta(_empty_scheduler_output())
+
+    if writes:
+        assert calls
+    else:
+        assert calls == []
+        assert meta.store_jobs == {}
+        spec.manager.prepare_store.assert_not_called()
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
