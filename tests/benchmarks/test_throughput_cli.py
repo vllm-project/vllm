@@ -16,7 +16,8 @@ from types import SimpleNamespace
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from vllm.benchmarks.datasets import SampleRequest
+from vllm import SamplingParams
+from vllm.benchmarks.datasets import PrefixRepetitionRandomDataset, SampleRequest
 from vllm.benchmarks.throughput import (
     _run_vllm_chat_requests,
     _to_serve_args,
@@ -328,6 +329,58 @@ def _parse_throughput_args(*argv: str) -> Namespace:
     parser = FlexibleArgumentParser()
     add_cli_args(parser)
     return parser.parse_args(["--model", MODEL_NAME, *argv])
+
+
+@pytest.mark.benchmark
+def test_get_requests_prefix_repetition_roundtrip(
+    hf_tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    # With this seed, GPT-2 can retokenize across the prefix/suffix boundary.
+    args = _parse_throughput_args(
+        "--dataset-name=prefix_repetition",
+        "--num-prompts=2",
+        "--prefix-repetition-num-prefixes=1",
+        "--prefix-repetition-prefix-len=8",
+        "--prefix-repetition-suffix-len=4",
+        "--seed=15",
+    )
+    first, second = get_requests(args, hf_tokenizer)
+    assert isinstance(first.prompt, str) and isinstance(second.prompt, str)
+    first_ids = hf_tokenizer.encode(first.prompt, add_special_tokens=False)
+    second_ids = hf_tokenizer.encode(second.prompt, add_special_tokens=False)
+
+    assert first_ids[:8] == second_ids[:8]
+    assert first.prompt_len == len(first_ids) == 12
+    assert second.prompt_len == len(second_ids) == 12
+    assert get_requests(args, hf_tokenizer) == [first, second]
+
+
+@pytest.mark.benchmark
+def test_prefix_repetition_engine_prompt_tokens(vllm_runner):
+    with vllm_runner(
+        "HuggingFaceTB/SmolLM2-135M-Instruct",
+        revision="12fd25f77366fa6b3b4b768ec3050bf629380bac",
+        max_model_len=64,
+        dtype="float16",
+        enforce_eager=True,
+    ) as runner:
+        llm = runner.get_llm()
+        samples = PrefixRepetitionRandomDataset(random_seed=7).sample(
+            llm.get_tokenizer(),
+            num_requests=2,
+            num_prefixes=1,
+            prefix_len=8,
+            suffix_len=4,
+        )
+        outputs = llm.generate(
+            [sample.prompt for sample in samples],
+            SamplingParams(max_tokens=1, temperature=0),
+            tokenization_kwargs={"add_special_tokens": False},
+        )
+    first, second = (output.prompt_token_ids for output in outputs)
+    assert first[:8] == second[:8]
+    assert len(first) == samples[0].prompt_len == 12
+    assert len(second) == samples[1].prompt_len == 12
 
 
 @pytest.mark.parametrize(
