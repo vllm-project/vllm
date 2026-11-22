@@ -46,6 +46,7 @@ from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.gdn.replayssm import (
     load_gdn_replayssm_kernel,
     load_gdn_replayssm_materializer,
+    plan_gdn_replayssm_cursors,
     run_gdn_replayssm,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
@@ -2052,8 +2053,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             assert attn_metadata.replayssm_output_indices is not None
+            assert attn_metadata.replayssm_cursors is not None
             assert self.replayssm_executed_width is not None
             num_replay_rows = attn_metadata.num_spec_decodes
+            cursors = attn_metadata.replayssm_cursors[:, :num_replay_rows]
+            if self._plans_replayssm_decode:
+                plan_gdn_replayssm_cursors(
+                    spec_state_indices_tensor[:num_replay_rows, 0],
+                    self._replayssm_ring_start,
+                    self._replayssm_prev_num_accepted,
+                    cursors,
+                )
             core_attn_out_spec = run_gdn_replayssm(
                 kernel=self._replayssm_kernel,
                 executed_width=self.replayssm_executed_width,
@@ -2064,10 +2074,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 dt_bias=self.dt_bias,
                 checkpoint_state=ssm_state,
                 replayssm_cache=self.replayssm_rings,
-                ring_start=self._replayssm_ring_start,
-                num_committed=self._replayssm_prev_num_accepted,
+                cursors=cursors,
                 query_start_loc=spec_query_start_loc[: num_replay_rows + 1],
-                state_indices=spec_state_indices_tensor[:num_replay_rows, 0],
                 output_indices=attn_metadata.replayssm_output_indices,
                 uniform_query_length=attn_metadata.uniform_spec_sequence_length,
                 num_k_heads=self.num_k_heads // self.tp_size,

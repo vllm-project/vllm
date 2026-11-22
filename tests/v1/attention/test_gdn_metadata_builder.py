@@ -327,6 +327,28 @@ def test_replayssm_captured_indices_remain_valid_after_ragged_batch():
     assert selected[120:].eq(0).all()
 
 
+def test_replayssm_cursors_stay_per_group():
+    """Each cache group plans its replay cursors into its own buffer, so one
+    group's first layer cannot overwrite another group's state indices."""
+    src, dst = (
+        _create_gdn_builder(
+            num_speculative_tokens=3, full_cuda_graph=True, use_replayssm=True
+        )
+        for _ in range(2)
+    )
+    batch = BatchSpec(seq_lens=[80] * 4, query_lens=[4] * 4)
+    source = _build(src, batch)
+    common = _common_attn_metadata(dst, batch)
+    # MRV2 precomputes these each step; their values do not matter here.
+    dst.mamba_aligned_state_indices = common.block_table_tensor
+    meta = dst.update_block_table(
+        source, common.block_table_tensor, common.slot_mapping
+    )
+    assert source.replayssm_cursors is src.replayssm_cursors
+    assert meta.replayssm_cursors is dst.replayssm_cursors
+    assert dst.replayssm_cursors is not src.replayssm_cursors
+
+
 def test_full_cudagraph_spec_metadata_uses_request_count():
     """FULL cudagraph token padding must not pad request-indexed metadata."""
     num_speculative_tokens = 3

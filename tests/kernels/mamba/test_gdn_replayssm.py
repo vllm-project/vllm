@@ -13,6 +13,7 @@ from vllm.model_executor.layers.mamba.gdn.replayssm import (
     load_gdn_replayssm_kernel,
     load_gdn_replayssm_materializer,
     pack_replayssm_rows,
+    plan_gdn_replayssm_cursors,
     run_gdn_replayssm,
 )
 
@@ -115,10 +116,8 @@ def test_uniform_replayssm_passes_qkv_views_and_aligned_gates():
             torch.zeros(3, 1, 32, dim, dtype=torch.bfloat16),
             torch.zeros(3, 1, 32),
         ),
-        ring_start=torch.zeros(3, dtype=torch.int32),
-        num_committed=torch.zeros(3, dtype=torch.int32),
+        cursors=torch.tensor([[1, 2], [0, 0], [0, 0]], dtype=torch.int32),
         query_start_loc=torch.tensor([0, width, tokens], dtype=torch.int32),
-        state_indices=torch.tensor([1, 2], dtype=torch.int32),
         output_indices=torch.arange(tokens),
         num_k_heads=1,
         num_v_heads=1,
@@ -245,6 +244,15 @@ def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
     padding_page = pages[0].clone()
     capture = width in (1, 4)
     graph = None
+    state_indices = torch.tensor(
+        [1, 0] if capture else [1], dtype=torch.int32, device=device
+    )
+    cursors = torch.empty(3, state_indices.numel(), dtype=torch.int32, device=device)
+
+    def replay_step(**inputs):
+        # The model plans once per cache group, inside the captured graph.
+        plan_gdn_replayssm_cursors(state_indices, ring_start, committed, cursors)
+        return run_gdn_replayssm(**inputs)
 
     # Eighteen steps cross a flush and the ring boundary.
     for step in range(18):
@@ -276,15 +284,11 @@ def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
             dt_bias=dt_bias,
             checkpoint_state=checkpoint,
             replayssm_cache=(u_cache, k_cache, g_cache),
-            ring_start=ring_start,
-            num_committed=committed,
+            cursors=cursors,
             query_start_loc=torch.tensor(
                 [0, query_len, query_len] if capture else [0, query_len],
                 dtype=torch.int32,
                 device=device,
-            ),
-            state_indices=torch.tensor(
-                [1, 0] if capture else [1], dtype=torch.int32, device=device
             ),
             output_indices=torch.tensor(
                 list(range(query_len)) + ([width] if capture else []),
@@ -306,12 +310,12 @@ def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
                 stream = torch.cuda.Stream()
                 stream.wait_stream(torch.cuda.current_stream())
                 with torch.cuda.stream(stream):
-                    run_gdn_replayssm(**graph_inputs)
+                    replay_step(**graph_inputs)
                 torch.cuda.current_stream().wait_stream(stream)
                 pages.copy_(saved_pages)
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
-                    graph_output = run_gdn_replayssm(**graph_inputs)
+                    graph_output = replay_step(**graph_inputs)
                 pages.copy_(saved_pages)
             else:
                 for name in ("mixed_qkv", "a", "b"):
@@ -322,7 +326,7 @@ def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
             torch.testing.assert_close(pages[0], padding_page, rtol=0, atol=0)
             a, b = a[:query_len], b[:query_len]
         else:
-            output = run_gdn_replayssm(**inputs)
+            output = replay_step(**inputs)
         expected_output, _ = _reference_gdn_step(
             accepted_state, q, k, v, a, b, A_log, dt_bias
         )

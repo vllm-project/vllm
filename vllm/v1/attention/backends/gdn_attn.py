@@ -152,6 +152,10 @@ class GDNAttentionMetadata:
     # tokens, through the spec_* fields above. Its kernel pads each row to the
     # launch width; these indices select the real-token outputs.
     replayssm_output_indices: torch.Tensor | None = None
+    # `[3, max_num_seqs]` per-group buffer of FlashInfer state indices, history
+    # lengths and ring bases. The group's first layer fills the leading
+    # `num_spec_decodes` columns each step; its other layers read them.
+    replayssm_cursors: torch.Tensor | None = None
 
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
@@ -303,9 +307,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             device=device,
         )
         self.replayssm_output_indices: torch.Tensor | None = None
+        self.replayssm_cursors: torch.Tensor | None = None
         if self.use_gdn_replayssm:
             self.replayssm_output_indices = torch.empty(
                 (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
+            )
+            self.replayssm_cursors = torch.empty(
+                (3, self.vllm_config.scheduler_config.max_num_seqs),
+                dtype=torch.int32,
+                device=device,
             )
 
     @staticmethod
@@ -848,6 +858,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_accepted_tokens=num_accepted_tokens,
             uniform_spec_sequence_length=uniform_spec_sequence_length,
             replayssm_output_indices=replayssm_output_indices,
+            replayssm_cursors=self.replayssm_cursors,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
@@ -887,8 +898,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> GDNAttentionMetadata:
-        """Re-gather this group's state indices. The other fields are
-        batch-level and stay shared with `metadata`."""
+        """Re-gather this group's state indices and use its own replay cursors.
+        The other fields are batch-level and stay shared with `metadata`."""
         m = metadata
         checkpoint = (
             m.checkpoint.regather_state_indices(blk_table)
@@ -937,6 +948,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_state_indices_tensor=non_spec_indices,
             prefill_state_indices=prefill_indices,
             checkpoint=checkpoint,
+            replayssm_cursors=self.replayssm_cursors,
         )
 
     def build_for_cudagraph_capture(

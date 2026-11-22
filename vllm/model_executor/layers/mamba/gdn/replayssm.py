@@ -104,6 +104,31 @@ def pack_replayssm_rows(
     return packed.masked_fill(~mask, padding_value)
 
 
+def plan_gdn_replayssm_cursors(
+    state_indices: torch.Tensor,
+    ring_start: torch.Tensor,
+    num_committed: torch.Tensor,
+    cursors: torch.Tensor,
+) -> None:
+    """Write one decode step's FlashInfer row cursors into `cursors`.
+
+    The rows of `cursors` are the FlashInfer state indices, the committed
+    history lengths and the ring bases. Every layer of a cache group reads
+    the same trackers, and the kernel does not change them, so one call per
+    group and step serves all of its layers.
+    """
+    fi_state_indices, hist_len, cache_base = cursors
+    # vLLM pads with block zero; FlashInfer skips only negative state indices.
+    # Gather cursors through the padding slot, then pass -1 for padding rows.
+    padding = state_indices <= NULL_BLOCK_ID
+    safe_slots = state_indices.clamp(min=NULL_BLOCK_ID)
+    fi_state_indices.copy_(state_indices).masked_fill_(padding, -1)
+    torch.index_select(num_committed, 0, safe_slots, out=hist_len)
+    torch.index_select(ring_start, 0, safe_slots, out=cache_base)
+    hist_len.masked_fill_(padding, 0)
+    cache_base.masked_fill_(padding, 0)
+
+
 def run_gdn_replayssm(
     *,
     kernel: Callable[..., None],
@@ -115,10 +140,8 @@ def run_gdn_replayssm(
     dt_bias: torch.Tensor,
     checkpoint_state: torch.Tensor,
     replayssm_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    ring_start: torch.Tensor,
-    num_committed: torch.Tensor,
+    cursors: torch.Tensor,
     query_start_loc: torch.Tensor,
-    state_indices: torch.Tensor,
     output_indices: torch.Tensor,
     num_k_heads: int,
     num_v_heads: int,
@@ -129,9 +152,10 @@ def run_gdn_replayssm(
 ) -> torch.Tensor:
     """Run one FlashInfer decode step over the replay rows.
 
-    Returns the outputs of real tokens in `output_indices` order. The kernel
-    reads the committed cursors but does not publish them; vLLM commits the
-    accepted tokens once per model step, after every layer runs.
+    `cursors` holds the rows that `plan_gdn_replayssm_cursors` wrote for this
+    step. Returns the outputs of real tokens in `output_indices` order. The
+    kernel reads the committed cursors but does not publish them; vLLM commits
+    the accepted tokens once per model step, after every layer runs.
     """
     uniform = uniform_query_length == executed_width
     packed_qkv = pack_replayssm_rows(
@@ -167,13 +191,7 @@ def run_gdn_replayssm(
     q = q_flat.view(num_rows, executed_width, num_k_heads, head_k_dim)
     k = k_flat.view_as(q)
     v = v_flat.view(num_rows, executed_width, num_v_heads, head_v_dim)
-    # vLLM pads with block zero; FlashInfer skips only negative state indices.
-    # Gather cursors through the padding slot, then pass -1 for padding rows.
-    valid_slots = state_indices > NULL_BLOCK_ID
-    safe_slots = torch.where(valid_slots, state_indices, NULL_BLOCK_ID).long()
-    fi_state_indices = torch.where(valid_slots, state_indices, -1)
-    hist_len = num_committed.index_select(0, safe_slots).masked_fill(~valid_slots, 0)
-    cache_base = ring_start.index_select(0, safe_slots).masked_fill(~valid_slots, 0)
+    fi_state_indices, hist_len, cache_base = cursors
     u_cache, k_cache, g_cache = replayssm_cache
     # Zero, not empty: padded token rows keep flowing through the model.
     output = torch.zeros(
@@ -210,4 +228,4 @@ def run_gdn_replayssm(
         flush_min=GDN_REPLAYSSM_LOGICAL_WINDOW + 1 - executed_width,
         restart_hist_on_flush=False,
     )
-    return output.flatten(0, 1).index_select(0, output_indices.long())
+    return output.flatten(0, 1).index_select(0, output_indices)

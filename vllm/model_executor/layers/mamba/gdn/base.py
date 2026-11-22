@@ -65,6 +65,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             )
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
+        # Writes the step's replay cursors; initialize_replayssm_ring_trackers()
+        # keeps this only on the first layer of each cache group.
+        self._plans_replayssm_decode = True
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
