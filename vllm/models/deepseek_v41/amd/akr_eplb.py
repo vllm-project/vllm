@@ -307,8 +307,8 @@ def register_aiter_profile(experts_per_rank: int, hidden: int, inter: int) -> bo
     """Give MegaMoE's replica-slot geometry (S = 49) AITER's tuned EP8 profile
     of this model, which AITER keys on 48 experts per rank only. Must run
     before the MegaMoE runtimes are built; a no-op for other S, other shapes,
-    or an AITER that already matches S. Belongs in AITER (a
-    `family_experts_per_rank` that also applies the tuner)."""
+    or an AITER that already matches S (ROCm/aiter#8453 adds S = 49 to the
+    profile; drop this once the pinned AITER has it)."""
     if experts_per_rank not in _AITER_PROFILE_EPR:
         return False
     from aiter.ops.flydsl.kernels.mega_moe import mega_moe_config as mc
