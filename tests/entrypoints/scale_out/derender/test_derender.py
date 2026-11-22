@@ -9,6 +9,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from tests.entrypoints.scale_out.derender.utils import stream_chat_derender
 from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -126,6 +127,56 @@ async def test_derender_chat_roundtrip(client):
     assert len(data["choices"]) == 1
     assert data["choices"][0]["message"]["content"]
     assert data["choices"][0]["message"]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server", [["--reasoning-parser", "ripple"]], indirect=True)
+@pytest.mark.parametrize("stream", [False, True])
+async def test_derender_ripple_preserves_literal_think_tag(client, tokenizer, stream):
+    """Hiding reasoning must not discard a literal think tag in the answer."""
+    gen_req = await _render_chat(client)
+    output_text = "The literal <think>example</think> is part of this answer."
+    output_ids = tokenizer.encode(output_text, add_special_tokens=False)
+    assert tokenizer.decode(output_ids, skip_special_tokens=False) == output_text
+    prompt_ids = gen_req["token_ids"]
+    prefix = tokenizer.decode(prompt_ids, skip_special_tokens=False)
+    full_text = tokenizer.decode(prompt_ids + output_ids, skip_special_tokens=False)
+    assert full_text.startswith(prefix)
+    expected_text = full_text[len(prefix) :]
+    chat_request = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "include_reasoning": False,
+    }
+
+    if stream:
+        message = await stream_chat_derender(
+            client,
+            output_ids,
+            [1] * len(output_ids),
+            chat_request,
+            len(gen_req["token_ids"]),
+            gen_req["token_ids"],
+        )
+        assert message["finish_reason"] == "stop"
+    else:
+        response = await client.post(
+            "/v1/chat/completions/derender",
+            json={
+                "model": MODEL_NAME,
+                "generate_response": _make_generate_response(output_ids),
+                "prompt_token_ids": gen_req["token_ids"],
+                "chat_request": chat_request,
+            },
+        )
+        assert response.status_code == 200, response.text
+        choice = response.json()["choices"][0]
+        assert choice["finish_reason"] == "stop"
+        message = choice["message"]
+
+    assert message["content"] == expected_text
+    assert message.get("reasoning") is None
+    assert not message.get("tool_calls")
 
 
 @pytest.mark.asyncio
