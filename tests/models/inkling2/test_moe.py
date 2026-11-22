@@ -239,6 +239,23 @@ requires_packed_experts = pytest.mark.skipif(
 )
 
 
+@pytest.mark.skipif(use_sm100_kernels(), reason="TRT-LLM-gen plans are exact")
+@pytest.mark.parametrize("num_experts", [64, 128])
+def test_sm12x_expert_plan_buckets_max_ctas(num_experts: int):
+    """Off the TRT-LLM-gen path, `max_ctas` (a Triton constexpr) is a
+    power-of-two upper bound, so batch sizes share compiled kernels."""
+    shapes = ((2304, 2304), (2304, 1152))
+    variants = set()
+    for tokens in range(1, 8193):
+        plan = trtllm_bmm.expert_plan(tokens, 8, num_experts, True, shapes)
+        rows = tokens * 8
+        exact = min(num_experts, rows) + (rows - min(num_experts, rows)) // plan.tile
+        assert exact <= plan.max_ctas < 2 * exact
+        assert plan.max_ctas & (plan.max_ctas - 1) == 0
+        variants.add((plan.tile, plan.max_ctas))
+    assert len(variants) <= 24
+
+
 @requires_packed_experts
 @pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
 @pytest.mark.parametrize("tile", [8, 16, 32, 64, 128, 256])
