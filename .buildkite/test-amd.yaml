@@ -2816,14 +2816,16 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/distributed/weight_transfer/
-  - tests/distributed/test_sharded_rdt_plan.py
+  - tests/distributed/test_sharded_rdt_engine.py
+  - vllm/model_executor/model_loader/reload/
+  - tests/model_executor/model_loader/test_load_plan.py
   - tests/distributed/test_sharded_rdt_producer.py
   - tests/distributed/test_sharded_rdt_trainer.py
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - uv pip install --system --no-deps 'ray==2.56.1'
-  - pytest -v -s distributed/test_sharded_rdt_plan.py
+  - pytest -v -s distributed/test_sharded_rdt_engine.py
   - pytest -v -s distributed/test_sharded_rdt_producer.py
   - pytest -v -s distributed/test_sharded_rdt_trainer.py
 

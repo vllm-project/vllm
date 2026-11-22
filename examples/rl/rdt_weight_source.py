@@ -29,8 +29,8 @@ class CheckpointNameSource(WeightSource):
     Transformers keeps each layer's experts fused as `[E, ...]` tensors, but
     vLLM's MoE loaders are written against the per-expert checkpoint entries --
     only `qwen{2,3}_moe` also accept the fused names, so publishing them
-    straight from `named_parameters()` limits the example to one family and
-    fails the consumer's bake on `experts.gate_up_proj` everywhere else.
+    straight from `named_parameters()` limits the example to one family, and
+    every other family's load plan sends `experts.gate_up_proj` in full.
     Splitting them back is also what a real trainer does, since converting an
     internal layout to checkpoint names is the normal producer job.
 
@@ -82,8 +82,8 @@ class CheckpointNameSource(WeightSource):
                 yield name, materialize_full_tensor(param)
                 continue
             # One gather per FUSED param, not per expert: the views below are
-            # into that one tensor, and every expert of a layer rides in the
-            # same gather group, so it stays resident exactly as long as needed.
+            # into that one tensor, which stays resident until the last gather
+            # unit holding one of its experts is released.
             prefix, kind = m.group(1), m.group(2)
             full = materialize_full_tensor(param)
             if kind == "down_proj":

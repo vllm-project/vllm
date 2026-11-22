@@ -29,7 +29,7 @@ def launch_vllm_serve(
     data_parallel_size: int = 1,
     enable_expert_parallel: bool = False,
     port: int = 8000,
-    # Leave headroom for the RDT receive buffers, which vLLM doesn't reserve.
+    # Leave headroom for the RDT receive arena, which vLLM doesn't reserve.
     gpu_memory_utilization: float = 0.7,
     extra_args: list[str] | None = None,
 ) -> subprocess.Popen:
@@ -77,6 +77,8 @@ def launch_vllm_serve(
     env = dict(
         os.environ,
         VLLM_SERVER_DEV_MODE="1",
+        # sharded RDT writes through the load plan, which needs direct reload
+        VLLM_RELOAD_MODE="direct",
     )
     # Pin the child to THIS Ray cluster. vLLM's ray DP backend reaches Ray
     # through a bare ``ray.init()``, which STARTS a cluster rather than

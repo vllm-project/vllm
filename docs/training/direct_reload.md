@@ -23,6 +23,11 @@ those refusals; `VLLM_RELOAD_MODE=layerwise` turns it off.
 No layer is buffered and no tensor changes address, so captured CUDA graphs
 stay valid. Each update must send every weight.
 
+The [sharded RDT](weight_transfer/sharded_rdt.md) backend requires direct
+reload: it writes each worker's slices straight into the tensors the load plan
+names. With `VLLM_RELOAD_MODE=layerwise`, or a configuration direct reload
+refuses, the server refuses to start.
+
 ## Online Quantization
 
 With `VLLM_RELOAD_MODE=direct`, the
@@ -49,8 +54,7 @@ arrives, and an update that delivers only one of them fails at finish.
 
 ## Refused Configurations
 
-- Weight offloading, `torchao` quantization, `draft_lm_head_quantization`, and
-  the `sharded_rdt` weight transfer backend.
+- Weight offloading, `torchao` quantization, and `draft_lm_head_quantization`.
 - LoRA, in `auto` mode only.
 - Online quantization. With `VLLM_RELOAD_MODE=direct` the schemes in the table
   above reload directly, except `mxfp4` and `mxfp4_hadamard32` linear layers,
@@ -62,5 +66,5 @@ arrives, and an update that delivers only one of them fails at finish.
 - Pre-processed weights (weight cache), with a log even under
   `VLLM_RELOAD_MODE=direct`.
 
-The NCCL weight transfer load plan (`use_load_plan`) requires direct reload and
-refuses online quantization.
+The NCCL weight transfer load plan (`use_load_plan`) and the `sharded_rdt`
+weight transfer backend require direct reload and refuse online quantization.
