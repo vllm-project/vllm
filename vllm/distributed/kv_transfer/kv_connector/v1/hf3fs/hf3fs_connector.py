@@ -238,6 +238,15 @@ class AsyncOperationManager:
         """Check if all save operations for a request are completed."""
         return all(future.done() for future in self._save_futures[request_id])
 
+    def wait_for_saves(self, request_ids: set[str]) -> None:
+        """Block until every queued save of these requests has finished."""
+        futures = [
+            future
+            for request_id in request_ids
+            for future in self._save_futures.get(request_id, ())
+        ]
+        concurrent.futures.wait(futures)
+
     def _save_worker(self) -> None:
         """Background worker for handling save operations."""
         torch.accelerator.set_device_index(self._device)
@@ -607,6 +616,21 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             logger.error("HF3FS client initialization failed: %s", e)
             raise
 
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        """Finish the saves of preempted requests before their blocks are reused.
+
+        A save gathers its blocks on the save thread, after the step that wrote them.
+        Preemption frees the blocks at once.
+        This step's forward can then write another request's KV into them.
+        Waiting here keeps the gather reading the preempted request's own KV.
+        """
+        if not isinstance(kv_connector_metadata, HF3FSConnectorMetadata):
+            return
+        manager = getattr(self, "_async_manager", None)
+        if manager is None or not kv_connector_metadata.preempted_req_ids:
+            return
+        manager.wait_for_saves(kv_connector_metadata.preempted_req_ids)
+
     def save_kv_layer(
         self,
         layer_name: str,
@@ -783,6 +807,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     ) -> KVConnectorMetadata:
         """Build connector metadata for scheduling step."""
         metadata = HF3FSConnectorMetadata()
+        metadata.preempted_req_ids = set(scheduler_output.preempted_req_ids or ())
 
         for request_id in scheduler_output.finished_req_ids:
             self._scheduling_states.pop(request_id, None)
