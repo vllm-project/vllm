@@ -194,7 +194,7 @@ class MambaHybridModelState(DefaultModelState):
         )
         mamba_group_ids = self._mamba_ctx.mamba_group_ids
         unit, num_holds = decode_match_holds(self.vllm_config, kv_cache_config)
-        if self._align_mode and unit and self._decode_hold_ids_gpu is None:
+        if self.prefix_caching and unit and self._decode_hold_ids_gpu is None:
             self._decode_match_unit = unit
             self._num_decode_holds = num_holds
             self._decode_hold_ids = StagedWriteTensor(

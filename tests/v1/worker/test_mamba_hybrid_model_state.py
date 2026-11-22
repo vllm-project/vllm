@@ -660,3 +660,44 @@ def test_decode_hold_blocks_applied_once_per_step(
     # A step with nothing set uploads nothing.
     state.apply_decode_hold_writes()
     assert applies == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.parametrize("prefix_caching", [True, False])
+def test_initialize_kv_cache_allocates_decode_holds_only_with_prefix_caching(
+    monkeypatch: pytest.MonkeyPatch, prefix_caching: bool
+) -> None:
+    """ReplaySSM trackers run `initialize_kv_cache` with prefix caching off
+    too; only prefix caching allocates the decode hold rows."""
+    state = object.__new__(MambaHybridModelState)
+    state.cache_config = SimpleNamespace(use_replayssm=False)
+    state.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(static_forward_context={})
+    )
+    state.prefix_caching = prefix_caching
+    state._use_replayssm_trackers = True
+    state._mamba_state_copy_funcs = {}
+    state.max_num_reqs = 4
+    state.device = torch.device("cuda")
+    state._decode_hold_ids = None
+    state._decode_hold_ids_gpu = None
+    state._pending_decode_holds = None
+    ctx = Mock(mamba_group_ids=[1, 2])
+    monkeypatch.setattr(
+        mamba_hybrid.MambaSpecDecodeGPUContext, "create", Mock(return_value=ctx)
+    )
+    monkeypatch.setattr(mamba_hybrid, "decode_match_holds", Mock(return_value=(16, 2)))
+    tables = [SimpleNamespace(gpu=None)] * 3
+    block_tables = SimpleNamespace(block_tables=tables, input_block_tables=[None] * 3)
+
+    state.initialize_kv_cache(Mock(), block_tables)  # type: ignore[arg-type]
+
+    ctx.initialize_from_forward_context.assert_called_once()
+    if prefix_caching:
+        assert state._decode_hold_ids_gpu is not None
+        # One hold row per request: two holds for each of the two Mamba groups.
+        assert state._decode_hold_ids_gpu.tolist() == [[-1] * 4] * 4
+        assert state._pending_decode_holds == {}
+    else:
+        assert state._decode_hold_ids_gpu is None
+        assert state._pending_decode_holds is None
