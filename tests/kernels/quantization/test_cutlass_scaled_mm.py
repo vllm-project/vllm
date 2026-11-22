@@ -504,10 +504,6 @@ def test_cutlass_int8_azp_bias_fold(m: int, n: int, k: int, out_dtype: torch.dty
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.parametrize("azp_per_token", [True, False])
-@pytest.mark.skipif(
-    current_platform.has_device_capability(100),
-    reason="Int8 AZP is not supported on SM100+.",
-)
 def test_cutlass_int8_azp(
     m: int, n: int, k: int, out_dtype: torch.dtype, use_bias: bool, azp_per_token: bool
 ):
@@ -574,6 +570,26 @@ def test_cutlass_int8_azp(
         opcheck(
             torch.ops._C.cutlass_scaled_mm_azp,
             (out, aq_i8, bq_i8, scale_a, scale_b, azp_with_adj_i32, None, func_bias),
+        )
+
+
+# SM100+ has no int8 azp kernel, so the op must raise a clear error
+# instead of launching the SM90 or SM80 kernel.
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="Only SM100+ rejects int8 azp.",
+)
+def test_cutlass_int8_azp_sm100_error():
+    m, n, k = 32, 16, 64
+    aq_i8 = rand_int8((m, k))
+    bq_i8 = rand_int8((n, k)).t()
+    scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
+    scale_b = torch.randn((1, n), device="cuda", dtype=torch.float32) / 10
+    azp_adj_i32 = bq_i8.to(torch.int32).sum(dim=0, keepdim=True, dtype=torch.int32)
+
+    with pytest.raises(RuntimeError, match="Int8 not supported on SM"):
+        ops.cutlass_scaled_mm_azp(
+            aq_i8, bq_i8, scale_a, scale_b, torch.bfloat16, azp_adj_i32
         )
 
 
