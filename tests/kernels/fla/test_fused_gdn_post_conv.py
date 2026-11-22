@@ -262,12 +262,16 @@ def test_fused_post_conv_int64_token_offset():
 @pytest.mark.parametrize(
     "head_ratio,tp_size,query_lengths,state_dtype,norm_dtype",
     [
+        pytest.param(
+            3, 1, (4, 2, 0), torch.float16, torch.bfloat16, id="ratio3-fp16-ragged"
+        ),
+        pytest.param(4, 4, (9,), torch.float16, torch.float32, id="ratio4-fp16-max"),
         pytest.param(8, 16, (4, 4), torch.bfloat16, torch.bfloat16, id="tp16-bf16"),
         pytest.param(8, 4, (4, 4), torch.float32, torch.float32, id="tp4-fp32"),
         pytest.param(8, 16, (4, 2, 0), torch.bfloat16, torch.float32, id="tp16-ragged"),
         pytest.param(8, 4, (4, 2, 0), torch.float32, torch.bfloat16, id="tp4-ragged"),
-        pytest.param(8, 16, (8,), torch.float32, torch.bfloat16, id="tp16-max"),
-        pytest.param(8, 4, (8,), torch.bfloat16, torch.float32, id="tp4-max"),
+        pytest.param(8, 16, (9,), torch.float32, torch.bfloat16, id="tp16-max"),
+        pytest.param(8, 4, (9,), torch.bfloat16, torch.float32, id="tp4-max"),
         pytest.param(
             1,
             1,
@@ -287,7 +291,7 @@ def test_fused_post_conv_int64_token_offset():
         pytest.param(
             2,
             4,
-            (8,),
+            (9,),
             torch.float32,
             torch.float32,
             id="ratio2-tp4-max-fp32",
@@ -303,10 +307,31 @@ def test_fused_post_conv_int64_token_offset():
         pytest.param(
             4,
             4,
-            (8,),
+            (9,),
             torch.float32,
             torch.bfloat16,
             id="ratio4-tp4-max-fp32",
+        ),
+        # More requests leave fewer idle SMs, so the CUDA kernel splits V less.
+        pytest.param(
+            2, 1, (9, 9, 4, 2), torch.float32, torch.bfloat16, id="ratio2-4reqs"
+        ),
+        pytest.param(
+            2,
+            1,
+            (9,) * 14 + (3, 0),
+            torch.bfloat16,
+            torch.float32,
+            id="ratio2-16reqs-ragged",
+        ),
+        # Enough requests for no V split: 16-bit state runs the separate kernel.
+        pytest.param(
+            3,
+            1,
+            (9,) + (4,) * 6 + (2, 0),
+            torch.float16,
+            torch.bfloat16,
+            id="ratio3-9reqs-fp16",
         ),
     ],
 )

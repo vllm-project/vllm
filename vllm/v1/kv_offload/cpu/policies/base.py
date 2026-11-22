@@ -91,7 +91,7 @@ class CachePolicy(ABC):
 
         Keys first observed here may not yet be resident. This hook can
         maintain prefix order during a request without committing the
-        frequency access handled by ``on_request_finished``.
+        frequency access handled by `on_request_finished`.
         """
         return
 
@@ -105,8 +105,8 @@ class CachePolicy(ABC):
     ) -> None:
         """Apply one request-scoped cache access in prefix order.
 
-        ``key_groups`` contains keys observed for each KV cache group in
-        head-to-tail order. ``insertion_only_keys`` and ``reused_keys``
+        `key_groups` contains keys observed for each KV cache group in
+        head-to-tail order. `insertion_only_keys` and `reused_keys`
         distinguish chunks only created by this request from ready chunks it
         actually reused, which matters for policies such as ARC where reuse
         changes frequency but insertion and pending observations do not.

@@ -48,6 +48,9 @@ def test_reference_encoder_fixtures(case_id):
     thinking_mode = case.get("thinking_mode") or "chat"
     expected = (FIXTURES / "deepseek_v41" / f"test_output_{case_id}.txt").read_text()
 
+    # The reference encodes a conversation that ends with an assistant message as
+    # closed history, which is add_generation_prompt=False here.
+    final_assistant = messages[-1]["role"] == "assistant"
     if any(m["role"] == "latest_reminder" for m in messages):
         # latest_reminder is not an API role.
         assert case.get("tools") is None
@@ -55,14 +58,21 @@ def test_reference_encoder_fixtures(case_id):
             messages,
             thinking_mode=thinking_mode,
             reasoning_effort=case.get("reasoning_effort"),
+            add_generation_prompt=not final_assistant,
         )
     else:
-        prompt = render(
-            messages,
+        kwargs = dict(
             tools=case.get("tools"),
             thinking=thinking_mode == "thinking",
             reasoning_effort=case.get("reasoning_effort"),
         )
+        prompt = render(messages, add_generation_prompt=not final_assistant, **kwargs)
+        if final_assistant:
+            # By default a new assistant turn follows the final assistant message.
+            opener = "<｜Assistant｜>" + (
+                "<think>" if thinking_mode == "thinking" else "</think>"
+            )
+            assert render(messages, **kwargs) == expected + opener
     assert prompt == expected
 
 
@@ -176,6 +186,30 @@ def test_raw_text_parts_preserve_reference_separator():
 
 
 @pytest.mark.parametrize(
+    ("content", "stream"),
+    [
+        ([], False),
+        ([], True),
+        ([{"type": "text", "text": "hello"}], False),
+    ],
+)
+def test_request_content_iterator_can_be_rendered_repeatedly(content, stream):
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+            "messages": [{"role": "user", "content": content}],
+            "stream": stream,
+        }
+    )
+
+    first = render(request.messages, thinking=False)
+    assert first == render(request.messages, thinking=False)
+    assert request.messages[0]["content"] == content
+    request.model_dump_json()
+    assert first == render(request.messages, thinking=False)
+
+
+@pytest.mark.parametrize(
     ("role", "responses_type"),
     [("user", "input_text"), ("assistant", "output_text")],
 )
@@ -285,6 +319,65 @@ def test_tool_references_render_as_tool_names():
     )
 
 
+def function_tool(name, description, parameters, deferred):
+    function = {"name": name, "description": description, "parameters": parameters}
+    return {"type": "function", "function": function, "defer_loading": deferred}
+
+
+TOOL_SEARCH_TOOLS = [
+    function_tool(
+        "tool_search",
+        "Search tools",
+        {"type": "object", "properties": {"query": {"type": "string"}}},
+        False,
+    ),
+    function_tool(
+        "get_weather",
+        "Weather",
+        {"type": "object", "properties": {"city": {"type": "string"}}},
+        True,
+    ),
+    function_tool("get_time", "Time", {"type": "object"}, True),
+]
+
+
+def tool_search_messages(*references):
+    search = tool_call("tool_search")
+    search["function"]["arguments"] = '{"query": "weather"}'
+    return [
+        {"role": "user", "content": "weather in Paris?"},
+        {"role": "assistant", "tool_calls": [search]},
+        {
+            "role": "tool",
+            "tool_call_id": "tool_search",
+            "content": [{"type": "tool_reference", "name": n} for n in references],
+        },
+        {"role": "user", "content": "go on"},
+    ]
+
+
+def test_tool_references_list_deferred_tools_like_deepseek_recipe():
+    # deepseek-recipe (935817c) leaves deferred tools out of the tool prompt
+    # and lists referenced ones after the tool search result's user turn.
+    # Same fixture as the Rust renderer's test of the same name.
+    expected = (FIXTURES / "deepseek_v41" / "tool_search_references.txt").read_text()
+    messages = tool_search_messages("get_weather", "get_time")
+    assert render(messages, tools=TOOL_SEARCH_TOOLS, thinking=False) == expected
+
+
+@pytest.mark.parametrize(
+    ("messages", "tools", "match"),
+    [
+        (tool_search_messages(), TOOL_SEARCH_TOOLS[1:], "cannot be deferred"),
+        (tool_search_messages("nope"), TOOL_SEARCH_TOOLS, "'nope' not found"),
+    ],
+    ids=["all_deferred", "unknown_reference"],
+)
+def test_tool_search_request_errors(messages, tools, match):
+    with pytest.raises(ValueError, match=match):
+        render(messages, tools=tools)
+
+
 @pytest.fixture(params=[False, True], ids=["sync", "async"])
 def render_with_media(request, monkeypatch):
     # Keep real message parsing and image tracking; no model download is needed.
@@ -379,3 +472,113 @@ def test_dropped_developer_only_image_leaves_text_prompt(render_with_media):
     assert "<｜deepseek_image｜>" not in prompt["prompt"]
     assert "multi_modal_data" not in prompt
     assert "multi_modal_uuids" not in prompt
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("final_role", ["user", "developer", "system", "assistant"])
+def test_generation_prompt_only_controls_final_turn(thinking, final_role):
+    messages = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+        {"role": final_role, "content": "final message"},
+    ]
+    original = copy.deepcopy(messages)
+    closed = render(messages, thinking=thinking, add_generation_prompt=False)
+    opened = render(messages, thinking=thinking, add_generation_prompt=True)
+    cue = "<｜Assistant｜>" + ("<think>" if thinking else "</think>")
+
+    assert opened == closed + cue
+    assert "first answer<｜end▁of▁sentence｜>" in closed
+    assert "<｜User｜>first question<｜Assistant｜>" in closed
+    assert messages == original
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_continue_final_message_preserves_historical_eos(thinking):
+    messages = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+        {"role": "assistant", "content": "The answer is "},
+    ]
+    original = copy.deepcopy(messages)
+    closed = render(messages, thinking=thinking, add_generation_prompt=False)
+    continued = render(
+        messages,
+        thinking=thinking,
+        add_generation_prompt=False,
+        continue_final_message=True,
+    )
+    assert closed == continued + "<｜end▁of▁sentence｜>"
+    assert continued.endswith("The answer is ")
+    assert "first answer<｜end▁of▁sentence｜>" in continued
+    assert messages == original
+
+
+def test_continue_final_message_through_chat_request():
+    request = ChatCompletionRequest(
+        model="deepseek-ai/DeepSeek-V4.1-Flash",
+        messages=[
+            {"role": "user", "content": "Finish this sentence."},
+            {"role": "assistant", "content": "The answer is "},
+        ],
+        continue_final_message=True,
+    )
+    kwargs = request.build_chat_params(None, "auto").get_apply_chat_template_kwargs()
+    assert render(request.messages, **kwargs).endswith("The answer is ")
+
+
+def test_continue_final_reasoning_keeps_thinking_open():
+    messages = [
+        {"role": "user", "content": "Explain your answer."},
+        {"role": "assistant", "content": None, "reasoning": "Let me consider "},
+    ]
+    assert render(messages, continue_final_message=True).endswith(
+        "<｜Assistant｜><think>Let me consider "
+    )
+
+
+@pytest.mark.parametrize("thinking_mode", ["chat", "thinking"])
+@pytest.mark.parametrize(
+    "final",
+    [
+        {"content": "The answer is "},
+        {"content": "", "reasoning_content": "Let me consider "},
+        {"content": "", "tool_calls": [tool_call("search")]},
+    ],
+)
+def test_open_final_message_gets_no_generation_prompt(thinking_mode, final):
+    # A final assistant message left open with wo_eos is never followed by a
+    # new assistant turn, whatever add_generation_prompt says.
+    messages = [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "wo_eos": True, **final},
+    ]
+
+    def encode(**kwargs):
+        return encode_messages(
+            copy.deepcopy(messages), thinking_mode=thinking_mode, **kwargs
+        )
+
+    closed = encode(add_generation_prompt=False)
+    assert not closed.endswith("<｜end▁of▁sentence｜>")
+    assert encode() == closed
+
+
+@pytest.mark.parametrize("messages", [[], [{"role": "user", "content": "hello"}]])
+def test_continue_final_message_requires_assistant(messages):
+    with pytest.raises(ValueError, match="final assistant"):
+        render(messages, continue_final_message=True)
+
+
+@pytest.mark.skip_global_cleanup
+def test_deepseek_v41_unknown_role_raises_value_error():
+    # Invalid roles are client errors: they must surface as ValueError
+    # (mapped to HTTP 400 by the OpenAI serving layer), not
+    # NotImplementedError (mapped to HTTP 501).
+    with pytest.raises(ValueError, match="Invalid role: SYSTEM"):
+        encode_messages(
+            [{"role": "SYSTEM", "content": "Hello"}],
+            thinking_mode="chat",
+        )

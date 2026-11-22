@@ -92,11 +92,10 @@ def _get_rope_parameters(
         rope_parameters.setdefault("partial_rotary_factor", 1.0)
         return rope_parameters
     # Remote code configs keep per-layer lists
-    rope_scaling = getattr(config, "rope_scaling", None)
     yarn_only_types = getattr(config, "yarn_only_types", None)
     if yarn_only_types and layer_type not in yarn_only_types:
-        rope_scaling = None
-    rope_parameters = dict(rope_scaling or {})
+        rope_parameters = {}
+    rope_parameters = dict(rope_parameters)
     rope_parameters.setdefault("rope_type", "default")
     rope_theta = config.rope_theta
     if isinstance(rope_theta, list):

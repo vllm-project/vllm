@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi-K3's MonoKernels on MI355X against the ops vLLM runs for the same
-spec-verify step, random weights in the checkpoint's formats at TP8 shapes:
+regular-decode or spec-verify step, with random checkpoint-format weights:
 
 - K1 (one GPU): AttnRes -> in_proj -> f_b -> conv -> KDA recurrence -> gated
   norm, the conv / SSM state updates and a block-write layer's block store.
@@ -188,9 +188,22 @@ def _kda_reference(w, nb: int, S: int, L: int, write_idx: int):
     }
 
 
-# (rows, tokens a request): the widths of concurrency 1 .. 16 at 1 + 3 or 1 + 7
-# speculative tokens
-K1_SHAPES = [(8, 8), (16, 8), (16, 4), (16, 16), (4, 4), (32, 8), (64, 4), (64, 16)]
+# (rows, tokens a request): served regular-decode widths, then speculative
+# verification and larger kernel-capacity shapes.
+K1_SHAPES = [
+    (1, 1),
+    (4, 1),
+    (8, 1),
+    (16, 1),
+    (8, 8),
+    (16, 8),
+    (16, 4),
+    (16, 16),
+    (4, 4),
+    (32, 8),
+    (64, 4),
+    (64, 16),
+]
 
 
 @needs_gfx950
@@ -202,8 +215,11 @@ def test_k1_matches_vllm_ops(
     S: int, L: int, dim_first: bool, nacc: int, write: bool
 ) -> None:
     """K1 against attn_res -> in_proj -> f_b -> causal_conv1d_update ->
-    fused_recurrent_kda -> FusedRMSNormGated on one spec-verify step (S / L
-    requests of L tokens), including the state each step leaves behind."""
+    fused_recurrent_kda -> FusedRMSNormGated on one regular-decode or spec-verify
+    step (S / L requests of L tokens), including the state each step leaves
+    behind."""
+    if L == 1 and nacc != 1:
+        pytest.skip("at L = 1 every request accepts 1 token: the nacc = 1 case")
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         PROJ,
         KdaPreBuild,
@@ -400,11 +416,11 @@ def _fp8_f(t):
 
 @needs_gfx950
 @pytest.mark.parametrize("qbf16", [False, True])
-@pytest.mark.parametrize("S", [4, 8, 16, 32, 64])
+@pytest.mark.parametrize("S", [1, 2, 3, 4, 8, 16, 32, 64])
 def test_m1a_single_gpu_matches_vllm_ops(S: int, qbf16: bool) -> None:
     """M1a at DCP1 (ranks = 1: no gather, no peer memory) against attn_res ->
     qkv_a -> q / kv RMSNorm -> q_b -> aiter's fp4 W_UK -> the fp8 query (bf16
-    with ``qbf16``, M1c's), the fp8 cache rows and the gate."""
+    with `qbf16`, M1c's), the fp8 cache rows and the gate."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import (
         ENTRY,
         GROWS,
@@ -487,7 +503,7 @@ def test_m1a_single_gpu_matches_vllm_ops(S: int, qbf16: bool) -> None:
 
 
 def _a2a_combine(o, lse, seq_lens, qsl, q: int):
-    """``_dcp_a2a_pack_send`` + ``_dcp_a2a_unpack_combine`` for one rank's heads,
+    """`dcp_a2a_lse_reduce`'s pack + unpack-combine for one rank's heads,
     every rank's partials stacked: o [R, S, 12, 512], lse [R, S, 12], each
     sender's local KV lengths seq_lens [R, requests]."""
     S = o.size(1)
@@ -539,7 +555,7 @@ def _mla_back_inputs(S: int, q: int, R: int, rank: int = 0):
 
 
 def _uv_gate(lat, w):
-    """The gate times vLLM's ``_v_up_proj`` (aiter's fp4 W_UV)."""
+    """The gate times vLLM's `_v_up_proj` (aiter's fp4 W_UV)."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import NH
 
@@ -558,12 +574,15 @@ def _uv_gate(lat, w):
 
 
 def _mla_back_reference(w):
-    """DCP1: AITER's output is the latent (vLLM's ``_v_up_proj`` input)."""
+    """DCP1: AITER's output is the latent (vLLM's `_v_up_proj` input)."""
     return _uv_gate(w["o"], w)
 
 
 @needs_gfx950
-@pytest.mark.parametrize("S, q", [(4, 4), (8, 4), (16, 4), (32, 4), (64, 4), (64, 8)])
+@pytest.mark.parametrize(
+    "S, q",
+    [(1, 1), (4, 1), (16, 1), (4, 4), (8, 4), (16, 4), (32, 4), (64, 4), (64, 8)],
+)
 def test_m1b_single_gpu_matches_vllm_ops(S: int, q: int) -> None:
     """M1b at DCP1 (ranks = 1: no LSE, no peer memory): AITER's strided
     output -> aiter's fp4 W_UV -> the gate."""
@@ -628,8 +647,8 @@ def _mla_attn_reference(qb, kv8, idx, lens, q, scale):
     [(8, [8704]), (8, [3000, 0]), (4, [5000, 17, 9000, 64]), (8, [9]), (8, [40000])],
 )
 def test_m1c_m1b_splits_single_gpu(q: int, lens: list) -> None:
-    """M1c (``mla_attn``: bf16 query, fp8 KV, the splits' partials) against
-    fp32 attention, and M1b's ``splits`` combine -> W_UV -> the gate against
+    """M1c (`mla_attn`: bf16 query, fp8 KV, the splits' partials) against
+    fp32 attention, and M1b's `splits` combine -> W_UV -> the gate against
     the partials merged in torch."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import mla_attn as m
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import (
@@ -714,7 +733,7 @@ def _all_reduce_fp32(t: torch.Tensor) -> torch.Tensor:
 
 
 def _moe_reference(x, mw, rank: int):
-    """KimiMoE's decode path on ``x``: sigmoid router + bias top-16, the latent
+    """KimiMoE's decode path on `x`: sigmoid router + bias top-16, the latent
     down, aiter's MXFP4 experts, the latent all-reduce + RMSNorm, this rank's
     up_proj rows into the shared experts' output, the final all-reduce."""
     from aiter import ActivationType, QuantType
@@ -840,6 +859,38 @@ def _k2_inputs(rank: int, device, S: int = 8, seed: int = 0):
     }
 
 
+_COMPILED: set = set()
+
+
+def _together() -> None:
+    """Every TP rank's host gets here before any goes on."""
+    from vllm.distributed import get_tp_group
+
+    dist.barrier(group=get_tp_group().cpu_group)
+
+
+def _launch_together(key) -> None:
+    """Compile `key` if new, then wait for every TP rank, before a launch.
+
+    The engine compiles every build before its first step (`compile_build`
+    in `runtime/decode.py`). Here a first launch would compile in place, for
+    seconds, while the peers already launched spin on this rank's mailbox
+    words: past `WAIT_SECONDS` their waits give up, they finish the step on
+    stale words, and the ranks that read their tagged outputs see wrong
+    values with clean health. In a graph capture nothing runs yet; the
+    graph's first replay calls `_together` instead."""
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import (
+        compile_build,
+    )
+
+    if torch.cuda.is_current_stream_capturing():
+        return
+    if key not in _COMPILED:
+        compile_build(key)
+        _COMPILED.add(key)
+    _together()
+
+
 def _k2_launch(
     runner,
     w,
@@ -854,9 +905,9 @@ def _k2_launch(
     m1c_in=None,
     opt: int | None = None,
 ):
-    """``m1b``: (``mla_post``'s inputs, qlen, ranks) to run M1b in K2's launch;
-    ``splits`` its M1c splits, ``m1c_in`` (``mla_attn.host_args``'s) to run M1c
-    in the launch too. ``opt``: ``K2Build.opt`` (None: the default)."""
+    """`m1b`: (`mla_post`'s inputs, qlen, ranks) to run M1b in K2's launch;
+    `splits` its M1c splits, `m1c_in` (`mla_attn.host_args`'s) to run M1c
+    in the launch too. `opt`: `K2Build.opt` (None: the default)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
 
     m1b_in, fused = None, {}
@@ -878,6 +929,7 @@ def _k2_launch(
         **fused,
         **runner.fault,
     )
+    _launch_together(key)
     k2.k2_launch(
         key,
         core=w["core"],
@@ -970,6 +1022,7 @@ def _k2_worker(
     with torch.cuda.graph(graph):
         runner.step_begin()
         _k2_launch(runner, w, mw, prefix, out, reset=True)
+    _together()
     graph.replay()
     torch.accelerator.synchronize()
     want_prefix, want_out = prefix.clone(), out.clone()
@@ -982,9 +1035,12 @@ def _k2_worker(
 
 # (rows, block-write layer): every width up to the runner's MAX_TOKENS
 K2_CASES = [
+    (1, False),
+    (1, True),
     (8, False),
     (8, True),
     (4, False),
+    (4, True),
     (16, False),
     (16, True),
     (32, False),
@@ -1044,14 +1100,14 @@ def _k2_opt_worker(
 @needs_gfx950
 @multi_gpu_test(num_gpus=8)
 def test_k2_tp8_opt_bits_are_bit_exact(monkeypatch: pytest.MonkeyPatch) -> None:
-    """K2's critical-path options (``layer.K2_OPT``, the default) give the
-    plain K2's (``opt=0``) bits at every width, block-write layer or not, on
+    """K2's critical-path options (`layer.K2_OPT`, the default) give the
+    plain K2's (`opt=0`) bits at every width, block-write layer or not, on
     both layer parities, and again after their regions were re-armed."""
     multi_process_parallel(monkeypatch, 8, 1, _k2_opt_worker)
 
 
 def _gather(t: torch.Tensor) -> torch.Tensor:
-    """Every rank's ``t`` stacked [ranks, ...]."""
+    """Every rank's `t` stacked [ranks, ...]."""
     out = [torch.empty_like(t) for _ in range(dist.get_world_size())]
     dist.all_gather(out, t.contiguous())
     return torch.stack(out)
@@ -1095,6 +1151,7 @@ def _m1_worker(
             peer_off=runner.mla_peer_off,
             qheads=q8.size(1) if q8.size(1) != R * NH else 0,
         )
+        _launch_together(key)
         mla_pre(
             key,
             prefix=prefix,
@@ -1123,6 +1180,7 @@ def _m1_worker(
         key = MlaPostBuild(
             tokens=core.size(0), qlen=q, ranks=ranks, peer_off=runner.mla_post_off
         )
+        _launch_together(key)
         mla_post(
             key,
             o=b["o"],
@@ -1146,7 +1204,7 @@ def _m1_worker(
     assert qheads >= R * NH
 
     # M1a: this rank's query rows land at heads 12 * rank.. on every rank
-    for S in (4, 8, 16, 32, 64):
+    for S in (1, 3, 4, 8, 16, 32, 64):
         w = _mla_inputs(S, nb, rank, R)
         ref = _mla_reference(w, nb)
         runner.step_begin()
@@ -1184,7 +1242,7 @@ def _m1_worker(
 
     # M1b: every sender's partials for this rank's heads, each with its own
     # empty-shard mask, combined in rank order
-    for S, q in ((4, 4), (16, 4), (64, 4), (64, 8)):
+    for S, q in ((1, 1), (16, 1), (4, 4), (16, 4), (64, 4), (64, 8)):
         b = _mla_back_inputs(S, q, R, rank)
         runner.step_begin()
         core = torch.zeros(S, GROWS, dtype=bf, device=device)
@@ -1212,7 +1270,7 @@ def _m1_worker(
     # K2 with M1b in its launch (``K2Build.m1b_qlen``): core, prefix and the
     # MoE output bit-identical to M1b's launch then K2's, at DCP8 and DCP1
     mw = _moe_weights(rank, device)
-    for S, q in ((8, 8), (16, 8), (16, 4), (64, 4)):
+    for S, q in ((1, 1), (8, 1), (16, 1), (8, 8), (16, 8), (16, 4), (64, 4)):
         k = _k2_inputs(rank, device, S)
         for ranks in (R, 1):
             b = _mla_back_inputs(S, q, ranks, rank)
@@ -1281,6 +1339,7 @@ def _m1_worker(
                         m1b=(m1b_in(b, b["gate"]), q, 1), splits=n,
                         m1c_in=c_in if fused else None,
                     )  # fmt: skip
+            _together()
             graph.replay()
             torch.accelerator.synchronize()
             want = [t.clone() for t in (core, prefix, out)]
@@ -1321,6 +1380,7 @@ def _m1_worker(
                 f = (m1b_in(b, gate), q, R) if fused else None
                 k2w = dict(k, core=core, blocks=blocks)
                 _k2_launch(runner, k2w, mw, prefix, out, False, layer=layer, m1b=f)
+        _together()
         graph.replay()
         torch.accelerator.synchronize()
         want = [t.clone() for t in (prefix, q8, core, out)]
@@ -1387,7 +1447,6 @@ def test_m1a_pad_through_aiter_cprr(monkeypatch: pytest.MonkeyPatch, qlen: int) 
             num_kv_heads=1,
             head_size=cp.HEAD_SIZE,
             dtype=config.model_config.dtype,
-            non_causal_multi_token_decode=False,
         )
         L = ctx + qlen
         fp8 = current_platform.fp8_dtype()
