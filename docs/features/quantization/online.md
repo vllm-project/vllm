@@ -77,7 +77,7 @@ is quantized as it is loaded;
 `fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel` and `mxfp8` are supported
 on linear and MoE layers, and `mxfp4` (`--quantization-config.moe mxfp4`)
 and `nvfp4_per_token` on MoE layers. See
-[Direct Weight Reload](../../training/direct_reload.md#online-quantization)
+[Direct Weight Reload](../../training/weight_updates/direct_reload.md#online-quantization)
 for the refused schemes and the NVFP4 delivery rule.
 
 ## Advanced Configuration

@@ -1,6 +1,16 @@
-# Weight Transfer
+# Weight Updates and Weight Transfer
 
-vLLM provides a pluggable weight transfer system for synchronizing model weights from a training process to the inference engine during reinforcement learning (RL) workflows. This is essential for RLHF, GRPO, and other online RL methods where the policy model is iteratively updated during training and the updated weights must be reflected in the inference engine for rollout generation.
+vLLM provides a pluggable weight update system for synchronizing model weights from a training process to the inference engine during reinforcement learning (RL) workflows. This covers **transport** (moving tensors from trainer to workers), **reloading** (writing weights into the running model in place or layerwise with online quantization), and **verification**.
+
+## Quick Routing Guide
+
+| Topic | Document | Key Flags / Concepts |
+| --- | --- | --- |
+| **In-place reload (default)** | [Direct Weight Reload](direct_reload.md) | `VLLM_RELOAD_MODE=auto`, Refused Configurations, online quantization |
+| **Layerwise reload & QeRL** | [Layerwise (Re)loading](layerwise.md) | `VLLM_RELOAD_MODE=layerwise`, online quantization, CUDA graph preservation |
+| **Correctness verification** | [Weight Checker](weight_checker.md) | SHA-256 parameter digest verification across ranks |
+| **Custom transfer engines** | [Base Classes and Custom Engines](engines/base.md) | `WeightSource`, `VLLMWeightSyncClient`, `WeightTransferEngine` |
+| **Online quantization** | [Online Quantization](../../features/quantization/online.md) | Quantizing full-precision trainer weights during reload |
 
 ## Architecture
 
@@ -14,8 +24,8 @@ Weight transfer has **two engines, one per process**, and they are symmetric:
 | Holds | communicators, transfer plans, wire params | communicators, the target model |
 
 The trainer engine is stateful: it owns its communicators and wire params, pulls
-weights from a [`WeightSource`](base.md#weightsource), and drives the inference
-side through a [`VLLMWeightSyncClient`](base.md#vllmweightsyncclient). Trainer
+weights from a [`WeightSource`](engines/base.md#weightsource), and drives the inference
+side through a [`VLLMWeightSyncClient`](engines/base.md#vllmweightsyncclient). Trainer
 code never has to know the transport, and never has to thread transfer state
 back in on every round — one `send_weights()` call per sync.
 
@@ -28,19 +38,19 @@ engine drives on your behalf:
 4. **Finish** (`finish_weight_update`): finalizes the update (e.g. runs post-processing for checkpoint-format weights). Called once after all weights have been transferred.
 
 Checkpoint-format backends reload in the mode set by the `VLLM_RELOAD_MODE`
-environment variable: by default [direct reload](../direct_reload.md) where it
-applies, else [layerwise reload](../layerwise.md).
+environment variable: by default [direct reload](direct_reload.md) where it
+applies, else [layerwise reload](layerwise.md).
 
 ## Available Backends
 
 | Backend | Transport | Use Case |
 | ------- | --------- | -------- |
-| [NCCL](nccl.md) | NCCL broadcast | Separate GPUs for training and inference |
-| [IPC](ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU |
-| [sparse_nccl](nccl.md#sparse-nccl) | NCCL broadcast | Checkpoint-coordinate sparse weight patches |
-| [sharded_rdt](sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) |
-| [nccl_m2n](m2n.md) | NCCL M2N reshard | Trainer and inference use different sharding layouts |
-| [ModelExpress](modelexpress.md) | ModelExpress version-based transfer | Install immutable published weight versions, including object-storage checkpoints and deltas |
+| [NCCL](engines/nccl.md) | NCCL broadcast | Separate GPUs for training and inference |
+| [IPC](engines/ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU |
+| [sparse_nccl](engines/nccl.md#sparse-nccl) | NCCL broadcast | Checkpoint-coordinate sparse weight patches |
+| [sharded_rdt](engines/sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) |
+| [nccl_m2n](engines/m2n.md) | NCCL M2N reshard | Trainer and inference use different sharding layouts |
+| [ModelExpress](engines/modelexpress.md) | ModelExpress version-based transfer | Install immutable published weight versions, including object-storage checkpoints and deltas |
 
 ## Quickstart
 
@@ -55,7 +65,7 @@ from vllm.config import WeightTransferConfig
 
 llm = LLM(
     model="my-model",
-    # Other backends: "ipc", "sparse_nccl", "sharded_rdt", "nccl_m2n".
+    # Other backends: "ipc", "sparse_nccl", "sharded_rdt", "nccl_m2n", "modelexpress".
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
 )
 ```
@@ -116,7 +126,7 @@ on. This is the main rule to internalize:
 | Backend, inference side | `WeightTransferConfig(backend=...)` | A plain string selector — that is all this config holds |
 | Backend, trainer side | `init_info.backend` | A `ClassVar` on each init info; never passed by hand |
 | Wire params (`packed`, buffer sizes) | the backend's `TrainerInitInfo` | The trainer propagates them to the worker during `trainer_init`, so the two sides *cannot* disagree |
-| Weights to send | a [`WeightSource`](base.md#weightsource) | Usually written for your framework; `ModuleSource(model)` covers modules every rank holds whole (plain, FSDP, DTensor) |
+| Weights to send | a [`WeightSource`](engines/base.md#weightsource) | Usually written for your framework; `ModuleSource(model)` covers modules every rank holds whole (plain, FSDP, DTensor) |
 | Per-round payload | the backend's update info | Built by the engine (from `source.metadata`, or from a delta backend's per-round payload); you never construct it |
 
 !!! note
@@ -134,8 +144,8 @@ the `WeightSource` over the parameters they own, because materializing a
 parameter is usually itself a collective among its owners (an FSDP
 `full_tensor()` all-gather, a Megatron export) that would deadlock if some of
 them skipped it. Which ranks own which parameter is declared in
-[`ParamMeta.owners`](base.md#parammeta-ownership-and-layout).
-Only [sharded RDT](sharded_rdt.md) and [NCCL](nccl.md#broadcasting-ranks)
+[`ParamMeta.owners`](engines/base.md#parammeta-ownership-and-layout).
+Only [sharded RDT](engines/sharded_rdt.md) and [NCCL](engines/nccl.md#broadcasting-ranks)
 accept ranks that own different parameters, such as pipeline stages.
 Pipeline-parallel support for IPC is in progress; until then it, like NCCL M2N,
 needs every parameter owned by rank 0 or by every rank (see each backend's
@@ -171,7 +181,7 @@ and start from `tools/state_transition_verifier/README.md`.
 
 ## API Endpoints
 
-When running vLLM as an HTTP server, the following endpoints are available for weight transfer. `HTTPVLLMWeightSyncClient` speaks the first five for you. A trainer may also implement the protocol directly without importing vLLM: see the wire contracts in [NCCL](nccl.md#trainer-without-vllm-over-http) and [IPC](ipc.md#trainer-without-vllm-over-http). This keeps the trainer decoupled from vLLM: it needs no vLLM install or version pin, only this documented HTTP and wire contract, so trainer and server can upgrade independently (non-PyTorch trainers such as JAX can use it too).
+When running vLLM as an HTTP server, the following endpoints are available for weight transfer. `HTTPVLLMWeightSyncClient` speaks the first five for you. A trainer may also implement the protocol directly without importing vLLM: see the wire contracts in [NCCL](engines/nccl.md#trainer-without-vllm-over-http) and [IPC](engines/ipc.md#trainer-without-vllm-over-http). This keeps the trainer decoupled from vLLM: it needs no vLLM install or version pin, only this documented HTTP and wire contract, so trainer and server can upgrade independently (non-PyTorch trainers such as JAX can use it too).
 
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
@@ -202,4 +212,4 @@ The Rust frontend's optional gRPC `Control` service exposes the same pause, slee
 Every piece of the system is replaceable: the weights you send (`WeightSource`),
 the control-plane transport (`VLLMWeightSyncClient`), and the transports
 themselves (both engine ABCs, each with its own factory registry). See
-[Base Classes](base.md).
+[Base Classes](engines/base.md).
