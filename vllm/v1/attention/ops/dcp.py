@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import functools
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
@@ -31,6 +32,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.ops.cp_common import (
     DirectCPWorkspace,
@@ -1220,8 +1222,9 @@ def reserve_query_head_storage(
 
 
 _A2A_SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
-# XPU: one 128B cache line per signal slot, so peers on different devices
-# never write the same line (observed to lose signals otherwise).
+# XPU loses stores when different devices write the same cache line, so each
+# signal slot and each source rank's receive partition is line-aligned.
+_XPU_A2A_CACHE_LINE_BYTES = 64
 _XPU_A2A_SIGNAL_STRIDE = 32
 
 
@@ -1245,6 +1248,13 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
                 f"Direct DCP A2A requires at least one ubatch slot, got {num_ubatches}"
             )
         super().__init__(group, device, num_ubatches)
+        if current_platform.is_xpu():
+            lse_row_bytes = heads_per_rank * torch.float32.itemsize
+            max_num_tokens = round_up(
+                max_num_tokens,
+                _XPU_A2A_CACHE_LINE_BYTES
+                // math.gcd(lse_row_bytes, _XPU_A2A_CACHE_LINE_BYTES),
+            )
         self.max_num_tokens = max_num_tokens
         self.heads_per_rank = heads_per_rank
         self.head_dim = head_dim
