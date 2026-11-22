@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 router = APIRouter()
 
 
-def attach_router(app: FastAPI):
+def attach_router(app: FastAPI, *, sagemaker_enabled: bool = True):
     """Attach the LoRA adapter load/unload endpoints to the API server.
 
     Does nothing when dynamic LoRA updating is disabled. Handler levels are
@@ -42,17 +42,29 @@ def attach_router(app: FastAPI):
     ]
 
     try:
-        _attach_router(app)
+        _attach_router(app, sagemaker_enabled)
     finally:
         for handler, level in snapshot:
             handler.setLevel(level)
 
 
-def _attach_router(app: FastAPI):
-    """Register the LoRA adapter load/unload routes on the app."""
-    import model_hosting_container_standards.sagemaker as sagemaker_standards
+def _pass_through(request_shape: dict[str, str]):
+    """Stand-in for the SageMaker adapter handlers, which only add the
+    `/adapters` aliases; without them the routes are used as they are."""
+    return lambda fn: fn
 
-    @sagemaker_standards.register_load_adapter_handler(
+
+def _attach_router(app: FastAPI, sagemaker_enabled: bool):
+    """Register the LoRA adapter load/unload routes on the app."""
+    if sagemaker_enabled:
+        import model_hosting_container_standards.sagemaker as sagemaker_standards
+
+        register_load = sagemaker_standards.register_load_adapter_handler
+        register_unload = sagemaker_standards.register_unload_adapter_handler
+    else:
+        register_load = register_unload = _pass_through
+
+    @register_load(
         request_shape={
             "lora_name": "body.name",
             "lora_path": "body.src",
@@ -73,7 +85,7 @@ def _attach_router(app: FastAPI):
 
         return Response(status_code=200, content=response)
 
-    @sagemaker_standards.register_unload_adapter_handler(
+    @register_unload(
         request_shape={
             "lora_name": "path_params.adapter_name",
         }

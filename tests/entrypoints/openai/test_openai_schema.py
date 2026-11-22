@@ -61,6 +61,7 @@ def test_openapi_exposes_completion_response_schemas() -> None:
         api_key=None,
         enable_request_id_headers=False,
         enable_fault_tolerance=False,
+        disable_sagemaker_integration=False,
         middleware=[],
         log_error_stack=False,
     )

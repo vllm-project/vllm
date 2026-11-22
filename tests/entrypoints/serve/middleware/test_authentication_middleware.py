@@ -80,7 +80,7 @@ def task_routes(request, monkeypatch) -> tuple[str, list[tuple[str, list[str]]]]
     monkeypatch.setenv("VLLM_SERVER_DEV_MODE", "1")
 
     app = FastAPI()
-    args = Namespace()
+    args = Namespace(disable_sagemaker_integration=False)
     app.state = Namespace()
     app.state.args = args
 

@@ -16,7 +16,7 @@ __all__ = [
 ]
 
 
-def register_vllm_serve_api_routers(app: FastAPI):
+def register_vllm_serve_api_routers(app: FastAPI, *, sagemaker_enabled: bool = True):
     from .instrumentator import register_instrumentator_api_routers
 
     register_instrumentator_api_routers(app)
@@ -25,7 +25,7 @@ def register_vllm_serve_api_routers(app: FastAPI):
         attach_router as attach_lora_router,
     )
 
-    attach_lora_router(app)
+    attach_lora_router(app, sagemaker_enabled=sagemaker_enabled)
 
     from vllm.entrypoints.serve.profile.api_router import (
         attach_router as attach_profile_router,

@@ -376,8 +376,9 @@ class FrontendArgs(BaseFrontendArgs):
     enable_request_id_headers: bool = False
     """If specified, API server will add X-Request-Id header to responses."""
     disable_sagemaker_integration: bool = False
-    """Python frontend only. Skip SageMaker route registration and bootstrap,
-    including the SageMaker aliases for runtime LoRA adapter management."""
+    """Python frontend only. Leave out the SageMaker HTTP integration entirely:
+    the `/ping`, `/invocations` and `/adapters` routes, and the bootstrap that
+    loads `/opt/ml/model/model.py` and the `CUSTOM_*` handler hooks."""
     disable_fastapi_docs: bool = False
     """Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint."""
     h11_max_incomplete_event_size: int = H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT
