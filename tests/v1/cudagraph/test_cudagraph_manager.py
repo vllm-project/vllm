@@ -54,6 +54,7 @@ def _create_vllm_config() -> MagicMock:
 
     vllm_config = MagicMock(spec=VllmConfig)
     vllm_config.compilation_config = compilation_config
+    vllm_config.model_config.max_model_len = 8192
     vllm_config.scheduler_config = SchedulerConfig.default_factory(max_num_seqs=4)
     vllm_config.parallel_config = ParallelConfig()
     vllm_config.speculative_config = None
@@ -324,6 +325,7 @@ def _create_decode_vllm_config(
     use_kda_recoverssm: bool = False,
     decode_sizes: list[int] | None = None,
     max_decode_tokens: int | None = None,
+    max_model_len: int = 8192,
 ) -> MagicMock:
     if decode_sizes is None:
         # The deprecated shared sizes set both kinds of graphs.
@@ -342,6 +344,7 @@ def _create_decode_vllm_config(
 
     vllm_config = MagicMock(spec=VllmConfig)
     vllm_config.compilation_config = compilation_config
+    vllm_config.model_config.max_model_len = max_model_len
     vllm_config.scheduler_config = SchedulerConfig.default_factory(
         max_num_seqs=max_num_seqs
     )
@@ -464,6 +467,22 @@ def test_decode_capture_sizes_are_request_counts(monkeypatch, decode_query_len):
     )
     assert capture_plan([], [8]) == ([], [8])
     assert capture_plan([2], []) == ([(2, 2 * q)], [])
+
+
+def test_recoverssm_keeps_mixed_graphs_past_the_decode_token_cap(monkeypatch):
+    """KDA RecoverSSM keeps the mixed graphs above max_num_seqs * (num_spec + 1)
+    tokens."""
+
+    def mixed_sizes(use_kda_recoverssm: bool) -> list[int]:
+        manager = _make_spec_decode_manager(
+            monkeypatch, max_num_seqs=2, use_kda_recoverssm=use_kda_recoverssm
+        )
+        return sorted(
+            d.num_tokens for d in manager._capture_descs[CUDAGraphMode.PIECEWISE]
+        )
+
+    assert max(mixed_sizes(True)) > 2 * _DECODE_QUERY_LEN
+    assert mixed_sizes(True) == mixed_sizes(False)
 
 
 def test_varlen_decode_graphs_take_the_decode_cap_as_a_token_budget(monkeypatch):
@@ -807,13 +826,13 @@ def test_draft_prefill_matches_shared_target_metadata_shape(
 def test_mixed_batch_at_decode_only_token_count_still_gets_a_graph(monkeypatch):
     """A mixed batch must not fall to eager where only decode graphs are staged.
 
-    ``round_up(size, decode_query_len)`` lands FULL decode graphs on token counts
+    `round_up(size, decode_query_len)` lands FULL decode graphs on token counts
     the PIECEWISE ladder never uses -- with capture sizes [1, 2, 4, 8, 16, 24]
     and query length 3, FULL covers 3, 6, 9 and 18 while PIECEWISE has only
     1, 2, 4, 8, 16, 24. Building each mode's candidate ranges independently keeps
     a PIECEWISE graph reachable there. Deriving the ranges from the staged sizes
     instead offers a mixed batch nothing but decode descriptors, whose
-    ``uniform_token_count`` it can never match, so it runs fully eager.
+    `uniform_token_count` it can never match, so it runs fully eager.
     """
     manager = _make_spec_decode_manager(monkeypatch)
 
@@ -852,10 +871,10 @@ def test_uniform_decode_beyond_capture_ladder_falls_back(monkeypatch):
 def test_dynamic_spec_decode_shared_token_count_stays_reachable(monkeypatch):
     """Every captured decode graph must remain reachable from dispatch().
 
-    Under dynamic speculative decoding ``decode_query_lens`` is a list, and the
+    Under dynamic speculative decoding `decode_query_lens` is a list, and the
     staging loop rounds each capture size up to *every* query length. Several
-    decode graphs therefore land on the same ``num_tokens`` -- e.g. capture size
-    2 stages both ``round_up(2, 1) == 2`` and ``round_up(2, 2) == 2``. Building
+    decode graphs therefore land on the same `num_tokens` -- e.g. capture size
+    2 stages both `round_up(2, 1) == 2` and `round_up(2, 2) == 2`. Building
     the candidate ranges one descriptor at a time would give all but the first
     of those an empty range, so they would never enter a candidate list and
     their batches would silently fall through to PIECEWISE.
@@ -910,7 +929,7 @@ def test_speculator_replays_graph_for_runtime_width(monkeypatch, specialize):
 
     def capture(manager, create_forward_fn, progress_bar_desc):
         for desc in manager._capture_descs[CUDAGraphMode.FULL]:
-            create_forward_fn(desc, warmup=False)(CUDAGraphMode.NONE)
+            create_forward_fn(desc, warmup=False)(CUDAGraphMode.FULL)
             k = forward.call_args.kwargs["num_speculative_steps"]
             graph = MagicMock()
             graph.replay.side_effect = lambda k=k: replayed_widths.append(k)
@@ -989,3 +1008,37 @@ def test_divisor_query_len_dispatch_is_unchanged(
         assert desc.cg_mode == CUDAGraphMode.FULL, num_tokens
         assert desc.num_tokens == expected, num_tokens
         assert desc.num_reqs == expected // decode_query_len, num_tokens
+
+
+def test_cudagraph_candidates_skip_sizes_exceeding_max_model_len(monkeypatch):
+    """Full/mixed CUDA graph candidates must not exceed max_num_reqs * max_model_len."""
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "get_global_graph_pool",
+        lambda: object(),
+    )
+    vllm_config = _create_decode_vllm_config(
+        [1, 8, 512],
+        num_speculative_tokens=0,
+        max_num_seqs=1,
+        max_model_len=448,
+    )
+
+    with patch.object(gpu_cudagraph_utils.logger, "warning") as warning:
+        manager = gpu_cudagraph_utils.CudaGraphManager(
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            decode_query_lens={1: 1},
+        )
+    warning.assert_called_once()
+    assert warning.call_args.args[1:] == ([512], 448)
+
+    all_descs = [desc for descs in manager._capture_descs.values() for desc in descs]
+    assert all(desc.num_tokens <= 448 for desc in all_descs)
+    assert any(desc.num_tokens == 8 for desc in all_descs)

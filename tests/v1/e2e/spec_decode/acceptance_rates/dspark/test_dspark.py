@@ -15,7 +15,7 @@ from ...utils import compute_acceptance_len, compute_acceptance_rate
 REGRESSION_TOLERANCE = 0.95
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DSparkCorrectnessConfig:
     model: str
     draft_model: str
@@ -30,7 +30,7 @@ class DSparkCorrectnessConfig:
     use_chat_completions: bool = False
     chat_template_kwargs: dict[str, object] | None = None
     attention_backend: str | None = None
-    gpu_memory_utilization: float = 0.92
+    gpu_memory_utilization: float | None = None
     enforce_eager: bool = False
     disable_flashinfer_sampler: bool = False
     language_model_only: bool = False
@@ -65,7 +65,6 @@ GEMMA4_DSPARK_DEEPSPEC = DSparkCorrectnessConfig(
     max_num_seqs=32,
     num_questions=200,
     use_chat_completions=True,
-    gpu_memory_utilization=0.85,
     enforce_eager=True,
     disable_flashinfer_sampler=True,
     language_model_only=True,
@@ -83,7 +82,6 @@ QWEN3_6_DSPARK_SPECULATORS = DSparkCorrectnessConfig(
     num_questions=200,
     use_chat_completions=True,
     chat_template_kwargs={"enable_thinking": False},
-    gpu_memory_utilization=0.85,
     language_model_only=True,
 )
 
@@ -127,7 +125,6 @@ def test_dspark_correctness_and_acceptance_rate(
 
     runner_config = {
         "block_size": None,
-        "trust_remote_code": True,
         "speculative_config": speculative_config,
         "max_model_len": config.max_model_len,
         "gpu_memory_utilization": config.gpu_memory_utilization,

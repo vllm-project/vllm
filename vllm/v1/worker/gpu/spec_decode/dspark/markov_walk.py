@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """One-launch DSpark Markov walk with an int8 Markov projection kept on chip.
 
-Host side of ``csrc/dspark_markov_walk.cu`` (layouts adapted from Xinwei
+Host side of `csrc/dspark_markov_walk.cu` (layouts adapted from Xinwei
 Qiang's int8 DSpark Markov walk kernels, MIT License). The eager
-walk reads the whole ``V x 256`` projection W2 from HBM once per draft step.
+walk reads the whole `V x 256` projection W2 from HBM once per draft step.
 The kernel quantizes W2 to int8 with one fp32 scale per row, keeps most of it
 in shared memory across all SMs and streams the rest from L2, and runs all
 steps in one cooperative launch. The target model verifies every draft token,
@@ -112,7 +112,7 @@ def stream_mask(tiles: int) -> int:
 
 
 def quantize_w2(w2: torch.Tensor, scale: float) -> tuple[torch.Tensor, torch.Tensor]:
-    """int8 W2 with one fp32 scale per row; ``scale`` (the logit scale) folds in."""
+    """int8 W2 with one fp32 scale per row; `scale` (the logit scale) folds in."""
     w = w2.float()
     row_scale = (w.abs().amax(1, keepdim=True) / 127.0).clamp_min(1e-30)
     q = (w / row_scale).round().clamp(-127, 127).to(torch.int8)
@@ -230,7 +230,7 @@ class DSparkMarkovWalker:
         draft_tokens: torch.Tensor,
         draft_logits: torch.Tensor | None,
     ) -> None:
-        """Walk ``base_logits`` [num_reqs, num_steps, V] into ``draft_tokens``.
+        """Walk `base_logits` [num_reqs, num_steps, V] into `draft_tokens`.
 
         No allocation and no host sync: safe under CUDA graph capture.
         """

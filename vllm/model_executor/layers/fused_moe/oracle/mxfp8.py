@@ -24,6 +24,8 @@ _SUPPORTED_BACKENDS = (
     # is_supported_config passes (gfx950 + flydsl installed + not EP). On other
     # devices / no flydsl / EP it is skipped and native is used.
     Fp8MoeBackend.AITER_MXFP8,
+    # AITER moe_gemm_a8w8 (gfx942): FP8 MFMA with per-32-K E8M0 scaling.
+    Fp8MoeBackend.AITER_TRITON_MXFP8_MXFP8,
     Fp8MoeBackend.HUMMING,
     Fp8MoeBackend.TRITON_MXFP8,
     Fp8MoeBackend.EMULATION,
@@ -35,6 +37,7 @@ _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "marlin": Fp8MoeBackend.MARLIN,
     "xpu": Fp8MoeBackend.XPU,
     "aiter": Fp8MoeBackend.AITER_MXFP8,
+    "aiter_triton_mxfp8_mxfp8": Fp8MoeBackend.AITER_TRITON_MXFP8_MXFP8,
     "triton": Fp8MoeBackend.TRITON_MXFP8,
     "humming": Fp8MoeBackend.HUMMING,
 }
@@ -45,8 +48,8 @@ def _mxfp8_backend_to_kernel_cls(
 ) -> list[type[mk.FusedMoEExperts]]:
     """Resolve the MXFP8 expert classes for a backend.
 
-    DeepGEMM resolves directly to ``DeepGemmExperts`` (not the
-    ``TritonOrDeepGemmExperts`` wrapper, whose Triton fallback cannot handle the
+    DeepGEMM resolves directly to `DeepGemmExperts` (not the
+    `TritonOrDeepGemmExperts` wrapper, whose Triton fallback cannot handle the
     MXFP8 1x32 scheme); all other backends defer to the FP8 resolver.
     """
     if backend == Fp8MoeBackend.DEEPGEMM:
@@ -61,6 +64,12 @@ def _mxfp8_backend_to_kernel_cls(
         )
 
         return [AiterMxfp8Experts]
+    if backend == Fp8MoeBackend.AITER_TRITON_MXFP8_MXFP8:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
+            AiterTritonMxfp8ExpertsMonolithic,
+        )
+
+        return [AiterTritonMxfp8ExpertsMonolithic]
     if backend == Fp8MoeBackend.TRITON_MXFP8:
         from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
             Mxfp8NativeTritonExperts,
@@ -80,6 +89,7 @@ class Mxfp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
     """MXFP8 MoE backend selection for one deployment configuration."""
 
     name = "Mxfp8"
+    placeholder_backend = Fp8MoeBackend.NONE
 
     def backend_to_kernel_cls(
         self, backend: Fp8MoeBackend
@@ -104,9 +114,15 @@ def select_mxfp8_moe_backend(
     """Select the MXFP8 MoE backend and the best expert class.
 
     Returns:
-        A tuple of (fp8_backend, experts_cls).
+        A tuple of (fp8_backend, experts_cls); `NONE` and a placeholder experts
+        class for requantization sources, which have no kernel.
 
     """
+    # TODO: migrate to oracle base method.
+    source = Mxfp8MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         backend = _BACKEND_NAME_MAP.get(runner_backend)
