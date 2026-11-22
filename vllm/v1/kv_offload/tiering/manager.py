@@ -19,11 +19,13 @@ Key Design Principles:
    protecting chunks from eviction until complete_read() is called
 """
 
+import math
 import threading
 import time
-from collections.abc import Collection, Iterable, Sequence
+import uuid
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 from typing_extensions import override
@@ -58,6 +60,7 @@ from vllm.v1.kv_offload.tiering.base import (
     TransferJob,
 )
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
+from vllm.v1.kv_offload.tiering.peer_import import PeerImport, PeerKeySource
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 logger = init_logger(__name__)
@@ -85,6 +88,8 @@ _TIER_POLL_BACKOFF_S = 1.0
 _TIER_POLL_ERROR_LOG_INTERVAL_S = 30.0
 # How long shutdown() waits for the thread to finish its round.
 _TIER_POLL_JOIN_TIMEOUT_S = 5.0
+# Longest a bulk import from a peer may run.
+_MAX_IMPORT_TIMEOUT_S = 3600.0
 
 
 @dataclass(slots=True)
@@ -273,6 +278,9 @@ class _SecondaryTierFacingParent(ParentManager):
             req_context, exclude_tier_idx=self._origin_idx
         )
 
+    def key_snapshot(self) -> Callable[[], list[OffloadKey]]:
+        return self._m.primary_tier.key_snapshot()
+
 
 class TieringOffloadingManager(OffloadingManager):
     """Orchestrates multi-tier KV cache offloading.
@@ -372,6 +380,88 @@ class TieringOffloadingManager(OffloadingManager):
         self._tier_poll_stop = threading.Event()
         self._tier_poll_thread: threading.Thread | None = None
         self._start_tier_poll_thread()
+
+        # Bulk imports of a peer's cache, by import id; see peer_import.py.
+        self._peer_imports: dict[str, PeerImport] = {}
+
+    # ------------------------------------------------------------------
+    # Bulk import from a peer
+    # ------------------------------------------------------------------
+
+    def start_peer_import(
+        self,
+        host: str,
+        base_port: int,
+        max_chunks: int | None = None,
+        timeout_s: float = 600.0,
+    ) -> dict[str, Any]:
+        """Start copying the CPU-tier cache of the peer at host.
+
+        Each DP rank imports from the peer rank with its index (base_port plus
+        the index), up to max_chunks (default: this tier's capacity). For a
+        replica warming up: on a serving one it replaces the working set. One
+        import runs at a time; asking again for its peer returns it. The
+        caller must hold self.lock.
+        """
+        tier = next((t for t in self.secondary_tiers if t.supports_peer_import), None)
+        if tier is None:
+            raise ValueError("bulk import needs a p2p secondary tier")
+        if not host:
+            raise ValueError("host is required")
+        if not 0 < base_port < 65536:
+            raise ValueError(f"invalid port {base_port}")
+        if max_chunks is not None and (type(max_chunks) is not int or max_chunks < 1):
+            raise ValueError(f"max_chunks must be an int >= 1, got {max_chunks!r}")
+        if not (math.isfinite(timeout_s) and 0 < timeout_s <= _MAX_IMPORT_TIMEOUT_S):
+            raise ValueError(
+                f"timeout_s must be in (0, {_MAX_IMPORT_TIMEOUT_S:.0f}], "
+                f"got {timeout_s}"
+            )
+        source = cast(PeerKeySource, tier)
+        port = source.peer_port(base_port)
+        self._peer_imports = {
+            import_id: imp
+            for import_id, imp in self._peer_imports.items()
+            if imp.active
+        }
+        running = next(iter(self._peer_imports.values()), None)
+        if running is not None:  # At most one import is active.
+            if running.host == host and running.port == port:
+                return running.status()
+            raise ValueError(
+                f"import {running.import_id} from {running.peer_id} is still running"
+            )
+        import_id = f"kv-import-{uuid.uuid4().hex[:12]}"
+        peer_import = PeerImport(
+            import_id=import_id,
+            host=host,
+            port=port,
+            tier=source,
+            max_chunks=max_chunks or self.primary_tier.num_chunks,
+            timeout_s=timeout_s,
+            capacity=self.primary_tier.num_chunks,
+        )
+        self._peer_imports[import_id] = peer_import
+        logger.info("KV import %s from %s started", import_id, peer_import.peer_id)
+        return peer_import.status()
+
+    def peer_import_status(self, import_id: str | None = None) -> list[dict[str, Any]]:
+        """Status of one import, or of every remembered one; hold self.lock."""
+        return [
+            imp.status()
+            for imp in self._peer_imports.values()
+            if import_id is None or imp.import_id == import_id
+        ]
+
+    def exclude_from_lookup_metrics(self, req_context: ReqContext) -> None:
+        """Keep an internal request's lookups (e.g. an import's) out of the
+        cache hit metrics, as allocation does for a scheduled request."""
+        self._metrics.on_request_allocated(req_context)
+
+    @property
+    def promotions_held(self) -> bool:
+        """True between reset_cache() and on_reset_flushed(); see lookup()."""
+        return self._promotions_held
 
     @property
     @override
@@ -1217,6 +1307,10 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             tier.serve_external_requests(self._tier_parents[tier])
 
+        # Before the promotion flush, so promotions go out this step.
+        for peer_import in self._peer_imports.values():
+            peer_import.advance(self)
+
         # Reset the per-step gate AFTER serve_external_requests so that
         # lookup() calls within it skip redundant _process_finished_jobs().
         self._processed_jobs_this_step = False
@@ -1243,6 +1337,9 @@ class TieringOffloadingManager(OffloadingManager):
         Work a live tier-poll thread finishes on its own is excluded, so an
         engine that only serves peers can go idle.
         """
+        # Imports advance only in on_schedule_end: keep an idle engine stepping.
+        if any(peer_import.active for peer_import in self._peer_imports.values()):
+            return True
         if self._polled_tiers:
             # Without a live thread, or with another tier a peer lookup can
             # promote from, only a step makes progress.
@@ -1293,6 +1390,8 @@ class TieringOffloadingManager(OffloadingManager):
         and a peer is told it is absent; RETRY would instead stall both until
         the hold is released.
         """
+        for peer_import in self._peer_imports.values():
+            peer_import.abort(self, "cache reset")
         for tier in self.secondary_tiers:
             tier.drain_jobs()
         # All tier I/O has stopped; consume their completion notifications

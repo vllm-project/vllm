@@ -5,7 +5,7 @@
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -141,6 +141,14 @@ class ParentManager(ABC):
     @abstractmethod
     def on_request_finished(self, req_context: ReqContext) -> None: ...
 
+    def key_snapshot(self) -> Callable[[], list[OffloadKey]]:
+        """The primary tier's keys for a peer importing them; pins nothing.
+
+        Only the copy runs under the manager lock; the returned call orders
+        the keys, MRU first, and may run on another thread.
+        """
+        raise NotImplementedError("this tier cannot list its keys")
+
 
 class SecondaryTierManager(ABC):
     """Abstract interface for managing a single non-primary offloading tier.
@@ -183,6 +191,9 @@ class SecondaryTierManager(ABC):
     # serve_external_requests() alone does not opt in: setting this asserts
     # the tier tolerates those calls off the scheduler thread.
     tolerates_off_thread_polling: ClassVar[bool] = False
+
+    # Whether a peer's cache can be bulk-imported over this tier.
+    supports_peer_import: ClassVar[bool] = False
 
     def __init__(
         self,

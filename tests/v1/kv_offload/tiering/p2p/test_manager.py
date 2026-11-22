@@ -148,6 +148,7 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._sessions = {}
     mgr._reconnect_backoff = {}
     mgr._data_plane_faults = {}
+    mgr._peer_down_reasons = {}
     mgr._kv_to_session = {}
     mgr._unbound_stores = {}
     mgr._reaped_stores = {}

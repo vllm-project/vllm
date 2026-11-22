@@ -449,6 +449,49 @@ would start new work; it does not discard these buffered terminal confirmations.
 
 In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so before the initial nonempty fetch is submitted, every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. After that submission, subsequent PD-tier lookups return MISS. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
 
+#### Bulk Import From a Peer (Warm Start)
+
+A new instance can copy a running peer's whole CPU-tier cache before it takes traffic, for example during a rolling upgrade. The import runs once: it lists the peer's keys, then pulls them over the normal lookup and fetch path, coldest to hottest, so eviction order is kept. The peer keeps serving meanwhile.
+
+Both instances need the P2P tier and compatible KV: same model, `block_size`, KV cache dtype, parallel layout and `PYTHONHASHSEED`. Different vLLM versions work when these match and both include bulk import (an older peer never answers the key listing, and the import fails after 30 s); pin `block_size` if their defaults differ. The old instance must use the default LRU eviction policy, which can list its keys.
+
+The import is driven through the generic connector RPC, `POST /v1/kv_connector/rpc`, with a JSON body. Both calls go to the **new** instance; it pulls from the old one.
+
+1. Start the new instance with the same P2P tier config as the old one.
+2. Start the import. `host` is the old instance's IP and `port` its base P2P port (`VLLM_P2P_SIDE_CHANNEL_PORT`, default `5710`), not its HTTP port. The call returns at once; the copy runs in the background.
+
+    ```bash
+    curl -X POST http://<new-instance>:8000/v1/kv_connector/rpc \
+      -d '{"op": "import_from_peer", "host": "<old-instance-ip>", "port": 5710}'
+    ```
+
+    Example response (`import_id` is a random ID for this import):
+
+    ```json
+    {"import_id": "kv-import-1a2b3c4d5e6f", "state": "connecting", ...}
+    ```
+
+    Optional fields: `max_chunks` (import only the hottest chunks) and `timeout_s` (default `600`, at most `3600`). A rejected request replies `{"error": ...}`.
+
+3. Poll the status every few seconds until it reports `done` or `failed`:
+
+    ```bash
+    curl -X POST http://<new-instance>:8000/v1/kv_connector/rpc \
+      -d '{"op": "import_status", "import_id": "kv-import-1a2b3c4d5e6f"}'
+    ```
+
+    Example response when finished:
+
+    ```json
+    [{"state": "done", "listed": 51200, "imported": 51200, "missed": 0, "failed": 0, ...}]
+    ```
+
+    `done` with `imported` close to `listed` means the warm-up worked. On `failed`, `error` says why; the instance keeps serving with what it has, at worst a cold start, and step 2 can be called again to retry.
+
+With data parallelism, each rank imports from the old instance's rank with the same index (`port + rank`). The RPC reaches one engine per API server, so run each rank behind its own API server (`--data-parallel-multi-port-external-lb`) and call each one.
+
+For a KV-event-aware router to see the imported chunks, set `self_describing_kv_events: true` and make sure the router is subscribed to the new instance's KV events before the import starts (for example, add it to the pool but keep it out of scheduling until the import is done). Events published before the router subscribes are lost.
+
 ### Out-of-Tree Secondary Tiers
 
 Implement `SecondaryTierManager` (`vllm/v1/kv_offload/tiering/base.py`) in your own package — no vLLM fork or patch required — and point the tier config at it directly:

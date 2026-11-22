@@ -237,6 +237,13 @@ class ClientRole:
         """True if any kv_request_id has a fetch in flight."""
         return bool(self._active_loads)
 
+    def has_unresolved_probes(self, kv_request_id: str) -> bool:
+        """True while a probe of kv_request_id is unsent or unanswered."""
+        st = self._requests.get(kv_request_id)
+        if st is None:
+            return False
+        return bool(st.unsent) or any(hit is None for hit in st.probes.values())
+
     def get_expired_lookup(self) -> tuple[str, float] | None:
         """Return an expired request and seconds without progress, if any."""
         now = time.monotonic()

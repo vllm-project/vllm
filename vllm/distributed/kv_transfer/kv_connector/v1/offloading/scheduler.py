@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import time
 from collections import Counter
-from collections.abc import Collection, Generator, Iterable, Sequence
+from collections.abc import Callable, Collection, Generator, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
@@ -64,6 +65,9 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 
 logger = init_logger(__name__)
 
@@ -1682,6 +1686,64 @@ class OffloadingConnectorScheduler:
         # Still a generator, so callers testing the result for truthiness keep
         # seeing a non-empty object the way they do today.
         yield from self._events_tracker.take_events(manager_events)
+
+    def _tiering_manager(self) -> "TieringOffloadingManager | None":
+        from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
+
+        if isinstance(self.manager, TieringOffloadingManager):
+            return self.manager
+        return None
+
+    def on_rpc(self, payload: bytes) -> bytes | None:
+        """Handle a connector RPC: a JSON object whose "op" names a handler in
+        _RPC_OPS, called under the manager lock.
+
+        Replies are JSON; a rejected request replies {"error": ...}. Payloads
+        with another op return None, so a MultiConnector tries the next child.
+        """
+        try:
+            msg = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        op = msg.get("op") if isinstance(msg, dict) else None
+        handler = self._RPC_OPS.get(op) if isinstance(op, str) else None
+        if handler is None:
+            return None
+        try:
+            with self._manager_locked():
+                result = handler(self, msg)
+        except (TypeError, ValueError, OverflowError) as exc:
+            result = {"error": str(exc)}
+        return json.dumps(result).encode()
+
+    def _peer_import_manager(self) -> "TieringOffloadingManager":
+        manager = self._tiering_manager()
+        if manager is None:
+            raise ValueError("peer import needs TieringOffloadingSpec")
+        return manager
+
+    def _rpc_import_from_peer(self, msg: dict[str, Any]) -> Any:
+        """{"op", "host", "port", "max_chunks"?, "timeout_s"?}: start copying
+        the CPU-tier cache of the P2P peer at host; port is its base P2P port
+        (see TieringOffloadingManager.start_peer_import)."""
+        return self._peer_import_manager().start_peer_import(
+            str(msg.get("host") or ""),
+            int(msg.get("port", 0)),
+            msg.get("max_chunks"),
+            float(msg.get("timeout_s", 600.0)),
+        )
+
+    def _rpc_import_status(self, msg: dict[str, Any]) -> Any:
+        """{"op", "import_id"?}: status of one import, or of all of them."""
+        return self._peer_import_manager().peer_import_status(msg.get("import_id"))
+
+    # RPC op name -> handler. To add an op, add a handler and an entry here.
+    _RPC_OPS: dict[
+        str, Callable[["OffloadingConnectorScheduler", dict[str, Any]], Any]
+    ] = {
+        "import_from_peer": _rpc_import_from_peer,
+        "import_status": _rpc_import_status,
+    }
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored chunks."""

@@ -37,6 +37,7 @@ from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTranspor
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
 from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import TYPE_KEY, DisconnectMsg
+from vllm.v1.kv_offload.tiering.p2p.session.session import KeyPage
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 if TYPE_CHECKING:
@@ -90,6 +91,8 @@ _IDLE_REAP_HEADROOM = 8
 # that is merely idle for the max starts over at an immediate reconnect.
 _RECONNECT_MIN_BACKOFF_S = 1.0
 _RECONNECT_MAX_BACKOFF_S = 60.0
+# Peers whose last session-death reason is kept for import status.
+_MAX_PEER_DOWN_REASONS = 64
 
 
 def _remote_prefiller_params(kv_params: dict | None) -> dict | None:
@@ -251,6 +254,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
     tolerates_off_thread_polling: ClassVar[bool] = True
+    supports_peer_import: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -358,6 +362,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # data-parallel index so replicas on a host don't collide (mirrors
         # NIXL). For DP=1 the index is 0, leaving the base port unchanged.
         dp_index = offloading_spec.config.parallel.data_parallel_index
+        self._dp_index = dp_index
+        # Why each recently lost peer's session died, for import status.
+        self._peer_down_reasons: dict[str, str] = {}
         port = int(port) + dp_index
         # Two decoupled identities:
         #   _local_id (``host:port``): the ZMQ control identity that peers
@@ -784,6 +791,60 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             session.flush_pending_lookups()
 
     # ------------------------------------------------------------------
+    # Bulk import: listing a peer's keys
+    # ------------------------------------------------------------------
+
+    def peer_port(self, base_port: int) -> int:
+        """The peer's port for this rank: its base port plus our DP index."""
+        return base_port + self._dp_index
+
+    def peer_ready(self, peer_id: str, connect: bool = False) -> bool | None:
+        """True once the session to peer_id is acked, False while pending,
+        None if there is none; connect opens one if needed."""
+        if connect:
+            self._peer_down_reasons.pop(peer_id, None)
+            session = self._get_or_create_session(peer_id)
+        else:
+            session = self._sessions.get(peer_id)
+        if session is None or not session.alive:
+            return None
+        return session.ready
+
+    def peer_down_reason(self, peer_id: str) -> str | None:
+        """Why the last session to peer_id died, if it did."""
+        session = self._sessions.get(peer_id)
+        if session is not None and not session.alive:  # Not reaped yet.
+            return session.death_reason
+        return self._peer_down_reasons.get(peer_id)
+
+    def request_peer_keys(
+        self, peer_id: str, list_id: str, cursor: int, limit: int
+    ) -> bool:
+        """Ask peer_id for one page of its keys. False if no session."""
+        session = self._sessions.get(peer_id)
+        if session is None or not session.alive:
+            return False
+        session.request_key_page(list_id, cursor, limit)
+        return True
+
+    def take_peer_keys(
+        self, peer_id: str, list_id: str, abandon: bool = False
+    ) -> KeyPage | None:
+        """Pop the page answering request_peer_keys, or None if pending;
+        abandon also stops waiting for it."""
+        session = self._sessions.get(peer_id)
+        if session is None:
+            return None
+        return session.take_key_page(list_id, abandon)
+
+    def probes_pending(self, peer_id: str, kv_request_id: str) -> bool:
+        """True while a probe of kv_request_id awaits the peer's answer."""
+        session = self._sessions.get(peer_id)
+        if session is None or not session.alive:
+            return False
+        return session.has_unresolved_probes(kv_request_id)
+
+    # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
@@ -960,6 +1021,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 backoff = self._schedule_reconnect_backoff(pid)
                 if backoff:
                     fault_info += f"; reconnect backoff {backoff:.0f}s"
+            self._peer_down_reasons.pop(pid, None)
+            self._peer_down_reasons[pid] = session.death_reason
+            while len(self._peer_down_reasons) > _MAX_PEER_DOWN_REASONS:
+                self._peer_down_reasons.pop(next(iter(self._peer_down_reasons)))
             logger.warning(
                 "P2P %s: peer %s down (%s)%s",
                 self._local_id,
