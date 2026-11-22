@@ -74,7 +74,8 @@ __global__ void rms_norm_kernel(
   }
   __syncthreads();
 
-  scalar_t* out_row = out + blockIdx.x * hidden_size;
+  const int64_t token_idx = blockIdx.x;
+  scalar_t* out_row = out + token_idx * hidden_size;
   auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
   auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight_row);
   auto* v_out = reinterpret_cast<vec_n_t<scalar_t, VEC_SIZE>*>(out_row);

@@ -325,10 +325,45 @@ def narrow_dummy_fp8_weights(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
 
+@pytest.fixture(scope="session", autouse=True)
+def release_dynamo_tracked_fakes():
+    """Clear ShapeEnv.tracked_fakes once Dynamo has built a frame's guards.
+
+    The tracked FakeTensors and their ShapeEnv form a cycle through C++ SymInts
+    that gc cannot collect. torch only clears the list for registered backends
+    (https://github.com/pytorch/pytorch/pull/193015, torch >= 2.15), not for
+    the callable backends the tests compile with.
+    """
+    from torch._dynamo import convert_frame
+
+    original = convert_frame.clear_compile_context_weakrefs
+
+    def clear_compile_context_weakrefs(tracer_output, compiler_fn):
+        original(tracer_output, compiler_fn)
+        output_graph = tracer_output and tracer_output.output_graph_for_cleanup
+        if output_graph is not None and not output_graph.export:
+            output_graph.tracked_fakes.clear()
+
+    convert_frame.clear_compile_context_weakrefs = clear_compile_context_weakrefs
+    yield
+    convert_frame.clear_compile_context_weakrefs = original
+
+
 @pytest.fixture(autouse=True)
 def dynamo_reset():
     yield
     torch._dynamo.reset()
+
+    # These caches are unbounded or keyed by pattern and ShapeEnv objects, so in
+    # a process that compiles once per test they grow until every full
+    # gc.collect() takes seconds.
+    from torch._inductor.pattern_matcher import PatternPrettyPrinter
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+    PatternPrettyPrinter.run.cache_clear()
+    for attr in vars(ShapeEnv).values():
+        if hasattr(attr, "cache_clear"):
+            attr.cache_clear()
 
 
 @pytest.fixture
@@ -1998,7 +2033,7 @@ def gpu_model_runner_for_requests(dist_init, tmp_path):
             max_model_len=1024,
         ),
     )
-    device = torch.device("cuda", 0)
+    device = torch.device(current_platform.device_type)
     runner = GPUModelRunner(config, device)
     runner.model_state = DefaultModelState(config, nn.Module(), None, device)
     runner.block_tables = BlockTables(

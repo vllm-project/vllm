@@ -752,6 +752,11 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "vllm-project/sentiment-polish-gpt2-small"
     ),
+    "GteForSequenceClassification": _HfExamplesInfo(
+        "alibaba-nlp-community/gte-multilingual-reranker-base",
+        min_transformers_version="5.18",
+        hf_overrides={"architectures": ["GteForSequenceClassification"]},
+    ),
     "GteNewForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-multilingual-reranker-base",
         trust_remote_code=True,
@@ -770,6 +775,7 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "RobertaForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/quora-roberta-base"
     ),
+    "ShieldGemma2ForImageClassification": _HfExamplesInfo("google/shieldgemma-2-4b-it"),
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3"),
 }
 
@@ -969,7 +975,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         max_model_len=4096,
     ),
     "HYV4VLForConditionalGeneration": _HfExamplesInfo(
-        "placeholder", is_available_online=False
+        "tencent/Hy4",
+        max_model_len=4096,
     ),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceM4/Idefics3-8B-Llama3",
@@ -982,6 +989,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "thinkingmachines/Inkling-2-Small",
         tokenizer_mode="inkling",
         max_model_len=4096,
+    ),
+    "Inkling2LoopForConditionalGeneration": _HfExamplesInfo(
+        "thinkingmachines/Inkling-2-Mini",
+        tokenizer_mode="inkling",
+        max_model_len=4096,
+        is_available_online=False,
     ),
     "IsaacForConditionalGeneration": _HfExamplesInfo(
         "PerceptronAI/Isaac-0.1",
@@ -1338,8 +1351,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen2.5-VL-3B-Instruct",
         max_model_len=4096,
     ),
-    "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B"),
-    "Qwen2_5OmniForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B-AWQ"),
+    "Qwen2_5OmniThinkerForConditionalGeneration": _HfExamplesInfo(
+        "Qwen/Qwen2.5-Omni-3B",
+        extras={"awq": "Qwen/Qwen2.5-Omni-7B-AWQ"},
+    ),
     "Qwen3VLForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-VL-4B-Instruct",
         max_model_len=4096,
@@ -1366,7 +1381,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "",
         is_available_online=False,
     ),
-    "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
+    "Qwen3OmniMoeThinkerForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         max_model_len=4096,
     ),
@@ -1898,7 +1913,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersForCausalLM": _HfExamplesInfo(
         "vllm-project/Ilama-3.2-1B", trust_remote_code=True
     ),
-    "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "TransformersMultiModalForCausalLM": _HfExamplesInfo(
+        "BAAI/Emu3-Chat-hf",
+        extras={"qwen2_5_omni": "Qwen/Qwen2.5-Omni-3B"},
+    ),
     "TransformersMultiModalForTranscription": _HfExamplesInfo(
         "microsoft/VibeVoice-ASR-HF"
     ),
@@ -1916,7 +1934,8 @@ _TRANSFORMERS_BACKEND_MODELS = {
         speculative_method="mtp",
     ),
     "TransformersMultiModalMoEForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-VL-30B-A3B-Instruct"
+        "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        extras={"qwen3_omni": "Qwen/Qwen3-Omni-30B-A3B-Instruct"},
     ),
     "TransformersMoEEmbeddingModel": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "TransformersMoEForSequenceClassification": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
