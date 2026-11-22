@@ -23,6 +23,7 @@ from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.qwen3 import (
     TOOL_CALL_END,
     TOOL_CALL_START,
+    Qwen3Parser,
     qwen3_config,
 )
 
@@ -1534,3 +1535,81 @@ def test_mimo_preserves_verbatim_parameter_values(
     )
     assert collect_function_name(results) == "run"
     assert json.loads(collect_tool_arguments(results)) == {"text": value}
+
+
+def _im_start_tokenizer():
+    # <|im_start|> as a real special token, so the engine drops it the way it
+    # drops the real one.
+    return make_mock_tokenizer(
+        {
+            TOOL_CALL_START: 100,
+            TOOL_CALL_END: 101,
+            "<|im_start|>": 102,
+            "<|im_end|>": 103,
+        },
+        special_tokens=[TOOL_CALL_START, TOOL_CALL_END, "<|im_start|>", "<|im_end|>"],
+    )
+
+
+# Shape from the issue: a quantized Qwen3 build puts the `<` of `<function=`
+# on a `<|im_start|>` token instead of emitting it as text.
+MISSING_ANGLE_TOOL_CALL = (
+    "<tool_call>\n"
+    "<|im_start|>function=get_weather>\n"
+    "<parameter=city>\n"
+    "Paris\n"
+    "</parameter>\n"
+    "</function>\n"
+    "</tool_call>"
+)
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_function_prefix_without_opening_angle(mock_request, thinking):
+    """The tool call must survive a dropped `<` in front of `function=`."""
+    parser = Qwen3Parser(
+        _im_start_tokenizer(),
+        chat_template_kwargs={"enable_thinking": thinking},
+    )
+    result = parser.extract_tool_calls(MISSING_ANGLE_TOOL_CALL, mock_request)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "get_weather"
+    assert json.loads(result.tool_calls[0].function.arguments) == {"city": "Paris"}
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_function_prefix_without_opening_angle_streaming(mock_request, thinking):
+    parser = Qwen3Parser(
+        _im_start_tokenizer(),
+        chat_template_kwargs={"enable_thinking": thinking},
+    )
+    chunks = [
+        "<tool_call>\n",
+        "<|im_start|>",
+        "function=get_weather",
+        ">\n",
+        "<parameter=city>\n",
+        "Paris\n",
+        "</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
+    ]
+    results = simulate_tool_streaming(parser, mock_request, chunks)
+
+    assert collect_function_name(results) == "get_weather"
+    assert json.loads(collect_tool_arguments(results)) == {"city": "Paris"}
+
+
+def test_loose_function_prefix_does_not_eat_plain_text(mock_request):
+    """`function=` in prose is still prose, not a tool call."""
+    parser = Qwen3Parser(
+        _im_start_tokenizer(),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    text = "Call function=main later, once the config has loaded."
+    result = parser.extract_tool_calls(text, mock_request)
+
+    assert result.tools_called is False
+    assert result.content == text

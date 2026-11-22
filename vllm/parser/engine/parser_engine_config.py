@@ -122,6 +122,13 @@ class ParserEngineConfig:
     # Special tokens exempt from auto-drop but not state-machine terminals.
     preserve_tokens: frozenset[str] = field(default_factory=frozenset)
 
+    # The lexer is shared by every state, so a spelling that only means
+    # something inside a wrapper (e.g. Qwen3's `function=` once the `<` of
+    # `<function=` was dropped) also matches where it is plain text. Called as
+    # `guard(state, terminal_name, matched_value)`; returning False keeps that
+    # occurrence as content.
+    terminal_guard: Callable[[ParserState, str, str], bool] | None = None
+
     # Special tokens delimiting conversation turns in the prompt only
     # considers reasoning markers after the last boundary token.
     turn_boundary_tokens: frozenset[str] = field(default_factory=frozenset)
