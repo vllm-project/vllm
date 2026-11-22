@@ -139,6 +139,28 @@ class JambaToolParser(ToolParser):
         if self.tool_calls_start_token not in current_text:
             return DeltaMessage(content=delta_text)
 
+        # The paths below only emit tool-call deltas, so text that shares a
+        # delta with the opener would be lost: stream it here.
+        if (
+            self.tool_calls_start_token not in previous_text
+            and self.tool_calls_start_token in delta_text
+        ):
+            leading, _, rest = delta_text.partition(self.tool_calls_start_token)
+            if leading:
+                delta = self.extract_tool_calls_streaming(
+                    previous_text + leading,
+                    current_text,
+                    self.tool_calls_start_token + rest,
+                    previous_token_ids,
+                    current_token_ids,
+                    delta_token_ids,
+                    request,
+                )
+                if delta is None:
+                    return DeltaMessage(content=leading)
+                delta.content = leading + (delta.content or "")
+                return delta
+
         # if the tool call token ID IS in the tokens generated so far, that
         # means we're parsing as tool calls now
 

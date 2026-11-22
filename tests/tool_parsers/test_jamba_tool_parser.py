@@ -368,3 +368,40 @@ def test_extract_tool_calls_streaming_partial_args_with_name_delta(jamba_tool_pa
                 streamed_arguments += arguments
 
     assert json.loads(streamed_arguments) == {"city": "Dallas", "state": "TX"}
+
+
+def test_extract_tool_calls_streaming_content_in_tool_start_delta(jamba_tool_parser):
+    """Text that shares a delta with `<tool_calls>` must be streamed as content."""
+    deltas = [
+        "Let",
+        ' me check. <tool_calls>[{"name": "get_current_weather"',
+        ', "arguments": {"city": "Dallas", "state": "TX"}}]',
+        "</tool_calls>",
+    ]
+
+    content = ""
+    names = []
+    streamed_arguments = ""
+    current_text = ""
+    for delta_text in deltas:
+        previous_text = current_text
+        current_text += delta_text
+        delta_message = jamba_tool_parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )
+        if delta_message:
+            content += delta_message.content or ""
+            for tool_call in delta_message.tool_calls:
+                if tool_call.function.name:
+                    names.append(tool_call.function.name)
+                streamed_arguments += tool_call.function.arguments or ""
+
+    assert content == "Let me check. "
+    assert names == ["get_current_weather"]
+    assert json.loads(streamed_arguments) == {"city": "Dallas", "state": "TX"}
