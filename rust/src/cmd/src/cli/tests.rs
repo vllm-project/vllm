@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use clap::{Args as _, FromArgMatches as _};
 use expect_test::expect;
 use vllm_chat::multimodal::MmModality;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -18,8 +17,8 @@ use vllm_text::backend::hf::{HfToken, ModelSource};
 use vllm_tracing::{LogFormatter, LogLevel};
 
 use super::{
-    BenchCommand, Cli, Command, DtypeArg, LogStatsInterval, SharedRuntimeArgs, UnsupportedArgs,
-    parse_int_flag,
+    BenchCommand, Cli, Command, DtypeArg, LogStatsInterval, SharedRuntimeArgs, parse_int_flag,
+    parse_runtime_args_json,
 };
 
 /// Resolve the data parallel topology the way `vllm-rs serve` does at startup.
@@ -1130,17 +1129,15 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     }
 }
 
+/// Python resolves the settings it reads only from environment variables and
+/// passes them in `--args-json`.
 #[test]
-fn args_json_reads_env_only_settings_from_env() {
-    let apply = |vars: &[(&str, &str)]| {
-        let vars: HashMap<_, _> = vars.iter().copied().collect();
-        let mut args: SharedRuntimeArgs =
-            serde_json::from_str(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#).unwrap();
-        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
-            .map(|()| args)
+fn args_json_reads_env_only_settings() {
+    let parse = |fields: &str| {
+        parse_runtime_args_json(&format!(r#"{{"model_tag":"Qwen/Qwen3-0.6B"{fields}}}"#))
     };
 
-    let args = apply(&[]).unwrap();
+    let args = parse("").unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
     assert!(!args.disable_request_id_randomization);
     assert!(!args.keep_alive_on_engine_death);
@@ -1153,16 +1150,12 @@ fn args_json_reads_env_only_settings_from_env() {
         Some(32 * 1024 * 1024)
     );
 
-    let args = apply(&[
-        ("VLLM_LOG_STATS_INTERVAL", "0.5"),
-        ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
-        ("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", "-1"),
-        ("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "1048576"),
-        ("VLLM_SKIP_MODEL_NAME_VALIDATION", " TRUE "),
-        ("VLLM_SERVER_DEV_MODE", " 1"),
-        ("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "true"),
-        ("VLLM_MAX_N_SEQUENCES", " 8 "),
-    ])
+    let args = parse(
+        r#","log_stats_interval":0.5,"disable_request_id_randomization":true,
+        "keep_alive_on_engine_death":true,"http_max_request_body_size":1048576,
+        "skip_model_name_validation":true,"server_dev_mode":true,
+        "allow_runtime_lora_updating":true,"max_n_sequences":8"#,
+    )
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
     assert!(args.disable_request_id_randomization);
@@ -1175,35 +1168,15 @@ fn args_json_reads_env_only_settings_from_env() {
         args.api_server_options().request_body_limit_bytes,
         Some(1024 * 1024)
     );
-    let args = apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "0")]).unwrap();
+    let args = parse(r#","http_max_request_body_size":0"#).unwrap();
     assert_eq!(args.api_server_options().request_body_limit_bytes, None);
-    let args = apply(&[("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "2")]).unwrap();
-    assert!(!args.api_server_options().allow_runtime_lora_updating);
 
-    let args = apply(&[("VLLM_LOG_STATS_INTERVAL", "inf")]).unwrap();
+    // Python sends the largest float for `inf`, which JSON cannot express.
+    let args = parse(r#","log_stats_interval":1.7976931348623157e308"#).unwrap();
     assert_eq!(args.log_stats_interval(), None);
 
-    let errors = [
-        apply(&[("VLLM_LOG_STATS_INTERVAL", "ten")]).unwrap_err(),
-        apply(&[("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "true")]).unwrap_err(),
-        apply(&[("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", "true")]).unwrap_err(),
-        apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "32MiB")]).unwrap_err(),
-        apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "-1")]).unwrap_err(),
-        apply(&[("VLLM_SERVER_DEV_MODE", "true")]).unwrap_err(),
-        apply(&[("VLLM_MAX_N_SEQUENCES", "1e3")]).unwrap_err(),
-    ];
-    expect![[r#"
-        [
-            "invalid value 'ten' for '--log-stats-interval <LOG_STATS_INTERVAL>': `ten` is not a number of seconds",
-            "invalid value 'true' for '--disable-request-id-randomization <DISABLE_REQUEST_ID_RANDOMIZATION>': `true` is not an integer",
-            "invalid value 'true' for '--keep-alive-on-engine-death <KEEP_ALIVE_ON_ENGINE_DEATH>': `true` is not an integer",
-            "invalid value '32MiB' for '--http-max-request-body-size <HTTP_MAX_REQUEST_BODY_SIZE>': `32MiB` is not a number of bytes",
-            "invalid value '-1' for '--http-max-request-body-size <HTTP_MAX_REQUEST_BODY_SIZE>': `-1` is not a number of bytes",
-            "invalid value 'true' for '--server-dev-mode <SERVER_DEV_MODE>': `true` is not an integer",
-            "invalid value '1e3' for '--max-n-sequences <MAX_N_SEQUENCES>': `1e3` is not an integer",
-        ]
-    "#]]
-    .assert_debug_eq(&errors);
+    expect!["invalid JSON arguments: http_max_request_body_size: invalid value: integer `-1`, expected usize at line 1 column 62"]
+        .assert_eq(&parse(r#","http_max_request_body_size":-1"#).unwrap_err());
 }
 
 /// `--log-error-stack` falls back to `VLLM_SERVER_DEV_MODE`. Python leaves the
@@ -1232,18 +1205,17 @@ fn log_error_stack_defaults_to_server_dev_mode() {
         "false"
     ]));
 
-    let json = |args_json: &str, vars: &[(&str, &str)]| {
-        let vars: HashMap<_, _> = vars.iter().copied().collect();
-        let mut args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
-        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
-            .unwrap();
+    let json = |args_json: &str| {
+        let args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
         args.api_server_options().log_error_stack
     };
-    let model_only = r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#;
-    let disabled = r#"{"model_tag":"Qwen/Qwen3-0.6B","log_error_stack":false}"#;
-    assert!(!json(model_only, &[]));
-    assert!(json(model_only, &[("VLLM_SERVER_DEV_MODE", "1")]));
-    assert!(!json(disabled, &[("VLLM_SERVER_DEV_MODE", "1")]));
+    assert!(!json(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#));
+    assert!(json(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","server_dev_mode":true}"#
+    ));
+    assert!(!json(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","server_dev_mode":true,"log_error_stack":false}"#
+    ));
 }
 
 /// `--enable-scale-out` falls back to `VLLM_SERVER_DEV_MODE`, like
@@ -1271,18 +1243,17 @@ fn enable_scale_out_defaults_to_server_dev_mode() {
         "false"
     ]));
 
-    let json = |args_json: &str, vars: &[(&str, &str)]| {
-        let vars: HashMap<_, _> = vars.iter().copied().collect();
-        let mut args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
-        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
-            .unwrap();
+    let json = |args_json: &str| {
+        let args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
         args.api_server_options().enable_scale_out
     };
-    let model_only = r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#;
-    let disabled = r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_scale_out":false}"#;
-    assert!(!json(model_only, &[]));
-    assert!(json(model_only, &[("VLLM_SERVER_DEV_MODE", "1")]));
-    assert!(!json(disabled, &[("VLLM_SERVER_DEV_MODE", "1")]));
+    assert!(!json(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#));
+    assert!(json(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","server_dev_mode":true}"#
+    ));
+    assert!(!json(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","server_dev_mode":true,"enable_scale_out":false}"#
+    ));
 }
 
 #[test]
@@ -3176,10 +3147,10 @@ fn unsupported_args_fail_startup() {
     }
 }
 
-/// Python features that only an environment variable turns on, and that Rust
-/// does not support yet, fail startup on both the `vllm-rs serve` path, where
-/// the variable binds a hidden flag, and the `--args-json` path. Off values, as
-/// Python reads them, are accepted.
+/// Python features that an environment variable turns on, and that Rust does
+/// not support yet, fail startup on both the `vllm-rs serve` path, where the
+/// variable binds a flag, and the `--args-json` path, where Python passes the
+/// value it resolves from the variable.
 #[test]
 fn unsupported_env_switches_fail_startup() {
     let serve = |flag: &str, value: &str| {
@@ -3187,28 +3158,36 @@ fn unsupported_env_switches_fail_startup() {
             .map(drop)
             .map_err(|error| error.to_string())
     };
-    let args_json = |name: &str, value: &str| {
-        let mut args: SharedRuntimeArgs =
-            serde_json::from_str(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#).unwrap();
-        args.apply_env_fallbacks(|lookup| (lookup == name).then(|| value.to_string()))
-    };
 
-    for (flag, name) in [
-        ("--enable-cohere-api", "VLLM_ENABLE_COHERE_API"),
+    for (flag, key, name) in [
+        (
+            "--enable-cohere-api",
+            "enable_cohere_api",
+            "VLLM_ENABLE_COHERE_API",
+        ),
         (
             "--enable-responses-api-store",
+            "enable_responses_api_store",
             "VLLM_ENABLE_RESPONSES_API_STORE",
         ),
-        ("--max-tokenize-tokens", "VLLM_MAX_TOKENIZE_TOKENS"),
+        (
+            "--max-tokenize-tokens",
+            "max_tokenize_tokens",
+            "VLLM_MAX_TOKENIZE_TOKENS",
+        ),
     ] {
         // Like any `Unsupported` argument, every value is refused, including
         // the off value `0`.
         for value in ["0", "1", "true"] {
             let error = serve(flag, value).unwrap_err();
             assert!(error.contains(flag), "{flag}={value}: {error}");
-            let error = args_json(name, value).unwrap_err();
-            assert!(error.contains(flag), "{name}={value}: {error}");
         }
+        let args_json = serde_json::json!({ "model_tag": "Qwen/Qwen3-0.6B", key: 1 }).to_string();
+        let error = parse_runtime_args_json(&args_json).unwrap_err();
+        assert!(
+            error.contains(&format!("- {key} ({name})\n")),
+            "{key}: {error}"
+        );
     }
 
     expect![[r#"
@@ -3219,175 +3198,17 @@ fn unsupported_env_switches_fail_startup() {
         For more information, try '--help'.
     "#]].assert_eq(&serve("--enable-cohere-api", "0").unwrap_err());
     expect![[r#"
-        invalid value '0' for '--enable-cohere-api <ENABLE_COHERE_API>': argument is not implemented in Rust frontend yet
+        The following arguments are not implemented in Rust frontend yet:
+        - enable_cohere_api (VLLM_ENABLE_COHERE_API)
+        - tool_server
 
-        Remove this argument, or unset the environment variable bound to it, to continue."#]].assert_eq(&args_json("VLLM_ENABLE_COHERE_API", "0").unwrap_err());
-}
-
-/// Every hidden flag and unsupported argument bound to an environment variable
-/// takes effect on the `--args-json` path exactly as on the `serve` path:
-/// starting from the same arguments, setting the variable on one path and
-/// passing the flag on the other give equal arguments.
-#[test]
-fn args_json_applies_hidden_and_unsupported_env_flags_like_serve() {
-    // A value per variable that changes the parsed arguments, or that an
-    // unsupported argument refuses.
-    let unsupported = [
-        "VLLM_ENABLE_COHERE_API",
-        "VLLM_ENABLE_RESPONSES_API_STORE",
-        "VLLM_MAX_TOKENIZE_TOKENS",
-    ];
-    let samples = [
-        ("VLLM_LOG_STATS_INTERVAL", "2.5"),
-        ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
-        ("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", "1"),
-        ("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "1048576"),
-        ("VLLM_SKIP_MODEL_NAME_VALIDATION", "true"),
-        ("VLLM_SERVER_DEV_MODE", "1"),
-        ("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "1"),
-        ("VLLM_MAX_N_SEQUENCES", "8"),
-        ("VLLM_ENABLE_COHERE_API", "0"),
-        ("VLLM_ENABLE_RESPONSES_API_STORE", "0"),
-        ("VLLM_MAX_TOKENIZE_TOKENS", "4096"),
-    ];
-
-    let cmd = SharedRuntimeArgs::augment_args(clap::Command::new("vllm-rs"));
-    let unsupported_cmd = UnsupportedArgs::augment_args(clap::Command::new("unsupported"));
-    let env_flags = cmd
-        .get_arguments()
-        .filter(|arg| {
-            arg.is_hide_set()
-                || (unsupported_cmd.get_arguments()).any(|other| other.get_id() == arg.get_id())
-        })
-        .filter_map(|arg| Some((arg.get_env()?.to_str()?, arg.get_long()?)))
-        .collect::<HashMap<_, _>>();
-    let mut sampled = samples.map(|(name, _)| name);
-    let mut bound = env_flags.keys().copied().collect::<Vec<_>>();
-    sampled.sort_unstable();
-    bound.sort_unstable();
-    assert_eq!(
-        sampled.as_slice(),
-        bound.as_slice(),
-        "add a sample for each new flag"
+        Remove these arguments, or unset the environment variables bound to them, to continue."#]]
+    .assert_eq(
+        &parse_runtime_args_json(
+            r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_cohere_api":true,"tool_server":"demo"}"#,
+        )
+        .unwrap_err(),
     );
-
-    let parse = |args: &[String]| {
-        let matches = cmd
-            .clone()
-            .try_get_matches_from(
-                ["vllm-rs".to_string(), "Qwen/Qwen3-0.6B".to_string()].iter().chain(args),
-            )
-            .map_err(drop)?;
-        Ok::<_, ()>(SharedRuntimeArgs::from_arg_matches(&matches).unwrap())
-    };
-    let base = parse(&[]).unwrap();
-    for (name, sample) in samples {
-        let flag = &env_flags[name];
-        let serve = parse(&[format!("--{flag}={sample}")]);
-        if unsupported.contains(&name) {
-            assert!(serve.is_err(), "{name}={sample} should be refused");
-        } else {
-            assert_ne!(
-                serve,
-                Ok(base.clone()),
-                "{name}={sample} should change the arguments"
-            );
-        }
-        // Values that start with `-`, empty values, and invalid values parse,
-        // or fail, the same way on both paths.
-        for value in [sample, "-1", "", "abc"] {
-            let serve = parse(&[format!("--{flag}={value}")]);
-            let mut args = base.clone();
-            let args_json = args
-                .apply_env_fallbacks(|lookup| (lookup == name).then(|| value.to_string()))
-                .map(|()| args)
-                .map_err(drop);
-            assert_eq!(args_json, serve, "{name}={value:?}");
-        }
-    }
-}
-
-/// Applying the environment on the `--args-json` path changes only the hidden
-/// flags bound to set variables, as unsupported arguments refuse any value. It
-/// keeps every value deserialized from the
-/// JSON, including flags that clap gives defaults or an implicit `false`, and
-/// visible flags bound to environment variables, whose JSON value wins.
-#[test]
-fn args_json_env_keeps_values_from_json() {
-    let json = r#"{
-        "model_tag": "Qwen/Qwen3-0.6B",
-        "tokenizer": "Qwen/Qwen3-0.6B-tokenizer",
-        "skip_tokenizer_init": true,
-        "hf_overrides": {"max_position_embeddings": 1024},
-        "generation_config": "vllm",
-        "engine_ready_timeout_secs": 12,
-        "language_model_only": true,
-        "stream_interval": 4,
-        "shutdown_timeout": 30,
-        "http_timeout_keep_alive": 11,
-        "chat_template": "{{ messages }}",
-        "trust_request_chat_template": true,
-        "enable_log_requests": true,
-        "max_log_len": 100,
-        "log_error_stack": false,
-        "sse_keep_alive_interval": 5,
-        "api_key": ["json-key"],
-        "disable_log_stats": true,
-        "served_model_name": ["a", "b"],
-        "allowed_origins": ["https://example.com"]
-    }"#;
-    let parse = || serde_json::from_str::<SharedRuntimeArgs>(json).unwrap();
-    let apply = |vars: &[(&str, &str)]| {
-        let vars: HashMap<_, _> = vars.iter().copied().collect();
-        let mut args = parse();
-        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
-            .unwrap();
-        args
-    };
-    let expected = parse();
-    assert!(expected.language_model_only && expected.enable_log_requests);
-    assert_eq!(expected.stream_interval.get(), 4);
-
-    assert_eq!(apply(&[]), expected);
-    // Visible flags bound to environment variables keep their JSON values.
-    assert_eq!(
-        apply(&[
-            ("VLLM_API_KEY", "env-key"),
-            ("VLLM_ENGINE_READY_TIMEOUT_S", "99"),
-            ("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "99"),
-        ]),
-        expected
-    );
-
-    // Setting every hidden variable changes only those flags.
-    let mut args = apply(&[
-        ("VLLM_LOG_STATS_INTERVAL", "2.5"),
-        ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
-        ("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", "1"),
-        ("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "1048576"),
-        ("VLLM_SKIP_MODEL_NAME_VALIDATION", "true"),
-        ("VLLM_SERVER_DEV_MODE", "1"),
-        ("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "1"),
-        ("VLLM_MAX_N_SEQUENCES", "8"),
-    ]);
-    assert!(args.server_dev_mode && args.allow_runtime_lora_updating);
-    assert_eq!(args.max_n_sequences, Some(8));
-    args.log_stats_interval = expected.log_stats_interval;
-    args.disable_request_id_randomization = expected.disable_request_id_randomization;
-    args.keep_alive_on_engine_death = expected.keep_alive_on_engine_death;
-    args.http_max_request_body_size = expected.http_max_request_body_size;
-    args.skip_model_name_validation = expected.skip_model_name_validation;
-    args.server_dev_mode = expected.server_dev_mode;
-    args.allow_runtime_lora_updating = expected.allow_runtime_lora_updating;
-    args.max_n_sequences = expected.max_n_sequences;
-    assert_eq!(args, expected);
-
-    // `VLLM_API_KEY` still fills `--api-key` when the JSON has none.
-    let mut args: SharedRuntimeArgs =
-        serde_json::from_str(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#).unwrap();
-    args.apply_env_fallbacks(|name| (name == "VLLM_API_KEY").then(|| "env-key".to_string()))
-        .unwrap();
-    assert_eq!(args.api_key, ["env-key"]);
 }
 
 #[test]

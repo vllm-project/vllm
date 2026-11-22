@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use clap::{ArgAction, Args, FromArgMatches as _, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use educe::Educe;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -683,7 +683,7 @@ pub struct SharedRuntimeArgs {
     /// Seconds between periodic engine statistics logs (default 10). Like
     /// Python, it is set only through `VLLM_LOG_STATS_INTERVAL`.
     #[arg(long, hide = true, env = "VLLM_LOG_STATS_INTERVAL")]
-    #[serde(skip)]
+    #[serde(default)]
     pub log_stats_interval: Option<LogStatsInterval>,
 
     /// Keep external request IDs as engine-core request IDs instead of adding
@@ -697,7 +697,7 @@ pub struct SharedRuntimeArgs {
         value_parser = parse_int_flag,
         default_value = "0"
     )]
-    #[serde(skip)]
+    #[serde(default)]
     pub disable_request_id_randomization: bool,
 
     /// Keep the API server running after the engine becomes permanently
@@ -711,7 +711,7 @@ pub struct SharedRuntimeArgs {
         value_parser = parse_int_flag,
         default_value = "0"
     )]
-    #[serde(skip)]
+    #[serde(default)]
     pub keep_alive_on_engine_death: bool,
 
     /// Maximum size in bytes of an HTTP request body and of a gRPC request
@@ -724,7 +724,7 @@ pub struct SharedRuntimeArgs {
         env = "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
         value_parser = parse_byte_count
     )]
-    #[serde(skip)]
+    #[serde(default)]
     pub http_max_request_body_size: Option<usize>,
 
     /// Accept any requested model name, served by the base model unless it
@@ -738,7 +738,7 @@ pub struct SharedRuntimeArgs {
         value_parser = parse_truthy_flag,
         default_value = "0"
     )]
-    #[serde(skip)]
+    #[serde(default)]
     pub skip_model_name_validation: bool,
 
     /// Register the development routes and default `--log-error-stack`. Like
@@ -752,7 +752,7 @@ pub struct SharedRuntimeArgs {
         value_parser = parse_int_flag,
         default_value = "0"
     )]
-    #[serde(skip)]
+    #[serde(default)]
     pub server_dev_mode: bool,
 
     /// Register the routes that load and unload LoRA adapters at runtime. Like
@@ -765,13 +765,13 @@ pub struct SharedRuntimeArgs {
         value_parser = parse_truthy_flag,
         default_value = "0"
     )]
-    #[serde(skip)]
+    #[serde(default)]
     pub allow_runtime_lora_updating: bool,
 
     /// Upper bound on a request's `n` (default 16384). Like Python, it is set
     /// only through `VLLM_MAX_N_SEQUENCES`.
     #[arg(long, hide = true, env = "VLLM_MAX_N_SEQUENCES", value_parser = parse_int)]
-    #[serde(skip)]
+    #[serde(default)]
     pub max_n_sequences: Option<i64>,
 
     /// The model name(s) used in the API. If multiple names are provided, the
@@ -983,59 +983,6 @@ impl SharedRuntimeArgs {
             serde_json::to_string(&self.mm_processor_kwargs)
                 .expect("mm-processor-kwargs serialization should not fail")
         })
-    }
-
-    /// Apply the configuration from environment variables, using `lookup` to
-    /// read the environment, on the `--args-json` path, where serde rather than
-    /// clap parses the arguments.
-    ///
-    /// Each set variable bound to a hidden flag or to an unsupported argument is
-    /// passed to clap as that flag, and the parsed value is written over the
-    /// deserialized arguments, so both launch paths share one binding and one
-    /// parser per variable. Python has no CLI flag for the hidden settings, so
-    /// the JSON never carries them. An unsupported argument refuses any value,
-    /// so it fails startup whether its value comes from the JSON or the
-    /// variable. Any other visible flag bound to a variable, such as
-    /// `--api-key`, is a Python CLI flag whose JSON value takes precedence.
-    fn apply_env_fallbacks(
-        &mut self,
-        lookup: impl Fn(&str) -> Option<String>,
-    ) -> Result<(), String> {
-        if self.api_key.is_empty()
-            && let Some(api_key) = lookup("VLLM_API_KEY")
-        {
-            self.api_key.push(api_key);
-        }
-
-        let unsupported = UnsupportedArgs::augment_args(clap::Command::new("unsupported"));
-        let mut env_args = Vec::new();
-        let cmd = Self::augment_args(
-            clap::Command::new("vllm-rs").no_binary_name(true).disable_help_flag(true),
-        )
-        .mut_args(|arg| {
-            let env = (arg.get_env())
-                .filter(|_| {
-                    arg.is_hide_set()
-                        || (unsupported.get_arguments()).any(|other| other.get_id() == arg.get_id())
-                })
-                .map(|env| env.to_string_lossy().into_owned());
-            // Only the arguments passed below may reach the matches, or
-            // `update_from_arg_matches` would overwrite the deserialized
-            // values: drop defaults, including the implicit `false` of
-            // `SetTrue`, and clap's own reading of the environment.
-            let arg = arg.env(None).default_value(None).required(false);
-            let Some(env) = env else {
-                return arg.action(ArgAction::Set);
-            };
-            if let Some(value) = lookup(&env) {
-                let long = arg.get_long().expect("env-bound flags are long flags");
-                // `=` keeps a value such as `-1` from reading as a flag.
-                env_args.push(format!("--{long}={value}"));
-            }
-            arg
-        });
-        let matches = cmd.try_get_matches_from(env_args).map_err(clap_error_message)?;
-        self.update_from_arg_matches(&matches).map_err(clap_error_message)
     }
 
     /// Build the OpenAI-server config for the Python-bootstrap worker contract.
@@ -1373,16 +1320,26 @@ pub struct StructuredOutputsConfig {
 /// Keys are API effort names, so unknown efforts fail at startup.
 type ReasoningEffortMap = HashMap<ReasoningEffort, String>;
 
-/// Parsed `VLLM_LOG_STATS_INTERVAL`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Parsed `VLLM_LOG_STATS_INTERVAL`, deserialized from seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(from = "f64")]
 pub enum LogStatsInterval {
     Every(Duration),
     /// Too long to ever elapse, such as `inf`, which Python sleeps forever on.
     Never,
 }
 
-/// Parse `VLLM_LOG_STATS_INTERVAL` seconds like Python: a non-positive value
-/// falls back to the default, and any positive one is slept on as is.
+/// Interpret seconds like Python: a non-positive value falls back to the
+/// default, and any positive one is slept on as is.
+impl From<f64> for LogStatsInterval {
+    fn from(seconds: f64) -> Self {
+        if seconds.is_nan() || seconds <= 0.0 {
+            return Self::Every(DEFAULT_LOG_STATS_INTERVAL);
+        }
+        Duration::try_from_secs_f64(seconds).map_or(Self::Never, Self::Every)
+    }
+}
+
 impl FromStr for LogStatsInterval {
     type Err = String;
 
@@ -1391,10 +1348,7 @@ impl FromStr for LogStatsInterval {
             .trim()
             .parse()
             .map_err(|_| format!("`{value}` is not a number of seconds"))?;
-        if seconds.is_nan() || seconds <= 0.0 {
-            return Ok(Self::Every(DEFAULT_LOG_STATS_INTERVAL));
-        }
-        Ok(Duration::try_from_secs_f64(seconds).map_or(Self::Never, Self::Every))
+        Ok(seconds.into())
     }
 }
 
@@ -1435,16 +1389,12 @@ fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
     from_json_str(value).map_err(|e| format!("invalid JSON object: {e}"))
 }
 
-/// Format a clap error without the `error: ` prefix that the caller adds.
-fn clap_error_message(error: clap::Error) -> String {
-    let message = error.to_string();
-    message.strip_prefix("error: ").unwrap_or(&message).trim_end().to_string()
-}
-
 fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
-    let mut args: SharedRuntimeArgs =
+    // --args-json is parsed with serde, so clap's env support does not run for
+    // the Python-supervised frontend path; Python passes the settings it
+    // resolves from the environment instead.
+    let args: SharedRuntimeArgs =
         from_json_str(value).map_err(|e| format!("invalid JSON arguments: {e}"))?;
-    args.apply_env_fallbacks(|name| std::env::var(name).ok())?;
     args.unsupported.check()?;
     Ok(args)
 }

@@ -104,24 +104,40 @@ impl UnsupportedArgs {
     pub(crate) fn check(&self) -> Result<(), String> {
         let value = serde_json::to_value(self).unwrap();
         let map = value.as_object().unwrap();
+        let cmd = Self::augment_args(clap::Command::new("unsupported"));
         let mut unsupported = Vec::new();
+        let mut env_bound = false;
 
         for (key, value) in map {
             if value.is_null() {
                 noop_warn(key);
-            } else {
-                unsupported.push(key.as_str());
+                continue;
             }
+            // Python resolves an environment variable into the argument bound
+            // to it, so name the variable too.
+            let env = (cmd.get_arguments())
+                .find(|arg| arg.get_id() == key)
+                .and_then(|arg| arg.get_env());
+            env_bound |= env.is_some();
+            unsupported.push(match env {
+                Some(env) => format!("{key} ({})", env.to_string_lossy()),
+                None => key.clone(),
+            });
         }
 
         if !unsupported.is_empty() {
             unsupported.sort_unstable();
             let bullets = unsupported.into_iter().map(|key| format!("- {key}")).join("\n");
+            let remove = if env_bound {
+                "Remove these arguments, or unset the environment variables bound to them, to continue."
+            } else {
+                "Remove these arguments to continue."
+            };
             return Err(format!(
                 "The following arguments are not implemented in Rust frontend yet:
 {bullets}
 
-Remove these arguments to continue."
+{remove}"
             ));
         }
 
