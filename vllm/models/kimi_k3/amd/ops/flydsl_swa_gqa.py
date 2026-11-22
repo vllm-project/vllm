@@ -64,10 +64,22 @@ def _flydsl_import_error() -> str | None:
     return None
 
 
-def _config(max_rows: int) -> tuple[int, int]:
-    """(query tiles, tiles per workgroup) for ``max_rows`` rows per request."""
+# From this many requests, 3-5 rows a request (2 query tiles) walk 8 key tiles
+# a workgroup, not 4: 1-19% faster at 5-64 requests on MI355X (fewer splits,
+# the grid still fills the GPU). 1-2 and 6-8 rows stay faster with 4.
+TPC8_MIN_REQS = 5
+
+
+def _config(max_rows: int, num_reqs: int) -> tuple[int, int]:
+    """(query tiles, tiles per workgroup) for ``num_reqs`` requests of at most
+    ``max_rows`` rows."""
     nt = (max_rows * QUERY_GROUP + 15) // 16
-    tpc = 4 if nt <= 3 else 2
+    if nt > 3:
+        tpc = 2
+    elif nt == 2 and num_reqs >= TPC8_MIN_REQS:
+        tpc = 8
+    else:
+        tpc = 4
     return nt, tpc
 
 
@@ -98,7 +110,7 @@ def _num_splits(window: int, max_rows: int, tiles_per_cta: int) -> int:
 
 
 def _partial_numel(num_reqs, num_kv_heads, window, max_rows):
-    nt, tpc = _config(max_rows)
+    nt, tpc = _config(max_rows, num_reqs)
     ctas = num_reqs * num_kv_heads * _num_splits(window, max_rows, tpc)
     return ctas * nt * 16 * HEAD_DIM, ctas * 2 * nt * 16
 
@@ -171,7 +183,7 @@ def flydsl_swa_gqa_call_reason(
     if po_n > parts[0].numel() or pml_n > parts[1].numel():
         return f"{num_reqs} requests x {max_query_len} rows exceed the partials"
     if torch.cuda.is_current_stream_capturing():
-        nt, tpc = _config(max_query_len)
+        nt, tpc = _config(max_query_len, num_reqs)
         key = (kv_cache.shape[1], nt, tpc, window, kv_cache.element_size() == 1)
         if key not in _COMPILED:
             return f"config {key} not compiled before CUDA-graph capture"
@@ -265,13 +277,18 @@ def flydsl_swa_gqa_fwd(
     num_reqs = query_start_loc.shape[0] - 1
     num_kv_heads = kv_cache.shape[1]
     kv_fp8 = kv_cache.element_size() == 1
-    nt, tpc = _config(max_query_len)
+    nt, tpc = _config(max_query_len, num_reqs)
     n_split = _num_splits(window, max_query_len, tpc)
     po, pml = _PARTIALS[kv_cache.device]
     es = kv_cache.element_size()
     key = (num_kv_heads, nt, tpc, window, kv_fp8)
     launch = _launcher(*key)
-    ksc = k_scale if kv_fp8 else seq_lens
+    # vLLM registers the per-tensor scales 0-dim; the launcher takes [1].
+    if kv_fp8:
+        assert k_scale is not None
+        ksc = k_scale.reshape(1)
+    else:
+        ksc = seq_lens
     _run_compiled(
         launch,
         query,
@@ -327,21 +344,31 @@ def flydsl_swa_gqa_warmup(
     kv_dtype: torch.dtype,
     rows: tuple[int, ...] = tuple(range(1, MAX_ROWS + 1)),
 ) -> None:
-    """Reserve the partials and compile + run every query-tile config on a
-    one-key problem, so nothing compiles inside a CUDA-graph capture."""
+    """Reserve the partials and compile + run every query-tile config on
+    one-key problems, so nothing compiles inside a CUDA-graph capture."""
     dev = _dev(device)
     flydsl_swa_gqa_reserve(dev, num_kv_heads, window)
     kv = torch.zeros(1, num_kv_heads, 16, 2 * HEAD_DIM, dtype=kv_dtype, device=dev)
-    bt = torch.zeros(1, 1, dtype=torch.int32, device=dev)
-    sl = torch.ones(1, dtype=torch.int32, device=dev)
-    sc = torch.ones(1, dtype=torch.float32, device=dev)
+    sc = torch.ones((), dtype=torch.float32, device=dev)
+    nq = num_kv_heads * QUERY_GROUP
     # Every row count, not one per tile config: the combine's Triton
     # specializations also depend on it.
     for q_rows in rows:
-        nq = num_kv_heads * QUERY_GROUP
-        q = torch.zeros(q_rows, nq, HEAD_DIM, dtype=torch.bfloat16, device=dev)
-        out = torch.empty_like(q)
-        qsl = torch.tensor([0, q_rows], dtype=torch.int32, device=dev)
-        flydsl_swa_gqa_fwd(
-            q, kv, bt, sl, qsl, q_rows, out, 0.125, window, sc, sc
-        )
+        for num_reqs in (1, TPC8_MIN_REQS):
+            q = torch.zeros(
+                num_reqs * q_rows, nq, HEAD_DIM, dtype=torch.bfloat16, device=dev
+            )
+            qsl = torch.arange(num_reqs + 1, dtype=torch.int32, device=dev)
+            flydsl_swa_gqa_fwd(
+                q,
+                kv,
+                torch.zeros(num_reqs, 1, dtype=torch.int32, device=dev),
+                torch.ones(num_reqs, dtype=torch.int32, device=dev),
+                qsl * q_rows,
+                q_rows,
+                torch.empty_like(q),
+                0.125,
+                window,
+                sc,
+                sc,
+            )

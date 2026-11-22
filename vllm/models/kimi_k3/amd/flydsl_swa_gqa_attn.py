@@ -47,6 +47,9 @@ class KimiK3FlyDSLSwaGqaImpl(TritonAttentionImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._window = self.sliding_window[0] + 1
+        # The kernel reads a bf16 query and dequantizes an fp8 cache itself:
+        # keep the Attention layer from quantizing q for an fp8 cache.
+        self.supports_quant_query_input = False
         # None: the FlyDSL kernel serves this layer (decided at warmup).
         self._off_reason: str | None = "not warmed up"
 
