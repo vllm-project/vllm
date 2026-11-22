@@ -4166,3 +4166,327 @@ def test_joint_prefix_preserves_dcp_lookahead_and_last_token(
         assert len(event.token_ids) == len(event.block_hashes) * size
     offload.request_finished(request, [])
     assert not hit.pinned
+
+
+@pytest.mark.parametrize("tail_on_cpu", [True, False])
+def test_joint_scheduler_loads_fine_grained_mamba_partial_tail(tail_on_cpu: bool):
+    """Joint lookup preserves fine-grained partial tails across GPU/CPU mixes."""
+    prompt_len, boundary = 44, 40
+    config = _make_lookahead_config(num_lookahead=1)
+    config.scheduler_config.async_scheduling = False
+    config.cache_config.prefix_match_unit = 4
+    config.cache_config.enable_prefix_caching = True
+    config.cache_config.prefix_cache_retention_interval = 0
+    config.kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="null"
+    )
+    assert config.kv_transfer_config is not None
+    config.kv_transfer_config.kv_connector_extra_config = {"num_cpu_blocks": 32}
+    kv_config = _make_kv_cache_config(32)
+    mamba = MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,))
+    kv_config.kv_cache_groups.append(
+        make_kv_cache_group(
+            ["mamba"],
+            mamba,
+            manager_config=MambaManager.config(
+                enable_prefix_caching=True,
+                num_speculative_blocks=1,
+                num_prefill_checkpoint_blocks=1,
+            ),
+        )
+    )
+    kv_config.kv_cache_tensors.append(
+        KVCacheTensor(
+            size=mamba.page_size_bytes * 32,
+            layers=["mamba"],
+            layer_stride=mamba.page_size_bytes * 32,
+            block_stride=mamba.page_size_bytes,
+        )
+    )
+    kv_config.cache_hit_alignment_tokens = 4
+    kv_config.prefix_cache_retention_interval = 0
+    engine = create_scheduler(
+        config, num_blocks=32, kv_cache_config=kv_config, hash_block_size=4
+    )
+    assert isinstance(engine.connector, SimpleCPUOffloadConnector)
+    sched = engine.connector.scheduler_manager
+    assert sched is not None
+
+    hasher = get_request_block_hasher(4, sha256, 1)
+    producer = Request(
+        "partial-producer",
+        list(range(prompt_len)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=hasher,
+    )
+    engine.add_request(producer)
+    for _ in range(4):
+        step = engine.schedule()
+        is_final = producer.num_computed_tokens == producer.num_tokens
+        engine.update_from_output(
+            step,
+            ModelRunnerOutput(
+                req_ids=[producer.request_id],
+                sampled_token_ids=[[99] if is_final else []],
+            ),
+        )
+        assert isinstance(step.kv_connector_metadata, SimpleCPUOffloadMetadata)
+        if step.kv_connector_metadata.store_event >= 0:
+            simulate_store_completion(sched, step.kv_connector_metadata.store_event)
+        if producer.is_finished():
+            break
+    assert producer.is_finished()
+    flush_meta = engine.schedule().kv_connector_metadata
+    assert isinstance(flush_meta, SimpleCPUOffloadMetadata)
+    if flush_meta.store_event >= 0:
+        simulate_store_completion(sched, flush_meta.store_event)
+    engine.kv_cache_manager.take_events()
+
+    if tail_on_cpu:
+        assert engine.kv_cache_manager.reset_prefix_cache()
+    else:
+        fa_block_0 = engine.kv_cache_manager.block_pool.get_cached_block(
+            producer.block_hashes[3], [0]
+        )
+        assert fa_block_0 is not None
+        engine.kv_cache_manager.block_pool._maybe_evict_cached_block(fa_block_0[0])
+    engine.kv_cache_manager.take_events()
+
+    consumer = Request(
+        "partial-consumer",
+        list(range(prompt_len)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=hasher,
+    )
+    consumer.kv_cache_report_mode = "full"
+    engine.add_request(consumer)
+    load_step = engine.schedule()
+    load_meta = load_step.kv_connector_metadata
+    assert isinstance(load_meta, SimpleCPUOffloadMetadata)
+    assert consumer.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert consumer.num_computed_tokens == boundary
+    if tail_on_cpu:
+        assert len(load_meta.load_gpu_blocks) == 4
+        assert load_step.kv_cache_block_copies is None
+    else:
+        assert len(load_meta.load_gpu_blocks) == 1
+        assert load_step.kv_cache_block_copies is not None
+        assert len(load_step.kv_cache_block_copies) == 2
+        fa_manager = engine.kv_cache_manager.coordinator.single_type_managers[0]
+        assert 2 not in fa_manager._joint_cache_reused_blocks[consumer.request_id]
+    engine.kv_cache_manager.take_events()
+
+    engine.update_from_output(
+        load_step,
+        ModelRunnerOutput(
+            req_ids=[],
+            sampled_token_ids=[],
+            kv_connector_output=KVConnectorOutput(
+                finished_recving={consumer.request_id}
+            ),
+        ),
+    )
+    resume_step = engine.schedule()
+    assert consumer.status == RequestStatus.RUNNING
+    assert resume_step.num_scheduled_tokens == {consumer.request_id: 4}
+    if tail_on_cpu:
+        # Mamba loaded a fresh partial tail and CoW-preserves it before advancing.
+        assert resume_step.kv_cache_block_copies is not None
+        assert len(resume_step.kv_cache_block_copies) == 1
+    else:
+        # GPU partial tails were already CoW-copied on step 1: no duplicate CoW
+        # and Mamba does not re-cache its reused partial tail after async load.
+        assert resume_step.kv_cache_block_copies is None
+        post_load_events = [
+            e
+            for e in (engine.kv_cache_manager.take_events() or ())
+            if isinstance(e, BlockStored)
+        ]
+        assert any(e.group_idx == 0 and e.block_size == 16 for e in post_load_events)
+        assert not any(e.group_idx == 1 for e in post_load_events)
+
+    engine.update_from_output(
+        resume_step,
+        ModelRunnerOutput(req_ids=[consumer.request_id], sampled_token_ids=[[77]]),
+    )
+    assert consumer.is_finished()
+    end_meta = engine.schedule().kv_connector_metadata
+    assert isinstance(end_meta, SimpleCPUOffloadMetadata)
+    for event in (
+        getattr(resume_step.kv_connector_metadata, "store_event", -1),
+        end_meta.store_event,
+    ):
+        if event >= 0:
+            simulate_store_completion(sched, event)
+    for pool in (engine.kv_cache_manager.block_pool, sched.cpu_block_pool):
+        assert all(b.ref_cnt == 0 for b in pool.blocks if not b.is_null)
+
+
+def test_joint_lookup_cold_miss_skips_pinning():
+    """A 0-token joint lookup does not pin blocks or record pending hits."""
+    offload, manager, _, _ = _make_joint_prefix_case(("gggg",))
+    cold = make_request(num_blocks=4, request_id="cold-miss")
+    hit = offload.get_joint_cache_hit(cold, manager.coordinator)
+    assert hit.num_computed_tokens == 0
+    assert not hit.pinned
+    assert not offload._pending_joint_hits
+    assert manager.allocate_slots(cold, 4 * BLOCK_SIZE) is not None
+    offload.update_state_after_alloc(cold, manager.get_blocks(cold.request_id), 0)
+    offload.request_finished(cold, [])
+    manager.free(cold)
+    for pool in (manager.block_pool, offload.cpu_block_pool):
+        assert all(b.ref_cnt == 0 for b in pool.blocks if not b.is_null)
+
+
+def test_joint_failed_load_before_reused_gpu_block_frees_request():
+    """A load failure before a reused GPU block frees instead of overwriting it."""
+    from tests.v1.core.utils import create_scheduler as create_core_scheduler
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    scheduler = create_core_scheduler(enable_prefix_caching=True, num_blocks=16)
+    scheduler.kv_cache_config.kv_cache_tensors = _make_kv_cache_config(
+        16
+    ).kv_cache_tensors
+    config = scheduler.vllm_config
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="SimpleCPUOffloadConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use": 1 << 20},
+    )
+    connector = SimpleCPUOffloadConnector(
+        config, KVConnectorRole.SCHEDULER, scheduler.kv_cache_config
+    )
+    scheduler.connector = connector
+    connector.bind_gpu_block_pool(scheduler.kv_cache_manager.block_pool)
+    offload = connector.scheduler_manager
+    assert offload is not None
+
+    request = make_request(num_blocks=4)
+    gpu_blocks = {}
+    for index, loc in enumerate("gcgc"):
+        pool = (
+            scheduler.kv_cache_manager.block_pool
+            if loc == "g"
+            else offload.cpu_block_pool
+        )
+        block = _seed_pool_block(
+            pool, request.block_hashes[index], 0, (index + 1) * BLOCK_SIZE
+        )
+        if loc == "g":
+            gpu_blocks[index] = block
+
+    scheduler.add_request(request)
+    step1 = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert request.num_computed_tokens == 4 * BLOCK_SIZE
+    req_blocks = scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[0]
+    assert req_blocks[2] is gpu_blocks[2]
+    failed_block_id = req_blocks[1].block_id
+
+    scheduler.update_from_output(
+        step1,
+        create_model_runner_output(
+            [],
+            finished_recving={request.request_id},
+            invalid_block_ids={failed_block_id},
+        ),
+    )
+    # Drop CPU copies so retry recomputes locally instead of reloading.
+    assert offload.cpu_block_pool.reset_prefix_cache()
+    step2 = scheduler.schedule()
+    # The failed load truncated before reused G2, so the request freed its
+    # blocks and re-admitted from G0 with fresh private blocks for [1..3].
+    assert request.status == RequestStatus.RUNNING
+    assert request.request_id in step2.num_scheduled_tokens
+    retry_blocks = scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[0]
+    assert retry_blocks[0] is gpu_blocks[0]
+    assert retry_blocks[2] is not gpu_blocks[2]
+    assert scheduler.kv_cache_manager.block_pool.get_cached_block(
+        request.block_hashes[2], [0]
+    ) == [gpu_blocks[2]]
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    end_meta = offload.build_connector_meta(make_scheduler_output({}))
+    for meta in (step2.kv_connector_metadata, end_meta):
+        if isinstance(meta, SimpleCPUOffloadMetadata) and meta.store_event >= 0:
+            simulate_store_completion(offload, meta.store_event)
+    for pool in (scheduler.kv_cache_manager.block_pool, offload.cpu_block_pool):
+        assert all(b.ref_cnt == 0 for b in pool.blocks if not b.is_null)
+
+
+def test_joint_dcp_mixed_cache_loads_fine_grained_partial_tail():
+    """DCP hybrid joint lookup keeps fine-grained CPU partial tails intact."""
+    hash_block_size = BLOCK_SIZE
+    mamba_block_size = 4 * BLOCK_SIZE
+    local_tokens = 4 * BLOCK_SIZE
+    external_tokens = 6 * BLOCK_SIZE
+    total_tokens = local_tokens + external_tokens
+    fix = _make_hybrid_attention_mamba_scheduler(
+        num_cpu_blocks=32,
+        num_gpu_blocks=32,
+        block_size=mamba_block_size,
+        hash_block_size=hash_block_size,
+        dcp_world_size=2,
+    )
+    offload = fix.scheduler
+    manager = KVCacheManager(
+        fix.kv_cache_config,
+        1024,
+        mamba_block_size,
+        hash_block_size,
+        dcp_world_size=2,
+    )
+    offload.bind_gpu_block_pool(manager.block_pool)
+    request = _make_cp_request(num_blocks=10, virtual_block_size=hash_block_size)
+    # Full attention (block_size=2*BLOCK_SIZE under DCP=2): first 2 blocks on
+    # GPU (64 tokens), next 3 blocks on CPU (96 tokens).
+    for idx in range(5):
+        pool = manager.block_pool if idx < 2 else offload.cpu_block_pool
+        end_tokens = (idx + 1) * 2 * BLOCK_SIZE
+        _seed_pool_block(
+            pool,
+            request.block_hashes[end_tokens // hash_block_size - 1],
+            0,
+            end_tokens,
+        )
+    # Mamba (block_size=4*BLOCK_SIZE): partial tail at 160 tokens on CPU only.
+    _seed_pool_block(
+        offload.cpu_block_pool,
+        request.block_hashes[total_tokens // hash_block_size - 1],
+        1,
+        total_tokens,
+    )
+
+    hit = offload.get_joint_cache_hit(request, manager.coordinator)
+    assert hit.num_computed_tokens == total_tokens
+    assert hit.num_gpu_tokens == local_tokens
+    assert hit.num_cpu_tokens == external_tokens
+    assert hit.needs_load
+    assert (
+        manager.allocate_slots(
+            request,
+            0,
+            num_new_computed_tokens=hit.num_gpu_tokens,
+            num_external_computed_tokens=hit.num_cpu_tokens,
+            delay_cache_blocks=True,
+            joint_cache_hit=hit,
+        )
+        is not None
+    )
+    blocks = manager.get_blocks(request.request_id)
+    offload.update_state_after_alloc(request, blocks, hit.num_cpu_tokens)
+    meta = offload.build_connector_meta(make_scheduler_output({}))
+    assert meta.load_gpu_blocks == [
+        *(block.block_id for block in blocks.blocks[0][2:5]),
+        blocks.blocks[1][2].block_id,
+    ]
+    assert len(meta.load_cpu_blocks) == 4
+    offload.update_connector_output(
+        KVConnectorOutput(finished_recving={request.request_id})
+    )
+    manager.cache_blocks(request, total_tokens)
+    offload.request_finished(request, [])
+    manager.free(request)
+    for pool in (manager.block_pool, offload.cpu_block_pool):
+        assert all(b.ref_cnt == 0 for b in pool.blocks if not b.is_null)

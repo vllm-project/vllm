@@ -618,7 +618,10 @@ class KVCacheManager:
             return None
 
         if joint_cache_hit is not None:
-            if self.enable_kv_cache_events and request.kv_cache_report_mode == "full":
+            if (
+                self.enable_kv_cache_events
+                and getattr(request, "kv_cache_report_mode", "incremental") == "full"
+            ):
                 self.coordinator.emit_joint_cached_block_events(
                     request, joint_cache_hit
                 )
@@ -665,6 +668,16 @@ class KVCacheManager:
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
+
+    def has_joint_reused_blocks_after(
+        self, request_id: str, num_computed_tokens: int
+    ) -> bool:
+        """Whether a joint hit retains shared GPU blocks past the prefix."""
+        return any(
+            idx >= num_computed_tokens // manager.block_size
+            for manager in self.coordinator.single_type_managers
+            for idx in manager._joint_cache_reused_blocks.get(request_id, ())
+        )
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.

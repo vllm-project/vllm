@@ -551,7 +551,10 @@ class KVConnectorBase_V1(ABC):
         """Optionally replace local/external lookups with a positional hit.
 
         The connector owns lookup pins until allocation notification or the
-        end of the scheduler step. None retains the legacy lookup path.
+        end of the scheduler step. If a load later fails with
+        `invalid_block_ids` before any reused GPU block, the scheduler frees
+        the request's blocks and retries from zero. None retains the legacy
+        lookup path.
         """
         return None
 

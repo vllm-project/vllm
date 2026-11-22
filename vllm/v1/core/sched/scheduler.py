@@ -1541,7 +1541,12 @@ class Scheduler(SchedulerInterface):
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
-                    joint_cache_hit=joint_cache_hit,
+                    joint_cache_hit=(
+                        joint_cache_hit
+                        if joint_cache_hit is not None
+                        and joint_cache_hit.num_computed_tokens
+                        else None
+                    ),
                 )
 
                 if new_blocks is None:
@@ -3723,7 +3728,16 @@ class Scheduler(SchedulerInterface):
         load_failed = request.request_id in self.failed_recving_kv_req_ids
         if load_failed:
             # Request had KV load failures; num_computed_tokens was already
-            # updated in _update_requests_with_invalid_blocks
+            # updated in _update_requests_with_invalid_blocks. If a failed
+            # joint load truncated before shared reused GPU blocks, release all
+            # blocks so recomputation cannot overwrite them in place.
+            if (
+                request.num_computed_tokens
+                and self.kv_cache_manager.has_joint_reused_blocks_after(
+                    request.request_id, request.num_computed_tokens
+                )
+            ):
+                request.num_computed_tokens = 0
             if request.num_computed_tokens:
                 # Cache any valid computed tokens.
                 self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)

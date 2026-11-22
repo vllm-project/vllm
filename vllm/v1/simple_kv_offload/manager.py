@@ -379,9 +379,11 @@ class SimpleCPUOffloadScheduler:
             max_length,
             self.block_size,
             num_request_tokens=request.num_tokens,
+            allow_partial_cpu_hits=self.cpu_coordinator.enable_partial_hash_hits,
         )
-        result.pin()
-        self._pending_joint_hits[request.request_id] = result
+        if result.num_computed_tokens:
+            result.pin()
+            self._pending_joint_hits[request.request_id] = result
         return result
 
     def _consume_joint_hit(

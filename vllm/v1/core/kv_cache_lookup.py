@@ -97,6 +97,8 @@ class JointCacheHit:
         max_length: int,
         scheduler_block_size: int,
         num_request_tokens: int | None = None,
+        *,
+        allow_partial_cpu_hits: bool = False,
     ) -> "JointCacheHit":
         def _is_cpu(block: KVCacheBlock) -> bool:
             return block.pool is not None and block.pool() is lookup.cpu
@@ -104,8 +106,10 @@ class JointCacheHit:
         blocks, length, uncached = coordinator.find_longest_cache_hit(
             block_hashes, max_length, num_request_tokens, lookup=lookup
         )
-        while length % scheduler_block_size and any(
-            _is_cpu(block) for group in blocks for block in group
+        while (
+            not allow_partial_cpu_hits
+            and length % scheduler_block_size
+            and any(_is_cpu(block) for group in blocks for block in group)
         ):
             blocks, length, uncached = coordinator.find_longest_cache_hit(
                 block_hashes,

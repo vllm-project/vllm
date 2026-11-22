@@ -243,6 +243,9 @@ class SingleTypeKVCacheManager(ABC):
         self.num_cached_block: dict[str, int] = {}
         # An empty set still marks a joint load for dense event emission.
         self._joint_cache_reused_blocks: dict[str, set[int]] = {}
+        # Prefix length of a GPU partial tail already CoW-copied on joint alloc,
+        # so async load completion does not re-cache it before compute resumes.
+        self._joint_cache_reused_partial_tail: dict[str, int] = {}
 
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
@@ -274,11 +277,22 @@ class SingleTypeKVCacheManager(ABC):
         num_local_computed_tokens: int,
     ) -> bool:
         # The local prefix-cache hit ends inside one of this manager's
-        # blocks: the shared tail block needs CoW.
+        # blocks: a shared local tail needs CoW, whereas a synthetic CPU
+        # load placeholder (`block_id < 0`) is allocated privately.
         return (
             len(new_computed_blocks) > 0
             and num_local_computed_tokens % self.block_size != 0
+            and new_computed_blocks[-1].block_id >= 0
         )
+
+    def _is_reused_partial_tail(self, request_id: str, num_tokens: int) -> bool:
+        reused = self._joint_cache_reused_partial_tail.get(request_id)
+        if reused is None:
+            return False
+        if num_tokens <= reused:
+            return True
+        self._joint_cache_reused_partial_tail.pop(request_id, None)
+        return False
 
     def get_num_blocks_to_reserve(self, request_id: str, num_tokens: int) -> int | None:
         """Return a reservation, or None to use the allocation-based admission check."""
@@ -466,13 +480,21 @@ class SingleTypeKVCacheManager(ABC):
         self.add_local_computed_blocks(request_id, blocks, num_computed_tokens, 0)
         # The request now owns the targets; drop their allocation references.
         self.block_pool.free_blocks(targets)
+        if hits and hits[-1].is_cpu:
+            # A CPU partial tail lands in a fresh private target block: no CoW.
+            self._partial_hit_reqs.pop(request_id, None)
+        elif request_id in self._partial_hit_reqs:
+            self._joint_cache_reused_partial_tail[request_id] = num_computed_tokens
         if cpu_positions:
             first_cpu = cpu_positions[0]
+            num_full_blocks = num_computed_tokens // self.block_size
             self.num_cached_block[request_id] = first_cpu
             self._joint_cache_reused_blocks[request_id] = {
                 index
                 for index, hit in enumerate(hits)
-                if index > first_cpu and not hit.is_cpu and not hit.block.is_null
+                if first_cpu < index < num_full_blocks
+                and not hit.is_cpu
+                and not hit.block.is_null
             }
 
     def allocate_external_computed_blocks(
@@ -797,6 +819,7 @@ class SingleTypeKVCacheManager(ABC):
         req_blocks = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
         self._joint_cache_reused_blocks.pop(request_id, None)
+        self._joint_cache_reused_partial_tail.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
         return trim_null_head(req_blocks)
 
@@ -1047,6 +1070,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         )
         hash_block_size = self.block_pool.hash_block_size
         if self.block_size == hash_block_size:
+            return
+        if self._is_reused_partial_tail(request.request_id, num_tokens):
             return
         self._cache_partial_tail_block(request, num_tokens)
 
@@ -2567,7 +2592,9 @@ class MambaManager(SingleTypeKVCacheManager):
             replay_boundaries=replay_boundaries,
         )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
-        if self.prefix_caching:
+        if self.prefix_caching and not self._is_reused_partial_tail(
+            request.request_id, num_tokens
+        ):
             partial_hash = self._cache_partial_tail_block(
                 request, num_tokens, retention_interval=retention_interval
             )
