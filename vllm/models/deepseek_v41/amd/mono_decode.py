@@ -201,31 +201,99 @@ def _max_rows() -> int:
     return MAX_ROWS_GFX942 if _on_gfx942() else MAX_ROWS
 
 
-def _capture_plain_experts(experts) -> None:
+def _capture_plain_experts(experts, share: bool) -> None:
     """gfx942: vLLM converts the routed experts to its Triton kernels' format
     when the weights are loaded and frees the plain scales. Wrap that step so
     the gfx942 copies (`weights942.moe_copies`) are made from the
-    plain tensors first."""
+    plain tensors first. With `share`, vLLM's MoE then reads those copies
+    (`_share_942_experts`)."""
     qm = experts.quant_method
     original = qm.process_weights_after_loading
 
     def process_weights_after_loading(layer):
-        if layer is experts:
-            from vllm.models.deepseek_v41.amd.mono.weights942 import moe_copies
-
-            _keep_copies(
-                layer,
-                moe_copies(
-                    layer.w13_weight.data,
-                    _scale_bytes(layer.w13_weight_scale.data),
-                    layer.w2_weight.data,
-                    _scale_bytes(layer.w2_weight_scale.data),
-                    _routed_inter_942(),
-                ),
+        if layer is not experts:
+            return original(layer)
+        if getattr(layer, "mono942_shared", False):
+            raise NotImplementedError(
+                "weight reloads with kernel_config.monokernel_shared_experts"
             )
-        return original(layer)
+        from vllm.models.deepseek_v41.amd.mono.weights942 import moe_copies
+
+        _keep_copies(
+            layer,
+            moe_copies(
+                layer.w13_weight.data,
+                _scale_bytes(layer.w13_weight_scale.data),
+                layer.w2_weight.data,
+                _scale_bytes(layer.w2_weight_scale.data),
+                _routed_inter_942(),
+            ),
+        )
+        out = original(layer)
+        if share:
+            _share_942_experts(layer)
+        return out
 
     qm.process_weights_after_loading = process_weights_after_loading
+
+
+def _share_942_experts(layer) -> None:
+    """`monokernel_shared_experts`: point vLLM's AITER Triton experts at the
+    gfx942 copies (`layer.mono942`) and free vLLM's converted w13 / w2 and
+    their scales. AITER reads the copies with `w_layout="GFX942_TILE_MAJOR"`:
+    unpadded tile-major bytes, w13's codes in `codes_tile_rounds` order and
+    w2's row-major, as transposed views like vLLM's Triton format."""
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        weight_mx_scale,
+    )
+    from vllm.model_executor.utils import replace_parameter
+
+    qm = layer.quant_method
+    w13, w13_s, w2, w2_s = layer.mono942
+    weights = {
+        "w13": (layer.w13_weight_triton, qm.w13_precision_config, w13, w13_s),
+        "w2": (layer.w2_weight_triton, qm.w2_precision_config, w2, w2_s),
+    }
+    scale_layouts = {"w13": "GFX942_TILE_ROUNDS", "w2": None}
+    for name, (tri, precision, w, s) in weights.items():
+        w_t, s_t = w.transpose(1, 2), s.transpose(1, 2)
+        tri.storage.data = w_t
+        weight_mx_scale(precision).storage.data = s_t
+        replace_parameter(layer, f"{name}_weight", w_t)
+        replace_parameter(layer, f"{name}_weight_scale", s_t)
+        # read by aiter_mxfp4_w4a16_moe as moe_gemm_a16w4 keyword arguments
+        tri.storage.aiter_layout = {
+            "w_layout": "GFX942_TILE_MAJOR",
+            "swizzle_mx_scale": scale_layouts[name],
+        }
+    layer.mono942_shared = True
+    torch.accelerator.empty_cache()
+
+
+def _shares_experts(layer: "DeepseekV4DecoderLayer", vllm_config) -> bool:
+    """Whether the layer's MoE takes `monokernel_shared_experts` on gfx942. An
+    opt-in that cannot run is an error."""
+    if not vllm_config.kernel_config.monokernel_shared_experts:
+        return False
+    import inspect
+
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+
+    experts = layer.ffn.experts.routed_experts
+    backend = getattr(experts.quant_method, "mxfp4_backend", None)
+    if backend != Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
+        raise ValueError(
+            "kernel_config.monokernel_shared_experts needs the "
+            f"aiter_triton_mxfp4_bf16 MoE backend, not {backend}."
+        )
+    from aiter.ops.triton.moe.moe_op_gemm_a16w4 import moe_gemm_a16w4
+
+    if "w_layout" not in inspect.signature(moe_gemm_a16w4).parameters:
+        raise ValueError(
+            "kernel_config.monokernel_shared_experts needs an AITER whose "
+            'moe_gemm_a16w4 takes w_layout="GFX942_TILE_MAJOR".'
+        )
+    return True
 
 
 def _keep_copies(layer, copies: tuple[torch.Tensor, ...]) -> None:
@@ -267,7 +335,9 @@ def _copy_linear_at_load(linear) -> None:
     qm.process_weights_after_loading = process_weights_after_loading
 
 
-def _copy_942_at_load(layer: "DeepseekV4DecoderLayer", ffn_only: bool) -> None:
+def _copy_942_at_load(
+    layer: "DeepseekV4DecoderLayer", ffn_only: bool, share_experts: bool = False
+) -> None:
     """gfx942: the kernels read their own copies of the layer's weights. Make
     them when vLLM processes the weights at load, so that they count as model
     memory when vLLM sizes the KV cache. Copies made at the first decode step
@@ -275,7 +345,7 @@ def _copy_942_at_load(layer: "DeepseekV4DecoderLayer", ffn_only: bool) -> None:
     with that profile off or with `enforce_eager` they would not count. A
     layer that takes only the FFN launch needs no attention copies."""
     ffn = layer.ffn
-    _capture_plain_experts(ffn.experts.routed_experts)
+    _capture_plain_experts(ffn.experts.routed_experts, share_experts)
     sh = ffn.shared_experts
     # _create refuses layers without a shared expert.
     assert sh is not None
@@ -396,7 +466,7 @@ class MonoDecodeLayer:
         ops.record_monokernel(vllm_config)
         mono = MonoDecodeLayer._create(layer, vllm_config)
         if mono is not None and _on_gfx942():
-            _copy_942_at_load(layer, mono.ffn_only)
+            _copy_942_at_load(layer, mono.ffn_only, _shares_experts(layer, vllm_config))
         elif mono is not None:
             _keep_row_major_at_load(layer, mono.ffn_only)
         return mono

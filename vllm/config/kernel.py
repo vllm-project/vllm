@@ -336,6 +336,14 @@ class KernelConfig:
     "latency_specialized"}'`, the specialized decode of RFC #60904: setting
     either one enables the model's specialized decode, whichever it reads."""
 
+    monokernel_shared_experts: bool = False
+    """With `monokernel` on gfx942 (DeepSeek-V4.1): keep one copy of each mono
+    layer's routed experts. vLLM's AITER Triton MoE (prefill and steps above the
+    mono row limit) reads the mono kernels' copy (AITER `moe_gemm_a16w4` with
+    `w_layout="GFX942_TILE_MAJOR"`), and vLLM's own converted copy is freed at
+    load, before the KV cache is sized. Needs the `aiter_triton_mxfp4_bf16` MoE
+    backend and an AITER with that layout. No effect on other GPUs."""
+
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
