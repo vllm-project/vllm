@@ -34,6 +34,7 @@ from vllm.transformers_utils.utils import (
 )
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
+from . import backward_compatibility_utils
 from .config_parser_base import ConfigParserBase
 from .repo_utils import (
     file_or_path_exists,
@@ -43,6 +44,8 @@ from .repo_utils import (
     try_get_local_file,
     with_retry,
 )
+
+backward_compatibility_utils.install()
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
