@@ -301,6 +301,11 @@ On the Python frontend, `/v1/responses` and `/v1/responses/render` stop validati
 the `input` list at the first invalid item and return HTTP 400. The error may
 include several details for that item.
 
+Generation requests also enforce `VLLM_MAX_STOP_STRINGS` (4),
+`VLLM_MAX_STOP_TOKEN_IDS` (128), and `VLLM_MAX_NUM_BAD_WORDS` (128).
+`VLLM_MAX_BAD_WORDS_TOTAL_TOKENS` (1024) bounds the combined length of the
+tokenized bad-word sequences.
+
 ### Recommendations
 
 - **Public-facing deployments:** Consider setting `VLLM_MAX_N_SEQUENCES` to a value appropriate for your workload (e.g., `64` or `128`) to limit the blast radius of a single request.
