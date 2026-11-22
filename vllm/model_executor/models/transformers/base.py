@@ -227,7 +227,8 @@ class Base(
         self.pipeline_parallel()
         # Skip the device sync of rope updates where `inv_freq` can be fixed
         maybe_disable_dynamic_rope_update(self.model.get_decoder(), vllm_config)
-        maybe_precompute_gemma3n_sparsity(self.model, self.device_config.device)
+        if self.text_config.model_type == "gemma3n_text":
+            maybe_precompute_gemma3n_sparsity(self.model, self.device_config.device)
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation

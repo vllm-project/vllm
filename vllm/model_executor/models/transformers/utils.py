@@ -470,6 +470,8 @@ def maybe_disable_dynamic_rope_update(
 
 def maybe_precompute_gemma3n_sparsity(model: nn.Module, device: torch.device) -> None:
     """Cache Gemma3n's constant Gaussian quantile outside the inference path."""
+    # TODO: Remove once the minimum supported Transformers version includes
+    # https://github.com/huggingface/transformers/pull/51077.
     from transformers.models.gemma3n.modeling_gemma3n import Gemma3nTextMLP
 
     def gaussian_topk(module: nn.Module, inputs: torch.Tensor) -> torch.Tensor:
