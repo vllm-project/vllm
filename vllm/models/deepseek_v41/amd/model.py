@@ -1718,6 +1718,10 @@ class DeepseekV41LLMForCausalLM(
 
     @staticmethod
     def get_model_state_cls():
+        if envs.VLLM_AKR_EXPERT_COUNTS:
+            from .akr_expert_counts import ExpertCountsModelState
+
+            return ExpertCountsModelState
         from ..nvidia.model_state import DeepseekV41ModelState
 
         return DeepseekV41ModelState

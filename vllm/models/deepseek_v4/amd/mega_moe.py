@@ -7,6 +7,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import get_ep_group
@@ -100,6 +101,8 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
                 )
         # the router's (logical) expert count
         self.num_logical_experts = num_experts
+        # DeepSeek-V4.1 expert-load counting (akr_expert_counts), opt-in
+        self._count_experts = bool(envs.VLLM_AKR_EXPERT_COUNTS)
         self.num_routed_local_experts = (
             num_experts // self.ep_size
             if self._perm is None
@@ -317,6 +320,10 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
         x_quant: QuantizedActivation | None = None,
     ) -> torch.Tensor:
         assert self._runtimes
+        if self._count_experts:
+            from vllm.models.deepseek_v41.amd import akr_expert_counts
+
+            akr_expert_counts.count(self.prefix, self.num_logical_experts, topk_ids)
         if self._perm is not None:
             # the routers' logical ids -> physical slots (owner = id // S)
             topk_ids = self._perm.remap(topk_ids)

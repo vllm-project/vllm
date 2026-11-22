@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Static expert placement with replicas (akr_eplb): plan validation, the
 replica tables and selection, the MegaMoE experts' loader and id remap, the
-shipped plan and the AITER profile registration. CPU, except the remap
-kernel test."""
+shipped plan and the AITER profile registration; the opt-in expert-load
+counting (akr_expert_counts). CPU, except the remap and counting kernel
+tests."""
 
 import os
 import types
@@ -296,3 +297,99 @@ def test_remap_kernel_matches_reference(rows):
         graph.replay()
         torch.accelerator.synchronize()
         assert np.array_equal(out.cpu().numpy(), lp.remap_reference(new.numpy()))
+
+
+def test_expert_counts_opt_in(monkeypatch):
+    """`VLLM_AKR_EXPERT_COUNTS` picks the counting model state and the MegaMoE
+    count hook; unset, neither runs."""
+    from vllm.models.deepseek_v41.amd.model import DeepseekV41LLMForCausalLM
+    from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
+
+    monkeypatch.delenv("VLLM_AKR_EXPERT_COUNTS", raising=False)
+    assert DeepseekV41LLMForCausalLM.get_model_state_cls() is DeepseekV41ModelState
+    assert not _experts(monkeypatch, "", 0)._count_experts
+    monkeypatch.setenv("VLLM_AKR_EXPERT_COUNTS", "/tmp/counts")
+    cls = DeepseekV41LLMForCausalLM.get_model_state_cls()
+    assert cls.__name__ == "ExpertCountsModelState"
+    assert issubclass(cls, DeepseekV41ModelState)
+    assert _experts(monkeypatch, "", 0)._count_experts
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_expert_counts_graph_replay(tmp_path, monkeypatch):
+    """Counts under CUDA graph replay and eager steps equal the bincount of
+    the routed ids on real rows, split by step kind."""
+    from vllm.config import VllmConfig
+    from vllm.forward_context import set_forward_context
+    from vllm.models.deepseek_v41.amd import akr_expert_counts as EC
+
+    monkeypatch.setattr(EC, "_S", EC._State())
+    EC.configure(str(tmp_path), 3)
+    layers = [
+        ("model.layers.0.ffn.experts", 384, 6),
+        ("model.layers.39.ffn.experts", 384, 6),
+        ("model.layers.40.ffn.experts", 128, 3),
+    ]
+    dev = torch.device("cuda")
+    g = torch.Generator(device=dev).manual_seed(0)
+    max_rows = 4096
+    is_padding = torch.ones(max_rows, dtype=torch.bool, device=dev)
+    ref = {name: np.zeros((2, n), np.int64) for name, n, _ in layers}
+
+    def rand_ids(m, n, k):
+        ids = torch.rand(m, n, device=dev, generator=g).argsort(1)[:, :k].int()
+        ids[torch.rand(m, device=dev, generator=g) < 0.1] = -1
+        return ids
+
+    def run(ids_list):
+        for (name, n, _), ids in zip(layers, ids_list):
+            EC.count(name, n, ids)
+
+    def expect(kind, real, ids_list):
+        for (name, n, _), ids in zip(layers, ids_list):
+            x = ids[:real].cpu().numpy().ravel()
+            ref[name][kind] += np.bincount(x[x >= 0], minlength=n)
+
+    cfg = VllmConfig()
+    with torch.inference_mode(), set_forward_context(None, cfg, is_padding=is_padding):
+        run([rand_ids(64, n, k) for _, n, k in layers])  # dropped at step 1
+        rows = 192
+        static = [rand_ids(rows, n, k) for _, n, k in layers]
+        EC.step_begin(False)
+        steps = [1, 0]
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run(static)
+        assert EC._S.buf is not None and EC._S.buf.sum().item() == 0
+        for step in range(12):
+            kind = int(step % 3 == 2)
+            EC.step_begin(bool(kind))
+            steps[kind] += 1
+            if step % 4 == 3:  # eager, prefill-sized
+                m = int(torch.randint(500, max_rows, (1,)).item())
+                real = int(torch.randint(1, m + 1, (1,)).item())
+                ids_list = [rand_ids(m, n, k) for _, n, k in layers]
+            else:
+                m, real = rows, int(torch.randint(0, rows + 1, (1,)).item())
+                for (_, n, k), ids in zip(layers, static):
+                    ids.copy_(rand_ids(rows, n, k))
+                ids_list = static
+            is_padding[:real].fill_(False)
+            is_padding[real:].fill_(True)
+            if ids_list is static:
+                graph.replay()
+            else:
+                run(ids_list)
+            expect(kind, real, ids_list)
+        torch.accelerator.synchronize()
+    path = EC.dump()
+    EC._S.stop.set()
+    assert path == str(tmp_path / "expert_counts_dp3.npz")
+    with np.load(path) as z:
+        assert list(z["layer_ids"]) == [0, 39] and list(z["draft_layer_ids"]) == [40]
+        for i, name in enumerate(n for n, _, _ in layers[:2]):
+            assert np.array_equal(z["counts_decode"][i], ref[name][0])
+            assert np.array_equal(z["counts_prefill"][i], ref[name][1])
+        assert np.array_equal(z["draft_counts_decode"][0], ref[layers[2][0]][0])
+        assert np.array_equal(z["draft_counts_prefill"][0], ref[layers[2][0]][1])
+        assert (int(z["steps_decode"]), int(z["steps_prefill"])) == tuple(steps)
