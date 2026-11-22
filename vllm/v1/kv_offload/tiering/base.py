@@ -45,6 +45,7 @@ TIER_LABEL = "tier"
 class SecondaryTierRequestContext(RequestOffloadingContext):
     """Per-request offloading preferences of a secondary tier."""
 
+    # Whether newly stored primary chunks are cascaded to this tier.
     receives_stores: bool = True
 
 

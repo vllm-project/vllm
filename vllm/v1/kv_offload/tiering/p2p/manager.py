@@ -480,6 +480,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         Producer-leg requests (`remote_decoder` present) ask for
         REQUEST_LEVEL: the peer needs every block of the request, not just
         the ones this request computed.
+
+        Requests without a `remote_decoder` opt out of cascades of newly
+        stored primary chunks, since there is no destination to receive them.
         """
         _annotate_req_context(req_context)
         source = req_context.get_state(P2PSourceInfo)
