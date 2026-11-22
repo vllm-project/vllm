@@ -3,9 +3,12 @@
 """DeepSeek-V4.1 mHC routes on amd_kernels (hidden 5120, 4 streams).
 
 - `mhc_seam`: post-mix of the previous sublayer + pre-mix, Sinkhorn and
-  RMSNorm of the next one, in place of the AITER mega-mHC seam. On request it
-  also emits the output as MXFP8 (for the fused EP8 experts / shared expert)
-  and the mean of the new streams (the DSpark auxiliary hidden state).
+  RMSNorm of the next one, in place of the AITER mega-mHC seam. It also emits
+  the layer input as MXFP8 wherever a consumer reads those codes (the
+  attention's fused wq_a + wkv, the fused EP8 experts, the shared expert's
+  gate_up), so no quantize launch sits between the seam and those GEMMs; on
+  request also the mean of the new streams (the DSpark auxiliary hidden
+  state).
 - `mhc_tail`: post-mix, collapse and final RMSNorm after the last layer.
 - `mhc_wo_b`: wo_b GEMM with the attention post-mix as its epilogue, then the
   FFN seam's gate finisher.
@@ -42,12 +45,35 @@ class SeamCarry(NamedTuple):
     layer_input: torch.Tensor
     attn_pre: torch.Tensor
     aux: torch.Tensor | None
+    # the layer input as MXFP8, where the attention's first GEMM reads codes
+    codes: QuantizedActivation | None = None
 
 
 class Step(NamedTuple):
     want_aux: bool
     next_layer: Any
     chain_aux: bool
+
+
+def attached_codes(x: torch.Tensor) -> QuantizedActivation | None:
+    """The MXFP8 copy of `x` that AITER's MXFP8 mHC seam attached (where that
+    seam ran), with byte scales as the amd_kernels entries read them."""
+    from vllm.models.deepseek_v4.amd.model import mxfp8_input
+
+    qa = mxfp8_input(x)
+    if qa is None or qa.scale.element_size() != 1 or qa.data.dim() != 2:
+        return None
+    return akr_config.quant_activation(
+        qa.data, qa.scale.view(torch.uint8), qa.orig_dtype
+    )
+
+
+def attach_codes(x: torch.Tensor, codes: QuantizedActivation | None) -> None:
+    """Hand the seam's MXFP8 copy of `x` to the stock linears that read it."""
+    if codes is not None:
+        from vllm.models.deepseek_v4.amd.model import attach_mxfp8_input
+
+        attach_mxfp8_input(x, codes)
 
 
 def seam_rows_ok(m: int, with_aux: bool = False) -> bool:
@@ -64,6 +90,8 @@ class AkrMhc:
         cfg = vllm_config.model_config.hf_config
         self.layer = layer
         self.shape_ok = cfg.hc_mult == HC and cfg.hidden_size == HIDDEN
+        # the attention's fused wq_a + wkv linear reads MXFP8 codes (set at load)
+        self.attn_codes = False
         self.no_ubatching = not vllm_config.parallel_config.use_ubatching
         self.ready = False
         self.attn_pack: torch.Tensor | None = None
@@ -88,6 +116,7 @@ class AkrMhc:
     def begin_step(self) -> Step:
         step, self._step = self._step, Step(False, None, False)
         self.aux_out = None
+        self.last_quant = None
         return step
 
     # ---------------------------------------------------------------- load
@@ -101,6 +130,12 @@ class AkrMhc:
             return
         self.attn_pack = akr_kernels.mhc_seam_gate(layer.hc_attn_fn.data, HC, HIDDEN)
         self.ffn_pack = akr_kernels.mhc_seam_gate(layer.hc_ffn_fn.data, HC, HIDDEN)
+        wqa_wkv = getattr(getattr(layer, "attn", None), "fused_wqa_wkv", None)
+        self.attn_codes = (
+            wqa_wkv is not None
+            and not getattr(layer, "use_sequence_parallel", False)
+            and akr_config.takes_mxfp8_codes(wqa_wkv)
+        )
         self.ready = True
 
     def post_load_chains(self) -> None:
@@ -129,6 +164,13 @@ class AkrMhc:
             and akr_config.on("mhc_seam")
             and seam_rows_ok(m, with_aux)
         )
+
+    def attn_wants_codes(self, m: int) -> bool:
+        """Whether the attention seam emits the layer input as MXFP8: wherever
+        it runs and the stock fused wq_a + wkv linear reads codes (seam with
+        the MXFP8 epilogue + the stock GEMM on its codes beat the bf16 seam +
+        the dense_gemm entry by 0.5-2.3 us at the seam's row counts)."""
+        return self.attn_codes and self.seam_ok(m)
 
     def wo_b_chain_ok(self, m: int) -> bool:
         layer = self.layer
@@ -194,6 +236,7 @@ class AkrMhc:
     ):
         """Shared down + routed add with the FFN post-mix as the epilogue, then
         the next layer's attention seam: (residual, post, comb, SeamCarry)."""
+        codes = nxt.akr_mhc.attn_wants_codes(residual.shape[0])
         residual, partial_x, gates, mean = akr_kernels.postmix_gates_gemm(
             shared_act,
             self.shared_down,
@@ -212,9 +255,17 @@ class AkrMhc:
             nxt.hc_attn_base,
             nxt.attn_norm,
             nxt,
-            quant=False,
+            quant=codes,
         )
-        return residual, out[0], out[1], SeamCarry(out[2], out[3], mean)
+        carry = SeamCarry(
+            out[2],
+            out[3],
+            mean,
+            akr_config.quant_activation(out[4], out[5], out[2].dtype)
+            if codes
+            else None,
+        )
+        return residual, out[0], out[1], carry
 
     # ---------------------------------------------------------------- the seam
 

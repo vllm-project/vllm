@@ -55,9 +55,14 @@ GATES: dict[str, Callable[[int], bool]] = {
     # wo_a's bf16 output through the dense entry vs its MXFP8 epilogue + AITER wo_b
     "wo_b": _rows(769, 1024),
     "router": _rows(1, 1024),
-    "shared_expert": _rows(1, 768),
+    # gate_up + clamped SiLU-mul for the mhc_ffn epilogue (standalone: stock)
+    "shared_expert": _rows(1, 192),
     "fused_ep8": _rows(1, 1024),
-    "mhc_seam": _rows(1, 384),
+    # attention + FFN seam with their MXFP8 outputs vs AITER's MXFP8 mega-mHC
+    # seam (dev1133), each with the first GEMM: 0.2-5.4 us faster per layer at
+    # 16-288 and 528-768 rows; ties at 289-384, AITER ahead at 385-512 (its
+    # 512-row variant) and above 768
+    "mhc_seam": lambda m: 1 <= m <= 288 or 513 <= m <= 768,
     "mhc_tail": _rows(1, 1024),
     "mhc_wo_b": _rows(1, 128),
     "mhc_ffn": _rows(1, 192),

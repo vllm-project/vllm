@@ -433,21 +433,32 @@ def _stock_mlp(mlp, x):
         mlp.akr = route
 
 
-@pytest.mark.parametrize("m", [16, 48, 192, 384, 769])
+@pytest.mark.parametrize("m", [16, 48, 128, 192, 193, 384])
 def test_shared_expert_matches_stock(mlp, m):
+    """The mhc_ffn epilogue's input (gate_up + clamped SiLU-mul as MXFP8, here
+    through the stock down) vs the stock chain; standalone the route declines."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+    from vllm.models.deepseek_v41.amd import akr_config
+
     x = torch.randn(m, H, device="cuda", dtype=torch.bfloat16) * 0.5
     ref = _stock_mlp(mlp, x)
-    out = mlp.akr.forward(mlp, x, None)
-    if m > 768:
-        assert out is None
-        return
-    assert out is not None and out.shape == ref.shape and out.dtype == ref.dtype
-    assert cos(out, ref) > 0.9999
+    assert mlp.akr.forward(mlp, x, None) is None
+    codes, scale = mxfp8_e4m3_quantize(x)
+    qx = akr_config.quant_activation(codes, scale.view(torch.uint8), x.dtype)
+    for x_quant in (None, qx):
+        out = mlp.akr.chain(mlp, x, x_quant)
+        if m > 192:
+            assert out is None
+            continue
+        assert out is not None and out.shape == ref.shape and out.dtype == ref.dtype
+        assert cos(out, ref) > 0.9999
 
 
 def test_shared_expert_graph_replay(mlp):
     x = torch.randn(16, H, device="cuda", dtype=torch.bfloat16)
-    out = _replayed(lambda t: mlp(t), x)
+    out = _replayed(lambda t: mlp.akr.chain(mlp, t, None), x)
     assert cos(out, _stock_mlp(mlp, x)) > 0.9999
 
 

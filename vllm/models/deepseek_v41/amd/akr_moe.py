@@ -6,10 +6,12 @@
 router / draft_router: gate GEMM, sqrt-softplus, correction bias, top-k,
     renormalize and routed scaling in one entry, for the target layers (384
     experts, top 6) and the DSpark draft layers (128 experts, top 3).
-shared_expert: the unfused FP8 shared expert (gate_up, clamped SiLU-mul,
-    down) with MXFP8 activations; `SHARED_PLAN` picks per static row count
-    which GEMMs run on amd_kernels. The stock linears' preshuffled weights are
-    read as they are; only their scales get a copy (about 0.5 MB per layer).
+shared_expert: the shared expert's gate_up and clamped SiLU-mul as MXFP8
+    for the `mhc_ffn` epilogue (shared down + routed add + FFN post-mix);
+    `SHARED_PLAN` picks per static row count which gate_up runs. Standalone
+    the stock chain on the FFN seam's MXFP8 copy wins at every row count, so
+    the route declines there. The stock linears' preshuffled weights are read
+    as they are; only their scales get a copy (about 0.5 MB per layer).
 
 While any of these routes is on, a MegaMoE layer runs its shared expert after
 the routed experts on the same stream: beside MegaMoE's persistent,
@@ -26,17 +28,18 @@ from vllm.models.deepseek_v41.amd import akr_config, akr_hooks, akr_kernels
 logger = init_logger(__name__)
 
 
-# (largest row count, gate_up plan), from a graph-replay benchmark of the
-# shared-expert chain against the stock chain on MI355X; above: stock chain.
+# (largest row count, gate_up plan) for the `mhc_ffn` epilogue (up to its 192
+# rows), from a graph-replay benchmark of the shared-expert chain on MI355X
+# against dev1133 stock (gate_up on the seam's MXFP8 copy, silu_and_mul_mxfp8,
+# down; 12.9-25.6 us at 16-192 rows): "swiglu" 13.0 us at 16 rows, "stock"
+# 15.8-26.0 us at 32-192 rows ("swiglu" 16.9-27.0, "linear" 18.3-27.1).
 # "swiglu": amd_kernels gate_up with the clamped SiLU-mul + MXFP8 epilogue
 # "linear": amd_kernels gate_up, then the amd_kernels clamped SiLU-mul + MXFP8
 # "stock":  the stock gate_up, then the amd_kernels clamped SiLU-mul + MXFP8
 # The stock down projection reads the MXFP8 activation in every plan.
 SHARED_PLAN: tuple[tuple[int, str], ...] = (
-    (32, "swiglu"),
-    (96, "stock"),
-    (192, "swiglu"),
-    (768, "linear"),
+    (16, "swiglu"),
+    (192, "stock"),
 )
 # the gate_up epilogue reads MXFP8 input codes only up to this row count
 SWIGLU_CODES_MAX_ROWS = 16
@@ -124,11 +127,7 @@ class SharedExpert:
                 x_quant if codes_in else x, self.gate_up
             )
         if out is None:
-            gate_up = None
-            if plan == "linear":
-                gate_up = akr_kernels.mxfp8_dense(x, self.gate_up)
-            if gate_up is None:
-                gate_up, _ = mlp.gate_up_proj(x if x_quant is None else x_quant)
+            gate_up, _ = mlp.gate_up_proj(x if x_quant is None else x_quant)
             out = akr_kernels.clamp_silu_mul_mxfp8(gate_up, self.limit)
         codes, scale = out
         return akr_config.quant_activation(codes, scale, x.dtype)
@@ -136,6 +135,16 @@ class SharedExpert:
     def forward(
         self, mlp, x: torch.Tensor, x_quant: QuantizedActivation | None
     ) -> torch.Tensor | None:
+        """None: standalone, the stock chain on the seam's MXFP8 copy wins or
+        ties (within 0.2 us) at every row count from 16 to 768 on MI355X
+        (dev1133), by up to 3.7 us."""
+        return None
+
+    def chain(
+        self, mlp, x: torch.Tensor, x_quant: QuantizedActivation | None
+    ) -> torch.Tensor | None:
+        """`activation` and the stock down projection (the unfused form of the
+        `mhc_ffn` epilogue's input; tests and warm-up)."""
         act = self.activation(mlp, x, x_quant)
         if act is None:
             return None
@@ -148,7 +157,7 @@ class SharedExpert:
         akr_kernels.warmup_clamp_silu_mul(self.gate_up.n // 2, dev)
         for bound, _ in SHARED_PLAN:
             x = torch.zeros(bound, hidden, dtype=torch.bfloat16, device=dev)
-            self.forward(mlp, x, None)
+            self.chain(mlp, x, None)
             if bound <= SWIGLU_CODES_MAX_ROWS:
                 codes = torch.zeros(
                     bound, hidden, dtype=torch.float8_e4m3fn, device=dev
@@ -156,18 +165,34 @@ class SharedExpert:
                 scale = torch.full(
                     (bound, hidden // 32), 127, dtype=torch.uint8, device=dev
                 )
-                self.forward(mlp, x, akr_config.quant_activation(codes, scale, x.dtype))
+                self.chain(mlp, x, akr_config.quant_activation(codes, scale, x.dtype))
 
 
 def wants_x_quant(moe, m: int) -> bool:
     """Whether the FFN seam should also emit MXFP8 codes for `moe` at `m` rows:
-    the fused EP8 experts read them, and so does the shared expert at the row
-    counts where its gate_up runs on codes."""
+    the fused EP8 experts read them, and so does the shared expert where its
+    gate_up runs on codes (the route's plan, or the stock linear where the
+    route does not serve)."""
     fused = getattr(getattr(moe, "experts", None), "akr", None)
     if fused is not None and fused.serves(m):
         return True
     shared = getattr(moe, "shared_experts", None)
-    return getattr(shared, "akr", None) is not None and shared_takes_codes(m)
+    if shared is None:
+        return False
+    if getattr(shared, "akr", None) is not None and shared_serves(m):
+        return shared_takes_codes(m)
+    return _stock_takes_codes(shared)
+
+
+def _stock_takes_codes(mlp) -> bool:
+    """Whether the stock shared expert's gate_up reads an attached MXFP8 copy."""
+    takes = getattr(mlp, "_akr_gate_up_codes", None)
+    if takes is None:
+        takes = mlp._gateup_scale is None and akr_config.takes_mxfp8_codes(
+            mlp.gate_up_proj
+        )
+        mlp._akr_gate_up_codes = takes
+    return takes
 
 
 def forward_parts(

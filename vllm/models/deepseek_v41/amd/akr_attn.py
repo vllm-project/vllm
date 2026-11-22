@@ -100,12 +100,18 @@ def create(layer) -> LayerState | None:
 
 
 def wqa_wkv(layer, hidden: torch.Tensor) -> torch.Tensor | None:
+    """The fused wq_a + wkv GEMM on the bf16 layer input. None where a seam
+    attached the input's MXFP8 copy: the stock GEMM on those codes is faster
+    than the entry on bf16 (which quantizes) at every row count."""
+    from vllm.models.deepseek_v4.amd.model import mxfp8_input
+
     w = layer.akr.wqa_wkv
     if (
         w is None
         or hidden.dim() != 2
         or hidden.dtype != torch.bfloat16
         or not akr_config.serves("dense_gemm", hidden.shape[0])
+        or mxfp8_input(hidden) is not None
     ):
         return None
     return akr_kernels.mxfp8_dense(hidden, w)

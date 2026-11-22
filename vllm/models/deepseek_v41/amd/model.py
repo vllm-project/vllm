@@ -459,6 +459,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         step = akr.begin_step() if akr is not None else None
         carried = isinstance(x, akr_mhc.SeamCarry)
+        carried_codes = None
         aux_inputs = None
         if akr is not None and step is not None:
             mhc_pre = partial(akr.pre, mhc_pre)
@@ -467,13 +468,16 @@ class DeepseekV4DecoderLayer(nn.Module):
             if step.want_aux and residual is not None and not carried:
                 aux_inputs = (x, residual, post_mix, res_mix)
             akr.want_aux = aux_inputs is not None
+            # The seam writes the layer input as MXFP8 too where the stock
+            # fused wq_a + wkv reads it.
+            akr.want_quant = not carried and akr.attn_wants_codes(num_tokens)
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
         if carried:
             # The previous layer's FFN epilogue chain ran this attention seam.
             assert fuse_attn_norm and residual is not None
-            attn_pre, x = x.attn_pre, x.layer_input
+            attn_pre, x, carried_codes = x.attn_pre, x.layer_input, x.codes
         elif residual is None:
             if x.dim() == 2:
                 # First layer: the stream is the embedding broadcast to hc
@@ -564,6 +568,10 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
         if not fuse_attn_norm:
             x = self.attn_norm(x)
+        if akr is not None:
+            akr_mhc.attach_codes(
+                x, carried_codes if carried else akr.quant_output(x.dtype)
+            )
         if akr is not None and aux_inputs is not None:
             # DSpark auxiliary hidden state of the previous layer: the mean of
             # the streams this seam's post-mix formed.
@@ -592,6 +600,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 quant=akr_moe.wants_x_quant(self.ffn, num_tokens),
                 dtype=x.dtype,
             )
+            akr_mhc.attach_codes(x, ffn_quant)
         else:
             x = self.attn(positions, x, None)
         if mhc_overlap is not None:
@@ -631,6 +640,11 @@ class DeepseekV4DecoderLayer(nn.Module):
                 x = self.ffn_norm(x)
             if akr is not None:
                 ffn_quant = akr.quant_output(x.dtype)
+                if ffn_quant is None:
+                    # AITER's MXFP8 seam ran: its copy feeds the routes too
+                    ffn_quant = akr_mhc.attached_codes(x)
+                else:
+                    akr_mhc.attach_codes(x, ffn_quant)
         # Shared-expert down + routed add + FFN post-mix as one GEMM epilogue,
         # then the next layer's attention seam. forward_parts does nothing and
         # returns None where the shared-expert route does not serve; every rank

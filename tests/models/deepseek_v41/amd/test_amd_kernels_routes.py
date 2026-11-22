@@ -66,7 +66,7 @@ def test_resolve_routes():
 @pytest.mark.parametrize(
     "route,last_on",
     [
-        ("mhc_seam", 384),
+        ("mhc_seam", 288),
         ("mhc_wo_b", 128),
         ("mhc_ffn", 192),
         ("sparse_mla", 768),
@@ -82,6 +82,13 @@ def test_row_gates(routes, route, last_on):
     assert not akr_config.serves(route, last_on + 1)
     akr_config.fail(route, "test")
     assert not akr_config.serves(route, 1)
+
+
+def test_mhc_seam_gate(routes):
+    # AITER's MXFP8 seam wins at 385-512 and above 768 rows (ties at 289-384)
+    assert akr_config.serves("mhc_seam", 288) and not akr_config.serves("mhc_seam", 512)
+    assert akr_config.serves("mhc_seam", 513) and akr_config.serves("mhc_seam", 768)
+    assert not akr_config.serves("mhc_seam", 769)
 
 
 def test_decode_scaling_gates(routes):
@@ -184,19 +191,19 @@ def test_fused_ep8_branch_follows_the_dp_max(routes, monkeypatch):
 
 
 def test_shared_expert_plan(routes):
-    assert akr_moe.shared_plan(769) is None
-    kinds = {m: akr_moe.shared_plan(m) for m in (1, 32, 33, 96, 97, 192, 768)}
+    assert akr_moe.shared_plan(193) is None
+    kinds = {m: akr_moe.shared_plan(m) for m in (1, 16, 17, 96, 97, 128, 192)}
     assert kinds == {
         1: "swiglu",
-        32: "swiglu",
-        33: "stock",
+        16: "swiglu",
+        17: "stock",
         96: "stock",
-        97: "swiglu",
-        192: "swiglu",
-        768: "linear",
+        97: "stock",
+        128: "stock",
+        192: "stock",
     }
     codes = {m for m in range(1, 1025) if akr_moe.shared_takes_codes(m)}
-    assert codes == set(range(1, 17)) | set(range(33, 97))
+    assert codes == set(range(1, 193))
     routes(ALL - {"shared_expert"})
     assert not akr_moe.shared_takes_codes(48)
 
@@ -205,8 +212,11 @@ def test_seam_codes_requested_for_the_fused_experts(routes):
     experts = types.SimpleNamespace(akr=types.SimpleNamespace(serves=lambda m: m <= 4))
     moe = types.SimpleNamespace(experts=experts, shared_experts=None)
     assert akr_moe.wants_x_quant(moe, 4) and not akr_moe.wants_x_quant(moe, 5)
-    moe.shared_experts = types.SimpleNamespace(akr=object())
+    moe.shared_experts = types.SimpleNamespace(akr=object(), _akr_gate_up_codes=False)
     assert akr_moe.wants_x_quant(moe, 48) and not akr_moe.wants_x_quant(moe, 200)
+    # where the route declines, the stock gate_up reads the copy if it takes codes
+    moe.shared_experts._akr_gate_up_codes = True
+    assert akr_moe.wants_x_quant(moe, 200)
 
 
 def test_moe_runs_shared_expert_serially_with_routes_on(monkeypatch):
