@@ -204,22 +204,27 @@ def benchmark_config(
 # CUDA grid Y/Z dim limit — both `batch` and `nheads` must fit individually.
 _CUDA_MAX_GRID_DIM = 65535
 
-# Above this, kernel state-offset arithmetic (batch * nheads * headdim * dstate)
-# overflows int32 and the launch raises cudaErrorIllegalAddress.
-# 262144 covers Nemotron Super TP1 BS=2048.
-_MAX_EFFECTIVE_BATCH = 262144
+# Above this many state elements, the state offset the kernel computes without
+# state_batch_indices (batch * nheads * headdim * dstate, as here) overflows
+# int32 and the launch raises cudaErrorIllegalAddress. For headdim=64,
+# dstate=128 this allows effective_batch up to 262144 (Nemotron Super TP1
+# BS=2048).
+_MAX_STATE_ELEMS = 2**31
 
 
 def expand_batch_x_nheads(
     batch_sizes: list[int],
     nheads_list: list[int],
     ngroups: int,
+    headdim: int,
+    dstate: int,
 ) -> list[tuple[int, int, int]]:
     """Cross-product batch_sizes × nheads_list → sorted [(effective_batch,
     batch, nheads)], deduped by effective_batch. Filters pairs that exceed
-    the CUDA grid dim limit, the effective_batch ceiling, or where nheads is
-    not a positive multiple of ngroups.
+    the CUDA grid dim limit, the int32 state-offset ceiling (which depends on
+    headdim * dstate), or where nheads is not a positive multiple of ngroups.
     """
+    max_effective_batch = _MAX_STATE_ELEMS // (headdim * dstate)
     seen: dict[int, tuple[int, int]] = {}
     skipped_grid: list[tuple[int, int]] = []
     skipped_ngroups: list[tuple[int, int]] = []
@@ -233,7 +238,7 @@ def expand_batch_x_nheads(
         if n % ngroups != 0:
             skipped_ngroups.append((b, n))
             continue
-        if b * n > _MAX_EFFECTIVE_BATCH:
+        if b * n > max_effective_batch:
             skipped_eb.append((b, n))
             continue
         seen.setdefault(b * n, (b, n))
@@ -250,7 +255,7 @@ def expand_batch_x_nheads(
     if skipped_eb:
         print(
             f"  Note: skipping (batch, nheads) pairs whose effective_batch "
-            f"exceeds {_MAX_EFFECTIVE_BATCH}: {skipped_eb}"
+            f"exceeds {max_effective_batch}: {skipped_eb}"
         )
     return sorted((eb, b, n) for eb, (b, n) in seen.items())
 
@@ -675,7 +680,7 @@ def main():
     state_dtype = _SSM_CACHE_DTYPE_MAP[args.mamba_ssm_cache_dtype]
     device_name = get_ssm_device_name()
     cap = current_platform.get_device_capability()
-    is_blackwell = cap is not None and cap[0] >= 10
+    is_blackwell = current_platform.is_device_capability_family(100)
 
     # Mirror all output to a results file (like Unix tee).
     buf = StringIO()
@@ -703,9 +708,11 @@ def main():
         print(f"triton : {triton.__version__}")
 
         dstates = ALL_DSTATES if args.all_dstates else [args.dstate]
-        active = expand_batch_x_nheads(args.batch_sizes, args.nheads, args.ngroups)
 
         for dstate in dstates:
+            active = expand_batch_x_nheads(
+                args.batch_sizes, args.nheads, args.ngroups, args.headdim, dstate
+            )
             tuned, timings = tune_dstate(
                 dstate=dstate,
                 headdim=args.headdim,
