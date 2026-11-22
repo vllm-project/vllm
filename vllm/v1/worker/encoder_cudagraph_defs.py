@@ -107,6 +107,13 @@ class EncoderCudaGraphConfig:
     product), so the total number of captured graphs is
     `num_budgets * prod(len(axis) for axis in capture_axes)`."""
 
+    eager_fallback_fast_path: bool = False
+    """Skip item selection and batch compact eager output views on full fallback.
+
+    Models opt in when eager forward accepts the original batch directly and
+    does not benefit from sorting items by output length.
+    """
+
 
 @dataclass(slots=True)
 class EncoderCudaGraphCaptureInputs:

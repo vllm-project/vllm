@@ -670,9 +670,10 @@ class EncoderCudaGraphManager:
             if sum(tokens) > 0
         }
         all_eager = all(budget is None for budget in path_budgets.values())
+        eager_fast_path = all_eager and self.config.eager_fallback_fast_path
         batch_indices = list(range(num_items))
         axis_keys: CaptureAxisKeys
-        if all_eager:
+        if eager_fast_path:
             batch_mm_kwargs, axis_keys = mm_kwargs, ()
         else:
             # Largest first balances varlen attention tiles on mixed batches.
@@ -711,11 +712,11 @@ class EncoderCudaGraphManager:
             batch_indices,
             per_item_out_tokens,
             outputs_by_orig_idx,
-            clone=not all_eager,
+            clone=not eager_fast_path,
             batch_mm_kwargs=batch_mm_kwargs,
         )
         outputs = [outputs_by_orig_idx[i] for i in range(num_items)]
-        if all_eager:
+        if eager_fast_path:
             # Do not retain a whole batch for one cached item.
             copy_indices = [
                 i

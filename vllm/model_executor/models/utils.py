@@ -1399,9 +1399,12 @@ def scatter_output_slices(
     clone: bool = False,
 ) -> None:
     """Slice a concatenated output tensor and scatter into dest by index."""
-    lengths = [per_item_out_tokens[idx] for idx in indices]
-    for idx, sliced in zip(indices, output[: sum(lengths)].split(lengths)):
+    offset = 0
+    for idx in indices:
+        n_tok = per_item_out_tokens[idx]
+        sliced = output[offset : offset + n_tok]
         dest[idx] = sliced.clone() if clone else sliced
+        offset += n_tok
 
 
 def parse_diarized_timestamp(marker: str) -> float | None:

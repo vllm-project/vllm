@@ -1723,6 +1723,7 @@ class Qwen3OmniMoeAudioEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             modalities=["audio"] if supported else [],
             buffer_keys=["hidden_states", "cu_seqlens", "max_seqlen"],
             out_hidden_size=self.config.audio_config.output_dim,
+            eager_fallback_fast_path=True,
         )
 
     def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
