@@ -355,6 +355,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     IS_FP8: tl.constexpr,
+    FP8_DOTS: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
@@ -374,6 +375,10 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         mask=head_offsets[:, None] < GROUP_SIZE,
         other=0.0,
     )
+    if FP8_DOTS:
+        # Unit K/V scales: the query goes to the cache's e4m3 as is, so both
+        # dots are FP8 MFMA and K/V are never widened.
+        query = query.to(k_cache_ptr.dtype.element_ty)
 
     max_value = tl.full((BLOCK_M,), -1.0e20, dtype=tl.float32)
     normalizer = tl.zeros((BLOCK_M,), dtype=tl.float32)
@@ -427,7 +432,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             mask=valid[:, None],
             other=0.0,
         )
-        if IS_FP8:
+        if IS_FP8 and not FP8_DOTS:
             # e4m3 -> Q dtype is exact; keep the QK dot in Q's dtype (an fp8
             # QK dot measured slower and less accurate on the NVIDIA port).
             keys = keys.to(query.dtype)
@@ -1080,12 +1085,28 @@ def qsa_sparse_paged_attention(
     base_programs = q.shape[0] * k_cache.shape[2]
     cdna_version = get_cdna_version()
     cdna_bf16 = cdna_version in (3, 4) and k_cache.dtype == torch.bfloat16
-    if cdna_bf16:
+    # With FP8 K/V on CDNA3/4 both dots run as FP8 MFMA: the query is cast to
+    # the cache's e4m3 and K/V are never widened.
+    fp8_dots = cdna_version in (3, 4) and is_fp8
+    if cdna_bf16 or fp8_dots:
         # tl.dot with fewer than 16 rows is slow on CDNA3/4; pad the head group.
         block_m = max(block_m, 16)
     small_profile_limit = 8 if block_m <= 8 else 4
 
-    if cdna_bf16 and base_programs >= 32:
+    if fp8_dots and base_programs < 32:
+        block_n, partial_warps = 32, 4
+        target_splits = 64 if base_programs <= small_profile_limit else 32
+    elif fp8_dots and cdna_version == 3:
+        # 64-wide tiles and one warp, with enough splits for about 1024 programs.
+        block_n, partial_warps = 64, 1
+        target_splits = min(16, triton.next_power_of_2(-(-1024 // base_programs)))
+    elif fp8_dots and base_programs <= 128:
+        block_n, partial_warps = 32, 2
+        target_splits = triton.next_power_of_2(-(-1024 // base_programs))
+    elif fp8_dots:
+        block_n, partial_warps = 64, 1
+        target_splits = min(4, triton.next_power_of_2(-(-2048 // base_programs)))
+    elif cdna_bf16 and base_programs >= 32:
         # Narrow tiles, one warp, and enough splits for about 2048 programs.
         # CDNA4 decode prefers about 1024 programs with four warps.
         block_n = 16
@@ -1107,9 +1128,6 @@ def qsa_sparse_paged_attention(
         block_n, target_splits, partial_warps = 64, 4, 2
     else:
         block_n, target_splits, partial_warps = 64, 1, 2
-        if cdna_version in (3, 4):
-            # FP8 K/V on CDNA3 and CDNA4 is faster with one warp per program.
-            partial_warps = 1
     # gfx942 and gfx950 have a 64 KiB LDS limit. One software-pipelining
     # stage keeps the wide TP4 tile within that shared-memory budget.
     partial_stages = 1 if current_platform.is_rocm() else 2
@@ -1172,6 +1190,7 @@ def qsa_sparse_paged_attention(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         IS_FP8=is_fp8,
+        FP8_DOTS=fp8_dots,
         num_warps=partial_warps,
         num_stages=partial_stages,
     )

@@ -603,8 +603,9 @@ def test_qsa_select_bounds_columns_to_max_seq_len(
         # group to 16 rows. From 32 programs it takes its splits from the
         # program count (on CDNA4, up to 128 programs use more splits and
         # four warps), and from 2048 programs one split writes the output
-        # directly. FP8 keeps the shared profiles; past 512 programs it uses
-        # one warp.
+        # directly. FP8 pads the same way and runs FP8 dots: 32-wide tiles
+        # under 32 programs, then 64-wide on CDNA3, and on CDNA4 32-wide up
+        # to 128 programs and 64-wide past them.
         pytest.param(1, 24, 2, 1792, id="tp1_p2"),
         pytest.param(257, 24, 2, 1792, id="tp1_p514"),
         pytest.param(16, 12, 1, 1792, id="tp2_p16"),
