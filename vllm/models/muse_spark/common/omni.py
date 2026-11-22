@@ -164,6 +164,7 @@ class MuseSparkOmniMixin:
             modalities: set[str] | str,
             *,
             targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+            auto_offload: bool = True,
         ): ...
 
     @classmethod
