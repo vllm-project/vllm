@@ -648,6 +648,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             region_num_blocks=remote_region_num_blocks,
             pairs=(pairs.remote, pairs.remote if by_region else pairs.group),
             ssm_regions=pairs.remote_ssm_regions,
+            ple_region=pairs.remote_ple_region,
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
