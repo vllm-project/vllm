@@ -158,9 +158,9 @@ def test_structured_output_applies_from_first_token(tokenizer):
     assert parser.is_reasoning_end([1, ord("u"), 2, 1])
 
 
-# Prose that merely mentions a marker must not switch parser state: the
-# chat template always frames markers with a trailing newline, so an
-# inline mention stays literal text (issue #69243).
+# Prose that merely mentions the tool-call marker must not switch parser
+# state: the chat template always frames markers with a trailing newline,
+# so an inline mention stays literal text (issue #69243).
 PROSE_CASES = {
     "mentions_tool_call": (
         "The parser looks for the literal <tool_call> marker in output. DONE",
@@ -169,10 +169,6 @@ PROSE_CASES = {
     "mentions_tool_call_in_backticks": (
         "Never write `<tool_call>` in prose; use a placeholder instead. DONE",
         "Never write `<tool_call>` in prose; use a placeholder instead. DONE",
-    ),
-    "mentions_think": (
-        "The template opens reasoning with <think> before thinking. DONE",
-        "The template opens reasoning with <think> before thinking. DONE",
     ),
 }
 

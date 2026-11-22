@@ -64,10 +64,10 @@ def ripple_config() -> ParserEngineConfig:
         terminals={
             # The chat template frames each marker with newlines
             # ("<think>\n...\n</think>\n", "\n<tool_call>\n...\n</tool_call>"),
-            # so they belong to the markers rather than the content. Opening
-            # markers additionally require the trailing newline so that prose
-            # merely mentioning them stays literal text.
-            "THINK_START": (THINK_START + "\n",),
+            # so they belong to the markers rather than the content. The
+            # tool-call opener additionally requires the trailing newline so
+            # that prose merely mentioning it stays literal text.
+            "THINK_START": _framed(THINK_START, before=False),
             "THINK_END": _framed(THINK_END),
             "TOOL_START": ("\n" + TOOL_CALL_START + "\n", TOOL_CALL_START + "\n"),
             "TOOL_END": _framed(TOOL_CALL_END, after=False),
