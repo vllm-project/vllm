@@ -305,7 +305,9 @@ fn inkling2_declared_tools(request: &ChatRequest) -> Vec<&ChatTool> {
             .flatten()
             .collect(),
         ChatToolChoice::Function { name } => request.tool(name).into_iter().collect(),
-        ChatToolChoice::Auto | ChatToolChoice::Required => request.tools().iter().collect(),
+        ChatToolChoice::Auto | ChatToolChoice::Required | ChatToolChoice::AllowedTools { .. } => {
+            request.tools().iter().collect()
+        }
     }
 }
 
@@ -314,7 +316,10 @@ fn tool_choice_instruction(
     parallel_tool_calls: bool,
 ) -> Option<String> {
     match tool_choice {
-        ChatToolChoice::None => None,
+        // Inkling2's reference renderer defines no prompt instruction for
+        // `allowed_tools`; leaving the system prompt untouched also keeps the
+        // prompt prefix fixed across allowed subsets.
+        ChatToolChoice::None | ChatToolChoice::AllowedTools { .. } => None,
         ChatToolChoice::Auto if parallel_tool_calls => None,
         ChatToolChoice::Auto => Some(
             "If you call a function, call at most one function in your next response.".to_string(),
