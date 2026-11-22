@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-import logging
+import errno
 import mmap
 import os
 import random
 import threading
 import time
+
+from vllm.logger import init_logger
 
 try:
     from vllm.fs_io_C import (  # pyright: ignore[reportMissingImports]
@@ -21,7 +23,7 @@ try:
 except ImportError:
     _HAS_FSIO_C = False
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 # O_DIRECT is Linux-specific and not available on macOS
 O_DIRECT = getattr(os, "O_DIRECT", 0)
@@ -30,24 +32,14 @@ O_DIRECT = getattr(os, "O_DIRECT", 0)
 _thread_local = threading.local()
 
 
-_access_time_failures = 0
-_access_time_lock = threading.Lock()
-
-
-def _report_access_time_error(exc: OSError) -> None:
-    global _access_time_failures
-    if isinstance(exc, FileNotFoundError):
+def _report_access_time_error(error: int | None) -> None:
+    if error == errno.ENOENT:
         return
-    with _access_time_lock:
-        _access_time_failures += 1
-        failures = _access_time_failures
-    if failures & (failures - 1) == 0:
-        logger.warning(
-            "Could not refresh cache access time (%d failures): %s; "
-            "recently used files may be evicted",
-            failures,
-            exc,
-        )
+    logger.warning_once(
+        "Could not refresh cache access time: %s; recently used files may be evicted",
+        os.strerror(error) if error is not None else "unknown error",
+        scope="process",
+    )
 
 
 def _refresh_file_access(fd: int) -> None:
@@ -56,14 +48,14 @@ def _refresh_file_access(fd: int) -> None:
         st = os.fstat(fd)
         os.utime(fd, ns=(time.time_ns(), st.st_mtime_ns))
     except OSError as exc:
-        _report_access_time_error(exc)
+        _report_access_time_error(exc.errno)
 
 
 def _refresh_existing_file(path: str) -> None:
     try:
         fd = os.open(path, os.O_RDONLY)
     except OSError as exc:
-        _report_access_time_error(exc)
+        _report_access_time_error(exc.errno)
         return
     try:
         _refresh_file_access(fd)

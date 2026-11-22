@@ -8,10 +8,6 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-#include <atomic>
-#include <cstdio>
-#include <cstring>
-
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -29,14 +25,18 @@ namespace {
 // Metadata failures must not fail a successful cache transfer.
 inline void report_access_time_error(int error) {
   if (error == ENOENT) return;
-  static std::atomic<size_t> failures{0};
-  const size_t count = failures.fetch_add(1) + 1;
-  if ((count & (count - 1)) == 0) {
-    fprintf(stderr,
-            "Could not refresh cache access time (%zu failures): %s; "
-            "recently used files may be evicted\n",
-            count, strerror(error));
+  // I/O runs without the GIL; only failures enter the shared Python logger.
+  const PyGILState_STATE state = PyGILState_Ensure();
+  PyObject* module = PyImport_ImportModule("vllm.v1.kv_offload.tiering.fs.io");
+  if (module != nullptr) {
+    PyObject* result =
+        PyObject_CallMethod(module, "_report_access_time_error", "i", error);
+    Py_XDECREF(result);
+    Py_DECREF(module);
   }
+  // Diagnostics must not turn a successful cache transfer into an error.
+  PyErr_Clear();
+  PyGILState_Release(state);
 }
 
 inline void refresh_file_access(int fd) {

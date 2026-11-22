@@ -286,7 +286,7 @@ already receive current timestamps on creation.
 Tracking defaults to `false` to avoid extra metadata operations on shared storage.
 With tracking disabled, `relatime` can leave repeated reads unrecorded, and
 `noatime` disables automatic read timestamps. Validate mount behavior against the
-evictor's protection window. Metadata-update failures are logged without failing
+evictor's protection window. Metadata-update failures warn once per error type per process without failing
 the transfer and weaken protection. GPU/CPU-only cache hits do not access the
 filesystem and are not tracked. Tracking does not lock out an external evictor
 or implement TTL, a capacity limit, or deletion itself.

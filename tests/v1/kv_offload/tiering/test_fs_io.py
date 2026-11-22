@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+from vllm.logger import _print_warning_once
 from vllm.v1.kv_offload.tiering.fs import io
 
 
@@ -87,22 +88,31 @@ def test_new_store_preserves_data_and_count(tmp_path, backend):
 
 
 @pytest.mark.parametrize("operation", ["load", "reuse"])
-def test_metadata_failure_does_not_fail_transfer(tmp_path, monkeypatch, operation):
+def test_metadata_failure_does_not_fail_transfer(
+    tmp_path, monkeypatch, caplog, operation
+):
     path = tmp_path / "block.bin"
     path.write_bytes(b"cache")
     monkeypatch.setattr(io, "_HAS_FSIO_C", False)
+    _print_warning_once.cache_clear()
 
     def denied(*args, **kwargs):
         raise PermissionError(errno.EPERM, "metadata update denied")
 
     monkeypatch.setattr(os, "utime", denied)
     buffer = bytearray(b"other")
-    if operation == "load":
-        io.batch_load_block([str(path)], memoryview(buffer), [0], 5, False, True)
-        assert buffer == b"cache"
-    else:
-        assert (
-            io.batch_store_block([str(path)], memoryview(buffer), [0], 5, False, True)
-            == 0
-        )
+    for _ in range(3):
+        if operation == "load":
+            io.batch_load_block([str(path)], memoryview(buffer), [0], 5, False, True)
+            assert buffer == b"cache"
+        else:
+            assert (
+                io.batch_store_block(
+                    [str(path)], memoryview(buffer), [0], 5, False, True
+                )
+                == 0
+            )
     assert path.read_bytes() == b"cache"
+    warnings = [r for r in caplog.records if "refresh cache access time" in r.message]
+    assert len(warnings) == 1
+    _print_warning_once.cache_clear()
