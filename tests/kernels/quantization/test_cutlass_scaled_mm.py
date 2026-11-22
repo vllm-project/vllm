@@ -506,7 +506,7 @@ def test_cutlass_int8_azp_bias_fold(m: int, n: int, k: int, out_dtype: torch.dty
 @pytest.mark.parametrize("azp_per_token", [True, False])
 @pytest.mark.skipif(
     current_platform.has_device_capability(100),
-    reason="Int8 AZP is not supported on SM100+."
+    reason="Int8 AZP is not supported on SM100+.",
 )
 def test_cutlass_int8_azp(
     m: int, n: int, k: int, out_dtype: torch.dtype, use_bias: bool, azp_per_token: bool

@@ -450,9 +450,9 @@ void cutlass_scaled_mm_azp(torch::stable::Tensor& c,
 
   int32_t version_num = get_sm_version_num();
 
-
-STD_TORCH_CHECK(version_num < 100, "Int8 not supported on SM", version_num, ". Use FP8 quantization instead, or run on older arch (SM < 100).");
-  
+  STD_TORCH_CHECK(
+      version_num < 100, "Int8 not supported on SM", version_num,
+      ". Use FP8 quantization instead, or run on older arch (SM < 100).");
 
 #if defined ENABLE_SCALED_MM_SM90 && ENABLE_SCALED_MM_SM90
   if (version_num >= 90) {
