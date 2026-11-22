@@ -1718,9 +1718,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # The hidden states must be gathered in rank-owner-sorted order
             # before computing the partial-vocab logits, so that the all-to-all
             # produces full-vocab logits for just the locally-owned requests.
-            sample_hidden_states = hidden_states[sorted_logits_indices]
-            local_logits = self.model.compute_logits_local(sample_hidden_states)
-            logits = all_to_all_logits(local_logits, shard_metadata)
+            logits = None
+            owned = getattr(self.model, "compute_logits_owned", None)
+            if owned is not None:  # the model's own owner exchange; None: stock
+                logits = owned(hidden_states, sorted_logits_indices, shard_metadata)
+            if logits is None:
+                sample_hidden_states = hidden_states[sorted_logits_indices]
+                local_logits = self.model.compute_logits_local(sample_hidden_states)
+                logits = all_to_all_logits(local_logits, shard_metadata)
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]

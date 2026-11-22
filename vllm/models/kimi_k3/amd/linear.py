@@ -73,7 +73,16 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.kimi_k3.amd import sequence_parallel
+from vllm.models.kimi_k3.amd import (
+    akr_attnres,
+    akr_final,
+    akr_kda,
+    akr_moe,
+    akr_runtime,
+    akr_switch,
+    akr_target,
+    sequence_parallel,
+)
 from vllm.models.kimi_k3.amd.dsa import KimiK3DSAAttention
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
@@ -285,6 +294,62 @@ def _apply_attn_res(
     return result
 
 
+def _apply_attn_res_partial(
+    prefix_sum: torch.Tensor | None,
+    block_residual: torch.Tensor,
+    proj: ReplicatedLinear,
+    norm: RMSNorm,
+    num_valid_blocks: int,
+    *,
+    partial: torch.Tensor,
+    output_norm: RMSNorm | None = None,
+    block_write_idx: int = -1,
+    quant_key: QuantKey | None = None,
+    return_prefix: bool = False,
+):
+    """`_apply_attn_res` with `delta` = all-reduce(`partial`) (a TP partial that was
+    left un-reduced, amd_kernels norm route): one fused launch when the kernel takes the
+    call, else the TP all-reduce and the stock AttnRes. `prefix_sum` None (block-write
+    layer after attention): the all-reduced partial becomes the prefix. With
+    `return_prefix` the result is (hidden, prefix_sum)."""
+    if quant_key is None and akr_attnres.fits(
+        partial,
+        prefix_sum,
+        block_residual,
+        proj,
+        norm,
+        num_valid_blocks,
+        output_norm=output_norm,
+        block_write_idx=block_write_idx,
+    ):
+        hidden, prefix_out = akr_attnres.fused(
+            partial,
+            prefix_sum,
+            block_residual,
+            proj,
+            norm,
+            num_valid_blocks,
+            output_norm=output_norm,
+            block_write_idx=block_write_idx,
+        )
+        return (hidden, prefix_out) if return_prefix else hidden
+    delta = akr_attnres.reduce(partial)
+    if prefix_sum is None:
+        prefix_sum, delta = delta, None
+    hidden = _apply_attn_res(
+        prefix_sum,
+        block_residual,
+        proj,
+        norm,
+        num_valid_blocks,
+        delta=delta,
+        output_norm=output_norm,
+        block_write_idx=block_write_idx,
+        quant_key=quant_key,
+    )
+    return (hidden, prefix_sum) if return_prefix else hidden
+
+
 class KimiMoE(nn.Module):
     def __init__(
         self,
@@ -446,6 +511,9 @@ class KimiMoE(nn.Module):
             routed_output_transform=self.routed_output_transform,
             runner_cls=ROCmLatentMoERunner if self.use_latent_moe else None,
         )
+        # amd_kernels moe/gemm routes (akr_moe): the decode chain of this layer
+        self._akr_moe = self.use_latent_moe and akr_moe.setup(self, config)
+        self._akr_state = None
         moe_parallel = self.experts.moe_config.moe_parallel_config
         if (
             isinstance(self.routed_expert_down_proj, KimiRoutedInputLinear)
@@ -473,6 +541,8 @@ class KimiMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
+        if self._akr_state is not None and akr_moe.eligible(self, hidden_states):
+            return akr_moe.forward(self, hidden_states).view(num_tokens, hidden_size)
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
@@ -746,6 +816,12 @@ class KimiDecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+        # amd_kernels norm route (akr_attnres): the attention o_proj output / the MoE
+        # output stay TP partials and the next fused all-reduce + AttnRes sums them. Set
+        # by KimiLinearForCausalLM.process_weights_after_loading (_akr_setup_deferral).
+        self._akr_attn_deferred = False  # self_attn.o_proj returns a TP partial
+        self._akr_mlp_deferred = False  # self.mlp returns a TP partial
+        self._akr_prev_deferred = False  # the incoming prefix_delta is a TP partial
         attn_res_block_size = config.attn_res_block_size
         self.use_attn_residuals = attn_res_block_size is not None
         if attn_res_block_size is not None:
@@ -827,46 +903,68 @@ class KimiDecoderLayer(nn.Module):
             if isinstance(self.self_attn, (KimiK3DeltaAttention, KimiMLAAttention))
             else None
         )
-        hidden_states = _apply_attn_res(
+        pre_attn_args = (
             prefix_sum,
             block_residual,
             self.self_attention_res_proj,
             self.self_attention_res_norm,
             self.prev_valid_blocks,
-            delta=prefix_delta,
+        )
+        pre_attn_kwargs: dict[str, Any] = dict(
             output_norm=self.input_layernorm,
             block_write_idx=(self.block_write_idx if self.is_block_write_layer else -1),
             quant_key=attention_quant_key,
         )
+        if self._akr_prev_deferred and prefix_delta is not None:
+            # prefix_delta is the previous layer's TP partial
+            hidden_states = _apply_attn_res_partial(
+                *pre_attn_args, partial=prefix_delta, **pre_attn_kwargs
+            )
+        else:
+            hidden_states = _apply_attn_res(
+                *pre_attn_args, delta=prefix_delta, **pre_attn_kwargs
+            )
 
         if self.is_block_write_layer:
             prefix_sum = None
 
         hidden_states = self._run_self_attn(positions, hidden_states)
 
-        if prefix_sum is None:
-            prefix_sum = hidden_states
-            prefix_delta = None
-        else:
-            prefix_delta = hidden_states
-
         mlp_valid_blocks = self.prev_valid_blocks + (
             1 if self.is_block_write_layer else 0
         )
-        hidden_states = _apply_attn_res(
-            prefix_sum,
-            block_residual,
-            self.mlp_res_proj,
-            self.mlp_res_norm,
-            mlp_valid_blocks,
-            delta=prefix_delta,
-            output_norm=self.post_attention_layernorm,
-            quant_key=(
-                self.mlp.get_input_quant_key()
-                if isinstance(self.mlp, KimiMLP)
-                else None
-            ),
+        mlp_quant_key = (
+            self.mlp.get_input_quant_key() if isinstance(self.mlp, KimiMLP) else None
         )
+        if self._akr_attn_deferred:
+            # hidden_states is the o_proj TP partial
+            hidden_states, prefix_sum = _apply_attn_res_partial(
+                prefix_sum,
+                block_residual,
+                self.mlp_res_proj,
+                self.mlp_res_norm,
+                mlp_valid_blocks,
+                partial=hidden_states,
+                output_norm=self.post_attention_layernorm,
+                quant_key=mlp_quant_key,
+                return_prefix=True,
+            )
+        else:
+            if prefix_sum is None:
+                prefix_sum = hidden_states
+                prefix_delta = None
+            else:
+                prefix_delta = hidden_states
+            hidden_states = _apply_attn_res(
+                prefix_sum,
+                block_residual,
+                self.mlp_res_proj,
+                self.mlp_res_norm,
+                mlp_valid_blocks,
+                delta=prefix_delta,
+                output_norm=self.post_attention_layernorm,
+                quant_key=mlp_quant_key,
+            )
 
         hidden_states = self.mlp(hidden_states)
         return prefix_sum, block_residual, hidden_states
@@ -1080,25 +1178,55 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 self._maybe_add_hidden_state(
                     aux_hidden_states,
                     layer_idx + 1,
-                    hidden_states + prefix_delta,
+                    hidden_states
+                    + (
+                        akr_attnres.reduce(prefix_delta)
+                        if layer._akr_mlp_deferred
+                        else prefix_delta
+                    ),
                     residual,
                 )
 
+        last_deferred = self.layers[self.end_layer - 1]._akr_mlp_deferred
         if not get_pp_group().is_last_rank:
-            hidden_states = hidden_states + prefix_delta
+            hidden_states = hidden_states + (
+                akr_attnres.reduce(prefix_delta) if last_deferred else prefix_delta
+            )
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states = _apply_attn_res(
+        final_args = (
             hidden_states,
             residual,
             self.output_attn_res_proj,
             self.output_attn_res_norm,
             attn_res_block_num,
-            delta=prefix_delta,
         )
-        # NOTE: the final norm is applied in compute_logits instead of here.
+        if last_deferred:
+            # amd_kernels ATTNRES_AR (kdamoe): the last layer's TP partial is reduced
+            # by the fused all-reduce + AttnRes kernel (it owns the last-layer path)
+            # (FINALNORM also on: the same kernel applies the final norm, keeping
+            # FINALNORM's "forward returns normed hidden states" contract)
+            hidden_states = _apply_attn_res_partial(
+                *final_args,
+                partial=prefix_delta,
+                output_norm=self.norm if akr_final.applied(self) else None,
+            )
+        elif akr_final.applied(self):
+            # amd_kernels FINALNORM: attn_res + the final norm in one launch
+            hidden_states = akr_final.final_hidden(
+                self,
+                lambda: _apply_attn_res(*final_args, delta=prefix_delta),
+                hidden_states,
+                residual,
+                prefix_delta,
+                attn_res_block_num,
+            )
+        else:
+            hidden_states = _apply_attn_res(*final_args, delta=prefix_delta)
+        # NOTE: the final norm is applied in compute_logits instead of here
+        # (unless akr_final.applied).
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -1365,6 +1493,95 @@ class KimiLinearForCausalLM(
         for module in self.modules():
             if isinstance(module, KimiK3MultiHeadLatentAttentionWrapper):
                 module.process_weights_after_loading()
+        # amd_kernels: kdamoe layer routes, then the non-layer routes (both are TP
+        # collectives: same order on every rank)
+        self._akr_setup()
+        akr_target.setup(self)
+
+    def _akr_setup(self) -> None:
+        """amd_kernels kdamoe routes that need the loaded weights: layer states of the
+        MoE chain, the 8-rank communicators (a TP collective: every rank takes the same
+        branches, they depend only on config and env), the deferred all-reduces and the
+        capture-stream pre-warm."""
+        model = self.model
+        layers = model.layers[model.start_layer : model.end_layer]
+        moes = [
+            layer.mlp
+            for layer in layers
+            if isinstance(layer.mlp, KimiMoE) and layer.mlp._akr_moe
+        ]
+        attnres = (
+            self.specialized_decode_config is None
+            and model.config.attn_res_block_size is not None
+            and akr_attnres.enabled(self.vllm_config)
+        )
+        latent = bool(moes) and akr_switch.on("LATENT_AR")
+        if attnres or latent:
+            hidden = model.config.hidden_size
+            akr_runtime.init_comms(
+                attnres=attnres,
+                latent=latent,
+                hidden=hidden,
+                up_rows=hidden // get_tensor_model_parallel_world_size(),
+                latent_dim=moes[0].moe_hidden_size if moes else 0,
+            )
+        ok_moe = [m for m in moes if akr_moe.prepare(m)]
+        n_tail = sum(m.experts._akr_tail is not None for m in moes)
+        fused_ar = attnres and akr_runtime.attnres_comm is not None
+        if fused_ar:
+            prev = False
+            for layer in layers:
+                layer._akr_prev_deferred = prev
+                if layer.use_attn_residuals:
+                    layer.self_attn.o_proj.reduce_results = False
+                    layer._akr_attn_deferred = True
+                mlp = layer.mlp
+                if (
+                    layer.use_attn_residuals
+                    and isinstance(mlp, KimiMoE)
+                    and mlp.use_latent_moe
+                    and mlp.experts._tail_shardable
+                    and not mlp.experts._fused_output_is_reduced
+                    and not mlp.experts.moe_config.is_sequence_parallel
+                ):
+                    mlp.experts._akr_defer_final = True
+                    layer._akr_mlp_deferred = True
+                prev = layer._akr_mlp_deferred
+        if fused_ar:
+            akr_attnres.warm_up(layers[0])
+        kda_layer = next(
+            (
+                layer.self_attn
+                for layer in layers
+                if isinstance(layer.self_attn, KimiK3DeltaAttention)
+                and layer.self_attn._akr_decode
+            ),
+            None,
+        )
+        if kda_layer is not None:
+            spec = self.vllm_config.speculative_config
+            akr_kda.warm_up(
+                kda_layer, 1 + (spec.num_speculative_tokens if spec is not None else 0)
+            )
+        if ok_moe:
+            # one layer's weights are enough to allocate the shared stream workspaces
+            akr_moe.prewarm_capture_stream(ok_moe[0])
+            akr_runtime.register_prewarm(
+                lambda m=ok_moe[0]: akr_moe.prewarm_capture_stream(m)
+            )
+        tail_moe = next((m for m in moes if m.experts._akr_tail is not None), None)
+        if tail_moe is not None:
+            akr_moe.warm_tail(tail_moe)
+        if fused_ar or ok_moe:
+            akr_runtime.install_capture_hook()
+        logger.info(
+            "amd_kernels kdamoe: moe chain on %d/%d MoE layers, latent tail kernel on "
+            "%d layers, fused all-reduce + AttnRes %s",
+            len(ok_moe),
+            len(moes),
+            n_tail,
+            "on" if fused_ar else "off",
+        )
 
     def compute_logits(
         self,
@@ -1372,8 +1589,29 @@ class KimiLinearForCausalLM(
     ) -> torch.Tensor | None:
         # The model's final norm is applied here, not at the end of forward.
         self.after_specialized_decode_step()
-        hidden_states = self.model.norm(hidden_states, None)
+        if not akr_final.applied(self.model):
+            hidden_states = self.model.norm(hidden_states, None)
+        logits = akr_target.compute_logits(self, hidden_states)
+        if logits is not None:
+            return logits
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """This rank's vocabulary shard of the logits (batch-sharded sampling)."""
+        self.after_specialized_decode_step()
+        if not akr_final.applied(self.model):
+            hidden_states = self.model.norm(hidden_states, None)
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+
+    def compute_logits_owned(self, hidden_states, sorted_logits_indices, metadata):
+        """Model-runner hook: the sampled rows' full logits from the amd_kernels
+        owner exchange, or None for the stock gather + all-to-all."""
+        logits = akr_target.compute_logits_owned(
+            self, hidden_states, sorted_logits_indices, metadata
+        )
+        if logits is not None:
+            self.after_specialized_decode_step()
+        return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)

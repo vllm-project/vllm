@@ -571,6 +571,8 @@ def forward(
         nblocks,
         delta=prefix_delta,
     )
+    if lin.akr_final.applied(model):  # compute_logits skips the final norm then
+        out = model.norm(out, None)
     out = sp.ag(out)[:T]
     if aux:
         return out, aux

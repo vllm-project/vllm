@@ -18,6 +18,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadata,
     SparseMLACommonMetadataBuilder,
 )
+from vllm.models.kimi_k3.amd import akr_dsa
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -1622,28 +1623,39 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
 
                 assert self.dcp_scores is not None
 
-                scores = (
-                    get_dcp_group()
-                    .all_gather(
-                        self.dcp_scores[:num_actual_toks].view(torch.int32), dim=1
-                    )
-                    .view(torch.float32)
-                )
                 token_pages = getattr(attn_metadata, "_dcp_token_pages", None)
                 if token_pages is None or token_pages.shape[0] != num_actual_toks:
                     token_pages = attn_metadata.block_table[
                         attn_metadata.req_id_per_token[:num_actual_toks]
                     ]
                     attn_metadata._dcp_token_pages = token_pages
-                packed, indptr = merge_dcp_scores(
-                    scores,
-                    self.topk_indices_buffer[:num_actual_toks],
+                local_scores = self.dcp_scores[:num_actual_toks]
+                local_idx = self.topk_indices_buffer[:num_actual_toks]
+                # amd_kernels: one launch for the score gather + merge
+                merged = akr_dsa.gather_merge(
+                    local_scores,
+                    local_idx,
                     token_pages,
-                    self.dcp_rank,
-                    self.dcp_world_size,
                     attn_metadata.block_size,
                     block_stride_rows,
                 )
+                if merged is not None:
+                    packed, indptr = merged
+                else:
+                    scores = (
+                        get_dcp_group()
+                        .all_gather(local_scores.view(torch.int32), dim=1)
+                        .view(torch.float32)
+                    )
+                    packed, indptr = merge_dcp_scores(
+                        scores,
+                        local_idx,
+                        token_pages,
+                        self.dcp_rank,
+                        self.dcp_world_size,
+                        attn_metadata.block_size,
+                        block_stride_rows,
+                    )
                 compact = True
             else:
                 indices = triton_filter_and_convert_dcp_index(
@@ -1663,6 +1675,18 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 # all topk (same keys in the same order, so the output is unchanged).
                 indptr, packed = _compact_dcp_indices(indices)
                 compact = True
+            if not attn_metadata.num_prefills:
+                # amd_kernels: the DCP decode kernel (bf16 out, natural-log lse)
+                akr_out = akr_dsa.sparse_mla_decode(
+                    q,
+                    kv_c_and_k_pe_cache,
+                    indptr,
+                    packed,
+                    self.scale,
+                    attn_metadata.attn_out_dtype,
+                )
+                if akr_out is not None:
+                    return akr_out
             output = torch.empty(
                 (q.shape[0], q.shape[1], self.kv_lora_rank),
                 dtype=attn_metadata.attn_out_dtype,
