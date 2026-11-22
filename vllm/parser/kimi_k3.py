@@ -25,6 +25,29 @@ class KimiK3Parser(DelegatingParser):
 
     # TODO: Switch Kimi K3 to the parser engine once its XTML reasoning/tool
     # path is covered there.
+    def parse(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        enable_auto_tools: bool = False,
+        model_output_token_ids: Sequence[int] = (),
+    ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        reasoning_parser = self._reasoning_parser
+        if not isinstance(reasoning_parser, KimiK3ReasoningParser):
+            return super().parse(
+                model_output, request, enable_auto_tools, model_output_token_ids
+            )
+        # Channel markers are structural only as special tokens; pass the ids
+        # so reasoning that quotes one as text is not split there.
+        self._initialize_history_tool_call_cnt(request)
+        reasoning, content = reasoning_parser.extract_reasoning(
+            model_output, request, model_output_token_ids
+        )
+        tool_calls, content = self._extract_tool_calls(
+            content, request, enable_auto_tools
+        )
+        return reasoning, content, tool_calls
+
     def _extract_tool_calls(
         self,
         content: str | None,

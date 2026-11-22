@@ -16,13 +16,14 @@ Two subtleties drive the implementation:
     generation prefix, so the model's output can begin *inside* the think
     channel with no open marker. The text paths therefore treat a missing open
     marker as "reasoning starts at offset 0".
-  * On very long prompts (~1M tokens) the model sometimes skips the pre-filled
-    think channel: it writes the reply directly and closes it with
-    ``<|close|>response<|sep|><|close|>message<|sep|>``, never emitting
-    ``<|close|>think<|sep|>`` or ``<|open|>response<|sep|>``. A
-    ``<|close|>response<|sep|>`` inside the think channel before any think exit
-    proves the preceding text was the response, so it is returned as content
-    (same reading as sgl-project/sglang#37743).
+  * The model does not always close the think channel the prompt opened. It
+    may open the response directly (`<|open|>response<|sep|>`), or, mostly on
+    ~1M-token prompts, write the reply straight away and end it with
+    `<|close|>response<|sep|><|close|>message<|sep|>`. Either marker inside
+    the think channel leaves it: text before a response opener is reasoning,
+    text before a response closer is the reply and is returned as content
+    (same reading as sgl-project/sglang#37743). These markers are located by
+    token id, so reasoning that merely quotes one is left alone.
 
 When thinking is disabled (``chat_template_kwargs={"thinking": False}`` or
 ``{"enable_thinking": False}``, i.e. instruct mode) the parser returns every
@@ -82,6 +83,10 @@ def _newest_marker(haystack: Sequence[int], a: Sequence[int], b: Sequence[int]) 
         if head == b0 and i + len(b) <= len(haystack) and _match_at(haystack, i, b):
             return 1
     return -1
+
+
+# Kinds of marker that leave the think channel.
+_THINK_CLOSE, _RESPONSE_OPEN, _RESPONSE_CLOSE = range(3)
 
 
 class KimiK3ReasoningParser(ReasoningParser):
@@ -148,14 +153,66 @@ class KimiK3ReasoningParser(ReasoningParser):
         self._response_close_ids = tokenizer.encode(
             self._response_close, add_special_tokens=False
         )
+        # Markers that leave the think channel, indexed by _THINK_CLOSE etc.
+        self._exit_ids = (
+            self._think_close_ids,
+            self._response_open_ids,
+            self._response_close_ids,
+        )
+        self._exit_res = (
+            self._think_close_re,
+            self._response_open_re,
+            self._response_close_re,
+        )
         self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
         self._last_streaming_content_token_ids: list[int] | None = None
-        # Set once a streamed response is found to have skipped the think
-        # channel; everything after that is content.
-        self._skipped_think = False
+        # Streaming: tokens already scanned for a think exit, the exit found
+        # (token index, kind), and whether its text has been handed off.
+        self._scanned = 0
+        self._exit_index = -1
+        self._exit_kind = -1
+        self._exited = False
+
+    def _first_think_exit(
+        self, token_ids: Sequence[int], start: int = 0
+    ) -> tuple[int, int]:
+        """`(index, kind)` of the first marker leaving the think channel."""
+        heads = {m[0] for m in self._exit_ids if m}
+        n = len(token_ids)
+        for i in range(start, n):
+            if token_ids[i] in heads:
+                for kind, marker in enumerate(self._exit_ids):
+                    if (
+                        marker
+                        and i + len(marker) <= n
+                        and _match_at(token_ids, i, marker)
+                    ):
+                        return i, kind
+        return -1, -1
+
+    def _exit_text_match(
+        self, text: str, token_ids: Sequence[int], index: int, kind: int
+    ) -> "re.Match[str] | None":
+        """Locate in *text* the marker that starts at token *index*.
+
+        Reasoning may quote the same marker as ordinary text before it; those
+        spellings are counted in the decoded prefix and skipped.
+        """
+        marker_re = self._exit_res[kind]
+        prefix = self.model_tokenizer.decode(
+            list(token_ids[:index]), skip_special_tokens=False
+        )
+        quoted = len(marker_re.findall(prefix))
+        for i, match in enumerate(marker_re.finditer(text)):
+            if i == quoted:
+                return match
+        return None
 
     def _skipped_think_channel(self, text: str, pos: int = 0) -> bool:
-        """A response-close inside the think channel before any think exit."""
+        """A response-close inside the think channel before any think exit.
+
+        Text-only fallback for callers that pass no token ids.
+        """
         m_rc = self._response_close_re.search(text, pos)
         if m_rc is None:
             return False
@@ -201,19 +258,16 @@ class KimiK3ReasoningParser(ReasoningParser):
         return self._reasoning_end_newest(input_ids)
 
     def _reasoning_end_newest(self, window: Sequence[int]) -> bool:
-        """True when the newest marker ends the current think channel.
+        """True when the newest marker leaves the current think channel.
 
-        That is ``<|close|>think<|sep|>``, or ``<|close|>response<|sep|>`` when
-        the model skipped the channel and closed its reply inside it (see the
-        module docstring). Either one only counts when it is newer than the last
-        ``<|open|>think<|sep|>``, so a prior turn's markers kept in the prompt do
+        That is `<|close|>think<|sep|>`, or a response opener or closer when
+        the model left the channel without closing it (see the module
+        docstring). It only counts when it is newer than the last
+        `<|open|>think<|sep|>`, so a prior turn's markers kept in the prompt do
         not end the current turn's reasoning.
         """
         open_ids = self._think_open_ids
-        return (
-            _newest_marker(window, self._think_close_ids, open_ids) == 0
-            or _newest_marker(window, self._response_close_ids, open_ids) == 0
-        )
+        return any(_newest_marker(window, ids, open_ids) == 0 for ids in self._exit_ids)
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
@@ -234,14 +288,7 @@ class KimiK3ReasoningParser(ReasoningParser):
         delta = list(delta_ids)
         if not delta:
             return False
-        carry = (
-            max(
-                len(self._think_close_ids),
-                len(self._think_open_ids),
-                len(self._response_close_ids),
-            )
-            - 1
-        )
+        carry = max(map(len, (self._think_open_ids, *self._exit_ids))) - 1
         head = len(input_ids) - len(delta)
         window = list(input_ids[max(0, head - carry) : head]) + delta
         return self._reasoning_end_newest(window)
@@ -252,13 +299,13 @@ class KimiK3ReasoningParser(ReasoningParser):
         idx = _subseq_index(input_ids, self._think_close_ids)
         if idx != -1:
             return input_ids[idx + len(self._think_close_ids) :]
-        if (
-            _newest_marker(input_ids, self._response_close_ids, self._think_open_ids)
-            == 0
-        ):
+        idx, kind = self._first_think_exit(input_ids)
+        if kind == _RESPONSE_OPEN:
+            return input_ids[idx:]
+        if kind == _RESPONSE_CLOSE:
             # Skipped think channel: the reply is everything after the last
             # think-open (or from the start when that was the generation prefix).
-            last_open = _subseq_index(input_ids, self._think_open_ids)
+            last_open = _subseq_index(input_ids[:idx], self._think_open_ids)
             start = last_open + len(self._think_open_ids) if last_open != -1 else 0
             return input_ids[start:]
         return []  # still reasoning
@@ -278,18 +325,21 @@ class KimiK3ReasoningParser(ReasoningParser):
         think_open = self._think_open_ids
         think_close = self._think_close_ids
         response_open = self._response_open_ids
-        first_ids = {m[0] for m in (think_open, think_close, response_open) if m}
+        response_close = self._response_close_ids
+        first_ids = {
+            m[0] for m in (think_open, think_close, response_open, response_close) if m
+        }
         n = len(token_ids)
         count = 0
+        channel_count = 0  # tokens counted since the think channel opened
         in_reasoning = True
-        seen_open = False
         i = 0
         while i < n:
             head = token_ids[i]
             if head in first_ids:
                 if i + len(think_open) <= n and _match_at(token_ids, i, think_open):
                     in_reasoning = True
-                    seen_open = True
+                    channel_count = 0
                     i += len(think_open)
                     continue
                 if i + len(think_close) <= n and _match_at(token_ids, i, think_close):
@@ -297,15 +347,25 @@ class KimiK3ReasoningParser(ReasoningParser):
                     i += len(think_close)
                     continue
                 if (
-                    not seen_open
-                    and i + len(response_open) <= n
-                    and _match_at(token_ids, i, response_open)
+                    in_reasoning
+                    and response_close
+                    and i + len(response_close) <= n
+                    and _match_at(token_ids, i, response_close)
+                ):
+                    # Skipped think channel: what it held was the reply.
+                    count -= channel_count
+                    in_reasoning = False
+                    i += len(response_close)
+                    continue
+                if i + len(response_open) <= n and _match_at(
+                    token_ids, i, response_open
                 ):
                     in_reasoning = False
                     i += len(response_open)
                     continue
             if in_reasoning:
                 count += 1
+                channel_count += 1
             i += 1
         return count
 
@@ -350,15 +410,22 @@ class KimiK3ReasoningParser(ReasoningParser):
         return self._strip_content_wrapper(text) or None
 
     def extract_reasoning(
-        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
+        self,
+        model_output: str,
+        request: "ChatCompletionRequest | ResponsesRequest",
+        token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None]:
         """Split full text into ``(reasoning, rest)`` for the non-streaming path.
 
-        Handles four shapes:
+        Handles these shapes:
           * response opener without think markers -> no think channel; all content
           * open marker present       -> reasoning starts after ``<|open|>think<|sep|>``
           * open marker absent but a   close marker exists (gen-prefix consumed
             the open) -> reasoning starts at offset 0
+          * response closer before any think exit -> the think channel was
+            skipped; the text before it is the reply, all content
+          * response opener before any think exit, given *token_ids* ->
+            reasoning ends there
           * neither marker present     -> truncated reasoning after a consumed
             generation prefix
         ``rest`` is whatever follows the close marker, fed on to the tool parser.
@@ -371,7 +438,21 @@ class KimiK3ReasoningParser(ReasoningParser):
         # open marker was already consumed as a generation prefix)
         content_start = m_open.end() if m_open is not None else 0
 
-        if self._skipped_think_channel(model_output, content_start):
+        if token_ids:
+            idx, kind = self._first_think_exit(token_ids)
+            m_exit = (
+                self._exit_text_match(model_output, token_ids, idx, kind)
+                if kind in (_RESPONSE_OPEN, _RESPONSE_CLOSE)
+                else None
+            )
+            if m_exit is not None and kind == _RESPONSE_OPEN:
+                reasoning = model_output[content_start : m_exit.start()]
+                rest = model_output[m_exit.start() :]
+                return reasoning or None, self._content_after_reasoning(rest, request)
+            skipped = m_exit is not None
+        else:
+            skipped = self._skipped_think_channel(model_output, content_start)
+        if skipped:
             # The model wrote its reply into the think channel; it is content.
             return None, self._content_after_reasoning(
                 model_output[content_start:], request
@@ -415,9 +496,14 @@ class KimiK3ReasoningParser(ReasoningParser):
         if m_open is not None:
             text = text[m_open.end() :]
         overlap = 0
-        # The response closer too, so no fragment of it leaks into reasoning
-        # before a skipped think channel is recognised.
-        for marker in (self._think_open, self._think_close, self._response_close):
+        # The response markers too, so no fragment of one leaks into reasoning
+        # before it is recognised as leaving the think channel.
+        for marker in (
+            self._think_open,
+            self._think_close,
+            self._response_open,
+            self._response_close,
+        ):
             max_check = min(len(marker) - 1, len(text))
             for n in range(max_check, 0, -1):
                 if text.endswith(marker[:n]):
@@ -493,24 +579,48 @@ class KimiK3ReasoningParser(ReasoningParser):
             return DeltaMessage(content=delta_text)
 
         # reasoning already ended -> downstream content
-        if self._skipped_think or self._think_close_re.search(previous_text):
+        if self._exited or self._think_close_re.search(previous_text):
             return DeltaMessage(content=delta_text)
 
-        # The think channel was skipped: what streamed as reasoning so far was
-        # the reply. It cannot be recalled, so it is replayed as content (the
-        # copy already sent stays in reasoning) -- sgl-project/sglang#37743.
-        # ``is_reasoning_end_streaming`` sees the same marker this step, so the
-        # caller switches to content here and takes this text as its first
-        # content; the response wrappers are stripped downstream as usual.
-        m_open = self._think_open_re.search(current_text)
-        r_start = m_open.end() if m_open is not None else 0
-        if self._skipped_think_channel(current_text, r_start):
-            self._skipped_think = True
+        # The model left the think channel without closing it.
+        # `is_reasoning_end_streaming` sees the same marker this step, so the
+        # caller switches to content here and takes the returned content as
+        # its first; the response wrappers are stripped downstream as usual.
+        if self._exit_kind == -1:
+            carry = max(map(len, self._exit_ids)) - 1
+            self._exit_index, self._exit_kind = self._first_think_exit(
+                current_token_ids, max(0, self._scanned - carry)
+            )
+            self._scanned = len(current_token_ids)
+        kind = self._exit_kind
+        m_exit = (
+            self._exit_text_match(
+                current_text, current_token_ids, self._exit_index, kind
+            )
+            if kind in (_RESPONSE_OPEN, _RESPONSE_CLOSE)
+            else None
+        )
+        if m_exit is not None:
+            self._exited = True
             self._last_streaming_delta_token_ids = tuple(delta_token_ids)
             self._last_streaming_content_token_ids = self._extract_content_ids(
                 list(current_token_ids)
             )
-            return DeltaMessage(content=current_text[r_start:] or None)
+            m_open = self._think_open_re.search(current_text)
+            r_start = m_open.end() if m_open is not None else 0
+            if kind == _RESPONSE_CLOSE:
+                # What streamed as reasoning so far was the reply. It cannot be
+                # recalled, so it is replayed as content (the copy already sent
+                # stays in reasoning) -- sgl-project/sglang#37743.
+                return DeltaMessage(content=current_text[r_start:] or None)
+            reasoning = current_text[r_start : m_exit.start()]
+            already_sent = self._reasoning_text_ready_to_emit(previous_text)
+            if reasoning.startswith(already_sent):
+                reasoning = reasoning[len(already_sent) :]
+            return DeltaMessage(
+                reasoning=reasoning or None,
+                content=current_text[m_exit.start() :] or None,
+            )
 
         # the close marker completes within this delta's accumulated text:
         # split the buffer at the close marker into reasoning vs trailing content.
