@@ -5,7 +5,6 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use serde_with::{DefaultOnError, serde_as};
@@ -377,13 +376,7 @@ pub(super) fn parse_sampling_defaults(config: Map<String, Value>) -> Result<Samp
 
 /// Load the model-side config (`config.json`) if present.
 pub fn load_model_config(path: Option<&Path>) -> Result<ModelConfig> {
-    read_config_json_file(path)
-}
-
-/// Load the model-side config as a JSON value, including bare non-finite
-/// constants that Python's `json` module writes.
-pub fn load_model_config_json(path: Option<&Path>) -> Result<Value> {
-    read_config_json_file(path)
+    read_json_file(path)
 }
 
 fn read_json_file<T>(path: Option<&Path>) -> Result<T>
@@ -400,46 +393,13 @@ where
             error.as_report()
         ))
     })?;
-    serde_json::from_str(&content).map_err(|error| {
+    json5::from_str(&content).map_err(|error| {
         Error::Tokenizer(format!(
             "failed to parse {}: {}",
             path.display(),
             error.as_report()
         ))
     })
-}
-
-fn read_config_json_file<T>(path: Option<&Path>) -> Result<T>
-where
-    T: for<'de> Deserialize<'de> + Default,
-{
-    let Some(path) = path else {
-        return Ok(T::default());
-    };
-    let content = fs::read_to_string(path).map_err(|error| {
-        Error::Tokenizer(format!(
-            "failed to read {}: {}",
-            path.display(),
-            error.as_report()
-        ))
-    })?;
-    parse_config_json(&content).map_err(|error| {
-        Error::Tokenizer(format!(
-            "failed to parse {}: {}",
-            path.display(),
-            error.as_report()
-        ))
-    })
-}
-
-/// Parse a checkpoint's `config.json`, also accepting the bare constants
-/// `NaN`, `Infinity` and `-Infinity` that Python's `json` module writes and
-/// reads (e.g. Nemotron Nano V2 VL's `"time_step_limit": [0.0, Infinity]`).
-///
-/// serde_json has no non-finite numbers, so each such constant outside a
-/// string is read as `null`.
-fn parse_config_json<T: DeserializeOwned>(text: &str) -> std::result::Result<T, json5::Error> {
-    json5::from_str(text)
 }
 
 #[cfg(test)]
@@ -448,11 +408,15 @@ mod tests {
 
     #[test]
     fn config_json_reads_bare_constants_as_null() {
-        let config: serde_json::Value = super::parse_config_json(
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
             r#"{"time_step_limit": [0.0, Infinity], "low": -Infinity, "nan": NaN,
                 "max": {"__float__": "Infinity"}, "text": "a \"NaN\" b"}"#,
         )
         .unwrap();
+        let config: serde_json::Value = super::read_json_file(Some(&path)).unwrap();
         assert_eq!(
             config,
             serde_json::json!({

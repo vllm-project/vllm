@@ -5693,6 +5693,7 @@ dependencies = [
  "half",
  "image",
  "itertools 0.14.0",
+ "json5",
  "llm-multimodal",
  "minijinja",
  "minijinja-contrib",

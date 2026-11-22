@@ -13,6 +13,7 @@ futures.workspace = true
 half.workspace = true
 image.workspace = true
 itertools.workspace = true
+json5.workspace = true
 llm-multimodal.workspace = true
 minijinja.workspace = true
 minijinja-contrib.workspace = true

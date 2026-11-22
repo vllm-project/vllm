@@ -448,8 +448,12 @@ impl MultimodalModelInfo {
         mm_processor_kwargs: &HashMap<String, serde_json::Value>,
     ) -> Result<Option<Self>> {
         let config = match files.config {
-            Some(path) => vllm_text::backend::hf::load_model_config_json(Some(path))
-                .map_err(|error| multimodal!("failed to load config.json: {error}"))?,
+            Some(path) => {
+                let text = fs::read_to_string(path)
+                    .map_err(|error| multimodal!("failed to read config.json: {error}"))?;
+                json5::from_str(&text)
+                    .map_err(|error| multimodal!("failed to parse config.json: {error}"))?
+            }
             None => serde_json::Value::Object(Default::default()),
         };
         let preprocessor_config = load_preprocessor_config(
