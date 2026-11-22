@@ -512,6 +512,21 @@ impl MuseSparkVisionProcessor {
             false,
         )?;
         let tokens_per_frame = nph * npw;
+        let output_bytes = 3usize
+            .checked_mul(target_h)
+            .and_then(|value| value.checked_mul(target_w))
+            .and_then(|value| value.checked_mul(aligned))
+            .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| TransformError::ShapeError("MuseSpark video size overflow".into()))?;
+        if let Some(limit) = crate::multimodal::media_request_decode_bytes() {
+            if output_bytes > limit {
+                return Err(TransformError::DecodedTooLarge {
+                    bytes: output_bytes,
+                    limit,
+                    knob: "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES",
+                });
+            }
+        }
 
         let mut pixels = Vec::new();
         for &index in &indices {
