@@ -7,9 +7,13 @@ paths, on random weights at the real shapes (vllm/models/kimi_k3/amd/akr_*.py):
   lmhead  `akr_lmhead` all-gather mode (target eager, draft in a graph) and owner mode
           (`owned_logits`) vs `LogitsProcessor` (GEMM + all-gather)
   ctx     `akr_draft.ContextProj` (eager + graph path) vs context_proj + context_norm
+          (the preview draft)
+  ctx_release  the same on the release draft's `fc` + `hidden_norm`: the stored rows
+          are normed and the precompute's norm is the identity, so its context K/V
+          projection matches the stock one
 
 Run (spawns 8 ranks, needs 8 GPUs):
-    python tests/kernels/models/amd/akr_nonlayer_8rank.py [embed lmhead ctx]
+    python tests/kernels/models/amd/akr_nonlayer_8rank.py [embed lmhead ctx ctx_release]
 """
 
 import sys
@@ -59,6 +63,12 @@ def test_embed(rank):
     # 2-D ids keep their shape; a non-contiguous id view takes the stock path
     b = batches[1]
     assert torch.equal(emb(b.view(3, 4)), ref[1].view(3, 4, HIDDEN))
+    # under torch.compile (the release draft's backbone shares this module): the op
+    compiled = torch.compile(
+        lambda ids: emb(ids), fullgraph=True, dynamic=True, backend="aot_eager"
+    )
+    for ids, r in zip(batches, ref):
+        assert torch.equal(compiled(ids), r), (rank, ids.shape, "compiled")
     assert torch.equal(emb(torch.stack([b, b], 1)[:, 0]), ref[1])
     # graph replay with new ids (stock results recomputed through the stock forward)
     stock = emb.__class__.forward
@@ -226,7 +236,7 @@ def test_ctx(rank):
         return y.to(torch.bfloat16)
 
     torch.manual_seed(9)
-    for rows in (12, 40, 60, 65, 144, 192):
+    for rows in (12, 40, 60, 65, 144, 192, 240, 256):
         aux = [
             torch.randn(rows + 5, HIDDEN, device="cuda").to(torch.bfloat16)
             for _ in range(5)
@@ -260,7 +270,7 @@ def test_ctx(rank):
         cos, rel = _cos_rel(out, exact(aux))
         assert cos > 0.99999 and rel < 1e-3, (i, cos, rel)
     # the speculator hooks: graph rows packed eagerly + projected in the graph step,
-    # the remaining rows eagerly (<= 192) or by the stock combine (> 192)
+    # the remaining rows eagerly (<= 256) or by the stock combine (> 256)
     spec = SimpleNamespace(
         _akr_ctx=ctx,
         _aux_staging=object(),
@@ -300,7 +310,125 @@ def test_ctx(rank):
     return "ctx ok"
 
 
-TESTS = {"embed": test_embed, "lmhead": test_lmhead, "ctx": test_ctx}
+def test_ctx_release(rank):
+    """The release draft: `fc` + `hidden_norm` of a `DFlashQwen3Model`."""
+    from vllm.model_executor.layers.layernorm import RMSNorm
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
+    from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+    from vllm.models.kimi_k3.amd import akr_draft
+
+    torch.manual_seed(301)  # replicated weights: the same on every rank
+    m = DFlashQwen3Model.__new__(DFlashQwen3Model)
+    torch.nn.Module.__init__(m)
+    m.use_aux_hidden_state = True
+    m.fc = ReplicatedLinear(
+        5 * HIDDEN, HIDDEN, bias=False, params_dtype=torch.bfloat16, return_bias=False
+    )
+    m.fc.weight.data.copy_((torch.randn(HIDDEN, 5 * HIDDEN) * 0.01).to(torch.bfloat16))
+    m.hidden_norm = RMSNorm(HIDDEN, eps=1e-5).to(torch.bfloat16)
+    m.hidden_norm.weight.data.copy_((torch.rand(HIDDEN) + 0.5).to(torch.bfloat16))
+    m._hidden_norm_weight = m.hidden_norm.weight.data
+    m._rms_norm_eps = 1e-5
+    L, nkv, hd = 5, 2, 64  # the release's context K/V shard (1280 rows a rank)
+    m._fused_kv_weight = (torch.randn(L * 2 * nkv * hd, HIDDEN) * 0.02).to(
+        torch.bfloat16
+    )
+    m._fused_kv_bias = None
+    m._context_kv_proj = None
+    model = Qwen3DSparkForCausalLM.__new__(Qwen3DSparkForCausalLM)  # type: ignore[type-abstract]
+    torch.nn.Module.__init__(model)
+    model.model = m
+    spec = SimpleNamespace(
+        _aux_staging=object(),
+        _num_graph_context_tokens=lambda n: n * 5,
+        max_num_reqs=8,
+        device=torch.device("cuda"),
+    )
+    assert akr_draft._ctx_reason(spec, model) is None
+    ctx = akr_draft.ContextProj(model, torch.device("cuda"))
+    assert ctx.reason(torch.device("cuda")) is None
+    ctx.warm_up(torch.device("cuda"))
+    w = m.fc.weight.data
+
+    def stock_kv(aux):
+        # the stock store (fc, unnormed) + the precompute (hidden_norm, K/V GEMM),
+        # taken before `install`
+        raw = model.combine_hidden_states(torch.cat(aux, dim=-1))
+        kv = type(m)._project_context_kv_token_major(m, raw, raw.shape[0], L, nkv, hd)
+        return raw, kv
+
+    def exact(aux):
+        y = (torch.cat(aux, dim=-1).float() @ w.float().t()).to(torch.bfloat16).float()
+        y = y * torch.rsqrt(y.pow(2).mean(-1, keepdim=True) + 1e-5)
+        return (y * m.hidden_norm.weight.float()).to(torch.bfloat16)
+
+    torch.manual_seed(10)
+    cases = []
+    for num_tokens, num_graph in (
+        (50, 40),
+        (40, 40),
+        (30, 40),
+        (300, 45),
+        (60, 0),
+        # the kernel's row cap (256) on the eager and the graph path: 257 eager rows
+        # take the stock combine + norm
+        (1, 0),
+        (192, 0),
+        (193, 0),
+        (256, 0),
+        (257, 0),
+        (99, 100),
+        (356, 100),
+        (357, 100),
+        (190, 190),
+        (240, 240),
+        (496, 240),
+        (497, 240),
+    ):
+        aux = [
+            torch.randn(num_tokens, HIDDEN, device="cuda").to(torch.bfloat16)
+            for _ in range(5)
+        ]
+        cases.append((num_tokens, num_graph, aux, stock_kv(aux)))
+    ctx.install()
+    probe = w[:2]
+    assert m._normalize_context_states(probe) is probe
+    vars(spec).update(
+        _akr_ctx=ctx,
+        hidden_states=torch.zeros(512, HIDDEN, dtype=torch.bfloat16, device="cuda"),
+        prepare_context_anchor=lambda *a: None,
+        target_input_buffers=SimpleNamespace(query_start_loc=None),
+        _num_rejected=None,
+        _precompute_context_kv=lambda a, b: None,
+        supports_decode_metadata_update=False,
+        _update_draft_decode_metadata=lambda *a: None,
+        model=model,
+    )
+    for num_tokens, num_graph, aux, (raw, kv_ref) in cases:
+        spec.hidden_states.zero_()
+        assert akr_draft.store_hidden_states(spec, num_tokens, None, aux, num_graph)
+        if min(num_tokens, num_graph):
+            assert akr_draft.prepare_graph_forward(spec, num_graph // 5, None)
+        torch.accelerator.synchronize()
+        got = spec.hidden_states[:num_tokens]
+        cos, rel = _cos_rel(got, exact(aux))
+        assert cos > 0.99999 and rel < 6e-3, (num_tokens, num_graph, cos, rel)
+        # the K/V the precompute projects from the stored rows (its norm now the
+        # identity) against the stock store + precompute
+        kv = m._project_context_kv_token_major(got, num_tokens, L, nkv, hd)
+        cos, rel = _cos_rel(kv, kv_ref)
+        assert cos > 0.9999 and rel < 1e-2, (num_tokens, num_graph, cos, rel)
+    ctx.comm.close()
+    return "ctx_release ok"
+
+
+TESTS = {
+    "embed": test_embed,
+    "lmhead": test_lmhead,
+    "ctx": test_ctx,
+    "ctx_release": test_ctx_release,
+}
 
 
 def worker(rank, port, names):

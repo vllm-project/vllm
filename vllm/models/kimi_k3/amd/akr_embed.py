@@ -7,8 +7,10 @@ all-reduce.
 
 The module's `forward` is replaced on the instance (`install`); ids the built gather
 does not take (`vocab_gather_unsupported_reason`: not a contiguous 1-D int32/int64
-tensor on the weight's device) and `inputs_embeds` paths go to the stock forward. The
-shard must stay unchanged and allocated after `install` (it is peer-mapped)."""
+tensor on the weight's device) and `inputs_embeds` paths go to the stock forward. Under
+torch.compile (the release DSpark draft's backbone, which shares this module) the call
+is the opaque op `vllm.kimi_akr_vocab_gather`, which makes the same choice when it runs.
+The shard must stay unchanged and allocated after `install` (it is peer-mapped)."""
 
 from typing import Any
 
@@ -16,10 +18,37 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.models.kimi_k3.amd import akr_nonlayer
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
 _state: dict[str, Any] = {}
+
+
+def _lookup(ids: torch.Tensor) -> torch.Tensor:
+    """The installed embedding of `ids` [...] -> [..., hidden]: the gather, or the stock
+    forward for ids it does not take."""
+    from amd_kernels.embedding.vocab_gather_common import (
+        vocab_gather_unsupported_reason,
+    )
+
+    gather, stock = _state["gather"], _state["stock"]
+    if ids.numel() > 0 and ids.is_contiguous():
+        flat = ids.view(-1)
+        if vocab_gather_unsupported_reason(gather, flat) is None:
+            out = gather(flat)
+            return out if ids.ndim == 1 else out.view(*ids.shape, -1)
+    return stock(ids)
+
+
+def _lookup_fake(ids: torch.Tensor) -> torch.Tensor:
+    hidden, dtype = _state["out"]
+    return ids.new_empty((*ids.shape, hidden), dtype=dtype)
+
+
+direct_register_custom_op(
+    op_name="kimi_akr_vocab_gather", op_func=_lookup, fake_impl=_lookup_fake
+)
 
 
 def unsupported_reason(embed) -> str | None:
@@ -50,7 +79,6 @@ def install(embed) -> bool:
     from amd_kernels.embedding.vocab_gather_common import (
         vocab_gather_comm,
         vocab_gather_comm_unsupported_reason,
-        vocab_gather_unsupported_reason,
     )
 
     g = akr_nonlayer.tp_group()
@@ -62,16 +90,13 @@ def install(embed) -> bool:
     gather = vocab_gather_comm(w, g.rank_in_group, g.cpu_group)
     gather.warm_up()
     _state["gather"] = gather
-    stock = embed.forward
+    _state["stock"] = embed.forward
+    _state["out"] = (w.shape[1], w.dtype)
 
     def forward(input_: torch.Tensor):
-        ids = input_
-        if ids.numel() > 0 and ids.is_contiguous():
-            flat = ids.view(-1)
-            if vocab_gather_unsupported_reason(gather, flat) is None:
-                out = gather(flat)
-                return out if ids.ndim == 1 else out.view(*ids.shape, -1)
-        return stock(input_)
+        if torch.compiler.is_compiling():
+            return torch.ops.vllm.kimi_akr_vocab_gather(input_)
+        return _lookup(input_)
 
     embed.forward = forward
     logger.info(
@@ -81,6 +106,7 @@ def install(embed) -> bool:
 
 
 def close() -> None:
+    _state.pop("stock", None)
     gather = _state.pop("gather", None)
     if gather is not None:
         gather.close()

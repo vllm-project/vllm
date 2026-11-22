@@ -28,5 +28,6 @@ def pack_tiles(x: torch.Tensor, out: torch.Tensor, tiles: int) -> torch.Tensor:
     rows, k = x.shape
     ksteps = k // 32
     assert out.numel() >= tiles * ksteps * 512 and tiles * 16 >= rows
-    _pack_tiles_kernel[(tiles, ksteps)](x, out, rows, K=k, KSTEPS=ksteps, num_warps=8)
+    # one wave per 1 KB tile (16 B a lane): 3.3 vs 4.9 us for 8 waves at 240 rows
+    _pack_tiles_kernel[(tiles, ksteps)](x, out, rows, K=k, KSTEPS=ksteps, num_warps=1)
     return out

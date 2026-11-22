@@ -109,7 +109,7 @@ def bench_mlp():
     )
     dev = torch.device("cuda")
     bf16 = torch.bfloat16
-    for rows in (16, 32, 52, 60, 144, 192):
+    for rows in (16, 32, 52, 60, 144, 160, 192, 224, 240, 256):
         x = torch.randn(rows, 7168, device=dev).to(bf16)
         act = SiluAndMul()
         gus = [(torch.randn(3584, 7168, device=dev) * 0.02).to(bf16) for _ in range(4)]
@@ -118,13 +118,16 @@ def bench_mlp():
             [lambda g=g, d=d: act(x @ g.t()) @ d.t() for g, d in zip(gus, dns)]
         )
         ws = dense_mlp_workspace(dev, hidden=7168, inter=1792)
+        stage = torch.zeros(
+            akr_draft._x_numel(dns[0], akr_draft.MLP_MAX_ROWS), dtype=bf16, device=dev
+        )
         mlps = []
         for g, d in zip(gus, dns):
             mlp = SimpleNamespace(
                 gate_up_proj=SimpleNamespace(weight=SimpleNamespace(data=g)),
                 down_proj=SimpleNamespace(weight=SimpleNamespace(data=d)),
             )
-            mlps.append(akr_draft._Mlp(mlp, ws, dev))
+            mlps.append(akr_draft._Mlp(mlp, ws, stage))
         new = time_graph([lambda m=m: m(x) for m in mlps])
         row(f"{rows} rows", stock, new)
 

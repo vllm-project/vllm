@@ -16,7 +16,8 @@ PROLOGUE        attention   q_a/kv_a norms + KV insert (+ wk/wv GEMMs, key LN,
 SCORE_TOPK      indexer     ``score_paged`` + the top-2048 select
 GATHER_MERGE    collectives DCP score all-gather + ``merge_dcp_scores``
 QGATHER         attention   q_b + W_UK + cat + DCP query all-gather
-SPARSE_MLA      attention   Triton ``sparse_mla_fwd`` (DCP decode)
+SPARSE_MLA      attention   Triton ``sparse_mla_fwd`` (DCP decode); not at the
+                            rows where the FlyDSL 96-head kernel is faster
 COMBINE         attention   DCP LSE combine + W_UV + reduce-scatter (+ gate)
 ==============  ==========  ===================================================
 
@@ -49,9 +50,14 @@ SWITCHES: dict[str, str] = {
 
 # rows of the shared gathered-query buffer (``ensure_q_buffer``)
 Q_BUFFER_ROWS = 256
-# the sparse MLA kernel's partials feed the combine kernel; past its rows (c48: 48 x 5)
-# the stock Triton decode + v_up-first combine run as a pair
-MAX_ROWS_SPARSE = 192
+# the sparse MLA kernel's partials feed the combine kernel, whose communicator takes
+# 256 rows (c48 with 4 speculative tokens: 48 x 5 = 240); past them the stock decode
+# + v_up-first combine run as a pair
+MAX_ROWS_SPARSE = 256
+# rows where the stock FlyDSL 96-head sparse MLA (VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA)
+# beats the kernel: 43-85 by 0.3-0.6 us, 129-215 by 0.5-6 us a layer (MI355X, graph
+# replay, cold inputs); the combine stays ours at every row count
+FLYDSL_SPARSE_ROWS = ((43, 85), (129, 215))
 
 
 def on(name: str) -> bool:
@@ -340,12 +346,29 @@ def gather_merge(
 # ---------------------------------------------------------------------------
 
 
+def _flydsl_sparse_wins(q) -> bool:
+    """The stock FlyDSL kernel serves this call (its packed, lse-returning variant of
+    these heads is built) and is faster at its row count."""
+    from vllm._aiter_ops import rocm_aiter_ops as ops
+
+    rows = q.shape[0]
+    return (
+        any(lo <= rows <= hi for lo, hi in FLYDSL_SPARSE_ROWS)
+        and ops._FLYDSL_SPARSE_MLA
+        and ops._AITER_ENABLED
+        and q.shape[1] not in ops._FLYDSL_SPARSE_MLA_FAILED
+        and (q.shape[1], False, True) in ops._FLYDSL_SPARSE_MLA_COMPILED
+    )
+
+
 def sparse_mla_decode(q, kv_rows, indptr, slots, scale, out_dtype):
     """``(out, lse)`` of the DCP sparse MLA decode kernel, or None when the case
     is not the kernel's (stock Triton runs)."""
     if not on("SPARSE_MLA"):
         return None
     if out_dtype != torch.bfloat16 or q.shape[0] > MAX_ROWS_SPARSE:
+        return None
+    if _flydsl_sparse_wins(q):
         return None
     from amd_kernels.attention.mla_decode_common import (
         fp8_sparse_mla_decode,
@@ -497,7 +520,7 @@ def build_weights(w) -> LayerWeights:
             _fallback("COMBINE", str(e))
             return lw
         if old is not None:
-            # the stock v_up-first combine stays for M > 192 (c48: 48 x 5 rows) on a
+            # the stock v_up-first combine stays for M > 256 on a
             # view of the kernel's copy ([96, 512, 128] = w_uv_t^T: no second copy;
             # dcp_vup_bmm takes any strides and reads its transpose = w_uv_t)
             layer.W_UV_dcp = torch.nn.Parameter(

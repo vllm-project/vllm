@@ -229,12 +229,39 @@ def test_prologue_matches_stock_ops(default_vllm_config, tokens):
     torch.testing.assert_close(idx_w, ref_w, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("rows", [1, 12, 43, 100, 192])
-def test_sparse_mla_decode_matches_triton(rows):
+def test_sparse_mla_gate_prefers_flydsl_where_it_wins(monkeypatch):
+    """The hook leaves the measured FlyDSL-faster row bands to the stock kernel, only
+    when the FlyDSL 96-head variant the decode call needs is built."""
+    from vllm._aiter_ops import rocm_aiter_ops as ops
+    from vllm.models.kimi_k3.amd import akr_dsa as A
+
+    monkeypatch.setattr(ops, "_FLYDSL_SPARSE_MLA", True)
+    monkeypatch.setattr(ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr(ops, "_FLYDSL_SPARSE_MLA_FAILED", set())
+    monkeypatch.setattr(ops, "_FLYDSL_SPARSE_MLA_COMPILED", {(96, False, True)})
+    stock = {r for lo, hi in A.FLYDSL_SPARSE_ROWS for r in range(lo, hi + 1)}
+    assert {43, 85, 129, 175, 215} <= stock and not {42, 86, 128, 216, 240} & stock
+    for rows in range(1, A.MAX_ROWS_SPARSE + 1):
+        q = torch.empty((rows, 96, 576), device="meta")
+        assert A._flydsl_sparse_wins(q) == (rows in stock), rows
+    q = torch.empty((64, 96, 576), device="meta")
+    monkeypatch.setattr(ops, "_FLYDSL_SPARSE_MLA_COMPILED", {(96, True, True)})
+    assert not A._flydsl_sparse_wins(q)
+    monkeypatch.setattr(ops, "_FLYDSL_SPARSE_MLA_COMPILED", {(96, False, True)})
+    monkeypatch.setattr(ops, "_FLYDSL_SPARSE_MLA_FAILED", {96})
+    assert not A._flydsl_sparse_wins(q)
+    monkeypatch.setattr(ops, "_FLYDSL_SPARSE_MLA_FAILED", set())
+    monkeypatch.setattr(ops, "_FLYDSL_SPARSE_MLA", False)
+    assert not A._flydsl_sparse_wins(q)
+
+
+@pytest.mark.parametrize("rows", [1, 12, 43, 100, 192, 240, 256])
+def test_sparse_mla_decode_matches_triton(monkeypatch, rows):
     """The DCP sparse MLA decode kernel against Triton sparse_mla_fwd (out and lse)."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.models.kimi_k3.amd import akr_dsa as A
 
+    monkeypatch.setattr(rocm_aiter_ops, "_FLYDSL_SPARSE_MLA", False)  # no gate
     torch.manual_seed(rows)
     dev = "cuda"
     pages = 64

@@ -160,7 +160,7 @@ def bench_ctx(rank):
     )
     ctx = akr_draft.ContextProj(model, torch.device("cuda"))
     ctx.warm_up(torch.device("cuda"))
-    for rows in (40, 65, 80, 192):
+    for rows in (40, 65, 80, 192, 240):
         aux = [
             torch.randn(rows, HIDDEN, device="cuda").to(torch.bfloat16)
             for _ in range(5)

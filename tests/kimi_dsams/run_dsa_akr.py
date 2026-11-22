@@ -626,8 +626,12 @@ def stage_sparse_combine(ha, hs, rank, M, reqs_empty=1):
     ).to(torch.int32)
     rows, stride_rows = flat_kv_row_view(ha.mla_cache, PAGE)
     scale = ha.layer.impl.scale
-    with akr_env(True):
-        res = A.sparse_mla_decode(q, rows, indptr, packed, scale, torch.bfloat16)
+    bands, A.FLYDSL_SPARSE_ROWS = A.FLYDSL_SPARSE_ROWS, ()  # the kernel at every M
+    try:
+        with akr_env(True):
+            res = A.sparse_mla_decode(q, rows, indptr, packed, scale, torch.bfloat16)
+    finally:
+        A.FLYDSL_SPARSE_ROWS = bands
     assert res is not None
     out, lse = res
     out_t = torch.empty((M, 96, 512), dtype=torch.bfloat16, device=dev)
@@ -796,6 +800,11 @@ def e2e(ha, hs, rank, name, lens, pad=0, switches=True, expect=None):
         f"e2e {name}: akr vs stock relL2 {r[1]} (noise {r[0]})",
     )
     if expect is not None:
+        from vllm.models.kimi_k3.amd import akr_dsa as A
+
+        if A._flydsl_sparse_wins(torch.empty((T, 96, 576), device="meta")):
+            # rows the hook leaves to the faster stock FlyDSL kernel
+            expect = [k for k in expect if k != "sparse_mla_decode"]
         for k in expect:
             check(rank, calls.get(k, 0) >= 1, f"e2e {name}: {k} did not run ({calls})")
     log(
@@ -838,6 +847,16 @@ GRAPH_CASES = {
         [(int(c), 4) for c in np.random.default_rng(6).integers(2000, 9000, 48)],
         0,
         192,
+    ),
+    "T240": (
+        [(int(c), 5) for c in np.random.default_rng(7).integers(2000, 9000, 48)],
+        0,
+        240,
+    ),
+    "T240pad": (
+        [(int(c), 5) for c in np.random.default_rng(8).integers(2000, 9000, 45)],
+        3,
+        240,
     ),
 }
 
@@ -1088,9 +1107,9 @@ def main():
                 stage_gather_merge(ha, hs, rank, 64, "dense")
                 stage_gather_merge(ha, hs, rank, 64, "ties")
                 stage_gather_merge(ha, hs, rank, 64, "skew")
-                for M in (12, 40, 100, 192):
+                for M in (12, 40, 100, 192, 240, 256):
                     stage_qgather(ha, hs, rank, M)
-                for M in (12, 40, 100, 192):
+                for M in (12, 40, 100, 192, 200, 240, 256):
                     stage_sparse_combine(ha, hs, rank, M)
             if run("gm"):
                 # the merge's receive regions must be clean after every kind of row
@@ -1199,12 +1218,15 @@ def main():
                     ),
                     ("padded reqs (23x4 + 2 pad)", draw(23), 2, True, None),
                     ("single row", [(5000, 1)], 0, True, None),
+                    ("T200 (50x4)", draw(50), 0, True, every),
                     (
-                        "T200 rows > 192 (row-capped kernels fall back)",
-                        draw(50),
+                        # the prologue (and so the fused score + top-k) takes one
+                        # indexer decode tile: decode_tile_size at 1M context = 233 rows
+                        "T240 (48x5)",
+                        [(int(c), 5) for c in rng.integers(1000, 9000, 48)],
                         0,
                         True,
-                        None,
+                        ["qgather", "gather_merge", "sparse_mla_decode", "combine"],
                     ),
                 ]
                 cases += [(f"only {sw}", lens25, 0, {sw}, None) for sw in SWITCHES]
