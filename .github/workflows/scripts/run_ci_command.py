@@ -25,7 +25,6 @@ COMMAND_RUN_AMD_CI_ALL = "/amd-ci run all"
 COMMAND_RUN_AMD_CI_NIGHTLY = "/amd-ci run nightly"
 COMMAND_RETRY_AMD_FAILED = "/amd-ci retry"
 COMMAND_CANCEL_AMD_CI = "/amd-ci cancel"
-RETIRED_ROCM_CACHE_COMMANDS = frozenset({"/ci rocm cache", "/ci rocm nocache"})
 ALLOW_STALE_SUFFIX = " --allow-stale"
 RUN_CI_COMMAND_ENV = {
     COMMAND_RUN_CI: {},
@@ -81,14 +80,14 @@ RETRY_STATES = "failed,timed_out,expired"
 CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
 # ensure-ci-base-amd: the old ROCm build chain, which ci-infra still renders
 # for branches that predate .buildkite/scripts/rocm/build.sh.
-SETUP_STEP_KEYS = {"ensure-ci-base-amd", "refresh-rocm-base-amd", "pre-commit"}
+ROCM_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
+SETUP_STEP_KEYS = {"ensure-ci-base-amd", ROCM_REFRESH_STEP_KEY, "pre-commit"}
 # A PR to main that changes these builds a new ROCm base image. Its
 # rocm-image-cache-check step fails until reconcile_rocm_cache caches the image
 # a trusted user's CI build pushed, so main reuses it after the merge.
 ROCM_STACK_INPUTS = ("docker/Dockerfile.rocm_base", "tools/vllm-rocm/therock_wheels.py")
 ROCM_CACHE_YAML = ".buildkite/image_build/amd_rocm_cache.yaml"
 ROCM_CACHE_CHECK_KEY = "rocm-image-cache-check"
-ROCM_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
 ROCM_PROMOTE_KEY = "rocm-promote"
 CODEOWNERS_PATH = ".github/CODEOWNERS"
 # build.sh check: main changed the stack since the PR's merge base.
@@ -1247,15 +1246,18 @@ def handle_retry_failed(
 
     failed_count = len(step_keys)
     # Branches from before the check existed fail on an unknown step key.
-    if (
-        pr["base"]["ref"] == "main"
-        and set(ROCM_STACK_INPUTS) & set(github.list_pr_files(pr["number"]))
-        and defines_step_key(
-            github.get_file_text(ROCM_CACHE_YAML, pr["head"]["sha"]),
-            ROCM_CACHE_CHECK_KEY,
-        )
-    ):
-        step_keys = sorted({*step_keys, ROCM_CACHE_CHECK_KEY})
+    try:
+        if (
+            pr["base"]["ref"] == "main"
+            and set(ROCM_STACK_INPUTS) & set(github.list_pr_files(pr["number"]))
+            and defines_step_key(
+                github.get_file_text(ROCM_CACHE_YAML, pr["head"]["sha"]),
+                ROCM_CACHE_CHECK_KEY,
+            )
+        ):
+            step_keys = sorted({*step_keys, ROCM_CACHE_CHECK_KEY})
+    except ApiError as error:
+        print(f"Not adding {ROCM_CACHE_CHECK_KEY}: {error}")
 
     retry_build = buildkite.create_build(
         create_retry_build_payload(
@@ -1350,7 +1352,8 @@ def rocm_key_format(build_sh: str) -> list[str]:
         inside = False
         for line in build_sh.splitlines():
             if inside or line.startswith(start):
-                lines.append(line)
+                if not line.lstrip().startswith("#"):
+                    lines.append(line)
                 inside = not (inside and line.startswith(end))
     return lines
 
@@ -1397,10 +1400,10 @@ def rocm_cache_run_note(
         mentions.setdefault(user.casefold(), user)
     return (
         f"{' '.join(f'@{user}' for user in mentions.values())}: this PR changes "
-        "the ROCm base image. A maintainer or trusted reviewer must comment "
-        f"`{COMMAND_RUN_CI}`, or approve this commit and then comment "
-        f"`{COMMAND_RUN_CI}`, to cache it into `main`; until then the "
-        "`ROCm image cache` step blocks the merge."
+        f"the ROCm base image. A maintainer must comment `{COMMAND_RUN_CI}`, or a "
+        f"trusted reviewer must approve this commit and comment `{COMMAND_RUN_CI}`, "
+        "to cache it into `main`; until then the `ROCm image cache` step blocks "
+        "the merge."
     )
 
 
@@ -1423,8 +1426,9 @@ def find_rocm_cache_source(
 
     A trusted user had the bot build its commit, or a trusted reviewer's latest
     review approved that commit: every build the bot made of the commit runs
-    the same code. It pushed the ROCm stack itself, passed its ROCm base image
-    step, and built the PR head's stack inputs. Its pull request is checked, not
+    the same code. It pushed the ROCm stack itself, finished its ROCm base image
+    step (a later failure leaves the stack whole), and built the PR head's stack
+    inputs. Its pull request is checked, not
     is_build_for_pr's github-pr-number fallback, which is metadata that any job
     can write.
     """
@@ -1472,7 +1476,7 @@ def find_rocm_cache_source(
             continue
         jobs = client.list_jobs(build["number"], step_key=ROCM_REFRESH_STEP_KEY)
         latest = max(jobs, key=lambda job: job.get("created_at") or "", default={})
-        if latest.get("state") != "passed":
+        if not latest.get("finished_at"):
             continue
         if all(
             github.get_file_sha(path, build["commit"]) == sha
@@ -1628,6 +1632,9 @@ def handle_buildkite_status(
     build = ci_buildkite.get_build(int(number))
     if build.get("source") != "api" or build.get("commit") != event.get("sha"):
         return "Not a build the bot created for this commit."
+    # Buildkite also posts failure while a failing build still runs.
+    if build.get("state") in CANCELABLE_BUILD_STATES:
+        return "The build has not finished."
     pr_number = str((build.get("pull_request") or {}).get("id") or "")
     if not pr_number and build.get("branch") == "main":
         pr_number = str((build.get("env") or {}).get("ROCM_PROMOTE_PR", ""))
@@ -1646,7 +1653,7 @@ def recheck_rocm_stack_prs(
     it fails until the PR merges main if main changed the stack since its merge base.
     Returns the builds whose check was retried.
     """
-    seen, retried = set(), []
+    seen, retried, failed = set(), [], []
     for build in iter_builds(ci_buildkite, metadata=(ROCM_CACHED_KEY, "true")):
         number = str((build.get("pull_request") or {}).get("id") or "")
         if build.get("source") != "api" or not number.isdigit() or number in seen:
@@ -1654,28 +1661,27 @@ def recheck_rocm_stack_prs(
         seen.add(number)  # its newest build
         try:
             pr = github.get_pr(int(number))
-        except ApiError as error:
-            if error.status != 404:
-                raise
-            continue
-        if (
-            pr["state"] != "open"
-            or pr["base"]["ref"] != "main"
-            or pr["head"]["sha"] != build["commit"]
-        ):
-            continue
-        checks = ci_buildkite.list_jobs(build["number"], step_key=ROCM_CACHE_CHECK_KEY)
-        check = max(checks, key=lambda job: job.get("created_at") or "", default={})
-        if check.get("state") != "passed":
-            continue
-        try:
+            if (
+                pr["state"] != "open"
+                or pr["base"]["ref"] != "main"
+                or pr["head"]["sha"] != build["commit"]
+            ):
+                continue
+            checks = ci_buildkite.list_jobs(
+                build["number"], step_key=ROCM_CACHE_CHECK_KEY
+            )
+            check = max(checks, key=lambda job: job.get("created_at") or "", default={})
+            if check.get("state") != "passed":
+                continue
             ci_buildkite.retry_job(build["number"], check["id"])
         except ApiError as error:
+            print(f"Could not recheck PR #{number}: {error}")
             if error.status is None or not 400 <= error.status < 500:
-                raise
-            print(f"Could not retry the cache check of {build['web_url']}: {error}")
+                failed.append(number)
             continue
         retried.append(build["web_url"])
+    if failed:
+        raise ApiError(None, f"Could not recheck PRs {failed}; retried {retried}.")
     return retried
 
 
@@ -1692,14 +1698,6 @@ def reply_unrecognized_command(
         print(f"Comment {comment_id} was already handled.")
         return
     add_reaction_safely(github, comment_id, "-1")
-    if event["comment"]["body"].strip() in RETIRED_ROCM_CACHE_COMMANDS:
-        github.add_comment(
-            issue_number,
-            f"ℹ️ @{actor}, this command is no longer needed: a trusted "
-            f"`{COMMAND_RUN_CI}` or approval caches the ROCm base image."
-            f"\n\n{command_comment_marker(comment_id)}",
-        )
-        return
     commands = ", ".join(f"`{command}`" for command in sorted(ALL_CI_COMMANDS))
     github.add_comment(
         issue_number,
@@ -1731,7 +1729,7 @@ def run(
         return
     add_reaction_safely(github, comment_id, "eyes")
 
-    rocm_note = ""
+    rocm = False
     try:
         pr = github.get_pr(issue_number)
         permission = github.get_permission(actor)
@@ -1772,8 +1770,7 @@ def run(
             return
 
         print(f"Authorized @{actor}: {reason}")
-        if command.startswith(COMMAND_RUN_CI) and pr["base"]["ref"] == "main":
-            rocm_note = rocm_cache_run_note(github, pr, trusted, trusted_users)
+        rocm = command.startswith(COMMAND_RUN_CI) and pr["base"]["ref"] == "main"
         if command in RUN_CI_COMMAND_ENV:
             message = handle_run_ci(
                 actor=actor,
@@ -1803,8 +1800,17 @@ def run(
         else:
             raise ValueError(f"Unsupported CI command: {command}")
         add_reaction_safely(github, comment_id, "rocket")
-        if rocm_note:
-            message = f"{message}\n\n{rocm_note}"
+        if rocm:
+            # The head the run built: handle_run_ci may have merged main into it.
+            try:
+                note = rocm_cache_run_note(
+                    github, github.get_pr(issue_number), trusted, trusted_users
+                )
+            except Exception as error:
+                note = ""
+                print(f"No ROCm image cache note: {error}")
+            if note:
+                message = f"{message}\n\n{note}"
         github.add_comment(issue_number, f"✅ {message}")
     except CiPreparationError as error:
         add_reaction_safely(github, comment_id, "-1")
@@ -1815,8 +1821,8 @@ def run(
     except Exception:
         add_reaction_safely(github, comment_id, "confused")
         raise
-    # Also when the run was refused: an approval can vouch for an earlier build.
-    if rocm_note:
+    # Also when preparing the run failed: an approval can vouch for an earlier build.
+    if rocm:
         try:
             result = reconcile_rocm_cache(
                 github.get_pr(issue_number),
@@ -1826,7 +1832,7 @@ def run(
                 parse_trusted_users(trusted_users_value),
             )
         except Exception as error:
-            result = f"Error, the next CI status retries: {error}"
+            result = f"Error (comment /ci run again to retry): {error}"
         print(f"ROCm image cache: {result}")
 
 

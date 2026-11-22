@@ -24,7 +24,7 @@
 # Trust: ROCM_CI_REPO is set by ci-infra (CI) or release-pipeline.yaml (release).
 #   Trusted main builds: rocm/vllm-ci
 #   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it,
-#                                          except promote: images a maintainer vouched for)
+#                                          except promote: images a trusted user vouched for)
 #   Other untrusted:     rocm/vllm-dev    (br-<branch>-<hash>- tags: nightlies, branch builds; they
 #                                          push these but never read them back, reuse only
 #                                          rocm/vllm-ci images and cache, and write no cache)
@@ -236,7 +236,7 @@ read -r Ks Kr <<<"$keys"
 # in parallel. MAIN_TAGS lists those tags; it stays empty when main cannot be read.
 MAIN_TAGS=""
 if [[ $MODE == base && $REPO != "$TRUSTED" ]] \
-    && git fetch -q --filter=tree:0 origin "${BUILDKITE_PIPELINE_DEFAULT_BRANCH:-main}" \
+    && git fetch -q --filter=tree:0 origin "$MAIN" \
     && mb=$(git merge-base HEAD FETCH_HEAD) && [[ -n $mb ]] \
     && keys=$(keys_at "$mb") && read -r mKs mKr <<<"$keys"; then
   MAIN_TAGS="stack-$STACK-$mKs runtime-$STACK-$mKr test-deps-$STACK-$mKr"
@@ -467,37 +467,40 @@ case $MODE in
       fi
     }
     if [[ $Ks == "$mKs" ]]; then
-      echo "This PR does not change the ROCm stack" >&2; exit 0
+      echo "This PR does not change the ROCm stack" >&2; note; exit 0
     fi
-    keys=$(keys_at "$main") || { echo "cannot compute the keys of $main" >&2; exit 1; }
-    read -r tKs _ <<<"$keys"
-    if [[ $tKs == "$Ks" ]]; then
-      echo "$MAIN already has this PR's stack" >&2; note; exit 0
-    fi
-    # Main changed the stack too: the merge gets a stack that no build of this PR made.
-    if [[ $tKs != "$mKs" ]]; then
-      note error "ROCm image cache: $MAIN changed the ROCm stack since this branch did. Merge $MAIN into this branch (a maintainer's /ci run does it), so CI builds and caches the combined stack."
-      exit 4
-    fi
-    # promote keys the stack with main's build.sh, so a PR that changes how it computes Ks is never
-    # cached. rocm_key_format in run_ci_command.py reads the same lines.
+    # The lines that make Ks (rocm_key_format in run_ci_command.py reads the same ones).
     keyfmt() {
       # shellcheck disable=SC2016  # sed matches a literal $STACK
-      git show "$1:.buildkite/scripts/rocm/build.sh" | sed -n '/^case \$STACK in/,/^esac/p;/^_trw=/,/^  Kr=/p'
+      git show "$1:.buildkite/scripts/rocm/build.sh" \
+        | sed -n '/^case \$STACK in/,/^esac/p;/^_trw=/,/^  Kr=/p' | grep -v '^[[:space:]]*#'
     }
-    if ! kf=$(keyfmt "$mb") || ! hf=$(keyfmt HEAD); then echo "cannot read keys_at" >&2; exit 1; fi
-    if [[ $kf != "$hf" ]]; then
+    if ! bf=$(keyfmt "$mb") || ! hf=$(keyfmt HEAD) || ! tf=$(keyfmt "$main"); then
+      echo "cannot read build.sh's stack key lines" >&2; exit 1
+    fi
+    # promote keys the stack with main's build.sh, so a PR that changes them is never cached.
+    if [[ $hf != "$bf" ]]; then
       note info "ROCm image cache: this PR changes how images are keyed: $MAIN rebuilds the stack after merge"
       exit 0
     fi
+    keys=$(keys_at "$main") || { echo "cannot compute the keys of $main" >&2; exit 1; }
+    read -r tKs _ <<<"$keys"
+    if [[ $tKs == "$Ks" && $tf == "$bf" ]]; then
+      echo "$MAIN already has this PR's stack" >&2; note; exit 0
+    fi
+    # Main changed the stack or its key too: the merge gets a stack that no build of this PR made.
+    if [[ $tKs != "$mKs" || $tf != "$bf" ]]; then
+      note error "ROCm image cache: $MAIN changed the ROCm stack since this branch did. Merge $MAIN into this branch (a maintainer's /ci run does it), so CI builds and caches the combined stack."
+      exit 4
+    fi
     if d=$(digest "$TRUSTED:stack-$STACK-$Ks") && d=$(digest "$TRUSTED:stack-$STACK-$Ks-wheels"); then
       echo "$TRUSTED has this PR's stack" >&2; note
-      meta set rocm-stack-cached true || true   # run_ci_command.py rechecks it when main moves
+      meta set rocm-stack-cached true || exit 75   # run_ci_command.py rechecks it when main moves
       exit 0
     else
       rc=$?; ((rc == 1)) || exit $rc   # a registry error is not a miss
     fi
-    note warning "ROCm image not cached yet: a maintainer or trusted reviewer must comment /ci run, or approve this commit and then comment /ci run."
+    note warning "ROCm image not cached yet: a maintainer must comment /ci run, or a trusted reviewer must approve this commit and comment /ci run. If an untrusted build pushed this stack first, bump ARG REFRESH."
     exit 3
     ;;
 

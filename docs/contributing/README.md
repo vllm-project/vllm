@@ -380,10 +380,12 @@ review process:
 - A PR targeting `main` that changes `docker/Dockerfile.rocm_base` or
   `tools/vllm-rocm/therock_wheels.py` can merge only once its new ROCm base
   image is cached for `main`, which its `ROCm image cache` CI step checks. A
-  maintainer or trusted reviewer comments `/ci run` (or approves the commit,
-  then someone comments `/ci run`), and when that commit's CI build finishes,
-  the bot caches the image and retries the step. If `main` changes those files
-  after the PR's merge base, the step fails until the PR merges `main`.
+  maintainer comments `/ci run`, or a trusted reviewer approves the commit and
+  comments `/ci run`, and when that commit's CI build finishes, the bot caches
+  the image and retries the step. If `main` changes those files after the PR's
+  merge base, the step fails until the PR merges `main`. A PR that changes how
+  `.buildkite/scripts/rocm/build.sh` keys the image is not cached: `main`
+  rebuilds it after the merge.
 - Retrying or cancelling builds does not check branch freshness.
 - Apart from that merge, these commands do not modify your branch or enforce
   merge requirements. Direct Buildkite launches are outside this workflow.

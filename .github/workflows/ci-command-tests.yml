@@ -3,6 +3,7 @@ name: CI command tests
 on:
   pull_request:
     paths:
+      - .buildkite/hardware_tests/amd.yaml
       - .buildkite/image_build/amd_rocm_cache.yaml
       - .buildkite/scripts/rocm/build.sh
       - .github/CODEOWNERS
