@@ -27,6 +27,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
@@ -262,6 +263,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         backends: list[str] | None = None,
         num_threads: int = 4,
         unbound_store_timeout_s: float = _UNBOUND_STORE_TIMEOUT_S,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
         **kwargs: Any,
     ) -> None:
         """Initialize the P2P secondary tier manager.
@@ -304,6 +306,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 `_reap_unbound_stores` drops them. Raise it for
                 deployments whose prefills outlast the default; the blocks
                 keep primary-tier slots pinned for the whole window.
+            access_mode: Direction(s) in which this tier may transfer data.
+                `read` fetches blocks from peers but never stages local
+                blocks for them; `write` stages blocks for peers but never
+                fetches. The tiering manager skips the directions the mode
+                disables.
             **kwargs: Reserved for future tier-specific options.
 
         Raises:
@@ -329,6 +336,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             offloading_spec,
             primary_kv_view,
             tier_type,
+            access_mode=access_mode,
         )
         try:
             timeout_s = float(unbound_store_timeout_s)
