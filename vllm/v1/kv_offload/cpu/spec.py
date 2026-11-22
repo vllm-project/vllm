@@ -89,24 +89,24 @@ class CPUOffloadingSpec(OffloadingSpec):
             CPUOffloadingMetrics.CPU_CHUNK_IDLE_BEFORE_EVICT: (
                 OffloadingHistogramMetadata(
                     documentation=(
-                        "Histogram of the time from the last request access of "
-                        "a CPU chunk, or from its store if never accessed, to "
-                        "its eviction."
+                        "Seconds from the last demand access to capacity eviction "
+                        "of a CPU chunk. Each request context counts once per "
+                        "residency. For untouched chunks, timing starts at readiness."
                     ),
                     buckets=_CHUNK_AGE_BUCKETS,
                 )
             ),
             CPUOffloadingMetrics.CPU_CHUNK_LIFETIME: OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of the time from the store of a CPU chunk to "
-                    "its eviction."
+                    "Seconds from completion of a CPU chunk's store or promotion "
+                    "to its capacity eviction."
                 ),
                 buckets=_CHUNK_AGE_BUCKETS,
             ),
             CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS: OffloadingCounterMetadata(
                 documentation=(
-                    "Number of CPU chunks evicted to reclaim capacity, split "
-                    "by whether a load or a remote read used the chunk."
+                    "Number of CPU chunks evicted to reclaim capacity, split by "
+                    "whether a CPU-to-GPU load or peer transfer confirmed a read."
                 ),
                 labelnames=("reused",),
             ),

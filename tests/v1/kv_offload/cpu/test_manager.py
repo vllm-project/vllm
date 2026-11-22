@@ -393,9 +393,20 @@ def test_cpu_manager_reports_chunk_eviction_metrics(monkeypatch):
     # Offering the cached chunk 3 is an access, but not a read.
     clock = 110.0
     manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
+    clock = 115.0
+    manager.prepare_store(
+        to_keys([3]), make_req_context("another"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    clock = 130.0
+    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
     # Neither a failed store nor a cache reset is an eviction.
     clock = 150.0
     store(4, success=False)
+    # Reinserting the same key in the same slot starts a new residency.
+    store(3)
+    clock = 160.0
+    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
+    clock = 180.0
     store(5)
     manager.reset_cache()
 
@@ -405,11 +416,33 @@ def test_cpu_manager_reports_chunk_eviction_metrics(monkeypatch):
     idle = CPUOffloadingMetrics.CPU_CHUNK_IDLE_BEFORE_EVICT
     lifetime = CPUOffloadingMetrics.CPU_CHUNK_LIFETIME
     evictions = CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS
-    assert reduced[f"{idle}_count"] == reduced[f"{lifetime}_count"] == 3
-    assert reduced[f"{idle}_sum"] == 20 + 60 + 40
-    assert reduced[f"{lifetime}_sum"] == 20 + 70 + 50
-    assert reduced[f"{evictions}:('false',)"] == 2
+    assert reduced[f"{idle}_count"] == reduced[f"{lifetime}_count"] == 4
+    assert reduced[f"{idle}_sum"] == 20 + 60 + 35 + 20
+    assert reduced[f"{lifetime}_sum"] == 20 + 70 + 50 + 30
+    assert reduced[f"{evictions}:('false',)"] == 3
     assert reduced[f"{evictions}:('true',)"] == 1
+
+
+def test_failed_load_preserves_prior_successful_reuse():
+    manager = make_cpu_manager(num_chunks=2)
+    keys = to_keys([1, 2])
+    trigger = StoreTrigger.ON_COMPUTE
+    manager.prepare_store(keys, _EMPTY_REQ_CTX, trigger=trigger)
+    manager.complete_store(keys, _EMPTY_REQ_CTX, trigger=trigger)
+
+    failed_reader = make_req_context("failed")
+    manager.prepare_load(keys, failed_reader)
+    reuse_keys(manager, keys[:1])
+    manager.fail_load(keys, failed_reader)
+
+    result = manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX, trigger=trigger)
+    assert result is not None and set(result.evicted_keys) == set(keys)
+    stats = manager.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    evictions = CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS
+    assert reduced[f"{evictions}:('true',)"] == 1
+    assert reduced[f"{evictions}:('false',)"] == 1
 
 
 def test_cpu_manager_reports_allocation_size_on_allocation_failure(monkeypatch):

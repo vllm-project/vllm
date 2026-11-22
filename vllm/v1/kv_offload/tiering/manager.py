@@ -121,7 +121,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
     """CPUOffloadingManager with a primary/secondary transfer interface.
 
     The inherited prepare_store/complete_store/prepare_load/complete_load are the
-    GPU-facing OffloadingManager interface. These aliases expose the same operations
+    GPU-facing OffloadingManager interface. The read/write methods expose operations
     from the secondary tier perspective, where read/write refers to secondary
     accessing primary. This avoids confusion when reading TieringOffloadingManager
     code (e.g. calling prepare_load inside a cascade/store path would be misleading).
@@ -144,10 +144,6 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
             info=info,
         )
         self._mmap_region = mmap_region
-        # read/write is for CPU<->secondary transfers,
-        # load/store is for CPU<->GPU transfers.
-        # These aliases avoid calling prepare_load inside a store path.
-        self.complete_read = self.complete_load
         # Chunks of failed writes the writer may still be filling; their
         # release to the free pool is deferred until release_deferred_write().
         self._deferred_release_chunk_ids: set[int] = set()
@@ -178,6 +174,12 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         request accesses, so they must not alter request-scoped recency.
         """
         return self._prepare_load(keys, req_context, record_access=False)
+
+    def complete_read(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> None:
+        """Release secondary-tier read pins. A cascade can also hold these pins."""
+        self._release_read(keys, reused=False)
 
     def defer_write_release(self, keys: Collection[OffloadKey]) -> list[int]:
         """Fail pending writes like `complete_write(False)`, deferring the release.
@@ -266,10 +268,7 @@ class _SecondaryTierFacingParent(ParentManager):
     def create_store_job(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> TransferJob:
-        job = self._m.create_store_job(keys, req_context, self._origin_idx)
-        # Unlike a cascade, serving a remote request reads the chunks.
-        self._m.primary_tier.record_reads(keys)
-        return job
+        return self._m.create_store_job(keys, req_context, self._origin_idx)
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         return self._m.on_request_finished(
@@ -651,6 +650,10 @@ class TieringOffloadingManager(OffloadingManager):
                     # Make chunks available in primary tier.
                     self._complete_promotion(job_metadata, completed_job)
                 else:
+                    if completed_job.peer_read_keys:
+                        self.primary_tier.record_reads(
+                            completed_job.peer_read_keys, transfer_job.req_context
+                        )
                     # primary→secondary transfer completed.
                     # Decrement ref_cnt on primary chunks.
                     self.primary_tier.complete_read(
@@ -923,6 +926,10 @@ class TieringOffloadingManager(OffloadingManager):
 
         """
         self.primary_tier.complete_load(keys, req_context)
+
+    @override
+    def fail_load(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
+        self.primary_tier.fail_load(keys, req_context)
 
     @override
     def prepare_store(

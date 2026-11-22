@@ -49,6 +49,8 @@ class _RequestCacheAccess:
     # per request: a retry of a failed offer, or a re-offer after preemption,
     # is not another use of the content.
     counted_keys: set[OffloadKey] = field(default_factory=set)
+    # A new ChunkStatus identifies a new residency, even for the same key and slot.
+    accessed_chunks: dict[OffloadKey, ChunkStatus] = field(default_factory=dict)
     finished: bool = False
 
 
@@ -175,6 +177,14 @@ class CPUOffloadingManager(OffloadingManager):
             req_context.set_state(state)
         return state
 
+    @staticmethod
+    def _record_demand_access(
+        key: OffloadKey, chunk: ChunkStatus, state: _RequestCacheAccess, now: float
+    ) -> None:
+        if state.accessed_chunks.get(key) is not chunk:
+            state.accessed_chunks[key] = chunk
+            chunk.last_access_time = now
+
     def _record_request_cache_access(
         self,
         keys: Iterable[OffloadKey],
@@ -203,14 +213,15 @@ class CPUOffloadingManager(OffloadingManager):
             key for key in reused_keys if key not in state.inserted_keys
         )
 
-    def record_reads(self, keys: Iterable[OffloadKey]) -> None:
-        """Mark ready chunks as read by a load or a remote request."""
+    def record_reads(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
+        """Record the chunks a peer confirmed reading before releasing its pins."""
+        state = self._get_request_cache_access(req_context)
         now = time.monotonic()
         for key in keys:
             chunk = self._policy.get(key)
             assert chunk is not None
             chunk.reused = True
-            chunk.last_access_time = now
+            self._record_demand_access(key, chunk, state, now)
 
     # --- OffloadingManager interface ---
 
@@ -250,6 +261,9 @@ class CPUOffloadingManager(OffloadingManager):
         record_access: bool,
     ) -> LoadStoreSpec:
         chunks = []
+        if record_access:
+            state = self._get_request_cache_access(req_context)
+            now = time.monotonic()
         for key in keys:
             chunk = self._policy.get(key)
             assert chunk is not None, f"Chunk {key!r} not found in cache"
@@ -260,19 +274,29 @@ class CPUOffloadingManager(OffloadingManager):
                 assert self._num_evictable_cache_chunks >= 0
             chunk.ref_cnt += 1
             chunks.append(chunk)
+            if record_access:
+                self._record_demand_access(key, chunk, state, now)
         if record_access:
             self._record_request_cache_access(keys, req_context, reused_keys=keys)
-            self.record_reads(keys)
         return self._get_load_store_spec(keys, chunks)
 
     @override
     def complete_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> None:
+        self._release_read(keys, reused=True)
+
+    @override
+    def fail_load(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
+        self._release_read(keys, reused=False)
+
+    def _release_read(self, keys: Collection[OffloadKey], *, reused: bool) -> None:
         for key in keys:
             chunk = self._policy.get(key)
             assert chunk is not None, f"Chunk {key!r} not found"
             assert chunk.ref_cnt > 0, f"Chunk {key!r} ref_cnt is already 0"
+            if reused:
+                chunk.reused = True
             chunk.ref_cnt -= 1
             if chunk.ref_cnt == 0:
                 self._num_evictable_cache_chunks += 1  # ref_cnt 1 -> 0
@@ -308,7 +332,7 @@ class CPUOffloadingManager(OffloadingManager):
             else:
                 if chunk.is_ready:
                     ready_existing_keys.append(key)
-                    chunk.last_access_time = now
+                    self._record_demand_access(key, chunk, state, now)
 
         if self.counts is not None:
             admitted_keys: list[OffloadKey] = []

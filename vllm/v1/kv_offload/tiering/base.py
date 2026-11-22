@@ -103,6 +103,8 @@ class JobResult:
     # I/O can no longer touch those chunks; the manager applies the release on
     # its own polling path.
     deferred_release: threading.Event | None = None
+    # Primary keys confirmed transferred to a requesting peer by this job.
+    peer_read_keys: Collection[OffloadKey] = ()
 
 
 class ParentManager(ABC):

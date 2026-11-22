@@ -30,6 +30,7 @@ from vllm.v1.kv_offload.base import (
     ScheduleEndContext,
     StoreTrigger,
 )
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import (
@@ -3303,6 +3304,41 @@ def _peer_hit(
     raise AssertionError("peer lookup did not reach HIT")
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("fetch", [False, True])
+def test_peer_lookup_counts_as_reuse_only_after_fetch(fetch):
+    key = OffloadKey(b"resident")
+    consumer, tiering = _producer_with_cpu_hit(key, tier_poll_interval_s=0)
+    try:
+        ctx = _peer_hit(consumer, tiering, key, step_producer=True)
+        if fetch:
+            consumer.submit_load(_job_metadata(7, [key], [0], ctx.kv_transfer_params))
+        else:
+            # The peer releases its lookup pin with an empty fetch.
+            consumer.on_request_finished(ctx)
+        tiering.on_schedule_end(ScheduleEndContext([], ()))
+        assert list(consumer.get_finished_jobs()) == (
+            [JobResult(7, True)] if fetch else []
+        )
+
+        # Fill the four-slot primary tier so the pinned residency is evicted.
+        primary = tiering.primary_tier
+        replacement = primary.prepare_write(
+            [OffloadKey(bytes([i])) for i in range(4)], ReqContext(req_id="new")
+        )
+        assert replacement is not None and replacement.evicted_keys == [key]
+        stats = primary.get_stats()
+        assert stats is not None
+        label = "true" if fetch else "false"
+        assert (
+            stats.reduce()[f"{CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS}:{(label,)}"]
+            == 1
+        )
+    finally:
+        tiering.shutdown()
+        consumer.shutdown()
+
+
 class TestIdleWhileServingPeers:
     @pytest.mark.cpu_test
     def test_pinned_peer_hit_does_not_block_idleness(self):
@@ -3426,7 +3462,9 @@ def test_drain_fails_unfetched_stores_and_rejects_late_fetch(drain_peers, bound)
         producer.submit_store(
             _job_metadata(11, [first], [0], _remote_decoder_kv_params())
         )
-        assert list(producer.get_finished_jobs()) == [JobResult(11, True)]
+        assert list(producer.get_finished_jobs()) == [
+            JobResult(11, True, peer_read_keys=[first])
+        ]
         assert list(consumer.get_finished_jobs()) == [JobResult(10, True)]
 
     for job_id in (20, 21):
@@ -3520,7 +3558,9 @@ def test_drain_rejects_fetch_arriving_mid_poll(drain_peers, drain_transports):
 
     data.on_poll = peer_traffic
     producer.drain_jobs()
-    assert list(producer.get_finished_jobs()) == [JobResult(2, True)]
+    assert list(producer.get_finished_jobs()) == [
+        JobResult(2, True, peer_read_keys=[key])
+    ]
     assert sorted(consumer.get_finished_jobs(), key=lambda result: result.job_id) == [
         JobResult(1, True),
         JobResult(3, False),

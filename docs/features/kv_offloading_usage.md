@@ -190,6 +190,24 @@ The spec declares the label names in the API server process, and the manager fil
 
 A manager adds a label with `config_info_keys()` of its spec and `config_info()` of its own class. A name that a manager fills and the spec does not declare is dropped, and the engine log then holds one warning line.
 
+## CPU chunk eviction metrics
+
+The CPU tier records one observation per chunk evicted to make room for another
+chunk. Reinserting a key starts a new residency. Failed writes and cache resets
+do not produce observations for the chunks they discard.
+
+| Prometheus metric | What it measures |
+| --- | --- |
+| `vllm:kv_offload_cpu_chunk_lifetime_seconds` | Time from successful store or promotion completion until eviction. |
+| `vllm:kv_offload_cpu_chunk_idle_before_evict_seconds` | Time since the most recent demand access, or since readiness if there was none. Each CPU manager request context counts once per residency. |
+| `vllm:kv_offload_cpu_chunk_evictions_total` | Capacity evictions, split by `reused`. A successful CPU-to-GPU load or a confirmed P2P read sets `reused="true"`. |
+
+Scheduling a GPU load, offering an already-resident chunk, and confirming a
+peer read count as demand accesses. The P2P source opens a request context
+for each inbound lookup batch, so a later fetch round can refresh the clock.
+Lookup probes and background copies alone leave the idle clock unchanged.
+KVCR reports pin releases without identifying which chunks a peer read.
+
 ## Custom Eviction Policies
 
 `eviction_policy` resolves through `CachePolicyFactory` (`vllm/v1/kv_offload/cpu/policies/factory.py`), which pre-registers the built-in `lru` and `arc` policies.

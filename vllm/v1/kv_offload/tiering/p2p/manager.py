@@ -734,7 +734,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     ) -> None:
         result = session.drain_stores(kv_request_ids)
         self._finished_jobs.extend(
-            JobResult(store.job_id, success=store.success) for store in result.stores
+            JobResult(
+                store.job_id, success=store.success, peer_read_keys=store.peer_read_keys
+            )
+            for store in result.stores
         )
         now = time.monotonic()
         for kid in result.reaped_pd_ids:
@@ -1176,7 +1179,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                     self._failed_req_ids.add(lr.kv_request_id)
             for sr in result.stores:
                 self._finished_jobs.append(
-                    JobResult(job_id=sr.job_id, success=sr.success)
+                    JobResult(
+                        sr.job_id, success=sr.success, peer_read_keys=sr.peer_read_keys
+                    )
                 )
             if draining:
                 if result.new_fetch_ids:
