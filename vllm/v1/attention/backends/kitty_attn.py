@@ -522,6 +522,10 @@ class KittyResidualMetadata:
 class KittyResidualMetadataBuilder(AttentionMetadataBuilder[KittyResidualMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
+    # The base __init__ is abstract.
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
     def build(
         self,
         common_prefix_len: int,
