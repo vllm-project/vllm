@@ -3,7 +3,10 @@
 import asyncio
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from functools import cached_property
 from itertools import accumulate
 from typing import (
@@ -47,6 +50,30 @@ from .types import ModalityStr
 
 _T = TypeVar("_T")
 _AsyncMultiModalItem: TypeAlias = Callable[[], Awaitable[tuple[object, str | None]]]
+
+
+@dataclass(frozen=True, slots=True)
+class MediaRequestBudgets:
+    decoded: MediaDecodedBudget = field(default_factory=MediaDecodedBudget)
+    download: MediaRequestDownloadBudget = field(
+        default_factory=MediaRequestDownloadBudget
+    )
+
+
+_media_request_budgets: ContextVar[MediaRequestBudgets | None] = ContextVar(
+    "media_request_budgets", default=None
+)
+
+
+@contextmanager
+def use_media_request_budgets(budgets: MediaRequestBudgets) -> Iterator[None]:
+    """Share byte budgets among trackers created in one request."""
+    token = _media_request_budgets.set(budgets)
+    try:
+        yield
+    finally:
+        _media_request_budgets.reset(token)
+
 
 if TYPE_CHECKING:
     import torch
@@ -216,8 +243,9 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._items_by_modality = defaultdict[str, list[_T]](list)
         # Track original modality for each vision_chunk item (image or video)
         self._modality_order = defaultdict[str, list[str]](list)
-        self.decoded_budget = MediaDecodedBudget()
-        self.download_budget = MediaRequestDownloadBudget()
+        budgets = _media_request_budgets.get() or MediaRequestBudgets()
+        self.decoded_budget = budgets.decoded
+        self.download_budget = budgets.download
 
     @cached_property
     def use_unified_vision_chunk_modality(self) -> bool:

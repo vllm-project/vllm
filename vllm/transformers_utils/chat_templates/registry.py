@@ -37,6 +37,7 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "minicpmv4_7": _get_minicpmv_chat_template_fallback,
     "openvla": CHAT_TEMPLATES_DIR / "template_openvla.jinja",
     "paligemma": CHAT_TEMPLATES_DIR / "template_basic.jinja",
+    "shieldgemma2": CHAT_TEMPLATES_DIR / "template_shieldgemma2.jinja",
     "siglip": CHAT_TEMPLATES_DIR / "template_siglip.jinja",
     "siglip2": CHAT_TEMPLATES_DIR / "template_siglip.jinja",
 }
@@ -44,7 +45,9 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
 # Model types whose fallback also replaces a chat template shipped with the
 # tokenizer. SigLIP2 checkpoints (model_type "siglip") reuse the Gemma tokenizer,
 # whose chat template wraps embedding text in chat turns and drops EOS.
-_MODEL_TYPES_OVERRIDING_TOKENIZER_CHAT_TEMPLATE = {"siglip"}
+# ShieldGemma 2 ships a template with one <bos>; the reference processor feeds
+# the model two.
+_MODEL_TYPES_OVERRIDING_TOKENIZER_CHAT_TEMPLATE = {"siglip", "shieldgemma2"}
 
 
 def register_chat_template_fallback_path(
@@ -82,7 +85,9 @@ def get_chat_template_override_path(
 ) -> Path | None:
     """Return the predefined template that replaces the tokenizer's own.
 
-    Only for model types whose Hub tokenizers ship a wrong chat template. Remove
+    Only for model types whose Hub tokenizers ship a wrong chat template. Also
+    for "shieldgemma2": its Hub template is right for Transformers, which adds
+    <bos> when tokenizing, but vLLM's chat path does not. Remove
     "siglip" from `_MODEL_TYPES_OVERRIDING_TOKENIZER_CHAT_TEMPLATE` once the
     SigLIP2 checkpoints drop the Gemma template upstream:
     https://huggingface.co/google/siglip2-base-patch16-224/discussions/23
