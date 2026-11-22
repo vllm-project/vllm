@@ -990,6 +990,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer_mode="inkling",
         max_model_len=4096,
     ),
+    "Inkling2LoopForConditionalGeneration": _HfExamplesInfo(
+        "thinkingmachines/Inkling-2-Mini",
+        tokenizer_mode="inkling",
+        max_model_len=4096,
+        is_available_online=False,
+    ),
     "IsaacForConditionalGeneration": _HfExamplesInfo(
         "PerceptronAI/Isaac-0.1",
         extras={"0.2-2B-Preview": "PerceptronAI/Isaac-0.2-2B-Preview"},
@@ -1345,8 +1351,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen2.5-VL-3B-Instruct",
         max_model_len=4096,
     ),
-    "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B"),
-    "Qwen2_5OmniForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B-AWQ"),
+    "Qwen2_5OmniThinkerForConditionalGeneration": _HfExamplesInfo(
+        "Qwen/Qwen2.5-Omni-3B",
+        extras={"awq": "Qwen/Qwen2.5-Omni-7B-AWQ"},
+    ),
     "Qwen3VLForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-VL-4B-Instruct",
         max_model_len=4096,
@@ -1373,7 +1381,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "",
         is_available_online=False,
     ),
-    "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
+    "Qwen3OmniMoeThinkerForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         max_model_len=4096,
     ),
@@ -1905,7 +1913,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersForCausalLM": _HfExamplesInfo(
         "vllm-project/Ilama-3.2-1B", trust_remote_code=True
     ),
-    "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "TransformersMultiModalForCausalLM": _HfExamplesInfo(
+        "BAAI/Emu3-Chat-hf",
+        extras={"qwen2_5_omni": "Qwen/Qwen2.5-Omni-3B"},
+    ),
     "TransformersMultiModalForTranscription": _HfExamplesInfo(
         "microsoft/VibeVoice-ASR-HF"
     ),
@@ -1923,7 +1934,8 @@ _TRANSFORMERS_BACKEND_MODELS = {
         speculative_method="mtp",
     ),
     "TransformersMultiModalMoEForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-VL-30B-A3B-Instruct"
+        "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        extras={"qwen3_omni": "Qwen/Qwen3-Omni-30B-A3B-Instruct"},
     ),
     "TransformersMoEEmbeddingModel": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "TransformersMoEForSequenceClassification": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),

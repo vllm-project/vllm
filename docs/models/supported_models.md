@@ -19,7 +19,7 @@ vLLM also supports model implementations that are available in Transformers. We 
 
 Currently, the Transformers modeling backend works for the following:
 
-- Modalities: embedding models, language models, vision-language models and audio-language models
+- Modalities: embedding models, language models, vision-language models, audio-language models and omni models
 - Architectures: encoder-only, decoder-only, mixture-of-experts
 - Attention types: full attention and/or sliding attention
 - [Speculative decoding](../features/speculative_decoding/README.md) methods: EAGLE-3, DFlash, DFlash2, DSpark, XPress and MTP (for models following the Transformers MTP standard)
@@ -47,6 +47,9 @@ If a model has a vLLM implementation but you would prefer to use the Transformer
 
 !!! note
     For vision-language models, if you are loading with `dtype="auto"`, vLLM loads the whole model with config's `dtype` if it exists. In contrast the native Transformers will respect the `dtype` attribute of each backbone in the model. That might cause a slight difference in performance.
+
+!!! note
+    For omni models, `load_audio_from_video` (or the deprecated `use_audio_in_video`) can only be set for the whole model with `mm_processor_kwargs` for [offline inference](../serving/offline_inference.md) or `--mm-processor-kwargs` for the [online serving](../serving/online_serving/README.md). In contrast the vLLM implementations of Qwen2.5-Omni and Qwen3-Omni also accept it per request.
 
 #### Custom models
 
@@ -590,6 +593,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `Idefics3ForConditionalGeneration` | Idefics3 | T + I | `HuggingFaceM4/Idefics3-8B-Llama3`, etc. | ✅︎ | |
 | `IsaacForConditionalGeneration` | Isaac | T + I<sup>+</sup> | `PerceptronAI/Isaac-0.1` | ✅︎ | ✅︎ |
 | `Inkling2ForConditionalGeneration` | Inkling 2 Small | T + I<sup>+</sup> | `thinkingmachines/Inkling-2-Small`, `thinkingmachines/Inkling-2-Small-MXFP8` | ✅︎ | |
+| `Inkling2LoopForConditionalGeneration` | Inkling 2 Mini | T + I<sup>+</sup> | `thinkingmachines/Inkling-2-Mini` | | |
 | `InternS1ForConditionalGeneration` | Intern-S1 | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S1`, `internlm/Intern-S1-mini`, etc. | ✅︎ | ✅︎ |
 | `InternS1ProForConditionalGeneration` | Intern-S1-Pro | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S1-Pro`, etc. | ✅︎ | ✅︎ |
 | `InternS2MobiusForConditionalGeneration` | Intern-S2-Mobius | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S2-Mobius` | ✅︎ | ✅︎ |
