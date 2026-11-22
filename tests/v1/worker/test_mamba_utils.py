@@ -681,6 +681,43 @@ def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
         )
 
 
+def test_gdn_replayssm_slot_rows_stay_16_byte_aligned() -> None:
+    """FlashInfer's GDN materializer rejects unaligned per-layer slot rows."""
+    max_num_reqs = 3
+    kv_cache = [
+        torch.empty(4, 1),
+        torch.empty(4, 1, 128, 128, dtype=torch.float16),
+        torch.empty(4, 1, 32, 128, dtype=torch.bfloat16),
+        torch.empty(4, 1, 32, 128, dtype=torch.bfloat16),
+        torch.empty(4, 1, 32),
+    ]
+    trackers = torch.zeros(4, dtype=torch.int32)
+    mixers = [
+        SimpleNamespace(
+            kv_cache=kv_cache,
+            replayssm_buffer_len=16,
+            replayssm_executed_width=1,
+            _replayssm_ring_start=trackers,
+            _replayssm_prev_num_accepted=trackers,
+        )
+        for _ in range(2)
+    ]
+    spec = MambaSpec(
+        block_size=16,
+        shapes=tuple(tensor.shape[1:] for tensor in kv_cache),
+        dtypes=tuple(tensor.dtype for tensor in kv_cache),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+    context = ReplaySSMModelContext.create(
+        [(mixers, spec, torch.zeros((max_num_reqs, 1), dtype=torch.int32))],
+        max_num_reqs=max_num_reqs,
+        materialize_prefixes=True,
+    )
+    for slots in (context.src_slots, context.dst_slots):
+        for layer_idx in range(len(mixers)):
+            assert slots[layer_idx, :max_num_reqs].data_ptr() % 16 == 0
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 @pytest.mark.parametrize(
     (
@@ -1104,7 +1141,7 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(
         replay.plan_flush_count,
         replay.block_table_strides,
         replay.num_layers,
-        MAX_NUM_REQS=1,
+        SLOT_ROW_STRIDE=1,
         MAMBA_BLOCK_SIZE=128,
         LOGICAL_WINDOW=16,
         RING_BUFFER_LEN=ring_len,

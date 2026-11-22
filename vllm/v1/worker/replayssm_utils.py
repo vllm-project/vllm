@@ -20,6 +20,7 @@ from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec 
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
@@ -216,7 +217,7 @@ def _postprocess_replayssm_kernel(
     plan_flush_count,
     block_table_strides,
     num_layers,
-    MAX_NUM_REQS: tl.constexpr,
+    SLOT_ROW_STRIDE: tl.constexpr,
     MAMBA_BLOCK_SIZE: tl.constexpr,
     LOGICAL_WINDOW: tl.constexpr,
     RING_BUFFER_LEN: tl.constexpr,
@@ -305,7 +306,7 @@ def _postprocess_replayssm_kernel(
         # FlashInfer's ABI requires packed [layer, batch] tables even though all
         # layers in this cache group share the same physical slot namespace.
         for layer_idx in range(tl.load(num_layers + group_idx)):
-            slot_offset = layer_idx * MAX_NUM_REQS + batch_idx
+            slot_offset = layer_idx * SLOT_ROW_STRIDE + batch_idx
             tl.store(
                 src_slots + slot_offset,
                 tl.where(materialize, live_slot, PAD_SLOT_ID),
@@ -481,8 +482,13 @@ class ReplaySSMModelContext:
                     f"ring slots, got {first.kv_cache[2].size(2)}"
                 )
         block_tables = [table for _, _, table in grouped]
+        # FlashInfer's GDN materializer takes one layer row per call and needs
+        # 16-byte aligned pointers, so GDN rows hold a multiple of four slots.
+        slot_row_len = max_num_reqs
+        if mamba_type == MambaAttentionBackendEnum.GDN_ATTN:
+            slot_row_len = round_up(max_num_reqs, 4)
         src_slots = torch.full(
-            (len(mixers), max_num_reqs),
+            (len(mixers), slot_row_len),
             NULL_BLOCK_ID,
             dtype=torch.int32,
             device=device,
@@ -626,8 +632,8 @@ class ReplaySSMModelContext:
             u_cache, k_cache, g_cache = mixer.kv_cache[2:5]
             materialize_fn(
                 state=mixer.kv_cache[1],
-                src_slots=self.src_slots[layer_idx],
-                dst_slots=self.dst_slots[layer_idx],
+                src_slots=self.src_slots[layer_idx, : self.max_num_reqs],
+                dst_slots=self.dst_slots[layer_idx, : self.max_num_reqs],
                 k_cache=k_cache,
                 u_cache=u_cache,
                 g_cache=g_cache,
@@ -693,7 +699,7 @@ class ReplaySSMModelContext:
             self.plan_flush_count,
             self.block_table_strides,
             self.num_layers,
-            MAX_NUM_REQS=self.max_num_reqs,
+            SLOT_ROW_STRIDE=self.src_slots.stride(0),
             MAMBA_BLOCK_SIZE=self.mamba_block_size,
             LOGICAL_WINDOW=self.logical_window,
             RING_BUFFER_LEN=self.ring_buffer_len,

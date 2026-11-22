@@ -404,7 +404,7 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(
         context.plan_flush_count,
         context.block_table_strides,
         context.num_layers,
-        MAX_NUM_REQS=4,
+        SLOT_ROW_STRIDE=4,
         MAMBA_BLOCK_SIZE=16,
         LOGICAL_WINDOW=16,
         RING_BUFFER_LEN=ring_slots,
