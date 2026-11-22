@@ -127,9 +127,9 @@ class InklingRenderer(BaseRenderer[HfTokenizer]):
 
         # Inkling2 shares the format but has its own reference rendering, and
         # payload text never encodes to framing tokens.
-        self._is_inkling2 = (
-            getattr(self.model_config.hf_config, "model_type", None) == "inkling2"
-        )
+        self._is_inkling2 = getattr(
+            self.model_config.hf_config, "model_type", None
+        ) in ("inkling2", "inkling2_loop")
         self._inkling_tokenizer = _HfBackedTmlTokenizer(
             self.get_tokenizer(), split_special_tokens=self._is_inkling2
         )
