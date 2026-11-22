@@ -9,6 +9,7 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen3_asr import Qwen3ASRProcessor
 
 from vllm.config import ModelConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import batched_tensors_equal
@@ -17,6 +18,15 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from .test_common import _assert_inputs_equal
 
 _AUDIO_PROMPT = "<|audio_start|><|audio_pad|><|audio_end|>"
+
+
+def test_default_audio_limit_rejects_direct_model_input():
+    config = ModelConfig("Qwen/Qwen3-ASR-0.6B", dtype="float32")
+    processor = MULTIMODAL_REGISTRY.create_processor(config)
+    audios = [np.zeros(16000, dtype=np.float32)] * 17
+
+    with pytest.raises(VLLMValidationError, match="At most 16 audio"):
+        processor.info.parse_mm_data({"audio": audios})
 
 
 @pytest.fixture(params=["Qwen/Qwen3-ASR-0.6B", "Qwen/Qwen3-ASR-0.6B-hf"])

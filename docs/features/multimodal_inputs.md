@@ -32,6 +32,9 @@ this checkpoint. For Python text-only inference, set
 
 ## Offline Inference
 
+By default, a prompt accepts up to 16 audio items. Set `limit_mm_per_prompt`
+in `LLM` or `--limit-mm-per-prompt.audio` when serving to change this limit.
+
 To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
 
 - `prompt`: The prompt should follow the format that is documented on HuggingFace.
