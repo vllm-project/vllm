@@ -404,6 +404,61 @@ def test_online_nvfp4_weight_only_linear_matches_dequantized_weight(
     assert ((out - ref).norm() / ref.norm()).item() < 1e-2
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Needs CUDA.")
+@pytest.mark.parametrize("backend", ["auto", "marlin"])
+def test_online_fp8_per_tensor_is_weight_only_without_fp8_gemm(
+    default_vllm_config, dist_init, monkeypatch, backend
+) -> None:
+    """Without FP8 GEMMs (SM < 89), online per-tensor FP8 picks its kernel from
+    the weight-only table (Humming first), and the weight still dequantizes."""
+    from vllm.model_executor.kernels.linear.scaled_mm.humming import (
+        HummingFP8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        get_and_maybe_dequant_weights,
+    )
+    from vllm.utils.import_utils import has_humming
+
+    if backend == "auto" and not has_humming():
+        pytest.skip("Humming is not installed")
+    monkeypatch.setattr(current_platform, "supports_fp8", lambda: False)
+    default_vllm_config.model_config = SimpleNamespace(
+        quantization_config=None, dtype=torch.bfloat16
+    )
+    default_vllm_config.kernel_config.linear_backend = backend
+    config = OnlineQuantizationConfig(quant_config_args(linear="fp8_per_tensor"))
+    torch.manual_seed(0)
+    weight = torch.randn(256, 512, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(8, 512, device="cuda", dtype=torch.bfloat16)
+    with torch.device("cuda"):
+        layer = ReplicatedLinear(
+            512,
+            256,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=config,
+            prefix="linear",
+        )
+    layer.weight.weight_loader(layer.weight, weight)
+    layer.quant_method.process_weights_after_loading(layer)
+
+    expected = (
+        HummingFP8ScaledMMLinearKernel
+        if backend == "auto"
+        else MarlinFP8ScaledMMLinearKernel
+    )
+    assert type(layer.quant_method.fp8_linear) is expected
+    # Both kernels repack the weight, so dequantization must not rescale it.
+    assert layer.quant_method.use_marlin
+    dequantized = get_and_maybe_dequant_weights(layer, torch.bfloat16).float()
+    assert dequantized.shape == weight.shape
+    rel = (dequantized - weight.float()).norm() / weight.float().norm()
+    assert rel.item() < 0.05
+    ref = x.float() @ weight.float().T
+    out = layer(x)[0].float()
+    assert ((out - ref).norm() / ref.norm()).item() < 0.05
+
+
 @pytest.mark.skipif(
     current_platform.is_xpu(),
     reason="MXFP4 linear kernels on XPU only support dynamic activation.",
