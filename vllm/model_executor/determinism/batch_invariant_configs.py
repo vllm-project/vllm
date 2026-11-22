@@ -1330,6 +1330,10 @@ _BATCH_INVARIANT_MOE_CONFIGS: dict[
     ),
     # Qwen3-30B-A3B (bf16), TP=1
     ("blackwell", None, None, 128, 768, 2048): _MoEConfig(64, 128, 64, 4, 3),
+    # Qwen3-30B-A3B-FP8, TP=1
+    ("blackwell", "fp8_w8a8", (128, 128), 128, 768, 2048): _MoEConfig(
+        64, 128, 128, 4, 4
+    ),
 }
 
 # Shapes without a tuned entry keep this fixed config.
