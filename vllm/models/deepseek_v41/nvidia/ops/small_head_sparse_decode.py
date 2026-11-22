@@ -4,12 +4,12 @@
 
 FlashMLA's SM90 sparse decode kernel tiles heads by 64 (the WGMMA M
 dimension), so a TP8 shard with 8 heads wastes 7/8 of its tensor-core work.
-This kernel tiles heads by 16 through ``tl.dot`` (mma.sync on SM90) and splits
+This kernel tiles heads by 16 through `tl.dot` (mma.sync on SM90) and splits
 the key set across programs instead.
 
-KV cache layout (``fp8_ds_mla``, 584 B/token): each page holds
-``page_size`` rows of 448 fp8 NoPE bytes + 64 bf16 RoPE values, followed by
-``page_size`` rows of 8 UE8M0 scale bytes (7 used, one per 64 NoPE dims).
+KV cache layout (`fp8_ds_mla`, 584 B/token): each page holds
+`page_size` rows of 448 fp8 NoPE bytes + 64 bf16 RoPE values, followed by
+`page_size` rows of 8 UE8M0 scale bytes (7 used, one per 64 NoPE dims).
 V is the full 512-dim key, so one dequantized tile feeds both GEMMs.
 """
 
@@ -242,7 +242,7 @@ def _pick_config(num_tokens: int, max_keys: int) -> tuple[int, int, int, int]:
 _HEAD_BLOCK = 16
 _PADDED_HEADS = 64
 _PAGE_ALIGNMENT = 576
-# Every ``num_splits`` ``_pick_config`` can return.
+# Every `num_splits` `_pick_config` can return.
 _SPLIT_CHOICES = (8, 16, 32)
 
 
@@ -380,7 +380,7 @@ def register_small_head_decode_warmup(
     swa_page_size: int,
     extra_page_size: int,
 ) -> None:
-    """Compile every kernel variant ``small_head_sparse_decode`` can dispatch."""
+    """Compile every kernel variant `small_head_sparse_decode` can dispatch."""
     for swa_width in swa_widths:
         _launch_partial_decode.register_warmup(
             num_heads=num_heads,
@@ -409,16 +409,16 @@ def small_head_sparse_decode(
     """Sparse MLA decode over SWA keys plus optional compressed (extra) keys.
 
     Args:
-        q: ``[T, H_pad, 512]`` bf16; only the first ``num_heads`` heads are read.
-        swa_cache: ``fp8_ds_mla`` paged SWA cache, ``[pages, page, 584]``.
-        swa_indices: ``[>=T, (1,) width]`` int32 global slot IDs; -1 is ignored.
-        swa_lens: ``[>=T]`` int32 valid SWA lengths.
+        q: `[T, H_pad, 512]` bf16; only the first `num_heads` heads are read.
+        swa_cache: `fp8_ds_mla` paged SWA cache, `[pages, page, 584]`.
+        swa_indices: `[>=T, (1,) width]` int32 global slot IDs; -1 is ignored.
+        swa_lens: `[>=T]` int32 valid SWA lengths.
         extra_cache: Optional compressed cache with the same packed layout.
         extra_indices: Optional compressed-cache global slot IDs.
         extra_lens: Optional valid compressed-cache lengths.
-        attn_sink: ``[H_pad]`` fp32 per-head sink logits.
+        attn_sink: `[H_pad]` fp32 per-head sink logits.
         sm_scale: Softmax scale.
-        out: ``[T, H_pad, 512]``; the first ``num_heads`` heads are written.
+        out: `[T, H_pad, 512]`; the first `num_heads` heads are written.
         num_heads: real (unpadded) heads on this rank, at most 16.
 
     """
