@@ -88,9 +88,9 @@ def test_fp8_is_weight_only_without_fp8_gemm(
     head = _target_head(monkeypatch)
     draft_head = quantized_lm_head_copy(head, "fp8")
     assert draft_head.quant_method.activation_quant_key is None
-    # One byte per weight (Marlin repacks it into int32 words).
+    # About one byte per weight (Marlin and Humming repack and may pad it).
     nbytes = draft_head.weight.numel() * draft_head.weight.element_size()
-    assert nbytes == head.weight.numel()
+    assert nbytes < 0.6 * head.weight.numel() * head.weight.element_size()
 
     logits_processor = LogitsProcessor(VOCAB)
     hidden = torch.randn(2048, HIDDEN, device="cuda", dtype=torch.bfloat16)
