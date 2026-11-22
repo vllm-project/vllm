@@ -3,6 +3,7 @@
 """Attention layer with AiterFlashAttention."""
 
 from dataclasses import dataclass, field, replace
+from functools import cache
 from typing import ClassVar
 
 import torch
@@ -70,6 +71,25 @@ def _uses_fast_verify(vllm_config: VllmConfig | None, kv_cache_dtype: str) -> bo
 if current_platform.is_rocm():
     from vllm.triton_utils import tl, triton
 
+    # Most elements of key, and of value, that one gather program copies; a
+    # program copies as many whole heads of a token as fit. The shuffle layout
+    # spreads a token over 16-byte groups, so its copy is bound by memory
+    # traffic and does best with smaller programs, counted in groups.
+    _GATHER_ELEMENTS_PER_PROGRAM = 2048
+    _GATHER_SHUFFLE_GROUPS_PER_PROGRAM = 32
+
+    @cache
+    def gather_head_block(
+        num_heads: int, head_dim: int, max_elements: int
+    ) -> tuple[int, int]:
+        # Heads one gather program copies (a power of two, as tl.arange
+        # needs) and the programs per token.
+        fit = max(1, max_elements // head_dim)
+        head_block = min(
+            triton.next_power_of_2(num_heads), triton.next_power_of_2(fit + 1) // 2
+        )
+        return head_block, triton.cdiv(num_heads, head_block)
+
     def block_size(x, head_dim):
         return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))
 
@@ -102,16 +122,20 @@ if current_platform.is_rocm():
         PAGE_SIZE: tl.constexpr,
         CACHE_FORMAT: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
+        HEAD_BLOCK: tl.constexpr,
     ):
+        # One program copies HEAD_BLOCK heads of one token, so the block-table
+        # lookup below runs once per token rather than once per head.
         token_id = tl.program_id(0)
-        head_id = tl.program_id(1)
-        col_offsets = tl.arange(0, BLOCK_SIZE)
+        head_id = tl.program_id(1) * HEAD_BLOCK + tl.arange(0, HEAD_BLOCK)[:, None]
+        col_offsets = tl.arange(0, BLOCK_SIZE)[None, :]
+        # The last block is partial when HEAD_BLOCK does not divide num_heads.
+        head_mask = tl.broadcast_to(head_id < num_heads, (HEAD_BLOCK, BLOCK_SIZE))
 
-        key_ptr_offset = (
-            key_ptr + token_id * head_size * num_heads + head_id * head_size
-        )
-        value_ptr_offset = (
-            value_ptr + token_id * head_size * num_heads + head_id * head_size
+        dst_offset = (
+            token_id.to(tl.int64) * head_size * num_heads
+            + head_id * head_size
+            + col_offsets
         )
         batch_idx = tl.load(token_to_batch_ptr + token_id)
         batch_start = tl.load(seq_start_ptr + batch_idx)
@@ -139,19 +163,15 @@ if current_platform.is_rocm():
                 + slot_id * v_cache_stride1
                 + head_id * v_cache_stride2
             )
-            k_reg = tl.load(key_cache_ptr_offset + col_offsets)
-            v_reg = tl.load(value_cache_ptr_offset + col_offsets)
+            k_reg = tl.load(key_cache_ptr_offset + col_offsets, mask=head_mask)
+            v_reg = tl.load(value_cache_ptr_offset + col_offsets, mask=head_mask)
             if DEQUANT:
                 k_scale = tl.load(k_scale_ptr)
                 v_scale = tl.load(v_scale_ptr)
-                k_reg = (k_reg.to(tl.float32) * k_scale).to(
-                    key_ptr_offset.dtype.element_ty
-                )
-                v_reg = (v_reg.to(tl.float32) * v_scale).to(
-                    value_ptr_offset.dtype.element_ty
-                )
-            tl.store(key_ptr_offset + col_offsets, k_reg)
-            tl.store(value_ptr_offset + col_offsets, v_reg)
+                k_reg = (k_reg.to(tl.float32) * k_scale).to(key_ptr.dtype.element_ty)
+                v_reg = (v_reg.to(tl.float32) * v_scale).to(value_ptr.dtype.element_ty)
+            tl.store(key_ptr + dst_offset, k_reg, mask=head_mask)
+            tl.store(value_ptr + dst_offset, v_reg, mask=head_mask)
 
         elif CACHE_FORMAT == "SHUFFLE":
             # for kv cache layout as
@@ -176,15 +196,15 @@ if current_platform.is_rocm():
             )
             k_reg_offset = col_offsets // x * PAGE_SIZE * x + col_offsets % x
             v_reg_offset = col_offsets * x
-            k_reg = tl.load(key_cache_ptr_offset + k_reg_offset)
-            v_reg = tl.load(value_cache_ptr_offset + v_reg_offset)
+            k_reg = tl.load(key_cache_ptr_offset + k_reg_offset, mask=head_mask)
+            v_reg = tl.load(value_cache_ptr_offset + v_reg_offset, mask=head_mask)
             if DEQUANT:
                 k_scale = tl.load(k_scale_ptr)
                 v_scale = tl.load(v_scale_ptr)
                 k_reg = k_reg.to(tl.float32) * k_scale
                 v_reg = v_reg.to(tl.float32) * v_scale
-            tl.store(key_ptr_offset + col_offsets, k_reg)
-            tl.store(value_ptr_offset + col_offsets, v_reg)
+            tl.store(key_ptr + dst_offset, k_reg, mask=head_mask)
+            tl.store(value_ptr + dst_offset, v_reg, mask=head_mask)
 
     def cp_mha_gather_cache(
         key_cache: torch.Tensor,
@@ -221,7 +241,15 @@ if current_platform.is_rocm():
         k_strides = key_cache.stride()
         v_strides = value_cache.stride()
 
-        grid = lambda meta: (total_tokens, num_heads)
+        max_elements = (
+            _GATHER_ELEMENTS_PER_PROGRAM
+            if kv_cache_layout == "NHD"
+            else _GATHER_SHUFFLE_GROUPS_PER_PROGRAM * x
+        )
+        head_block, programs_per_token = gather_head_block(
+            num_heads, head_dim, max_elements
+        )
+        grid = (total_tokens, programs_per_token)
         cp_mha_gather_cache_kernel[grid](
             key_cache,
             value_cache,
@@ -247,6 +275,7 @@ if current_platform.is_rocm():
             PAGE_SIZE=page_size,
             CACHE_FORMAT=kv_cache_layout,
             BLOCK_SIZE=head_dim,
+            HEAD_BLOCK=head_block,
         )
 
     @triton.jit

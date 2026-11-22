@@ -784,6 +784,114 @@ def test_aiter_fa_sliding_window_matches_reference():
 
 @pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
 @pytest.mark.parametrize(
+    "num_kv_heads,head_size",
+    [(1, 128), (2, 64), (8, 128), (10, 128), (32, 128), (40, 64), (16, 256)],
+)
+@pytest.mark.parametrize("layout", ["NHD", "NHD_interleaved", "SHUFFLE"])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_aiter_fa_gather_cache_matches_indexing(
+    num_kv_heads, head_size, layout, kv_cache_dtype
+):
+    """The workspace gather copies each token's keys and values unchanged.
+
+    One gather program copies a block of heads, so cover head counts below,
+    equal to and above the block, and ones the block does not divide.
+    """
+    from vllm.v1.attention.backends.rocm_aiter_fa import cp_mha_gather_cache
+
+    set_random_seed(0)
+    num_blocks = 256
+    quantized = kv_cache_dtype == "fp8"
+    cache_dtype = current_platform.fp8_dtype() if quantized else DIRECT_DTYPE
+    # (first token to gather, number of tokens) per request
+    rows = [(0, 37), (19, 130), (48, 1), (5, 64)]
+
+    def make_cache(*shape: int) -> torch.Tensor:
+        return torch.randn(shape).clamp_(-1.0, 1.0).to(cache_dtype)
+
+    if layout == "NHD_interleaved":
+        # Without the shuffle layout the server passes strided views of one
+        # [num_blocks, num_heads, block_size, 2 * head_size] tensor.
+        kv_cache = make_cache(num_blocks, num_kv_heads, BLOCK_SIZE, 2 * head_size)
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(head_size, dim=-1)
+    else:
+        key_cache = make_cache(num_blocks, BLOCK_SIZE, num_kv_heads, head_size)
+        value_cache = make_cache(num_blocks, BLOCK_SIZE, num_kv_heads, head_size)
+
+    if layout == "SHUFFLE":
+        # K: [num_blocks, num_heads, head_size // x, block_size, x]
+        # V: [num_blocks, num_heads, block_size // x, head_size, x]
+        x = 16 // key_cache.element_size()
+        ref_key_cache = (
+            key_cache.view(num_blocks, num_kv_heads, head_size // x, BLOCK_SIZE, x)
+            .permute(0, 3, 1, 2, 4)
+            .reshape(num_blocks, BLOCK_SIZE, num_kv_heads, head_size)
+        )
+        ref_value_cache = (
+            value_cache.view(num_blocks, num_kv_heads, BLOCK_SIZE // x, head_size, x)
+            .permute(0, 2, 4, 1, 3)
+            .reshape(num_blocks, BLOCK_SIZE, num_kv_heads, head_size)
+        )
+    else:
+        ref_key_cache, ref_value_cache = key_cache, value_cache
+
+    starts = [start for start, _ in rows]
+    lens = [num_tokens for _, num_tokens in rows]
+    total_tokens = sum(lens)
+    max_num_blocks = max(-(-(start + n) // BLOCK_SIZE) for start, n in rows)
+    block_tables = (
+        torch.randperm(num_blocks)[: len(rows) * max_num_blocks]
+        .view(len(rows), max_num_blocks)
+        .to(torch.int32)
+    )
+    k_scale = torch.tensor([0.5 if quantized else 1.0], dtype=torch.float32)
+    v_scale = torch.tensor([0.25 if quantized else 1.0], dtype=torch.float32)
+
+    # One spare token at the end: the gather must not write past its tokens.
+    sentinel = 7.0
+    gathered = torch.full(
+        (2, total_tokens + 1, num_kv_heads, head_size), sentinel, dtype=DIRECT_DTYPE
+    )
+    cp_mha_gather_cache(
+        key_cache=key_cache,
+        value_cache=value_cache,
+        key=gathered[0],
+        value=gathered[1],
+        block_tables=block_tables,
+        k_scales=k_scale,
+        v_scales=v_scale,
+        cu_seqlens_kv=torch.tensor([0] + lens, dtype=torch.int32).cumsum(
+            dim=0, dtype=torch.int32
+        ),
+        token_to_batch=torch.repeat_interleave(
+            torch.arange(len(rows), dtype=torch.int32), torch.tensor(lens)
+        ),
+        seq_starts=torch.tensor(starts, dtype=torch.int32),
+        dequant=quantized,
+        kv_cache_layout="SHUFFLE" if layout == "SHUFFLE" else "NHD",
+        total_tokens=total_tokens,
+    )
+
+    expected_key, expected_value = [], []
+    for row, (start, num_tokens) in enumerate(rows):
+        positions = torch.arange(start, start + num_tokens)
+        blocks = block_tables[row, positions // BLOCK_SIZE].long()
+        slots = positions % BLOCK_SIZE
+        expected_key.append(ref_key_cache[blocks, slots])
+        expected_value.append(ref_value_cache[blocks, slots])
+    key_ref = torch.cat(expected_key)
+    value_ref = torch.cat(expected_value)
+    if quantized:
+        key_ref = (key_ref.float() * k_scale).to(DIRECT_DTYPE)
+        value_ref = (value_ref.float() * v_scale).to(DIRECT_DTYPE)
+
+    assert torch.equal(gathered[0, :total_tokens], key_ref)
+    assert torch.equal(gathered[1, :total_tokens], value_ref)
+    assert (gathered[:, total_tokens:] == sentinel).all()
+
+
+@pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
+@pytest.mark.parametrize(
     "shuffle,sliding_window", [(False, None), (False, 16), (True, None)]
 )
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
