@@ -1640,19 +1640,20 @@ def supports_any_eagle(
 class LocalArgmaxMixin:
     """Mixin for draft model heads in speculative decoding.
 
-    Provides a D2T-aware `get_top_tokens` that preserves the
-    local-argmax communication reduction even when the draft vocabulary
-    is smaller than the target vocabulary.
+    Provides D2T-aware `get_top_tokens` and `get_top_k_tokens` that
+    preserve the local-argmax / local-top-k communication reduction even
+    when the draft vocabulary is smaller than the target vocabulary.
 
     When `draft_id_to_target_id` is present (shape `(draft_vocab_size,)`,
-    containing per-token offset to target vocab id), the draft argmax index
-    `k` is mapped to the target vocab id via::
+    containing per-token offset to target vocab id), each draft index `k`
+    is mapped to the target vocab id via::
 
         target_id = k + draft_id_to_target_id[k]
 
     This is mathematically equivalent to computing the full-vocab scatter
-    logits and taking the global argmax, but requires only
-    O(batch * 2 * tp_size) communication instead of O(batch * vocab_size).
+    logits and taking the global argmax / top-k, but requires only
+    O(batch * 2 * tp_size) (argmax) or O(batch * 2k * tp_size) (top-k)
+    communication instead of O(batch * vocab_size).
 
     Requires the subclass to expose:
         `self.logits_processor`: LogitsProcessor
@@ -1673,6 +1674,28 @@ class LocalArgmaxMixin:
         if d2t is not None:
             top = top + d2t[top]
         return top
+
+    def get_top_k_tokens(
+        self, hidden_states: torch.Tensor, k: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Vocab-parallel top-k with optional D2T remapping, for
+        `speculative_config.draft_top_k`.
+
+        Returns (target-vocab token ids, logits at those ids), both shape
+        (batch, k), with the head's soft cap and scale applied. The logits are
+        not normalized: draft_top_k renormalizes over the k entries at the
+        request temperature, where the full-vocabulary log-partition would
+        cancel, so it is not computed (saving a full-vocabulary pass). The
+        same communication reduction as `get_top_tokens`, widened from 1 to
+        k: O(batch * 2k * tp_size) instead of O(batch * vocab_size).
+        """
+        ids, logits = self.logits_processor.get_top_k_tokens(
+            self.lm_head, hidden_states, k, return_log_probs=False
+        )
+        d2t = getattr(self, "draft_id_to_target_id", None)
+        if d2t is not None:
+            ids = ids + d2t[ids]
+        return ids, logits
 
 
 class EagleModelMixin:

@@ -1796,7 +1796,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logits,
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
-                self.speculator.draft_logits,
+                self.speculator.draft_topk_cache or self.speculator.draft_logits,
             )
 
         if shard_metadata is not None:

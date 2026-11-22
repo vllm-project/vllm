@@ -187,6 +187,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         draft_model_config=draft_model_config,
         draft_decode_context_parallel_size=1,
         use_local_argmax_reduction=False,
+        draft_top_k=None,
         draft_sample_method="greedy",
         enable_adaptive_verification=False,
     )
@@ -239,6 +240,7 @@ def test_mm_support_configured_after_model_load(monkeypatch):
         speculator.supports_mm_inputs = False
         speculator.use_acceptance_estimator = False
         speculator.use_draft_logits = False
+        speculator.draft_top_k = None
 
     monkeypatch.setattr(DraftModelSpeculator, "__init__", init_base)
     _mock_base_model_load(monkeypatch)
@@ -264,6 +266,7 @@ def test_load_model_keeps_mm_support_for_capable_drafter(monkeypatch):
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
     speculator.use_draft_logits = False
+    speculator.draft_top_k = None
     speculator.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(supports_multimodal_inputs=True)
     )
@@ -287,6 +290,7 @@ def test_load_model_disables_mm_support_for_text_only_drafter(monkeypatch):
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
     speculator.use_draft_logits = False
+    speculator.draft_top_k = None
     speculator.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(supports_multimodal_inputs=True)
     )
@@ -318,6 +322,7 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
     speculator.use_draft_logits = False
+    speculator.draft_top_k = None
     speculator.cached_draft_input_embeds = None
     speculator.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(supports_multimodal_inputs=True)

@@ -14,11 +14,14 @@ from vllm.sampling_params import StructuredOutputsParams
 from .utils import compute_acceptance_rate
 
 
-@pytest.mark.parametrize("rejection_sample_method", ["standard", "block"])
+@pytest.mark.parametrize(
+    "rejection_sample_method,draft_top_k",
+    [("standard", None), ("block", None), ("standard", 64)],
+)
 @pytest.mark.parametrize("async_scheduling", [False, True], ids=["sync", "async"])
 @single_gpu_only
 def test_structured_output_preserves_sampling_distribution(
-    rejection_sample_method, async_scheduling, vllm_runner
+    rejection_sample_method, draft_top_k, async_scheduling, vllm_runner
 ):
     spec_config = {
         "method": "dflash",
@@ -26,6 +29,7 @@ def test_structured_output_preserves_sampling_distribution(
         "num_speculative_tokens": 3,
         "draft_sample_method": "probabilistic",
         "rejection_sample_method": rejection_sample_method,
+        "draft_top_k": draft_top_k,
     }
     regex = r'\{"city": "(Paris|Berlin|Madrid)"\}'
     num_samples = 4000
