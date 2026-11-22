@@ -43,9 +43,9 @@ setting, including automatic selection when it is `auto`.
 ## Automatic MoE Backend Selection on SM120
 
 On SM120 GPUs such as the RTX PRO 6000, DeepSeek-V4 MXFP4 MoE layers use
-Humming instead of DeepGEMM, except when expert parallelism is combined with
-data or prefill context parallelism. Pass `--moe-backend deep_gemm` to keep
-DeepGEMM.
+Humming instead of DeepGEMM with tensor parallelism, or expert parallelism over
+the tensor-parallel ranks. With data or prefill context parallelism they keep
+DeepGEMM. Pass `--moe-backend deep_gemm` to keep DeepGEMM.
 
 ## Hadamard Input Transforms (QuIP)
 

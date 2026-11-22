@@ -151,23 +151,38 @@ def test_hash_routing_backend_selection(
         (120, {}, "HUMMING"),
         (120, {"use_ep": True, "ep_size": 4}, "HUMMING"),
         (120, {"use_ep": True, "dp_size": 2}, "DEEPGEMM_MXFP4"),
+        (120, {"dp_size": 2}, "DEEPGEMM_MXFP4"),
+        (120, {"pcp_size": 2}, "DEEPGEMM_MXFP4"),
         (121, {}, "DEEPGEMM_MXFP4"),
         (100, {}, "DEEPGEMM_MXFP4"),
     ],
-    ids=["sm120", "sm120_ep", "sm120_all2all", "sm121", "sm100"],
+    ids=[
+        "sm120",
+        "sm120_ep",
+        "sm120_all2all",
+        "sm120_dp",
+        "sm120_pcp",
+        "sm121",
+        "sm100",
+    ],
 )
 def test_deepseek_v4_auto_backend_prefers_humming_on_sm120(
     dist_init, default_vllm_config, monkeypatch, capability, ep_config, expected
 ):
     """With DeepGEMM and Humming both available, DeepSeek-V4's auto MXFP4 MoE
-    selection takes Humming on SM120 unless EP uses all-to-all."""
+    selection takes Humming on SM120 with TP or EP over TP ranks, and DeepGEMM
+    under DP or PCP, with or without EP."""
     from dataclasses import replace
+    from types import SimpleNamespace
 
     from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
         DeepGemmFP4Experts,
     )
     from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        BatchedHummingGroupedExperts,
         HummingExpertsBase,
+        HummingGroupedExperts,
+        HummingIndexedExperts,
     )
     from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
 
@@ -188,6 +203,17 @@ def test_deepseek_v4_auto_backend_prefers_humming_on_sm120(
     )
     for experts in (DeepGemmFP4Experts, HummingExpertsBase):
         monkeypatch.setattr(experts, "_supports_current_device", lambda: True)
+    # The real gemm types come from humming.config; stand them in so this test
+    # also runs where Humming is not installed (e.g. ROCm).
+    for experts, gemm_type in (
+        (HummingIndexedExperts, "indexed"),
+        (HummingGroupedExperts, "grouped_contiguous"),
+        (BatchedHummingGroupedExperts, "grouped_masked"),
+    ):
+        gemm = SimpleNamespace(value=gemm_type)
+        monkeypatch.setattr(
+            experts, "humming_gemm_type", staticmethod(lambda g=gemm: g)
+        )
 
     backend, _ = mxfp4_oracle.select_deepseek_v4_mxfp4_moe_backend(config)
     assert backend.name == expected

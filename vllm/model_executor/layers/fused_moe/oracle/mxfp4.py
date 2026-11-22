@@ -804,15 +804,20 @@ def select_deepseek_v4_mxfp4_moe_backend(
     else:
         priority_backends = _get_priority_backends()
 
+    parallel_config = config.moe_parallel_config
     if (
         config.routing_method == RoutingMethodType.DeepseekV4
-        and not config.moe_parallel_config.use_all2all_kernels
+        and parallel_config.dp_size == 1
+        and parallel_config.pcp_size == 1
+        and not parallel_config.use_all2all_kernels
         and current_platform.is_cuda()
         and current_platform.is_device_capability(120)
     ):
         # Humming runs DeepSeek-V4's experts faster than DeepGEMM on SM120 at
-        # every decode batch size, with TP or EP over TP ranks. EP with
-        # all-to-all (DP/PCP) and SM121 are not benchmarked.
+        # every decode batch size, with TP or EP over TP ranks; only those
+        # layouts are benchmarked. DP/PCP keep DeepGEMM: even without EP the
+        # inputs are all-gathered, and DeepGEMM sends them as FP8 where
+        # Humming sends BF16. SM121 is not benchmarked either.
         priority_backends.remove(Mxfp4MoeBackend.HUMMING)
         priority_backends.insert(
             priority_backends.index(Mxfp4MoeBackend.DEEPGEMM_MXFP4),
