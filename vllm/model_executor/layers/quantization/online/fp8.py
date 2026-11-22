@@ -13,6 +13,7 @@ if TYPE_CHECKING:
         FusedMoEQuantConfig,
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+    from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
@@ -801,6 +802,29 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             weight_block_size=[128, 128],
             moe=moe,
         )
+
+    def set_requantization_source(self, source_method: "QuantizeMethodBase") -> None:
+        from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+        from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+        from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+
+        limit = self.moe.swiglu_limit
+        if (
+            self.fp8_backend == Fp8MoeBackend.AITER
+            and isinstance(source_method, Mxfp4MoEMethod)
+            and self.moe.activation == MoEActivation.SILU
+            and limit is not None
+            and 0 < limit < float("inf")
+        ):
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if not rocm_aiter_ops.supports_fp8_block_silu_limit():
+                raise ValueError(
+                    f"MXFP4 to block FP8 with swiglu_limit={limit} requires AITER "
+                    "with FP8 blockscale SiLU clamping (ROCm/aiter#7019). "
+                    "Upgrade AITER or remove this online quantization target."
+                )
+        super().set_requantization_source(source_method)
 
     def maybe_roundup_sizes(
         self,

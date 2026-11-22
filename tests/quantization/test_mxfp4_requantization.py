@@ -109,3 +109,27 @@ def test_power_of_two_block_fp8_keeps_mxfp4_exact(
         quantized.float().view(3, 128, 2, 128) * block_scale[:, None, :, None]
     ).view(384, 256)
     assert torch.equal(restored, values.float())
+
+
+@pytest.mark.parametrize("dispatcher", [False, True])
+@pytest.mark.parametrize("stage1", [False, True])
+def test_block_fp8_silu_limit_requires_dispatch_and_ck_stage1(
+    monkeypatch, dispatcher, stage1
+):
+    import sys
+    from types import ModuleType
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    fused = ModuleType("aiter.fused_moe")
+    # Older AITER already accepts the argument on the outer fused_moe.
+    fused.fused_moe = lambda swiglu_limit: None
+    if dispatcher:
+        fused.swiglu_limit_tag = lambda limit: str(limit)
+    ck = ModuleType("aiter.ops.moe_op")
+    ck.ck_moe_stage1_fwd = (lambda swiglu_limit: None) if stage1 else (lambda: None)
+    monkeypatch.setitem(sys.modules, fused.__name__, fused)
+    monkeypatch.setitem(sys.modules, ck.__name__, ck)
+    probe = rocm_aiter_ops.supports_fp8_block_silu_limit
+    # Exercise each installed interface independently of the cached result.
+    assert probe.__wrapped__() is (dispatcher and stage1)

@@ -3217,6 +3217,25 @@ class rocm_aiter_ops:
 
         return "gate_mode" in inspect.signature(fused_moe).parameters
 
+    @staticmethod
+    @functools.cache
+    def supports_fp8_block_silu_limit() -> bool:
+        """ROCm/aiter#7019 routes limited block FP8 to a clamp-capable CK stage."""
+        import inspect
+
+        try:
+            from aiter.fused_moe import swiglu_limit_tag
+            from aiter.ops.moe_op import ck_moe_stage1_fwd
+
+            # Older fused_moe already accepts swiglu_limit but drops it for
+            # block FP8. Check both the dispatcher and the CK stage-1 ABI.
+            return (
+                callable(swiglu_limit_tag)
+                and "swiglu_limit" in inspect.signature(ck_moe_stage1_fwd).parameters
+            )
+        except (ImportError, TypeError, ValueError):
+            return False
+
     @classmethod
     @if_aiter_supported
     @functools.cache

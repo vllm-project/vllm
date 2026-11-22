@@ -223,7 +223,11 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash-1017 --tensor-parallel-size 8 \
 From an MXFP4 source, `fp8_per_block` keeps power-of-two block scales. The
 conversion is then exact whenever the largest and smallest E8M0 scales within
 each 128×128 block differ by at most 2^14, which holds for every routed expert
-of DeepSeek-V4.1-Flash-1017.
+of DeepSeek-V4.1-Flash-1017. For a finite positive SiLU clamp, this AITER
+path also requires the blockscale clamp implementation from
+[ROCm/aiter#7019](https://github.com/ROCm/aiter/pull/7019). vLLM checks this
+at load time. Exact expert-weight conversion alone does not ensure identical
+model outputs.
 
 !!! info
 
