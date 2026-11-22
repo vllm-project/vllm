@@ -328,6 +328,7 @@ class PrefillStats:
     num_local_cached_tokens: int = 0
     num_external_cached_tokens: int = 0
     num_cache_creation_tokens: int = 0
+    _num_recomputed_cached_tokens: int = 0
 
     def set(
         self,
@@ -343,11 +344,27 @@ class PrefillStats:
         self.num_cached_tokens = num_cached_tokens
         self.num_local_cached_tokens = num_local_cached_tokens
         self.num_external_cached_tokens = num_external_cached_tokens
+        self._num_recomputed_cached_tokens = 0
+
+    def record_full_external_hit_recompute(self) -> None:
+        """Count the last prompt token as computed instead of skipped."""
+        if self.num_cached_tokens != self.num_prompt_tokens:
+            return
+        if not self.num_external_cached_tokens:
+            return
+        self.num_computed_tokens += 1
+        self.num_cached_tokens -= 1
+        self.num_external_cached_tokens -= 1
+        # Its KV was already cached before the scheduler rewound the token.
+        self._num_recomputed_cached_tokens = 1
 
     def finalize(self, num_cached_tokens: int) -> None:
         assert num_cached_tokens >= 0
         self.num_cache_creation_tokens = max(
-            0, min(num_cached_tokens, self.num_prompt_tokens) - self.num_cached_tokens
+            0,
+            min(num_cached_tokens, self.num_prompt_tokens)
+            - self.num_cached_tokens
+            - self._num_recomputed_cached_tokens,
         )
 
 

@@ -37,6 +37,13 @@ The following metrics are exposed:
 
 --8<-- "gen:metrics-general"
 
+Cache-tier counters such as `vllm:prompt_tokens_cached_by_source` describe
+cache hits at admission. Request usage (`prompt_tokens_details.cached_tokens`)
+and `vllm:prompt_tokens_by_source` instead reflect how prefill was performed.
+For example, when an asynchronous KV load covers the entire prompt, vLLM
+still recomputes the final prompt token to sample the next token. That token
+counts as a cache hit at admission but as `local_compute` in prefill.
+
 ## Speculative Decoding Metrics
 
 --8<-- "gen:metrics-spec-decode"
