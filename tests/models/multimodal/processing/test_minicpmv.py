@@ -238,6 +238,7 @@ def test_minicpmv4_6_rejects_aspect_ratio_above_bound(
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     info = processor.info
+    assert isinstance(info, MiniCPMV4_6ProcessingInfo)
 
     with pytest.raises(ValueError, match=f"must not exceed {max_ratio}, got"):
         if modality == "image":
@@ -269,6 +270,7 @@ def test_minicpmv4_6_dummy_covers_inputs_within_size_hint(
     ctx = build_model_context("openbmb/MiniCPM-V-4_6", limit_mm_per_prompt=limits)
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     info = processor.info
+    assert isinstance(info, MiniCPMV4_6ProcessingInfo)
     max_tokens = info.get_mm_max_tokens_per_item(
         seq_len=ctx.model_config.max_model_len, mm_counts={modality: 1}
     )

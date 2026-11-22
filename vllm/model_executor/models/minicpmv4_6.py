@@ -355,6 +355,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
 
         if isinstance(parsed_images, MiniCPMVImageEmbeddingItems):
             return {}
+        assert isinstance(parsed_images, ImageProcessorItems)
 
         # transformers v5.7+ MiniCPMV4_6ImageProcessor returns
         # `pixel_values` (1, C, P, sum_W) where all slices are fused along W
