@@ -25,6 +25,7 @@
 """Inference-only Qwen3VL model compatible with HuggingFace weights."""
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import replace
 from functools import lru_cache, partial
 from itertools import islice
 from typing import Any, Literal
@@ -78,7 +79,10 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.hasher import MultiModalHasher
@@ -1452,7 +1456,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 video_mm_kwargs["videos_kwargs"] = video_scoped_kwargs
 
                 sampled_fps = video_scoped_kwargs.get("fps")
-                if is_list_of(sampled_fps, float):
+                if is_list_of(sampled_fps, (int, float)):
                     video_scoped_kwargs["fps"] = sampled_fps[item_idx]
                 sampled_num_frames = video_scoped_kwargs.get("num_frames")
                 if is_list_of(sampled_num_frames, int):
@@ -1575,10 +1579,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             out_item = out_mm_kwargs["video"][item_idx]
             grid_thw = out_item["video_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
-
-            sampled_fps = hf_processor_mm_kwargs.get("fps")
-            if is_list_of(sampled_fps, float):
-                sampled_fps = sampled_fps[item_idx]
 
             timestamps = out_item["timestamps"].data
             assert isinstance(timestamps, (list, torch.Tensor))
@@ -1892,6 +1892,46 @@ class Qwen3VLForConditionalGeneration(
             multimodal_config.is_multimodal_pruning_enabled()
         )
 
+    def _init_marker_embed_tokens(self, vllm_config: VllmConfig, prefix: str) -> None:
+        """Keep the token embedding on an encoder-only instance that prunes.
+
+        Pruned video outputs include the embeddings of the timestamp and
+        vision marker tokens, which `--mm-encoder-only` otherwise leaves
+        unloaded with the rest of the language model.
+        """
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
+        if not (
+            multimodal_config.mm_encoder_only and self.is_multimodal_pruning_enabled
+        ):
+            self.marker_embed_tokens = None
+            return
+
+        text_config = self.config.text_config
+        self.marker_embed_tokens = VocabParallelEmbedding(
+            text_config.vocab_size,
+            text_config.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "language_model.model.embed_tokens"),
+        )
+        self.hf_to_vllm_mapper = self._get_marker_embed_weights_mapper()
+
+    @classmethod
+    def _get_marker_embed_weights_mapper(cls) -> WeightsMapper:
+        mapper = cls.hf_to_vllm_mapper
+        return replace(
+            mapper,
+            orig_to_new_prefix={
+                **mapper.orig_to_new_prefix,
+                "language_model.model.embed_tokens.": "marker_embed_tokens.",
+            },
+        )
+
+    def _embed_marker_tokens(self, input_ids: torch.Tensor) -> torch.Tensor:
+        marker_embed_tokens = getattr(self, "marker_embed_tokens", None)
+        if marker_embed_tokens is not None:
+            return marker_embed_tokens(input_ids)
+        return self.get_language_model().embed_input_ids(input_ids)
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         super().__init__()
         config: Qwen3VLConfig = vllm_config.model_config.hf_config
@@ -1945,6 +1985,7 @@ class Qwen3VLForConditionalGeneration(
                 ),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
+        self._init_marker_embed_tokens(vllm_config, prefix)
 
         if not get_pp_group().is_first_rank and hasattr(
             config.vision_config, "deepstack_visual_indexes"
@@ -2322,7 +2363,7 @@ class Qwen3VLForConditionalGeneration(
         is_video_embed = torch.isin(repl_token_ids, embed_token_id)
 
         # Get text embeddings for indicator tokens (has only `visual_dim``).
-        text_embeddings = self.get_language_model().embed_input_ids(repl_token_ids)
+        text_embeddings = self._embed_marker_tokens(repl_token_ids)
 
         if self.use_deepstack:
             (
