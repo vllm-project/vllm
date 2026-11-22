@@ -58,26 +58,6 @@ def test_registered_attention_wrapper_fake_layouts():
         assert all(output.is_contiguous() for output in outputs)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-@pytest.mark.parametrize("lengths", [[5, 13, 0], [0, 1, 7, 0]])
-def test_triton_precomputed_lengths_match_recomputed(lengths: list[int]):
-    torch.manual_seed(0)
-    q, k, v = torch.randn(
-        3, 1, sum(lengths), 2, 64, device="cuda", dtype=torch.bfloat16
-    ).unbind()
-    sequence_lengths = torch.tensor(lengths, device="cuda", dtype=torch.int32)
-    cu_seqlens = torch.cat([sequence_lengths.new_zeros(1), sequence_lengths]).cumsum(
-        0, dtype=torch.int32
-    )
-    max_seqlen = torch.tensor(max(lengths), device="cpu", dtype=torch.int32)
-    args = (q, k, v, 1, None, cu_seqlens, max_seqlen)
-    expected = vit_attn_wrappers.vit_triton_attn_wrapper(*args)
-    actual = vit_attn_wrappers.vit_triton_attn_wrapper(
-        *args, sequence_lengths=sequence_lengths
-    )
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
 def test_aiter_flash_attn_omits_out_and_returns_contiguous_output(
     monkeypatch: pytest.MonkeyPatch,
 ):

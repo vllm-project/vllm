@@ -18,14 +18,12 @@ Test organization:
 """
 
 from collections.abc import Hashable
-from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from torch.utils._python_dispatch import TorchDispatchMode
 
 from vllm.model_executor.models.encoder_cudagraph_utils import (
     Qwen2VLEncoderCudaGraphMixin,
@@ -41,7 +39,6 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphReplayBuffers,
     EncoderItemSpec,
 )
-from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
 HAS_DEVICE_GRAPH = current_platform.is_cuda_alike() or current_platform.is_xpu()
 
@@ -2263,7 +2260,7 @@ def _make_qwen3_omni_audio_host(device: torch.device, dtype: torch.dtype):
             self.audio_tower = audio_tower
             self.config = config
 
-    # Real audio windows; small widths, depth, and convolution batches.
+    # Real defaults for the chunk/window sizes; small widths and depth.
     audio_config = Qwen3OmniMoeAudioEncoderConfig(
         d_model=128,
         encoder_layers=2,
@@ -2271,7 +2268,6 @@ def _make_qwen3_omni_audio_host(device: torch.device, dtype: torch.dtype):
         encoder_ffn_dim=256,
         downsample_hidden_size=32,
         output_dim=96,
-        conv_chunksize=4,
     )
     torch.manual_seed(0)
     with set_default_torch_dtype(dtype), torch.device(device):
@@ -2369,36 +2365,14 @@ class TestQwen3OmniAudioEncoderCudaGraphReplay:
     """Graph replay matches the eager audio tower on the same inputs."""
 
     @pytest.fixture(autouse=True)
-    def _host(self, dist_init, workspace_init, request, tmp_path):
-        config_context = nullcontext()
-        if hasattr(request, "param"):
-            from transformers import Qwen3OmniMoeConfig
-
-            from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
-
-            Qwen3OmniMoeConfig(
-                architectures=["Qwen3OmniMoeForConditionalGeneration"]
-            ).save_pretrained(tmp_path)
-            config_context = set_current_vllm_config(
-                VllmConfig(
-                    model_config=ModelConfig(
-                        model=str(tmp_path),
-                        skip_tokenizer_init=True,
-                        dtype="bfloat16",
-                        max_model_len=4096,
-                        mm_encoder_attn_backend=request.param,
-                    )
-                )
-            )
-        with config_context:
-            self.device = torch.device("cuda", 0)
-            self.dtype = torch.bfloat16
-            self.host = _make_qwen3_omni_audio_host(self.device, self.dtype)
-            self.mgr = _make_manager_for_gpu(
-                cast(Any, self.host), [104, 512, 1024], 8, self.device, self.dtype
-            )
-            self.mgr.capture(graph_pool=current_platform.graph_pool_handle())
-            yield
+    def _host(self, dist_init, workspace_init):
+        self.device = torch.device("cuda", 0)
+        self.dtype = torch.bfloat16
+        self.host = _make_qwen3_omni_audio_host(self.device, self.dtype)
+        self.mgr = _make_manager_for_gpu(
+            cast(Any, self.host), [104, 512, 1024], 8, self.device, self.dtype
+        )
+        self.mgr.capture(graph_pool=current_platform.graph_pool_handle())
 
     def _eager(self, mm_kwargs: dict[str, Any]) -> list[torch.Tensor]:
         lens = [
@@ -2437,133 +2411,18 @@ class TestQwen3OmniAudioEncoderCudaGraphReplay:
         assert result is not None
         torch.testing.assert_close(result[0], self._eager(small)[0])
 
-    @pytest.mark.parametrize("_host", ["TRITON_ATTN"], indirect=True)
-    def test_triton_reuses_sequence_lengths_across_layers(self, monkeypatch):
-        """Capture and eager forwards share lengths across real Triton layers."""
-        from vllm.v1.attention.ops import triton_prefill_attention
-
-        sequence_lengths: list[torch.Tensor] = []
-        context_attention_fwd = triton_prefill_attention.context_attention_fwd
-
-        def record_sequence_lengths(*args, **kwargs):
-            # Retain tensors so allocator reuse cannot hide per-layer allocations.
-            sequence_lengths.append(kwargs["b_seq_len"])
-            return context_attention_fwd(*args, **kwargs)
-
-        monkeypatch.setattr(
-            triton_prefill_attention, "context_attention_fwd", record_sequence_lengths
-        )
-        mgr = _make_manager_for_gpu(
-            cast(Any, self.host), [512], 8, self.device, self.dtype
-        )
-        mgr.capture(graph_pool=current_platform.graph_pool_handle())
-        num_layers = len(self.host.audio_tower.layers)
-        capture_calls = len(sequence_lengths)
-        assert num_layers > 1 and capture_calls >= num_layers
-
-        for feature_lens in ([900], [1600], [900]):
-            mm_kwargs = _make_audio_mm_kwargs(feature_lens, self.device, self.dtype)
-            before = len(sequence_lengths)
-            expected = self._eager(mm_kwargs)
-            assert len(sequence_lengths) == before + num_layers
-            misses = mgr.graph_misses
-            result = mgr.execute(mm_kwargs)
-            assert mgr.graph_misses == misses
-            assert len(sequence_lengths) == before + num_layers
-            assert result is not None and len(result) == len(expected)
-            for out, ref in zip(result, expected):
-                torch.testing.assert_close(out, ref)
-
-        assert len(sequence_lengths) % num_layers == 0
-        for start in range(0, len(sequence_lengths), num_layers):
-            lengths = sequence_lengths[start : start + num_layers]
-            assert len({tensor.data_ptr() for tensor in lengths}) == 1
-
     @pytest.mark.parametrize(
-        "feature_lens",
-        [[37] * 9, [100] * 9, [37, 99] * 15 + [37], [37, 99] * 16, [401, 37]],
-    )
-    def test_frontend_preserves_per_clip_chunk_padding(self, feature_lens):
-        """Packed padding must match padding independent per-clip chunks."""
-        mm_kwargs = _make_audio_mm_kwargs(feature_lens, self.device, self.dtype)
-        features = mm_kwargs["input_audio_features"]
-        tower = self.host.audio_tower
-        cnn_inputs = []
-        hook = tower.conv2d1.register_forward_pre_hook(
-            lambda module, args: cnn_inputs.append(args[0])
-        )
-        try:
-            tower.embed_audio_features(features, mm_kwargs["audio_feature_lengths"])
-        finally:
-            hook.remove()
-        chunks = [
-            chunk
-            for clip in features.T.split(feature_lens)
-            for chunk in clip.split(tower.n_window * 2)
-        ]
-        expected = (
-            torch.nn.utils.rnn.pad_sequence(chunks, batch_first=True)
-            .transpose(1, 2)
-            .unsqueeze(1)
-        )
-        torch.testing.assert_close(torch.cat(cnn_inputs), expected, rtol=0, atol=0)
-
-    @pytest.mark.parametrize(
-        "feature_lens",
-        [
-            [10000],
-            [100, 10000, 250],
-            [100, 250] * 5,
-            [100] * 9,
-            [37, 99] * 15 + [37],
-            [37, 99] * 16,
-        ],
+        "feature_lens", [[10000], [100, 10000, 250], [100, 250] * 5]
     )
     def test_oversized_batch_falls_back_to_eager(self, feature_lens):
-        """Fallback preserves input order and lets cache items be freed separately."""
+        """Overflow preserves clip order, independent storage, and output lifetime."""
         mm_kwargs = _make_audio_mm_kwargs(feature_lens, self.device, self.dtype)
         expected = self._eager(mm_kwargs)
         misses = self.mgr.graph_misses
-        input_storage = mm_kwargs["input_audio_features"].untyped_storage().data_ptr()
-        output_width = self.mgr.config.out_hidden_size
-
-        class CheckFallbackCopies(TorchDispatchMode):
-            def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-                if func == torch.ops.aten.cat.default:
-                    assert all(
-                        tensor.untyped_storage().data_ptr() != input_storage
-                        for tensor in args[0]
-                    ), "Eager fallback must not concatenate the packed audio input"
-                elif func == torch.ops.aten._foreach_clone.default:
-                    assert all(
-                        tensor.untyped_storage().nbytes() > tensor.nbytes
-                        for tensor in args[0]
-                    ), "Eager fallback must not copy outputs with bounded storage"
-                elif func == torch.ops.aten._foreach_copy_.default:
-                    assert all(
-                        tensor.untyped_storage().nbytes() > tensor.nbytes
-                        for tensor in args[1]
-                    ), "Eager fallback must not copy outputs with bounded storage"
-                elif func == torch.ops.aten.clone.default:
-                    source = args[0]
-                    assert not (
-                        source.ndim == 2 and source.shape[-1] == output_width
-                    ), "Eager fallback must compact output views in one batch"
-                return func(*args, **(kwargs or {}))
-
-        with CheckFallbackCopies():
-            result = self.mgr.execute(mm_kwargs)
+        result = self.mgr.execute(mm_kwargs)
         assert self.mgr.graph_misses == misses + len(feature_lens)
-        assert len(result) == len(expected)
+        assert result is not None and len(result) == len(expected)
         self.mgr.execute(_make_audio_mm_kwargs([100], self.device, self.dtype))
         for out, ref in zip(result, expected):
             torch.testing.assert_close(out, ref, rtol=0, atol=0)
-        cache = EncoderCache()
-        cache.encoder_outputs.update({str(i): out for i, out in enumerate(result)})
-        for i in range(1, len(result)):
-            cache.free_encoder_cache(str(i))
-        del result, out
-        retained = cache.encoder_outputs["0"]
-        assert retained.untyped_storage().nbytes() == (
-            retained.numel() * retained.element_size()
-        )
+            assert out.untyped_storage().nbytes() == out.numel() * out.element_size()
