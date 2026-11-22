@@ -45,7 +45,6 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         # Target conversion needs this metadata even when the source creates weights.
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
-        layer.weight_block_size = None
 
         if self.requantization_source is not None:
             # In case FSE is used, shared experts slots are initialized on RoutedExperts
@@ -59,7 +58,12 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
                 **extra_weight_attrs,
             )
             layer.num_experts = num_experts
+            # The source describes its serialized weights (e.g. a block size) on the
+            # layer: the target owns the layer's quantization attributes.
+            layer.weight_block_size = None
             return
+
+        layer.weight_block_size = None
 
         # Fused gate_up_proj (column parallel) — full precision on meta device
         w13_weight = torch.nn.Parameter(

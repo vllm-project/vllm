@@ -33,7 +33,7 @@ class CompressedSlotMappingKernel(
 ):
     TRITON_BLOCK_SIZE = 1024
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         compress_ratio: int
         triton_block_size: int
@@ -106,7 +106,7 @@ class CompressedSlotMappingKernel(
                 compressed_slot_mapping_ptr + query_start + offset, slot_ids, mask=mask
             )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         compress_ratio: int,

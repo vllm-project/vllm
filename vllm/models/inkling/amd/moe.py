@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
+from transformers import InklingTextConfig
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
@@ -44,7 +45,6 @@ from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
 
 from ..common.weight_loading import load_expert_scales
-from ..configs import InklingModelConfig
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.routed_experts import (
@@ -413,7 +413,7 @@ class InklingSinkExpertsLinear(nn.Module):
 class InklingMoE(nn.Module):
     def __init__(
         self,
-        config: InklingModelConfig,
+        config: InklingTextConfig,
         *,
         prefix: str = "",
         quant_config: QuantizationConfig | None = None,
@@ -423,7 +423,6 @@ class InklingMoE(nn.Module):
         # top-k, shared sink experts, interleaved gate/up checkpoint rows.
         assert config.gate_activation == "sigmoid" and config.norm_after_topk
         assert config.n_shared_experts > 0 and config.shared_expert_sink
-        assert config.inference_moe_w13_interleaved
         n_routed = config.n_routed_experts
         n_shared = config.n_shared_experts
         self.n_routed_experts = n_routed
@@ -463,7 +462,7 @@ class InklingMoE(nn.Module):
             num_experts=num_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
+            intermediate_size=config.moe_intermediate_size,
             renormalize=False,
             quant_config=routed_quant_config,
             prefix=f"{prefix}.experts",
@@ -485,7 +484,7 @@ class InklingMoE(nn.Module):
         self.sink_experts = sink_experts_cls(
             n_experts=n_shared,
             d_model=config.hidden_size,
-            d_mlp=config.intermediate_size,
+            d_mlp=config.moe_intermediate_size,
             prefix=f"{prefix}.shared_experts",
         )
 
