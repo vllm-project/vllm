@@ -964,14 +964,6 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        if hasattr(config, "text_config"):
-            text_config = config.text_config
-        else:
-            text_config_dict = config.to_dict()
-            for key in ("model_type", "architectures", "auto_map", "vision_config"):
-                text_config_dict.pop(key, None)
-            text_config = PaddleOCRTextConfig(**text_config_dict)
-
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -982,7 +974,7 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
-            self.mlp_AR = Projector(text_config, config.vision_config)
+            self.mlp_AR = Projector(config.text_config, config.vision_config)
 
         with self._mark_language_model(vllm_config):
             # TODO: Remove this shim when PaddleOCR-VL is migrated after
@@ -994,7 +986,7 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             )
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
-                hf_config=text_config,
+                hf_config=config.text_config,
                 architectures=["TransformersForCausalLM"],
                 prefix=maybe_prefix(prefix, "language_model"),
             )
