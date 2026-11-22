@@ -42,7 +42,11 @@ class ClassifierWithReshape(nn.Module):
     def forward(self, *args, **kwargs):
         if len(args) > 0:
             args = (args[0].unsqueeze(1), *args[1:])
-        return super().forward(*args, **kwargs)
+        output = super().forward(*args, **kwargs)
+        # Heads that select their own token (e.g. RoBERTa's) return
+        # (num_seqs, num_labels); heads applied at every position (e.g.
+        # CTRL's `nn.Linear` `classifier`) return (num_seqs, 1, num_labels)
+        return output.squeeze(1) if output.dim() == 3 else output
 
 
 class EmbeddingMixin(VllmModelForPooling, Base):
