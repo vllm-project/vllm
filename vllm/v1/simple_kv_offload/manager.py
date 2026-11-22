@@ -501,8 +501,10 @@ class SimpleCPUOffloadScheduler:
             )
 
         joint_hit = self._pending_joint_hits.pop(req_id, None)
+        if joint_hit is not None and not joint_hit.pinned:
+            joint_hit = None
         num_local_tokens = self._pending_local_hits.pop(req_id, 0)
-        if joint_hit is not None and not self._lazy_mode:
+        if joint_hit is not None and not self._lazy_mode and joint_hit.num_gpu_tokens:
             num_local_tokens = joint_hit.num_computed_tokens
         if num_local_tokens:
             # Eager CPU is inclusive: a GPU prefix hit also uses the CPU copy,
@@ -516,9 +518,7 @@ class SimpleCPUOffloadScheduler:
 
         if joint_hit is not None:
             if num_external_tokens:
-                assert num_external_tokens == (
-                    joint_hit.num_computed_tokens - joint_hit.num_gpu_prefix_tokens
-                )
+                assert num_external_tokens == joint_hit.num_cpu_tokens
                 self._consume_joint_hit(request, blocks, joint_hit)
             else:
                 joint_hit.release()

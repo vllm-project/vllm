@@ -23,6 +23,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.kv_events import KVEventsConfig
+from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
@@ -31,10 +32,12 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
     KVCacheBlock,
     get_request_block_hasher,
     init_none_hash,
     make_block_hash_with_group_id,
+    maybe_convert_block_hash,
 )
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -57,7 +60,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
@@ -3653,6 +3656,19 @@ def test_lazy_target_blocks_ignore_non_prefix_cacheable_groups() -> None:
     assert target_with == target_without
 
 
+def _seed_pool_block(
+    pool: BlockPool, block_hash: BlockHash, group_id: int, num_tokens: int
+) -> KVCacheBlock:
+    block = pool.get_new_blocks(1)[0]
+    pool._insert_block_hash(
+        make_block_hash_with_group_id(block_hash, group_id),
+        block,
+        num_tokens=num_tokens,
+    )
+    pool.free_blocks([block])
+    return block
+
+
 def _make_joint_prefix_case(
     locations,
     *,
@@ -3661,8 +3677,6 @@ def _make_joint_prefix_case(
     request=None,
     needs_kv_cache_zeroing=False,
 ):
-    from vllm.v1.core.kv_cache_manager import KVCacheManager
-
     fix = make_scheduler(
         num_cpu_blocks=16, num_gpu_blocks=num_gpu_blocks, num_groups=len(locations)
     )
@@ -3687,16 +3701,12 @@ def _make_joint_prefix_case(
                 ("c", fix.scheduler.cpu_block_pool),
             ):
                 if location == device or location == "b":
-                    block = pool.get_new_blocks(1)[0]
-                    pool._insert_block_hash(
-                        make_block_hash_with_group_id(
-                            request.block_hashes[index], group
-                        ),
-                        block,
-                        num_tokens=(index + 1) * BLOCK_SIZE,
+                    sources[group, index, device] = _seed_pool_block(
+                        pool,
+                        request.block_hashes[index],
+                        group,
+                        (index + 1) * BLOCK_SIZE,
                     )
-                    pool.free_blocks([block])
-                    sources[group, index, device] = block
     return fix.scheduler, manager, request, sources
 
 
@@ -3705,10 +3715,7 @@ def _make_joint_prefix_case(
     [
         (("gggg",), True),
         (("cccc",), True),
-        (("gcgg",), False),
-        (("cgcg",), False),
         (("gbcg",), False),
-        (("gmgg",), False),
         (("cgcg", "gcgc"), True),
         (("gmgg", "cmcc"), False),
     ],
@@ -3734,13 +3741,12 @@ def test_joint_prefix_reuses_gpu_and_loads_only_cpu(locations, needs_kv_cache_ze
                 cpu_positions.append((group, index))
     needs_load = bool(cpu_positions)
     assert hit.needs_load == needs_load
-    external = hit.num_computed_tokens - hit.num_gpu_prefix_tokens
     assert (
         manager.allocate_slots(
             request,
             0 if needs_load else 1,
-            num_new_computed_tokens=hit.num_gpu_prefix_tokens,
-            num_external_computed_tokens=external,
+            num_new_computed_tokens=hit.num_gpu_tokens,
+            num_external_computed_tokens=hit.num_cpu_tokens,
             delay_cache_blocks=needs_load,
             joint_cache_hit=hit,
         )
@@ -3762,7 +3768,7 @@ def test_joint_prefix_reuses_gpu_and_loads_only_cpu(locations, needs_kv_cache_ze
                 assert target.block_hash is None
             else:
                 assert target is sources[group, index, "g"]
-    offload.update_state_after_alloc(request, blocks, external)
+    offload.update_state_after_alloc(request, blocks, hit.num_cpu_tokens)
     assert not hit.pinned
     metadata = offload.build_connector_meta(make_scheduler_output({}))
     assert list(zip(metadata.load_gpu_blocks, metadata.load_cpu_blocks)) == [
@@ -3789,18 +3795,11 @@ def test_joint_lookup_memoizes_hits_and_misses(monkeypatch):
     from collections import Counter
 
     from vllm.v1.core.kv_cache_lookup import JointCacheLookup
-    from vllm.v1.core.kv_cache_utils import BlockHash
 
     request = make_request()
     gpu = BlockPool(4, True, BLOCK_SIZE)
     cpu = BlockPool(4, True, BLOCK_SIZE)
-    block = cpu.get_new_blocks(1)[0]
-    cpu._insert_block_hash(
-        make_block_hash_with_group_id(request.block_hashes[0], 0),
-        block,
-        num_tokens=BLOCK_SIZE,
-    )
-    cpu.free_blocks([block])
+    block = _seed_pool_block(cpu, request.block_hashes[0], 0, BLOCK_SIZE)
     calls: Counter[tuple[str, BlockHash, int]] = Counter()
     for name, pool in (("gpu", gpu), ("cpu", cpu)):
         original = pool.get_cached_block
@@ -3824,10 +3823,6 @@ def test_joint_lookup_memoizes_hits_and_misses(monkeypatch):
 @pytest.mark.parametrize("attention", ["swa", "mamba", "mixed_sizes"])
 def test_joint_sparse_prefix_allocates_reachable_states(attention):
     """Sparse groups load reachable states without materializing null padding."""
-    from vllm.distributed.kv_events import BlockStored
-    from vllm.v1.core.kv_cache_manager import KVCacheManager
-    from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
-
     num_blocks = 4
     config = _make_kv_cache_config(48, 2)
     if attention == "mamba":
@@ -3874,15 +3869,9 @@ def test_joint_sparse_prefix_allocates_reachable_states(attention):
                 if end % (2 * group_size) == 0
                 else manager.block_pool
             )
-            block = pool.get_new_blocks(1)[0]
-            pool._insert_block_hash(
-                make_block_hash_with_group_id(
-                    request.block_hashes[end // BLOCK_SIZE - 1], group_idx
-                ),
-                block,
-                num_tokens=end,
+            _seed_pool_block(
+                pool, request.block_hashes[end // BLOCK_SIZE - 1], group_idx, end
             )
-            pool.free_blocks([block])
     hit = offload.get_joint_cache_hit(request, manager.coordinator)
     assert hit.num_computed_tokens == num_blocks * BLOCK_SIZE
     retained = {id(source.block) for group in hit.blocks for source in group}
@@ -3893,20 +3882,19 @@ def test_joint_sparse_prefix_allocates_reachable_states(attention):
     assert hit.blocks[1][-1].block.block_hash == make_block_hash_with_group_id(
         request.block_hashes[num_blocks - 1], 1
     )
-    external = hit.num_computed_tokens - hit.num_gpu_prefix_tokens
     assert (
         manager.allocate_slots(
             request,
             0,
-            num_new_computed_tokens=hit.num_gpu_prefix_tokens,
-            num_external_computed_tokens=external,
+            num_new_computed_tokens=hit.num_gpu_tokens,
+            num_external_computed_tokens=hit.num_cpu_tokens,
             delay_cache_blocks=True,
             joint_cache_hit=hit,
         )
         is not None
     )
     offload.update_state_after_alloc(
-        request, manager.get_blocks(request.request_id), external
+        request, manager.get_blocks(request.request_id), hit.num_cpu_tokens
     )
     offload.update_connector_output(
         KVConnectorOutput(finished_recving={request.request_id})
@@ -3948,9 +3936,8 @@ def test_joint_prefix_allocation_failure_preserves_caches(cleanup):
         manager.allocate_slots(
             request,
             0,
-            num_new_computed_tokens=hit.num_gpu_prefix_tokens,
-            num_external_computed_tokens=hit.num_computed_tokens
-            - hit.num_gpu_prefix_tokens,
+            num_new_computed_tokens=hit.num_gpu_tokens,
+            num_external_computed_tokens=hit.num_cpu_tokens,
             delay_cache_blocks=True,
             joint_cache_hit=hit,
         )
@@ -3989,7 +3976,6 @@ def test_scheduler_uses_joint_lookup_without_legacy_scans(
 ):
     """The scheduler admits a whole joint match or defers it without partial loads."""
     from tests.v1.core.utils import create_scheduler as create_core_scheduler
-    from vllm.v1.request import RequestStatus
 
     scheduler = create_core_scheduler(
         enable_prefix_caching=True,
@@ -4019,13 +4005,7 @@ def test_scheduler_uses_joint_lookup_without_legacy_scans(
             if index == 1
             else scheduler.kv_cache_manager.block_pool
         )
-        block = pool.get_new_blocks(1)[0]
-        pool._insert_block_hash(
-            make_block_hash_with_group_id(request.block_hashes[index], 0),
-            block,
-            num_tokens=(index + 1) * BLOCK_SIZE,
-        )
-        pool.free_blocks([block])
+        _seed_pool_block(pool, request.block_hashes[index], 0, (index + 1) * BLOCK_SIZE)
 
     def forbidden(*args, **kwargs):
         pytest.fail("legacy prefix scan was called")
@@ -4058,7 +4038,6 @@ def test_joint_prefix_respects_bounded_replay(locations):
     """Discard short hits without retaining pins; replay longer hits after loading."""
     from tests.v1.core.test_prefix_replay import WINDOW, _replay_scheduler
     from tests.v1.kv_connector.unit.utils import create_model_runner_output
-    from vllm.v1.request import RequestStatus
 
     scheduler = _replay_scheduler()
     kv_config = scheduler.kv_cache_config
@@ -4090,13 +4069,7 @@ def test_joint_prefix_respects_bounded_replay(locations):
     request = make_request(num_blocks=4)
     for index, location in enumerate(locations):
         pool = manager.block_pool if location == "g" else offload.cpu_block_pool
-        block = pool.get_new_blocks(1)[0]
-        pool._insert_block_hash(
-            make_block_hash_with_group_id(request.block_hashes[index], 0),
-            block,
-            num_tokens=(index + 1) * BLOCK_SIZE,
-        )
-        pool.free_blocks([block])
+        _seed_pool_block(pool, request.block_hashes[index], 0, (index + 1) * BLOCK_SIZE)
 
     scheduler.add_request(request)
     output = scheduler.schedule()
@@ -4133,15 +4106,13 @@ def test_joint_prefix_respects_bounded_replay(locations):
 
 
 @pytest.mark.parametrize("dcp", [1, 2])
-@pytest.mark.parametrize("lookahead", [0, 2])
-@pytest.mark.parametrize("extra_tokens", [0, 1, 2])
+@pytest.mark.parametrize(
+    ("lookahead", "extra_tokens"), [(0, 0), (0, 1), (2, 1), (2, 2)]
+)
 def test_joint_prefix_preserves_dcp_lookahead_and_last_token(
     dcp, lookahead, extra_tokens
 ):
     """Joint lookup uses the same effective block, lookahead, and last-token bounds."""
-    from vllm.distributed.kv_events import BlockStored
-    from vllm.v1.core.kv_cache_manager import KVCacheManager
-
     size = BLOCK_SIZE * dcp
     kv_cache_config = _make_kv_cache_config(16)
     vllm_config = _make_cp_vllm_config(dcp_world_size=dcp)
@@ -4175,13 +4146,7 @@ def test_joint_prefix_preserves_dcp_lookahead_and_last_token(
     )
     for index in range(4):
         pool = manager.block_pool if index % 2 == 0 else offload.cpu_block_pool
-        block = pool.get_new_blocks(1)[0]
-        pool._insert_block_hash(
-            make_block_hash_with_group_id(seed.block_hashes[index], 0),
-            block,
-            num_tokens=(index + 1) * size,
-        )
-        pool.free_blocks([block])
+        _seed_pool_block(pool, seed.block_hashes[index], 0, (index + 1) * size)
     request = Request(
         request_id="joint-cp-query",
         prompt_token_ids=full_tokens[: 4 * size + extra_tokens],

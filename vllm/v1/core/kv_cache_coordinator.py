@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_lookup import CacheLookup, JointCacheHit
+from vllm.v1.core.kv_cache_lookup import CacheLookup, JointCacheHit, iter_true_runs
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -377,25 +377,17 @@ class KVCacheCoordinator(ABC):
         for group_idx, (manager, group) in enumerate(
             zip(self.single_type_managers, hit.blocks, strict=True)
         ):
-            run_start = None
-            for index in range(len(group) + 1):
-                is_gpu = (
-                    index < len(group)
-                    and not group[index].is_cpu
-                    and not group[index].block.is_null
+            for run_start, run_end in iter_true_runs(
+                not block.is_cpu and not block.block.is_null for block in group
+            ):
+                manager.block_pool.emit_cached_block_events(
+                    request,
+                    run_end - run_start,
+                    manager.block_size,
+                    group_idx,
+                    start_block=run_start,
+                    num_cached_tokens=hit.num_computed_tokens,
                 )
-                if is_gpu and run_start is None:
-                    run_start = index
-                elif not is_gpu and run_start is not None:
-                    manager.block_pool.emit_cached_block_events(
-                        request,
-                        index - run_start,
-                        manager.block_size,
-                        group_idx,
-                        start_block=run_start,
-                        num_cached_tokens=hit.num_computed_tokens,
-                    )
-                    run_start = None
 
     def reset_prefix_cache(self) -> bool:
         """Reset each manager's pool once."""

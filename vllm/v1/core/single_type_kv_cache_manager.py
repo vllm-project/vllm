@@ -11,7 +11,7 @@ from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.utils.gc_utils import untracked_list
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_lookup import CacheHitBlock, CacheLookup
+from vllm.v1.core.kv_cache_lookup import CacheHitBlock, CacheLookup, iter_true_runs
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
@@ -696,7 +696,7 @@ class SingleTypeKVCacheManager(ABC):
             request, num_cached_blocks, num_full_blocks, block_mask
         )
         reused_gpu_blocks = self._joint_cache_reused_blocks.get(request.request_id)
-        if reused_gpu_blocks is not None:
+        if reused_gpu_blocks:
             block_mask = [
                 (block_mask is None or block_mask[i - num_cached_blocks])
                 and i not in reused_gpu_blocks
@@ -705,25 +705,22 @@ class SingleTypeKVCacheManager(ABC):
 
         blocks = self.req_to_blocks[request.request_id]
         if reused_gpu_blocks is not None and self.block_pool.enable_kv_cache_events:
-            run_start = None
-            for index in range(num_cached_blocks, num_full_blocks + 1):
-                cacheable = (
-                    index < num_full_blocks
-                    and not blocks[index].is_null
-                    and (block_mask is None or block_mask[index - num_cached_blocks])
+            for run_start, run_end in iter_true_runs(
+                (
+                    not blocks[i].is_null
+                    and (block_mask is None or block_mask[i - num_cached_blocks])
+                    for i in range(num_cached_blocks, num_full_blocks)
+                ),
+                start=num_cached_blocks,
+            ):
+                self.block_pool.cache_full_blocks(
+                    request=request,
+                    blocks=blocks,
+                    num_cached_blocks=run_start,
+                    num_full_blocks=run_end,
+                    block_size=self.block_size,
+                    kv_cache_group_id=self.kv_cache_group_id,
                 )
-                if cacheable and run_start is None:
-                    run_start = index
-                elif not cacheable and run_start is not None:
-                    self.block_pool.cache_full_blocks(
-                        request=request,
-                        blocks=blocks,
-                        num_cached_blocks=run_start,
-                        num_full_blocks=index,
-                        block_size=self.block_size,
-                        kv_cache_group_id=self.kv_cache_group_id,
-                    )
-                    run_start = None
         else:
             self.block_pool.cache_full_blocks(
                 request=request,

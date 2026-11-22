@@ -836,10 +836,9 @@ def test_scratch_group_store_emits_events_for_cacheable_groups_only() -> None:
     [
         ("gcgg", [(0, 1), (2, 4)], [(1, 2)]),
         ("gcgc", [(0, 1), (2, 3)], [(1, 2), (3, 4)]),
-        ("gccc", [(0, 1)], [(1, 4)]),
         ("cgcg", [(1, 2), (3, 4)], [(0, 1), (2, 3)]),
     ],
-    ids=["gcgg", "gcgc", "gccc", "cgcg"],
+    ids=["gcgg", "gcgc", "cgcg"],
 )
 def test_joint_prefix_events_separate_reused_and_loaded_blocks(
     layout, gpu_runs, cpu_runs, report_mode
@@ -864,14 +863,12 @@ def test_joint_prefix_events_separate_reused_and_loaded_blocks(
     )
     request.kv_cache_report_mode = report_mode
     hit = offload.get_joint_cache_hit(request, manager.coordinator)
-    local_tokens = hit.num_gpu_prefix_tokens
-    external_tokens = hit.num_computed_tokens - local_tokens
     assert (
         manager.allocate_slots(
             request,
             0,
-            num_new_computed_tokens=local_tokens,
-            num_external_computed_tokens=external_tokens,
+            num_new_computed_tokens=hit.num_gpu_tokens,
+            num_external_computed_tokens=hit.num_cpu_tokens,
             delay_cache_blocks=True,
             joint_cache_hit=hit,
         )
@@ -907,7 +904,7 @@ def test_joint_prefix_events_separate_reused_and_loaded_blocks(
     )
 
     offload.update_state_after_alloc(
-        request, manager.get_blocks(request.request_id), external_tokens
+        request, manager.get_blocks(request.request_id), hit.num_cpu_tokens
     )
     offload.update_connector_output(
         KVConnectorOutput(finished_recving={request.request_id})

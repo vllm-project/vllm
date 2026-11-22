@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Read-only prefix lookup and positional cache hits across storage pools."""
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -13,6 +14,21 @@ from vllm.v1.core.kv_cache_utils import (
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_coordinator import KVCacheCoordinator
+
+
+def iter_true_runs(flags: Iterable[bool], start: int = 0) -> Iterator[tuple[int, int]]:
+    """Yield contiguous `[run_start, run_end)` spans where `flags` are True."""
+    run_start: int | None = None
+    index = start
+    for flag in flags:
+        if flag and run_start is None:
+            run_start = index
+        elif not flag and run_start is not None:
+            yield run_start, index
+            run_start = None
+        index += 1
+    if run_start is not None:
+        yield run_start, index
 
 
 class CacheLookup(Protocol):
@@ -62,14 +78,11 @@ class CacheHitBlock:
 class JointCacheHit:
     """A reconciled prefix; null blocks denote attention padding, not loads.
 
-    `num_gpu_prefix_tokens` is a boundary, not the total GPU reuse count.
-    Scheduling uses the boundary and its extension; allocation uses positions.
     Admission accepts the complete match or defers the request.
     """
 
     blocks: tuple[list[CacheHitBlock], ...]
     num_computed_tokens: int
-    num_gpu_prefix_tokens: int
     shared_prefix_boundary: int
     num_cpu_tokens: int
     lookup: JointCacheLookup
@@ -85,13 +98,14 @@ class JointCacheHit:
         scheduler_block_size: int,
         num_request_tokens: int | None = None,
     ) -> "JointCacheHit":
+        def _is_cpu(block: KVCacheBlock) -> bool:
+            return block.pool is not None and block.pool() is lookup.cpu
+
         blocks, length, uncached = coordinator.find_longest_cache_hit(
             block_hashes, max_length, num_request_tokens, lookup=lookup
         )
         while length % scheduler_block_size and any(
-            block.pool is not None and block.pool() is lookup.cpu
-            for group in blocks
-            for block in group
+            _is_cpu(block) for group in blocks for block in group
         ):
             blocks, length, uncached = coordinator.find_longest_cache_hit(
                 block_hashes,
@@ -100,15 +114,9 @@ class JointCacheHit:
                 lookup=lookup,
             )
         hits = tuple(
-            [
-                CacheHitBlock(
-                    block, block.pool is not None and block.pool() is lookup.cpu
-                )
-                for block in group
-            ]
+            [CacheHitBlock(block, _is_cpu(block)) for block in group]
             for group in blocks
         )
-        gpu_prefix_tokens = length
         cpu_hash_blocks: set[int] = set()
         hash_block_size = lookup.hash_block_size
         for group, manager in zip(hits, coordinator.single_type_managers, strict=True):
@@ -116,18 +124,12 @@ class JointCacheHit:
                 if hit.is_cpu:
                     start = index * manager.block_size
                     end = min(start + manager.block_size, length)
-                    gpu_prefix_tokens = min(gpu_prefix_tokens, start)
                     cpu_hash_blocks.update(
                         range(start // hash_block_size, end // hash_block_size)
                     )
         return cls(
             blocks=hits,
             num_computed_tokens=length,
-            num_gpu_prefix_tokens=(
-                gpu_prefix_tokens // scheduler_block_size * scheduler_block_size
-                if cpu_hash_blocks
-                else length
-            ),
             num_cpu_tokens=len(cpu_hash_blocks) * hash_block_size,
             shared_prefix_boundary=length + uncached if uncached else 0,
             lookup=lookup,
