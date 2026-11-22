@@ -8,6 +8,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import Attention
+from vllm.utils.func_utils import supports_kw
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     STR_DTYPE_TO_TORCH_DTYPE,
@@ -102,6 +103,17 @@ class EncoderOnlyModelState(DefaultModelState):
             self.max_num_tokens, dtype=torch.int64, device=device
         )
         self.token_type_ids: dict[str, torch.Tensor] = {}
+        self.token_type_ids_buffer: torch.Tensor | None = None
+        compilation = vllm_config.compilation_config
+        if (
+            compilation.use_breakable_cudagraph
+            and compilation.cudagraph_mode.has_piecewise_cudagraphs()
+            and supports_kw(model.forward, "token_type_ids", allow_var_kwargs=False)
+        ):
+            # Capture and replay must read segment IDs from the same address.
+            self.token_type_ids_buffer = torch.zeros(
+                self.max_num_tokens, dtype=torch.int32, device=device
+            )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -124,11 +136,22 @@ class EncoderOnlyModelState(DefaultModelState):
         super().remove_request(req_id)
         self.token_type_ids.pop(req_id, None)
 
+    def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
+        model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
+        if self.token_type_ids_buffer is not None:
+            model_inputs["token_type_ids"] = self.token_type_ids_buffer[:num_tokens]
+        return model_inputs
+
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
     ) -> dict[str, torch.Tensor | None]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
+        out = self.token_type_ids_buffer
+        if out is not None:
+            out = out[: input_batch.num_tokens_after_padding]
         if not self.token_type_ids:
+            if out is not None:
+                model_inputs["token_type_ids"] = out.zero_()
             return model_inputs
 
         token_type_ids_cpu = torch.zeros(
@@ -147,7 +170,7 @@ class EncoderOnlyModelState(DefaultModelState):
                 )
             offset += num_tokens
         model_inputs["token_type_ids"] = async_tensor_h2d(
-            token_type_ids_cpu, device=self.device
+            token_type_ids_cpu, device=self.device, out=out
         )
         return model_inputs
 

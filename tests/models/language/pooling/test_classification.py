@@ -7,6 +7,55 @@ from transformers import AutoModelForSequenceClassification
 from vllm.platforms import current_platform
 
 
+@pytest.mark.core_model
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA graph replay")
+def test_bert_segment_ids_with_breakable_cudagraph(vllm_runner, tmp_path, monkeypatch):
+    from transformers import BertConfig, BertForSequenceClassification, BertTokenizer
+
+    vocab = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "a", "b", "c"]
+    BertTokenizer(vocab={s: i for i, s in enumerate(vocab)}).save_pretrained(tmp_path)
+    config = BertConfig(
+        vocab_size=len(vocab),
+        hidden_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        intermediate_size=256,
+        max_position_embeddings=64,
+        num_labels=1,
+        initializer_range=0.12,
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.random.default_generator.manual_seed(123)
+        BertForSequenceClassification(config).save_pretrained(tmp_path)
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+
+    def scores(enforce_eager):
+        with vllm_runner(
+            str(tmp_path),
+            runner="pooling",
+            dtype="half",
+            enforce_eager=enforce_eager,
+            max_model_len=32,
+            max_num_seqs=4,
+            max_num_batched_tokens=64,
+            compilation_config={
+                "cudagraph_mode": "PIECEWISE",
+                "cudagraph_capture_sizes": [8],
+            },
+        ) as model:
+            # Same token IDs; only the query/document boundary moves or disappears.
+            return (
+                model.score("a", "b [SEP] c")[0],
+                model.score("a [SEP] b", "c")[0],
+                model.classify(["a [SEP] b [SEP] c"])[0][0],
+            )
+
+    eager = scores(True)
+    assert eager[0] != pytest.approx(eager[1])
+    assert scores(False) == pytest.approx(eager, abs=1e-4)
+
+
 @pytest.mark.parametrize(
     "model",
     [
