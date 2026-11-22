@@ -4,10 +4,12 @@
 
 import multiprocessing
 import os
+from io import StringIO
 
 import pytest
 
 import vllm.envs as envs
+from vllm.utils import torch_utils
 from vllm.utils.torch_utils import available_cpu_count
 from vllm.v1.structured_output.utils import grammar_compile_max_workers
 
@@ -31,10 +33,16 @@ class TestGrammarCompileMaxWorkers:
             (172, 8),  # many-core host: must stay capped
         ],
     )
-    def test_capped_at_8(self, cpu_count: int, expected: int):
-        assert grammar_compile_max_workers(cpu_count) == min(
-            expected, available_cpu_count()
+    def test_capped_at_8(self, monkeypatch, cpu_count: int, expected: int):
+        # Keep the fixed ceiling observable even on quota-limited CI runners.
+        monkeypatch.setattr(os, "cpu_count", lambda: 32)
+        monkeypatch.setattr(
+            os, "sched_getaffinity", lambda pid: set(range(32)), raising=False
         )
+        monkeypatch.setattr(
+            torch_utils, "open", lambda path: StringIO(""), raising=False
+        )
+        assert grammar_compile_max_workers(cpu_count) == expected
 
     def test_defaults_to_host_cpu_count(self):
         assert grammar_compile_max_workers() == max(

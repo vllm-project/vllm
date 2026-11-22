@@ -115,7 +115,7 @@ def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
 def grammar_compile_max_workers(cpu_count: int | None = None) -> int:
     """Bound outer compilation concurrency by host and available CPUs.
 
-    Set ``VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS`` to a positive value
+    Set `VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS` to a positive value
     to override automatic sizing, including its available-CPU cap.
     """
     override = envs.VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS
