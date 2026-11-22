@@ -542,6 +542,38 @@ fn none_with_tools_only_answers() {
 }
 
 #[test]
+fn parameterless_tool_takes_no_arguments() {
+    // Like Python Beam, every declared schema is enforced, also for non-strict
+    // tools; a missing (`Null`) or empty schema declares no parameters.
+    let tool = |parameters| Tool {
+        name: "get_time".to_string(),
+        description: None,
+        parameters,
+        strict: None,
+        defer_loading: None,
+    };
+    let required = |parameters| {
+        grammar_with(
+            HfPosition::ResponseStart,
+            &[tool(parameters)],
+            ToolChoice::required(),
+            true,
+            false,
+            false,
+        )
+        .unwrap()
+    };
+    let no_parameters = required(json!({"type": "object", "properties": {}}));
+    for parameters in [Value::Null, json!({})] {
+        assert_eq!(
+            required(parameters.clone()),
+            no_parameters,
+            "parameters: {parameters}"
+        );
+    }
+}
+
+#[test]
 fn always_constrain_answers_without_tools() {
     expect_test::expect![[r#"
         sequence
