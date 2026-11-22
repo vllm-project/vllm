@@ -84,8 +84,16 @@ fn shutdown_signal() -> CancellationToken {
     token
 }
 
-/// Raise the open-file soft limit (`RLIMIT_NOFILE`) up to the hard limit so
-/// high-concurrency serving does not hit `EMFILE` under a 1024 default.
+/// Open-file soft limit the API server raises to, as Python's `set_ulimit`.
+///
+/// Not the hard limit: the managed engine and its workers inherit it, and
+/// Python runs them at this value unless the inherited soft limit is higher.
+const TARGET_NOFILE_SOFT_LIMIT: u64 = 65535;
+
+/// Raise the open-file soft limit (`RLIMIT_NOFILE`) to
+/// [`TARGET_NOFILE_SOFT_LIMIT`], within the hard limit, so high-concurrency
+/// serving does not hit `EMFILE` under a 1024 default. A higher soft limit is
+/// kept.
 fn raise_nofile_limit() {
     let prev_soft = match rlimit::Resource::NOFILE.get() {
         Ok((soft, _hard)) => soft,
@@ -94,7 +102,7 @@ fn raise_nofile_limit() {
             return;
         }
     };
-    match rlimit::increase_nofile_limit(u64::MAX) {
+    match rlimit::increase_nofile_limit(TARGET_NOFILE_SOFT_LIMIT) {
         Ok(new) if new > prev_soft => {
             info!(
                 previous = prev_soft,
