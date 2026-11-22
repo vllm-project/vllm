@@ -396,6 +396,10 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         self.n_window = config.n_window
         self.n_window_infer = config.n_window_infer
         self.conv_chunksize = config.conv_chunksize
+        self.embed_dim = embed_dim
+        self.tp_size = get_tensor_model_parallel_world_size()
+        if config.encoder_attention_heads % self.tp_size != 0:
+            self.tp_size = 1
         # Attention window in encoder tokens: n_window_infer mel frames, i.e.
         # n_window_infer // (2 * n_window) full conv chunks.
         chunk_size = self.n_window * 2
@@ -633,6 +637,31 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             # Empty windows repeat the last offset, so padded tokens attend
             # to nothing.
             cu_chunk_lens.extend([0] * (max_num_windows + 1 - len(cu_chunk_lens)))
+        if self.attn_backend == AttentionBackendEnum.FLASHINFER:
+            # FlashInfer takes a bucketed maximum, padded segment lengths and
+            # element offsets instead of token offsets. It is not captured in
+            # encoder CUDA graphs, so the overrides above do not apply.
+            cu_seqlens_np = np.cumsum(cu_chunk_lens, dtype=np.int32)
+            return {
+                "cu_seqlens": MMEncoderAttention.maybe_recompute_cu_seqlens(
+                    self.attn_backend,
+                    cu_seqlens_np,
+                    self.embed_dim,
+                    self.tp_size,
+                    device,
+                ),
+                "max_seqlen": torch.tensor(
+                    MMEncoderAttention.compute_max_seqlen(
+                        self.attn_backend, cu_seqlens_np
+                    ),
+                    dtype=torch.int32,
+                    device="cpu",
+                ),
+                "sequence_lengths": MMEncoderAttention.maybe_compute_seq_lens(
+                    self.attn_backend, cu_seqlens_np, device
+                ),
+            }
+
         cu_seqlens = async_tensor_h2d(
             cu_chunk_lens, dtype=torch.int32, device=device
         ).cumsum(-1, dtype=torch.int32)
@@ -661,9 +690,11 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         cu_seqlens = encoder_metadata["cu_seqlens"]
         assert cu_seqlens is not None
         max_seqlen = encoder_metadata.get("max_seqlen")
-        sequence_lengths = None
+        # FlashInfer builds its padded segment lengths with the metadata.
+        sequence_lengths = encoder_metadata.get("sequence_lengths")
         if (
-            self.attn_backend == AttentionBackendEnum.TRITON_ATTN
+            sequence_lengths is None
+            and self.attn_backend == AttentionBackendEnum.TRITON_ATTN
             and hidden_states.is_cuda
             and current_platform.is_cuda()
         ):
