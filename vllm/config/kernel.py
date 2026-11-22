@@ -37,10 +37,12 @@ DeepseekV41AmdKernelsRoute = Literal[
     "compressor",
     "kv_score",
     "dense_gemm",
+    "wq_b",
     # indexer, sparse attention, output projection
     "indexer",
     "sparse_mla",
     "wo_a",
+    "wo_b",
     # MoE block
     "router",
     "shared_expert",

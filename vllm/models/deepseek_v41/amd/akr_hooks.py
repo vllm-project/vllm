@@ -20,9 +20,12 @@ logger = init_logger(__name__)
 # (module, routes it owns), in dependency order
 _MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("akr_moe", ("router", "shared_expert", "draft_router")),
-    ("akr_attn", ("rope_insert", "norm_dual", "compressor", "kv_score", "dense_gemm")),
+    (
+        "akr_attn",
+        ("rope_insert", "norm_dual", "compressor", "kv_score", "dense_gemm", "wq_b"),
+    ),
     ("akr_indexer", ("indexer",)),
-    ("akr_mla", ("sparse_mla", "wo_a")),
+    ("akr_mla", ("sparse_mla", "wo_a", "wo_b")),
     ("akr_experts", ("fused_ep8",)),
     ("akr_mhc", ("mhc_seam", "mhc_tail", "mhc_wo_b", "mhc_ffn")),
     ("akr_draft", ("lm_head", "main_proj")),

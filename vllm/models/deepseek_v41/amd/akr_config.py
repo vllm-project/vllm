@@ -28,6 +28,10 @@ _NEEDS: dict[str, tuple[str, ...]] = {
     "mhc_wo_b": ("mhc_seam", "wo_a"),
     # the fused shared-expert down epilogue replaces the next attention seam
     "mhc_ffn": ("mhc_seam", "shared_expert"),
+    # wq_b reads the MXFP8 rows `norm_dual` writes
+    "wq_b": ("norm_dual",),
+    # wo_b runs on wo_a's bf16 output
+    "wo_b": ("wo_a",),
 }
 
 
@@ -40,13 +44,17 @@ def _rows(lo: int, hi: int) -> Callable[[int], bool]:
 GATES: dict[str, Callable[[int], bool]] = {
     "rope_insert": _rows(1, 1024),
     "norm_dual": _rows(1, 1024),
-    "compressor": _rows(1, 768),
-    "kv_score": _rows(1, 768),
+    "compressor": _rows(1, 1024),
+    "kv_score": _rows(1, 1024),
     "dense_gemm": _rows(1, 768),
+    # AITER's FlyDSL GEMM on the same codes is faster up to 768 rows
+    "wq_b": _rows(769, 1024),
     "indexer": _rows(1, 768),
     "sparse_mla": _rows(1, 768),
     "wo_a": _rows(1, 1024),
-    "router": _rows(1, 768),
+    # wo_a's bf16 output through the dense entry vs its MXFP8 epilogue + AITER wo_b
+    "wo_b": _rows(769, 1024),
+    "router": _rows(1, 1024),
     "shared_expert": _rows(1, 768),
     "fused_ep8": _rows(1, 1024),
     "mhc_seam": _rows(1, 384),

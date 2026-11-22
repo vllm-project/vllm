@@ -35,9 +35,11 @@ _ROUTES = (
     "compressor",
     "kv_score",
     "dense_gemm",
+    "wq_b",
     "indexer",
     "sparse_mla",
     "wo_a",
+    "wo_b",
 )
 
 
@@ -53,6 +55,8 @@ class LayerState:
         self.kv_score_w: torch.Tensor | None = None
         self.kv_score_n = 0
         self.wqa_wkv: Any = None
+        self.wq_b: Any = None
+        self.wo_b: Any = None  # akr_mla
         self.indexer: Any = None  # akr_indexer
         self.mla = False  # akr_mla
         self.mla_caches_ok: bool | None = None
@@ -107,6 +111,20 @@ def wqa_wkv(layer, hidden: torch.Tensor) -> torch.Tensor | None:
     return akr_kernels.mxfp8_dense(hidden, w)
 
 
+def wq_b(layer, qr) -> torch.Tensor | None:
+    """The attention wq_b on `norm_dual`'s MXFP8 rows, where the entry beats
+    AITER's GEMM on the same codes."""
+    w = layer.akr.wq_b
+    if (
+        w is None
+        or not isinstance(qr, QuantizedActivation)
+        or len(qr.orig_shape) != 2
+        or not akr_config.serves("wq_b", qr.data.shape[0])
+    ):
+        return None
+    return akr_kernels.mxfp8_dense(qr, w)
+
+
 def indexer_wq_b(indexer, qr) -> torch.Tensor | None:
     """The indexer wq_b on `norm_dual`'s MXFP8 rows."""
     if not isinstance(qr, QuantizedActivation) or not akr_config.serves(
@@ -137,7 +155,12 @@ def norm_dual(layer, qr_kv: torch.Tensor):
         return None
     qr, kv = qr_kv.split([layer.q_lora_rank, layer.head_dim], dim=-1)
     out = akr_kernels.rmsnorm_dual_mxfp8(
-        qr, kv, layer.q_norm.weight.data, layer.kv_norm.weight.data, layer.eps
+        qr,
+        kv,
+        layer.q_norm.weight.data,
+        layer.kv_norm.weight.data,
+        layer.eps,
+        pad_scale=st.wq_b is not None and akr_config.serves("wq_b", qr_kv.shape[0]),
     )
     if out is None:
         return None
@@ -273,6 +296,8 @@ def post_load(model) -> None:
     ]
     for layer in layers:
         st, ind, comp = layer.akr, layer.indexer, layer.compressor
+        if akr_config.on("wq_b"):
+            st.wq_b = akr_kernels.mxfp8_dense_weight(layer.wq_b)
         if akr_config.on("dense_gemm"):
             st.wqa_wkv = akr_kernels.mxfp8_dense_weight(layer.fused_wqa_wkv)
             if ind is not None:

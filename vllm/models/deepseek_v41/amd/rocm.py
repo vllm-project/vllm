@@ -1194,6 +1194,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         self, attn_out: torch.Tensor | QuantizedActivation, positions: torch.Tensor
     ) -> torch.Tensor:
         if isinstance(attn_out, QuantizedActivation) and self.akr is not None:
+            out = akr_mla.wo_a_wo_b(self, attn_out)
+            if out is not None:
+                return out
             z_quant = akr_mla.wo_a(self, attn_out)
             if z_quant is not None:
                 if self.akr.want_codes:
@@ -1223,6 +1226,17 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             inverse_rope=False,
         )
         return self._wo_b_after_wo_a(z.flatten(1))
+
+    def _wq_b_proj(
+        self,
+        qr: torch.Tensor | QuantizedActivation,
+        qr_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.akr is not None:
+            q = akr_attn.wq_b(self, qr)
+            if q is not None:
+                return q
+        return super()._wq_b_proj(qr, qr_scale)
 
     def _wo_b_after_wo_a(self, zf: torch.Tensor) -> torch.Tensor:
         if self._wo_b_scale is not None and zf.dim() == 2:

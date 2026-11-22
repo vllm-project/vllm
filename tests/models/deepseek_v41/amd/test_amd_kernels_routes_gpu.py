@@ -170,6 +170,62 @@ def test_dense_mxfp8_codes_match_stock(vllm_config):
     assert cos(out, ref) > 0.9999
 
 
+def _codes_of(x: torch.Tensor):
+    """`norm_dual`'s output form: MXFP8 rows whose scales are the first rows of a
+    buffer padded to 32 rows."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+    from vllm.models.deepseek_v41.amd import akr_config
+
+    codes, scale = mxfp8_e4m3_quantize(x)
+    m = x.shape[0]
+    padded = torch.empty(
+        (m + 31) // 32 * 32, scale.shape[1], dtype=torch.uint8, device=x.device
+    )
+    padded[:m] = scale.view(torch.uint8)
+    return akr_config.quant_activation(codes, padded[:m], x.dtype)
+
+
+@pytest.mark.parametrize("m", [768, 769, 800, 848, 960, 1024])
+def test_wq_b_codes_match_stock(vllm_config, m):
+    """wq_b on `norm_dual`'s MXFP8 rows: the entry above 768 rows (the blocker
+    declines below), the stock linear's result."""
+    from vllm.models.deepseek_v41.amd import akr_config, akr_kernels
+
+    linear = _mxfp8_linear(vllm_config, 32768, 1280, "model.layers.0.attn.wq_b", 5)
+    weight = akr_kernels.mxfp8_dense_weight(linear)
+    assert weight is not None and akr_config.takes_mxfp8_codes(linear)
+    qx = _codes_of(torch.randn(m, 1280, device="cuda", dtype=torch.bfloat16))
+    out = akr_kernels.mxfp8_dense(qx, weight)
+    assert (out is not None) == akr_config.serves("wq_b", m)
+    if out is not None:
+        ref, _ = linear(qx)
+        assert cos(out, ref) > 0.99999
+
+
+@pytest.mark.parametrize("m", [769, 848, 1024])
+def test_wo_b_on_bf16_matches_stock(vllm_config, m):
+    """wo_b on wo_a's bf16 output through the entry vs the stock wo_b on that
+    output's MXFP8 quantization."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+    from vllm.models.deepseek_v41.amd import akr_config, akr_kernels
+
+    wo_b = _mxfp8_linear(vllm_config, 5120, 8192, "model.layers.0.attn.wo_b", 6)
+    dense = akr_kernels.mxfp8_dense_weight(wo_b)
+    if dense is None:
+        pytest.skip("the stock wo_b kept no preshuffled MXFP8 weight")
+    assert akr_config.serves("wo_b", m)
+    z = torch.randn(m, 8192, device="cuda", dtype=torch.bfloat16)
+    out = akr_kernels.mxfp8_dense(z, dense)
+    assert out is not None
+    codes, scale = mxfp8_e4m3_quantize(z)
+    ref, _ = wo_b(akr_config.quant_activation(codes, scale.view(torch.uint8), z.dtype))
+    assert cos(out, ref) > 0.9999
+
+
 @pytest.mark.parametrize("m", [16, 192, 1024])
 def test_grouped_wo_a_matches_stock(vllm_config, m):
     """wo_a with the MXFP8 epilogue vs the stock grouped GEMM (bf16 out)."""
@@ -261,11 +317,11 @@ def _stock_router(moe, x):
     )
 
 
-@pytest.mark.parametrize("m", [1, 16, 192, 768, 769])
+@pytest.mark.parametrize("m", [1, 16, 192, 768, 769, 848, 1024, 1025])
 def test_router_matches_stock(moe, m):
     x = torch.randn(m, H, device="cuda", dtype=torch.bfloat16)
     out = moe.akr.route(moe, x)
-    if m > 768:
+    if m > 1024:
         assert out is None
         return
     weights, ids = out

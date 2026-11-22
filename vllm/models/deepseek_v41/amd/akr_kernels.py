@@ -254,11 +254,22 @@ def fused_ep_moe(ep, weights, x, x_quant, topk_weights, topk_ids, *, rows: int):
 # ---------------------------------------------------------------- attention
 
 
-def rmsnorm_dual_mxfp8(q, kv, q_weight, kv_weight, eps):
+def rmsnorm_dual_mxfp8(q, kv, q_weight, kv_weight, eps, pad_scale: bool = False):
+    """(codes, scales, kv). `pad_scale`: the scales are the first rows of a
+    buffer with a multiple of 32 rows, which the `wq_b` entry moves to its
+    layout in one launch (any other storage works, with more launches)."""
     norm = _norm()
     if not _covered("rmsnorm_dual_mxfp8", norm.rmsnorm_dual_mxfp8_blocker(q, kv)):
         return None
-    return norm.rmsnorm_dual_mxfp8(q, kv, q_weight, kv_weight, eps)
+    kwargs = {}
+    if pad_scale:
+        rows = q.shape[0]
+        kwargs["scale"] = torch.empty(
+            ((rows + 31) // 32 * 32, q.shape[1] // 32),
+            dtype=torch.uint8,
+            device=q.device,
+        )[:rows]
+    return norm.rmsnorm_dual_mxfp8(q, kv, q_weight, kv_weight, eps, **kwargs)
 
 
 def rmsnorm_dual_warmup(q_dim: int, kv_dim: int, device: torch.device) -> None:
@@ -435,6 +446,12 @@ def mxfp8_grouped_ok(m: int, w: GroupedWeight) -> bool:
 def mxfp8_grouped_gemm(x: QuantizedActivation, w: GroupedWeight):
     """(codes, scales) of the grouped GEMM with the MXFP8 epilogue."""
     return _gemm().mxfp8_grouped_gemm_mxfp8(x.data, x.scale, w.weight, w.scale)
+
+
+def mxfp8_grouped_gemm_bf16(x: QuantizedActivation, w: GroupedWeight) -> torch.Tensor:
+    """bf16 output of the grouped GEMM (wo_b's input without the quantize round trip
+    of the MXFP8 epilogue)."""
+    return _gemm().mxfp8_grouped_gemm(x.data, x.scale, w.weight, w.scale)
 
 
 # ---------------------------------------------------------------- indexer

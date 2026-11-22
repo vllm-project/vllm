@@ -70,6 +70,9 @@ def test_resolve_routes():
         ("mhc_wo_b", 128),
         ("mhc_ffn", 192),
         ("sparse_mla", 768),
+        ("router", 1024),
+        ("compressor", 1024),
+        ("kv_score", 1024),
         ("fused_ep8", 1024),
         ("markov", 160),
     ],
@@ -79,6 +82,21 @@ def test_row_gates(routes, route, last_on):
     assert not akr_config.serves(route, last_on + 1)
     akr_config.fail(route, "test")
     assert not akr_config.serves(route, 1)
+
+
+def test_decode_scaling_gates(routes):
+    # wq_b and wo_b win only above 768 rows (below: AITER wq_b, epilogue + AITER wo_b)
+    for route in ("wq_b", "wo_b"):
+        assert not akr_config.serves(route, 768) and akr_config.serves(route, 769)
+        assert akr_config.serves(route, 1024) and not akr_config.serves(route, 1025)
+    assert "wq_b" not in akr_config.resolve_routes(True, {"norm_dual"}, True)
+    assert "wo_b" not in akr_config.resolve_routes(True, {"wo_a"}, True)
+    # each is switchable alone
+    on = akr_config.resolve_routes(True, {"wq_b", "wo_b"}, True)
+    assert {"norm_dual", "wo_a", "dense_gemm", "router"} <= on and not {
+        "wq_b",
+        "wo_b",
+    } & on
 
 
 def test_lm_head_and_main_proj_rows(routes):

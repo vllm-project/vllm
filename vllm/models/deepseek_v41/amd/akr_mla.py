@@ -9,6 +9,9 @@ wo_a: the grouped MXFP8 wo_a GEMM with an MXFP8 epilogue, so wo_b (stock, or
     the mHC post-mix chain) reads its codes without a quantize launch. It reads
     the AITER-preshuffled weight the stock linear keeps (no copy). One split-K
     workspace per device: default stream only.
+wo_b: at the rows where the dense entry's decode kernel on wo_a's bf16 output
+    (quantizer launch + GEMM) beats AITER's wo_b on the epilogue's codes, wo_a
+    writes bf16 and the entry runs wo_b (the stock weight, shuffled scales).
 """
 
 import torch
@@ -97,6 +100,26 @@ def wo_a(layer, attn_out: QuantizedActivation) -> QuantizedActivation | None:
     return akr_config.quant_activation(codes, scale, attn_out.orig_dtype)
 
 
+def wo_a_wo_b(layer, attn_out: QuantizedActivation) -> torch.Tensor | None:
+    """wo_b(wo_a(attn_out)) with wo_a's bf16 output through the dense entry
+    (its quantizer launch + GEMM), where that beats wo_a's MXFP8 epilogue +
+    AITER's wo_b on the codes; None, having launched nothing, elsewhere."""
+    st = layer.akr
+    m = attn_out.data.shape[0]
+    if (
+        st.wo_b is None
+        or st.want_codes
+        or layer.gemm_rs is not None
+        or not akr_config.serves("wo_b", m)
+        or not wo_a_serves(layer, m)
+        or not attn_out.data.is_contiguous()
+        or not attn_out.scale.is_contiguous()
+    ):
+        return None
+    z = akr_kernels.mxfp8_grouped_gemm_bf16(attn_out, st.wo_a)
+    return akr_kernels.mxfp8_dense(z, st.wo_b)
+
+
 def post_load(model) -> None:
     from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 
@@ -118,6 +141,12 @@ def post_load(model) -> None:
             st.wo_a = akr_kernels.mxfp8_grouped_weight(
                 layer.wo_a, layer.n_local_groups, layer.o_lora_rank
             )
+        if (
+            akr_config.on("wo_b")
+            and st.wo_a is not None
+            and getattr(layer.wo_b, "tp_size", 1) == 1
+        ):
+            st.wo_b = akr_kernels.mxfp8_dense_weight(layer.wo_b)
         states.append(st)
     logger.info(
         "amd_kernels attention: sparse_mla on %d, wo_a on %d of %d layers",
