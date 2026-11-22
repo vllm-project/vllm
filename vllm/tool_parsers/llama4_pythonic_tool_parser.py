@@ -131,12 +131,15 @@ class Llama4PythonicToolParser(ToolParser):
             return DeltaMessage(content=delta_text)
 
         try:
-            # remove <|python_start|> and <|python_end|>
+            # remove <|python_start|> and <|python_end|>. Trailing whitespace
+            # after the end marker is allowed; any other trailing text is left
+            # in place, as non-streaming parses the whole remainder.
+            closed = current_text.rstrip().endswith("<|python_end|>")
             if current_text.startswith("<|python_start|>"):
                 current_text = current_text[len("<|python_start|>") :]
-            if current_text.endswith("<|python_end|>"):
+            if closed:
                 current_text = current_text[: current_text.rfind("<|python_end|>")]
-            valid_and_added_text = make_valid_python(current_text)
+            valid_and_added_text = make_valid_python(current_text, closed=closed)
             if valid_and_added_text is None:
                 return None
             valid_text, added_text = valid_and_added_text

@@ -148,16 +148,31 @@ class Olmo3PythonicToolParser(ToolParser):
             return DeltaMessage(content=delta_text)
 
         try:
-            # Remove xml tags.
-            if current_text.startswith("<function_calls>"):
-                current_text = current_text[len("<function_calls>") :]
-            if current_text.endswith("</function_calls>"):
-                current_text = current_text[: -len("</function_calls>")]
+            # Remove xml tags. The end tag closes the block even when content
+            # follows it in the same delta (the non-streaming regex only reads
+            # what is between the tags), so anything after it is ignored here.
+            closed = "</function_calls>" in current_text
+            if current_text.startswith(start_tag):
+                current_text = current_text[len(start_tag) :]
+            if closed:
+                current_text = current_text[: current_text.find("</function_calls>")]
 
-            valid_and_added_text = make_valid_python(current_text)
-            if valid_and_added_text is None:
-                return None
-            valid_text, added_text = valid_and_added_text
+            if closed:
+                # Validate the shape non-streaming parses: the newline
+                # separated calls joined into one list literal. A closed block
+                # is not completed, so a malformed call is rejected instead of
+                # being repaired into a valid one.
+                valid_text = ", ".join(
+                    line.strip() for line in current_text.splitlines() if line.strip()
+                )
+                if make_valid_python(f"[{valid_text}]", closed=True) is None:
+                    return None
+                added_text = ""
+            else:
+                valid_and_added_text = make_valid_python(current_text)
+                if valid_and_added_text is None:
+                    return None
+                valid_text, added_text = valid_and_added_text
 
             # Make the newline separated function calls into a list.
             valid_text = ", ".join(

@@ -239,6 +239,25 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
     assert reconstructor.tool_calls[2].function == EMPTY_LIST_FUNCTION_CALL
 
 
+def test_streaming_malformed_call_in_single_delta(default_tokenizer: TokenizerLike):
+    """A closed block that non-streaming rejects (here an unbalanced quote)
+    must not be streamed as a tool call when it arrives in one delta."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    model_output = "<function_calls>get_weather(city=\"'Paris')</function_calls>"
+
+    _content, tool_calls = run_tool_extraction(
+        tool_parser, model_output, streaming=False
+    )
+    assert len(tool_calls) == 0
+
+    reconstructor = run_tool_extraction_streaming(
+        tool_parser, [model_output], assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 0
+
+
 @pytest.mark.parametrize("streaming", [False])
 def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLike):
     """Test regex timeout is handled gracefully."""

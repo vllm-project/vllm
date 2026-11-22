@@ -979,11 +979,19 @@ def _is_escaped(text: str, index: int) -> bool:
     return backslashes % 2 == 1
 
 
-def make_valid_python(text: str) -> tuple[str, str] | None:
+def make_valid_python(text: str, closed: bool = False) -> tuple[str, str] | None:
     """Attempt to close all open brackets/quotes to make partial Python valid.
 
     Used during streaming to parse incomplete tool call expressions by
     appending the necessary closing characters.
+
+    Args:
+        text: The tool call text received so far.
+        closed: The caller has already seen the end of the tool call block
+            (e.g. its end token), so no more text will arrive. Nothing is
+            completed then: the text must parse as it stands, as in the
+            non-streaming path. An open string there is a malformed call,
+            not a prefix.
 
     Returns:
         A tuple of (completed_text, added_suffix) if the text can be
@@ -995,6 +1003,14 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
             are detected.
 
     """
+    if closed:
+        text = text.rstrip()
+        try:
+            module = ast.parse(text)
+        except (SyntaxError, ValueError):
+            return None
+        return (text, "") if module.body else None
+
     bracket_stack: list[str] = []
     for index, char in enumerate(text):
         # Inside a string literal only an unescaped matching quote is
