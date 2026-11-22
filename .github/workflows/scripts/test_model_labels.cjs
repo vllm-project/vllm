@@ -4,7 +4,10 @@
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { test } = require('node:test');
-const { script, families } = JSON.parse(readFileSync(0, 'utf8'));
+const { parse } = require('yaml');
+const workflow = parse(readFileSync('.github/workflows/issue_autolabel.yml', 'utf8'));
+const script = workflow.jobs['add-labels'].steps.find(step => step.id === 'label-step').with.script;
+const families = JSON.parse(readFileSync('tools/pre_commit/model_label_cases.json', 'utf8'));
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const labelIssue = new AsyncFunction('github', 'context', 'core', script);
 

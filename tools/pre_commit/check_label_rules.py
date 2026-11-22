@@ -117,22 +117,6 @@ def check_model_examples() -> list[tuple[str, str, str]]:
 
 
 def main() -> int:
-    if "--issues" in sys.argv[1:]:
-        workflow = yaml.safe_load(
-            Path(".github/workflows/issue_autolabel.yml").read_text()
-        )
-        steps = workflow["jobs"]["add-labels"]["steps"]
-        script = next(
-            step["with"]["script"] for step in steps if step.get("id") == "label-step"
-        )
-        return subprocess.run(
-            ["node", ".github/workflows/scripts/test_model_labels.cjs"],
-            input=json.dumps(
-                {"script": script, "families": json.loads(MODEL_CASES.read_text())}
-            ),
-            text=True,
-            check=False,
-        ).returncode
     dead = check(tracked_files()) + check_model_examples()
     if not dead:
         return 0
