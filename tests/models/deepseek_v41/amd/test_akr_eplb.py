@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Static expert placement with replicas (akr_eplb): plan validation, the
 replica tables and selection, the MegaMoE experts' loader and id remap, the
-shipped plan and the AITER profile registration; the opt-in expert-load
-counting (akr_expert_counts). CPU, except the remap and counting kernel
-tests."""
+shipped plan and the AITER profile registration; the planner that made the
+shipped plan (akr_eplb_plan) and the opt-in expert-load counting that feeds it
+(akr_expert_counts). CPU, except the remap and counting kernel tests."""
 
 import os
 import types
@@ -16,6 +16,10 @@ import torch
 from vllm.models.deepseek_v41.amd import akr_eplb as P
 
 SHIPPED = os.path.join(P.CONFIG_DIR, "expert_plan_S49.npz")
+# the expert load the shipped plan was fitted on, summed over the DP ranks
+COUNTS = os.path.join(
+    os.path.dirname(__file__), "data", "expert_counts_agentx_c1024.npz"
+)
 
 
 def _cfg(path: str):
@@ -241,20 +245,12 @@ def test_aiter_profile_registration(monkeypatch):
     mc.build_mega_moe_bundle_plan.cache_clear()
 
 
-COUNTS = "/home/fai/opt_dsv41f/results/expert_counts_c1024"
-
-
-@pytest.mark.skipif(not os.path.isdir(COUNTS), reason="measured counts not here")
 def test_shipped_plan_balances_measured_load():
     """Routes drawn from the measured per-layer expert popularity through the
     replica selection: the per-rank load max/mean drops well below identity."""
-    import glob
-
     plan = P.Plan(SHIPPED)
-    tot = sum(
-        np.load(f)["counts"].astype(np.float64)
-        for f in glob.glob(COUNTS + "/expert_counts_dp*.npz")
-    )
+    with np.load(COUNTS) as z:
+        tot = (z["counts_decode"] + z["counts_prefill"]).astype(np.float64)
     rng = np.random.default_rng(0)
     lam_id, lam_pl = [], []
     for layer in (0, 11, 22, 33, 39):
@@ -271,6 +267,57 @@ def test_shipped_plan_balances_measured_load():
         lam_id.append(ident.max() / ident.mean())
         lam_pl.append(load.max() / load.mean())
     assert np.mean(lam_pl) < 1.12 and np.mean(lam_pl) < np.mean(lam_id) - 0.2
+
+
+def test_planner_reproduces_shipped_plan(tmp_path, capsys):
+    """The planner CLI on the measured counts writes the shipped plan's
+    arrays, bit for bit."""
+    from vllm.models.deepseek_v41.amd import akr_eplb_plan
+
+    out = str(tmp_path / "plan.npz")
+    akr_eplb_plan.main(["--counts", COUNTS, "--out", out, "--slots", "49"])
+    assert "slots per rank {384: 49, 128: 17}" in capsys.readouterr().out
+    with np.load(out) as got, np.load(SHIPPED) as want:
+        for k in ("phys2log", "layer_ids", "draft_phys2log", "draft_layer_ids"):
+            assert got[k].dtype == want[k].dtype and np.array_equal(got[k], want[k])
+        assert int(got["world_size"]) == int(want["world_size"]) == 8
+
+
+def test_planner_rules(tmp_path):
+    """Replicas go to the hottest experts, at most one per rank; every expert
+    keeps a slot; the plan balances both objectives and loads at runtime."""
+    from vllm.models.deepseek_v41.amd import akr_eplb_plan as PL
+
+    rng = np.random.default_rng(7)
+    decode = (rng.zipf(1.6, size=(2, 384)) * 100).astype(np.int64)
+    prefill = rng.permutation(decode.T).T  # other hot experts in prefill
+    counts = dict(
+        counts_decode=decode,
+        counts_prefill=prefill,
+        layer_ids=np.array([0, 1]),
+        draft_counts_decode=decode[:1, :128],
+        draft_counts_prefill=prefill[:1, :128],
+        draft_layer_ids=np.array([40]),
+    )
+    plan = PL.make_plan(counts, 52)
+    assert plan["phys2log"].shape == (2, 8 * 52)
+    assert plan["draft_phys2log"].shape == (1, 8 * PL.default_draft_slots(52))
+    for row, d, p in zip(plan["phys2log"], decode, prefill):
+        nrep = np.bincount(row, minlength=384)
+        assert nrep.min() == 1 and nrep.max() <= 8
+        for r in range(8):
+            assert len(set(row[r * 52 : (r + 1) * 52])) == 52
+        hot = np.argmax(np.maximum(d / d.sum(), p / p.sum()))
+        assert nrep[hot] == nrep.max() > 1
+        ident = np.arange(384)
+        for load in (d, p):
+            assert PL.rank_imbalance(load, row) < PL.rank_imbalance(load, ident)
+            assert PL.rank_imbalance(load, row) < 1.1
+    f = str(tmp_path / "p.npz")
+    np.savez(f, **plan)
+    assert P.Plan(f).slots == {384: 52, 128: PL.default_draft_slots(52)}
+    with pytest.raises(ValueError, match="slots for 384 experts"):
+        PL.replicate(np.ones((1, 384)), 8 * 384 + 1)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
@@ -318,9 +365,11 @@ def test_expert_counts_opt_in(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 def test_expert_counts_graph_replay(tmp_path, monkeypatch):
     """Counts under CUDA graph replay and eager steps equal the bincount of
-    the routed ids on real rows, split by step kind."""
+    the routed ids on real rows, split by step kind; the planner reads the
+    dump."""
     from vllm.config import VllmConfig
     from vllm.forward_context import set_forward_context
+    from vllm.models.deepseek_v41.amd import akr_eplb_plan
     from vllm.models.deepseek_v41.amd import akr_expert_counts as EC
 
     monkeypatch.setattr(EC, "_S", EC._State())
@@ -393,3 +442,5 @@ def test_expert_counts_graph_replay(tmp_path, monkeypatch):
         assert np.array_equal(z["draft_counts_decode"][0], ref[layers[2][0]][0])
         assert np.array_equal(z["draft_counts_prefill"][0], ref[layers[2][0]][1])
         assert (int(z["steps_decode"]), int(z["steps_prefill"])) == tuple(steps)
+    counts = akr_eplb_plan.load_counts([str(tmp_path)])
+    assert counts["counts_decode"].shape == (2, 384)
