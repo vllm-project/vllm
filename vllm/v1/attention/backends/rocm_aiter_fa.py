@@ -657,13 +657,14 @@ class AiterFlashAttentionMetadataBuilder(
             if layer.impl.sliding_window[0] != -1 and not layer.impl._fast_verify:
                 swa_tables_needed = True
             # Per-head q scales are only known once the weights are loaded.
-            per_head_q_scale = layer._q_scale.numel() != 1
-            if layer.impl.use_fp8_extend_query and per_head_q_scale:
+            fp8_layer = layer.impl.use_fp8_extend_query
+            if fp8_layer and layer._q_scale.numel() != 1:
                 logger.info_once(
                     "AITER FA: per-head q scales keep a BF16 query for prefill "
                     "attention (attention_config.use_prefill_query_quantization)."
                 )
-            fp8_query.append(layer.impl.use_fp8_extend_query and not per_head_q_scale)
+                fp8_layer = False
+            fp8_query.append(fp8_layer)
             if (
                 layer.kv_sharing_target_layer_name is not None
                 or layer.kv_cache_update_bypass
