@@ -146,7 +146,6 @@ _MAX_LOCAL_MAMBA_TAIL_BLOCKS = 1
 # A WRITE failure is broadcast to every decode DP rank, so ranks that never
 # see the request would otherwise keep its transfer id forever.
 _MAX_UNMATCHED_WRITE_FAILURES = 4096
-_MAX_COMPLETED_WRITE_TRANSFERS = 4096
 
 
 try:
@@ -1704,15 +1703,27 @@ class MoRIIOConnectorScheduler:
             )
         ):
             transfer_id = params.setdefault("transfer_id", f"sidecar-{request_id}")
-            abort_meta = MoRIIOConnectorMetadata()
-            abort_meta.add_new_req(
-                request_id=request_id,
-                local_block_ids=[],
-                kv_transfer_params=params,
-                write_mode=True,
-                abort_write=True,
+            fill_remote_pod_from_config(
+                params, self.kv_transfer_config.kv_connector_extra_config, True
             )
-            self._reqs_need_abort.update(abort_meta.reqs_to_abort)
+            abort_meta = MoRIIOConnectorMetadata()
+            try:
+                abort_meta.add_new_req(
+                    request_id=request_id,
+                    local_block_ids=[],
+                    kv_transfer_params={
+                        "remote_engine_id": "",
+                        "remote_block_ids": [],
+                        **params,
+                    },
+                    write_mode=True,
+                )
+            except ValueError:
+                if request_id in self._req_kv_params:
+                    raise
+                # No allocation or advertised peer: there is no WRITE to cancel.
+                return False, None
+            self._reqs_need_abort.update(abort_meta.reqs_to_save)
             self._reqs_need_save.pop(request_id, None)
             self._reqs_need_pending_save.pop(request_id, None)
             self._req_kv_params.pop(request_id, None)
@@ -2016,13 +2027,6 @@ class MoRIIOConnectorWorker:
         # Retried each step until the mapping is established.
         self._unmatched_write_completions: set[str] = set()
         self._unmatched_write_failures: OrderedDict[TransferId, None] = OrderedDict()
-        # A repeated notification must not count as a second TP worker's vote.
-        self._reported_write_transfers: set[TransferId] = set()
-        # Unlike the live-report set, remember recently completed IDs after
-        # unmapping so a late allocation's repeated write_failed is not queued
-        # as an unknown early failure. This is bounded deduplication, not an
-        # epoch or a guarantee about transfer-ID reuse/history eviction.
-        self._completed_write_transfers: OrderedDict[TransferId, None] = OrderedDict()
         # Producer-side READ-mode ACK fan-in. When decode TP is larger than
         # prefill TP, multiple decode ranks can read from one prefill rank and
         # notify the same transfer_id. Blocks are reusable only after all ACKs.
@@ -2236,7 +2240,7 @@ class MoRIIOConnectorWorker:
             remote_dp_size: Global DP size of the decode instance
             remote_tp_size: Tensor parallel size advertised by the peer
             tp_mapping: Decode ranks this rank writes and what each receives
-            transfer_state: Submission gate retained across asynchronous handshakes
+            transfer_state: Shared gate retained by pending handshakes
 
         """
         # synchronization to prevent dirty reads between
@@ -3112,9 +3116,7 @@ class MoRIIOConnectorWorker:
                 # Accumulate with any completions that arrived before their
                 # transfer_id was registered in transfer_id_to_request_id.
                 self._unmatched_write_completions |= fresh
-                done_recving = (
-                    self._unmatched_write_completions - self._reported_write_transfers
-                )
+                done_recving = self._unmatched_write_completions
             else:
                 # READ mode: the scheduler treats KV loads as synchronous
                 # (load_kv_async=False), so requests go directly to RUNNING
@@ -3139,7 +3141,6 @@ class MoRIIOConnectorWorker:
                 if id in self.transfer_id_to_request_id
             }
             self._unmatched_write_completions -= matched_xfer_ids
-            self._reported_write_transfers.update(matched_xfer_ids)
 
         return done_sending, done_recving
 
@@ -3150,32 +3151,14 @@ class MoRIIOConnectorWorker:
         if self.mode == MoRIIOMode.WRITE and not self.is_producer:
             pending = self._unmatched_write_failures
             mapping = self.transfer_id_to_request_id
-            completed = self._completed_write_transfers
             for transfer_id in self.moriio_wrapper.pop_failed_write_req_ids():
-                if transfer_id not in completed:
-                    pending[transfer_id] = None
+                pending[transfer_id] = None
             for transfer_id in [t for t in pending if t in mapping]:
                 del pending[transfer_id]
-                request_id = mapping[transfer_id]
-                if (
-                    transfer_id not in self._reported_write_transfers
-                    or request_id in done_recving
-                ):
-                    # Failure wins over success received in this same poll.
-                    failed_recving.add(request_id)
-                    self._reported_write_transfers.add(transfer_id)
+                failed_recving.add(mapping[transfer_id])
             while len(pending) > _MAX_UNMATCHED_WRITE_FAILURES:
                 pending.popitem(last=False)
             done_recving |= failed_recving
-            # Record only mapped terminal results. Unknown notifications must
-            # still wait for metadata, and failure wins over a success received
-            # in this same poll before the ID enters the completed history.
-            if done_recving:
-                for transfer_id, request_id in mapping.items():
-                    if request_id in done_recving:
-                        completed[transfer_id] = None
-            while len(completed) > _MAX_COMPLETED_WRITE_TRANSFERS:
-                completed.popitem(last=False)
 
         return KVConnectorTransferResults(
             finished_sending=done_sending,
@@ -3327,7 +3310,12 @@ class MoRIIOConnectorWorker:
         remote_engine_id = None
 
         for req_id, meta in metadata.reqs_to_save.items():
-            if not self._writer.bind_transfer(meta):
+            if meta.transfer_state is not None:
+                if meta.transfer_state.cancelled:
+                    continue
+            elif supports_zero_submit_abort(
+                self.world_size, meta.tp_size, self.pp_size
+            ) and not self._writer.bind_transfer(meta):
                 continue
             # we only need to check if dp0 in rank
             remote_engine_id = (
@@ -3561,9 +3549,6 @@ class MoRIIOConnectorWorker:
             self.moriio_wrapper.async_wait_reqid()
             return
         if self.mode == MoRIIOMode.WRITE:
-            self._reported_write_transfers.intersection_update(
-                self.transfer_id_to_request_id
-            )
             return
 
         # Handshake every referenced remote prefill rank up front, before any

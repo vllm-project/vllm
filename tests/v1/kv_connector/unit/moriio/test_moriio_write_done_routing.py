@@ -146,16 +146,7 @@ MLA_FANOUT = compute_write_tp_mapping(1, 2, 4, 1, True, False)
 
 
 def _real_wrapper() -> MoRIIOWrapper:
-    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
-    wrapper.lock = threading.Lock()
-    wrapper.done_req_ids = []
-    wrapper.done_remote_allocate_req_dict = {}
-    wrapper.done_write_cache_req_ids = []
-    wrapper._write_done_senders = {}
-    wrapper.failed_write_cache_req_ids = []
-    wrapper._terminal_transfer_ids = OrderedDict()
-    wrapper._aborted_write_endpoints = {}
-    return wrapper
+    return MoRIIOWrapper()
 
 
 def test_execute_write_task_ip_is_per_task_under_overwrite():
@@ -465,6 +456,7 @@ def _fanout_save_worker(remote_agents: set[str]) -> MoRIIOConnectorWorker:
     worker.mode = MoRIIOMode.WRITE
     worker.tp_rank = 0
     worker.world_size = 1
+    worker.pp_size = 1
     worker.use_mla = True
     worker._has_mamba = False
     worker._remote_agents = {engine_id: {"agent"} for engine_id in remote_agents}
@@ -475,7 +467,6 @@ def _fanout_save_worker(remote_agents: set[str]) -> MoRIIOConnectorWorker:
     worker.moriio_config = SimpleNamespace(transfer_timeout=0.01)
     worker.handshakes = []
     worker.writes = []
-    worker._writer = SimpleNamespace(bind_transfer=lambda meta: True)
     worker._background_moriio_handshake = (  # type: ignore[method-assign]
         lambda req_id, remote_engine_id, meta: worker.handshakes.append(req_id)
     )
@@ -663,8 +654,6 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
         moriio_wrapper=wrapper,
         transfer_id_to_request_id={"tA": "req-1"},
         _unmatched_write_failures=OrderedDict(),
-        _reported_write_transfers=set(),
-        _completed_write_transfers=OrderedDict(),
         get_finished=lambda: (set(), set()),
     )
 

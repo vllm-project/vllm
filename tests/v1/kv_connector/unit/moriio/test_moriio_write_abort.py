@@ -1,28 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MoRIIO WRITE cancellation before the first transport submission.
-
-Writer cases drive the real `MoRIIOWriter`/`MoRIIOWrapper`; only the
-transfer plan, sessions and notification socket are replaced. Scheduler cases
-add the real producer scheduler, allocator and connector worker.
-"""
+"""WRITE abort arbitration; sessions/events replace the CPU-unavailable transport."""
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
+import msgpack
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    ROLE,
     LayerTransferPlan,
     MoRIIOMode,
     RemoteAllocInfo,
     ReqMeta,
     TransferError,
     WriteTask,
-    WriteTransferState,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     MoRIIOConnectorWorker,
@@ -30,10 +26,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
     MoRIIOWriter,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
-    MoRIIOWriteTPMapping,
-    WriteTarget,
 )
 from vllm.v1.request import RequestStatus
 
@@ -43,14 +35,9 @@ from .test_moriio_connector import _setup_kv_transfer_request, create_vllm_confi
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 
-def _setup(*, targets=1, mamba=False):
-    """Writer for one transfer. Two targets only exercise writer iteration;
-    they are not a negotiated heterogeneous topology."""
-    attempts: list[str] = []
-    notifications: list[tuple[str, str]] = []
-    controls = SimpleNamespace(
-        before_plan=lambda task, target: None, on_submit=lambda: None
-    )
+def _setup(*, mamba=False, empty=False):
+    attempts, notifications = [], []
+    controls = SimpleNamespace(on_submit=lambda: None)
     wrapper = MoRIIOWrapper()
     wrapper.local_memory_registered = True
     wrapper.moriio_engine = SimpleNamespace(allocate_transfer_uid=lambda: 1)
@@ -58,8 +45,8 @@ def _setup(*, targets=1, mamba=False):
         notifications.append((tid, message_type))
     )
 
-    def submit(engine_id):
-        attempts.append(engine_id)
+    def submit(*args):
+        attempts.append("WRITE")
         controls.on_submit()
         return SimpleNamespace(Failed=lambda: False, Succeeded=lambda: True)
 
@@ -70,284 +57,241 @@ def _setup(*, targets=1, mamba=False):
         pp_rank=0,
         pp_size=1,
         moriio_wrapper=wrapper,
-        moriio_config=SimpleNamespace(defer_timeout=60.0),
+        moriio_config=SimpleNamespace(defer_timeout=60),
         is_producer=True,
         mode=MoRIIOMode.WRITE,
-        _has_mamba=False,
-        layer_to_spec={},
         transfer_id_to_request_id={},
         _pending_unmapped_acks=[],
         _consumer_notification_counts={},
         _completed_consumer_notifications=set(),
         get_engine_name_with_dp=lambda engine, dp: f"{engine}_dp{dp}",
-        get_engine_name_with_dp_tp=lambda engine, dp, tp: f"{engine}_dp{dp}_tp{tp}",
-        _is_mamba_layer=lambda layer_name: mamba,
-        _get_built_session=lambda engine: (
-            [SimpleNamespace(batch_write=lambda *args: submit(engine))],
-            None,
-        ),
+        _is_mamba_layer=lambda layer: mamba,
+        _get_built_session=lambda engine: ([SimpleNamespace(batch_write=submit)], None),
     )
     wrapper.async_wait_reqid = lambda: None
     writer = worker._writer = MoRIIOWriter(worker)
     writer.ensure_worker_started = lambda: None
+    meta = ReqMeta("transfer", [[1]], [], "127.0.0.2", 7000, 7000, 7000, "decode", 1, 1)
+    task = WriteTask(
+        "request",
+        meta.transfer_id,
+        "decode",
+        [[1]],
+        None,
+        "layer",
+        SimpleNamespace(synchronize=lambda: None),
+        7000,
+        "127.0.0.2",
+        remote_tp_size=1,
+    )
 
-    def prepare(
-        task, info, remote_meta, *, remote_engine_id=None, target=None, tp_mapping=None
-    ):
-        controls.before_plan(task, target)
+    def prepare(*args, **kwargs):
         return LayerTransferPlan(
-            task.request_id, task.transfer_id, task.layer_name, 0, [0], [0], [8]
+            task.request_id,
+            task.transfer_id,
+            task.layer_name,
+            0,
+            [] if empty else [0],
+            [] if empty else [0],
+            [] if empty else [8],
         )
 
     writer._prepare_transfer_plan = prepare
-    writer._prepare_mamba_transfer_plans = lambda task, info, target, meta, engine: [
-        prepare(task, info, meta, target=target)
-    ]
-    meta = ReqMeta(
-        transfer_id="transfer",
-        local_block_ids=[[1]],
-        remote_block_ids=[],
-        remote_host="127.0.0.2",
-        remote_port=6301,
-        remote_handshake_port=6301,
-        remote_notify_port=61005,
-        remote_engine_id="decode",
-        tp_size=1,
-        remote_dp_size=1,
-    )
-    write_targets = tuple(
-        WriteTarget(rank, 0, 0, 1, 0, 1, 0, 1, 1) for rank in range(targets)
-    )
-    worker._write_tp_mapping = lambda *args: MoRIIOWriteTPMapping(
-        1, 1, 1, 1, write_targets
-    )
-    task = WriteTask(
-        request_id="request",
-        transfer_id=meta.transfer_id,
-        dst_engine_id="decode",
-        local_block_ids=[[1]],
-        remote_block_ids_hint=None,
-        layer_name="layer-0",
-        event=SimpleNamespace(synchronize=lambda: None),
-        remote_notify_port=61005,
-        remote_ip="127.0.0.2",
-        remote_tp_size=1,
-        tp_mapping=(
-            MoRIIOWriteTPMapping(1, 1, 1, 1, write_targets) if targets > 1 else None
-        ),
-    )
+    writer._prepare_mamba_transfer_plans = lambda *args: [prepare()]
+    allocation = RemoteAllocInfo([[2]])
+    wrapper.done_remote_allocate_req_dict[meta.transfer_id] = allocation
     return SimpleNamespace(
         worker=worker,
         writer=writer,
         wrapper=wrapper,
         meta=meta,
         task=task,
+        allocation=allocation,
         controls=controls,
         attempts=attempts,
         notifications=notifications,
     )
 
 
-def _allocate(h):
-    h.allocation = RemoteAllocInfo([[2]])
-    h.wrapper.done_remote_allocate_req_dict[h.task.transfer_id] = h.allocation
+def _run(h, task=None):
+    assert h.writer.schedule_write(task or h.task)
+    h.writer._execute_write_task(h.writer._write_task_q.get_nowait())
 
 
 def _acks(h):
     return [ack.transfer_id for ack in h.wrapper.done_req_ids]
 
 
-def _run_deferred(h, task=None):
-    assert h.writer.schedule_write(h.task if task is None else task)
-    h.writer._deferred_tasks.append(h.writer._write_task_q.get_nowait())
-    h.writer._process_deferred_tasks()
-
-
-def _assert_source_released_once(h):
-    """A failure after a possible submit frees the source, as on main, but
-    never tells decode to reuse its blocks; a later abort changes nothing."""
-    assert h.attempts
-    assert h.task.transfer_state.submit_started
-    assert not h.writer.abort_before_write(h.task.request_id, h.meta)
-    h.writer._mark_request_done(h.task.transfer_id, h.task.transfer_state)
-    assert _acks(h) == ["transfer"]
-    assert h.notifications == []
-    assert h.wrapper.done_remote_allocate_req_dict == {}
-
-
-@pytest.mark.parametrize("allocation_arrived", [False, True])
-def test_abort_before_submit_notifies_and_acks_once(allocation_arrived):
-    h = _setup()
-    if allocation_arrived:
-        _allocate(h)
-
-    # Cancellation is only claimed for homogeneous TP.
-    assert not h.writer.abort_before_write("request", replace(h.meta, tp_size=2))
+def test_empty_plan_does_not_close_submission_gate(monkeypatch):
+    h = _setup(empty=True)
+    assert h.writer.bind_transfer(h.meta)
+    h.task.transfer_state = h.meta.transfer_state
+    _run(h)
     assert h.writer.abort_before_write(h.task.request_id, h.meta)
     assert not h.writer.abort_before_write(h.task.request_id, h.meta)
-    assert not h.writer.schedule_write(h.task)
+    assert h.meta.transfer_state.cancelled
+    assert not h.writer.bind_transfer(h.meta)
+    h.writer.seal_pending_transfers()
+    h.writer._finalize_if_complete(h.task.transfer_id, h.allocation)
     assert h.attempts == []
     assert h.notifications == [("transfer", "write_failed")]
     assert _acks(h) == ["transfer"]
-    assert h.wrapper.done_remote_allocate_req_dict == {}
+    # Late allocation is ignored; it must not cause another notification/ACK.
+    monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.PRODUCER)
+    h.wrapper._handle_message(
+        msgpack.dumps(
+            {
+                "type": "remote_blocks",
+                "transfer_id": "transfer",
+                "block_notify_list": [2],
+            }
+        )
+    )
+    assert not h.wrapper.done_remote_allocate_req_dict
+    assert h.notifications == [("transfer", "write_failed")]
+    consumer = MoRIIOWrapper()
+    monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.CONSUMER)
+    for kind in ["write_failed", "write_failed", "write_done"]:
+        consumer._handle_message(
+            msgpack.dumps({"type": kind, "transfer_id": "transfer"})
+        )
+    assert consumer.pop_failed_write_req_ids() == {"transfer"}
+    assert not consumer.pop_failed_write_req_ids()
+    assert not consumer.pop_finished_write_req_ids()
 
 
 @pytest.mark.parametrize("submit_wins", [False, True])
-@pytest.mark.parametrize("mamba", [False, True], ids=["attention", "mamba"])
+@pytest.mark.parametrize("mamba", [False, True])
 def test_abort_and_first_submit_have_one_winner(submit_wins, mamba):
     h = _setup(mamba=mamba)
-    _allocate(h)
     reached, resume = threading.Event(), threading.Event()
 
     def pause():
         reached.set()
-        assert resume.wait(5), "test failed to release the writer"
+        assert resume.wait(5)
 
     if submit_wins:
         h.controls.on_submit = pause
     else:
         h.task.event = SimpleNamespace(synchronize=pause)
-    assert h.writer.schedule_write(h.task)
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(h.writer._execute_write_task, h.task)
+        future = executor.submit(_run, h)
         try:
-            assert reached.wait(5), "writer did not reach the race"
-            aborted = h.writer.abort_before_write(h.task.request_id, h.meta)
-            assert aborted is not submit_wins
-            if submit_wins:
-                assert h.notifications == []
-                assert h.wrapper.done_req_ids == []
+            assert reached.wait(5)
+            assert (
+                h.writer.abort_before_write(h.task.request_id, h.meta)
+                is not submit_wins
+            )
         finally:
             resume.set()
         future.result(timeout=5)
     h.writer.seal_pending_transfers()
+    assert len(h.attempts) == int(submit_wins)
+    assert h.notifications == [
+        ("transfer", "write_done" if submit_wins else "write_failed")
+    ]
+    assert _acks(h) == ["transfer"]
 
-    if submit_wins:
-        assert h.attempts == ["decode_dp0"]
-        assert h.notifications == [("transfer", "write_done")]
+
+def test_empty_finalize_claim_keeps_abort_out():
+    h = _setup(empty=True)
+    _run(h)
+    reached, resume = threading.Event(), threading.Event()
+
+    def wait_for_transport(statuses):
+        assert statuses == []
+        reached.set()
+        assert resume.wait(5)
+
+    h.wrapper.waiting_for_transfer_complete = wait_for_transport
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(h.writer.seal_pending_transfers)
+        try:
+            assert reached.wait(5)
+            assert not h.writer.abort_before_write(h.task.request_id, h.meta)
+        finally:
+            resume.set()
+        future.result(timeout=5)
+    h.writer._finalize_if_complete(h.task.transfer_id, h.allocation)
+    assert h.attempts == []
+    assert h.notifications == [("transfer", "write_done")]
+    assert _acks(h) == ["transfer"]
+
+
+@pytest.mark.parametrize("later_layer", [False, True])
+def test_possible_submit_failure_releases_source_only(later_layer):
+    h = _setup()
+    if later_layer:
+        _run(h)
+        task = replace(h.task, layer_name="later", transfer_state=None)
     else:
-        assert h.attempts == []
-        assert h.notifications == [("transfer", "write_failed")]
+        task = h.task
+
+    def fail(*args, **kw):
+        raise TransferError("submission outcome unknown")
+
+    if later_layer:
+        h.writer._prepare_transfer_plan = fail
+    else:
+        h.controls.on_submit = fail
+    assert h.writer.schedule_write(task)
+    h.writer._deferred_tasks.append(h.writer._write_task_q.get_nowait())
+    h.writer._process_deferred_tasks()
+    assert h.attempts == ["WRITE"]
+    assert not h.writer.abort_before_write(h.task.request_id, h.meta)
+    assert h.notifications == []
+    assert _acks(h) == ["transfer"]
+    h.writer._mark_request_done(h.task.transfer_id)
     assert _acks(h) == ["transfer"]
 
 
 @pytest.mark.parametrize(
-    "failure", ["submit_raises", "second_target_prepare", "later_layer_prepare"]
+    ("allocated", "missing_peer_fields"), [(False, False), (False, True), (True, False)]
 )
-def test_failure_after_possible_submit_releases_source_only(failure):
-    h = _setup(targets=2)
-    _allocate(h)
-    if failure == "submit_raises":
-        # The transport may have accepted part of the write before raising.
-        def raise_after_attempt():
-            raise TransferError("submission outcome unknown")
-
-        h.controls.on_submit = raise_after_attempt
-        _run_deferred(h)
-        assert h.attempts == ["decode_dp0_tp0"]
-    elif failure == "second_target_prepare":
-
-        def fail_second(task, target):
-            if target.tp_rank == 1:
-                raise TransferError("second target preparation failed")
-
-        h.controls.before_plan = fail_second
-        _run_deferred(h)
-        assert h.attempts == ["decode_dp0_tp0"]
-    else:
-        # Separate state objects for the two layers still share one gate.
-        h.task.transfer_state = WriteTransferState()
-        later = replace(h.task, layer_name="layer-1")
-        later.transfer_state = WriteTransferState()
-        assert h.writer.schedule_write(h.task)
-        h.writer._execute_write_task(h.writer._write_task_q.get_nowait())
-        late_meta = replace(h.meta, transfer_state=WriteTransferState())
-        assert h.writer.bind_transfer(late_meta)
-        assert late_meta.transfer_state is h.task.transfer_state
-
-        def fail(task, target):
-            raise TransferError("later layer preparation failed")
-
-        h.controls.before_plan = fail
-        _run_deferred(h, later)
-        assert later.transfer_state is h.task.transfer_state
-    _assert_source_released_once(h)
-
-
-def _add_producer_request(scheduler, h, num_tokens):
-    request = create_request(num_tokens=num_tokens, do_remote_decode=True)
-    _setup_kv_transfer_request(request, fake_transfer_id=h.task.transfer_id)
-    h.task.request_id = request.request_id
-    scheduler.add_request(request)
-    return request
-
-
-def _deliver_ack(scheduler, h, step):
-    finished_sending, _ = h.worker.get_finished()
-    assert finished_sending == {h.task.request_id}
-    scheduler.update_from_output(
-        step, create_model_runner_output([], finished_sending=finished_sending)
+def test_abort_before_alloc_uses_configured_peer_pods(allocated, missing_peer_fields):
+    config = create_vllm_config(role="kv_producer")
+    config.parallel_config.tensor_parallel_size = 2
+    config.kv_transfer_config.kv_connector_extra_config.update(
+        remote_hosts=["10.0.0.1", "10.0.0.2"], remote_dp_size_local=8
     )
-
-
-@pytest.mark.parametrize("path", ["never_scheduled", "queued"])
-def test_producer_scheduler_frees_once_on_worker_ack(monkeypatch, path):
-    scheduler = create_scheduler(
-        create_vllm_config(role="kv_producer", max_num_batched_tokens=64)
-    )
-    h = _setup()
-    worker = h.worker
-    pool = scheduler.kv_cache_manager.block_pool
-    free_before = pool.get_num_free_blocks()
-    request = _add_producer_request(scheduler, h, 32)
-    free = MagicMock(wraps=scheduler.kv_cache_manager.free)
-    monkeypatch.setattr(scheduler.kv_cache_manager, "free", free)
-    if path != "never_scheduled":
-        worker.start_load_kv(scheduler.schedule().kv_connector_metadata)
-    if path == "queued":
-        assert h.writer.schedule_write(h.task)
-
-    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
-    # Blocks stay with the request until the worker closes the gate.
-    assert request.request_id in scheduler.requests
-    assert free.call_count == 0
-    step = scheduler.schedule()
-    assert step.total_num_scheduled_tokens == 0
-    assert set(step.kv_connector_metadata.reqs_to_abort) == {request.request_id}
-    worker.start_load_kv(step.kv_connector_metadata)
-    _deliver_ack(scheduler, h, step)
-
-    assert request.request_id not in scheduler.requests
-    assert pool.get_num_free_blocks() == free_before
-    assert not scheduler.has_requests()
-    # A stale queued task adds no write, failure or ACK.
-    worker.start_load_kv(scheduler.schedule().kv_connector_metadata)
-    if path == "queued":
-        h.writer._execute_write_task(h.writer._write_task_q.get_nowait())
-    assert worker.get_finished() == (set(), set())
-    assert h.attempts == []
-    assert h.notifications == [("transfer", "write_failed")]
-    assert free.call_count == 1
-
-
-@pytest.mark.parametrize("topology", ["remote_tp_size", "tp_size", "pipeline"])
-def test_multi_writer_producer_abort_keeps_existing_behavior(topology):
-    scheduler = create_scheduler(create_vllm_config(role="kv_producer"))
-    connector = scheduler.connector.connector_scheduler
+    scheduler = create_scheduler(config)
     request = create_request(num_tokens=32, do_remote_decode=True)
-    _setup_kv_transfer_request(request, fake_transfer_id="hetero")
-    if topology == "pipeline":
-        connector.vllm_config.parallel_config.pipeline_parallel_size = 2
-    else:
-        request.kv_transfer_params.pop("remote_tp_size", None)
-        request.kv_transfer_params[topology] = 2
+    _setup_kv_transfer_request(request, fake_transfer_id="transfer", fake_port=7000)
+    request.kv_transfer_params.update(remote_dp_size=16, remote_tp_size=2)
+    if missing_peer_fields:
+        for key in ["remote_engine_id", "remote_block_ids"]:
+            del request.kv_transfer_params[key]
     pool = scheduler.kv_cache_manager.block_pool
     free_before = pool.get_num_free_blocks()
     scheduler.add_request(request)
-    scheduler.schedule()
-
+    if allocated:
+        scheduler.schedule()
+        assert pool.get_num_free_blocks() < free_before
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    step = scheduler.schedule()
+    h = _setup()
+    h.wrapper.done_remote_allocate_req_dict.clear()
+    h.worker.world_size, h.worker.tp_rank = 2, 1
+    routed = []
+    h.wrapper.send_notify = lambda tid, host, port, **kw: routed.append((host, port))
+    h.worker.start_load_kv(step.kv_connector_metadata)
+    assert routed[9] == ("10.0.0.2", 7003)
+    assert len(routed) == 16
+    finished, _ = h.worker.get_finished()
+    assert finished == {request.request_id}
+    scheduler.update_from_output(
+        step, create_model_runner_output([], finished_sending=finished)
+    )
     assert request.request_id not in scheduler.requests
     assert pool.get_num_free_blocks() == free_before
-    assert not connector._reqs_need_abort
-    assert not connector._deferred_send_deadlines
+    assert _acks(h) == []  # The one source ACK was consumed.
+    assert h.worker.get_finished() == (set(), set())
+
+
+def test_unallocated_abort_without_peer_can_finish_locally():
+    scheduler = create_scheduler(create_vllm_config(role="kv_producer"))
+    request = create_request(num_tokens=32, do_remote_decode=True)
+    scheduler.add_request(request)
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.schedule().kv_connector_metadata.reqs_to_abort

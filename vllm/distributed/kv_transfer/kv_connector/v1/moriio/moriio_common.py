@@ -612,6 +612,7 @@ class ReqMeta:
     multi_pod_hosts: list[str] = field(default_factory=list)
     # Per-pod DP size; 0 means fallback to remote_dp_size.
     remote_dp_size_local: int = 0
+
     transfer_state: WriteTransferState | None = None
 
 
@@ -638,7 +639,6 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
         write_mode=False,
-        abort_write: bool = False,
     ):
         """Ingest a peer's `kv_transfer_params` into a typed `ReqMeta`.
 
@@ -737,9 +737,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             multi_pod_hosts=_pod_hosts,
             remote_dp_size_local=_remote_dp_size_local,
         )
-        if abort_write:
-            self.reqs_to_abort[request_id] = _req
-        elif write_mode:
+        if write_mode:
             self.reqs_to_save[request_id] = _req
         else:
             self.reqs_to_recv[request_id] = _req

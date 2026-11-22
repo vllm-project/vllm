@@ -163,11 +163,14 @@ class MoRIIOWriter:
                 return False
             if task.layer_name in self._scheduled_layers[task.transfer_id]:
                 return False
-            task.transfer_state = self._transfer_states.setdefault(
-                task.transfer_id, task.transfer_state or WriteTransferState()
-            )
-            if task.transfer_state.cancelled:
-                return False
+            if supports_zero_submit_abort(
+                self.worker.world_size, task.remote_tp_size or 0, self.worker.pp_size
+            ):
+                task.transfer_state = self._transfer_states.setdefault(
+                    task.transfer_id, task.transfer_state or WriteTransferState()
+                )
+                if task.transfer_state.cancelled:
+                    return False
             self._scheduled_layers[task.transfer_id].add(task.layer_name)
             self._scheduled_writes[task.transfer_id] += 1
         self._write_task_q.put(task)
@@ -205,6 +208,9 @@ class MoRIIOWriter:
             state = self._transfer_states.get(meta.transfer_id)
             if state is not None and state.submit_started:
                 return False
+            info = wrapper.done_remote_allocate_req_dict.get(meta.transfer_id)
+            if info is not None and info.completion_notified:
+                return False
             with wrapper.lock:
                 if wrapper._is_transfer_terminal_locked(meta.transfer_id):
                     return False
@@ -213,12 +219,16 @@ class MoRIIOWriter:
                     # terminal-ID history forgets this transfer.
                     state.cancelled = True
                 wrapper._mark_transfer_terminal_locked(meta.transfer_id)
-                wrapper._aborted_write_endpoints[meta.transfer_id] = endpoints
                 wrapper.done_remote_allocate_req_dict.pop(meta.transfer_id, None)
+                wrapper.done_req_ids.append(MoRIIOTransferAck(meta.transfer_id))
         self._clear_transfer_state(meta.transfer_id)
-        wrapper.notify_aborted_write(meta.transfer_id, endpoints)
-        with wrapper.lock:
-            wrapper.done_req_ids.append(MoRIIOTransferAck(meta.transfer_id))
+        for host, port in endpoints:
+            try:
+                wrapper.send_notify(
+                    meta.transfer_id, host, port, message_type="write_failed"
+                )
+            except Exception:
+                logger.exception("Failed to notify aborted WRITE %s", meta.transfer_id)
         logger.debug("Cancelled unsubmitted WRITE for request %s", request_id)
         return True
 
@@ -284,10 +294,10 @@ class MoRIIOWriter:
                 self._execute_write_task(task)
             except Exception:
                 logger.exception(
-                    "Write task failed for request %s, checking submission state",
+                    "Write task failed for request %s, marking done",
                     task.request_id,
                 )
-                self._mark_request_done(task.transfer_id, task.transfer_state)
+                self._mark_request_done(task.transfer_id)
 
     def _process_deferred_tasks(self) -> None:
         """Process tasks that were previously deferred."""
@@ -308,33 +318,19 @@ class MoRIIOWriter:
                     self._execute_write_task(task)
                 except Exception:
                     logger.exception(
-                        "Deferred write task failed for request %s, "
-                        "checking submission state",
+                        "Deferred write task failed for request %s, marking done",
                         task.request_id,
                     )
-                    self._mark_request_done(task.transfer_id, task.transfer_state)
-            elif now - task.enqueue_time > defer_timeout:
-                if not self._fail_deferred_task(task, now - task.enqueue_time):
-                    still_deferred.append(task)
+                    self._mark_request_done(task.transfer_id)
+            elif (
+                now - task.enqueue_time > defer_timeout
+                and self.worker.moriio_wrapper.fail_unallocated_write(task.transfer_id)
+            ):
+                self._notify_write_failed(task, now - task.enqueue_time)
             else:
                 still_deferred.append(task)
 
         self._deferred_tasks = still_deferred
-
-    def _fail_deferred_task(self, task: WriteTask, age: float) -> bool:
-        """Serialize timeout with abort and first submission."""
-        with self._write_state_lock:
-            if task.transfer_state is not None:
-                if task.transfer_state.cancelled:
-                    return True
-                if task.transfer_state.submit_started:
-                    return False
-            if not self.worker.moriio_wrapper.fail_unallocated_write(task.transfer_id):
-                return False
-            if task.transfer_state is not None:
-                task.transfer_state.cancelled = True
-        self._notify_write_failed(task, age)
-        return True
 
     def _notify_write_failed(self, task: WriteTask, age: float) -> None:
         self._clear_transfer_state(task.transfer_id)
@@ -378,9 +374,7 @@ class MoRIIOWriter:
         with wrapper.lock:
             return wrapper._is_transfer_terminal_locked(transfer_id)
 
-    def _mark_request_done(
-        self, transfer_id: str, state: WriteTransferState | None = None
-    ) -> None:
+    def _mark_request_done(self, transfer_id: str) -> None:
         """Release a failed transfer's source blocks exactly once.
 
         Decode is not notified here: after a possible submit, telling it to
@@ -388,7 +382,7 @@ class MoRIIOWriter:
         """
         wrapper = self.worker.moriio_wrapper
         with self._write_state_lock:
-            state = self._transfer_states.get(transfer_id, state)
+            state = self._transfer_states.get(transfer_id)
             with wrapper.lock:
                 if wrapper._is_transfer_terminal_locked(transfer_id):
                     return
@@ -441,14 +435,7 @@ class MoRIIOWriter:
 
         """
         with self._write_state_lock:
-            if (
-                task.transfer_state is not None and task.transfer_state.cancelled
-            ) or self._is_transfer_terminal(task.transfer_id):
-                return
-            state = task.transfer_state = self._transfer_states.setdefault(
-                task.transfer_id, task.transfer_state or WriteTransferState()
-            )
-            if state.cancelled:
+            if task.transfer_state is not None and task.transfer_state.cancelled:
                 return
             request_info = self._get_remote_alloc_info(task.transfer_id)
             request_info.completion_request_id = task.request_id
@@ -523,16 +510,13 @@ class MoRIIOWriter:
                         tp_mapping=layer_mapping,
                     )
                 ]
-            # Serialize cancellation with this transfer's first possible submit.
-            # The shared state is never reset between targets or layer tasks.
-            with self._write_state_lock:
-                if state.cancelled or self._is_transfer_terminal(task.transfer_id):
-                    return
-                state.submit_started = True
             for plan in plans:
-                transfer_statuses = self._do_layer_write(plan, sessions)
+                if task.transfer_state is None:
+                    statuses = self._do_layer_write(plan, sessions)
+                else:
+                    statuses = self._do_layer_write(plan, sessions, task.transfer_state)
                 with self._write_state_lock:
-                    request_info.transfer_statuses.extend(transfer_statuses)
+                    request_info.transfer_statuses.extend(statuses)
 
         # Finalize if all layers complete
         self._mark_write_done(task.transfer_id, request_info)
@@ -692,15 +676,29 @@ class MoRIIOWriter:
             )
         return plans
 
-    def _do_layer_write(self, plan: LayerTransferPlan, sessions: list) -> list[Any]:
+    def _do_layer_write(
+        self,
+        plan: LayerTransferPlan,
+        sessions: list,
+        state: WriteTransferState | None = None,
+    ) -> list[Any]:
         """Perform the actual layer write.
 
         Args:
             plan: The transfer plan
             sessions: List of transfer sessions
+            state: Shared cancellation gate for supported WRITE topologies
 
         """
         if not plan.transfer_sizes:
+            return []
+        if state is not None and not state.submit_started:
+            with self._write_state_lock:
+                if state.cancelled:
+                    return []
+                # An attempt may be accepted even when the transport raises.
+                state.submit_started = True
+        elif state is not None and state.cancelled:
             return []
         if plan.use_batch:
             return [
@@ -743,7 +741,7 @@ class MoRIIOWriter:
             if request_info.completion_notified:
                 return
             request_id = request_info.completion_request_id
-            if request_id is None:
+            if request_id is None or self._is_transfer_terminal(transfer_id):
                 return
             notify_targets = dict(
                 sorted(request_info.completion_notify_targets.items())
@@ -906,7 +904,6 @@ class MoRIIOWrapper:
         # Writers that sent write_done, per transfer whose writers are not all in.
         self._write_done_senders: dict[TransferId, set[Any]] = {}
         self._terminal_transfer_ids: OrderedDict[TransferId, None] = OrderedDict()
-        self._aborted_write_endpoints: dict[TransferId, list[tuple[str, int]]] = {}
         self._transfer_timeout = transfer_timeout
         self.notify_thread: threading.Thread | None = None
         self.sessions: list[IOEngine.Session] = []
@@ -1252,36 +1249,22 @@ class MoRIIOWrapper:
                 "block_notify_list cannot be empty in remote allocate message"
             )
 
-        abort_endpoints = None
         with self.lock:
-            abort_endpoints = self._aborted_write_endpoints.get(transfer_id)
             if self._is_transfer_terminal_locked(transfer_id):
                 logger.debug(
                     "Ignoring remote allocation for terminal transfer %s",
                     transfer_id,
                 )
-            else:
-                self.done_remote_allocate_req_dict[transfer_id] = RemoteAllocInfo(
-                    block_ids=(
-                        [block_notify_list]
-                        if isinstance(block_notify_list[0], int)
-                        else block_notify_list
-                    ),
-                    num_skip_blocks=int(data.get("num_skip_blocks", 0)),
-                    decode_dp_rank=decode_dp_rank,
-                )
-        if abort_endpoints is not None:
-            self.notify_aborted_write(transfer_id, abort_endpoints)
-
-    def notify_aborted_write(
-        self, transfer_id: TransferId, endpoints: list[tuple[str, int]]
-    ) -> None:
-        """Report a zero-submit abort, also when its allocation arrives late."""
-        for host, port in endpoints:
-            try:
-                self.send_notify(transfer_id, host, port, message_type="write_failed")
-            except Exception:
-                logger.exception("Failed to notify aborted WRITE %s", transfer_id)
+                return
+            self.done_remote_allocate_req_dict[transfer_id] = RemoteAllocInfo(
+                block_ids=(
+                    [block_notify_list]
+                    if isinstance(block_notify_list[0], int)
+                    else block_notify_list
+                ),
+                num_skip_blocks=int(data.get("num_skip_blocks", 0)),
+                decode_dp_rank=decode_dp_rank,
+            )
 
     def _handle_write_done_message(self, data: dict):
         assert get_role() != ROLE.PRODUCER, (
@@ -1361,8 +1344,7 @@ class MoRIIOWrapper:
         self._terminal_transfer_ids[transfer_id] = None
         self._terminal_transfer_ids.move_to_end(transfer_id)
         while len(self._terminal_transfer_ids) > _MAX_TERMINAL_TRANSFER_IDS:
-            expired, _ = self._terminal_transfer_ids.popitem(last=False)
-            self._aborted_write_endpoints.pop(expired, None)
+            self._terminal_transfer_ids.popitem(last=False)
 
     def send_notify(
         self,
