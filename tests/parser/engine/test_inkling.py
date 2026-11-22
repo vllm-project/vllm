@@ -9,6 +9,7 @@ cases mirror the Rust unified parser's tests
 (`rust/src/parser/src/unified/inkling.rs`) where applicable.
 """
 
+import dataclasses
 import json
 
 import pytest
@@ -33,7 +34,12 @@ from vllm.parser.engine.registered_adapters import (
     InklingParserToolAdapter,
 )
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
-from vllm.parser.inkling import InklingParser, _inkling_arg_converter, inkling_config
+from vllm.parser.inkling import (
+    InklingParser,
+    _inkling_arg_converter,
+    _inkling_arg_value_extender,
+    inkling_config,
+)
 from vllm.parser.parser_manager import ParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
@@ -259,6 +265,92 @@ class TestArgConverter:
     def test_non_object_args_rejected(self):
         with pytest.raises(ValueError, match="JSON object"):
             _inkling_arg_converter('{"name":"x","args":[1]}', False)
+
+
+# Escapes, braces, non-ASCII and marker-like text that must stay inside the value.
+LONG_ARG_LINE = 'if a < b: print("x\\y", {"k": [1, "}"]})  # <|end_message \u00e9\n'
+
+
+def _long_tool_block(lines: int) -> str:
+    args = json.dumps(
+        {"path": "/repo/app.py", "mode": 644, "content": LONG_ARG_LINE * lines}
+    )
+    return _tool_block("write_file", args)
+
+
+class TestArgValueExtender:
+    """The open `args` object streams without re-running the converter."""
+
+    @pytest.mark.parametrize("chunk_size", [1, 7, 64])
+    def test_long_call_streams_non_streaming_arguments(
+        self, mock_tokenizer, mock_request, chunk_size
+    ):
+        text = _long_tool_block(lines=200)
+
+        results = _stream(InklingParser(mock_tokenizer), mock_request, text, chunk_size)
+        result = InklingParser(mock_tokenizer).extract_tool_calls(text, mock_request)
+
+        assert (
+            collect_tool_arguments(results) == result.tool_calls[0].function.arguments
+        )
+
+    def test_conversions_do_not_grow_with_argument_length(
+        self, mock_tokenizer, mock_request
+    ):
+        base = inkling_config()
+
+        def streaming_conversions(lines: int) -> int:
+            calls = 0
+
+            def counting_converter(raw_args: str, partial: bool) -> str:
+                nonlocal calls
+                calls += partial
+                return _inkling_arg_converter(raw_args, partial)
+
+            parser = InklingParser(
+                mock_tokenizer,
+                parser_engine_config=dataclasses.replace(
+                    base, arg_converter=counting_converter
+                ),
+            )
+            _stream(parser, mock_request, _long_tool_block(lines), 4)
+            return calls
+
+        assert streaming_conversions(lines=20) == streaming_conversions(lines=200)
+
+    def test_string_extender_stops_at_closing_quote(self):
+        extend = _inkling_arg_value_extender('{"name":"f","args":{"a":"x')
+        assert extend is not None
+        assert [extend(d) for d in ["{y}", '\\"', "z\\\\", '"']] == [
+            "{y}",
+            '\\"',
+            "z\\\\",
+            None,
+        ]
+
+    def test_nested_extender_stops_when_value_closes(self):
+        extend = _inkling_arg_value_extender('{"name":"f","args":{"a":{"b":"}')
+        assert extend is not None
+        assert [extend(d) for d in ['"', ',"c":[1,', "2]", "}"]] == [
+            '"',
+            ',"c":[1,',
+            "2]",
+            None,
+        ]
+
+    @pytest.mark.parametrize(
+        "raw_args",
+        [
+            '{"name":"f"',
+            '{"name":"f","args":{"a":"x"}',
+            '{"name":"f","args":{"a":"x","b',
+            '{"name":"f","args":{"a":',
+            '{"name":"f","args":{"a": ',
+        ],
+        ids=["args_not_started", "args_closed", "key", "value_not_started", "ws"],
+    )
+    def test_no_extender_unless_value_is_open(self, raw_args):
+        assert _inkling_arg_value_extender(raw_args) is None
 
 
 class TestNonStreaming:
