@@ -47,6 +47,7 @@ _PARAM = re.compile(r"""<param(?:\s*name=['"]([^'"]+)['"]|(?=\s|>))[^<>]*>""")
 _PARAM_END = "</param>"
 _CDATA_START = "<![CDATA["
 _CDATA_END = "]]>"
+_CDATA_PARAM_START = re.compile(_PARAM.pattern + r"\s*" + re.escape(_CDATA_START))
 _XML_ENTITY = re.compile(r"&(?:amp|lt|gt|quot|apos|#[0-9]{1,7}|#x[0-9a-fA-F]{1,6});")
 
 # SentencePiece/GPT-style decoders may emit U+0120 (Ġ) / U+010A (Ċ).
@@ -240,6 +241,18 @@ def _find_function_end(text: str, start: int, *, final: bool) -> int:
         cdata_end = text.find(_CDATA_END, cdata + len(_CDATA_START))
         if cdata_end == -1:
             return end if final else -1
+
+        # A later function with its own CDATA parameter owns this terminator.
+        after_close = end + len(_FUNCTION_END)
+        recovery_end = None
+        for opener in _FUNCTION_NAME.finditer(text, after_close, cdata_end):
+            if recovery_end is None:
+                recovery_end = text.rfind(_FUNCTION_END, end, opener.start())
+            next_end = text.find(_FUNCTION_END, opener.end(), cdata_end)
+            next_end = cdata_end if next_end == -1 else next_end
+            if _CDATA_PARAM_START.search(text, opener.end(), next_end):
+                return recovery_end
+
         start = cdata_end + len(_CDATA_END)
     return -1
 

@@ -844,7 +844,7 @@ def test_recovers_missing_param_close(parser: ToolParser, stream: bool) -> None:
 @pytest.mark.parametrize("stream", [False, True])
 def test_cdata_in_arguments_wrapper(parser: ToolParser, stream: bool) -> None:
     request = make_request(make_tools_write())
-    value = "  </function>\n<param name='ignored'>&lt;  "
+    value = "  </function>\n<function name='write_file'><param name='ignored'>&lt;  "
     text = (
         '<function name="write_file"><arguments><param name="content">\n '
         f"<![CDATA[{value}]]></arguments></function>"
@@ -854,6 +854,46 @@ def test_cdata_in_arguments_wrapper(parser: ToolParser, stream: bool) -> None:
     else:
         calls = parser.extract_tool_calls(text, request).tool_calls
     assert_tool_calls(calls, [make_tool_call("write_file", {"content": value})])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("between", "prose", "cities"),
+    [
+        pytest.param("", "", ["Beijing", "Shanghai"], id="adjacent"),
+        pytest.param(
+            "\nContinuing.\n", "\nContinuing.\n", ["Beijing", "Shanghai"], id="prose"
+        ),
+        pytest.param(
+            '<function name="get_weather"><param name="city">Tokyo</param></function>',
+            "",
+            ["Beijing", "Tokyo", "Shanghai"],
+            id="ordinary-call",
+        ),
+    ],
+)
+def test_missing_cdata_end_keeps_next_call(
+    parser: ToolParser, stream: bool, between: str, prose: str, cities: list[str]
+) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        '<function name="get_weather"><param name="city"><![CDATA[Beijing'
+        "</param></function>"
+        + between
+        + '<function name="get_weather"><param name="city"><![CDATA[Shanghai]]>'
+        "</param></function>"
+    )
+    if stream:
+        output = run_tool_extraction_streaming(
+            parser, list(text), request, assert_one_tool_per_delta=False
+        )
+        calls = output.tool_calls
+        assert output.other_content == prose
+    else:
+        calls = parser.extract_tool_calls(text, request).tool_calls
+    assert_tool_calls(
+        calls, [make_tool_call("get_weather", {"city": city}) for city in cities]
+    )
 
 
 def test_unified_stream_drains_last_delta() -> None:
@@ -911,11 +951,7 @@ def test_responses_namespace_function(parser: ToolParser, stream: bool) -> None:
 @pytest.mark.parametrize("stream", [False, True])
 def test_collapsed_tag_names(parser: ToolParser, stream: bool) -> None:
     request = make_request(make_tools_weather())
-    text = (
-        '<functionname="get_weather">'
-        '<paramname="city">Paris</param>'
-        "</function>"
-    )
+    text = '<functionname="get_weather"><paramname="city">Paris</param></function>'
     if stream:
         calls = run_tool_extraction_streaming(parser, list(text), request).tool_calls
     else:
@@ -926,7 +962,9 @@ def test_collapsed_tag_names(parser: ToolParser, stream: bool) -> None:
 @pytest.mark.parametrize("stream", [False, True])
 def test_missing_required_stays_in_content(parser: ToolParser, stream: bool) -> None:
     request = make_request(make_tools_weather())
-    text = '<function name="get_weather"><param name="date">2026-11-21</param></function>'
+    text = (
+        '<function name="get_weather"><param name="date">2026-11-21</param></function>'
+    )
     if stream:
         streamed = run_tool_extraction_streaming(parser, list(text), request)
         assert not streamed.tool_calls
