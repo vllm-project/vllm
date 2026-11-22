@@ -21,6 +21,7 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseReasoningItem,
+    ResponseToolSearchCall,
 )
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.response_function_tool_call_output_item import (
@@ -39,14 +40,21 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionMessageParam,
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
+from vllm.entrypoints.openai.responses.protocol import (
+    RESPONSES_TOOL_ADAPTER,
+    ResponseInputOutputItem,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tool_parsers.utils import (
     CUSTOM_TOOL_INPUT_KEY,
+    TOOL_SEARCH_LOADABLE_TYPES,
+    TOOL_SEARCH_TOOL_NAME,
     build_responses_tool_call_name_map,
     flat_namespace_tool_name,
+    get_function_tools,
+    is_client_tool_search,
     iter_response_function_tool_dicts,
     resolve_responses_tool_call_name,
 )
@@ -57,6 +65,58 @@ logger = init_logger(__name__)
 
 def custom_tool_names(tools: list[Tool] | None) -> frozenset[str]:
     return frozenset(tool.name for tool in tools or [] if tool.type == "custom")
+
+
+def tool_search_names(tools: list[Tool] | None) -> frozenset[str]:
+    """Names of the functions that are client-executed `tool_search` calls."""
+    if any(is_client_tool_search(tool) for tool in tools or []):
+        return frozenset({TOOL_SEARCH_TOOL_NAME})
+    return frozenset()
+
+
+def decode_tool_search_arguments(arguments: str) -> object:
+    """Arguments of a `tool_search_call`; text that is not JSON is kept as is."""
+    try:
+        return json.loads(arguments)
+    except ValueError:
+        return arguments
+
+
+def render_loaded_tools(tools: Iterable[Any]) -> str:
+    """Tool-message text for a `tool_search_output`: one schema per line.
+
+    Each loaded function is written the way the chat template is given
+    functions (namespace members as `<namespace>__<name>`), so the model can
+    call it by that name. Tool types that cannot be loaded are skipped.
+    """
+    loadable = [
+        tool
+        for tool in map(RESPONSES_TOOL_ADAPTER.validate_python, tools)
+        if tool.type in TOOL_SEARCH_LOADABLE_TYPES
+    ]
+    lines = []
+    for function_tool in get_function_tools(loadable):
+        schema = function_tool.model_dump(
+            exclude_none=True, exclude={"defer_loading", "strict"}
+        )
+        lines.append(json.dumps(schema, ensure_ascii=False))
+    return "\n".join(lines)
+
+
+def make_tool_search_call(
+    call_id: str,
+    arguments: str,
+    status: Literal["in_progress", "completed", "incomplete"],
+    item_id: str | None = None,
+) -> ResponseToolSearchCall:
+    return ResponseToolSearchCall(
+        id=item_id or f"tsc_{random_uuid()}",
+        call_id=call_id,
+        type="tool_search_call",
+        execution="client",
+        status=status,
+        arguments=decode_tool_search_arguments(arguments) if arguments else {},
+    )
 
 
 def encode_custom_tool_input(payload: str) -> str:
@@ -168,6 +228,7 @@ def build_response_output_items(
     outputs: list[ResponseOutputItem] = []
     tool_call_name_map = build_responses_tool_call_name_map(tools)
     custom_names = custom_tool_names(tools)
+    search_names = tool_search_names(tools)
     last_item_status = response_item_status(finish_reason)
 
     if reasoning is not None:
@@ -218,6 +279,15 @@ def build_response_output_items(
                     )
                 )
                 continue
+            if tool_call.name in search_names:
+                outputs.append(
+                    make_tool_search_call(
+                        call_id,
+                        tool_call.arguments,
+                        last_item_status if is_last else "completed",
+                    )
+                )
+                continue
             call_name = resolve_responses_tool_call_name(
                 tool_call.name, tool_call_name_map=tool_call_name_map
             )
@@ -253,6 +323,9 @@ def reuse_streamed_item_ids(
             item.id = streamed.id
             if isinstance(item, ResponseFunctionToolCall):
                 assert isinstance(streamed, ResponseFunctionToolCall)
+                item.call_id = streamed.call_id
+            elif isinstance(item, ResponseToolSearchCall):
+                assert isinstance(streamed, ResponseToolSearchCall)
                 item.call_id = streamed.call_id
             del remaining[i]
             break
@@ -402,6 +475,20 @@ def _construct_message_from_response_item(
             ),
             type="function",
         )
+    elif _item_type(item) == "tool_search_call":
+        call = _item_dict(item)
+        arguments = call.get("arguments")
+        tool_call = ChatCompletionMessageToolCallParam(
+            # Request validation fills both; a caller passing raw items may not.
+            id=call.get("call_id") or call.get("id") or make_tool_call_id(),
+            function=FunctionCallTool(
+                name=TOOL_SEARCH_TOOL_NAME,
+                arguments=arguments
+                if isinstance(arguments, str)
+                else json.dumps(arguments or {}, ensure_ascii=False),
+            ),
+            type="function",
+        )
     if tool_call is not None:
         if prev_assistant_msg:
             tool_calls = prev_assistant_msg.get("tool_calls")
@@ -481,6 +568,15 @@ def _construct_message_from_response_item(
             role="tool",
             content=output.get("output"),
             tool_call_id=output.get("call_id"),
+        )
+    elif _item_type(item) == "tool_search_output":
+        output = _item_dict(item)
+        return ChatCompletionToolMessageParam(
+            role="tool",
+            content=render_loaded_tools(output.get("tools") or []),
+            tool_call_id=output.get("call_id")
+            or output.get("id")
+            or make_tool_call_id(),
         )
     elif isinstance(item, dict) and item.get("type") == "reasoning":
         # Dict-form reasoning item (e.g. from TypedDict union parsing).
@@ -593,7 +689,32 @@ def construct_tool_dicts(
 ) -> list[dict[str, Any]] | None:
     if not tools or (tool_choice == "none" and exclude_tools_when_tool_choice_none):
         return None
+    _warn_unloadable_deferred_tools(tools)
     return [
         convert_tool_responses_to_completions_format(tool).model_dump()
         for tool in iter_response_function_tool_dicts(tools)
     ]
+
+
+def _warn_unloadable_deferred_tools(tools: list[Tool]) -> None:
+    """Warn about tools the model is told to load but cannot.
+
+    Only a client-executed `tool_search` is shown to the model, so with any
+    other setup a chat template that lists deferred functions without their
+    schema leaves the model to guess the arguments. Templates that ignore
+    `defer_loading` still show the full schema, so this is not an error.
+    """
+    if any(is_client_tool_search(tool) for tool in tools):
+        return
+    if any(tool.type == "tool_search" for tool in tools):
+        logger.warning_once(
+            "tool_search tools are only supported with execution='client'; "
+            "the tool_search tool is not shown to the model."
+        )
+    for function_tool in get_function_tools(tools):
+        if getattr(function_tool, "defer_loading", None):
+            logger.warning_once(
+                "Request has defer_loading tools but no tool_search tool with "
+                "execution='client', so the model cannot load their schemas."
+            )
+            return

@@ -1,10 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import patch
 
 import pytest
-from openai.types.responses import CustomTool, FunctionTool, ResponseCustomToolCall
+from openai.types.responses import (
+    CustomTool,
+    FunctionTool,
+    ResponseCustomToolCall,
+    ResponseToolSearchCall,
+    ToolSearchTool,
+)
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
@@ -23,6 +30,7 @@ from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     construct_chat_messages_with_tool_call,
     construct_input_messages,
+    construct_tool_dicts,
     decode_custom_tool_input,
     decode_custom_tool_input_prefix,
     should_continue_final_message,
@@ -1049,3 +1057,119 @@ class TestBuildResponseOutputItemsStatus:
         assert message.status == "completed"
         assert first.status == "completed"
         assert last.status == "incomplete"
+
+
+class TestToolSearch:
+    JIRA = {
+        "type": "function",
+        "name": "jira_search",
+        "description": "Search Jira",
+        "defer_loading": True,
+        "parameters": {"type": "object", "properties": {"jql": {"type": "string"}}},
+    }
+
+    def test_client_tool_search_is_shown_as_a_function(self):
+        tools = [
+            ToolSearchTool(type="tool_search", execution="client"),
+            FunctionTool.model_validate(self.JIRA),
+        ]
+        names = [t["function"]["name"] for t in construct_tool_dicts(tools, "auto")]
+        assert names == ["tool_search", "jira_search"]
+
+    def test_client_tool_search_keeps_its_own_schema(self):
+        parameters = {"type": "object", "properties": {"q": {"type": "string"}}}
+        tool = ToolSearchTool(
+            type="tool_search",
+            execution="client",
+            description="Find tools",
+            parameters=parameters,
+        )
+        [shown] = construct_tool_dicts([tool], "auto")
+        assert shown["function"]["description"] == "Find tools"
+        assert shown["function"]["parameters"] == parameters
+
+    def test_hosted_tool_search_is_not_shown(self):
+        tools = [
+            ToolSearchTool(type="tool_search"),
+            FunctionTool.model_validate(self.JIRA),
+        ]
+        names = [t["function"]["name"] for t in construct_tool_dicts(tools, "auto")]
+        assert names == ["jira_search"]
+
+    def test_tool_search_call_output_item(self):
+        tools = [ToolSearchTool(type="tool_search", execution="client")]
+        [item] = build_response_output_items(
+            reasoning=None,
+            content=None,
+            tool_calls=[
+                FunctionCall(
+                    id="call_1", name="tool_search", arguments='{"query": "jira"}'
+                )
+            ],
+            tools=tools,
+        )
+        assert isinstance(item, ResponseToolSearchCall)
+        assert item.id.startswith("tsc_")
+        assert (item.call_id, item.execution, item.status) == (
+            "call_1",
+            "client",
+            "completed",
+        )
+        assert item.arguments == {"query": "jira"}
+
+    def test_tool_search_history_replays_as_tool_call_and_result(self):
+        messages = construct_chat_messages_with_tool_call(
+            [
+                {"role": "user", "content": "Find my open bugs"},
+                {
+                    "type": "tool_search_call",
+                    "id": "tsc_1",
+                    "call_id": "call_1",
+                    "execution": "client",
+                    "status": "completed",
+                    "arguments": {"query": "jira"},
+                },
+                {
+                    "type": "tool_search_output",
+                    "id": "tso_1",
+                    "call_id": "call_1",
+                    "execution": "client",
+                    "status": "completed",
+                    "tools": [
+                        self.JIRA,
+                        {
+                            "type": "namespace",
+                            "name": "github",
+                            "description": "GitHub",
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "name": "open_pr",
+                                    "description": "Open a PR",
+                                    "parameters": {"type": "object"},
+                                }
+                            ],
+                        },
+                    ],
+                },
+            ]
+        )
+        assert messages[1] == {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "tool_search",
+                        "arguments": '{"query": "jira"}',
+                    },
+                }
+            ],
+        }
+        assert messages[2]["role"] == "tool"
+        assert messages[2]["tool_call_id"] == "call_1"
+        loaded = [json.loads(line) for line in messages[2]["content"].splitlines()]
+        assert [tool["name"] for tool in loaded] == ["jira_search", "github__open_pr"]
+        assert loaded[0]["parameters"] == self.JIRA["parameters"]
+        assert "defer_loading" not in loaded[0]

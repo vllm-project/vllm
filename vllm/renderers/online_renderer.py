@@ -380,7 +380,7 @@ class OnlineRenderer:
             )
 
         tool_dicts = construct_tool_dicts(
-            request.tools,
+            request.template_tools(),
             request.tool_choice,
             exclude_tools_when_tool_choice_none=(
                 self.exclude_tools_when_tool_choice_none
