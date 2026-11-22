@@ -1482,6 +1482,7 @@ class _TestReplaySSMMixer(MambaMixer2):
         self.use_flashinfer_replayssm = backend == MambaBackendEnum.FLASHINFER
         self.use_replayssm_trackers = self.use_flashinfer_replayssm
         self.mamba_config = MambaConfig(backend=backend)
+        self.cache_config = SimpleNamespace(enable_prefix_caching=True)
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         # conv, ssm, x, B, dt and the (ring_start, num_committed) trackers.

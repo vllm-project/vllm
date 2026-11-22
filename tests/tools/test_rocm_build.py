@@ -137,6 +137,8 @@ case $2 in
     fi ;;
   bake)
     echo "bake ${*:5}" >> "$CALLS"
+    # BAKE_ERROR: the stack bake prints it and fails.
+    [[ -n $BAKE_ERROR && ${@: -1} == base ]] && { echo "$BAKE_ERROR" >&2; exit 1; }
     echo "cache: ${CACHE:-own only}, to: ${CACHE_TO:-none}" >&2
     [[ $5 == --metadata-file ]] && for t in stack-rocm stack-wheels runtime test-deps
     do
@@ -192,6 +194,7 @@ echo $((1000000000 + n * 60))
         "APPEARS": "",
         "APPEAR_AFTER": "3",
         "BEAT_AGE": "",
+        "BAKE_ERROR": "",
         "FAKE_CLOCK": "",
         "REAL_SLEEP": "",
         "ROCM_TRUSTED_POLL_SECONDS": "0",
@@ -378,6 +381,36 @@ def untrusted_base(tmp_path, **env):
         BUILDKITE_PULL_REQUEST="7",
         **env,
     )
+
+
+PPA_503 = (
+    "E: Failed to fetch https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu/"
+    "python3.14_3.14.10-1_amd64.deb  503  Service Unavailable [IP: 185.125.189.187 443]"
+)
+VANISHED_TMP = (
+    "lld: error: cannot open output file /tmp/a8w8-gfx942-497938.out: "
+    "No such file or directory"
+)
+
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        # A mirror still down after apt's own retries: a retried step may get past it.
+        (PPA_503, 75),
+        # Vanished compiler outputs look like a deterministic bug too: no retry.
+        (VANISHED_TMP, 1),
+        # A broken recipe fails the same way every time: no retry.
+        ("E: Unable to locate package python3.99", 1),
+        ("error: use of undeclared identifier 'foo'", 1),
+    ],
+)
+def test_only_infrastructure_faults_retry_a_failed_stack_build(tmp_path, error, status):
+    got, stderr, _ = untrusted_base(
+        tmp_path, CHANGED="docker/Dockerfile.rocm_base", BAKE_ERROR=error
+    )
+    assert got == status, stderr
+    assert error in stderr
 
 
 def test_a_pr_with_mains_keys_waits_for_mains_images(tmp_path):
