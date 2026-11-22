@@ -42,7 +42,8 @@ use vllm_tokenizer::{DecodedText, DynTokenizer};
 use xgrammar_structural_tag::ToolChoice;
 use xgrammar_structural_tag::format::{EndBoundary, Format};
 use xgrammar_structural_tag::tool::{
-    BuilderToolChoice, NormalizedToolChoice, ToolChoiceValue, normalize_tool_choice,
+    AllowedToolsMode, BuilderToolChoice, NormalizedToolChoice, ToolChoiceValue,
+    normalize_tool_choice,
 };
 
 use super::{
@@ -104,7 +105,10 @@ impl BeamUnifiedParser {
     /// Create a parser for one request from the checkpoint's `response_template`.
     pub fn new(template: Arc<ResponseTemplate>, tools: &[Tool], tokenizer: DynTokenizer) -> Self {
         Self {
-            lenient: template.argument_lookahead() == Some(PARAMETER_OPEN),
+            // The tag pattern ends a value where the next parameter opens.
+            lenient: template
+                .argument_tag_pattern()
+                .is_some_and(|pattern| pattern.contains(&format!("(?={PARAMETER_OPEN})"))),
             reasoning_ends: match template.reasoning_closers() {
                 [] => vec![NEXT_MESSAGE.to_string()],
                 closers => closers.to_vec(),
@@ -173,10 +177,14 @@ fn build_output_grammar(
     reasoning_ends: &[String],
 ) -> output_grammar::Result<Option<BuiltOutputGrammar>> {
     let forced = !ctx.tools.is_empty()
-        && matches!(
-            ctx.tool_choice,
-            ToolChoice::Value(ToolChoiceValue::Required) | ToolChoice::NamedFunction(_)
-        );
+        && match ctx.tool_choice {
+            ToolChoice::Value(ToolChoiceValue::Required) | ToolChoice::NamedFunction(_) => true,
+            ToolChoice::AllowedTools(choice) => {
+                choice.allowed_tools.mode == AllowedToolsMode::Required
+            }
+            ToolChoice::FlatAllowedTools(choice) => choice.mode == AllowedToolsMode::Required,
+            ToolChoice::Value(_) | ToolChoice::Builtin(_) => false,
+        };
     let answer_format = ctx.answer.filter(|_| !forced);
     // The prompt may still list the tools, so only the grammar keeps the model
     // from calling them.
@@ -241,7 +249,8 @@ fn build_output_grammar(
             Format::sequence(vec![header, arguments(&schema, lenient)])
         })
         .collect::<Vec<_>>();
-    if matches!(choice, BuilderToolChoice::Auto) {
+    // An allowed-tools choice admits only its tools, not undeclared ones.
+    if matches!(ctx.tool_choice, ToolChoice::Value(ToolChoiceValue::Auto)) {
         let names = ctx.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>();
         let header = Format::sequence(vec![
             Format::const_string(" to="),

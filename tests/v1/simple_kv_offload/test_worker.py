@@ -23,25 +23,32 @@ if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
 from tests.v1.attention.utils import dense_kv_cache_tensor, dense_kv_cache_views
-from vllm.config import CacheConfig
+from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    make_kv_cache_group_from_specs,
+)
+from vllm.config import CacheConfig, KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
+from vllm.distributed.kv_transfer.kv_transfer_state import (
+    ensure_kv_transfer_initialized,
+    ensure_kv_transfer_shutdown,
+    get_kv_transfer_group,
+)
 from vllm.v1.core.kv_cache_planning import (
+    can_share_block_table,
     get_kv_cache_config_from_groups,
-    is_kv_cache_spec_uniform,
 )
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheSpec,
     KVCacheTensor,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
@@ -105,88 +112,96 @@ def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
     return backend, gpu["k"], cpu["k"]
 
 
-def test_no_forward_step_completes_cpu_store(monkeypatch):
+@pytest.fixture
+def active_cpu_offload_connector(dist_init):
+    config = VllmConfig(
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="SimpleCPUOffloadConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "cpu_bytes_to_use": NUM_BLOCKS * BLOCK_BYTES,
+                "num_cpu_blocks": NUM_BLOCKS,
+            },
+        ),
+    )
+    gpu = torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cuda")
+    cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=gpu.nbytes,
+                layers=["k"],
+                layer_stride=gpu.nbytes,
+                block_stride=BLOCK_BYTES,
+            )
+        ],
+        kv_cache_groups=[],
+    )
+    ensure_kv_transfer_initialized(config, cache_config)
+    connector = get_kv_transfer_group()
+    assert isinstance(connector, SimpleCPUOffloadConnector)
+    worker = connector.worker_handler
+    assert worker is not None
+    try:
+        active = ActiveKVConnector(config, {"k": gpu})
+        assert worker.cpu_kv_caches is not None
+        yield active, connector, gpu, worker.cpu_kv_caches["k"]
+    finally:
+        ensure_kv_transfer_shutdown()
+
+
+def _wait_for_store(connector):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        connector.get_finished(set())
+        completion = connector.build_connector_worker_meta()
+        if completion is not None:
+            return completion
+    raise AssertionError("CPU store never completed")
+
+
+def test_no_forward_step_completes_cpu_store(active_cpu_offload_connector):
     """A finished request's final store must drain without another model step."""
-    backend, gpu, cpu = _make_backend()
-    worker = _make_worker(None, 0)
-    worker._backend = backend
-    connector = SimpleCPUOffloadConnector.__new__(SimpleCPUOffloadConnector)
-    connector.worker_handler = worker
+    active, connector, gpu, cpu = active_cpu_offload_connector
     output = _make_empty_scheduler_output()
     output.kv_connector_metadata = SimpleCPUOffloadMetadata(
         store_event=0, store_gpu_blocks=[0], store_cpu_blocks=[0]
     )
-    try:
-        gpu.fill_(91)
-        active = ActiveKVConnector.__new__(ActiveKVConnector)
-        active.kv_connector = connector
-        active._disabled = False
-        active._pending_load_kwargs = None
-        module = "vllm.v1.worker.gpu.kv_connector"
-        monkeypatch.setattr(f"{module}.is_forward_context_available", lambda: True)
-        monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
-        result = active.no_forward(output)
-        completion = (
-            result.kv_connector_output.kv_connector_worker_meta
-            if result.kv_connector_output is not None
-            else None
-        )
-        deadline = time.monotonic() + 5
-        while completion is None and time.monotonic() < deadline:
-            connector.get_finished(set())
-            completion = connector.build_connector_worker_meta()
-            time.sleep(0.001)
-        assert completion is not None, "CPU store never completed on the empty step"
-        assert isinstance(completion, SimpleCPUOffloadWorkerMetadata)
-        assert completion.completed_store_events == {0: 1}
-        assert torch.equal(cpu[0], gpu[0].cpu())
-    finally:
-        backend.shutdown()
+    gpu.fill_(91)
+    result = active.no_forward(output)
+    completion = (
+        result.kv_connector_output.kv_connector_worker_meta
+        if result.kv_connector_output is not None
+        else None
+    )
+    if completion is None:
+        completion = _wait_for_store(connector)
+    assert isinstance(completion, SimpleCPUOffloadWorkerMetadata)
+    assert completion.completed_store_events == {0: 1}
+    assert torch.equal(cpu[0], gpu[0].cpu())
 
 
-def test_deferred_store_waits_for_draft_forward(monkeypatch):
+def test_deferred_store_waits_for_draft_forward(active_cpu_offload_connector):
     """Target completion must not submit the store before draft finalization."""
-    backend, gpu, cpu = _make_backend()
-    worker = _make_worker(None, 0)
-    worker._backend = backend
-    connector = SimpleCPUOffloadConnector.__new__(SimpleCPUOffloadConnector)
-    connector.worker_handler = worker
+    active, connector, gpu, cpu = active_cpu_offload_connector
+    cpu.zero_()
     output = _make_empty_scheduler_output()
     output.kv_connector_metadata = SimpleCPUOffloadMetadata(
         store_event=0, store_gpu_blocks=[0], store_cpu_blocks=[0]
     )
-    active = ActiveKVConnector.__new__(ActiveKVConnector)
-    active.kv_connector = connector
-    active._disabled = False
-    active._pending_load_kwargs = None
-    module = "vllm.v1.worker.gpu.kv_connector"
-    monkeypatch.setattr(f"{module}.is_forward_context_available", lambda: True)
-    monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
-    launch = MagicMock(wraps=backend.launch_copy)
-    monkeypatch.setattr(backend, "launch_copy", launch)
-    try:
-        active.pre_forward(output)
-        # Target forward.
-        gpu.fill_(17)
-        active.finish_forward()
-        active.post_forward(set(), defer_finalize=True)
-        launch.assert_not_called()
-        # Draft forward writes the final KV.
-        gpu.fill_(91)
-        active.finalize_step()
-        assert launch.call_count == 1
-        completion = None
-        deadline = time.monotonic() + 5
-        while completion is None and time.monotonic() < deadline:
-            connector.get_finished(set())
-            completion = connector.build_connector_worker_meta()
-            time.sleep(0.001)
-        assert completion is not None
-        assert completion.completed_store_events == {0: 1}
-        assert torch.equal(cpu[0], gpu[0].cpu())
-        assert launch.call_count == 1
-    finally:
-        backend.shutdown()
+    active.pre_forward(output)
+    gpu.fill_(17)
+    active.finish_forward()
+    active.post_forward(set(), defer_finalize=True)
+    # No store has been submitted while the draft may still write the KV cache.
+    torch.accelerator.synchronize()
+    assert torch.count_nonzero(cpu) == 0
+    assert connector.build_connector_worker_meta() is None
+    gpu.fill_(91)
+    active.finalize_step()
+    completion = _wait_for_store(connector)
+    assert completion.completed_store_events == {0: 1}
+    assert torch.equal(cpu[0], gpu[0].cpu())
 
 
 def _launch_and_wait(
@@ -344,7 +359,7 @@ def test_build_params_src_access_order():
 def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
     num_blocks = 4
     num_layers = 2
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=2,
         num_kv_heads=2,
         head_size=2,
@@ -496,7 +511,7 @@ def test_register_separate_kv_head_groups(monkeypatch):
     layout = KVCacheLayout.LHBNC
     num_blocks = 4
     num_layers = 2
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=2,
         num_kv_heads=2,
         head_size=2,
@@ -599,9 +614,9 @@ def _dsa_specs(num_layers: int, block_size: int) -> dict[str, KVCacheSpec]:
     cache, whose pages differ in size (`MLAAttentionSpec` off `head_size`:
     512 + 64 for the latent, 128 fp8 keys + one fp32 scale per 128 elements for
     the indexer). Both are `MLAAttentionSpec` with the same block size, so the
-    hybrid allocator puts them in one `UniformTypeKVCacheSpecs` cache group.
-    See `DeepseekV32IndexerCache.get_kv_cache_spec` and
-    `MLAAttention.get_kv_cache_spec`.
+    hybrid allocator puts them in one cache group.
+    See `DeepseekV32IndexerCache.get_kv_cache_config` and
+    `MLAAttention.get_kv_cache_config`.
     """
     specs: dict[str, KVCacheSpec] = {}
     for i in range(num_layers):
@@ -634,12 +649,11 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
     specs = _dsa_specs(num_layers, block_size)
     # Differing head sizes make the specs non-identical but same-type, which is
     # what lands both caches of a layer in one group.
-    assert not is_kv_cache_spec_uniform(specs)
-    assert UniformTypeKVCacheSpecs.is_uniform_type(specs)
-    group = KVCacheGroupSpec(
-        list(specs),
-        UniformTypeKVCacheSpecs(block_size=block_size, kv_cache_specs=specs),
+    assert len(set(specs.values())) > 1
+    assert can_share_block_table(
+        {name: FullAttentionManager.layer_config(s) for name, s in specs.items()}
     )
+    group = make_kv_cache_group_from_specs(specs)
 
     # DEEPSEEK_V32_INDEXER declares no supported layouts, so resolution lands on
     # the default preference: layer-outermost, one region per layer.
@@ -698,10 +712,7 @@ def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
     num_layers = 4
     block_size = 64
     specs = _dsa_specs(num_layers, block_size)
-    group = KVCacheGroupSpec(
-        list(specs),
-        UniformTypeKVCacheSpecs(block_size=block_size, kv_cache_specs=specs),
-    )
+    group = make_kv_cache_group_from_specs(specs)
     layout = KVCacheLayout.LBNHC
     vllm_config = MagicMock()
     vllm_config.cache_config = CacheConfig()
@@ -747,10 +758,7 @@ def test_mixed_page_byte_placement_is_dcp_invariant():
 
     placements = []
     for dcp_size in (1, 2):
-        group = KVCacheGroupSpec(
-            list(specs),
-            UniformTypeKVCacheSpecs(block_size=128, kv_cache_specs=specs),
-        )
+        group = make_kv_cache_group_from_specs(specs)
         vllm_config = MagicMock()
         vllm_config.cache_config = CacheConfig()
         vllm_config.cache_config.block_size = 128

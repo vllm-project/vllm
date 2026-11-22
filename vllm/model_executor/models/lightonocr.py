@@ -111,10 +111,14 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessing
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
-                assert isinstance(images, ImageProcessorItems)
-                size = images.get_image_size(item_idx)
-                num_image_tokens = self.info.get_num_image_tokens(
-                    image_width=size.width, image_height=size.height
+                pixel_values = out_mm_kwargs["image"][item_idx]["pixel_values"].data
+                assert isinstance(pixel_values, torch.Tensor)
+                height, width = pixel_values.shape[-2:]
+                stride = (
+                    hf_config.vision_config.patch_size * hf_config.spatial_merge_size
+                )
+                num_image_tokens = ((height + stride - 1) // stride) * (
+                    (width + stride - 1) // stride
                 )
             # break/end tokens are not used in LightOnOCR
             return [image_token_id] * num_image_tokens
