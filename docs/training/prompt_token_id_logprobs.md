@@ -65,6 +65,19 @@ block-aligned, so reuse can end a few rows earlier. Without
 `prompt_logprob_start`, every row is scored and nothing is reused. KV connector
 hits are not used for scoring requests; only the local prefix cache is reused.
 
+## Retaining shared prefixes
+
+For models with sliding-window cache groups, enabling cache reads may still
+leave a shared-prefix miss: an earlier request may not have retained the
+window needed at that boundary. Set `prefix_cache_retention_interval` to a
+positive multiple of the scheduler block size to retain periodic checkpoints.
+For example, `prefix_cache_retention_interval=2048` can help responses that
+share a prompt reuse its cached prefix.
+
+Retention occupies more of the existing KV cache pool. Compare cache hits,
+evictions and batch completion time at the same cache capacity before changing
+the interval; a small pool may see no benefit.
+
 ## Limitations
 
 - Non-streaming only; `stream=true` requests are rejected.
