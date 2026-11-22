@@ -71,6 +71,27 @@ class _TestConfig9:
     """docstring"""
 '''
 
+_TestConfig10 = '''
+@config
+class _TestConfig10:
+    a: Optional[Literal[1] | Literal[2]] = 1
+    """docstring"""
+'''
+
+_TestConfig11 = '''
+@config
+class _TestConfig11:
+    a: Union[Literal[1], Literal[2] | None] = 1
+    """docstring"""
+'''
+
+_TestConfig12 = '''
+@config
+class _TestConfig12:
+    a: typing.Optional[typing.Union[Literal[1], Literal[2]]] = 1
+    """docstring"""
+'''
+
 
 @pytest.mark.parametrize(
     ("test_config", "expected_error"),
@@ -84,6 +105,9 @@ class _TestConfig9:
         (_TestConfig7, "must use a single Literal"),
         (_TestConfig8, "must have a default"),
         (_TestConfig9, "should be used alone"),
+        (_TestConfig10, "must use a single Literal"),
+        (_TestConfig11, "must use a single Literal"),
+        (_TestConfig12, "must use a single Literal"),
     ],
 )
 def test_config(test_config, expected_error):
@@ -102,6 +126,10 @@ class _ValidConfig1:
     d: Literal[1] | None = None
     """docstring"""
     e: Union[Literal[1], int] = 1
+    """docstring"""
+    f: Optional[Literal[1, 2]] = None
+    """docstring"""
+    g: typing.Optional[Union[Literal[1], int]] = None
     """docstring"""
 '''
 

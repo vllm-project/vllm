@@ -61,13 +61,14 @@ def _subscript_name(node: ast.expr) -> str | None:
 
 
 def _union_members(annotation: ast.expr) -> list[ast.expr]:
-    """Return the members of `Union[...]` or PEP 604 `A | B` annotations."""
+    """Return the flattened members of `Union[...]`, `Optional[...]` or PEP 604
+    `A | B` annotations, recursing so nested unions are fully flattened."""
     if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
         return _union_members(annotation.left) + _union_members(annotation.right)
-    if _subscript_name(annotation) == "Union" and isinstance(
-        annotation.slice, ast.Tuple
-    ):
-        return annotation.slice.elts
+    if _subscript_name(annotation) in {"Union", "Optional"}:
+        members = annotation.slice
+        elts = members.elts if isinstance(members, ast.Tuple) else [members]
+        return [m for elt in elts for m in _union_members(elt)]
     return [annotation]
 
 
