@@ -25,12 +25,12 @@ FP32 partial goes to cluster rank 0's shared memory, which sums the partials in
 a fixed order, rounds to BF16 and stores y. The summation order depends only on
 the launch shape, so runs are bitwise reproducible.
 
-Zero-copy epilogue (``zerocopy``): rank 0 also multicasts y (-0.0 stored as
+Zero-copy epilogue (`zerocopy`): rank 0 also multicasts y (-0.0 stored as
 +0.0) into this rank's slot of the next boundary's LamportMailbox at stage
 NEXT_STAGE and sets ACTIVE_STAGE, the same bytes and stage word the mailbox's
 own publisher would write.
 
-Ticket stage (``ticket_stage``, with ``zerocopy``): the stage is instead the
+Ticket stage (`ticket_stage`, with `zerocopy`): the stage is instead the
 upper 16 bits of the draft boundary's ticket word, and no stage word is stored;
 the consuming boundary advances the stage itself.
 """
@@ -78,7 +78,7 @@ TOKEN_TILES = (8, 16)
 
 def launch_unsupported(n: int, k: int, splits: int, kw: int, accs: int) -> str | None:
     """Why the kernel has no launch for an [n, k] weight with K split over
-    ``splits`` CTAs, ``kw`` K per warp and ``accs`` accumulators, or None."""
+    `splits` CTAs, `kw` K per warp and `accs` accumulators, or None."""
     if n <= 0 or n % TILE_N or splits not in (1, 2, 4, 8) or accs not in (1, 2, 4):
         return f"unsupported shape or tactic n={n} splits={splits} accs={accs}"
     if k % (splits * kw) or kw % BLOCK_K:
@@ -371,8 +371,8 @@ def compile_unpooler(
 ):
     """The compiled kernel for weight [n, k] and one token tile; called as
     fn(weight, x, out, stage_state, mailbox_multicast_address, m, stream) with
-    flat views (``Unpooler`` binds them; ``stage_state`` is the ticket word
-    with ``ticket_stage``). Shared by every layer of one shape."""
+    flat views (`Unpooler` binds them; `stage_state` is the ticket word
+    with `ticket_stage`). Shared by every layer of one shape."""
     assert_not_capturing("the unpooler GEMM")
     kernel = UnpoolerKernel(
         n=n,
@@ -406,14 +406,14 @@ class Unpooler:
     graph capture): the [N, K] BF16 weight shard (this rank's rows of the
     replicated unpooler weight) and the kernels of both token tiles compiled.
 
-    With ``mailbox`` (the next boundary's LamportMailbox, width N) the epilogue
+    With `mailbox` (the next boundary's LamportMailbox, width N) the epilogue
     also publishes y into it (zero-copy); without, y is only stored and the
-    boundary publishes it. With ``ticket`` (int32 [1], stage << 16: the draft
+    boundary publishes it. With `ticket` (int32 [1], stage << 16: the draft
     boundary's ticket on that mailbox) the slot's stage is the ticket's, and the
-    mailbox's own stage state is not used. With ``rows`` only the token tiles
+    mailbox's own stage state is not used. With `rows` only the token tiles
     those row counts take are compiled at build (default: every row count); a
     call with another row count compiles its tile then, which must not happen
-    under CUDA graph capture. ``run`` is graph-capturable and allocates
+    under CUDA graph capture. `run` is graph-capturable and allocates
     nothing.
     """
 
@@ -492,8 +492,8 @@ class Unpooler:
     def unsupported(
         weight: torch.Tensor, shape: UnpoolerShape = UNPOOLER
     ) -> str | None:
-        """Why the GEMM cannot take ``weight`` (an [N, K] shard) at launch
-        shape ``shape``, or None: the constructor's checks of both, which it
+        """Why the GEMM cannot take `weight` (an [N, K] shard) at launch
+        shape `shape`, or None: the constructor's checks of both, which it
         raises as ValueError."""
         if weight.dim() != 2:
             return f"unpooler shard must be 2-D, got {tuple(weight.shape)}"

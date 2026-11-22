@@ -34,9 +34,9 @@ def _create_vllm_config_for_dsd(
     The test uses an exact capture-size grid so that every valid uniform decode
     shape has a directly matching FULL graph candidate.
 
-    ``num_spec_per_batch_size`` lets a test supply an explicit DSD schedule of
-    ``(range_start, range_end, num_speculative_tokens)`` tuples. When omitted,
-    a schedule covering every query length in ``[1, max_decode_query_len]`` is
+    `num_spec_per_batch_size` lets a test supply an explicit DSD schedule of
+    `(range_start, range_end, num_speculative_tokens)` tuples. When omitted,
+    a schedule covering every query length in `[1, max_decode_query_len]` is
     generated.
     """
     max_decode_query_len = max_spec_tokens + 1
@@ -51,6 +51,7 @@ def _create_vllm_config_for_dsd(
 
     vllm_config = MagicMock(spec=VllmConfig)
     vllm_config.compilation_config = compilation_config
+    vllm_config.model_config.max_model_len = 8192
     vllm_config.scheduler_config = SchedulerConfig.default_factory(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_capture_tokens,
@@ -381,7 +382,7 @@ def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):
 def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
     """DSD should only capture FULL graphs for query lengths in the schedule.
 
-    With a partial schedule of ``(1, 31, 4)`` and ``(32, 128, 3)``, only the
+    With a partial schedule of `(1, 31, 4)` and `(32, 128, 3)`, only the
     scheduled speculative-token counts (K = 4 and K = 3) become decode query
     lengths (K + 1 = 5 and 4). Uniform batches at those query lengths should get
     FULL graphs, while every other query length (e.g. the lower values 1, 2, 3)

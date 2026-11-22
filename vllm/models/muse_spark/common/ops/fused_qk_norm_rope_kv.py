@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Muse-Spark QK-norm + RoPE + KV-cache insert as one launch.
 
-Not a custom op since ``MuseSparkModel`` is ``@ignore_torch_compile``;
+Not a custom op since `MuseSparkModel` is `@ignore_torch_compile`;
 re-enabling compile requires hiding the forward-context lookup from dynamo.
 """
 
@@ -23,7 +23,7 @@ SUPPORTED_KV_CACHE_DTYPES = frozenset(
 def supports_fused_kv_insert(attn_layer: torch.nn.Module) -> bool:
     """Whether this attention layer's backend and cache can take the insert.
 
-    The backend must keep its KV write out of ``forward``. Off under DCP, whose
+    The backend must keep its KV write out of `forward`. Off under DCP, whose
     FlashInfer prefill attends over the raw new-token k/v.
     """
     parallel_config = get_current_vllm_config().parallel_config

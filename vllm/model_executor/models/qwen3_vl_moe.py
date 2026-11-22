@@ -91,6 +91,8 @@ class Qwen3VLMoeDecoderLayer(Qwen3MoeDecoderLayer):
     }
 )
 class Qwen3MoeLLMModel(Qwen3MoeModel):
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(
         self,
         *,
@@ -148,7 +150,11 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
         hidden_states, _ = self.norm(hidden_states, residual)
 
@@ -289,6 +295,7 @@ class Qwen3VLMoeForConditionalGeneration(
                 ),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
+        self._init_marker_embed_tokens(vllm_config, prefix)
 
         if not get_pp_group().is_first_rank and hasattr(
             config.vision_config, "deepstack_visual_indexes"

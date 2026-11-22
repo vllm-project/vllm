@@ -18,6 +18,7 @@ use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
 use vllm_engine_core_client::protocol::lora::LoraRequest;
+use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmModality, PlaceholderRange};
 use vllm_engine_core_client::protocol::output::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
     EngineCoreOutputs, RequestBatchOutputs,
@@ -33,7 +34,7 @@ use vllm_engine_core_client::test_utils::{
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
     EngineCoreLlm, Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo,
-    GenerateRequest, WeightVersionSpan,
+    GenerateRequest, WeightVersionSpan, WeightVersions,
 };
 use vllm_metrics::METRICS;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -433,28 +434,50 @@ async fn generate_merges_outputs_by_stream_interval() {
         start,
         end,
     };
+    // Each output carries the labels of its own tokens, merged like the tokens.
+    let labels = |runs: &[(&str, usize)]| {
+        let mut labels = WeightVersions::default();
+        for &(version, num_tokens) in runs {
+            labels.append(WeightVersions::new(Some(version.into()), num_tokens));
+        }
+        labels
+    };
     let weight_versions: Vec<_> =
         outputs.iter().map(|output| output.weight_versions.clone()).collect();
     assert_eq!(
         weight_versions,
         [
-            Some(vec![span("v7", 0, 1)]),
-            Some(vec![span("v7", 0, 2), span("v8", 2, 5)]),
-            Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
+            labels(&[("v7", 1)]),
+            labels(&[("v7", 1), ("v8", 3)]),
+            labels(&[("v7", 2)]),
         ]
     );
-    let routed_experts: Vec<_> =
-        outputs.iter().map(|output| output.routed_experts.clone()).collect();
+    let mut all = WeightVersions::default();
+    for labels in weight_versions {
+        all.append(labels);
+    }
+    assert_eq!(
+        all.spans(),
+        Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
+    );
+    // Each output carries the rows of its own tokens, merged like the tokens.
+    let routed_rows = |token_ids: &[u32]| {
+        WireNdArray::from_raw(
+            TensorDtype::U8,
+            vec![token_ids.len(), 1, 2],
+            token_ids.iter().flat_map(|&id| [id as u8, 0]).collect(),
+        )
+    };
+    let routed_experts: Vec<_> = outputs
+        .iter()
+        .map(|output| output.routed_experts.clone().concat().unwrap())
+        .collect();
     assert_eq!(
         routed_experts,
         [
-            None,
-            None,
-            Some(Box::new(WireNdArray::from_raw(
-                TensorDtype::U8,
-                vec![7, 1, 2],
-                vec![1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0],
-            )))
+            Some(routed_rows(&[1])),
+            Some(routed_rows(&[2, 3, 4, 5])),
+            Some(routed_rows(&[6, 7])),
         ]
     );
     let last_token_timestamps: Vec<_> =
@@ -583,8 +606,8 @@ async fn collect_output_rejects_partial_sampling_mask() {
             rows: vec![vec![1, 33, 99]],
         }),
         spec_decode_metrics: None,
-        weight_versions: None,
-        routed_experts: None,
+        weight_versions: WeightVersions::new(None, 2),
+        routed_experts: Default::default(),
         timestamps: Default::default(),
     };
 
@@ -747,6 +770,175 @@ async fn generate_propagates_unexpected_close_errors() {
         }) if request_id == internal_id
     ));
     assert!(stream.next().await.is_none());
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+/// When the engine reports a limit on the encoder cache tokens a request's
+/// multimodal items may need together, a request exceeding it fails before
+/// submission, counting a repeated item once; other requests reach the engine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mm_items_exceeding_encoder_cache_rejected_before_submission() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        b"engine-no-chunked-prefill".to_vec(),
+        EngineCoreReadyResponse {
+            max_mm_embeds_per_request: Some(1000),
+            ..default_ready_response()
+        },
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert_eq!(request.external_req_id.as_deref(), Some("req-repeated"));
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            &request.request_id,
+                            vec![1],
+                            Some(EngineCoreFinishReason::Length),
+                        )],
+                        finished_requests: Some(BTreeSet::from([request.request_id])),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
+
+    let mm_request = |request_id: &str, identifiers: [&str; 2]| {
+        let mut request = sample_generate_request(request_id, 1);
+        request.prompt_token_ids = vec![11; 1300];
+        request.mm_features = Some(
+            identifiers
+                .iter()
+                .zip([0, 650])
+                .map(|(identifier, offset)| MmFeatureSpec {
+                    data: None,
+                    modality: MmModality::Image,
+                    identifier: identifier.to_string(),
+                    mm_position: PlaceholderRange {
+                        offset,
+                        length: 600,
+                        is_embed: None,
+                    },
+                    mm_hash: None,
+                })
+                .collect(),
+        );
+        request
+    };
+
+    let error = llm
+        .generate(mm_request("req-distinct", ["a", "b"]))
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::MmEmbedsExceedEncoderCache {
+                num_embeds: 1200,
+                max_embeds: 1000
+            }
+        ),
+        "{error:?}"
+    );
+
+    let output = llm
+        .generate(mm_request("req-repeated", ["a", "a"]))
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.finish_reason, Some(FinishReason::Length));
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+/// When the engine reports that it does not compute prompt logprobs (under
+/// `--kv-sharing-fast-prefill`), requests asking for them fail before
+/// submission, including `prompt_logprobs=0`; other requests still reach the
+/// engine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_logprobs_rejected_when_engine_lacks_them() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        b"engine-fast-prefill".to_vec(),
+        EngineCoreReadyResponse {
+            supports_prompt_logprobs: false,
+            ..default_ready_response()
+        },
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert_eq!(request.external_req_id.as_deref(), Some("req-plain"));
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            &request.request_id,
+                            vec![1],
+                            Some(EngineCoreFinishReason::Length),
+                        )],
+                        finished_requests: Some(BTreeSet::from([request.request_id])),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
+
+    let mut prompt_logprobs = sample_generate_request("req-prompt-logprobs", 1);
+    prompt_logprobs.sampling_params.prompt_logprobs = Some(0);
+    let mut prompt_logprob_token_ids = sample_generate_request("req-prompt-token-ids", 1);
+    prompt_logprob_token_ids.sampling_params.prompt_logprob_token_ids =
+        Some(WireNdArray::from_i32(vec![1, 1], vec![7]).unwrap());
+    for (request, expected) in [
+        (prompt_logprobs, "prompt_logprobs"),
+        (prompt_logprob_token_ids, "prompt_logprob_token_ids"),
+    ] {
+        let error = llm.generate(request).await.map(|_| ()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::PromptLogprobsUnsupported { parameter } if parameter == expected
+            ),
+            "{error:?}"
+        );
+    }
+
+    let output = llm
+        .generate(sample_generate_request("req-plain", 1))
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.finish_reason, Some(FinishReason::Length));
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -917,7 +1109,12 @@ async fn abort_resolves_external_request_id_to_internal_before_reaching_engine()
     let internal_id = stream.request_id().to_string();
     assert_ne!(internal_id, "req-abort");
 
-    assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![7]);
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(first.token_ids, vec![7]);
+    assert_eq!(
+        first.weight_versions,
+        WeightVersions::new(Some("v7".into()), 1)
+    );
 
     // Abort by the external id; engine-core only knows the internal id.
     llm.abort(&["req-abort".to_string()]).await.unwrap();
@@ -928,15 +1125,8 @@ async fn abort_resolves_external_request_id_to_internal_before_reaching_engine()
     let terminal = stream.next().await.unwrap().unwrap();
     assert_eq!(terminal.finish_reason, Some(FinishReason::Abort));
     assert!(terminal.token_ids.is_empty());
-    // The synthesized abort output reports the spans received so far.
-    assert_eq!(
-        terminal.weight_versions,
-        Some(vec![WeightVersionSpan {
-            version: "v7".into(),
-            start: 0,
-            end: 1
-        }])
-    );
+    // The synthesized abort output carries no tokens, so no labels either.
+    assert_eq!(terminal.weight_versions, WeightVersions::default());
     assert!(stream.next().await.is_none());
 
     let _ = shutdown_tx.send(());
