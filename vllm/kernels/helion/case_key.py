@@ -15,8 +15,8 @@ class CaseKey(dict[str, Any]):
     input generation.  Behaves like a read-only dict and can be used
     as a dict key or in sets.
 
-    The canonical string form (``__str__``) is stable JSON with sorted
-    keys.  Use ``CaseKey.default()`` for the default/fallback key.
+    The canonical string form (`__str__`) is stable JSON with sorted
+    keys.  Use `CaseKey.default()` for the default/fallback key.
     The regular constructor requires at least one key-value pair::
 
         CaseKey({"intermediate": 2048, "numtokens": 256})

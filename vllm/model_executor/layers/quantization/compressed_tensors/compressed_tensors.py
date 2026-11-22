@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import torch
 from compressed_tensors.config import CompressionFormat, SparsityCompressionConfig
 from compressed_tensors.quantization import (
-    ActivationOrdering,
     QuantizationArgs,
     QuantizationStrategy,
     QuantizationType,
@@ -20,7 +19,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -44,6 +43,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
+    CompressedTensorsW4A8Mxfp4,
+    CompressedTensorsW6A8Mxfp6,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -63,11 +64,19 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    create_fp8_quant_key,
+    kMxfp8Dynamic,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -204,7 +213,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 )
             return CompressedTensorsEmbeddingWNA16Int(weight_quant)
 
-        if isinstance(layer, Attention):
+        if isinstance(layer, (Attention, MLAAttention)):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, RoutedExperts):
             return CompressedTensorsMoEMethod.get_moe_method(
@@ -327,16 +336,6 @@ class CompressedTensorsConfig(QuantizationConfig):
                 weight_quant = QuantizationArgs.model_validate(
                     quant_config.get("weights")
                 )
-                if weight_quant.actorder in (
-                    ActivationOrdering.GROUP.value,
-                    ActivationOrdering.DYNAMIC.value,
-                ):
-                    raise ValueError(
-                        "Compressed-tensors group/dynamic activation ordering "
-                        f"(actorder={weight_quant.actorder!r}) is no longer supported. "
-                        "Use a checkpoint with static/weight activation ordering or "
-                        "without activation ordering."
-                    )
                 target_scheme_map[target]["weights"] = weight_quant
 
                 target_scheme_map[target]["input_activations"] = None
@@ -447,6 +446,50 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_4_bits
             and is_group_size_32
             and is_symmetric
+        )
+
+    @classmethod
+    def _is_mxfp4_w4a8_fp8(
+        cls, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+    ) -> bool:
+        if not cls._is_mxfp4(weight_quant) or input_quant is None:
+            return False
+
+        is_float_type = input_quant.type == QuantizationType.FLOAT
+        is_8_bits = input_quant.num_bits == 8
+        is_static_weight = not weight_quant.dynamic
+        is_dynamic_input = bool(input_quant.dynamic)
+        is_token_or_group = input_quant.strategy in (
+            QuantizationStrategy.TOKEN,
+            QuantizationStrategy.GROUP,
+        )
+
+        return (
+            is_float_type
+            and is_8_bits
+            and is_static_weight
+            and is_dynamic_input
+            and is_token_or_group
+            and input_quant.symmetric
+        )
+
+    @staticmethod
+    def _fp8_dynamic_input_key(input_quant: QuantizationArgs) -> QuantKey:
+        if input_quant.strategy == QuantizationStrategy.GROUP:
+            group_shape = GroupShape(1, input_quant.group_size)
+        else:
+            group_shape = GroupShape.PER_TOKEN
+        return create_fp8_quant_key(static=False, group_shape=group_shape)
+
+    @staticmethod
+    def _is_mxfp6(quant_args: QuantizationArgs) -> bool:
+        return (
+            quant_args is not None
+            and quant_args.strategy == QuantizationStrategy.GROUP.value
+            and quant_args.symmetric
+            and quant_args.group_size == 32
+            and quant_args.type == QuantizationType.FLOAT
+            and quant_args.num_bits == 6
         )
 
     @staticmethod
@@ -764,8 +807,23 @@ class CompressedTensorsConfig(QuantizationConfig):
                 )
             return CompressedTensorsW4A4Fp4()
 
+        if self._is_mxfp4_w4a8_fp8(weight_quant, input_quant):
+            return CompressedTensorsW4A8Mxfp4(
+                activation_quant_key=self._fp8_dynamic_input_key(input_quant)
+            )
+
         if self._is_mxfp4(weight_quant):
             return CompressedTensorsW4A4Mxfp4()
+
+        if self._is_mxfp6(weight_quant):
+            if input_quant is None:
+                return CompressedTensorsW6A8Mxfp6(activation_quant_key=None)
+            if self._is_mxfp8(input_quant) and input_quant.dynamic:
+                return CompressedTensorsW6A8Mxfp6(activation_quant_key=kMxfp8Dynamic)
+            raise ValueError(
+                "MXFP6 weights require 16-bit or dynamic MXFP8 activations, "
+                f"got {input_quant}"
+            )
 
         if self._is_mxfp8(weight_quant):
             return CompressedTensorsW8A8Mxfp8()
@@ -1028,6 +1086,9 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             params_dtype=params_dtype,
             weight_loader=weight_loader,
         )
+        self.supports_pre_processed_weights = (
+            layer.scheme.supports_pre_processed_weights
+        )
 
     def apply(
         self,
@@ -1118,8 +1179,9 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         layer.v_scale = torch.nn.Parameter(
             torch.ones(n_scales, requires_grad=False, dtype=torch.float32)
         )
+        # -1.0 marks a q_scale the checkpoint does not provide.
         layer.q_scale = torch.nn.Parameter(
-            torch.ones(n_scales, requires_grad=False, dtype=torch.float32)
+            torch.full((n_scales,), -1.0, requires_grad=False, dtype=torch.float32)
         )
 
         # Zero points are not used in vLLM as currently only symmetric quantization is
@@ -1208,10 +1270,37 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
-        # Buffers (not Parameters) so sleep snapshots them; ATTN_HEAD changes shape.
-        layer.register_buffer("_k_scale", layer.k_scale.detach())
-        layer.register_buffer("_v_scale", layer.v_scale.detach())
-        layer.register_buffer("_q_scale", layer.q_scale.detach())
+        if is_weights_pre_processed():
+            super().process_weights_after_loading(layer)
+            return
+
+        # k/v scales default to 1.0, so only a configured scheme means they were loaded.
+        fnuz_factor = (
+            2.0
+            if current_platform.is_fp8_fnuz()
+            and is_quantized_kv_cache(layer.kv_cache_dtype)
+            and getattr(self.quant_config, "kv_cache_scheme", None) is not None
+            else 1.0
+        )
+        q_loaded = bool((layer.q_scale > 0).all())
+
+        # Buffers, not Parameters: updates don't rewrite them, so level-2 sleep
+        # must keep them. ATTN_HEAD changes shape.
+        def _set_scale(name: str, value: torch.Tensor) -> None:
+            buf = getattr(layer, name, None)
+            if isinstance(buf, torch.Tensor) and buf.shape == value.shape:
+                buf.copy_(value)
+            else:
+                layer.register_buffer(name, value)
+
+        _set_scale("_k_scale", layer.k_scale.detach() * fnuz_factor)
+        _set_scale("_v_scale", layer.v_scale.detach() * fnuz_factor)
+        _set_scale(
+            "_q_scale",
+            layer.q_scale.detach() * fnuz_factor
+            if q_loaded
+            else torch.ones_like(layer.q_scale),
+        )
 
         # Set the _float variants that the attention backend uses.
         def _to_scalar(tensor: torch.Tensor) -> float:
@@ -1220,18 +1309,10 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 return tensor.max().item()
             return tensor.item()
 
-        layer._k_scale_float = _to_scalar(layer.k_scale)
-        layer._v_scale_float = _to_scalar(layer.v_scale)
-        layer._q_scale_float = _to_scalar(layer.q_scale)
+        layer._k_scale_float = _to_scalar(layer._k_scale)
+        layer._v_scale_float = _to_scalar(layer._v_scale)
+        layer._q_scale_float = _to_scalar(layer._q_scale)
 
         # Sync host (cpu) scale copies read by AITER fused kernels.
         layer._k_scale_cpu.fill_(layer._k_scale_float)
         layer._v_scale_cpu.fill_(layer._v_scale_float)
-
-        # Discard all placeholders.
-        del layer.k_scale
-        del layer.v_scale
-        del layer.q_scale
-        del layer.k_zero_point
-        del layer.v_zero_point
-        del layer.q_zero_point

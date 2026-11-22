@@ -14,12 +14,12 @@ from tests.v1.shutdown.utils import (
 )
 from vllm import LLM, AsyncEngineArgs, SamplingParams
 from vllm.distributed import get_tensor_model_parallel_rank
-from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.transformers import TransformersForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
 
-MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
+MODELS = ["vllm-project/tiny-random-LlamaForCausalLM"]
 
 
 def evil_forward(self, *args, **kwargs):
@@ -36,26 +36,25 @@ def evil_forward(self, *args, **kwargs):
         raise Exception("Simulated illegal memory access on Rank 0!")
     self.num_calls += 1
 
-    kwargs.setdefault("intermediate_tensors", None)  # required for MRV2
-    return self.model(*args, **kwargs)
+    return super(TransformersForCausalLM, self).forward(*args, **kwargs)
 
 
 @pytest.fixture
-def rocm_evil_forward(rocm_sitecustomize_factory):
+def evil_forward_fixture(spawn_sitecustomize_factory):
     lines = [
         "from vllm.distributed import get_tensor_model_parallel_rank",
-        "from vllm.model_executor.models.llama import LlamaForCausalLM",
+        "from vllm.model_executor.models.transformers import TransformersForCausalLM",
         inspect.getsource(evil_forward),
-        f"LlamaForCausalLM.forward = {evil_forward.__name__}",
+        f"TransformersForCausalLM.forward = {evil_forward.__name__}",
     ]
-    rocm_sitecustomize_factory(lines)
+    spawn_sitecustomize_factory(lines)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("model", MODELS)
 async def test_async_llm_model_error(
-    monkeypatch, rocm_evil_forward, tensor_parallel_size: int, model: str
+    monkeypatch, evil_forward_fixture, tensor_parallel_size: int, model: str
 ) -> None:
     """Test that AsyncLLM propagates a forward pass error and frees memory.
 
@@ -65,7 +64,7 @@ async def test_async_llm_model_error(
         pytest.skip(reason="Not enough CUDA devices")
 
     # Monkeypatch an error in the model.
-    monkeypatch.setattr(LlamaForCausalLM, "forward", evil_forward)
+    monkeypatch.setattr(TransformersForCausalLM, "forward", evil_forward)
 
     engine_args = AsyncEngineArgs(
         model=model, enforce_eager=True, tensor_parallel_size=tensor_parallel_size
@@ -118,7 +117,7 @@ async def test_async_llm_model_error(
 @pytest.mark.parametrize("model", MODELS)
 def test_llm_model_error(
     monkeypatch,
-    rocm_evil_forward,
+    evil_forward_fixture,
     tensor_parallel_size: int,
     enable_multiprocessing: bool,
     model: str,
@@ -135,7 +134,7 @@ def test_llm_model_error(
         m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", MP_VALUE)
 
         # Monkeypatch an error in the model.
-        m.setattr(LlamaForCausalLM, "forward", evil_forward)
+        m.setattr(TransformersForCausalLM, "forward", evil_forward)
 
         llm = LLM(
             model=model, enforce_eager=True, tensor_parallel_size=tensor_parallel_size

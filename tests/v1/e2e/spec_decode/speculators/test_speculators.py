@@ -55,11 +55,9 @@ def test_speculators_model_integration(
     with vllm_runner(
         model_path,
         block_size=None,
-        trust_remote_code=False,
         enable_chunked_prefill=None,
         compilation_config=CompilationConfig(),
         max_model_len=4096,
-        gpu_memory_utilization=0.92,
     ) as spec_runner:
         evaluate_llm_for_gsm8k(
             spec_runner.llm, expected_accuracy_threshold=expected_accuracy_threshold
@@ -89,11 +87,9 @@ def test_speculators_model_integration(
     with vllm_runner(
         verifier_model,
         block_size=None,
-        trust_remote_code=False,
         enable_chunked_prefill=None,
         compilation_config=CompilationConfig(),
         max_model_len=4096,
-        gpu_memory_utilization=0.92,
     ) as ref_runner:
         ref_outputs = ref_runner.llm.chat(test_prompts, sampling_config)
 

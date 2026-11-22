@@ -77,4 +77,8 @@ If the model responds correctly, your setup is working. You can now use Claude C
 
 **Tool calls not working**: Verify that your model supports tool calling and that you've enabled it with the correct `--tool-call-parser` flag. See [Tool Calling](../../features/tool_calling.md).
 
+**WebSearch fails with `tool type 'web_search_...' is not supported`**: Claude Code's WebSearch tool relies on Anthropic's server-side web search tool, which runs on Anthropic's servers. vLLM does not run server tools and rejects requests that include them with a 400. Use an MCP server that provides web search instead.
+
+**`max_tokens: 0` is rejected**: Anthropic's API accepts `max_tokens: 0` to populate the prompt cache without generating output. A client or gateway sending `max_tokens: 0` to `/v1/messages` gets a 400 ("max_tokens=0 (prompt-cache pre-warming) is not supported"), because vLLM samples at least one token per request. Warm the cache with `max_tokens: 1` instead.
+
 **Model not found**: Ensure the `--served-model-name` matches the model names in your environment variables. You cannot use model names with `/` in them, such as `openai/gpt-oss-120b` directly from Huggingface, so beware of that limitation with Claude Code.

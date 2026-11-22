@@ -110,3 +110,53 @@ sequence
           `</arg_value:opensource>`
           `\n`
     `\n</tool_calls:opensource>`
+
+# auto_schema_calls (from_token_zero)
+sequence
+  tag `` text `</think:opensource>`
+  or
+    sequence
+      `<tool_calls:opensource>\n`
+      tags_with_separator `\n` at_least_one
+        tag `<tool_call:opensource>get_weather<tool_sep:opensource>\n` .. `</tool_call:opensource>`
+          sequence
+            sequence
+              `<arg_key:opensource>`
+              `location`
+              `</arg_key:opensource>`
+              `\n`
+              `<arg_value:opensource>`
+              text excluding [`<tool_calls:opensource>`, `</tool_calls:opensource>`, `<tool_call:opensource>`, `</tool_call:opensource>`, `<tool_sep:opensource>`, `<arg_key:opensource>`, `</arg_key:opensource>`, `<arg_value:opensource>`, `</arg_value:opensource>`]
+              `</arg_value:opensource>`
+              `\n`
+        tag `<tool_call:opensource>add<tool_sep:opensource>\n` .. `</tool_call:opensource>`
+          sequence
+            sequence
+              `<arg_key:opensource>`
+              `y`
+              `</arg_key:opensource>`
+              `\n`
+              `<arg_value:opensource>`
+              text excluding [`<tool_calls:opensource>`, `</tool_calls:opensource>`, `<tool_call:opensource>`, `</tool_call:opensource>`, `<tool_sep:opensource>`, `<arg_key:opensource>`, `</arg_key:opensource>`, `<arg_value:opensource>`, `</arg_value:opensource>`]
+              `</arg_value:opensource>`
+              `\n`
+            sequence
+              `<arg_key:opensource>`
+              `x`
+              `</arg_key:opensource>`
+              `\n`
+              `<arg_value:opensource>`
+              text excluding [`<tool_calls:opensource>`, `</tool_calls:opensource>`, `<tool_call:opensource>`, `</tool_call:opensource>`, `<tool_sep:opensource>`, `<arg_key:opensource>`, `</arg_key:opensource>`, `<arg_value:opensource>`, `</arg_value:opensource>`]
+              `</arg_value:opensource>`
+              `\n`
+            sequence
+              `<arg_key:opensource>`
+              `items`
+              `</arg_key:opensource>`
+              `\n`
+              `<arg_value:opensource>`
+              text excluding [`<tool_calls:opensource>`, `</tool_calls:opensource>`, `<tool_call:opensource>`, `</tool_call:opensource>`, `<tool_sep:opensource>`, `<arg_key:opensource>`, `</arg_key:opensource>`, `<arg_value:opensource>`, `</arg_value:opensource>`]
+              `</arg_value:opensource>`
+              `\n`
+      `\n</tool_calls:opensource>`
+    json({ answer: string })

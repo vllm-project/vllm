@@ -123,7 +123,7 @@ ITERATION_TOKENS_BUCKETS: tuple[float, ...] = (
 max-num-batched-tokens budget."""
 
 REQUEST_PARAMS_N_BUCKETS: tuple[float, ...] = (1, 2, 5, 10, 20)
-"""Small integer counts for the ``n`` sampling parameter."""
+"""Small integer counts for the `n` sampling parameter."""
 
 REQUEST_NUM_PREEMPTIONS_BUCKETS: tuple[float, ...] = (1, 2, 3, 4, 5, 10, 20)
 """Per-request preemption counts, recorded for every finished request: the

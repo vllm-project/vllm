@@ -27,7 +27,6 @@ COLBERT_MODELS = {
         "hf_comparison": {
             "weights_file": "model.safetensors",
             "weights_key": "linear.weight",
-            "trust_remote_code": False,
             "model_cls": "BertModel",
         },
     },
@@ -43,7 +42,6 @@ COLBERT_MODELS = {
         "hf_comparison": {
             "weights_file": "1_Dense/model.safetensors",
             "weights_key": "linear.weight",
-            "trust_remote_code": False,
             "model_cls": "AutoModel",
         },
     },
@@ -55,6 +53,7 @@ COLBERT_MODELS = {
             "hf_overrides": {
                 "architectures": ["ColBERTJinaRobertaModel"],
             },
+            "trust_remote_code": True,
         },
         "hf_comparison": {
             "weights_file": "model.safetensors",
@@ -75,7 +74,6 @@ COLBERT_MODELS = {
         "hf_comparison": {
             "weights_file": "1_Dense/model.safetensors",
             "weights_key": "linear.weight",
-            "trust_remote_code": False,
             "model_cls": "AutoModel",
         },
     },
@@ -315,22 +313,14 @@ class TestColbertSharedEngine:
         assert scores[0] > scores[1], "ML doc should score higher than Python doc"
         assert scores[2] > scores[1], "DL doc should score higher than Python doc"
 
-    def test_colbert_embed_not_supported(self, colbert_model):
+    def test_colbert_embed_task_not_supported(self, colbert_model):
         """Test that ColBERT model does not support the embed task."""
         with pytest.raises(ValueError, match="Embedding API is not supported"):
-            colbert_model.embed([TEXTS_1[0]])
+            colbert_model.llm.encode([TEXTS_1[0]], pooling_task="embed")
 
 
-@pytest.mark.parametrize(
-    ("backend", "use_v2"),
-    [
-        pytest.param("bert", True, id="bert-v2"),
-        pytest.param("modernbert", True, id="modernbert-v2"),
-        pytest.param("jina", True, id="jina-v2"),
-        pytest.param("lfm2", True, id="lfm2-v2"),
-    ],
-)
-def test_colbert_hf_comparison(vllm_runner, monkeypatch, backend, use_v2):
+@pytest.mark.parametrize("backend", ["bert", "modernbert", "jina", "lfm2"])
+def test_colbert_hf_comparison(vllm_runner, backend):
     """Test that vLLM ColBERT embeddings match HuggingFace for each backend."""
     from transformers import AutoTokenizer
 
@@ -343,8 +333,6 @@ def test_colbert_hf_comparison(vllm_runner, monkeypatch, backend, use_v2):
     assert isinstance(extra_kwargs, dict)
     test_texts = [TEXTS_1[0], TEXTS_2[0]]
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2 else "0")
-
     with vllm_runner(
         model_name,
         runner="pooling",
@@ -353,7 +341,6 @@ def test_colbert_hf_comparison(vllm_runner, monkeypatch, backend, use_v2):
         enforce_eager=True,
         **extra_kwargs,
     ) as vllm_model:
-        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner == use_v2
         vllm_outputs = vllm_model.token_embed(test_texts)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
