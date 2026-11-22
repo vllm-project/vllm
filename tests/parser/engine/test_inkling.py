@@ -9,6 +9,7 @@ cases mirror the Rust unified parser's tests
 (`rust/src/parser/src/unified/inkling.rs`) where applicable.
 """
 
+import dataclasses
 import json
 
 import pytest
@@ -261,6 +262,34 @@ class TestArgConverter:
             _inkling_arg_converter('{"name":"x","args":[1]}', False)
 
 
+def test_long_string_does_not_reconvert_every_delta(mock_tokenizer, mock_request):
+    """Long string values must not repeatedly scan the full tool wrapper."""
+    config = inkling_config()
+    converter = config.arg_converter
+    assert converter is not None
+    converted_chars = 0
+
+    def counting_converter(raw_args: str, partial: bool) -> str:
+        nonlocal converted_chars
+        converted_chars += len(raw_args)
+        return converter(raw_args, partial)
+
+    parser = InklingParser(
+        mock_tokenizer,
+        parser_engine_config=dataclasses.replace(
+            config, arg_converter=counting_converter
+        ),
+    )
+    expected = {"content": "x" * 4096}
+    args = json.dumps(expected, separators=(",", ":"))
+    results = _stream(
+        parser, mock_request, _tool_block("write_note", args), chunk_size=16
+    )
+
+    assert json.loads(collect_tool_arguments(results)) == expected
+    assert converted_chars < 8 * len(args)
+
+
 class TestNonStreaming:
     @pytest.mark.parametrize("suffix", ["", END_MESSAGE, END_SAMPLING])
     def test_bare_text_after_model_opener(self, parser, mock_request, suffix):
@@ -371,6 +400,25 @@ class TestStreaming:
         assert collect_content(results) == "Check this."
         assert collect_function_name(results) == "get_weather"
         assert json.loads(collect_tool_arguments(results)) == {"city": "San Francisco"}
+
+    @pytest.mark.parametrize("chunk_size", [1, 2, 3, 7, 16, 64, 4096])
+    def test_chunk_invariance_escaped_strings(
+        self, mock_tokenizer, mock_request, chunk_size
+    ):
+        expected = {
+            "content": 'quote " slash \\ newline\n snowman ☃',
+            "nested": {"text": 'braces { } and a \\" escaped quote'},
+            "tail": "done",
+        }
+        args = json.dumps(expected, ensure_ascii=False, separators=(",", ":"))
+        results = _stream(
+            InklingParser(mock_tokenizer),
+            mock_request,
+            _tool_block("write_note", args),
+            chunk_size,
+        )
+        assert collect_tool_arguments(results) == args
+        assert json.loads(collect_tool_arguments(results)) == expected
 
     @pytest.mark.parametrize("chunk_size", [1, 3, 7, 64])
     def test_chunk_invariance_tool_call_text_only(

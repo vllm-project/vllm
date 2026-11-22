@@ -44,6 +44,7 @@ from vllm.parser.abstract_parser import structured_outputs_to_format
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
@@ -118,6 +119,56 @@ def _inkling_arg_converter(raw_args: str, partial: bool) -> str:
         # No args value yet (streaming) or none at all (treat as empty).
         return "" if partial else "{}"
     return span
+
+
+def _inkling_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
+    """Extend an unterminated JSON string value without rescanning it."""
+    args = extract_json_member_object(raw_args, "args")
+    if args is None:
+        return None
+
+    in_string = False
+    value_string = False
+    escape = False
+    containers: list[str] = []
+    previous = ""
+    for char in args:
+        if escape:
+            escape = False
+            continue
+        if in_string:
+            if char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            value_string = previous == ":" or (
+                containers[-1:] == ["["] and previous in ("[", ",")
+            )
+        elif char in ("{", "["):
+            containers.append(char)
+        elif char in ("}", "]") and containers:
+            containers.pop()
+        if char not in " \t\r\n":
+            previous = char
+    if not in_string or not value_string:
+        return None
+
+    def extend(delta: str) -> str | None:
+        nonlocal escape
+        for char in delta:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                return None
+        # The converter returns a verbatim substring of this JSON input.
+        return delta
+
+    return extend
 
 
 @functools.cache
@@ -244,6 +295,7 @@ def inkling_config() -> ParserEngineConfig:
         token_id_terminals={},
         transitions=transitions,
         arg_converter=_inkling_arg_converter,
+        arg_value_extender=_inkling_arg_value_extender,
         stream_arg_deltas=True,
         tool_args_json=True,
         strip_trailing_reasoning_whitespace=True,
