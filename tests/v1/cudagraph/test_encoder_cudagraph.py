@@ -18,6 +18,7 @@ Test organization:
 """
 
 from collections.abc import Hashable
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -2368,14 +2369,36 @@ class TestQwen3OmniAudioEncoderCudaGraphReplay:
     """Graph replay matches the eager audio tower on the same inputs."""
 
     @pytest.fixture(autouse=True)
-    def _host(self, dist_init, workspace_init):
-        self.device = torch.device("cuda", 0)
-        self.dtype = torch.bfloat16
-        self.host = _make_qwen3_omni_audio_host(self.device, self.dtype)
-        self.mgr = _make_manager_for_gpu(
-            cast(Any, self.host), [104, 512, 1024], 8, self.device, self.dtype
-        )
-        self.mgr.capture(graph_pool=current_platform.graph_pool_handle())
+    def _host(self, dist_init, workspace_init, request, tmp_path):
+        config_context = nullcontext()
+        if hasattr(request, "param"):
+            from transformers import Qwen3OmniMoeConfig
+
+            from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+
+            Qwen3OmniMoeConfig(
+                architectures=["Qwen3OmniMoeForConditionalGeneration"]
+            ).save_pretrained(tmp_path)
+            config_context = set_current_vllm_config(
+                VllmConfig(
+                    model_config=ModelConfig(
+                        model=str(tmp_path),
+                        skip_tokenizer_init=True,
+                        dtype="bfloat16",
+                        max_model_len=4096,
+                        mm_encoder_attn_backend=request.param,
+                    )
+                )
+            )
+        with config_context:
+            self.device = torch.device("cuda", 0)
+            self.dtype = torch.bfloat16
+            self.host = _make_qwen3_omni_audio_host(self.device, self.dtype)
+            self.mgr = _make_manager_for_gpu(
+                cast(Any, self.host), [104, 512, 1024], 8, self.device, self.dtype
+            )
+            self.mgr.capture(graph_pool=current_platform.graph_pool_handle())
+            yield
 
     def _eager(self, mm_kwargs: dict[str, Any]) -> list[torch.Tensor]:
         lens = [
@@ -2413,6 +2436,48 @@ class TestQwen3OmniAudioEncoderCudaGraphReplay:
         result = self.mgr.execute(small)
         assert result is not None
         torch.testing.assert_close(result[0], self._eager(small)[0])
+
+    @pytest.mark.parametrize("_host", ["TRITON_ATTN"], indirect=True)
+    def test_triton_reuses_sequence_lengths_across_layers(self, monkeypatch):
+        """Capture and eager forwards share lengths across real Triton layers."""
+        from vllm.v1.attention.ops import triton_prefill_attention
+
+        sequence_lengths: list[torch.Tensor] = []
+        context_attention_fwd = triton_prefill_attention.context_attention_fwd
+
+        def record_sequence_lengths(*args, **kwargs):
+            # Retain tensors so allocator reuse cannot hide per-layer allocations.
+            sequence_lengths.append(kwargs["b_seq_len"])
+            return context_attention_fwd(*args, **kwargs)
+
+        monkeypatch.setattr(
+            triton_prefill_attention, "context_attention_fwd", record_sequence_lengths
+        )
+        mgr = _make_manager_for_gpu(
+            cast(Any, self.host), [512], 8, self.device, self.dtype
+        )
+        mgr.capture(graph_pool=current_platform.graph_pool_handle())
+        num_layers = len(self.host.audio_tower.layers)
+        capture_calls = len(sequence_lengths)
+        assert num_layers > 1 and capture_calls >= num_layers
+
+        for feature_lens in ([900], [1600], [900]):
+            mm_kwargs = _make_audio_mm_kwargs(feature_lens, self.device, self.dtype)
+            before = len(sequence_lengths)
+            expected = self._eager(mm_kwargs)
+            assert len(sequence_lengths) == before + num_layers
+            misses = mgr.graph_misses
+            result = mgr.execute(mm_kwargs)
+            assert mgr.graph_misses == misses
+            assert len(sequence_lengths) == before + num_layers
+            assert result is not None and len(result) == len(expected)
+            for out, ref in zip(result, expected):
+                torch.testing.assert_close(out, ref)
+
+        assert len(sequence_lengths) % num_layers == 0
+        for start in range(0, len(sequence_lengths), num_layers):
+            lengths = sequence_lengths[start : start + num_layers]
+            assert len({tensor.data_ptr() for tensor in lengths}) == 1
 
     @pytest.mark.parametrize(
         "feature_lens",
