@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+//! Reads `/proc`, so Linux only.
+#![cfg(target_os = "linux")]
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::process::CommandExt as _;
@@ -62,26 +65,35 @@ fn wait_for_ready(child: &mut ChildGuard, addr: SocketAddr) {
     panic!("timed out waiting for vllm-rs render server at {addr}");
 }
 
+/// Read the soft `Max open files` limit of a running process.
+fn soft_nofile_limit(pid: u32) -> u64 {
+    let limits = std::fs::read_to_string(format!("/proc/{pid}/limits"))
+        .expect("failed to read /proc/<pid>/limits");
+    let line = limits
+        .lines()
+        .find(|line| line.starts_with("Max open files"))
+        .expect("no `Max open files` row in /proc/<pid>/limits");
+    line["Max open files".len()..]
+        .split_whitespace()
+        .next()
+        .and_then(|soft| soft.parse().ok())
+        .unwrap_or_else(|| panic!("unexpected `Max open files` row: {line:?}"))
+}
+
 /// Regression test for #68023: when `vllm-rs` starts with the typical Linux
 /// default soft `RLIMIT_NOFILE=1024` (and a higher hard limit), it must raise
-/// its soft limit so it can accept more than 1,024 concurrent connections
-/// without failing `accept()` with `EMFILE`.
+/// its soft limit like Python's `set_ulimit`, to 65535 within the hard limit,
+/// so it can accept more than 1,024 concurrent connections without failing
+/// `accept()` with `EMFILE`.
 #[test]
 fn render_raises_soft_nofile_above_1024_default() {
-    const TARGET_CONNECTIONS: usize = 1100;
     const INITIAL_SOFT_LIMIT: u64 = 1024;
 
     let (_, hard_limit) = rlimit::Resource::NOFILE.get().expect("failed to get RLIMIT_NOFILE");
-    if hard_limit <= TARGET_CONNECTIONS as u64 + 128 {
-        eprintln!(
-            "skipping test: RLIMIT_NOFILE hard limit ({hard_limit}) too low for {TARGET_CONNECTIONS} connections"
-        );
+    if hard_limit <= INITIAL_SOFT_LIMIT {
+        eprintln!("skipping test: RLIMIT_NOFILE hard limit ({hard_limit}) leaves nothing to raise");
         return;
     }
-
-    // Ensure the test process itself can hold >1,024 client sockets even if the
-    // test runner started with a 1024 soft limit.
-    rlimit::increase_nofile_limit(u64::MAX).expect("failed to raise test runner NOFILE limit");
 
     let model_dir = tempfile::tempdir().expect("failed to create temp model dir");
     std::fs::write(
@@ -117,16 +129,5 @@ fn render_raises_soft_nofile_above_1024_default() {
     let mut child = ChildGuard(cmd.spawn().expect("failed to spawn vllm-rs render"));
     wait_for_ready(&mut child, addr);
 
-    let mut connections = Vec::with_capacity(TARGET_CONNECTIONS);
-    for i in 0..TARGET_CONNECTIONS {
-        let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))
-            .unwrap_or_else(|err| panic!("connect failed at connection {i}: {err}"));
-        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
-        send_health_check(&mut stream)
-            .unwrap_or_else(|err| panic!("health check failed at connection {i}: {err}"));
-        connections.push(stream);
-    }
-
-    assert_eq!(connections.len(), TARGET_CONNECTIONS);
+    assert_eq!(soft_nofile_limit(child.0.id()), hard_limit.min(65535));
 }
