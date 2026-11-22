@@ -79,6 +79,7 @@ def linear_attention_prefill_and_mix(
     hidden = []
     req_offset = getattr(attn_metadata, "num_decodes", 0)
     prefill_state_indices = getattr(attn_metadata, "state_indices_tensor_p", None)
+    checkpoint = getattr(attn_metadata, "checkpoint", None)
     for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
         if req_offset + _prefill_idx + 1 >= len(attn_metadata.query_start_loc):
             break
@@ -94,20 +95,28 @@ def linear_attention_prefill_and_mix(
             slot_id = prefill_state_indices[_prefill_idx]
         else:
             slot_id = state_indices_tensor[req_offset + _prefill_idx]
-        qs = q[_start:_end].transpose(0, 1).contiguous()
-        ks = k[_start:_end].transpose(0, 1).contiguous()
-        vs = v[_start:_end].transpose(0, 1).contiguous()
         slice_layer_cache = kv_cache[slot_id, ...]
-        out_slice = prefix_fn(
-            qs,
-            ks,
-            vs,
-            slice_layer_cache,
-            slope_rate,
-            block_size,
-            layer_idx=layer_idx,
-        )
-        hidden.append(out_slice.contiguous())
+        # A checkpoint splits the prefill: the state after the first part is
+        # copied out, and the second part continues from it.
+        bounds = [_start, _end]
+        if checkpoint is not None:
+            assert checkpoint.offsets is not None
+            if checkpoint.offsets[_prefill_idx]:
+                bounds.insert(1, _start + checkpoint.offsets[_prefill_idx])
+        for part, (part_start, part_end) in enumerate(zip(bounds, bounds[1:])):
+            if part > 0:
+                assert checkpoint is not None
+                kv_cache[checkpoint.state_indices[_prefill_idx]] = slice_layer_cache
+            out_slice = prefix_fn(
+                q[part_start:part_end].transpose(0, 1).contiguous(),
+                k[part_start:part_end].transpose(0, 1).contiguous(),
+                v[part_start:part_end].transpose(0, 1).contiguous(),
+                slice_layer_cache,
+                slope_rate,
+                block_size,
+                layer_idx=layer_idx,
+            )
+            hidden.append(out_slice.contiguous())
 
     if attn_metadata.num_decode_tokens > 0:
         hidden_decode = decode_fn(
@@ -478,6 +487,10 @@ class BailingMoELinearAttention(LinearAttention):
         )
 
         return BailingLinearAttentionBackend
+
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        # The prefill splits at any checkpoint offset.
+        return 1
 
     def forward(
         self,
