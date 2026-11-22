@@ -1305,6 +1305,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         return self._forward_method(hidden_states)
 
+    def _core_attn_out_dtype(self, activation_dtype: torch.dtype) -> torch.dtype:
+        """Precision for the GDN readout buffer.
+
+        The readout `o = state @ q` is unnormalized until `RMSNormGated`.
+        With fp16 activations and an fp32 SSM state it can exceed fp16's 65504,
+        so an fp16 buffer would overflow to `inf` and the norm would turn that
+        into `NaN`. bf16 shares fp32's exponent range, so only fp16 widens.
+        """
+        if activation_dtype is not torch.float16:
+            return activation_dtype
+        kv_cache = getattr(self, "kv_cache", None)
+        if kv_cache is None or len(kv_cache) < 2:
+            return activation_dtype
+        if getattr(kv_cache[1], "dtype", None) is torch.float32:
+            return torch.float32
+        return activation_dtype
+
     def _output_projection(
         self,
         core_attn_out: torch.Tensor,
@@ -1316,6 +1333,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         by the compilation pass when fuse_norm_quant is enabled.
         """
         core_attn_out = self.norm(core_attn_out, z)
+        if core_attn_out.dtype != z.dtype:
+            core_attn_out = core_attn_out.to(z.dtype)
         output, _ = self.out_proj(core_attn_out.flatten(-2))
         return output
 
@@ -1333,7 +1352,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             projected_states_ba = projected_states_ba.view(num_tokens, -1)
             core_attn_out = torch.empty(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-                dtype=hidden_states.dtype,
+                dtype=self._core_attn_out_dtype(hidden_states.dtype),
                 device=hidden_states.device,
             )
             if self.use_aiter_fused_gdn_decode:
@@ -1448,7 +1467,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # are only read by row-wise ops and never reach sampled outputs.
         core_attn_out = torch.empty(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
+            dtype=self._core_attn_out_dtype(hidden_states.dtype),
             device=hidden_states.device,
         )
 
@@ -1511,7 +1530,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
+            dtype=self._core_attn_out_dtype(hidden_states.dtype),
             device=hidden_states.device,
         )
 
@@ -1529,7 +1548,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 layer_name=_encode_layer_name(self.prefix),
             )
         else:
-            z = torch.empty_like(core_attn_out)
+            # z must stay in the activation dtype: RMSNormGated casts the
+            # widened readout back to z's dtype before the output projection.
+            z = torch.empty_like(core_attn_out, dtype=hidden_states.dtype)
             torch.ops.vllm.gdn_attention_core_xpu(
                 core_attn_out,
                 z,
@@ -1572,7 +1593,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_tokens = hidden_states.size(0)
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
+            dtype=self._core_attn_out_dtype(hidden_states.dtype),
             device=hidden_states.device,
         )
 

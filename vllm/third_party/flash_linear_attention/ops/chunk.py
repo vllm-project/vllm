@@ -138,7 +138,16 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             assert not torch.is_grad_enabled(), (
                 "core_attn_out buffer reuse is only supported for inference"
             )
-            assert q.dtype == o.dtype, "Incompatible dtype for inplace computation"
+        if o.dtype != q.dtype:
+            assert o.dtype == torch.float32, (
+                "Incompatible dtype for readout: "
+                f"core_attn_out={o.dtype}, activation={q.dtype}"
+            )
+            # The readout is unnormalized and can exceed fp16's range with
+            # an fp32 SSM state (see chunk_o.py's h_dtype gating); casting
+            # back here would reintroduce that overflow. The caller narrows
+            # the readout after RMSNormGated.
+            return o, final_state
         return o.to(q.dtype), final_state
 
 
