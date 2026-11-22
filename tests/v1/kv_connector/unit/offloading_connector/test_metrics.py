@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -25,9 +26,18 @@ from vllm.v1.kv_offload.base import (
     OffloadingCounterMetadata,
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
+    ReqContext,
+    make_offload_key,
 )
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
-from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
+from vllm.v1.kv_offload.tiering.base import (
+    JobResult,
+    TieringOffloadingMetrics,
+    TransferJob,
+)
+from vllm.v1.kv_offload.tiering.manager import JobMetadata
+from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
+from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 LOAD_BYTES = _TransferMetricName.LOAD_BYTES
 LOAD_TIME = _TransferMetricName.LOAD_TIME
@@ -1122,3 +1132,65 @@ def test_scheduler_sends_the_config_info_once(request_runner):
     assert stats is not None
     assert stats.data[_StatsKey.INFO] == [{}]
     assert runner.connector_scheduler.get_stats() is None
+
+
+def test_prom_metrics_exports_promoted_chunk_outcomes():
+    """Stats from the tiering tracker export with the tiering spec's labels."""
+    tracker = TieringMetricsTracker(
+        tier_types=["fs"], num_primary_chunks=4, primary_chunk_size=16
+    )
+    loaded, peer, wasted, unread = (
+        make_offload_key(str(i).encode(), 0) for i in range(4)
+    )
+    tracker.on_promotion_landed(0, [loaded, peer, wasted, unread])
+    tracker.on_promoted_reads_started([loaded])
+    tracker.on_promoted_reads_done([loaded], success=True, by_gpu_load=True)
+    job = JobMetadata(
+        TransferJob(1, [peer], np.array([1]), False, ReqContext(req_id="r")), 0
+    )
+    tracker.on_job_registered(job)
+    tracker.on_peer_read_job(1, [peer])
+    tracker.on_job_finished(job, JobResult(job_id=1, success=True))
+    tracker.on_primary_evicted([wasted])
+    tracker.on_promotion_slots_allocated(0, [wasted])
+    stats = tracker.take_stats()
+    assert stats is not None
+
+    definitions = TieringOffloadingSpec.build_metric_definitions({})
+    with patch.object(
+        OffloadingSpecFactory,
+        "get_spec_cls",
+        return_value=_spec_cls_with_metric_definitions(definitions),
+    ):
+        prom_metrics = OffloadPromMetrics(
+            vllm_config=_FakeVllmConfig(store_threshold=0),
+            metric_types={
+                Gauge: _FakeMetric,
+                Counter: _FakeMetric,
+                Histogram: _FakeMetric,
+            },
+            labelnames=["model_name", "engine"],
+            per_engine_labelvalues={0: ["model", "0"]},
+        )
+    prom_metrics.observe(stats.data)
+
+    metrics = prom_metrics.offloading_metrics
+    outcomes = TieringOffloadingMetrics.PROMOTED_CHUNK_OUTCOMES
+    for outcome in ("loaded", "served_peer", "evicted_unloaded"):
+        counter = metrics[(0, outcomes, ("1:fs", outcome))]
+        assert counter.increments == [1]
+        assert counter.labelvalues == ("model", "0", "1:fs", outcome)
+    pending = TieringOffloadingMetrics.PROMOTED_CHUNKS_PENDING
+    assert metrics[(0, pending, ("1:fs", "unread"))].set_values == [1]
+    assert metrics[(0, pending, ("1:fs", "reading"))].set_values == [0]
+    repromotions = TieringOffloadingMetrics.CHUNK_REPROMOTIONS
+    assert metrics[(0, repromotions, ("1:fs",))].increments == [1]
+    time_to_outcome = TieringOffloadingMetrics.PROMOTED_CHUNK_TIME_TO_OUTCOME
+    assert len(metrics[(0, time_to_outcome, ("1:fs", "loaded"))].observed) == 1
+    outcome_def = prom_metrics._offloading_metric_defs[outcomes]
+    assert outcome_def.kwargs["labelnames"] == [
+        "model_name",
+        "engine",
+        "tier",
+        "outcome",
+    ]
