@@ -26,7 +26,6 @@ from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
-    RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
     TransferJob,
@@ -340,9 +339,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
         self._lookup_manager.flush()
-
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        return RequestOffloadingContext()
 
     def _poll_active_transfers(self) -> None:
         """Poll all in-flight transfers once; move newly-completed (success or

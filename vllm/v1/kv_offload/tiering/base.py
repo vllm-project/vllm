@@ -41,6 +41,13 @@ JobId = int
 TIER_LABEL = "tier"
 
 
+@dataclass(slots=True)
+class SecondaryTierRequestContext(RequestOffloadingContext):
+    """Per-request offloading preferences of a secondary tier."""
+
+    receives_stores: bool = True
+
+
 class TieringOffloadingMetrics:
     """Metric names for TieringOffloadingManager."""
 
@@ -312,18 +319,17 @@ class SecondaryTierManager(ABC):
         """Take KV events for storage state owned by this tier."""
         return ()
 
-    @abstractmethod
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+    def on_new_request(self, req_context: ReqContext) -> SecondaryTierRequestContext:
         """Called when a new request is first seen by the scheduler.
 
-        Returns a RequestOffloadingContext expressing this tier's preference
+        Returns a SecondaryTierRequestContext expressing this tier's preference
         for how chunks should be offloaded for this request.
 
         Args:
             req_context: Per-request context.
 
         """
-        pass
+        return SecondaryTierRequestContext()
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         """Called when a request has finished.

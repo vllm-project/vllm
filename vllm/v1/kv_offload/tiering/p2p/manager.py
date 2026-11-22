@@ -24,13 +24,13 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     OffloadPolicy,
     ReqContext,
-    RequestOffloadingContext,
     ScheduleEndContext,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
+    SecondaryTierRequestContext,
     TransferJob,
 )
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
@@ -465,7 +465,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         return LookupResult.HIT
 
     @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+    def on_new_request(self, req_context: ReqContext) -> SecondaryTierRequestContext:
         """Parse kv_transfer_params once and open the outbound session.
 
         Parses the P2P routing state onto `req_context` (cached for the
@@ -489,8 +489,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._failed_req_ids.add(source.kv_request_id)
         dest = req_context.get_state(P2PDestInfo)
         if dest is not None and dest.kv_request_id:
-            return RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
-        return RequestOffloadingContext(cascade_stores=dest is not None)
+            return SecondaryTierRequestContext(policy=OffloadPolicy.REQUEST_LEVEL)
+        return SecondaryTierRequestContext(receives_stores=dest is not None)
 
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:

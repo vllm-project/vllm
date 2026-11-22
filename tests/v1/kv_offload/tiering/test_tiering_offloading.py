@@ -38,7 +38,6 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     OffloadPolicy,
     ReqContext,
-    RequestOffloadingContext,
     ScheduleEndContext,
     StoreTrigger,
     TierFilter,
@@ -52,6 +51,7 @@ from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
+    SecondaryTierRequestContext,
     TieringOffloadingMetrics,
     TransferJob,
 )
@@ -157,8 +157,8 @@ class MetricsSecondaryTierManager(SecondaryTierManager):
     def drain_jobs(self) -> None:
         return
 
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        return RequestOffloadingContext()
+    def on_new_request(self, req_context: ReqContext) -> SecondaryTierRequestContext:
+        return SecondaryTierRequestContext()
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = self.stats
@@ -1437,7 +1437,7 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: RequestOffloadingContext(
+            lambda req_context: SecondaryTierRequestContext(
                 policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
@@ -1479,7 +1479,7 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: RequestOffloadingContext(
+            lambda req_context: SecondaryTierRequestContext(
                 policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
@@ -1519,7 +1519,7 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: RequestOffloadingContext(
+            lambda req_context: SecondaryTierRequestContext(
                 policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
@@ -1680,7 +1680,7 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: RequestOffloadingContext(
+            lambda req_context: SecondaryTierRequestContext(
                 policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )

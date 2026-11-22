@@ -1150,7 +1150,7 @@ class TieringOffloadingManager(OffloadingManager):
             if tier_idx == exclude_tier_idx:
                 continue
             tier_ctx = tier.on_new_request(req_context)
-            if not tier_ctx.cascade_stores:
+            if not tier_ctx.receives_stores:
                 if state.skip_cascade_tiers is None:
                     state.skip_cascade_tiers = set()
                 state.skip_cascade_tiers.add(tier_idx)

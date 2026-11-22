@@ -183,8 +183,6 @@ class OffloadPolicy(Enum):
 @dataclass(slots=True)
 class RequestOffloadingContext:
     policy: OffloadPolicy = OffloadPolicy.CHUNK_LEVEL
-    # Whether this secondary tier wants newly stored primary chunks cascaded.
-    cascade_stores: bool = True
 
 
 class ScheduleEndContext(NamedTuple):

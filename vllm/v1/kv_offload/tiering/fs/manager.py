@@ -43,7 +43,6 @@ from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
-    RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
     TransferJob,
@@ -208,10 +207,6 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
-
-    @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        return RequestOffloadingContext()
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
