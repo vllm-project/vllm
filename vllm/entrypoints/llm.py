@@ -182,10 +182,6 @@ class LLM(
         This class is intended to be used for offline inference. For online
         serving, use the [AsyncLLMEngine][vllm.AsyncLLMEngine] class instead.
 
-    Raises:
-        VLLMValidationError: If `kv_transfer_config` is invalid or data-parallel
-            execution is configured for unsupported single-process usage.
-
     """
 
     def __init__(
@@ -475,9 +471,6 @@ class LLM(
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
 
-        Raises:
-            RuntimeError: If the loaded model is not configured for generation.
-
         """
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
@@ -532,9 +525,6 @@ class LLM(
 
         Returns:
             A list of request IDs for the enqueued requests.
-
-        Raises:
-            RuntimeError: If the loaded model is not configured for generation.
 
         """
         runner_type = self.model_config.runner_type
@@ -709,9 +699,6 @@ class LLM(
             A list of `RequestOutput` objects containing the generated
             responses in the same order as the input messages.
 
-        Raises:
-            RuntimeError: If the loaded model is not configured for generation.
-
         """
         model_config = self.model_config
         runner_type = model_config.runner_type
@@ -794,9 +781,6 @@ class LLM(
 
         Returns:
             A list of request IDs for the enqueued requests.
-
-        Raises:
-            RuntimeError: If the loaded model is not configured for generation.
 
         """
         model_config = self.model_config
