@@ -57,7 +57,7 @@ async fn health() -> StatusCode {
 /// `root` = adapter path and `parent` = base model.
 async fn list_models(State(state): State<Arc<RenderState>>) -> Json<ListModelsResponse> {
     let created = unix_timestamp() as i64;
-    let base_cards = state.served_model_names.names().iter().map(|model| ModelObject {
+    let base_cards = state.served_model_names.base_names().iter().map(|model| ModelObject {
         id: model.clone(),
         object: "model".to_string(),
         created,
@@ -227,26 +227,35 @@ pub(crate) async fn render_completion<S: RenderContext>(
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
-    let text_request = lower_completion_request(
+    let text_requests = lower_completion_request(
         body,
         &lora_resolution,
         request_context,
         state.text_processor(),
     )?;
-    validate_max_output_tokens(
-        "max_tokens",
-        text_request.sampling_params.max_tokens,
-        state.text_processor().max_model_len(),
-    )?;
-    Ok(Json(vec![lower_render_request(
-        state.as_ref(),
-        &lora_resolution.model_names,
-        text_request,
-        model,
-        n,
-        stream,
-        stream_options,
-        return_token_ids,
-        MmPayload::Tensors,
-    )?]))
+    for text_request in &text_requests {
+        validate_max_output_tokens(
+            "max_tokens",
+            text_request.sampling_params.max_tokens,
+            state.text_processor().max_model_len(),
+        )?;
+    }
+    // Like Python, one generate request per prompt.
+    let generate_requests = text_requests
+        .into_iter()
+        .map(|text_request| {
+            lower_render_request(
+                state.as_ref(),
+                &lora_resolution.model_names,
+                text_request,
+                model.clone(),
+                n,
+                stream,
+                stream_options.clone(),
+                return_token_ids,
+                MmPayload::Tensors,
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(Json(generate_requests))
 }
