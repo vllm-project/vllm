@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import CompilationConfig, CompilationMode
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.platforms import current_platform
@@ -237,7 +238,7 @@ def test_v2_load_model_registers_dspark_speculator_when_supported(monkeypatch):
     speculator = FakeDSparkSpeculator()
     runner = _make_runner(
         is_last_pp_rank=False,
-        speculative_config=SimpleNamespace(
+        speculative_config=fake_speculative_config(
             method="dspark",
             draft_model_config=draft_model_config,
             prefill_context_kv_only=False,
