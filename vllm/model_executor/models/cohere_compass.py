@@ -23,7 +23,6 @@
 # limitations under the License.
 """Inference-only Cohere Compass model compatible with HuggingFace weights."""
 
-import math
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache, partial
 from itertools import islice
@@ -134,6 +133,7 @@ from .utils import (
 )
 from .vision import (
     get_fp8_padded_hidden_size,
+    get_max_image_size,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
@@ -1126,23 +1126,7 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
 
             max_pixels = size["longest_edge"]
 
-        unit = patch_size * merge_size
-        max_seq_len = max_pixels // (unit * unit)
-
-        def closest_factor_pair(n: int) -> tuple[int, int]:
-            # left <= right
-            for d in range(math.isqrt(n), 0, -1):
-                if n % d == 0:
-                    return d, n // d
-            return 1, n
-
-        height_factor, width_factor = 1, max_seq_len
-        for seq_len in range(max_seq_len, 0, -1):
-            height_factor, width_factor = closest_factor_pair(seq_len)
-            if width_factor / height_factor <= 200:
-                break
-
-        return ImageSize(width=unit * width_factor, height=unit * height_factor)
+        return get_max_image_size(max_pixels, patch_size * merge_size)
 
     def get_max_image_tokens(self) -> int:
         image_processor = self.get_image_processor()

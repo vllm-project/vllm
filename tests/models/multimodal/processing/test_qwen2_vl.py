@@ -402,11 +402,40 @@ def test_get_image_size_with_most_features(
         assert tokens < max_tokens
 
 
+def test_image_budget_with_sub_cell_pixel_limit() -> None:
+    ctx = build_model_context(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        mm_processor_kwargs={"min_pixels": 196, "max_pixels": 196},
+        limit_mm_per_prompt={"image": 1, "video": 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Qwen2VLProcessingInfo)
+
+    max_image_tokens = processor.info.get_max_image_tokens()
+    dummy_inputs = processor.get_dummy_mm_inputs({"image": 1})
+    assert (
+        sum(p.get_num_embeds() for p in dummy_inputs["mm_placeholders"]["image"])
+        == max_image_tokens
+    )
+
+
 @pytest.mark.parametrize(
     ("model_id", "max_model_len", "mm_processor_kwargs"),
     [
         ("Qwen/Qwen2-VL-2B-Instruct", 20000, None),
+        ("Qwen/Qwen2-VL-2B-Instruct", 8192, None),
+        (
+            "Qwen/Qwen2-VL-2B-Instruct",
+            8192,
+            {"images_kwargs": {"min_pixels": 1605632, "max_pixels": 1605632}},
+        ),
+        (
+            "Qwen/Qwen2-VL-2B-Instruct",
+            8192,
+            {"min_pixels": 1605632, "max_pixels": 1605632},
+        ),
         ("Qwen/Qwen2.5-VL-3B-Instruct", 20000, None),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", 4096, None),
         ("Qwen/Qwen2.5-VL-3B-Instruct", 20000, {"max_pixels": 4096 * 28 * 28}),
         (
             "Qwen/Qwen2.5-VL-3B-Instruct",

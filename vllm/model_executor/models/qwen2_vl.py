@@ -25,7 +25,6 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 
-import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias, cast
@@ -89,7 +88,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.math_utils import cdiv
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -109,6 +107,8 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
+    get_max_image_size,
+    get_video_size_and_frames_for_budget,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
@@ -1109,23 +1109,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
 
             max_pixels = size["longest_edge"]
 
-        unit = patch_size * merge_size
-        max_seq_len = max_pixels // (unit * unit)
-
-        def closest_factor_pair(n: int) -> tuple[int, int]:
-            # left <= right
-            for d in range(math.isqrt(n), 0, -1):
-                if n % d == 0:
-                    return d, n // d
-            return 1, n
-
-        height_factor, width_factor = 1, max_seq_len
-        for seq_len in range(max_seq_len, 0, -1):
-            height_factor, width_factor = closest_factor_pair(seq_len)
-            if width_factor / height_factor <= 200:
-                break
-
-        return ImageSize(width=unit * width_factor, height=unit * height_factor)
+        return get_max_image_size(max_pixels, patch_size * merge_size)
 
     def get_max_image_tokens(self) -> int:
         image_processor = self.get_image_processor()
@@ -1208,26 +1192,19 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         if video_options and video_options.num_frames:
             max_frames = min(max_frames, video_options.num_frames)
 
-        max_step_tokens = num_tokens(max_size, temporal_patch_size)
-        min_step_tokens = num_tokens(ImageSize(unit, unit), temporal_patch_size)
-
-        video_tokens = seq_len // max(mm_counts.get("video", 0), 1)
-        num_steps = min(
-            cdiv(video_tokens, max_step_tokens),
-            cdiv(max_frames, temporal_patch_size),
-            video_tokens // min_step_tokens,
-        )
-        if num_steps > 1:
-            step_tokens = min(video_tokens // num_steps, max_step_tokens)
-            size = self.get_image_size_with_most_features(
+        return get_video_size_and_frames_for_budget(
+            seq_len=seq_len,
+            video_tokens=seq_len // max(mm_counts.get("video", 0), 1),
+            max_size=max_size,
+            max_size_frames=max_size_frames,
+            step_frames=temporal_patch_size,
+            max_frames=max_frames,
+            unit=unit,
+            num_tokens=num_tokens,
+            get_step_size=lambda step_tokens: self.get_image_size_with_most_features(
                 max_pixels=step_tokens * unit * unit
-            )
-            num_frames = num_steps * temporal_patch_size
-            tokens = num_tokens(size, num_frames)
-            if num_tokens(max_size, max_size_frames) < tokens <= video_tokens:
-                return size, num_frames
-
-        return max_size, max_size_frames
+            ),
+        )
 
     def get_max_video_tokens(
         self,
