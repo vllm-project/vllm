@@ -609,7 +609,8 @@ def _close_against_a_hung_server(role: str, stuck: str) -> None:
     if role == "scheduler":
         handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
         setattr(pool.clients[0], stuck, _hang)
-        assert handle.lookup(["k"]) == [False]
+        # A hung exists call is unavailable; with a hung close, "k" is absent.
+        assert handle.lookup(["k"]) == ([None] if stuck == "batch_exists" else [False])
     else:
         handle = runtime.create_worker_handle("ns", RankTopology(), None)
         source = torch.arange(16, dtype=torch.uint8)
@@ -940,7 +941,9 @@ def _stall_scheduler_call(server, monkeypatch, method, release) -> list:
     return calls
 
 
-def test_lookup_without_a_reply_misses_until_the_server_answers(server, monkeypatch):
+def test_lookup_without_a_reply_is_unavailable_until_the_server_answers(
+    server, monkeypatch
+):
     handle = _runtime(lookup_timeout_ms=50).create_scheduler_handle(
         "ns", RankTopology(), None
     )
@@ -948,8 +951,8 @@ def test_lookup_without_a_reply_misses_until_the_server_answers(server, monkeypa
     release = threading.Event()
     calls = _stall_scheduler_call(server, monkeypatch, "batch_exists", release)
     try:
-        assert handle.lookup(["k"]) == [False]
-        assert handle.lookup(["j"]) == [False]
+        assert handle.lookup(["k"]) == [None]
+        assert handle.lookup(["j"]) == [None]
         assert "returned" not in calls
 
         release.set()
@@ -987,7 +990,7 @@ def test_scheduler_close_does_not_wait_on_a_stalled_server(server, monkeypatch, 
     calls = _stall_scheduler_call(server, monkeypatch, stuck, release)
     try:
         if stuck == "batch_exists":
-            assert handle.lookup(["k"]) == [False]
+            assert handle.lookup(["k"]) == [None]
 
         handle.close()
 
@@ -1003,7 +1006,7 @@ def test_scheduler_drops_its_client_once_a_stalled_call_returns(server, monkeypa
     )
     release = threading.Event()
     _stall_scheduler_call(server, monkeypatch, "batch_exists", release)
-    assert handle.lookup(["k"]) == [False]
+    assert handle.lookup(["k"]) == [None]
 
     handle.close()
     release.set()
@@ -1025,7 +1028,10 @@ def test_lookup_and_clear_degrade_when_the_server_is_lost(server, failure):
 
     server.lose(failure)
 
-    assert handle.lookup(["k", "j"]) == [False, False]
+    # MORI reports a lost server by result, which looks like a miss; only a
+    # raising RPC is known to be unavailable.
+    expected = [False, False] if failure == "server-down" else [None, None]
+    assert handle.lookup(["k", "j"]) == expected
     assert handle.clear() is False
     handle.close()
 
@@ -1035,7 +1041,7 @@ def test_lookup_rejects_a_short_result(server, monkeypatch):
     handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
     monkeypatch.setattr(server.clients[0], "batch_exists", lambda keys: [True])
 
-    assert handle.lookup(["a", "b"]) == [False, False]
+    assert handle.lookup(["a", "b"]) == [None, None]
 
 
 @pytest.mark.parametrize("load_async", [False, True])

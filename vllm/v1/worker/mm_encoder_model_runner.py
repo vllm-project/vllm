@@ -8,7 +8,7 @@ embeddings. It runs no language model: no KV cache, sampler, or decoder graphs.
 """
 
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -19,7 +19,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 from vllm.v1.outputs import (
     ModelRunnerOutput,
     make_empty_encoder_model_runner_output,
@@ -52,7 +52,7 @@ class MMEncoderModelRunner(GPUModelRunner):
         self._input_event_idx = 0
 
     @contextmanager
-    def input_tensor_semaphore(self) -> Iterator[None]:
+    def input_tensor_semaphore(self) -> Generator[None]:
         """Guard the host writes into the pooled input buffers.
 
         `UvaBufferPool` recycles a slot every `max_concurrent_batches` steps and
@@ -70,7 +70,7 @@ class MMEncoderModelRunner(GPUModelRunner):
             input_event.record()
             self._input_event_idx = (idx + 1) % len(self._input_events)
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+    def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
         return {}
 
     @torch.inference_mode()

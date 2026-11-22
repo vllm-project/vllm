@@ -283,10 +283,12 @@ class Granite4VisionLLMModel(GraniteModel):
 
         if not get_pp_group().is_last_rank:
             # Forward hidden_states and any deepstack features for later ranks.
+            # Copy the features: on the first rank they are views of buffers the
+            # outer model zeroes right after this forward, before the PP send.
             it = {"hidden_states": hidden_states}
             if deepstack_input_embeds is not None:
                 remaining = {
-                    k: v
+                    k: v.clone()
                     for k, v in deepstack_input_embeds.tensors.items()
                     if int(k.split("_")[1]) >= self.end_layer
                 }
@@ -331,9 +333,12 @@ class Granite4VisionLLMForCausalLM(GraniteForCausalLM):
         self, batch_size: int, dtype: torch.dtype, device: torch.device
     ) -> IntermediateTensors:
         tensors = super().make_empty_intermediate_tensors(batch_size, dtype, device)
-        # Include deepstack buffers so non-first PP ranks receive them.
+        # Include the deepstack buffers this PP rank receives: the previous rank
+        # forwards only the features of layers from this rank's first layer on.
         # _ds_layer_indices is set directly on this instance by the outer model.
         for llm_layer in getattr(self, "_ds_layer_indices", []):
+            if llm_layer < self.model.start_layer:
+                continue
             tensors.tensors[f"ds_{llm_layer}"] = torch.zeros(
                 (batch_size, self.config.hidden_size), dtype=dtype, device=device
             )

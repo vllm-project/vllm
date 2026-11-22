@@ -309,8 +309,6 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        # The checkpoint's stale `auto_map` points at remote code that no longer exists
-        vllm_runner_kwargs={"trust_remote_code": False},
         hf_processor=AutoProcessor.from_pretrained,
         single_image_prompts=IMAGE_ASSETS.prompts(
             {
@@ -379,6 +377,29 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],
         image_size_factors=[(1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
+    ),
+    "dots_ocr": VLMTestInfo(
+        models=["rednote-hilab/dots.ocr"],
+        test_type=VLMTestType.IMAGE,
+        prompt_formatter=lambda img_prompt: (
+            f"<|user|>{img_prompt}<|endofuser|><|assistant|>"
+        ),
+        img_idx_to_prompt=lambda idx: "<|img|><|imgpad|><|endofimg|>",
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForCausalLM,
+        image_size_factors=[(0.25,)],
+        # TP=2 regression test for the vision tower QKV split in dots_ocr.
+        # The HF reference side cannot run: dots.ocr's remote code targets
+        # transformers 4.51 and breaks in generate() under the pinned vLLM
+        # environment (transformers >= 5.16.1).
+        tensor_parallel_size=2,
+        marks=[
+            pytest.mark.skip(
+                reason="Custom model code is not compatible with Transformers v5"
+            ),
+            *multi_gpu_marks(num_gpus=2),
+        ],
     ),
     "gemma3": VLMTestInfo(
         models=["google/gemma-3-4b-it"],
@@ -805,6 +826,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         dtype="bfloat16",
+        hf_runner_kwargs={"trust_remote_code": True},
         hf_processor=model_utils.moondream3_processor,
         patch_hf_runner=model_utils.moondream3_patch_hf_runner,
         # Single size factor to avoid GPU OOM when running multiple test
@@ -870,15 +892,9 @@ VLM_TEST_SETTINGS = {
         ),
         max_model_len=8192,
         max_num_seqs=2,
-        auto_cls=AutoModelForCausalLM,
+        auto_cls=AutoModelForImageTextToText,
         patch_hf_runner=model_utils.paddleocr_vl_patch_hf_runner,
         image_size_factors=[(0.25,)],
-        marks=[
-            pytest.mark.skip(
-                reason="Model's custom code uses ROPE_INIT_FUNCTIONS"
-                "['default'] which was removed in transformers v5",
-            ),
-        ],
     ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],

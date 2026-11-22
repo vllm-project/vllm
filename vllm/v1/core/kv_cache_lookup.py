@@ -58,11 +58,11 @@ class CacheHitBlock:
     is_cpu: bool = False
 
 
-@dataclass(kw_only=True)
+@dataclass(kw_only=True, slots=True)
 class JointCacheHit:
     """A reconciled prefix; null blocks denote attention padding, not loads.
 
-    ``num_gpu_prefix_tokens`` is a boundary, not the total GPU reuse count.
+    `num_gpu_prefix_tokens` is a boundary, not the total GPU reuse count.
     Scheduling uses the boundary and its extension; allocation uses positions.
     Admission accepts the complete match or defers the request.
     """
@@ -83,9 +83,10 @@ class JointCacheHit:
         block_hashes: list[BlockHash],
         max_length: int,
         scheduler_block_size: int,
+        num_request_tokens: int | None = None,
     ) -> "JointCacheHit":
         blocks, length, uncached = coordinator.find_longest_cache_hit(
-            block_hashes, max_length, lookup=lookup
+            block_hashes, max_length, num_request_tokens, lookup=lookup
         )
         while length % scheduler_block_size and any(
             block.pool is not None and block.pool() is lookup.cpu
@@ -95,6 +96,7 @@ class JointCacheHit:
             blocks, length, uncached = coordinator.find_longest_cache_hit(
                 block_hashes,
                 length // scheduler_block_size * scheduler_block_size,
+                num_request_tokens,
                 lookup=lookup,
             )
         hits = tuple(

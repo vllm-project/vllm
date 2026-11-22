@@ -709,7 +709,7 @@ class BenchmarkWorker:
 
         need_device_guard = False
         if current_platform.is_rocm():
-            visible_device = os.environ.get("ROCR_VISIBLE_DEVICES", None)
+            visible_device = os.environ.get("HIP_VISIBLE_DEVICES", None)
             if visible_device != f"{self.device_id}":
                 need_device_guard = True
 
@@ -909,6 +909,15 @@ def get_model_params(config):
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
     elif architecture in (
+        "Glm5NextForConditionalGeneration",
+        "Glm5NextForCausalLM",
+    ):
+        text_config = config.get_text_config()
+        E = text_config.n_routed_experts
+        topk = text_config.num_experts_per_tok
+        intermediate_size = text_config.moe_intermediate_size
+        hidden_size = text_config.hidden_size
+    elif architecture in (
         "DiffusionGemmaForBlockDiffusion",
         "Gemma4ForCausalLM",
         "Gemma4ForConditionalGeneration",
@@ -982,7 +991,7 @@ def get_quantization_group_size(config) -> int | None:
     """Extract the quantization group size from the HF model config.
 
     This reads directly from the HuggingFace config object (as returned by
-    ``get_config()``), not from vLLM's quantization config classes.
+    `get_config()`), not from vLLM's quantization config classes.
 
     Supports AWQ/GPTQ-style configs (direct 'group_size' key) and
     compressed-tensors configs (nested inside 'config_groups').
@@ -1075,14 +1084,10 @@ def main(args: argparse.Namespace):
     use_deep_gemm = bool(args.use_deep_gemm)
 
     if current_platform.is_rocm() and "HIP_VISIBLE_DEVICES" in os.environ:
-        # Ray will set ROCR_VISIBLE_DEVICES for device visibility
-        logger.warning(
-            "Ray uses ROCR_VISIBLE_DEVICES to control device accessibility."
-            "Replacing HIP_VISIBLE_DEVICES with ROCR_VISIBLE_DEVICES."
-        )
-        val = os.environ["HIP_VISIBLE_DEVICES"]
-        os.environ["ROCR_VISIBLE_DEVICES"] = val
-        del os.environ["HIP_VISIBLE_DEVICES"]
+        # Importing vLLM copied HIP_VISIBLE_DEVICES into CUDA_VISIBLE_DEVICES.
+        # Ray narrows HIP_VISIBLE_DEVICES per worker, so an inherited copy
+        # would conflict with it. Drop it; each worker re-syncs on import.
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
     ray.init()
     num_gpus = int(ray.available_resources()["GPU"])

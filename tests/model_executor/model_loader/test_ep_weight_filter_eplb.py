@@ -26,9 +26,8 @@ FILTER_LOG = "EP weight filter: ep_size=2, ep_rank=0, loading 37/72 experts"
 pytestmark = [
     *multi_gpu_marks(num_gpus=2),
     pytest.mark.skipif(
-        not current_platform.is_cuda(),
-        reason="Exact comparison needs VLLM_BATCH_INVARIANT, unsupported for MLA "
-        "on this platform.",
+        not current_platform.is_cuda_alike(),
+        reason="Needs a CUDA or ROCm GPU.",
     ),
 ]
 
@@ -39,6 +38,7 @@ def test_ep_weight_filter_matches_unfiltered_with_eplb(
     # Batch invariance makes the two runs comparable token for token, and
     # spawned workers let caplog_mp_spawn read their logs.
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "0")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     outputs = {}
