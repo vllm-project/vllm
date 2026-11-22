@@ -97,6 +97,13 @@ CASES = {
         "Use <think> and </think> as text.",
         ["Paris"],
     ),
+    # A tool call is not answer text, so reasoning after it is still parsed.
+    "reasoning_after_tool": (
+        _call("Paris") + "\n<think>\nLater.\n</think>",
+        "Later.",
+        "",
+        ["Paris"],
+    ),
     # Text before a tool call keeps its whitespace in both parse paths.
     "extra_newline_before_tool_content": (
         "<think>\nNeed the tool.\n</think>\n\nChecking now." + _call("Paris"),

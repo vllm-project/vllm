@@ -108,9 +108,11 @@ class RippleStreamingParserEngine(StreamingParserEngine):
         self._content_started = False
 
     def _emit_for_state(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
+        # A tool call forwarded as text by the reasoning pass is not the answer.
         if (
             not self._content_started
             and self.state is ParserState.CONTENT
+            and not self._in_skipped_tool_span
             and text.strip()
         ):
             self._content_started = True
@@ -125,7 +127,12 @@ class RippleStreamingParserEngine(StreamingParserEngine):
             and terminal in ("THINK_START", "THINK_END")
         ):
             return self._emit_for_state(value, token_count)
-        return super()._on_terminal(terminal, value, token_count)
+        content_started = self._content_started
+        events = super()._on_terminal(terminal, value, token_count)
+        if self.skip_tool_parsing and terminal in self._tool_terminals:
+            # Forwarded tool-call markers are not answer content either.
+            self._content_started = content_started
+        return events
 
 
 class RippleParser(ParserEngine):
