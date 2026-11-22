@@ -5,7 +5,7 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Looped multimodal (text and image in, text out) MoE from Thinking Machines Lab with 26B total and 3.5B active parameters and up to 1M context: its 12 middle layers run three passes per token, each with its own KV cache and gated messages from the previous pass. Bundles a DSpark speculator."
   date_added: 2026-11-20
-  date_updated: 2026-11-20
+  date_updated: 2026-11-22
   difficulty: intermediate
   tasks:
     - multimodal
@@ -29,7 +29,7 @@ model:
   docker_image: "vllm/vllm-openai:inkling-2-mini"
   install:
     docker:
-      note: "Serve from the `vllm/vllm-openai:inkling-2-mini` image; no pip wheel is available yet."
+      note: "Use the `vllm/vllm-openai:inkling-2-mini` image for the listed configurations."
     pip: false
   architecture: moe
   parameter_count: "26B"
@@ -85,6 +85,22 @@ strategy_overrides:
         extra_args:
           - "--max-model-len"
           - "262144"
+
+troubleshooting:
+  - title: "DSpark warmup fails with no kernel image available on SM120"
+    when: { hardware: [arch:sm120], features: [spec_decoding] }
+    body: |
+      The launch build of `vllm/vllm-openai:inkling-2-mini` lacks the SM120
+      `reshape_and_cache_flash` kernel used by the DSpark drafter. See
+      [issue #69081](https://github.com/vllm-project/vllm/issues/69081) for the
+      affected image digest. On that build, disable DSpark to serve without the drafter.
+
+      The [native wheel for commit 8c17e46](https://wheels.vllm.ai/8c17e4692a7cf393e3d1dacf6404fa4d48d993a1/vllm/)
+      served the original checkpoint on one 32 GB RTX 5090 with PyTorch 2.14.0,
+      CUDA 13.2, and driver 595.71.05. The run used TP1, seven DSpark draft
+      tokens, FP8 KV, 16,384 tokens of context, 8 maximum sequences, a
+      1,024-token batch budget, and 0.90 GPU memory utilization. Text-only
+      mode used `--limit-mm-per-prompt '{"image":0}'`.
 
 guide: |
   ## Overview
