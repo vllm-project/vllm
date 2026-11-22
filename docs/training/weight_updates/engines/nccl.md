@@ -85,6 +85,7 @@ once every transfer has drained.
 | `packed` | `True` | Use packed broadcasting |
 | `packed_buffer_size_bytes` | 1 GiB | Packed buffer size |
 | `packed_num_buffers` | 2 | Number of rotating buffers (double/triple buffering) |
+| `use_load_plan` | `False` | Use a pre-recorded load plan for direct reload (requires direct reload and refuses online quantization; see [Direct Weight Reload](../direct_reload.md#refused-configurations)) |
 
 `packed` defaults to `True` here. The worker-side default is `False`, but it only
 applies when no trainer ships a value — which, on this path, never happens.

@@ -138,6 +138,7 @@ To adapt a trainer that is not a plain `nn.Module` — a Megatron export, a raw 
 | `stall_timeout_s` | 300.0 | Seconds without progress before the sync fails. A liveness backstop for a consumer that dies mid-sync, not a latency target |
 | `staging_device` | `"gpu"` | Receive-slot location: `"gpu"` for GPU memory or `"host"` for pinned host memory |
 | `stages_in_flight` | 1 | Maximum trainer stage streams pulled concurrently; clamped to the plan's stream count |
+| `workers_per_replica` | 0 | Workers per inference replica for slot-sharing across multi-replica deployments (`0` disables grouping) |
 
 ## Limitations
 

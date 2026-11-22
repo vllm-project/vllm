@@ -65,7 +65,7 @@ from vllm.config import WeightTransferConfig
 
 llm = LLM(
     model="my-model",
-    # Other backends: "ipc", "sparse_nccl", "sharded_rdt", "nccl_m2n".
+    # Other backends: "ipc", "sparse_nccl", "sharded_rdt", "nccl_m2n", "modelexpress".
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
 )
 ```
