@@ -331,19 +331,23 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     int profile_m_blocks = 4;
   #ifdef VLLM_MARLIN_GROUPED_NVFP4
     GroupedNvfp4Kernel profile_kernel = GroupedNvfp4Kernel::M64Whole;
-    if (use_input_profile && rest_m > 64) {
-      constexpr int m_tile_group = 8;
+    constexpr int m_tile_group = 8;
+    // Split a short input tile without adding padded rows.
+    const bool split_single_input_tile =
+        div_ceil(prob_m, 16) == 4 &&
+        div_ceil(2 * (prob_n / 128), 2 * sms) <= m_tile_group;
+    if (use_input_profile && (rest_m > 64 || split_single_input_tile)) {
       if (rest_m >= m_tile_group * 64) {
         profile_rows = rest_m / (m_tile_group * 64) * (m_tile_group * 64);
       } else {
         profile_rows = rest_m;
         int tiles32 = div_ceil(profile_rows, 32);
         int tiles64 = div_ceil(profile_rows, 64);
-        // Use the narrower tile when it saves padding and per-CTA work is
-        // small.
+        // Use narrower tiles for short inputs or padding savings.
         bool narrow_tile =
-            tiles32 * 32 < tiles64 * 64 &&
-            div_ceil(tiles32 * (prob_n / 128), 2 * sms) <= m_tile_group;
+            split_single_input_tile ||
+            (tiles32 * 32 < tiles64 * 64 &&
+             div_ceil(tiles32 * (prob_n / 128), 2 * sms) <= m_tile_group);
         if (narrow_tile) profile_m_blocks = 2;
       }
     } else if (use_output_profile) {

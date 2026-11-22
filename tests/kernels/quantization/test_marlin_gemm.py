@@ -366,6 +366,10 @@ def test_marlin_gemm(
                 1,
                 8,
                 9,
+                48,
+                49,
+                56,
+                63,
                 64,
                 65,
                 79,
@@ -394,9 +398,9 @@ def test_marlin_gemm(
                 8193,
             )
         ],
-        *[(m, 4096, 18560, "strided") for m in (8, 79, 96, 128)],
-        *[(m, 4096, 18560, "minimal_workspace") for m in (8, 96, 128, 1025)],
-        *[(m, 4096, 18560, "below_profile_workspace") for m in (96, 513)],
+        *[(m, 4096, 18560, "strided") for m in (8, 49, 79, 96, 128)],
+        *[(m, 4096, 18560, "minimal_workspace") for m in (8, 49, 96, 128, 1025)],
+        *[(m, 4096, 18560, "below_profile_workspace") for m in (49, 96, 513)],
         *[
             (m, 8192, 4096, "contiguous")
             for m in (
