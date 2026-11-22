@@ -1220,6 +1220,9 @@ def reserve_query_head_storage(
 
 
 _A2A_SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
+# XPU: one 128B cache line per signal slot, so peers on different devices
+# never write the same line (observed to lose signals otherwise).
+_XPU_A2A_SIGNAL_STRIDE = 32
 
 
 class DirectDCPA2AWorkspace(DirectCPWorkspace):
@@ -1261,7 +1264,9 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
             max_num_tokens,
             heads_per_rank,
         )
-        signal_shape = (num_ubatches, 2, self.world_size)
+        signal_shape: tuple[int, ...] = (num_ubatches, 2, self.world_size)
+        if current_platform.is_xpu():
+            signal_shape += (_XPU_A2A_SIGNAL_STRIDE,)
         self.received_output, self.peer_output_ptrs = self._allocate(
             output_shape, dtype
         )
