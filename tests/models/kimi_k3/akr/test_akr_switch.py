@@ -32,3 +32,15 @@ def test_route_off_wins(monkeypatch):
     assert akr_switch.on("KDA_DECODE")
     monkeypatch.setenv("VLLM_KIMI_AKR_K2", "1")
     assert not akr_switch.on("K2")  # K2 is on the moe route
+
+
+def test_kda_prefill_default_on(monkeypatch):
+    from vllm.models.kimi_k3.amd import akr_kda_prefill
+
+    monkeypatch.delenv("VLLM_KIMI_AKR_KDA_PREFILL", raising=False)
+    assert akr_kda_prefill._env_on()
+    for v in ("0", "false", "off", "no"):
+        monkeypatch.setenv("VLLM_KIMI_AKR_KDA_PREFILL", v)
+        assert not akr_kda_prefill._env_on(), v
+    monkeypatch.setenv("VLLM_KIMI_AKR_KDA_PREFILL", "1")
+    assert akr_kda_prefill._env_on()

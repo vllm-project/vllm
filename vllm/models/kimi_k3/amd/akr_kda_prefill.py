@@ -6,9 +6,7 @@
 One call replaces, for the prefill tokens of a layer: the fused qkv causal conv + SiLU,
 the gate / beta / q-k L2-norm computation, `chunk_kda_prefill` and the gated RMSNorm
 (`self.o_norm`). Route `kda` of `akr_config`, sub-switch `VLLM_KIMI_AKR_KDA_PREFILL`
-(default off: unset keeps the stock path, `=1` enables it). Off by default because of an
-open bug: with it on, served requests can be corrupted across requests (garbage answers
-in GSM8K runs at TP8/DCP8).
+(default on; `=0` / false / off / no keeps the stock path).
 
 Constraints (any failure falls back to the stock path before anything is written):
 - The entry serves the call (`kda_prefill_unsupported_reason`: the (heads, head_dim) of
@@ -37,13 +35,13 @@ logger = init_logger(__name__)
 
 _ATTR_W = "_akr_kda_conv_w"
 _STEP = "_akr_kda_table"
+_SIDX = "_akr_kda_sidx"
 
 
 def _env_on() -> bool:
-    """VLLM_KIMI_AKR_KDA_PREFILL: off unless set to 1/true/on/yes (open cross-request
-    corruption, see above)."""
+    """VLLM_KIMI_AKR_KDA_PREFILL: on unless set to 0/false/off/no/none."""
     v = os.environ.get("VLLM_KIMI_AKR_KDA_PREFILL", "").strip().lower()
-    return v in ("1", "true", "on", "yes")
+    return v not in ("0", "false", "off", "no", "none")
 
 
 def _impl() -> str | None:
@@ -94,6 +92,18 @@ def _conv_weight(layer) -> torch.Tensor:
     return w
 
 
+def _state_indices(m) -> torch.Tensor | None:
+    """`prefill_state_indices` with unit stride, once per step: the builder's is the
+    column view `block_table[:, 0]` (row stride 1 + speculative blocks)."""
+    s = getattr(m, _SIDX, None)
+    if s is None:
+        s = m.prefill_state_indices
+        if s is not None:
+            s = s.contiguous()
+        setattr(m, _SIDX, s)
+    return s
+
+
 def _table(m, prefill_state_indices, prefill_has_initial_state, cu, state_cache):
     from amd_kernels.attention.kda_common import kda_prefill_chunk_table
 
@@ -138,7 +148,7 @@ def try_prefill(
     nd = m.num_decodes  # decode-first, only when there is no spec split (checked above)
     nd_tok = m.num_decode_tokens
     cu = m.prefill_query_start_loc
-    sidx = m.prefill_state_indices
+    sidx = _state_indices(m)
     has = m.prefill_has_initial_state
     if cu is None or sidx is None or has is None:
         return False

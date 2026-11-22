@@ -61,7 +61,7 @@ def make_layer(seed=0):
     return layer
 
 
-def make_batch(nd, plens, ctxs, seed=1, slots=64):
+def make_batch(nd, plens, ctxs, seed=1, slots=200):
     """Nd decode rows (1 token, cached state) then prefill sequences (plens new tokens,
     ctxs cached)."""
     g = torch.Generator(device=dev).manual_seed(seed)
@@ -85,7 +85,9 @@ def make_batch(nd, plens, ctxs, seed=1, slots=64):
     cu_cpu = cu.cpu()
     ctx_all = [1] * nd + list(ctxs)
     has = torch.tensor([c > 0 for c in ctx_all], device=dev)
-    sidx = torch.arange(1, n + 1, device=dev, dtype=torch.int32)
+    # served layout: the column view block_table[:, 0] (1 + speculative blocks per row)
+    bt = torch.arange(1, 4 * n + 1, device=dev, dtype=torch.int32).view(n, 4)
+    sidx = bt[:, 0]
     rec = (0.1 * torch.randn(slots, H, D, D, device=dev, generator=g)).float()
     # DS layout: [slots, dim, 3]; SD layout: [slots, 3, dim] (transposed to dim-first by
     # the layer)
@@ -131,8 +133,9 @@ def run(layer, b, akr, patch):
     layer.kv_cache = (conv, rec)
     out = torch.full((1, b["T"], H, D), float("nan"), device=dev, dtype=torch.bfloat16)
     patch(lambda: SimpleNamespace(attn_metadata={layer.prefix: b["m"]}))
-    if hasattr(b["m"], ak._STEP):
-        delattr(b["m"], ak._STEP)
+    for attr in (ak._STEP, ak._SIDX):
+        if hasattr(b["m"], attr):
+            delattr(b["m"], attr)
     called = []
     orig = ak.try_prefill
 
@@ -203,14 +206,18 @@ def main():
         e_out = rel(o1[0], o0[0])
         e_pre = rel(o1[0, nd:], o0[0, nd:])
         e_dec = rel(o1[0, :nd], o0[0, :nd]) if nd else 0.0
-        e_st = rel(r1[slots], r0[slots])
+        e_st = max(rel(r1[s], r0[s]) for s in slots.tolist())
+        others = torch.ones(r0.shape[0], dtype=torch.bool, device=dev)
+        others[slots] = False
+        others_ok = torch.equal(r1[others], b["rec"][others])
         e_cv = (c1.float() - c0.float()).abs().max().item()
         untouched = bool((r1[0] == b["rec"][0]).all())
         print(
             f"{name:34s} T={nrow:6d} used={ok_used} out_relL2={e_out:.2e} (prefill "
             f"{e_pre:.2e}, decode {e_dec:.2e}) "
-            f"state_relL2={e_st:.2e} conv_state_maxabs={e_cv:.1e} "
-            f"nan={bool(torch.isnan(o1).any())} slot0_untouched={untouched}",
+            f"state_relL2(max per seq)={e_st:.2e} conv_state_maxabs={e_cv:.1e} "
+            f"nan={bool(torch.isnan(o1).any())} slot0_untouched={untouched} "
+            f"other_slots_untouched={others_ok}",
             flush=True,
         )
         if b["T"] >= 2048:
