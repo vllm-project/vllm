@@ -112,6 +112,7 @@ def _make_worker(
 
     spec = MagicMock(spec=OffloadingSpec)
     spec.replicated_layout = replicated_layout
+    spec.async_init = False
     spec.config = MagicMock()
     spec.config.canonical_layout = canonical_layout
     spec.config.parallel.rank = rank
@@ -179,6 +180,7 @@ def _offloading_config(rank: int = 0) -> OffloadingConfig:
         parallel=OffloadingParallelConfig(
             rank=rank,
             world_size=2,
+            local_world_size=2,
             tp_size=2,
             pp_size=1,
             pcp_size=1,

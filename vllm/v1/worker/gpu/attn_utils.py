@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AttentionCGSupportInfo:
     min_cg_support: AttentionCGSupport = AttentionCGSupport.ALWAYS
     min_cg_attn_backend: str | None = None
@@ -71,7 +71,7 @@ class AttentionCGSupportInfo:
         return self
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FastPrefillBatchMetadata:
     """Per-step inputs for the KV-sharing fast prefill path."""
 
@@ -163,7 +163,7 @@ def get_shared_kv_cache_layers(vllm_config: VllmConfig) -> dict[str, str]:
     return {
         layer_name: kv_tgt_layer
         for layer_name, attn_module in attn_layers.items()
-        if (kv_tgt_layer := attn_module.kv_sharing_target_layer_name)
+        if (kv_tgt_layer := getattr(attn_module, "kv_sharing_target_layer_name", None))
     }
 
 

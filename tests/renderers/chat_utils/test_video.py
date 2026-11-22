@@ -177,6 +177,30 @@ def test_parse_chat_messages_video_and_video_embeds_mixed(
         )
 
 
+@pytest.mark.parametrize("count", [0, 1])
+def test_parse_chat_messages_video_embeds_disabled_modality(count):
+    model_config = ModelConfig(
+        QWEN25OMNI_MODEL_ID,
+        runner="generate",
+        limit_mm_per_prompt={"video": {"count": count, "allow_embeds": False}},
+        enable_mm_embeds=True,
+    )
+
+    with pytest.raises(VLLMValidationError, match="`video_embeds` inputs are disabled"):
+        parse_chat_messages(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "video_embeds", "video_embeds": None, "uuid": "x"},
+                    ],
+                }
+            ],
+            model_config,
+            content_format="string",
+        )
+
+
 @pytest.mark.parametrize("json_metadata", [False, True])
 def test_parse_chat_messages_multiple_dict_image_embeds(
     qwen25omni_model_config_image_embeds,

@@ -13,7 +13,7 @@
 #   vllm-dev: used for development
 #
 # Build arguments:
-#   PYTHON_VERSION=3.13|3.12 (default)|3.11
+#   PYTHON_VERSION=3.14 (default)|3.13|3.12|3.11
 #   VLLM_CPU_X86=false (default)|true (for cross-compilation)
 #   VLLM_CPU_ARM_BF16=false (default)|true (for cross-compilation)
 #
@@ -84,10 +84,15 @@ WORKDIR /workspace
 
 COPY --from=binutils-build /opt/binutils /opt/binutils
 
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.14
 
 ARG max_jobs=32
 ENV MAX_JOBS=${max_jobs}
+
+# The toolchain PPA is added from its pinned signing key (fingerprint
+# C8EC952E2A0E1FBDC5090F6A2C277A0A352154E5) rather than add-apt-repository,
+# which needs the Launchpad API and fails the build whenever that API is down.
+COPY docker/keys/ubuntu-toolchain-r.asc /etc/apt/keyrings/ubuntu-toolchain-r.asc
 
 # Install minimal dependencies and uv
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -95,10 +100,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates zlib1g-dev \
     software-properties-common libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof make xz-utils \
-    && for i in 1 2 3; do \
-        add-apt-repository -y ppa:ubuntu-toolchain-r/test && break || \
-        { echo "Attempt $i failed, retrying toolchain PPA..."; sleep 5; }; \
-    done \
+    && echo "deb [signed-by=/etc/apt/keyrings/ubuntu-toolchain-r.asc] https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") main" \
+        > /etc/apt/sources.list.d/ubuntu-toolchain-r-test.list \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends gcc-15 g++-15 \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 10 --slave /usr/bin/g++ g++ /usr/bin/g++-15 \
@@ -496,7 +499,7 @@ ARG PYTHON_VERSION
 LABEL ai.vllm.build.target-arch="${TARGETARCH}"
 LABEL ai.vllm.build.cpu-x86="${VLLM_CPU_X86:-false}"
 LABEL ai.vllm.build.cpu-arm-bf16="${VLLM_CPU_ARM_BF16:-false}"
-LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
+LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.14}"
 
 # Copy the examples directory (including the chat/tool templates) so it is
 # present in the released image, as the CUDA image ships it too. The vllm-test
