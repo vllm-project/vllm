@@ -48,6 +48,12 @@ pub enum Error {
     UnsupportedInputAudioFormat { format: String },
     #[error("`{modality}` input is not supported by this model")]
     UnsupportedModality { modality: String },
+    #[error(
+        "`{modality}` input is not supported by the Rust frontend for this model; set \
+         VLLM_USE_RUST_FRONTEND=0 to serve it with the Python frontend, or pass \
+         --limit-mm-per-prompt '{{\"{modality}\": 0}}' to disable it"
+    )]
+    RustFrontendUnsupportedModality { modality: &'static str },
     #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
     MmLimitExceeded { modality: String, limit: usize },
     #[error("invalid inline multimodal features: {message}")]
@@ -61,22 +67,13 @@ pub enum Error {
         source: Box<Error>,
     },
     #[error(
-        "model `{model_id}` (model_type `{model_type}`) has a multimodal preprocessor config, \
-         but the Rust frontend has no multimodal processor for it; pass --language-model-only \
-         to serve it as a text-only model, or set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend"
+        "the Rust frontend cannot serve multimodal input for model `{model_id}` \
+         (model_type `{model_type}`); pass --language-model-only to serve it as a text-only \
+         model, or set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend"
     )]
     MultimodalModelUnsupported {
         model_id: String,
         model_type: String,
-    },
-    #[error(
-        "the Rust frontend does not support `{modality}` input for model `{model_id}`; \
-         pass --limit-mm-per-prompt '{{\"{modality}\": 0}}' or --language-model-only to serve \
-         it without that input, or set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend"
-    )]
-    MultimodalModalityUnsupported {
-        model_id: String,
-        modality: &'static str,
     },
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
@@ -184,6 +181,7 @@ impl Error {
             | Self::UnsupportedContentPart(_)
             | Self::UnsupportedInputAudioFormat { .. }
             | Self::UnsupportedModality { .. }
+            | Self::RustFrontendUnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
             | Self::MmLimitExceeded { .. } => true,
             // A media host that timed out or failed, and a decoder that failed

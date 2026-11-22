@@ -63,6 +63,9 @@ pub struct MultimodalModelInfo {
     image: Option<VisionModalitySupport>,
     video: Option<VisionModalitySupport>,
     audio: Option<AudioModalitySupport>,
+    /// Modalities the engine accepts for this checkpoint but no lane above
+    /// serves, so requests carrying them name the Rust frontend.
+    unserved_modalities: Vec<MmModality>,
     media_connector: Arc<MediaConnector>,
     /// Maximum number of input items allowed per prompt for each modality.
     limit_mm_per_prompt: MmLimitPerPrompt,
@@ -443,12 +446,13 @@ impl MultimodalModelInfo {
     ///
     /// Returns `Ok(None)` for a text-only model: no registered model spec and
     /// no media preprocessor config (or every modality limited to 0), or a
-    /// spec that declares no modality for this checkpoint. A model with media
-    /// preprocessor config but no registered spec is an error, as is any
-    /// modality the spec declares for this checkpoint but cannot serve, unless
-    /// `--limit-mm-per-prompt` limits it to 0: the engine would accept that
-    /// media, so the frontend fails at launch instead of rejecting it per
-    /// request. File read/parse failures are errors too.
+    /// spec that declares no modality for this checkpoint. A model whose media
+    /// the engine accepts but the frontend can serve none of (media
+    /// preprocessor config but no registered spec, or no declared modality
+    /// resolving) is an error, so it fails at launch instead of rejecting
+    /// every media request. A declared modality that does not resolve while
+    /// another does is warned about and rejected per request. File read/parse
+    /// failures are errors too.
     pub fn from_paths(
         model_id: String,
         model_type: Option<String>,
@@ -551,22 +555,41 @@ impl MultimodalModelInfo {
         )?;
         let audio = Self::resolve_audio_lane(&context, model_spec, &audio_preprocessor_config)?;
 
-        // The spec's declared modalities are the ones this checkpoint takes,
-        // read from its config; serving any of them as text-only would
-        // silently drop a capability the engine has.
+        // The engine accepts the modalities the spec declares for this
+        // checkpoint (read from its config), except those limited to 0.
+        let mut served = false;
+        let mut unserved_modalities = Vec::new();
         for modality in model_spec.modality_limits(&context.metadata())?.into_keys() {
-            let (resolved, limit_modality) = match modality {
+            let (resolved, modality) = match modality {
                 Modality::Image => (image.is_some(), MmModality::Image),
                 Modality::Video => (video.is_some(), MmModality::Video),
                 Modality::Audio => (audio.is_some(), MmModality::Audio),
                 Modality::ImageEmbeds => continue,
             };
-            if !resolved && !limited_to_zero(&limit_mm_per_prompt, limit_modality) {
-                return Err(Error::MultimodalModalityUnsupported {
-                    model_id: context.model_id,
-                    modality: limit_modality.as_str(),
-                });
+            if limited_to_zero(&limit_mm_per_prompt, modality) {
+                continue;
             }
+            if resolved {
+                served = true;
+            } else {
+                unserved_modalities.push(modality);
+            }
+        }
+        if !served && !unserved_modalities.is_empty() {
+            return Err(Error::MultimodalModelUnsupported {
+                model_id: context.model_id,
+                model_type: context.model_type.unwrap_or_default(),
+            });
+        }
+        for modality in &unserved_modalities {
+            warn!(
+                model_id = context.model_id,
+                "the Rust frontend does not support `{modality}` input for this model, and \
+                 requests carrying it will be rejected; pass --limit-mm-per-prompt \
+                 '{{\"{modality}\": 0}}' to disable it, or set VLLM_USE_RUST_FRONTEND=0 to use \
+                 the Python frontend",
+                modality = modality.as_str(),
+            );
         }
 
         if image.is_none() && video.is_none() && audio.is_none() {
@@ -603,9 +626,23 @@ impl MultimodalModelInfo {
             image,
             video,
             audio,
+            unserved_modalities,
             media_connector,
             limit_mm_per_prompt,
         }))
+    }
+
+    /// The error for a request carrying `modality`, which no lane serves.
+    fn unsupported_modality(&self, modality: MmModality) -> Error {
+        if self.unserved_modalities.contains(&modality) {
+            Error::RustFrontendUnsupportedModality {
+                modality: modality.as_str(),
+            }
+        } else {
+            Error::UnsupportedModality {
+                modality: modality.as_str().to_owned(),
+            }
+        }
     }
 
     /// Resolve the spec-backed vision lanes (image and video).
@@ -951,9 +988,7 @@ impl MultimodalModelInfo {
                 MmModality::Audio => self.audio.is_some(),
             };
             if !supported {
-                return Err(Error::UnsupportedModality {
-                    modality: feature.modality.as_str().to_owned(),
-                });
+                return Err(self.unsupported_modality(feature.modality));
             }
         }
         self.validate_modality_limits(features.iter().map(|feature| feature.modality))?;
@@ -2230,7 +2265,7 @@ mod tests {
             let error = load_from_files(config.clone(), &[media_file], HashMap::new())
                 .err()
                 .unwrap_or_else(|| panic!("{media_file:?} without a spec should fail to load"));
-            expect!["model `test-model` (model_type `gemma3`) has a multimodal preprocessor config, but the Rust frontend has no multimodal processor for it; pass --language-model-only to serve it as a text-only model, or set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend"].assert_eq(&error.to_report_string());
+            expect!["the Rust frontend cannot serve multimodal input for model `test-model` (model_type `gemma3`); pass --language-model-only to serve it as a text-only model, or set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend"].assert_eq(&error.to_report_string());
 
             let info = load_from_files(
                 config.clone(),
@@ -2255,34 +2290,58 @@ mod tests {
         assert!(info.is_none());
     }
 
-    #[test]
-    fn unsupported_declared_modality_fails_launch_unless_limited_to_zero() {
+    #[tokio::test]
+    async fn unsupported_declared_modality_is_rejected_per_request() {
         // The checkpoint declares video (`video_token_id`), but the tokenizer
-        // has no `<|video_pad|>` placeholder, so the video lane cannot resolve.
+        // has no `<|video_pad|>` placeholder, so only the image lane resolves.
         let tokenizer =
-            || TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN3_IMAGE_PAD_ID);
+            TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN3_IMAGE_PAD_ID);
+        let info = test_info_with_limits("qwen3_vl", qwen3_vl_config(), tokenizer, HashMap::new());
+        assert_eq!(
+            info.placeholder_token(Modality::Image),
+            Some("<|image_pad|>")
+        );
+
+        let error = info
+            .prepare_videos(Vec::new(), Vec::new(), ModelDtype::Float32)
+            .await
+            .err()
+            .expect("video input should be rejected");
+        expect![[r#"`video` input is not supported by the Rust frontend for this model; set VLLM_USE_RUST_FRONTEND=0 to serve it with the Python frontend, or pass --limit-mm-per-prompt '{"video": 0}' to disable it"#]].assert_eq(&error.to_report_string());
+
+        // The checkpoint does not declare audio, so the model itself does not
+        // take it.
+        let error = info
+            .prepare_audios(Vec::new(), Vec::new())
+            .await
+            .err()
+            .expect("audio input should be rejected");
+        expect!["`audio` input is not supported by this model"]
+            .assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn spec_without_resolved_modality_fails_launch_unless_limited_to_zero() {
+        // Neither placeholder is in the tokenizer, so no declared modality
+        // resolves.
         let load = |limit_mm_per_prompt| {
             test_context_info(
                 "qwen3_vl",
                 qwen3_vl_config(),
-                tokenizer(),
+                TestTokenizer::new(),
                 limit_mm_per_prompt,
             )
         };
 
         let error = load(HashMap::new())
             .err()
-            .expect("an unsupported declared modality should fail to load");
-        expect![[r#"the Rust frontend does not support `video` input for model `qwen3_vl-test`; pass --limit-mm-per-prompt '{"video": 0}' or --language-model-only to serve it without that input, or set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend"#]].assert_eq(&error.to_report_string());
+            .expect("a spec serving no declared modality should fail to load");
+        expect!["the Rust frontend cannot serve multimodal input for model `qwen3_vl-test` (model_type `qwen3_vl`); pass --language-model-only to serve it as a text-only model, or set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend"].assert_eq(&error.to_report_string());
 
-        let info = load(HashMap::from([(MmModality::Video, MmLimitSpec::Count(0))]))
-            .unwrap()
-            .expect("image support should resolve");
-        assert_eq!(
-            info.placeholder_token(Modality::Image),
-            Some("<|image_pad|>")
-        );
-        assert_eq!(info.placeholder_token(Modality::Video), None);
+        let disabled = [MmModality::Image, MmModality::Video]
+            .map(|modality| (modality, MmLimitSpec::Count(0)));
+        let info = load(HashMap::from(disabled)).expect("disabled media should load text-only");
+        assert!(info.is_none());
     }
 
     #[test]
