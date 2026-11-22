@@ -249,6 +249,10 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         # Every draft logits write goes through sample_draft.
         return True
 
+    def supports_draft_top_k(self) -> bool:
+        # Every draft is sampled by sample_draft.
+        return True
+
     def _decode(
         self,
         num_reqs: int,

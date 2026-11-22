@@ -1806,17 +1806,11 @@ def rejection_sample_topk(
     use_fp64: bool = False,
     skip_masked_vocab_blocks: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Standard speculative sampling (Leviathan et al., 2023) against the
-    sparse top-K proposal cache of `speculative_config.draft_top_k`. Exactly
-    lossless: q' (the drafter's distribution restricted to its top-K tokens)
-    is fixed before the draft token is sampled, and this verifies against
-    that same q'.
-
-    Same outputs and launch structure as `rejection_sample` (target stats,
-    per-request accept, per-block resample, insert), with q' read from the
-    sparse cache. No host syncs. Block verification, FLy, synthetic
-    acceptance and watermarking are rejected for draft_top_k at config time.
-    """
+    """Standard speculative sampling against a `SparseDraftCache`. Same
+    outputs and launch sequence as `rejection_sample` (target stats, accept,
+    resample, insert), with q' read from the sparse cache. Kept separate from
+    `_rejection_kernel` / `_resample_kernel` so their block, FLy, synthetic and
+    watermarking modes are unchanged."""
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape

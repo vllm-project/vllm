@@ -1678,17 +1678,10 @@ class LocalArgmaxMixin:
     def get_top_k_tokens(
         self, hidden_states: torch.Tensor, k: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Vocab-parallel top-k with optional D2T remapping, for
-        `speculative_config.draft_top_k`.
-
-        Returns (target-vocab token ids, logits at those ids), both shape
-        (batch, k), with the head's soft cap and scale applied. The logits are
-        not normalized: draft_top_k renormalizes over the k entries at the
-        request temperature, where the full-vocabulary log-partition would
-        cancel, so it is not computed (saving a full-vocabulary pass). The
-        same communication reduction as `get_top_tokens`, widened from 1 to
-        k: O(batch * 2k * tp_size) instead of O(batch * vocab_size).
-        """
+        """Vocab-parallel top-k with optional D2T remapping. Returns
+        (target-vocab token ids, logits at those ids), both (batch, k), with
+        soft cap and scale applied. The logits are not normalized: the caller
+        renormalizes over the k entries."""
         ids, logits = self.logits_processor.get_top_k_tokens(
             self.lm_head, hidden_states, k, return_log_probs=False
         )

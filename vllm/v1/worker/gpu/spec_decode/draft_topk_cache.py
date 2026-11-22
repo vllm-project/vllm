@@ -7,23 +7,9 @@ from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_see
 
 
 class SparseDraftCache:
-    """Sparse draft cache for `speculative_config.draft_top_k`: per draft
-    slot, the K (token id, log q') pairs the draft token was proposed from,
-    instead of a dense [max_num_reqs, num_steps, vocab_size] cache of raw
-    logits (`DraftLogitsCache`).
-
-    q' is the drafter's distribution restricted to its top-K tokens
-    (renormalized, temperature applied). Any proposal fixed before sampling
-    is exactly lossless, so verifying against q' instead of the full
-    distribution does not change the output.
-
-    Indexed by persistent request-state index, like `DraftLogitsCache`'s
-    replicated (non-sharded) mode: every TP rank holds every request's K
-    pairs. `DraftLogitsCache.row_mapping`'s batch-sharded storage (each rank
-    keeping only the rows it owns) is not implemented here yet; draft_top_k's
-    own savings already come from exchanging only K pairs per row, rather
-    than the full vocabulary, when the cache is written.
-    """
+    """Per request state and draft slot, the K (token id, log q') pairs the
+    draft token was sampled from, where q' is the drafter's distribution over
+    its top-K tokens (temperature applied). Replicated on every TP rank."""
 
     def __init__(
         self,
@@ -71,20 +57,10 @@ def _topk_draft_sample_kernel(
     IS_DRAFTING: tl.constexpr,
     USE_FP64: tl.constexpr,
 ):
-    """One program per draft row: samples the draft token from q' (the K-entry
-    truncated, temperature-scaled distribution) via the same Gumbel-max
-    mechanism as the dense path's `_gumbel_sample_kernel`, and writes the K
-    (id, log q') pairs into the sparse cache — all in one kernel, instead of
-    gumbel_sample + two index_put_ + log_softmax as separate launches.
-
-    `ids` double as the noise key (so a token draws the same noise wherever it
-    appears, matching `gumbel_block_argmax`'s use of the global vocab id), and
-    the seed is step-mixed via `spec_step_seed` exactly as the dense path does
-    when writing a cache column, which avoids the "revisited position" bug
-    `test_dspark_revisited_position_uses_step_seed` guards against: without
-    it, a request whose draft position repeats across speculative steps would
-    draw the same noise twice.
-    """
+    """One program per draft row: Gumbel-max sample from q' and write the K
+    (id, log q') pairs to the cache. As in the dense path, noise is keyed by
+    token id and the seed is step-mixed, so a revisited (seed, pos) at another
+    draft step draws new noise."""
     token_idx = tl.program_id(0).to(tl.int64)
     block = tl.arange(0, BLOCK_K)
     mask = block < K
@@ -116,10 +92,8 @@ def _topk_draft_sample_kernel(
     sampled_id = tl.load(ids_ptr + token_idx * ids_stride + local_idx)
     tl.store(sampled_ptr + token_idx, sampled_id)
 
-    # log q' = log_softmax(logits / T) over the K entries, for the verify-side
-    # accept test. Greedy (temp == 0) rows: never read back (the accept test
-    # checks the target argmax for those instead), so only needs to avoid a
-    # div-by-zero here, not be meaningful.
+    # log q' over the K entries. Greedy rows are never read back by the
+    # accept test, so their temperature only needs to avoid a division by zero.
     safe_temp = tl.maximum(temp, 1e-5)
     scaled = tl.where(mask, logits / safe_temp, float("-inf"))
     m = tl.max(scaled, axis=0)

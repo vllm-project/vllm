@@ -197,6 +197,10 @@ class DFlash2Speculator(DFlashSpeculator):
     _speculator_name = "DFlash2"
     _candidate_top_k_key = "selector_top_k"
 
+    def supports_draft_top_k(self) -> bool:
+        # Drafts are sampled by CandidateSampler, not sample_draft.
+        return False
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         draft_config = self.draft_model_config.hf_config.dflash_config

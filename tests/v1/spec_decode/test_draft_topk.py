@@ -3,13 +3,22 @@
 """Tests for `speculative_config.draft_top_k`: the fused draft sampler
 (`sample_draft_topk_fused`) and sparse verification (`rejection_sample_topk`)."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.draft_topk_cache import (
     SparseDraftCache,
     sample_draft_topk_fused,
+)
+from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
+from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
+    MultiModuleMTPSpeculator,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
@@ -278,3 +287,29 @@ def test_sample_draft_topk_fused_is_cudagraph_safe():
     assert torch.equal(out, expected)
     assert torch.equal(cache.ids[:256, 2], expected_ids)
     torch.testing.assert_close(cache.logq[:256, 2], expected_logq)
+
+
+@pytest.mark.parametrize(
+    "speculator_cls,supported",
+    [
+        (DFlashSpeculator, True),
+        (EagleSpeculator, True),
+        (DSparkSpeculator, False),
+        (DFlash2Speculator, False),
+        (MultiModuleMTPSpeculator, False),
+    ],
+)
+def test_draft_top_k_rejects_speculators_bypassing_sample_draft(
+    speculator_cls, supported
+):
+    """Speculators that sample drafts outside `sample_draft` would never write
+    the sparse cache, so draft_top_k must be rejected for them at load time."""
+    speculator = object.__new__(speculator_cls)
+    speculator.draft_top_k = 64
+    speculator.draft_watermarker = None
+    speculator.model = SimpleNamespace(get_top_k_tokens=lambda *args: None)
+    if supported:
+        speculator._validate_draft_top_k()
+    else:
+        with pytest.raises(ValueError, match="not supported"):
+            speculator._validate_draft_top_k()

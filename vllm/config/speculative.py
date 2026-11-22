@@ -556,24 +556,10 @@ class SpeculativeConfig:
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
     draft_top_k: int | None = Field(default=None, ge=1)
-    """With draft_sample_method="probabilistic", propose from the drafter's
-    distribution restricted to its top `draft_top_k` tokens, and verify
-    against that same truncated distribution. Any proposal fixed before
-    sampling is exactly lossless, so this does not change the output
-    distribution.
-
-    Replaces the dense [max_num_reqs, num_speculative_tokens, vocab_size]
-    draft-logits cache with a [max_num_reqs, num_speculative_tokens,
-    draft_top_k] sparse cache of (token id, log-probability) pairs, and the
-    full-vocabulary all-gather of draft logits (with tensor parallelism) with
-    a vocab-parallel top-k reduction, using the same mechanism as
-    `use_local_argmax_reduction`. Communication drops from O(vocab_size) to
-    O(2 * draft_top_k * tp_size) per token.
-
-    Mutually exclusive with `use_local_argmax_reduction` (that option is for
-    greedy drafting only). Not yet compatible with adaptive verification,
-    draft watermarking, block verification or a non-"standard"
-    `rejection_sample_method`."""
+    """With draft_sample_method="probabilistic", propose from and verify against
+    the drafter's top `draft_top_k` tokens only. The output distribution is
+    unchanged; the dense draft-logits cache is replaced by a draft_top_k-entry
+    sparse cache, freeing memory for the KV cache."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -1545,23 +1531,17 @@ class SpeculativeConfig:
                 )
             if self.use_local_argmax_reduction:
                 raise ValueError(
-                    "draft_top_k and use_local_argmax_reduction are both "
-                    "vocab-parallel reductions for different draft_sample_method "
-                    "values ('probabilistic' and 'greedy'); disable one."
+                    "draft_top_k cannot be combined with use_local_argmax_reduction."
                 )
             if self.enable_adaptive_verification:
                 raise ValueError(
                     "draft_top_k is not yet compatible with "
-                    "enable_adaptive_verification: the estimator reads the "
-                    "dense draft-logits cache, which draft_top_k does not "
-                    "allocate. Disable one of them."
+                    "enable_adaptive_verification."
                 )
             if self.rejection_sample_method != "standard":
                 raise ValueError(
-                    "draft_top_k only supports rejection_sample_method="
-                    f"'standard' (got {self.rejection_sample_method!r}); this "
-                    "also excludes block verification (method='block') and "
-                    "Fly (method='fly')."
+                    "draft_top_k requires rejection_sample_method='standard' "
+                    f"(got {self.rejection_sample_method!r})."
                 )
 
         return self

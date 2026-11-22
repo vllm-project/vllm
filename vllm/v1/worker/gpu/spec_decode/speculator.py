@@ -91,8 +91,7 @@ class BaseSpeculator(ABC):
     # Draft logits for probabilistic rejection sampling, or None for
     # greedy-draft verification and for speculators without a draft model.
     draft_logits: DraftLogitsCache | None = None
-    # Sparse (id, log q') proposal cache for `draft_top_k`, used instead of
-    # `draft_logits`.
+    # Sparse (id, log q') cache for `draft_top_k`, used instead of `draft_logits`.
     draft_topk_cache: SparseDraftCache | None = None
 
     @abstractmethod
@@ -361,19 +360,13 @@ class DraftModelSpeculator(BaseSpeculator):
         return
 
     def _init_draft_topk_cache(self) -> None:
-        """Allocate the sparse (id, log q') cache for draft_top_k."""
         if self.vllm_config.parallel_config.prefill_context_parallel_size != 1:
             raise ValueError(
-                "draft_top_k is not yet compatible with prefill context "
-                "parallelism: PCPManager.sync_drafts indexes the dense draft "
-                "logits cache by request state and does not know about the "
-                "sparse cache."
+                "draft_top_k is not yet compatible with prefill context parallelism."
             )
         if self.vllm_config.parallel_config.enable_batch_sharded_sampling:
             raise ValueError(
-                "draft_top_k is not yet compatible with batch-sharded "
-                "sampling: SparseDraftCache does not implement "
-                "DraftLogitsCache.row_mapping-style sharded storage."
+                "draft_top_k is not yet compatible with batch-sharded sampling."
             )
         self.draft_topk_cache = SparseDraftCache(
             self.max_num_reqs,
@@ -385,6 +378,11 @@ class DraftModelSpeculator(BaseSpeculator):
     def supports_batch_sharded_draft_logits(self) -> bool:
         """Whether every draft logits write on this speculator's path honors
         DraftLogitsCache.row_mapping."""
+        return False
+
+    def supports_draft_top_k(self) -> bool:
+        """Whether every probabilistic draft on this speculator's path is
+        sampled by `sample_draft`, which writes the sparse draft_top_k cache."""
         return False
 
     def _init_draft_logits(self, target_model: nn.Module) -> None:
@@ -634,15 +632,11 @@ class DraftModelSpeculator(BaseSpeculator):
     def _validate_draft_top_k(self) -> None:
         if self.draft_top_k is None:
             return
-        # SpeculativeConfig.__post_init__ already checked draft_sample_method,
-        # use_local_argmax_reduction, enable_adaptive_verification and
-        # rejection_sample_method; here we check what depends on the loaded
-        # draft model.
+        if not self.supports_draft_top_k():
+            raise ValueError(f"draft_top_k is not supported by {type(self).__name__}.")
         if self.draft_watermarker is not None:
             raise ValueError(
-                "draft_top_k is not yet compatible with draft watermarking: "
-                "the watermarker's own cache-writing sampler does not know "
-                "about the sparse cache."
+                "draft_top_k is not yet compatible with draft watermarking."
             )
         if not hasattr(self.model, "get_top_k_tokens"):
             raise ValueError(
@@ -682,14 +676,8 @@ class DraftModelSpeculator(BaseSpeculator):
         draft_step: torch.Tensor,
         spec_step_idx: int,
     ) -> torch.Tensor:
-        """Draft side of draft_top_k: propose from the drafter's distribution
-        restricted to its top `self.draft_top_k` tokens (q'), and cache those
-        (id, log q') pairs in `self.draft_topk_cache` for verification.
-
-        Fused into one Triton kernel (`sample_draft_topk_fused`): sampling and
-        the sparse-cache write used to be a `gumbel_sample` call plus two
-        `index_put_` plus a `log_softmax`, each a separate kernel launch.
-        """
+        """Sample from the drafter's top-K distribution q' and cache the K
+        (id, log q') pairs for verification."""
         cache = self.draft_topk_cache
         assert cache is not None
         ids, logits = self.get_draft_top_k_tokens(hidden_states, spec_step_idx)

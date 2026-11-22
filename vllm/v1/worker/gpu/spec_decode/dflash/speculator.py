@@ -487,6 +487,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         # Every draft logits write goes through sample_draft.
         return True
 
+    def supports_draft_top_k(self) -> bool:
+        # Every draft is sampled by sample_draft.
+        return True
+
     @torch.inference_mode()
     def propose(
         self,
