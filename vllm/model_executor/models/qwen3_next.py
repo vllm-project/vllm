@@ -195,9 +195,18 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
+        # INC/AutoRound decides per layer whether the routed gate is quantized
+        # (Intel/Qwen3-Coder-Next-int4-AutoRound stores it as int4); other
+        # formats keep the historical unquantized gate.
+        gate_quant_config = (
+            quant_config
+            if quant_config is not None and quant_config.get_name() == "inc"
+            else None
+        )
         self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
+            quant_config=gate_quant_config,
             prefix=f"{prefix}.gate",
         )
 

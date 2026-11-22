@@ -311,8 +311,11 @@ pub struct EngineUnsupportedArgs {
 
     /// Log aggregate rather than per-engine statistics when using data
     /// parallelism.
-    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
-    pub aggregate_engine_logging: Option<Unsupported>,
+    ///
+    /// Accepted as a no-op: the Rust frontend's periodic stats line always
+    /// aggregates across engines.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1, hide = true)]
+    pub aggregate_engine_logging: Option<Noop>,
 }
 
 /// Frontend-owned Python OpenAI server arguments that `vllm-rs` recognizes but
@@ -380,8 +383,10 @@ pub struct ServerUnsupportedArgs {
     pub enable_server_load_tracking: Option<Noop>,
 
     /// Log level for uvicorn.
-    #[arg(long)]
-    pub uvicorn_log_level: Option<Unsupported>,
+    ///
+    /// Accepted as a no-op: the Rust frontend does not run uvicorn.
+    #[arg(long, hide = true)]
+    pub uvicorn_log_level: Option<Noop>,
 
     /// Refresh SSL Context when SSL certificate files change
     #[arg(
@@ -430,13 +435,17 @@ pub struct ServerUnsupportedArgs {
 
     /// Enable offline FastAPI documentation for air-gapped environments.
     /// Uses vendored static assets bundled with vLLM.
+    ///
+    /// Accepted as a no-op: the Rust frontend does not serve these docs
+    /// endpoints at all.
     #[arg(
         long,
         visible_alias = "no-enable-offline-docs",
         default_missing_value = "true",
-        num_args = 0..=1
+        num_args = 0..=1,
+        hide = true
     )]
-    pub enable_offline_docs: Option<Unsupported>,
+    pub enable_offline_docs: Option<Noop>,
 
     /// If set, run pooling score MaxSim on GPU in the API server process.
     /// Can significantly improve late-interaction scoring performance.

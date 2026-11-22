@@ -213,11 +213,15 @@ class HYV4FlashConfig(HYV4Config):
             raise ValueError(
                 "IndexPool requires index_topk=candidate_topk=group_topk*ratio"
             )
+        if self.index_topk % 128 or self.index_topk < self.sliding_window:
+            raise ValueError("index_topk must be 128-aligned and cover sliding_window")
         if self.compressed_indexer_head_dim != 128 or self.index_head_dim != 128:
             raise ValueError("IndexPool requires 128-dimensional keys")
         if not self.q_lora_rank:
             raise ValueError("IndexPool requires q_lora_rank")
         if self.engram_layer_ids:
+            if not self.enable_ihc:
+                raise ValueError("Flash Engram requires the iHC residual stream")
             layers = self.engram_layer_ids
             if len(set(layers)) != len(layers):
                 raise ValueError("engram_layer_ids must be unique")
