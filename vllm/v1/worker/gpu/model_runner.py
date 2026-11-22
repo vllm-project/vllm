@@ -1071,14 +1071,48 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.model_state.dummy_sampler_run(self.sampler, hidden_states):
             return
         num_reqs = hidden_states.shape[0]
+        num_logits_per_req = 1
+        if self.rejection_sampler is not None and self.decode_query_len > 1:
+            # Verify steps compute logits for the target token and every draft
+            # of each request, as many requests as the token budget fits: far
+            # more rows than one per request. warmup_kernels runs such a step
+            # after the KV cache is sized, so the profiled peak must cover it.
+            assert self.speculative_config is not None
+            num_logits_per_req = self.decode_query_len
+            draft_slots = self.speculative_config.max_num_new_slots_for_drafting
+            num_reqs = max(
+                1,
+                min(
+                    self.max_num_reqs,
+                    self.max_num_tokens // (num_logits_per_req + draft_slots),
+                ),
+            )
+            hidden_states = hidden_states.new_zeros(
+                (num_reqs * num_logits_per_req, hidden_states.shape[-1])
+            )
+        num_logits = num_reqs * num_logits_per_req
         logits = self.model.compute_logits(hidden_states)
         dummy_input_batch = InputBatch.make_dummy(
-            num_reqs, num_reqs, self.input_buffers
+            num_reqs,
+            num_logits,
+            self.input_buffers,
+            num_logits_per_req=num_logits_per_req,
         )
+
+        sampler = self.sampler
+        rejection_sampler = self.rejection_sampler
+        speculator = self.speculator
+
+        def run_sampler() -> None:
+            if num_logits_per_req == 1:
+                sampler(logits, dummy_input_batch)
+                return
+            assert rejection_sampler is not None and speculator is not None
+            rejection_sampler(logits, dummy_input_batch, speculator.draft_logits)
 
         # Default pass: compiles the kernels the first real step uses (logits in
         # the model dtype, no per-request processing).
-        self.sampler(logits, dummy_input_batch)
+        run_sampler()
         if current_platform.is_cpu():
             # The CPU worker sizes the KV cache from process RSS, which would
             # keep the extra pass's buffers, and has no warmup OOM to prevent.
@@ -1089,7 +1123,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for req_idx in range(num_reqs):
             self.sampler.add_request(req_idx, warmup_params)
         self.sampler.apply_staged_writes()
-        self.sampler(logits, dummy_input_batch)
+        run_sampler()
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
