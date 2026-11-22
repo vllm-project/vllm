@@ -30,6 +30,7 @@ import time
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -54,6 +55,7 @@ from vllm.utils.torch_utils import PIN_MEMORY
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
 from .eplb_utils import CpuGpuEvent
+from .placement import write_placement_snapshot
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, EplbStats
 from .rebalance_execute import (
     AsyncEplbLayerResult,
@@ -215,6 +217,10 @@ class EplbModelState:
     pointers remain stable across CUDA-graph replays.  The router kernel
     indexes this list with `dbo_current_ubatch_id()`.
     """
+    model_id: str | None = None
+    """Configured checkpoint identifier for placement metadata."""
+    model_revision: str | None = None
+    """Configured checkpoint revision for placement metadata."""
 
     def _commit_eplb_maps_for_layer(
         self,
@@ -373,6 +379,12 @@ class EplbState:
         ] = deque()
         """Balancedness stats whose copies to the host are in flight, oldest
         first."""
+        self._placement_export: tuple[str, int] | None = None
+        self._placement_models_frozen = False
+        self._pending_placement_exports: deque[
+            tuple[torch.Event | None, dict[str, Any]]
+        ] = deque()
+        """Keep snapshot buffers alive until their host copies complete."""
         self.is_async: bool = False
         """
         The flag indicates whether the EPLB is running in async mode.
@@ -391,6 +403,7 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
+        self.async_worker_stop = threading.Event()
         self.async_worker_error: Exception | None = None
         """
         Exception that stopped the async worker thread, if any.
@@ -403,6 +416,99 @@ class EplbState:
             self.device_index = self.device.index
             if self.device_index is None and torch.accelerator.is_available():
                 self.device_index = torch.accelerator.current_device_index()
+
+        if parallel_config.eplb_config.placement_export_path is not None:
+            self.enable_placement_export(
+                parallel_config.eplb_config.placement_export_path
+            )
+
+    def enable_placement_export(self, path: str) -> None:
+        """Configure export before registering the models in this state."""
+        if not path.strip():
+            raise ValueError("Placement export requires a nonempty file path.")
+        if self.model_states or self._placement_models_frozen:
+            raise RuntimeError("Configure placement export before registering models.")
+        if (
+            self.parallel_config.pipeline_parallel_size != 1
+            or self.parallel_config.enable_elastic_ep
+            or self.parallel_config.enable_fault_tolerance
+        ):
+            raise ValueError(
+                "Placement export requires PP=1, elastic EP disabled, "
+                "and fault tolerance disabled."
+            )
+        if not torch.distributed.is_initialized():
+            raise RuntimeError("Placement export requires initialized worker groups.")
+        ep_group = get_ep_group()
+        if ep_group.world_size != torch.distributed.get_world_size():
+            raise ValueError(
+                "Placement export requires one EP group covering all workers."
+            )
+        if self.device.type != "cpu" and not PIN_MEMORY:
+            raise ValueError("Placement export requires pinned host memory.")
+        self._placement_export = (path, ep_group.world_size)
+
+    def export_committed_placement(self) -> None:
+        """Queue a complete snapshot after weight and map commit hooks finish."""
+        if (
+            self._placement_export is None
+            or not self.model_states
+            or any(state.rebalanced for state in self.model_states.values())
+        ):
+            return
+        self._placement_models_frozen = True
+        if get_ep_group().rank_in_group != 0:
+            return
+        _, ep_size = self._placement_export
+        models = {}
+        has_device_copy = False
+        for key, state in self.model_states.items():
+            source = state.physical_to_logical_map
+            if source.device.type == "cpu":
+                copied = source.clone()
+            else:
+                copied = torch.empty_like(source, device="cpu", pin_memory=True)
+                copied.copy_(source, non_blocking=True)
+                has_device_copy = True
+            models[key] = {
+                "model": state.model_id or state.model_name,
+                "revision": state.model_revision,
+                "num_logical_experts": state.model.num_logical_experts,
+                "num_redundant_experts": (
+                    source.shape[1] - state.model.num_logical_experts
+                ),
+                "physical_to_logical_map": copied,
+            }
+        ready = torch.Event() if has_device_copy else None
+        if ready is not None:
+            ready.record()
+        self._pending_placement_exports.append(
+            (ready, {"version": 1, "ep_size": ep_size, "models": models})
+        )
+        self._publish_placement_exports()
+
+    def _publish_placement_exports(self, wait: bool = False) -> None:
+        while self._pending_placement_exports:
+            ready, snapshot = self._pending_placement_exports[0]
+            if ready is not None:
+                if wait:
+                    with gpu_sync_allowed():
+                        ready.synchronize()
+                elif not ready.query():
+                    return
+            self._pending_placement_exports.popleft()
+            for model in snapshot["models"].values():
+                model["physical_to_logical_map"] = model[
+                    "physical_to_logical_map"
+                ].tolist()
+            assert self._placement_export is not None
+            path, _ = self._placement_export
+            try:
+                write_placement_snapshot(path, snapshot)
+            except OSError:
+                logger.exception(
+                    "Could not export committed EPLB placement to %s", path
+                )
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -453,6 +559,13 @@ class EplbState:
         model_name: str | None = None,
     ):
         """Build the initial EPLB state."""
+        if self._placement_models_frozen:
+            raise RuntimeError("Cannot register models after placement export starts.")
+        model_key = hash_config_cached(model_config)
+        if self._placement_export is not None and model_key in self.model_states:
+            raise ValueError(
+                "Placement export requires distinct model configuration hashes."
+            )
         self.is_async = self.parallel_config.eplb_config.use_async
 
         physical_to_logical_map_list = (
@@ -620,8 +733,14 @@ class EplbState:
             device_index=self.device_index,
             communicator=communicator,
             num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
+            model_id=(
+                model_config.model if self._placement_export is not None else None
+            ),
+            model_revision=(
+                model_config.revision if self._placement_export is not None else None
+            ),
         )
-        self.model_states[hash_config_cached(model_config)] = model_state
+        self.model_states[model_key] = model_state
 
     def prepare_forward(
         self,
@@ -681,6 +800,8 @@ class EplbState:
             - `balancedness`: The ratio of average load to maximum load.
 
         """
+        if self._pending_placement_exports:
+            self._publish_placement_exports()
         ep_group = get_ep_group().device_group
         if is_dummy:
             # Do not record load metrics for dummy steps
@@ -788,6 +909,7 @@ class EplbState:
                         # Start the next interval after the final commit, allowing
                         # the load window to fill under the new placement.
                         self.expert_rearrangement_step = 0
+                        self.export_committed_placement()
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             if self._async_rearrangement_in_progress():
@@ -1150,6 +1272,8 @@ class EplbState:
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
             self.rearrange_event.record()
+        elif not is_profile:
+            self.export_committed_placement()
         return None
 
     def start_async_loop(
@@ -1160,10 +1284,21 @@ class EplbState:
         if not self.is_async:
             return
         if self.async_worker is None:
+            self.async_worker_stop.clear()
             self.async_worker = start_async_worker(
                 self,
                 is_profile=is_profile,
             )
+
+    def stop_async_loop(self) -> None:
+        """Drain and stop the worker before releasing its resources."""
+        if self.async_worker is not None:
+            self.drain_async()
+            self.async_worker_stop.set()
+            self.rearrange_event.record()
+            self.async_worker.join()
+            self.async_worker = None
+        self._publish_placement_exports(wait=True)
 
     def drain_async(self) -> None:
         """Drain in-flight async EPLB by consuming all remaining layer results.

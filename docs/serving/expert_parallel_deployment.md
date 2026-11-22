@@ -268,6 +268,7 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `num_redundant_experts` | Additional experts needed to make the total divisible by EP size; computed when unset | `auto` |
 | `draft_num_redundant_experts` | Redundant expert count for a speculative MoE draft; inherits a valid target count for matching routed expert counts, otherwise computed when unset. Invalid explicit values fail validation with a suggested minimum when possible. Ignored without a speculative MoE draft. | `auto` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
+| `placement_export_path` | Write the last completely committed placement as versioned JSON | unset |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`, `"symm_mem"`, or `null` (auto) | `null` |
 
@@ -278,6 +279,12 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --enable-eplb \
   --eplb-config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
 ```
+
+To save expert placement after completed rebalance cycles, set `"placement_export_path":"/tmp/placement.json"` in `--eplb-config`. Export requires EPLB, PP=1, elastic EP and fault tolerance disabled, and a single EP group containing all worker ranks. Accelerator export also requires platform support for pinned host memory. Use a distinct destination for each engine.
+
+EP rank zero writes only after every registered model has committed its weights and routing maps. A snapshot may appear on a later engine step while its host copy completes; shutdown publishes any remaining completed snapshot. Models cannot be added after the first snapshot. A failed file write is logged, inference continues, and the previous complete file remains intact.
+
+The JSON envelope contains `version` (currently `1`), `ep_size`, and a `models` object indexed by model configuration hash. Each model records its configured `model` and `revision`, logical and redundant expert counts, and `physical_to_logical_map` as `[layers, physical_experts]` lists. This is an export format; startup placement import is a separate feature.
 
 ??? tip "Prefer individual arguments instead of JSON?"
 
