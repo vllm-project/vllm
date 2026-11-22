@@ -523,6 +523,9 @@ class MultiprocExecutor(Executor):
         def get_response():
             responses = []
             has_failure = False
+            # Every response queue must be drained for each RPC: a reply left
+            # behind after a failure would be returned to the next RPC.
+            worker_error: RuntimeError | None = None
 
             for mq in response_mqs:
                 dequeue_timeout = (
@@ -538,7 +541,10 @@ class MultiprocExecutor(Executor):
                         not self.vllm_config.parallel_config.enable_fault_tolerance
                         or self.is_failed
                     ):
-                        raise RuntimeError("Worker failed with KV connector output")
+                        worker_error = worker_error or RuntimeError(
+                            "Worker failed with KV connector output"
+                        )
+                        continue
                     has_failure = True
                     assert isinstance(result, KVConnectorOutput)
                     responses.append(result)
@@ -547,13 +553,17 @@ class MultiprocExecutor(Executor):
                         not self.vllm_config.parallel_config.enable_fault_tolerance
                         or self.is_failed
                     ):
-                        raise RuntimeError(
+                        worker_error = worker_error or RuntimeError(
                             f"Worker failed with error '{result}', please check the"
                             " stack trace above for the root cause"
                         )
+                        continue
                     has_failure = True
                 else:
                     responses.append(result)
+
+            if worker_error is not None:
+                raise worker_error
 
             if has_failure:
                 kv_connector_outputs: list[KVConnectorOutput | None] = []
