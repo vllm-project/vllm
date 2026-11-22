@@ -459,7 +459,7 @@ th {
 | `MistralLarge3ForCausalLM` | Mistral-Large-3-675B-Base-2512, Mistral-Large-3-675B-Instruct-2512 | `mistralai/Mistral-Large-3-675B-Base-2512`, `mistralai/Mistral-Large-3-675B-Instruct-2512`, etc. | ✅︎ | ✅︎ |
 | `MixtralForCausalLM` | Mixtral-8x7B, Mixtral-8x7B-Instruct | `mistralai/Mixtral-8x7B-v0.1`, `mistralai/Mixtral-8x7B-Instruct-v0.1`, `mistral-community/Mixtral-8x22B-v0.1`, etc. | ✅︎ | ✅︎ |
 | `NemotronForCausalLM` | Nemotron-3, Nemotron-4, Minitron | `nvidia/Minitron-8B-Base`, `mgoin/Nemotron-4-340B-Base-hf-FP8`, etc. | ✅︎ | ✅︎ |
-| `Nemotron3_6AcademiaForCausalLM` | Nemotron 3.6 Academia | `nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF16` | | |
+| `Nemotron3_6AcademiaForCausalLM` | Nemotron 3.6 Academia | `nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF16`, `nvidia/NVIDIA-Nemotron-3.6-Academia-4B-NVFP4` | | |
 | `NemotronHForCausalLM` | Nemotron-H | `nvidia/Nemotron-H-8B-Base-8K`, `nvidia/Nemotron-H-47B-Base-8K`, `nvidia/Nemotron-H-56B-Base-8K`, etc. | ✅︎ | ✅︎ |
 | `NemotronLabsDiffusionModel`, `NemotronLabsDiffusionForCausalLM` | Nemotron Labs Diffusion | `nvidia/Nemotron-Labs-Diffusion-3B`, `nvidia/Nemotron-Labs-Diffusion-8B` | | |
 | `OlmoHybridForCausalLM` | OLMo Hybrid | `allenai/Olmo-Hybrid-7B` | ✅︎ | ✅︎ |
@@ -908,3 +908,18 @@ Run a BF16 checkpoint with `vllm serve nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF
 The initial implementation supports ordinary decoding without speculative decoding.
 
 Prefix caching preserves caller cache salts and isolates different loop budgets. GDP layers export convolution and recurrent states at aligned internal prefill boundaries; the alignment is `64 / gcd(64, linear_num_householder)` tokens. FULL CUDA graphs capture one variant per supported loop budget, increasing graph capture time and memory with the maximum budget.
+
+Quantized Academia checkpoints can mix BF16, MXFP8 and NVFP4 matrix weights while retaining BF16 activations. Run `vllm serve nvidia/NVIDIA-Nemotron-3.6-Academia-4B-NVFP4 --dtype bfloat16` on a Marlin-capable CUDA GPU with tensor and pipeline parallel size 1 and untied embeddings. The checkpoint selects each matrix's format; the `--quantization` override is unsupported.
+
+The configuration names the allocation file with:
+
+```json
+{
+  "per_tensor_quantization": {
+    "version": 1,
+    "allocation": "quantization_allocation.json"
+  }
+}
+```
+
+The allocation file's `formats` mapping assigns canonical checkpoint tensor names to `BF16`, `MXFP8` or `NVFP4`. Packed matrices retain their block scales and, for NVFP4, individual tensor scales. Projections with different formats or scales remain separate.

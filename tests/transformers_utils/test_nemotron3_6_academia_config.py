@@ -100,3 +100,31 @@ def test_request_cache_salt_preserves_default_and_isolates_budgets():
         for caller in (None, "caller", "other")
     }
     assert len(salts) == 12
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        {},
+        {"version": 2, "allocation": "x.json"},
+        {"version": True, "allocation": "x.json"},
+        {"version": 1},
+        {"version": 1, "allocation": ""},
+        {"version": 1, "allocation": 1},
+    ],
+)
+def test_invalid_per_tensor_quantization(marker):
+    with pytest.raises(
+        StrictDataclassClassValidationError, match="per_tensor_quantization"
+    ):
+        Nemotron3_6AcademiaConfig(per_tensor_quantization=marker).validate()
+
+
+def test_per_tensor_quantization_roundtrip(tmp_path):
+    marker = {"version": 1, "allocation": "quantization_allocation.json"}
+    config = Nemotron3_6AcademiaConfig(per_tensor_quantization=marker)
+    config.save_pretrained(tmp_path)
+    assert (
+        Nemotron3_6AcademiaConfig.from_pretrained(tmp_path).per_tensor_quantization
+        == marker
+    )

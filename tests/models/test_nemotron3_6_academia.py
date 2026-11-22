@@ -118,8 +118,9 @@ def test_loop_cache_modes(vllm_runner, tmp_path, cache_mode, gdp_dims):
 
 @pytest.mark.parametrize("cache_mode", ["per_loop", "last_loop"])
 @pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize("precision", ["BF16", "NVFP4"])
 def test_mixed_request_loops_match_separate_requests(
-    vllm_runner, cache_mode, enforce_eager
+    vllm_runner, cache_mode, enforce_eager, precision
 ):
     """A graph for batch budget 3 must not run the engine's maximum budget 4."""
     from tests.models.utils import check_logprobs_close
@@ -141,7 +142,7 @@ def test_mixed_request_loops_match_separate_requests(
         for count in (1, 2, 3)
     ]
     with vllm_runner(
-        "nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF16",
+        f"nvidia/NVIDIA-Nemotron-3.6-Academia-4B-{precision}",
         dtype="bfloat16",
         max_model_len=512,
         max_num_seqs=4,
@@ -172,7 +173,7 @@ def test_mixed_request_loops_match_separate_requests(
         )
 
     with vllm_runner(
-        "nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF16",
+        f"nvidia/NVIDIA-Nemotron-3.6-Academia-4B-{precision}",
         dtype="bfloat16",
         max_model_len=512,
         max_num_seqs=4,
@@ -280,3 +281,81 @@ def test_request_loops_isolate_prefixes_at_engine_admission(
                 core.preprocess_add_request(request(invalid))
             with pytest.raises(VLLMValidationError, match="num_loops"):
                 runner.llm.generate(["test"], params(invalid))
+
+
+@pytest.mark.parametrize(
+    "case,match",
+    [
+        ("shape", "shape/dtype"),
+        ("dtype", "shape/dtype"),
+        ("missing", "Incomplete checkpoint"),
+        ("duplicate", "Duplicate source tensor"),
+        ("unknown", "Unexpected checkpoint tensor"),
+    ],
+)
+def test_packed_loader_rejects_inconsistent_tensors(case, match):
+    from vllm.model_executor.models.nemotron3_6_academia import _load_per_matrix_weights
+
+    module = torch.nn.Linear(16, 8, dtype=torch.bfloat16)
+    tensors = [(name, torch.ones_like(p)) for name, p in module.named_parameters()]
+    if case == "shape":
+        tensors[0] = ("weight", torch.ones(8, 8, dtype=torch.bfloat16))
+    elif case == "dtype":
+        tensors[0] = ("weight", tensors[0][1].float())
+    elif case == "missing":
+        tensors.pop()
+    elif case == "duplicate":
+        tensors.append(tensors[0])
+    else:
+        tensors.append(("missing.weight", tensors[0][1]))
+    with pytest.raises(ValueError, match=match):
+        _load_per_matrix_weights(module, tensors)
+
+
+@pytest.mark.parametrize(
+    "allocation,match",
+    [
+        (None, "allocation file was not found"),
+        ({"formats": []}, "formats mapping"),
+        ({"formats": {"model.layers.0.mixer.up_proj.weight": "FP3"}}, "Unsupported"),
+        ({"formats": {"missing.weight": "NVFP4"}}, "only pack linear matrix weights"),
+    ],
+)
+def test_packed_model_rejects_invalid_allocation(
+    dist_init, tmp_path, allocation, match
+):
+    import json
+
+    from vllm.config import ModelConfig
+    from vllm.model_executor.models.nemotron3_6_academia import (
+        Nemotron3_6AcademiaForCausalLM,
+    )
+
+    Nemotron3_6AcademiaConfig(
+        architectures=["Nemotron3_6AcademiaForCausalLM"],
+        vocab_size=64,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        layer_types=["mlp"],
+        n_input_layers=0,
+        n_recurrent_layers=1,
+        n_output_layers=0,
+        n_recurrent_loops=1,
+        loop_conditioning_hidden_size=8,
+        loop_adapter_rank=0,
+        per_tensor_quantization={"version": 1, "allocation": "allocation.json"},
+    ).save_pretrained(tmp_path)
+    if allocation is not None:
+        (tmp_path / "allocation.json").write_text(json.dumps(allocation))
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            max_model_len=64,
+            enforce_eager=True,
+        )
+    )
+    with set_current_vllm_config(config), pytest.raises(ValueError, match=match):
+        Nemotron3_6AcademiaForCausalLM(vllm_config=config)

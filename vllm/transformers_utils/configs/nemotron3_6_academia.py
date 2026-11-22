@@ -25,6 +25,7 @@ class Nemotron3_6AcademiaConfig(PreTrainedConfig):
     n_output_layers: int = 14
     n_recurrent_loops: int = 4
     recurrent_kv_cache_mode: str = "per_loop"
+    per_tensor_quantization: dict[str, Any] | None = None
     num_attention_heads: int = 24
     num_key_value_heads: int = 8
     head_dim: int = 128
@@ -108,6 +109,20 @@ class Nemotron3_6AcademiaConfig(PreTrainedConfig):
             )
         if self.hidden_act != "relu2" or self.rms_norm_eps <= 0:
             raise ValueError("Academia requires relu2 and positive rms_norm_eps")
+
+    def validate_per_tensor_quantization(self):
+        marker = self.per_tensor_quantization
+        if marker is None:
+            return
+        if (
+            type(marker.get("version")) is not int
+            or marker["version"] != 1
+            or not isinstance(marker.get("allocation"), str)
+            or not marker["allocation"]
+        ):
+            raise ValueError(
+                "per_tensor_quantization requires version 1 and an allocation filename"
+            )
 
     def get_num_loops(self, extra_args: dict[str, Any] | None) -> int:
         num_loops = (extra_args or {}).get("num_loops", self.n_recurrent_loops)

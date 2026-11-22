@@ -6,6 +6,8 @@
 import math
 import types
 from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -18,6 +20,8 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
+    LinearBase,
+    LinearMethodBase,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -40,6 +44,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron3_6_academia import (
     Nemotron3_6AcademiaConfig,
 )
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
@@ -48,6 +53,223 @@ from vllm.v1.worker.gpu.states import RequestState
 from .interfaces import HasInnerState, IsHybrid
 from .nemotron_h import NemotronHMLP
 from .utils import extract_layer_index, maybe_prefix
+
+if TYPE_CHECKING:
+    from vllm.model_executor.kernels.linear.mxfp8.marlin import MarlinMxfp8LinearKernel
+    from vllm.model_executor.kernels.linear.nvfp4.marlin import MarlinNvFp4LinearKernel
+
+GDP_PROJECTION_ROLES = ("z_proj", "v_proj", "k_proj", "q_proj", "b_proj", "a_proj")
+QKV_PROJECTION_ROLES = ("q_proj", "k_proj", "v_proj")
+
+
+class AcademiaPackedMethod(LinearMethodBase):
+    kernel: "MarlinMxfp8LinearKernel | MarlinNvFp4LinearKernel"
+
+    def __init__(self, shape):
+        self.shape = shape
+
+    def create_weights(self, *args, **kwargs):
+        raise RuntimeError(
+            "Academia packed weights are installed before checkpoint load"
+        )
+
+    def process_weights_after_loading(self, layer):
+        layer.output_size_per_partition, layer.input_size_per_partition = self.shape
+        layer.params_dtype = torch.bfloat16
+        self.kernel.process_weights_after_loading(layer)
+
+    def apply(self, layer, x, bias=None):
+        return self.kernel.apply_weights(layer, x, bias)
+
+
+class AcademiaMxFp8Method(AcademiaPackedMethod):
+    def __init__(self, shape):
+        super().__init__(shape)
+        from vllm.model_executor.kernels.linear.mxfp8 import Mxfp8LinearLayerConfig
+        from vllm.model_executor.kernels.linear.mxfp8.marlin import (
+            MarlinMxfp8LinearKernel,
+        )
+
+        self.kernel = MarlinMxfp8LinearKernel(Mxfp8LinearLayerConfig(shape))
+
+
+class AcademiaNvFp4Method(AcademiaPackedMethod):
+    def __init__(self, shape):
+        super().__init__(shape)
+        from vllm.model_executor.kernels.linear.nvfp4 import NvFp4LinearLayerConfig
+        from vllm.model_executor.kernels.linear.nvfp4.marlin import (
+            MarlinNvFp4LinearKernel,
+        )
+
+        self.kernel = MarlinNvFp4LinearKernel(NvFp4LinearLayerConfig())
+
+    def process_weights_after_loading(self, layer):
+        layer.register_parameter(
+            "weight_global_scale", layer._parameters.pop("weight_scale_2")
+        )
+        super().process_weights_after_loading(layer)
+
+
+class AcademiaPackedLinear(nn.Linear):
+    def forward(self, x):
+        return self.quant_method.apply(self, x, self.bias)
+
+
+@dataclass(frozen=True)
+class PackedFormat:
+    block_size: int
+    elements_per_byte: int
+    weight_dtype: torch.dtype
+    scale_dtype: torch.dtype
+    method: type[AcademiaPackedMethod]
+    tensor_scale: bool = False
+
+
+PACKED_FORMATS = {
+    "MXFP8": PackedFormat(32, 1, torch.float8_e4m3fn, torch.uint8, AcademiaMxFp8Method),
+    "NVFP4": PackedFormat(
+        16, 2, torch.uint8, torch.float8_e4m3fn, AcademiaNvFp4Method, True
+    ),
+}
+
+
+def install_packed_linear(module, fmt):
+    """Allocate source-format storage while retaining vLLM parameter metadata."""
+    spec = PACKED_FORMATS[fmt]
+    w = module.weight
+    n, k = w.shape
+    if k % spec.block_size:
+        raise ValueError(f"{fmt} block size does not divide input size {k}")
+    w.requires_grad_(False)
+    w.data = torch.empty(
+        n, k // spec.elements_per_byte, dtype=spec.weight_dtype, device=w.device
+    )
+    module.register_parameter(
+        "weight_scale",
+        nn.Parameter(
+            torch.empty(
+                n, k // spec.block_size, dtype=spec.scale_dtype, device=w.device
+            ),
+            requires_grad=False,
+        ),
+    )
+    if spec.tensor_scale:
+        module.register_parameter(
+            "weight_scale_2",
+            nn.Parameter(
+                torch.empty((), dtype=torch.float32, device=w.device),
+                requires_grad=False,
+            ),
+        )
+    module.quant_method = spec.method((n, k))
+    if isinstance(module, nn.Linear):
+        module.__class__ = AcademiaPackedLinear
+
+
+class SplitProjection(nn.Module):
+    def __init__(self, roles, sizes, k):
+        super().__init__()
+        self.parts = nn.ModuleDict(
+            {role: nn.Linear(k, n, bias=False) for role, n in zip(roles, sizes)}
+        )
+
+    def forward(self, x):
+        return torch.cat([part(x) for part in self.parts.values()], dim=-1), None
+
+
+def mapped_name(model, name):
+    if name.startswith("model.layers.") and ".mixer." in name:
+        stem, leaf = name.rsplit(".mixer.", 1)
+        role, _, suffix = leaf.partition(".")
+        kind = model.config.layer_types[int(stem.split(".")[-1])]
+        if kind == "linear_attention" and role in GDP_PROJECTION_ROLES:
+            return f"{stem}.mixer.in_proj.parts.{role}.{suffix}"
+        if kind == "full_attention" and role in QKV_PROJECTION_ROLES:
+            return f"{stem}.mixer.qkv_proj.parts.{role}.{suffix}"
+    return name
+
+
+def _install_per_matrix_weights(model, vllm_config):
+    marker = model.config.per_tensor_quantization
+    if (
+        vllm_config.parallel_config.tensor_parallel_size != 1
+        or vllm_config.parallel_config.pipeline_parallel_size != 1
+    ):
+        raise ValueError("Academia packed weights require TP=PP=1")
+    if vllm_config.model_config.dtype != torch.bfloat16:
+        raise ValueError("Academia packed weights require --dtype bfloat16")
+    if model.config.tie_word_embeddings:
+        raise ValueError("Per-matrix Academia checkpoints require untied embeddings")
+    allocation = get_hf_file_to_dict(
+        marker["allocation"],
+        vllm_config.model_config.model,
+        revision=vllm_config.model_config.revision,
+    )
+    if allocation is None:
+        raise ValueError("Academia quantization allocation file was not found")
+    if not isinstance(allocation, dict) or not isinstance(
+        allocation.get("formats"), dict
+    ):
+        raise ValueError("Academia quantization allocation requires a formats mapping")
+    for i, layer in enumerate(model.model.layers):
+        mixer = layer.mixer
+        kind = model.config.layer_types[i]
+        if kind == "linear_attention":
+            m = mixer.num_householder
+            sizes = [
+                mixer.value_dim,
+                m * mixer.value_dim,
+                m * mixer.key_dim,
+                mixer.key_dim,
+                m * mixer.num_v_heads,
+                mixer.num_v_heads,
+            ]
+            mixer.in_proj = SplitProjection(
+                GDP_PROJECTION_ROLES, sizes, model.config.hidden_size
+            )
+        elif kind == "full_attention":
+            mixer.qkv_proj = SplitProjection(
+                QKV_PROJECTION_ROLES,
+                [mixer.q_size, mixer.kv_size, mixer.kv_size],
+                model.config.hidden_size,
+            )
+    modules = dict(model.named_modules())
+    for name, fmt in allocation["formats"].items():
+        if fmt == "BF16":
+            continue
+        if fmt not in PACKED_FORMATS:
+            raise ValueError(f"Unsupported Academia matrix format {fmt!r}: {name}")
+        module = modules.get(mapped_name(model, name).rsplit(".", 1)[0])
+        if (
+            not name.endswith(".weight")
+            or not isinstance(module, (nn.Linear, LinearBase, ParallelLMHead))
+            or module.weight.ndim != 2
+        ):
+            raise ValueError(f"Academia can only pack linear matrix weights: {name}")
+        install_packed_linear(module, fmt)
+
+
+def _load_per_matrix_weights(model, weights):
+    params = dict(model.named_parameters())
+    loaded = set()
+    for name, value in weights:
+        target = mapped_name(model, name)
+        if target in loaded:
+            raise ValueError(f"Duplicate source tensor {name}")
+        if target not in params:
+            raise ValueError(
+                f"Unexpected checkpoint tensor or missing allocation: {name}"
+            )
+        p = params[target]
+        if value.shape != p.shape or (
+            value.dtype != p.dtype and not name.endswith(".A_log")
+        ):
+            raise ValueError(f"Packed shape/dtype mismatch: {name}")
+        p.data.copy_(value)
+        loaded.add(target)
+    if loaded != set(params):
+        raise ValueError(f"Incomplete checkpoint: missing {set(params) - loaded}")
+    return loaded
 
 
 class AcademiaAttention(nn.Module):
@@ -579,7 +801,10 @@ class Nemotron3_6AcademiaForCausalLM(nn.Module, HasInnerState, IsHybrid):
         config = self.config = vllm_config.model_config.hf_config
         config.validate()
         if vllm_config.quant_config is not None:
-            raise ValueError("Academia does not support quantized checkpoints")
+            raise ValueError(
+                "Academia quantization uses per_tensor_quantization; "
+                "do not pass --quantization"
+            )
         if vllm_config.speculative_config is not None:
             raise ValueError("Academia currently supports plain decoding only")
         self.model = Nemotron3_6AcademiaModel(
@@ -593,6 +818,8 @@ class Nemotron3_6AcademiaForCausalLM(nn.Module, HasInnerState, IsHybrid):
         if config.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
+        if config.per_tensor_quantization:
+            _install_per_matrix_weights(self, vllm_config)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_tokens(input_ids)
@@ -642,6 +869,8 @@ class Nemotron3_6AcademiaForCausalLM(nn.Module, HasInnerState, IsHybrid):
         return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        if self.config.per_tensor_quantization:
+            return _load_per_matrix_weights(self, weights)
         params = dict(self.named_parameters())
         loaded = set()
         for name, weight in weights:
