@@ -67,6 +67,25 @@ def _uses_fast_verify(vllm_config: VllmConfig | None, kv_cache_dtype: str) -> bo
     return on_gfx950()
 
 
+def _chunk_token_to_batch(
+    cu_seq_lens: torch.Tensor, max_cum_tokens: int
+) -> torch.Tensor:
+    """Row of each workspace token, for every context chunk.
+
+    `cu_seq_lens` is `[num_chunks, num_rows + 1]`: the cumulative context
+    lengths of the rows within each chunk. Token `t` of a chunk belongs to the
+    row whose span holds it, which is the number of rows that end at or before
+    `t`. The cumulative lengths are sorted, so that count is a search.
+    Returns `[num_chunks, max_cum_tokens]`.
+    """
+    positions = torch.arange(
+        max_cum_tokens, dtype=cu_seq_lens.dtype, device=cu_seq_lens.device
+    ).expand(cu_seq_lens.shape[0], -1)
+    return torch.searchsorted(
+        cu_seq_lens[:, 1:].contiguous(), positions.contiguous(), right=True
+    )
+
+
 if current_platform.is_rocm():
     from vllm.triton_utils import tl, triton
 
@@ -968,12 +987,9 @@ class AiterFlashAttentionMetadataBuilder(
                 cu_seq_lens_cpu[:, -1].max().item() if num_chunks > 0 else 0
             )
 
-            range_idx = torch.arange(max_cum_tokens, dtype=torch.int32)[None, None, :]
-            idx_to_batch_tensor = range_idx == cu_seq_lens_cpu[:, 1:][:, :, None]
-            idx_to_batch_tensor = idx_to_batch_tensor.sum(
-                dim=1
-            )  # [num_chunks, max_cum_tokens]
-            token_to_batch_tensor = torch.cumsum(idx_to_batch_tensor, dim=1)
+            token_to_batch_tensor = _chunk_token_to_batch(
+                cu_seq_lens_cpu, max_cum_tokens
+            )
 
             chunk_context_metadata = AiterChunkContextMetadata(
                 workspace=self.extend_workspace,

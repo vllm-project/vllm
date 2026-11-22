@@ -1038,6 +1038,54 @@ def test_aiter_fa_chunked_extend_with_sinks_matches_reference(monkeypatch, use_s
     torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
 
 
+def test_aiter_fa_chunk_token_to_batch_matches_comparison():
+    """The searched token-to-row table equals the comparison it replaces."""
+    from vllm.v1.attention.backends.rocm_aiter_fa import _chunk_token_to_batch
+
+    cpu = torch.device("cpu")
+    gen = torch.Generator(device=cpu).manual_seed(0)
+    for trial in range(200):
+        num_rows = int(torch.randint(1, 17, (1,), generator=gen, device=cpu))
+        context = torch.randint(
+            0, 4096, (num_rows,), generator=gen, dtype=torch.int32, device=cpu
+        )
+        if trial % 5 == 0:
+            context[0] = 0  # a row with nothing cached
+        if trial % 50 == 0:
+            context[:] = 0  # no chunk at all
+        # Split the context the way build() does: every chunk takes at most
+        # `per_row` tokens of a row, so short rows are empty in later chunks.
+        per_row = max(1, 1024 // max(int((context > 0).sum()), 1))
+        num_chunks = (int(context.max()) + per_row - 1) // per_row
+        starts = torch.arange(num_chunks, dtype=torch.int32, device=cpu)[:, None]
+        starts = starts * per_row
+        lens = (torch.minimum(context[None, :], starts + per_row) - starts).clamp_(
+            min=0
+        )
+        cu_seq_lens = torch.zeros(
+            num_chunks, num_rows + 1, dtype=torch.int32, device=cpu
+        )
+        cu_seq_lens[:, 1:] = lens.cumsum(dim=1)
+        max_cum_tokens = int(cu_seq_lens[:, -1].max()) if num_chunks > 0 else 0
+
+        actual = _chunk_token_to_batch(cu_seq_lens, max_cum_tokens)
+
+        # The construction this replaces: mark where each row ends, then count.
+        positions = torch.arange(max_cum_tokens, dtype=torch.int32, device=cpu)
+        row_ends = positions[None, None, :] == cu_seq_lens[:, 1:, None]
+        expected = row_ends.sum(dim=1).cumsum(dim=1)
+        assert actual.dtype == expected.dtype
+        assert torch.equal(actual, expected)
+
+        # Every token of a chunk lies inside the span of its row.
+        for chunk in range(num_chunks):
+            total = int(cu_seq_lens[chunk, -1])
+            rows = actual[chunk, :total]
+            pos = positions[:total]
+            assert bool((cu_seq_lens[chunk, rows] <= pos).all())
+            assert bool((pos < cu_seq_lens[chunk, rows + 1]).all())
+
+
 # Decode path test --------------------------------------------------------
 @pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
 @pytest.mark.parametrize("dtype", DTYPES)
