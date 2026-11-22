@@ -1014,7 +1014,7 @@ class Qwen4ExpForConditionalGeneration(
             self.video_pruning_rate = 0.0
             self._tokenizer = None
             self.visual = StageMissingLayer("vision_tower")
-            self._tower_model_names = []
+            self._tower_model_names = ()
         else:
             self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
             self._init_video_pruning(multimodal_config)

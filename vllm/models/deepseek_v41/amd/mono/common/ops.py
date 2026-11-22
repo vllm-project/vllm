@@ -57,6 +57,17 @@ def rsrc(addr, nbytes=None):
     return bo.create_buffer_resource_from_addr(addr, num_records_bytes=nbytes)
 
 
+def buf_load(addr, *args, **kwargs):
+    """`buffer_load` at the raw device address `addr` (its buffer resource),
+    for kernels that take Int64 addresses rather than tensors."""
+    return bo.buffer_load(rsrc(addr), *args, **kwargs)
+
+
+def buf_store(value, addr, *args, **kwargs):
+    """`buffer_store` of `value` at the raw device address `addr`."""
+    bo.buffer_store(value, rsrc(addr), *args, **kwargs)
+
+
 def permlane_swap(off, x, y):
     """v_permlane{32,16}_swap on registers (x, y): off 32 trades x's upper-half
     lanes with y's lower-half lanes; off 16 trades x's odd 16-lane rows with y's
