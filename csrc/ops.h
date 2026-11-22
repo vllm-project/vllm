@@ -534,8 +534,8 @@ void inkling2_allreduce_conv_mix(
     torch::stable::Tensor& conv_out, torch::stable::Tensor const& stack,
     std::optional<torch::stable::Tensor> last,
     torch::stable::Tensor const& queries,
-    torch::stable::Tensor const& norm_weight, double eps, double norm_eps,
-    torch::stable::Tensor& out);
+    std::optional<torch::stable::Tensor> norm_weight, double eps,
+    double norm_eps, torch::stable::Tensor& out);
 
 void inkling2_conv_mix(
     torch::stable::Tensor const& x, torch::stable::Tensor& cache,
@@ -550,8 +550,8 @@ void inkling2_conv_mix(
     torch::stable::Tensor& conv_out, torch::stable::Tensor const& stack,
     std::optional<torch::stable::Tensor> last,
     torch::stable::Tensor const& queries,
-    torch::stable::Tensor const& norm_weight, double eps, double norm_eps,
-    torch::stable::Tensor& out);
+    std::optional<torch::stable::Tensor> norm_weight, double eps,
+    double norm_eps, torch::stable::Tensor& out);
 
 void inkling2_seq_parallel_conv_mix(
     torch::stable::Tensor const& x, torch::stable::Tensor& cache,
