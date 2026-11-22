@@ -108,7 +108,9 @@ class PagedCacheView:
         page_bytes = block_size * row_bytes
         extent = (num_blocks - 1) * block_stride + page_bytes if num_blocks else 0
         attention_cache = (
-            raw_tensor[byte_offset : byte_offset + extent].view(dtype).view(-1, block_size, row_width)
+            raw_tensor[byte_offset : byte_offset + extent]
+            .view(dtype)
+            .view(-1, block_size, row_width)
         )
         return cls(cache, attention_cache, block_size, block_stride // row_bytes)
 

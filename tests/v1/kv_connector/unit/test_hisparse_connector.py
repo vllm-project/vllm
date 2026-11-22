@@ -538,7 +538,6 @@ def test_residency_updates_persist_by_state_row():
     assert table[1, [0, 2]].tolist() == [[14, 15, 0, 0], [11, 0, 13, 16]]
 
 
-
 def test_paged_view_accepts_unaligned_trailing_compact_storage():
     import torch
 
