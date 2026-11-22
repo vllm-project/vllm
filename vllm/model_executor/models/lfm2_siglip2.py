@@ -47,54 +47,91 @@ class Siglip2VisionEmbeddings(nn.Module):
         self.position_embedding_size = int(self.num_patches**0.5)
         self.position_embedding = nn.Embedding(self.num_patches, self.embed_dim)
 
-    def forward(
+    def get_packed_pos_embeds(
         self,
-        pixel_values_packed: torch.FloatTensor,
-        spatial_shapes: torch.LongTensor,
+        spatial_shapes: torch.Tensor,
+        lengths_list: list[int] | None = None,
+        *,
+        device: torch.device | None = None,
     ) -> torch.Tensor:
-        """Embed patchified pixel values in packed (unpadded) form.
-
-        Args:
-            pixel_values_packed: (1, total_tokens, patch_dim) or
-                (total_tokens, patch_dim), packed in tile order.
-            spatial_shapes: (num_tiles, 2) on CPU (height, width) per tile.
-
-        Returns:
-            (1, total_tokens, embed_dim) packed embeddings.
-
-        """
+        """Compute packed bilinearly-interpolated positional embeddings."""
         assert spatial_shapes.device.type == "cpu", (
             "Expected `spatial_shapes` on CPU to avoid device-to-host sync in "
             "variable-length packing."
         )
+        if lengths_list is None:
+            lengths = (spatial_shapes[:, 0] * spatial_shapes[:, 1]).to(
+                dtype=torch.int64
+            )
+            lengths_list = lengths.tolist()
+        pos_weight = self.position_embedding.weight
+        if device is not None and pos_weight.device != device:
+            pos_weight = pos_weight.to(device=device, non_blocking=True)
+        positional_embeddings = pos_weight.reshape(
+            self.position_embedding_size, self.position_embedding_size, -1
+        )
+        return self.resize_positional_embeddings_packed(
+            positional_embeddings,
+            spatial_shapes,
+            lengths_list=lengths_list,
+        )
 
+    def forward(
+        self,
+        pixel_values_packed: torch.FloatTensor,
+        spatial_shapes: torch.LongTensor | None = None,
+        *,
+        pos_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Embed patchified pixel values in packed (unpadded) form.
+
+        Args:
+            pixel_values_packed: `(1, total_tokens, patch_dim)` or
+                `(total_tokens, patch_dim)`, packed in tile order.
+            spatial_shapes: `(num_tiles, 2)` on CPU `(height, width)` per tile.
+                Required when `pos_embeds` is `None`.
+            pos_embeds: Optional precomputed positional embeddings
+                `(total_tokens, embed_dim)` for graph-safe replay.
+
+        Returns:
+            `(1, total_tokens, embed_dim)` packed embeddings.
+
+        """
         if pixel_values_packed.dim() == 3:
             assert pixel_values_packed.shape[0] == 1
             pixel_values_flat = pixel_values_packed[0]
         else:
             pixel_values_flat = pixel_values_packed
 
-        lengths = (spatial_shapes[:, 0] * spatial_shapes[:, 1]).to(dtype=torch.int64)
-        lengths_list = lengths.tolist()
-        total_tokens = int(sum(lengths_list))
-        if total_tokens != pixel_values_flat.shape[0]:
-            raise ValueError(
-                "Packed pixel_values token count does not match spatial_shapes: "
-                f"{pixel_values_flat.shape[0]} vs {total_tokens}."
+        if pos_embeds is None:
+            assert spatial_shapes is not None, (
+                "`spatial_shapes` is required when `pos_embeds` is not provided."
             )
+            assert spatial_shapes.device.type == "cpu", (
+                "Expected `spatial_shapes` on CPU to avoid device-to-host sync in "
+                "variable-length packing."
+            )
+
+            lengths = (spatial_shapes[:, 0] * spatial_shapes[:, 1]).to(
+                dtype=torch.int64
+            )
+            lengths_list = lengths.tolist()
+            total_tokens = int(sum(lengths_list))
+            if total_tokens != pixel_values_flat.shape[0]:
+                raise ValueError(
+                    "Packed pixel_values token count does not match spatial_shapes: "
+                    f"{pixel_values_flat.shape[0]} vs {total_tokens}."
+                )
+            packed_pos_embeds = self.get_packed_pos_embeds(
+                spatial_shapes,
+                lengths_list=lengths_list,
+                device=pixel_values_flat.device,
+            )
+        else:
+            packed_pos_embeds = pos_embeds
 
         target_dtype = self.patch_embedding.weight.dtype
         patch_embeds = self.patch_embedding(pixel_values_flat.to(dtype=target_dtype))
-
-        positional_embeddings = self.position_embedding.weight.reshape(
-            self.position_embedding_size, self.position_embedding_size, -1
-        )
-        packed_pos_embeds = self.resize_positional_embeddings_packed(
-            positional_embeddings,
-            spatial_shapes,
-            lengths_list=lengths_list,
-        )
-
         embeddings = patch_embeds + packed_pos_embeds
         return embeddings.unsqueeze(0)
 
@@ -211,6 +248,7 @@ class Siglip2Attention(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int | torch.Tensor,
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(
             hidden_states
@@ -234,6 +272,7 @@ class Siglip2Attention(nn.Module):
             value=value_states,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         out = out.reshape(bsz, q_len, -1)
         attn_output, _ = self.out_proj(out)
@@ -274,7 +313,11 @@ class Siglip2MLP(nn.Module):
 
 
 @support_torch_compile(
-    dynamic_arg_dims={"hidden_states": [0, 1], "cu_seqlens": 0},
+    dynamic_arg_dims={
+        "hidden_states": [0, 1],
+        "cu_seqlens": 0,
+        "sequence_lengths": 0,
+    },
     enable_if=should_torch_compile_mm_encoder,
     is_encoder=True,
 )
@@ -305,11 +348,13 @@ class Siglip2EncoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int | torch.Tensor,
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Args:
         hidden_states: Input tensor of shape (batch, seq_len, embed_dim).
         cu_seqlens: Cumulative sequence lengths tensor.
         max_seqlen: Maximum sequence length.
+        sequence_lengths: Optional per-sequence lengths (FlashInfer backend).
 
         """
         residual = hidden_states
@@ -319,6 +364,7 @@ class Siglip2EncoderLayer(nn.Module):
             hidden_states=hidden_states,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         hidden_states = residual + hidden_states
 
@@ -370,6 +416,7 @@ class Siglip2Encoder(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int | torch.Tensor,
         return_all_hidden_states: bool = False,
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor | list[torch.Tensor]:
         hidden_states_pool = [inputs_embeds]
         hidden_states = inputs_embeds
@@ -379,6 +426,7 @@ class Siglip2Encoder(nn.Module):
                 hidden_states,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
             )
             if return_all_hidden_states:
                 hidden_states_pool.append(hidden_states)
@@ -427,26 +475,34 @@ class Siglip2VisionTransformer(nn.Module):
     def forward(
         self,
         pixel_values_packed: torch.FloatTensor,
-        spatial_shapes: torch.LongTensor,
+        spatial_shapes: torch.LongTensor | None,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
         select_layers: list[int] | None = None,
+        *,
+        pos_embeds: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
-            Tensor containing the spatial dimensions (height, width)
+            Tensor containing the spatial dimensions `(height, width)`
         of the input images.
         select_layers (`list[int]` or `None`, defaults to `None`):
             Layer indices to select hidden states from. Supports negative
             indices (e.g., -1 for last layer, -2 for second-to-last).
             If None, returns the last layer output.
         """
-        hidden_states = self.embeddings(pixel_values_packed, spatial_shapes)
+        hidden_states = self.embeddings(
+            pixel_values_packed,
+            spatial_shapes,
+            pos_embeds=pos_embeds,
+        )
 
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             return_all_hidden_states=select_layers is not None,
+            sequence_lengths=sequence_lengths,
         )
 
         encoder_outputs = resolve_visual_encoder_outputs(
@@ -493,10 +549,13 @@ class Siglip2Model(torch.nn.Module):
     def forward(
         self,
         pixel_values_packed: torch.FloatTensor,
-        spatial_shapes: torch.LongTensor,
+        spatial_shapes: torch.LongTensor | None,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
         select_layers: list[int] | None = None,
+        *,
+        pos_embeds: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass through the vision model.
 
@@ -506,9 +565,11 @@ class Siglip2Model(torch.nn.Module):
             cu_seqlens: Cumulative sequence lengths of the packed images.
             max_seqlen: Longest image sequence in the batch.
             select_layers: Layer indices to select hidden states from.
-                Supports negative indices (e.g., [-2] for second-to-last).
+                Supports negative indices (e.g., `[-2]` for second-to-last).
                 If None, returns the last layer output with post_layernorm.
                 Multiple layers can be selected and will be concatenated.
+            pos_embeds: Optional precomputed packed positional embeddings.
+            sequence_lengths: Optional per-sequence lengths (FlashInfer).
 
         """
         return self.vision_model(
@@ -517,6 +578,8 @@ class Siglip2Model(torch.nn.Module):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             select_layers=select_layers,
+            pos_embeds=pos_embeds,
+            sequence_lengths=sequence_lengths,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
