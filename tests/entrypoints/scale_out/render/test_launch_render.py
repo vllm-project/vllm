@@ -18,6 +18,7 @@ MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
     [
         ("Qwen/Qwen3-VL-Reranker-2B", 512 * 1024, 0),
         ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf", 3 * 1024**2, 1),
+        ("google/gemma-4-E2B-it", 6 * 1024**2, 0),
     ],
 )
 def test_chat_render_rejects_over_budget_video_tensors(

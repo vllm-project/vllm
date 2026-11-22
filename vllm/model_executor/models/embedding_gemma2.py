@@ -77,6 +77,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.context import validate_video_preprocessing_budget
 from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
@@ -656,6 +657,7 @@ class EmbeddingGemma2MultiModalProcessor(Gemma4MultiModalProcessor):
 
             all_video_pixel_values: list[torch.Tensor] = []
             all_video_position_ids: list[torch.Tensor] = []
+            video_tensor_bytes = 0
             video_num_soft_tokens_per_video: list[list[int]] = []
             video_timestamps_per_video: list[list[float]] = []
             video_frame_counts: list[int] = []
@@ -720,7 +722,12 @@ class EmbeddingGemma2MultiModalProcessor(Gemma4MultiModalProcessor):
                     video_mm_kwargs,
                 )
 
-                all_video_pixel_values.append(single_video_out["pixel_values_videos"])
+                video_pixels = single_video_out["pixel_values_videos"]
+                video_tensor_bytes += (
+                    video_pixels.untyped_storage().nbytes() + video_pixels.nbytes
+                )
+                validate_video_preprocessing_budget(video_tensor_bytes)
+                all_video_pixel_values.append(video_pixels)
                 all_video_position_ids.append(single_video_out["video_position_ids"])
 
                 num_frames = int(single_video_out["num_frames_per_video"][0])

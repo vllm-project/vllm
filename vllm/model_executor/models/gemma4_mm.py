@@ -67,6 +67,7 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing.context import validate_video_preprocessing_budget
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -648,6 +649,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
             all_video_pixel_values: list[torch.Tensor] = []
             all_video_position_ids: list[torch.Tensor] = []
+            video_tensor_bytes = 0
             video_num_soft_tokens_per_video: list[list[int]] = []
             video_timestamps_per_video: list[list[float]] = []
             video_frame_counts: list[int] = []
@@ -690,7 +692,12 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                         "image_position_ids"
                     )
 
-                all_video_pixel_values.append(frame_outputs["pixel_values"])
+                video_pixels = frame_outputs["pixel_values"]
+                video_tensor_bytes += (
+                    video_pixels.untyped_storage().nbytes() + video_pixels.nbytes
+                )
+                validate_video_preprocessing_budget(video_tensor_bytes)
+                all_video_pixel_values.append(video_pixels)
                 all_video_position_ids.append(frame_outputs["pixel_position_ids"])
 
                 # Compute soft tokens per frame
