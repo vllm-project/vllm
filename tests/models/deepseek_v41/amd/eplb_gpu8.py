@@ -120,15 +120,17 @@ def main() -> None:
             ),
             scheduler_config=types.SimpleNamespace(max_num_batched_tokens=4096),
         )
-        return mega_moe.DeepseekV4AiterMegaMoEExperts(
-            cfg,
-            num_experts=n_exp,
-            top_k=topk,
-            hidden_size=H,
-            intermediate_size=INTER,
-            swiglu_limit=10.0,
-            prefix=f"model.layers.{layer}.ffn.experts",
-        )
+        # parameters on the GPU, as under the model loader's device context
+        with torch.device(dev):
+            return mega_moe.DeepseekV4AiterMegaMoEExperts(
+                cfg,
+                num_experts=n_exp,
+                top_k=topk,
+                hidden_size=H,
+                intermediate_size=INTER,
+                swiglu_limit=10.0,
+                prefix=f"model.layers.{layer}.ffn.experts",
+            )
 
     # every rank makes the same logical experts (seed per expert block)
     raw = [
@@ -281,11 +283,31 @@ def main() -> None:
             ]
         ):
             ids, tw, x = inputs(m, i, kind)
-            cmp(
-                f"staged rows {m} {kind}",
-                run(ident, x, tw, ids),
-                run(placed, x, tw, ids),
-            )
+            b = run(placed, x, tw, ids)
+            cap_i = next(c for c, _ in ident._runtimes if m <= c)
+            cap_p = next(c for c, _ in placed._runtimes if m <= c)
+            if cap_i != cap_p:
+                # AITER's fixed-slot dispatch (<= 255 tokens per rank) exists
+                # for 48 experts per rank only: S != 48 runs the indexed
+                # MegaMoE at the larger capacity, another kernel (FP8 P2P);
+                # compare against identity on that same runtime
+                a = run(ident, x, tw, ids)
+                cos = torch.nn.functional.cosine_similarity(
+                    a.double().flatten(), b.double().flatten(), dim=0
+                ).item()
+                rep.append(
+                    f"staged rows {m} {kind}: identity fixed-slot cap {cap_i} vs "
+                    f"placed cap {cap_p}: cos {cos:.6f} (kernel difference, info)"
+                )
+                saved = ident._runtimes
+                ident._runtimes = [r for r in saved if r[0] == cap_p]
+                try:
+                    a = run(ident, x, tw, ids)
+                finally:
+                    ident._runtimes = saved
+            else:
+                a = run(ident, x, tw, ids)
+            cmp(f"staged rows {m} {kind} (capacity {cap_p})", a, b)
     all_err: list = [None] * WORLD
     dist.all_gather_object(all_err, errors)
     if rank == 0:
