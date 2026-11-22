@@ -70,6 +70,29 @@ other dispatch paths retain their backend-specific behavior.
 Set `VLLM_MOE_SKIP_PADDING=0` before starting the engine to disable this
 optimization for comparisons.
 
+!!! note "Hopper NVFP4 MoE kernels for Muse Spark"
+    On Hopper (SM90, `20 <= num_sms < 256`) GPUs with `--moe-backend auto` (the
+    default), Muse Spark NVFP4 MoE layers automatically select fused Hopper
+    NVFP4 MoE kernels (`T <= 1536` persistent decode/verify, `T >= 1537`
+    chunked prefill) when served with `--enable-expert-parallel` over 8 GPUs
+    (MoE tensor parallel size 1, 32 local experts, hidden/intermediate size
+    4096, top-8 SiLU activation, BF16 activations, weight-first post-expert
+    RMSNorm), without data, context or sequence parallelism, EPLB, MoE LoRA,
+    all2all kernels, or `VLLM_BATCH_INVARIANT=1`. vLLM JIT-compiles the
+    kernels at model load using a CUDA toolkit whose `nvcc` targets `sm_90a`,
+    plus `ninja`; the first start on a machine takes several minutes to
+    compile, and later starts reuse the PyTorch extension cache
+    (`TORCH_EXTENSIONS_DIR`). The weights are packed into an E5M3 block-scale
+    layout that represents every finite E4M3 block scale exactly, and the log
+    line `MuseSpark NVFP4: Hopper SM90a fused NVFP4 MoE kernels.` confirms
+    selection. Otherwise, or if compilation or weight encoding fails on any
+    rank, every rank falls back cleanly to the Hopper Marlin W4A16 MoE path;
+    pass `--moe-backend marlin` to force Marlin explicitly. A weight reload of
+    a layer already using these kernels re-encodes in place and raises if a
+    new block scale cannot be encoded (there is no fallback mid-run). Under
+    direct reload, each layer also keeps its checkpoint block scales (about
+    96 MiB per layer) for the next update.
+
 ## Benchmarking with dummy weights
 
 For performance experiments with random weights, use `--load-format dummy`.

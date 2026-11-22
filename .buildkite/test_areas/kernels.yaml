@@ -704,6 +704,28 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":nvidia: (H100) Muse Spark Hopper NVFP4 MoE Kernels"
+  key: kernels-muse-spark-hopper-nvfp4-moe-h100
+  automatic_shard: true
+  timeout_in_minutes: 30
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - csrc/moe/
+  - vllm/models/muse_spark/nvidia/
+  - vllm/models/muse_spark/common/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/modelopt.py
+  - vllm/model_executor/layers/quantization/utils/marlin_utils_fp4.py
+  - vllm/model_executor/layers/quantization/utils/nvfp4_emulation_utils.py
+  - vllm/model_executor/model_loader/reload/
+  - vllm/model_executor/utils.py
+  - vllm/utils/gpu_sync_debug.py
+  - tests/kernels/moe/test_muse_spark_hopper_marlin_moe.py
+  - tests/kernels/moe/muse_spark_utils.py
+  commands:
+    - pytest -v -s kernels/moe/test_muse_spark_hopper_marlin_moe.py
+
 - label: ":nvidia: (H200 MIG 35GB) Mamba Kernels"
   device: h200_35gb
   key: kernels-mamba-test

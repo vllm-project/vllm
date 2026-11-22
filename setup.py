@@ -1644,6 +1644,9 @@ package_data = {
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",
         # Inkling2 TRT-LLM-gen expert GEMM binding (FlashInfer JIT)
         "models/inkling2/nvidia/ops/*.cu",
+        # Muse Spark Hopper NVFP4 MoE JIT kernels
+        "models/muse_spark/nvidia/ops/hopper_nvfp4_moe/csrc/*.cu",
+        "models/muse_spark/nvidia/ops/hopper_nvfp4_moe/csrc/*.cuh",
         # Built-in multimodal chat template fallbacks (registry.py)
         "transformers_utils/chat_templates/*.jinja",
         "third_party/flash_linear_attention/LICENSE",

@@ -52,6 +52,7 @@ def make_runner(
     hidden_size: int,
     intermediate_size: int,
     top_k: int,
+    moe_backend: str = "auto",
 ):
     """Build a MuseSpark runner, load `ckpt` and finalize its weights.
 
@@ -60,7 +61,7 @@ def make_runner(
     num_experts = expert_bias.numel()
     vllm_config = VllmConfig(
         parallel_config=ParallelConfig(),
-        kernel_config=KernelConfig(moe_backend="auto"),
+        kernel_config=KernelConfig(moe_backend=moe_backend),
     )
     with set_current_vllm_config(vllm_config), torch.device("cuda"):
         router = MuseSparkRouter(
@@ -119,8 +120,21 @@ def run_moe(runner, vllm_config, x, logits):
         return runner.forward(hidden_states=x, router_logits=logits)
 
 
-def assert_cudagraph_replays(runner, vllm_config, x, logits, next_x, next_logits):
-    """A captured forward replayed on new inputs matches an eager forward."""
+def assert_cudagraph_replays(
+    runner,
+    vllm_config,
+    x,
+    logits,
+    next_x,
+    next_logits,
+    *,
+    exact: bool = False,
+):
+    """A captured forward replayed on new inputs matches an eager forward.
+
+    With `exact=True`, checks bitwise equality across two consecutive replays
+    (exercising both control-buffer epoch parities).
+    """
     with set_current_vllm_config(vllm_config), set_forward_context(None, vllm_config):
         # FlashInfer autotuning must happen before capture.
         for _ in range(3):
@@ -139,8 +153,10 @@ def assert_cudagraph_replays(runner, vllm_config, x, logits, next_x, next_logits
         ).clone()
         x_static.copy_(next_x)
         logits_static.copy_(next_logits)
-        graph.replay()
-    torch.testing.assert_close(out_static, expected)
+        tolerance = {"rtol": 0, "atol": 0} if exact else {}
+        for _ in range(2 if exact else 1):
+            graph.replay()
+            torch.testing.assert_close(out_static, expected, **tolerance)
 
 
 def swiglu_moe_ref(
