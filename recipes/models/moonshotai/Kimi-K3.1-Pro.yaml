@@ -1723,7 +1723,7 @@ presets:
     strategy: pd_cluster
     workload: "Agentic (InferenceX AgentX)"
     description: "Concurrency 960 on 64 GPUs: one DEP32 prefill worker and one DEP32 decode worker, each across eight GB300 trays (TP1 x DP32 with EP32 on MegaMoE), the decode worker on the low-latency decode backend, with expert-parallel load balancing, served by Dynamo with the K3.1 DSpark draft (5 tokens) and a shared Mooncake KV store in host DRAM."
-    source: { label: "InferenceX #5109", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5109", key: "kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dep32-disagg", revision: "f0eb10565a156da96e3b6a92848e749a7a02f520" }
+    source: { label: "InferenceX #5109", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5109", key: "kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dep32-disagg", revision: "5db09f1436c596febceaec4f1d2fc11854b1a0bd" }
     image:
       vllm: "vllm/vllm-openai:kimi-k31-mc-f4c9618@sha256:01257a77db1a749f97a542431d40c89cbec750c2f1585282e5975b4872ea7b19"
       dynamo: "ec06c09e7232e24f6faeec4069acdc61e4379916"
@@ -1780,7 +1780,7 @@ presets:
         nodes: 8
         args:
           - "--kv-cache-memory-bytes"
-          - "91268055040"
+          - "85899345920"
           - "--kernel-config"
           - *k31_gb300_prefill_topk
           - "--max-async-kv-loads-per-step"
@@ -1846,7 +1846,7 @@ presets:
       Run each worker's command on each of its eight trays with `--data-parallel-start-rank` 0, 4, … 28 and the worker's first tray as `--data-parallel-address`, as rendered.
 
       **Changes from the [DEP16 preset](#preset-gb300_agentx_pd_dep16).**
-      - **Layout and KV pools.** One DEP32 worker per role. A DEP32 prefill rank holds half the routed experts of a DEP16 rank, so each expert gets twice the tokens per step, and the memory this frees goes to the KV pool. `--kv-cache-memory-bytes` per rank is 91268055040 on prefill and 97710505984 on decode; at 960 clients decode is otherwise bound by its KV capacity. Size both to your own image and memory budget.
+      - **Layout and KV pools.** One DEP32 worker per role. A DEP32 prefill rank holds half the routed experts of a DEP16 rank, so each expert gets twice the tokens per step, and the memory this frees goes to the KV pool. `--kv-cache-memory-bytes` per rank is 85899345920 on prefill and 97710505984 on decode; at 960 clients decode is otherwise bound by its KV capacity. Size both to your own image and memory budget.
       - **Store lookup.** The scheduler starts a request's Mooncake store lookup when the request arrives, with up to 16 lookups in flight (`lookup_prefetch_limit`) and results kept for 30 s (`lookup_prefetch_ttl_s`); beyond that it looks up as usual. `store_tp_size: 1` and `store_chunk_size: 4096` lay out the store keys for TP1 ranks in 4096-token chunks.
       - **KV load starts.** `--max-async-kv-loads-per-step` caps the asynchronous KV loads that start in one scheduling step: 4 on prefill, 2 on decode. Each start allocates the request's KV blocks, and with data parallelism every rank waits for the slowest step.
       - **Mooncake store tail pruning** on both roles (`VLLM_MOONCAKE_STORE_KEEP_LOADED_TAIL=1`, `VLLM_MOONCAKE_STORE_DROP_CONSUMED_TAILS=1`), as in the [hybrid preset](#preset-gb300_agentx_pd_hybrid).
