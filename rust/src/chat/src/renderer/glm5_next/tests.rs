@@ -440,6 +440,55 @@ fn empty_developer_messages_merge_like_existing_hf_renderer() {
 }
 
 #[test]
+fn media_in_merged_leading_turn_keeps_source_indices() {
+    use crate::renderer::MediaPartSource;
+    let request = ChatRequest {
+        messages: vec![
+            ChatMessage::system(vec![
+                ChatContentPart::image_url("unused"),
+                ChatContentPart::text("You are a helpful assistant."),
+            ]),
+            ChatMessage::developer(
+                vec![
+                    ChatContentPart::text("Reply in French."),
+                    ChatContentPart::image_url("unused"),
+                ],
+                None,
+            ),
+            ChatMessage::user("Hi"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    let native = Glm5NextChatRenderer::default().with_multimodal(true).render(&request).unwrap();
+    let hf = hf_renderer(CHECKPOINT_TEMPLATES[1].1)
+        .with_multimodal(Some(MultimodalRenderInfo {
+            image_token: Some("<|image|>".into()),
+            video_token: Some("<|video|>".into()),
+            audio_token: None,
+        }))
+        .render(&request)
+        .unwrap();
+    assert_eq!(native.prompt, hf.prompt);
+    assert_eq!(
+        native.media_order.unwrap(),
+        vec![
+            MediaPartSource {
+                message_index: 0,
+                content_part_index: 0
+            },
+            MediaPartSource {
+                message_index: 1,
+                content_part_index: 1
+            },
+        ]
+    );
+    expect_test::expect![[r#"
+        [gMASK]<sop><|system|>Reasoning Effort: Max<|system|><|begin_of_image|><|image|><|end_of_image|>You are a helpful assistant.
+
+        Reply in French.<|begin_of_image|><|image|><|end_of_image|><|user|>Hi<|assistant|><think>"#]].assert_eq(&native.prompt.into_text().unwrap());
+}
+
+#[test]
 fn media_parts_render_reminders_without_multimodal_inputs() {
     let request = ChatRequest {
         messages: vec![ChatMessage::user(vec![
