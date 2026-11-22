@@ -606,13 +606,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 and params.num_prefill_checkpoint_blocks > 0
             )
             self._mamba_spec = spec
-            scatter_states.register_warmup(
-                state_shape=spec.shapes[1],
-                state_dtype=spec.dtypes[1],
-                indices_dtype=torch.int32,
-                max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
-                indices_stride=self._state_indices_stride,
-            )
+            # The CPU kernel writes its final states without Triton.
+            if self.ssd_kernel.backend != MambaBackendEnum.CPU:
+                scatter_states.register_warmup(
+                    state_shape=spec.shapes[1],
+                    state_dtype=spec.dtypes[1],
+                    indices_dtype=torch.int32,
+                    max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
+                    indices_stride=self._state_indices_stride,
+                )
 
     def forward(
         self,
