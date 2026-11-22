@@ -12,6 +12,8 @@ import pytest
 import torch
 
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
 
 fa_interface = pytest.importorskip(
     "vllm.vllm_flash_attn.flash_attn_interface",
@@ -117,6 +119,36 @@ def test_sm90_fp8_mma_block_size():
         assert "block size" in _supports_combination(SM90, 512, "fp8", 16)
     with _device(SM90, head_size=512, kv_cache_dtype="auto"):
         assert _supports_combination(SM90, 512, "auto", 16) is None
+
+
+@pytest.mark.parametrize(
+    "capability,head_size,kv_quant_mode,block_size,expected",
+    [
+        # 16-bit d512 blocks that are multiples of 64 split into 64-token
+        # kernel blocks, so the kernel loads K/V with TMA.
+        (SM90, 512, KVQuantMode.NONE, 128, [64]),
+        (SM90, 512, KVQuantMode.NONE, 64, [64]),
+        # Other block sizes keep their own page size (cp.async path).
+        (SM90, 512, KVQuantMode.NONE, 32, [MultipleOf(16)]),
+        # Other head sizes and GPUs are unchanged; FP8 KV keeps its own rule.
+        (SM90, 256, KVQuantMode.NONE, 128, [MultipleOf(16)]),
+        (SM100, 512, KVQuantMode.NONE, 128, [MultipleOf(16)]),
+        (SM90, 512, KVQuantMode.FP8_PER_TENSOR, 128, [64]),
+    ],
+)
+def test_sm90_d512_kernel_block_size(
+    capability, head_size, kv_quant_mode, block_size, expected
+):
+    spec = AttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=torch.bfloat16,
+        kv_quant_mode=kv_quant_mode,
+    )
+    kv_cache_dtype = "auto" if kv_quant_mode == KVQuantMode.NONE else "fp8"
+    with _device(capability, head_size=head_size, kv_cache_dtype=kv_cache_dtype):
+        assert FlashAttentionBackend.get_supported_kernel_block_sizes(spec) == expected
 
 
 @pytest.mark.parametrize(

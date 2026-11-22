@@ -459,6 +459,17 @@ class FlashAttentionBackend(AttentionBackend):
             return cls._get_xpu_kernel_block_sizes()
         if block_size := cls._get_sm90_fa4_fp8_kv_block_size(kv_cache_spec):
             return [block_size]
+        if (
+            isinstance(kv_cache_spec, AttentionSpec)
+            and kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+            and kv_cache_spec.head_size == 512
+            and kv_cache_spec.block_size % 64 == 0
+            and current_platform.is_device_capability_family(90)
+            and get_flash_attn_version(head_size=512) == 4
+        ):
+            # The SM90 FA4 d512 kernel loads 16-bit paged KV with TMA only when
+            # the page is its 64-token KV tile; other pages use cp.async.
+            return [64]
         return [MultipleOf(16)]
 
     forward_includes_kv_cache_update: bool = False
