@@ -197,9 +197,16 @@ class AsyncOperationManager:
         return future
 
     def get_finished_operations(
-        self, finished_req_ids: set[str]
+        self, finished_req_ids: set[str], unowned_req_ids: set[str] | None = None
     ) -> tuple[set[str], set[str]]:
-        completed_saves = self._check_completed_saves(finished_req_ids)
+        # The scheduler frees the blocks of these requests itself.
+        # Reporting them as finished sending would free those blocks twice.
+        unowned_req_ids = unowned_req_ids or set()
+        for request_id in unowned_req_ids:
+            self._save_futures.pop(request_id, None)
+        completed_saves = self._check_completed_saves(
+            finished_req_ids - unowned_req_ids
+        )
         completed_loads = self._check_completed_loads()
 
         if completed_saves or completed_loads:
@@ -549,6 +556,9 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
         if self._role == KVConnectorRole.SCHEDULER:
             self._scheduling_states: dict[str, RequestSchedulingState] = {}
+            # Block ids of each load sent to the worker and not yet reported finished.
+            self._loading_block_ids: dict[str, list[int]] = {}
+            self._unowned_finished_req_ids: set[str] = set()
             self._metadata_client = Hf3fsMetadataClient(self._metadata_server_url)
             self._metadata_client.initialize(0, role="scheduler")
 
@@ -702,7 +712,13 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
-        return self._async_manager.get_finished_operations(finished_req_ids)
+        unowned_req_ids: set[str] = set()
+        metadata = getattr(self, "_connector_metadata", None)
+        if isinstance(metadata, HF3FSConnectorMetadata):
+            unowned_req_ids = metadata.unowned_finished_req_ids
+        return self._async_manager.get_finished_operations(
+            finished_req_ids, unowned_req_ids
+        )
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Block ids whose load failed, latched by the latest `get_finished`.
@@ -741,22 +757,35 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             return
         invalid = connector_output.invalid_block_ids
         failed_reqs = connector_output.failed_recving
-        if not invalid and not failed_reqs:
-            return
-        for state in self._scheduling_states.values():
-            if state.load_failed:
-                continue
-            fetched = state.load_op.need_fetch_block_ids if state.load_op else ()
-            if state.request_id in failed_reqs or any(
-                block_id in invalid for block_id in fetched
-            ):
+        if invalid or failed_reqs:
+            # Only an outstanding load owns its block ids.
+            # A finished load may have released them to another request.
+            for request_id, block_ids in self._loading_block_ids.items():
+                state = self._scheduling_states.get(request_id)
+                if state is None or state.load_op is None:
+                    continue
+                failed = [i for i, b in enumerate(block_ids) if b in invalid]
+                if request_id not in failed_reqs and not failed:
+                    continue
                 state.load_failed = True
+                if failed:
+                    # The scheduler keeps only the blocks before the first failed one.
+                    # Saves then start there, so the recomputed blocks are stored again.
+                    state.load_op.num_blocks_to_load = min(
+                        state.load_op.num_blocks_to_load, failed[0]
+                    )
+        for request_id in connector_output.finished_recving or ():
+            self._loading_block_ids.pop(request_id, None)
 
     def request_finished(
         self,
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
+        if request.request_id in self._loading_block_ids:
+            # The scheduler frees the blocks once the load is reported finished.
+            self._unowned_finished_req_ids.add(request.request_id)
+            return False, None
         return True, None
 
     def get_num_new_matched_tokens(
@@ -859,6 +888,8 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     ) -> KVConnectorMetadata:
         """Build connector metadata for scheduling step."""
         metadata = HF3FSConnectorMetadata()
+        metadata.unowned_finished_req_ids = self._unowned_finished_req_ids
+        self._unowned_finished_req_ids = set()
 
         for request_id in scheduler_output.finished_req_ids:
             self._scheduling_states.pop(request_id, None)
@@ -900,6 +931,9 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             if request_metadata:
                 metadata.add_request(request_metadata)
                 state.phase = "ACTIVE"
+                self._loading_block_ids[state.request_id] = list(
+                    state.allocated_block_ids
+                )
 
     def _process_new_requests(
         self, scheduler_output: SchedulerOutput, metadata: HF3FSConnectorMetadata

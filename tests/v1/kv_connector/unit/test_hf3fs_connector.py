@@ -635,6 +635,7 @@ class TestHF3FSRecomputeDoesNotReload:
         from vllm.sampling_params import SamplingParams
         from vllm.v1.core.kv_cache_manager import KVCacheBlocks
         from vllm.v1.core.kv_cache_utils import KVCacheBlock
+        from vllm.v1.core.sched.output import SchedulerOutput
         from vllm.v1.core.sched.scheduler import Scheduler
         from vllm.v1.outputs import KVConnectorOutput
         from vllm.v1.request import Request, RequestStatus
@@ -706,6 +707,8 @@ class TestHF3FSRecomputeDoesNotReload:
             )
             request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
             request.num_computed_tokens = checked
+            # The scheduler step sends the load to the worker here.
+            connector.build_connector_meta(SchedulerOutput.make_empty())
 
             services = _LoadServices(
                 lambda found: connector._metadata_client.get_key_locations(0, found),

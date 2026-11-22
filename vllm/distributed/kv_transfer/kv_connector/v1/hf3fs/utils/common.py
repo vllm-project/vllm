@@ -137,6 +137,9 @@ class HF3FSConnectorMetadata(KVConnectorMetadata):
 
     def __init__(self):
         self.requests: list[HF3FSRequestMetadata] = []
+        # Requests that finished while loading, so the scheduler frees their blocks.
+        # The worker must not report them as finished sending.
+        self.unowned_finished_req_ids: set[str] = set()
 
     def add_request(self, request_metadata: HF3FSRequestMetadata) -> None:
         """Add request to metadata."""
