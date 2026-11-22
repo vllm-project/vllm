@@ -269,13 +269,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
 
     # SILU: silu(gate) * up — same kernel, just no "+1" residual in swiglu.
     swiglu_add_residual = activation != MoEActivation.SILU
-    # SWIGLUOAI_UNINTERLEAVE is the SWIGLUOAI epilogue on a packed checkpoint:
-    # weight loading interleaves gate/up for this backend, so only the model's
-    # clamp and residual have to be ones the kernel can express.
     if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
-        assert swiglu_limit is not None, (
-            "SWIGLUOAI_UNINTERLEAVE requires gemm1_clamp_limit"
-        )
         assert quant_config.gemm1_beta in (None, 1.0), (
             "aiter's fused swiglu hardcodes the residual to (up + 1); "
             f"gemm1_beta={quant_config.gemm1_beta} cannot be expressed"
@@ -449,10 +443,10 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.DeepSeekV3,
             RoutingMethodType.MiniMax2,
         ):
-            # MiMo-V2.6 and MiniMax-M3: an ungrouped sigmoid router with a
-            # per-expert correction bias. aiter's flat top-k implements this
-            # natively (select on sigmoid(logits) + bias, return the unbiased
-            # sigmoid scores).
+            # MiMo-V2.6, MiniMax: an ungrouped sigmoid router with a per-expert
+            # correction bias. aiter's flat top-k implements this natively
+            # (select on sigmoid(logits) + bias, return the unbiased sigmoid
+            # scores).
             assert e_score_correction_bias is not None, (
                 f"{routing_method.name} routing requires e_score_correction_bias"
             )
