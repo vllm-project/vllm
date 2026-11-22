@@ -88,6 +88,8 @@ class ActiveKVConnector(KVConnector):
         scheduler_output: "SchedulerOutput",
         input_batch: "InputBatch | None" = None,
         attn_metadata: dict[str, Any] | None = None,
+        *,
+        defer_decode_row_mirror: bool = False,
     ) -> None:
         if self._disabled:
             return
@@ -99,6 +101,8 @@ class ActiveKVConnector(KVConnector):
         self._pending_load_kwargs = self._build_load_kwargs(
             scheduler_output, input_batch, attn_metadata
         )
+        if defer_decode_row_mirror:
+            self._pending_load_kwargs["defer_decode_row_mirror"] = True
 
         if scheduler_output.has_sync_kv_loads:
             # Sync loads need to run before this step's forward.
