@@ -36,6 +36,11 @@ mask in every MoE router backend, including CUDA-graph and MegaMoE paths.
 | `vllm:eplb_expert_load_window_steps` | Gauge | Number of engine steps covered by the last sample |
 | `vllm:eplb_rearrangements_total` | Counter | Completed EPLB rearrangements |
 | `vllm:eplb_rearrangement_timestamp_seconds` | Gauge | When the last rearrangement occurred |
+| `vllm:eplb_rearrangement_pause_seconds` | Histogram | Blocking time spent rearranging experts |
+| `vllm:eplb_rearrangement_blocked_request_seconds_total` | Counter | Rearrangement pause weighted by in-flight requests |
+| `vllm:eplb_rearrangement_blocked_token_seconds_total` | Counter | Rearrangement pause weighted by scheduled tokens |
+| `vllm:eplb_load_rank_skew` | Histogram | Max/mean token load across EP ranks per sample |
+| `vllm:eplb_critical_rank_excess_tokens` | Histogram | Tokens above the rank mean on the busiest rank |
 | `vllm:eplb_expert_topology_timestamp_seconds` | Gauge | When the current topology was committed |
 
 `vllm:eplb_expert_tokens_total` includes the labels `logical_expert` and
@@ -99,7 +104,7 @@ The default is `100`.
 | --- | --- |
 | Production Prometheus monitoring | 10–15 second equivalent |
 | SLO incident correlation | 1–5 second equivalent |
-| Exact step-by-step diagnosis | `expert_metrics_interval=1` plus JSONL tracing |
+| Exact step-by-step diagnosis | `expert_metrics_interval=1` |
 | Very large wide-EP deployment | Start with 10–30 second equivalent and measure overhead |
 
 A useful rule is to sample at least 5–10 times finer than the SLO evaluation
@@ -112,75 +117,55 @@ window:
 | 5 minutes | 15–30 seconds |
 | 15 minutes | 30–60 seconds |
 
-## Prometheus vs exact per-step tracing
+## Tail-latency metrics
 
-Prometheus is scrape-based. If EPLB samples every second but Prometheus scrapes
-every 15 seconds, you will not see every sample. The counter still contains the
-correct cumulative value, and `rate()` over a longer window will reflect the
-aggregate, but individual one-second spikes are lost.
+Load imbalance predicts mean throughput, not tail latency. A bulk-synchronous
+decode step waits for its slowest EP rank, but the rank skew measured over a
+sampling window is usually small and averages away the transients that produce
+SLO breaches. Rearrangement stalls are the tail-dominant EPLB event: the
+serving loop is blocked while experts move, so every in-flight request gains
+the pause duration.
 
-Use Prometheus for:
+The tail metrics are event-based, which makes them robust to Prometheus
+scrape aliasing:
 
-- near-real-time monitoring,
-- alerts,
-- comparing load trends over minutes,
-- correlation with aggregated TTFT/TPOT metrics.
+- `vllm:eplb_rearrangement_pause_seconds` observes the blocking duration of
+  each rearrangement. Use `histogram_quantile` for the tail.
+- `vllm:eplb_rearrangement_blocked_request_seconds_total` adds
+  `pause_seconds * num_requests` per rearrangement.
+- `vllm:eplb_rearrangement_blocked_token_seconds_total` adds
+  `pause_seconds * num_scheduled_tokens` per rearrangement.
+- `vllm:eplb_load_rank_skew` and `vllm:eplb_critical_rank_excess_tokens` are
+  guardrails for sustained rank imbalance. They are not tail predictors on
+  their own.
 
-Use JSONL tracing for:
+The **EPLB tail exposure ratio (ETER)** is the fraction of served
+request-time lost to EPLB stalls:
 
-- exact step-by-step hotspot movement,
-- offline analysis,
-- debugging why one expert or rank is hot,
-- reconstructing global per-step load across DP/EP ranks.
-
-## Exact per-step JSONL tracing
-
-Enable tracing:
-
-```json
-{
-  "enable_expert_metrics": true,
-  "expert_metrics_interval": 1,
-  "expert_metrics_trace": true,
-  "expert_metrics_trace_interval": 1,
-  "expert_metrics_trace_path": "/tmp/eplb_expert_trace.jsonl"
-}
+```promql
+sum(increase(vllm:eplb_rearrangement_blocked_request_seconds_total[5m]))
+/
+(
+  sum(avg_over_time(vllm:num_requests_running[5m]))
+  * 300
+)
 ```
 
-Each DP/EP rank writes its own file, for example:
+Compare `histogram_quantile(0.99, rate(vllm:eplb_rearrangement_pause_seconds_bucket[5m]))`
+with the SLO headroom (p99 SLO latency minus median latency). A pause longer
+than the headroom is a direct tail-breach candidate. Label results by `phase`
+and `async` so synchronous and asynchronous EPLB are not mixed.
 
-```text
-/tmp/eplb_expert_trace.jsonl.dp0.ep1.model.jsonl
-```
-
-Each line contains:
-
-```json
-{
-  "timestamp": 123.0,
-  "step": 42,
-  "model": "my-model",
-  "dp_rank": 0,
-  "ep_rank": 1,
-  "num_ep_ranks": 8,
-  "num_local_experts": 36,
-  "phase": "decode",
-  "tokens": [[0, 12, 3, 0]]
-}
-```
-
-`tokens[layer][physical_expert]` is the load contributed by that source EP rank
-during that step. Sum across rank files to reconstruct global per-step load.
-
-Tracing performs synchronous device-to-host copies and writes files. Use it for
-diagnostic runs, not as a permanent production setting.
+Avoid using `vllm:eplb_rearrangement_timestamp_seconds` to reconstruct when
+events happened: it is a last-value gauge and aliases whenever the scrape
+period is longer than the rearrangement period.
 
 ## Recommended workflow
 
 1. Measure median and p95 engine step time under a representative workload.
 2. Pick a target sample period based on the SLO or latency window.
 3. Convert the period to steps.
-4. Run with JSONL tracing for a short diagnostic window.
+4. Run with `expert_metrics_interval=1` for a short diagnostic window.
 5. Check how quickly the hottest expert/rank changes.
 6. Choose the shortest Prometheus interval that preserves the changes you care
    about.
@@ -223,7 +208,8 @@ time() - max by (model_name, engine, model, phase) (
 
 ## Limitations
 
-- Prometheus cannot reliably retain every short sample.
+- Prometheus cannot reliably retain every short gauge value. Event histograms
+  and counters are not affected by scrape loss.
 - Mixed prefill/decode batches are labeled `mixed`; they are not split per token.
 - Token load is per source EP rank. Aggregate across engines for global load.
 - Per-expert topology has high label cardinality; keep the feature opt-in.

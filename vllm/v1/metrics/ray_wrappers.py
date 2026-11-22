@@ -202,6 +202,7 @@ class RayEplbProm(EplbProm):
 
     _gauge_cls = RayGaugeWrapper
     _counter_cls = RayCounterWrapper
+    _histogram_cls = RayHistogramWrapper
 
 
 class RayPrometheusStatLogger(PrometheusStatLogger):

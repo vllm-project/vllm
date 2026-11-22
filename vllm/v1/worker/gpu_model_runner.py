@@ -3149,7 +3149,11 @@ class GPUModelRunner(
         )
 
     def eplb_step(
-        self, is_dummy: bool = False, is_profile: bool = False
+        self,
+        is_dummy: bool = False,
+        is_profile: bool = False,
+        num_requests: int = 0,
+        num_scheduled_tokens: int = 0,
     ) -> EplbMetricsSnapshot | None:
         """Step the EPLB (Expert Parallelism Load Balancing) state."""
         if not self.parallel_config.enable_eplb or self.eep_eplb_suppressed:
@@ -3161,6 +3165,8 @@ class GPUModelRunner(
             is_dummy,
             is_profile,
             log_stats=self.parallel_config.eplb_config.log_balancedness,
+            num_requests=num_requests,
+            num_scheduled_tokens=num_scheduled_tokens,
         )
 
     def setup_eplb_from_mapping(
@@ -4476,7 +4482,10 @@ class GPUModelRunner(
             self.finalize_kv_connector()
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
-            eplb_metrics = self.eplb_step()
+            eplb_metrics = self.eplb_step(
+                num_requests=self.input_batch.num_reqs,
+                num_scheduled_tokens=scheduler_output.total_num_scheduled_tokens,
+            )
 
         # self.kv_connector_output may be modified during drafting
         kv_connector_output = self.kv_connector_output

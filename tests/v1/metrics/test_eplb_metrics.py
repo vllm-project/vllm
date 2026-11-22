@@ -6,10 +6,13 @@ from types import SimpleNamespace
 import prometheus_client
 
 from vllm.distributed.eplb.metrics import (
+    EPLB_PHASE_DECODE,
     EPLB_PHASE_PREFILL,
     EplbExpertTokens,
     EplbExpertTopology,
+    EplbLoadSample,
     EplbMetricsSnapshot,
+    EplbRearrangementStall,
 )
 from vllm.v1.metrics.eplb import EplbProm
 
@@ -25,8 +28,13 @@ def make_prom(monkeypatch, *, enabled: bool = True):
         def __new__(cls, *args, **kwargs):
             return prometheus_client.Counter(*args, registry=registry, **kwargs)
 
+    class TestHistogram:
+        def __new__(cls, *args, **kwargs):
+            return prometheus_client.Histogram(*args, registry=registry, **kwargs)
+
     monkeypatch.setattr(EplbProm, "_gauge_cls", TestGauge)
     monkeypatch.setattr(EplbProm, "_counter_cls", TestCounter)
+    monkeypatch.setattr(EplbProm, "_histogram_cls", TestHistogram)
 
     config = SimpleNamespace(
         enable_eplb=True,
@@ -65,6 +73,30 @@ def test_eplb_prom_exports_topology_and_tokens(monkeypatch):
                 num_local_experts=2,
                 physical_to_logical=[[0, 1, 0, 1]],
                 timestamp=124.0,
+            )
+        ],
+        stalls=[
+            EplbRearrangementStall(
+                model_name="served",
+                pause_seconds=1.5,
+                blocked_requests=8,
+                blocked_tokens=512,
+                phase=EPLB_PHASE_DECODE,
+                is_async=False,
+                timestamp=125.0,
+            )
+        ],
+        loads=[
+            EplbLoadSample(
+                model_name="served",
+                phase=EPLB_PHASE_DECODE,
+                num_ep_ranks=2,
+                num_local_experts=2,
+                rank_tokens=[5, 3],
+                skew=1.25,
+                excess_tokens=1,
+                timestamp=125.0,
+                steps=10,
             )
         ],
     )
@@ -129,6 +161,53 @@ def test_eplb_prom_exports_topology_and_tokens(monkeypatch):
     assert (
         registry.get_sample_value("vllm:eplb_expert_load_window_steps", load_labels)
         == 5.0
+    )
+
+    stall_labels = {
+        "model_name": "served",
+        "engine": "0",
+        "model": "served",
+        "phase": EPLB_PHASE_DECODE,
+        "async": "false",
+    }
+    assert (
+        registry.get_sample_value(
+            "vllm:eplb_rearrangement_blocked_request_seconds_total", stall_labels
+        )
+        == 12.0
+    )
+    assert (
+        registry.get_sample_value(
+            "vllm:eplb_rearrangement_blocked_token_seconds_total", stall_labels
+        )
+        == 768.0
+    )
+    pause_count = registry.get_sample_value(
+        "vllm:eplb_rearrangement_pause_seconds_count", stall_labels
+    )
+    assert pause_count == 1.0
+    pause_sum = registry.get_sample_value(
+        "vllm:eplb_rearrangement_pause_seconds_sum", stall_labels
+    )
+    assert pause_sum == 1.5
+
+    skew_labels = {
+        "model_name": "served",
+        "engine": "0",
+        "model": "served",
+        "phase": EPLB_PHASE_DECODE,
+    }
+    assert (
+        registry.get_sample_value("vllm:eplb_load_rank_skew_count", skew_labels) == 1.0
+    )
+    assert (
+        registry.get_sample_value("vllm:eplb_load_rank_skew_sum", skew_labels) == 1.25
+    )
+    assert (
+        registry.get_sample_value(
+            "vllm:eplb_critical_rank_excess_tokens_sum", skew_labels
+        )
+        == 1.0
     )
 
 

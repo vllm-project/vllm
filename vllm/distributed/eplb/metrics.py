@@ -59,8 +59,47 @@ class EplbExpertTopology:
 
 
 @dataclass
+class EplbRearrangementStall:
+    """Blocking interval spent rearranging experts while requests were in flight.
+
+    ``pause_seconds`` is measured on the worker around the synchronous part of
+    :meth:`EplbState.rearrange`. ``blocked_requests`` and ``blocked_tokens`` are
+    the batch sizes observed for the step that triggered the rearrangement; they
+    weight the pause by the work that could not make progress.
+    """
+
+    model_name: str
+    pause_seconds: float
+    blocked_requests: int
+    blocked_tokens: int
+    phase: str
+    is_async: bool
+    timestamp: float
+
+
+@dataclass
+class EplbLoadSample:
+    """Aggregate load sample used to derive rank-skew tail signals."""
+
+    model_name: str
+    phase: str
+    num_ep_ranks: int
+    num_local_experts: int
+    rank_tokens: list[int]
+    """Tokens routed to each EP rank over the sample window."""
+    skew: float
+    """``max(rank_tokens) / mean(rank_tokens)``; 1.0 is perfectly balanced."""
+    excess_tokens: int
+    """``max(rank_tokens) - mean(rank_tokens)``, rounded down."""
+    timestamp: float
+    steps: int
+
+
+@dataclass
 class EplbMetricsSnapshot:
     """EPLB expert metrics collected by one worker since the previous snapshot."""
 
     tokens: list[EplbExpertTokens] = field(default_factory=list)
     topology: list[EplbExpertTopology] = field(default_factory=list)
+    stalls: list[EplbRearrangementStall] = field(default_factory=list)
+    loads: list[EplbLoadSample] = field(default_factory=list)

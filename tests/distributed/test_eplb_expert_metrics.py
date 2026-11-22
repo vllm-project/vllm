@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +15,8 @@ from vllm.distributed.eplb.metrics import (
     EPLB_PHASE_MIXED,
     EPLB_PHASE_PREFILL,
     EplbExpertTokens,
+    EplbLoadSample,
+    EplbRearrangementStall,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -24,13 +25,10 @@ pytestmark = pytest.mark.cpu_test
 def test_take_expert_metrics_snapshot_copies_topology_once():
     state = EplbState.__new__(EplbState)
     state.parallel_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(
-            enable_expert_metrics=True,
-            expert_metrics_trace=False,
-            expert_metrics_trace_interval=1,
-            expert_metrics_trace_path="unused.jsonl",
-        )
+        eplb_config=SimpleNamespace(enable_expert_metrics=True)
     )
+    state._pending_eplb_stalls = []
+    state._pending_eplb_loads = []
     state._pending_expert_tokens = [
         EplbExpertTokens(
             model_name="model",
@@ -66,12 +64,7 @@ def test_take_expert_metrics_snapshot_copies_topology_once():
 def test_phase_load_accumulation_separates_prefill_and_decode():
     state = EplbState.__new__(EplbState)
     state.parallel_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(
-            enable_expert_metrics=True,
-            expert_metrics_trace=False,
-            expert_metrics_trace_interval=1,
-            expert_metrics_trace_path="unused.jsonl",
-        )
+        eplb_config=SimpleNamespace(enable_expert_metrics=True)
     )
     state.expert_metrics_total_step = 1
     pass_load = torch.tensor([[1, 2, 3, 4]], dtype=torch.int32)
@@ -119,6 +112,7 @@ def test_sample_expert_metrics_emits_phase_samples_and_resets():
     )
     state.expert_metrics_window_step = 7
     state._pending_expert_tokens = []
+    state._pending_eplb_loads = []
     phase_load = {
         phase: torch.ones((1, 4), dtype=torch.int32)
         for phase in (EPLB_PHASE_PREFILL, EPLB_PHASE_DECODE, EPLB_PHASE_MIXED)
@@ -151,35 +145,107 @@ def test_sample_expert_metrics_emits_phase_samples_and_resets():
     assert all(torch.count_nonzero(t) == 0 for t in phase_load.values())
 
 
-def test_trace_writes_per_rank_jsonl(tmp_path):
-    trace_path = tmp_path / "trace.jsonl"
+def test_sample_expert_metrics_emits_rank_skew_and_excess():
     state = EplbState.__new__(EplbState)
     state.parallel_config = SimpleNamespace(
-        data_parallel_rank=0,
-        eplb_config=SimpleNamespace(
-            expert_metrics_trace=True,
-            expert_metrics_trace_interval=1,
-            expert_metrics_trace_path=str(trace_path),
-        ),
+        eplb_config=SimpleNamespace(enable_expert_metrics=True)
     )
-    state.expert_metrics_total_step = 3
-    state._expert_metrics_trace_files = {}
+    state.expert_metrics_window_step = 4
+    state._pending_expert_tokens = []
+    state._pending_eplb_loads = []
+    phase_load = {
+        phase: torch.zeros((1, 4), dtype=torch.int32)
+        for phase in (EPLB_PHASE_PREFILL, EPLB_PHASE_DECODE, EPLB_PHASE_MIXED)
+    }
+    # Rank 0 gets 7 tokens, rank 1 gets 1 token.
+    phase_load[EPLB_PHASE_DECODE][0] = torch.tensor([3, 4, 1, 0])
     model_state = SimpleNamespace(
-        metrics=SimpleNamespace(
+        phase_load_accum=phase_load,
+        metrics=EplbModelMetricsState(
             model_name="model",
-            ep_rank=1,
+            ep_rank=0,
             num_ep_ranks=2,
             num_local_experts=2,
-            phase=EPLB_PHASE_DECODE,
-        )
+        ),
+        physical_to_logical_map=torch.tensor([[0, 1, 0, 1]]),
     )
+    state.model_states = {"model": model_state}
+    state._allreduce_list = lambda tensors: tensors
 
-    state._write_expert_trace(model_state, torch.tensor([[1, 2], [3, 4]]))
+    state._sample_expert_metrics(rearranged=False)
 
-    output = tmp_path / "trace.jsonl.dp0.ep1.model.jsonl"
-    record = json.loads(output.read_text().strip())
-    assert record["step"] == 3
-    assert record["dp_rank"] == 0
-    assert record["ep_rank"] == 1
-    assert record["phase"] == EPLB_PHASE_DECODE
-    assert record["tokens"] == [[1, 2], [3, 4]]
+    loads = [
+        load for load in state._pending_eplb_loads if load.phase == EPLB_PHASE_DECODE
+    ]
+    assert len(loads) == 1
+    load = loads[0]
+    assert load.rank_tokens == [7, 1]
+    assert load.excess_tokens == 3
+    assert load.skew == pytest.approx(7 / 4)
+    assert load.steps == 4
+
+
+def test_rearrangement_stall_is_attributed_to_each_model():
+    state = EplbState.__new__(EplbState)
+    state._pending_eplb_stalls = []
+    state.is_async = False
+    state.model_states = {
+        "main": SimpleNamespace(
+            metrics=SimpleNamespace(model_name="main", phase=EPLB_PHASE_DECODE)
+        ),
+        "draft": SimpleNamespace(
+            metrics=SimpleNamespace(model_name="draft", phase=EPLB_PHASE_MIXED)
+        ),
+    }
+
+    state._record_rearrangement_stall(1.5, num_requests=32, num_scheduled_tokens=3072)
+
+    assert len(state._pending_eplb_stalls) == 2
+    assert all(stall.pause_seconds == 1.5 for stall in state._pending_eplb_stalls)
+    assert all(stall.blocked_requests == 32 for stall in state._pending_eplb_stalls)
+    assert all(stall.blocked_tokens == 3072 for stall in state._pending_eplb_stalls)
+    assert {stall.model_name for stall in state._pending_eplb_stalls} == {
+        "main",
+        "draft",
+    }
+
+
+def test_take_expert_metrics_snapshot_includes_stalls_and_loads():
+    state = EplbState.__new__(EplbState)
+    state.parallel_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(enable_expert_metrics=True)
+    )
+    state._pending_expert_tokens = []
+    state._pending_eplb_stalls = [
+        EplbRearrangementStall(
+            model_name="model",
+            pause_seconds=0.5,
+            blocked_requests=8,
+            blocked_tokens=512,
+            phase=EPLB_PHASE_DECODE,
+            is_async=False,
+            timestamp=1.0,
+        )
+    ]
+    state._pending_eplb_loads = [
+        EplbLoadSample(
+            model_name="model",
+            phase=EPLB_PHASE_DECODE,
+            num_ep_ranks=2,
+            num_local_experts=2,
+            rank_tokens=[5, 3],
+            skew=1.25,
+            excess_tokens=1,
+            timestamp=1.0,
+            steps=10,
+        )
+    ]
+    state.model_states = {}
+
+    snapshot = state._take_expert_metrics_snapshot()
+
+    assert snapshot is not None
+    assert len(snapshot.stalls) == 1
+    assert len(snapshot.loads) == 1
+    assert state._pending_eplb_stalls == []
+    assert state._pending_eplb_loads == []

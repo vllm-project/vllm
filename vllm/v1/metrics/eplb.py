@@ -26,6 +26,7 @@ class EplbProm:
 
     _gauge_cls = prometheus_client.Gauge
     _counter_cls = prometheus_client.Counter
+    _histogram_cls = prometheus_client.Histogram
 
     def __init__(
         self,
@@ -123,6 +124,88 @@ class EplbProm:
         self._gauge_load_timestamp_metric = gauge_load_timestamp
         self._gauge_window_steps_metric = gauge_window_steps
 
+        stall_labelnames = [*labelnames, "model", "phase", "async"]
+        histogram_stall = self._histogram_cls(
+            name="vllm:eplb_rearrangement_pause_seconds",
+            documentation=(
+                "Blocking time spent rearranging experts before the serving "
+                "loop resumes. Compare its tail with the latency SLO headroom."
+            ),
+            labelnames=stall_labelnames,
+            buckets=(
+                0.001,
+                0.005,
+                0.01,
+                0.025,
+                0.05,
+                0.1,
+                0.25,
+                0.5,
+                1.0,
+                2.5,
+                5.0,
+                10.0,
+                30.0,
+            ),
+        )
+        counter_blocked_requests = self._counter_cls(
+            name="vllm:eplb_rearrangement_blocked_request_seconds_total",
+            documentation=(
+                "Request-seconds spent blocked in EPLB rearrangements. The "
+                "increase rate divided by served request-seconds is the "
+                "fraction of request time exposed to rearrangement stalls."
+            ),
+            labelnames=stall_labelnames,
+        )
+        counter_blocked_tokens = self._counter_cls(
+            name="vllm:eplb_rearrangement_blocked_token_seconds_total",
+            documentation=(
+                "Token-seconds spent blocked in EPLB rearrangements, using the "
+                "scheduled tokens of the triggering batch as the weight."
+            ),
+            labelnames=stall_labelnames,
+        )
+        load_labelnames = [*labelnames, "model", "phase"]
+        histogram_load_skew = self._histogram_cls(
+            name="vllm:eplb_load_rank_skew",
+            documentation=(
+                "Max/mean token load across EP ranks for one load sample. "
+                "1.0 is perfectly balanced."
+            ),
+            labelnames=load_labelnames,
+            buckets=(1.0, 1.02, 1.05, 1.1, 1.2, 1.3, 1.5, 2.0, 3.0, 5.0),
+        )
+        histogram_excess_tokens = self._histogram_cls(
+            name="vllm:eplb_critical_rank_excess_tokens",
+            documentation=(
+                "Tokens on the busiest EP rank above the rank mean for one load sample."
+            ),
+            labelnames=load_labelnames,
+            buckets=(
+                0.0,
+                10.0,
+                50.0,
+                100.0,
+                250.0,
+                500.0,
+                1000.0,
+                2500.0,
+                5000.0,
+                10000.0,
+                50000.0,
+            ),
+        )
+        self._histogram_stall_metric = histogram_stall
+        self._counter_blocked_requests_metric = counter_blocked_requests
+        self._counter_blocked_tokens_metric = counter_blocked_tokens
+        self._histogram_load_skew_metric = histogram_load_skew
+        self._histogram_excess_tokens_metric = histogram_excess_tokens
+        self._histogram_stall: dict[tuple[int, str, str, str], object] = {}
+        self._counter_blocked_requests: dict[tuple[int, str, str, str], object] = {}
+        self._counter_blocked_tokens: dict[tuple[int, str, str, str], object] = {}
+        self._histogram_load_skew: dict[tuple[int, str, str], object] = {}
+        self._histogram_excess_tokens: dict[tuple[int, str, str], object] = {}
+
     def _labels(
         self,
         engine_idx: int,
@@ -180,9 +263,74 @@ class EplbProm:
             cache[key] = child
         return child
 
+    def _stall_metric(
+        self,
+        cache: dict[tuple[int, str, str, str], object],
+        metric,
+        engine_idx: int,
+        model_name: str,
+        phase: str,
+        is_async: bool,
+    ):
+        async_label = "true" if is_async else "false"
+        key = (engine_idx, model_name, phase, async_label)
+        child = cache.get(key)
+        if child is None:
+            child = metric.labels(
+                *self.per_engine_labelvalues[engine_idx],
+                model_name,
+                phase,
+                async_label,
+            )
+            cache[key] = child
+        return child
+
     def observe(self, snapshot: EplbMetricsSnapshot, engine_idx: int = 0):
         if not self.enabled:
             return
+
+        for stall in snapshot.stalls:
+            pause = max(0.0, stall.pause_seconds)
+            self._stall_metric(
+                self._histogram_stall,
+                self._histogram_stall_metric,
+                engine_idx,
+                stall.model_name,
+                stall.phase,
+                stall.is_async,
+            ).observe(pause)
+            self._stall_metric(
+                self._counter_blocked_requests,
+                self._counter_blocked_requests_metric,
+                engine_idx,
+                stall.model_name,
+                stall.phase,
+                stall.is_async,
+            ).inc(pause * stall.blocked_requests)
+            self._stall_metric(
+                self._counter_blocked_tokens,
+                self._counter_blocked_tokens_metric,
+                engine_idx,
+                stall.model_name,
+                stall.phase,
+                stall.is_async,
+            ).inc(pause * stall.blocked_tokens)
+
+        for load in snapshot.loads:
+            self._load_metric(
+                self._histogram_load_skew,
+                self._histogram_load_skew_metric,
+                engine_idx,
+                load.model_name,
+                load.phase,
+            ).observe(load.skew)
+            self._load_metric(
+                self._histogram_excess_tokens,
+                self._histogram_excess_tokens_metric,
+                engine_idx,
+                load.model_name,
+                load.phase,
+            ).observe(load.excess_tokens)
 
         rearranged_models: dict[str, float] = {}
         for model in snapshot.tokens:

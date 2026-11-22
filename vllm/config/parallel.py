@@ -105,20 +105,6 @@ class EPLBConfig:
     Steps between per-expert metric samples. Set to 1 for per-step samples
     at the cost of an EP-group all-reduce every step.
     """
-    expert_metrics_trace: bool = False
-    """
-    Write per-step expert load records to JSONL files. One file is written
-    per DP/EP rank under ``expert_metrics_trace_path``. This is a diagnostic
-    path and synchronously copies expert load tensors to CPU.
-    """
-    expert_metrics_trace_interval: int = Field(default=1, ge=1)
-    """
-    Steps between per-step JSONL trace records.
-    """
-    expert_metrics_trace_path: str = "eplb_expert_trace.jsonl"
-    """
-    Base path for per-step EPLB JSONL traces. Rank suffixes are appended.
-    """
     use_async: bool = True
     """
     Whether to use non-blocking EPLB.

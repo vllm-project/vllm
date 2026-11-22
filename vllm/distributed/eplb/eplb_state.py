@@ -25,14 +25,11 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
-import json
-import os
 import threading
 import time
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TextIO
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -62,7 +59,9 @@ from .metrics import (
     EPLB_PHASES,
     EplbExpertTokens,
     EplbExpertTopology,
+    EplbLoadSample,
     EplbMetricsSnapshot,
+    EplbRearrangementStall,
 )
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
@@ -272,9 +271,8 @@ class EplbState:
         self._pending_expert_tokens: list[EplbExpertTokens] = []
         self.expert_metrics_window_step = 0
         """Steps accumulated into the current per-expert metric sample."""
-        self.expert_metrics_total_step = 0
-        """Monotonic step counter used by JSONL traces."""
-        self._expert_metrics_trace_files: dict[str, TextIO] = {}
+        self._pending_eplb_stalls: list[EplbRearrangementStall] = []
+        self._pending_eplb_loads: list[EplbLoadSample] = []
         self.policy: type[AbstractEplbPolicy] = DefaultEplbPolicy
         """
         Selected EPLB algorithm class
@@ -664,6 +662,8 @@ class EplbState:
         is_dummy: bool = False,
         is_profile: bool = False,
         log_stats: bool = False,
+        num_requests: int = 0,
+        num_scheduled_tokens: int = 0,
     ) -> EplbMetricsSnapshot | None:
         """Step the EPLB state.
 
@@ -676,6 +676,10 @@ class EplbState:
                 `profile_run` to reserve enough memory
                 for the communication buffer.
             log_stats (bool): If `True`, log the expert load metrics.
+            num_requests (int): Requests in the batch that triggered this step.
+                Used to weight rearrangement stalls.
+            num_scheduled_tokens (int): Tokens in the batch that triggered this
+                step. Used to weight rearrangement stalls.
 
         # Stats
             The metrics are all summed up across layers.
@@ -697,7 +701,6 @@ class EplbState:
 
         metrics_enabled = self.parallel_config.eplb_config.enable_expert_metrics
         if not is_dummy and metrics_enabled:
-            self.expert_metrics_total_step += 1
             self.expert_metrics_window_step += 1
             for eplb_model_state in self.model_states.values():
                 self._accumulate_expert_metrics(eplb_model_state)
@@ -823,7 +826,14 @@ class EplbState:
                 self._update_layer_should_record(log_stats=log_stats)
                 return self._take_expert_metrics_snapshot()
             self.expert_rearrangement_step = 0
+            rearrange_start = time.perf_counter()
             self.rearrange()
+            if metrics_enabled and not is_dummy:
+                self._record_rearrangement_stall(
+                    time.perf_counter() - rearrange_start,
+                    num_requests,
+                    num_scheduled_tokens,
+                )
 
         self._update_layer_should_record(log_stats=log_stats)
         return self._take_expert_metrics_snapshot()
@@ -835,50 +845,30 @@ class EplbState:
         if pending is None or phase_accum is None:
             return
         pass_load = model_state.expert_load_pass
-        self._write_expert_trace(model_state, pass_load)
         pending.add_(pass_load)
         phase_accum[model_state.metrics.phase].add_(pass_load)
         pass_load.zero_()
 
-    def _write_expert_trace(
+    def _record_rearrangement_stall(
         self,
-        model_state: EplbModelState,
-        pass_load: torch.Tensor,
+        pause_seconds: float,
+        num_requests: int,
+        num_scheduled_tokens: int,
     ) -> None:
-        config = self.parallel_config.eplb_config
-        if not config.expert_metrics_trace:
-            return
-        if self.expert_metrics_total_step % config.expert_metrics_trace_interval:
-            return
-
-        metrics = model_state.metrics
-        model_name = "".join(
-            c if c.isalnum() or c in "-_." else "_" for c in metrics.model_name
-        )
-        dp_rank = self.parallel_config.data_parallel_rank
-        path = os.path.expanduser(
-            f"{config.expert_metrics_trace_path}"
-            f".dp{dp_rank}.ep{metrics.ep_rank}.{model_name}.jsonl"
-        )
-        trace_file = self._expert_metrics_trace_files.get(path)
-        if trace_file is None:
-            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-            trace_file = open(path, "a", encoding="utf-8")  # noqa: SIM115
-            self._expert_metrics_trace_files[path] = trace_file
-
-        record = {
-            "timestamp": time.time(),
-            "step": self.expert_metrics_total_step,
-            "model": metrics.model_name,
-            "dp_rank": dp_rank,
-            "ep_rank": metrics.ep_rank,
-            "num_ep_ranks": metrics.num_ep_ranks,
-            "num_local_experts": metrics.num_local_experts,
-            "phase": metrics.phase,
-            "tokens": pass_load.cpu().tolist(),
-        }
-        trace_file.write(json.dumps(record, separators=(",", ":")) + "\n")
-        trace_file.flush()
+        """Record how long a rearrangement blocked the serving loop."""
+        timestamp = time.time()
+        for model_state in self.model_states.values():
+            self._pending_eplb_stalls.append(
+                EplbRearrangementStall(
+                    model_name=model_state.metrics.model_name,
+                    pause_seconds=max(0.0, pause_seconds),
+                    blocked_requests=max(0, num_requests),
+                    blocked_tokens=max(0, num_scheduled_tokens),
+                    phase=model_state.metrics.phase,
+                    is_async=self.is_async,
+                    timestamp=timestamp,
+                )
+            )
 
     def _sample_expert_metrics(self, *, rearranged: bool) -> None:
         if not self.model_states:
@@ -900,13 +890,15 @@ class EplbState:
             for phase in EPLB_PHASES:
                 expert_load = global_phase_loads[load_idx]
                 load_idx += 1
+                expert_load_cpu = expert_load.cpu()
+                local_load_cpu = model_state.phase_load_accum[phase].cpu()
                 self._pending_expert_tokens.append(
                     EplbExpertTokens(
                         model_name=metrics.model_name,
                         ep_rank=metrics.ep_rank,
                         num_ep_ranks=metrics.num_ep_ranks,
                         num_local_experts=metrics.num_local_experts,
-                        tokens=expert_load.cpu().tolist(),
+                        tokens=expert_load_cpu.tolist(),
                         physical_to_logical=physical_to_logical,
                         phase=phase,
                         timestamp=timestamp,
@@ -914,6 +906,49 @@ class EplbState:
                         rearranged=rearranged,
                     )
                 )
+                if (
+                    expert_load_cpu.dim() == 2
+                    and metrics.num_ep_ranks * metrics.num_local_experts
+                    == expert_load_cpu.shape[-1]
+                ):
+                    shape = (
+                        expert_load_cpu.shape[0],
+                        metrics.num_ep_ranks,
+                        metrics.num_local_experts,
+                    )
+                    local_rank_tokens = (
+                        local_load_cpu.reshape(shape).sum(dim=(0, 2)).tolist()
+                    )
+                    # Some EP backends record a global load vector on every rank;
+                    # others record only the local rank. Prefer the global vector
+                    # when the local sample is clearly rank-partitioned.
+                    if any(
+                        tokens and rank != metrics.ep_rank
+                        for rank, tokens in enumerate(local_rank_tokens)
+                    ):
+                        rank_tokens = local_rank_tokens
+                    else:
+                        rank_tokens = (
+                            expert_load_cpu.reshape(shape).sum(dim=(0, 2)).tolist()
+                        )
+                    max_load = max(rank_tokens, default=0)
+                    mean_load = (
+                        sum(rank_tokens) / len(rank_tokens) if rank_tokens else 0.0
+                    )
+                    skew = max_load / mean_load if mean_load else 1.0
+                    self._pending_eplb_loads.append(
+                        EplbLoadSample(
+                            model_name=metrics.model_name,
+                            phase=phase,
+                            num_ep_ranks=metrics.num_ep_ranks,
+                            num_local_experts=metrics.num_local_experts,
+                            rank_tokens=rank_tokens,
+                            skew=skew,
+                            excess_tokens=int(max_load - mean_load),
+                            timestamp=timestamp,
+                            steps=steps,
+                        )
+                    )
                 model_state.phase_load_accum[phase].zero_()
         self.expert_metrics_window_step = 0
 
@@ -935,6 +970,10 @@ class EplbState:
 
         tokens = self._pending_expert_tokens
         self._pending_expert_tokens = []
+        stalls = self._pending_eplb_stalls
+        self._pending_eplb_stalls = []
+        loads = self._pending_eplb_loads
+        self._pending_eplb_loads = []
         topology: list[EplbExpertTopology] = []
         for model_state in self.model_states.values():
             metrics = model_state.metrics
@@ -952,9 +991,14 @@ class EplbState:
             )
             metrics.topology_dirty = False
 
-        if not tokens and not topology:
+        if not tokens and not topology and not stalls and not loads:
             return None
-        return EplbMetricsSnapshot(tokens=tokens, topology=topology)
+        return EplbMetricsSnapshot(
+            tokens=tokens,
+            topology=topology,
+            stalls=stalls,
+            loads=loads,
+        )
 
     def _maybe_log_balancedness(self) -> None:
         pending = self._pending_balancedness

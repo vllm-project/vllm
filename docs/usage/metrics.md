@@ -55,23 +55,20 @@ one series per MoE layer and physical expert:
   taken.
 - `vllm:eplb_rearrangements_total` and
   `vllm:eplb_rearrangement_timestamp_seconds` mark actual rearrangements.
+- `vllm:eplb_rearrangement_pause_seconds` is a histogram of the blocking time
+  spent rearranging experts, and
+  `vllm:eplb_rearrangement_blocked_request_seconds_total` /
+  `vllm:eplb_rearrangement_blocked_token_seconds_total` weight that pause by
+  the in-flight batch. These are the EPLB metrics correlated with tail latency.
+- `vllm:eplb_load_rank_skew` and `vllm:eplb_critical_rank_excess_tokens` are
+  histograms of rank imbalance per load sample, useful as guardrails.
 - `vllm:eplb_expert_topology_timestamp_seconds` marks when the current
   placement was committed.
 
 Samples are taken every `expert_metrics_interval` steps (default `100`). Set it
 to `1` for per-step samples; each sample then costs one EP-group all-reduce per
-step. For exact per-step analysis without scrape loss, enable JSONL tracing:
-
-```json
-{"enabled": true, "enable_expert_metrics": true,
- "expert_metrics_interval": 1,
- "expert_metrics_trace": true,
- "expert_metrics_trace_interval": 1,
- "expert_metrics_trace_path": "/tmp/eplb_expert_trace.jsonl"}
-```
-
-This writes one JSONL file per DP/EP rank. Each line contains the step,
-timestamp, phase, model, rank, and the per-layer/per-expert token vector.
+step. Rearrangement stalls are recorded per event, so they are not thinned by
+the sampling interval or by Prometheus scrape loss.
 
 ```promql
 # Global tokens per logical expert and phase, aggregated across replicas and
@@ -87,6 +84,19 @@ time() - max by (model_name, engine, model, phase) (
 
 # Current logical expert placement for layer 0 on EP rank 2.
 vllm:eplb_expert_topology{layer="0", ep_rank="2"}
+
+# p99 rearrangement pause.
+histogram_quantile(
+  0.99,
+  sum by (le, model_name, phase, async) (
+    rate(vllm:eplb_rearrangement_pause_seconds_bucket[5m])
+  )
+)
+
+# Fraction of request service time exposed to EPLB rearrangement stalls.
+sum(increase(vllm:eplb_rearrangement_blocked_request_seconds_total[5m]))
+/
+(sum(avg_over_time(vllm:num_requests_running[5m])) * 300)
 ```
 
 --8<-- "gen:metrics-eplb"
