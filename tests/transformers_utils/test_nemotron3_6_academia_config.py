@@ -64,7 +64,7 @@ def test_nemotron3_6_academia_accepts_hf_special_token_types():
         ({"recurrent_kv_cache_mode": "last"}, "recurrent_kv_cache_mode"),
         ({"n_recurrent_layers": 22}, "partitions"),
         ({"layer_types": []}, "num_hidden_layers"),
-        ({"layer_types": ["moe"] * 52}, "Academia layers"),
+        ({"layer_types": ["moe"] * 52}, "Nemotron 3.6 Academia layers"),
         ({"linear_num_key_heads": 7}, "divisible"),
         ({"head_dim": 0}, "dimensions"),
         ({"loop_conditioning_hidden_size": 255}, "must be even"),

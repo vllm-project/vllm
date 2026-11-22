@@ -14,13 +14,21 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d_prefill import (
 from vllm.model_executor.layers.mamba.ops.gated_delta_product import (
     fused_recurrent_gated_delta_product,
 )
-from vllm.model_executor.layers.mamba.ops.gdp_chunk_prefill import gdp_chunk_prefill
+from vllm.model_executor.layers.mamba.ops.gdp_chunk_prefill import (
+    gdp_chunk_prefill,
+    gdp_chunk_prefill_supported,
+)
 from vllm.third_party.flash_linear_attention.ops import chunk_gated_delta_rule
 from vllm.third_party.flash_linear_attention.ops.index import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
 )
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+
+requires_gdp_chunk_prefill = pytest.mark.skipif(
+    not gdp_chunk_prefill_supported(1, 64, 32),
+    reason="GDP chunk prefill is not supported on this platform",
+)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -114,6 +122,7 @@ def _virtual_inputs(conv, b, a, a_log, bias, m, heads=4, groups=2, kdim=64, vdim
     )
 
 
+@requires_gdp_chunk_prefill
 @pytest.mark.parametrize("m", [1, 3, 4])
 @pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
 def test_direct_prefill_matches_fla_with_initial_and_checkpoint_states(m, state_dtype):
@@ -180,6 +189,7 @@ def test_direct_prefill_matches_fla_with_initial_and_checkpoint_states(m, state_
     torch.testing.assert_close(state[[0, 5]], before[[0, 5]], atol=0, rtol=0)
 
 
+@requires_gdp_chunk_prefill
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("dim_first", [True, False])
 def test_direct_conv_matches_existing_conv_and_exports_windows(dtype, dim_first):
@@ -231,6 +241,7 @@ def test_direct_conv_matches_existing_conv_and_exports_windows(dtype, dim_first)
     torch.testing.assert_close(state[[0, 8]], initial[[0, 8]], atol=0, rtol=0)
 
 
+@requires_gdp_chunk_prefill
 @pytest.mark.parametrize("m", [1, 3, 4])
 def test_checkpoint_at_sequence_end(m):
     torch.manual_seed(29)
@@ -261,6 +272,7 @@ def test_checkpoint_at_sequence_end(m):
     torch.testing.assert_close(state[1], state[2], atol=0, rtol=0)
 
 
+@requires_gdp_chunk_prefill
 def test_large_batch_grid_matches_recurrent():
     from vllm.model_executor.layers.mamba.ops.gated_delta_product import (
         fused_recurrent_gated_delta_product,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
-"""Configuration for the recurrent Academia hybrid architecture."""
+"""Configuration for the recurrent Nemotron 3.6 Academia hybrid architecture."""
 
 import json
 from typing import Any
@@ -60,7 +60,8 @@ class Nemotron3_6AcademiaConfig(PreTrainedConfig):
             raise ValueError("layer_types must have num_hidden_layers entries")
         if set(self.layer_types) - {"linear_attention", "full_attention", "mlp"}:
             raise ValueError(
-                "Academia layers must be linear_attention, full_attention, or mlp"
+                "Nemotron 3.6 Academia layers must be "
+                "linear_attention, full_attention, or mlp"
             )
 
     def validate_architecture(self):
@@ -70,7 +71,9 @@ class Nemotron3_6AcademiaConfig(PreTrainedConfig):
             self.n_output_layers,
         )
         if min(partitions) < 0 or sum(partitions) != self.num_hidden_layers:
-            raise ValueError("Academia layer partitions must sum to num_hidden_layers")
+            raise ValueError(
+                "Nemotron 3.6 Academia layer partitions must sum to num_hidden_layers"
+            )
         if self.n_recurrent_layers < 1 or self.n_recurrent_loops < 1:
             raise ValueError(
                 "n_recurrent_layers and n_recurrent_loops must be positive"
@@ -92,7 +95,7 @@ class Nemotron3_6AcademiaConfig(PreTrainedConfig):
             self.loop_conditioning_max_loops,
         )
         if min(dimensions) <= 0:
-            raise ValueError("Academia dimensions must be positive")
+            raise ValueError("Nemotron 3.6 Academia dimensions must be positive")
         if self.num_attention_heads % self.num_key_value_heads:
             raise ValueError(
                 "num_attention_heads must be divisible by num_key_value_heads"
@@ -108,7 +111,9 @@ class Nemotron3_6AcademiaConfig(PreTrainedConfig):
                 "Loop conditioning size must be even and adapter rank nonnegative"
             )
         if self.hidden_act != "relu2" or self.rms_norm_eps <= 0:
-            raise ValueError("Academia requires relu2 and positive rms_norm_eps")
+            raise ValueError(
+                "Nemotron 3.6 Academia requires relu2 and positive rms_norm_eps"
+            )
 
     def validate_per_tensor_quantization(self):
         marker = self.per_tensor_quantization

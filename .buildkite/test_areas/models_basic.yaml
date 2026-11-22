@@ -2,24 +2,33 @@ group: Models - Basic
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H100) Academia inference and GDP kernels"
-  key: academia-inference-kernels
+- label: ":nvidia: (H200 MIG 35GB) Nemotron 3.6 Academia inference"
+  key: nemotron3-6-academia-inference
   timeout_in_minutes: 60
-  device: h100
+  device: h200_35gb
   source_file_dependencies:
   - vllm/model_executor/models/nemotron3_6_academia.py
+  - vllm/model_executor/models/nemotron_h.py
+  - vllm/model_executor/kernels/linear/mxfp8/marlin.py
+  - vllm/model_executor/kernels/linear/nvfp4/marlin.py
   - vllm/transformers_utils/configs/nemotron3_6_academia.py
   - vllm/model_executor/layers/mamba/
   - tests/models/test_nemotron3_6_academia.py
-  - vllm/v1/engine/
-  - vllm/v1/worker/gpu/
+  - vllm/v1/engine/core.py
+  - vllm/v1/engine/input_processor.py
+  - vllm/v1/worker/gpu/cudagraph_utils.py
+  - vllm/v1/worker/gpu/model_states/interface.py
   - vllm/v1/attention/backends/gdn_attn.py
-  - tests/kernels/mamba/test_gated_delta_product.py
   commands:
-    - >-
-      pytest -v -s
-      models/test_nemotron3_6_academia.py
-      kernels/mamba/test_gated_delta_product.py
+    - pytest -v -s models/test_nemotron3_6_academia.py -m "not slow_test"
+
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Nemotron 3.6 Academia inference"
+  key: nemotron3-6-academia-inference-nightly
+  optional: true
+  timeout_in_minutes: 60
+  device: h200_35gb
+  commands:
+    - pytest -v -s models/test_nemotron3_6_academia.py
 
 - label: ":nvidia: (H200 MIG 18GB) Basic Models (Initialization)"
   key: basic-models-tests-initialization

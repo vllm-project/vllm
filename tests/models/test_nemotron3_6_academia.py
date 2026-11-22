@@ -8,8 +8,8 @@ import torch
 from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.nemotron3_6_academia import (
-    AcademiaLoopConditioning,
-    AcademiaLoopSeam,
+    Nemotron3_6AcademiaLoopConditioning,
+    Nemotron3_6AcademiaLoopSeam,
 )
 from vllm.transformers_utils.configs.nemotron3_6_academia import (
     Nemotron3_6AcademiaConfig,
@@ -27,9 +27,9 @@ def test_loop_table_reload_preserves_captured_storage(seam):
     )
     with set_current_vllm_config(VllmConfig(device_config=DeviceConfig(device="cpu"))):
         module = (
-            AcademiaLoopSeam(config)
+            Nemotron3_6AcademiaLoopSeam(config)
             if seam
-            else AcademiaLoopConditioning(config, "test")
+            else Nemotron3_6AcademiaLoopConditioning(config, "test")
         )
     steps = [0, 1, 0, 1, 2]
     conds = [torch.randn(4) for _ in steps]
@@ -116,9 +116,20 @@ def test_loop_cache_modes(vllm_runner, tmp_path, cache_mode, gdp_dims):
         assert runner.apply_model(_cache_layout) == [(attention_caches, 2)]
 
 
-@pytest.mark.parametrize("cache_mode", ["per_loop", "last_loop"])
-@pytest.mark.parametrize("enforce_eager", [True, False])
-@pytest.mark.parametrize("precision", ["BF16", "NVFP4"])
+@pytest.mark.parametrize(
+    "precision,enforce_eager,cache_mode",
+    [
+        # Regular CI covers all pairs; slow cases complete the three-way matrix.
+        ("BF16", False, "per_loop"),
+        ("BF16", True, "last_loop"),
+        ("NVFP4", False, "last_loop"),
+        ("NVFP4", True, "per_loop"),
+        pytest.param("BF16", False, "last_loop", marks=pytest.mark.slow_test),
+        pytest.param("BF16", True, "per_loop", marks=pytest.mark.slow_test),
+        pytest.param("NVFP4", False, "per_loop", marks=pytest.mark.slow_test),
+        pytest.param("NVFP4", True, "last_loop", marks=pytest.mark.slow_test),
+    ],
+)
 def test_mixed_request_loops_match_separate_requests(
     vllm_runner, cache_mode, enforce_eager, precision
 ):
