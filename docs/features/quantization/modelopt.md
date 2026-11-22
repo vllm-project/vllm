@@ -65,8 +65,14 @@ module prefix and decoder layer indices before constructing quantized layers.
     batch-invariant mode, preprocessed checkpoints and disabled Marlin kernels
     retain their existing selection.
 
-    On SM121, BF16 Bolt projections also use shape-specific
-    Marlin launch profiles for prefill and decode.
+    On SM121, BF16 Bolt projections also use Marlin launch profiles for
+    prefill and decode. Input prefill groups the aligned bulk of a request
+    separately from its final partial tile group; output profiles retain
+    the ordinary schedule where the grouped schedule does not improve it.
+    These shape-based profiles apply to any matching Marlin call,
+    independently of Mamba2 backend selection. Unsupported layouts,
+    batch-invariant mode and insufficient workspace retain ungrouped Marlin
+    dispatch.
 
 !!! note
     For models quantized to MXFP8 with BF16 activations on SM100-family GPUs,

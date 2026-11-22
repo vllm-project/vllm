@@ -135,7 +135,7 @@ def mamba_nvfp4_checkpoint(tmp_path):
 def test_mamba_nvfp4_loaded_generation(
     vllm_runner, mamba_nvfp4_checkpoint, monkeypatch, enable_pickle
 ):
-    """Load/pack, run the grouped M=96 prefill, then two recurrent decode steps."""
+    """Load/pack, run a ragged M=79 prefill, then two recurrent decode steps."""
     capability = current_platform.get_device_capability()
     assert capability is not None and capability.to_int() in (120, 121), (
         "Run this regression in the DGX Spark Mamba Marlin CI step"
@@ -191,7 +191,7 @@ def test_mamba_nvfp4_loaded_generation(
         ) as runner:
             runner.collective_rpc(check_model)
             result = runner.generate_w_logprobs(
-                [[1] + [3 + index % 253 for index in range(95)]],
+                [[1] + [3 + index % 253 for index in range(78)]],
                 SamplingParams(
                     temperature=0,
                     max_tokens=3,

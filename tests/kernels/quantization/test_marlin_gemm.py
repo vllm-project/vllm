@@ -366,6 +366,11 @@ def test_marlin_gemm(
                 1,
                 8,
                 9,
+                64,
+                65,
+                79,
+                80,
+                81,
                 95,
                 96,
                 97,
@@ -376,6 +381,12 @@ def test_marlin_gemm(
                 160,
                 161,
                 257,
+                511,
+                512,
+                513,
+                4095,
+                4096,
+                4097,
                 1024,
                 1025,
                 8191,
@@ -383,33 +394,48 @@ def test_marlin_gemm(
                 8193,
             )
         ],
-        *[(m, 4096, 18560, "strided") for m in (8, 96, 128)],
-        *[(m, 4096, 18560, "minimal_workspace") for m in (8, 96, 128)],
-        (96, 4096, 18560, "below_profile_workspace"),
+        *[(m, 4096, 18560, "strided") for m in (8, 79, 96, 128)],
+        *[(m, 4096, 18560, "minimal_workspace") for m in (8, 96, 128, 1025)],
+        *[(m, 4096, 18560, "below_profile_workspace") for m in (96, 513)],
         *[
             (m, 8192, 4096, "contiguous")
             for m in (
                 1,
                 8,
                 9,
+                64,
+                65,
+                79,
                 95,
                 96,
                 97,
+                127,
+                128,
+                129,
                 159,
                 160,
                 161,
+                191,
+                192,
+                193,
                 224,
                 255,
                 256,
                 257,
+                511,
+                512,
+                513,
+                2047,
+                2048,
+                2049,
                 1024,
                 8191,
                 8192,
                 8193,
             )
         ],
-        (256, 8192, 4096, "strided"),
-        (256, 8192, 4096, "minimal_workspace"),
+        *[(m, 8192, 4096, "strided") for m in (79, 256)],
+        *[(m, 8192, 4096, "minimal_workspace") for m in (256, 2049)],
     ],
 )
 def test_marlin_nvfp4_projection_profiles(size_m, size_k, size_n, layout):
@@ -460,13 +486,16 @@ def test_marlin_nvfp4_projection_profiles(size_m, size_k, size_n, layout):
 
     reference = torch.matmul(inputs, weight_ref)
     guarded_output = torch.full(
-        (size_m + 64, size_n), float("nan"), dtype=dtype, device="cuda"
+        (size_m + 128, size_n), 2048, dtype=dtype, device="cuda"
     )
     for _ in range(2):
-        output = run(inputs, guarded_output[:size_m])
+        output_view = guarded_output[64 : 64 + size_m]
+        output_view.fill_(float("nan"))
+        output = run(inputs, output_view)
         assert compute_max_diff(output, reference) < 0.04
         assert torch.isfinite(output).all()
-        assert torch.isnan(guarded_output[size_m:]).all()
+        assert (guarded_output[:64] == 2048).all()
+        assert (guarded_output[64 + size_m :] == 2048).all()
         assert torch.count_nonzero(workspace) == 0
         if workspace_guard is not None:
             assert (workspace_guard[workspace.numel() :] == 12345).all()

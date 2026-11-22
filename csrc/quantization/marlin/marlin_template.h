@@ -54,7 +54,8 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
           const int group_blocks,  // number of consecutive 16x16 blocks
                                    // with a separate quantization scale
           const bool is_zp_float,  // is zero point of float16 type?
-          const int m_tile_group, const bool group_all_mn_tiles>
+          const int m_tile_group, const bool group_all_mn_tiles,
+          const bool partial_m_tiles>
 __global__ void Marlin(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,  // 4bit quantized weight matrix of shape kxn
@@ -213,7 +214,8 @@ template <const vllm::ScalarTypeId a_type_id,  // A ScalarType id
           const int group_blocks,  // number of consecutive 16x16 blocks
                                    // with a separate quantization scale
           const bool is_zp_float,  // is zero point of float16 type?
-          const int m_tile_group, const bool group_all_mn_tiles>
+          const int m_tile_group, const bool group_all_mn_tiles,
+          const bool partial_m_tiles>
 __global__ void Marlin(
     const int4* __restrict__ A0,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,   // 4bit quantized weight matrix of shape kxn
@@ -320,6 +322,7 @@ __global__ void Marlin(
   static_assert(group_blocks != 0,
                 "runtime activation ordering is not supported");
   constexpr int m_block_size = m_block_size_8 ? 8 : (16 * thread_m_blocks);
+  static_assert(!partial_m_tiles || group_all_mn_tiles);
 
   extern __shared__ int4 sh[];
   constexpr int pack_factor = 32 / b_type.size_bits();
@@ -327,8 +330,11 @@ __global__ void Marlin(
 
   // For larger GEMMs we run multiple batchsize 64 versions in parallel for a
   // better partitioning with less reductions
+  const int total_m = prob_m;
   int parallel = 1;
-  if (prob_m > m_block_size) {
+  if constexpr (partial_m_tiles) {
+    parallel = div_ceil(total_m, m_block_size);
+  } else if (prob_m > m_block_size) {
     parallel = prob_m / m_block_size;
     prob_m = m_block_size;
   }
@@ -379,6 +385,8 @@ __global__ void Marlin(
     int tile = virtual_tile - group * m_tile_group * n_tiles;
     par_id = group * m_tile_group + tile % group_m;
     slice_col = tile / group_m;
+    if constexpr (partial_m_tiles)
+      prob_m = min(m_block_size, total_m - par_id * m_block_size);
     A = A0 + 16 * thread_m_blocks / 8 * par_id * lda;
     C = C0 + 16 * thread_m_blocks / 8 * par_id * prob_n;
   };
@@ -658,9 +666,11 @@ __global__ void Marlin(
   // needed if there are more threads than required for a certain tilesize or
   // when the batchsize is not a multiple of 16.
   bool a_sh_wr_pred[a_sh_wr_iters];
+  if constexpr (!partial_m_tiles) {
   #pragma unroll
-  for (int i = 0; i < a_sh_wr_iters; i++)
-    a_sh_wr_pred[i] = a_sh_wr_delta * i + a_sh_wr < a_sh_stride * prob_m;
+    for (int i = 0; i < a_sh_wr_iters; i++)
+      a_sh_wr_pred[i] = a_sh_wr_delta * i + a_sh_wr < a_sh_stride * prob_m;
+  }
 
   // To ensure that writing and reading A tiles to/from shared memory, the
   // latter in fragment format, is fully bank conflict free, we need to use a
@@ -1158,7 +1168,8 @@ __global__ void Marlin(
                 &sh_red[c_sh_wr + c_sh_wr_delta * i],
                 &C[c_gl_wr + c_gl_wr_delta_o * (i / 2) +
                    c_gl_wr_delta_i * (i % 2)],
-                i < (thread_m_blocks - 1) * 4 || 8 * (i / 2) + row < prob_m);
+                (!partial_m_tiles && i < (thread_m_blocks - 1) * 4) ||
+                    8 * (i / 2) + row < prob_m);
           }
         }
         cp_async_fence();
@@ -1167,8 +1178,9 @@ __global__ void Marlin(
 
   #pragma unroll
       for (int i = 0; i < (m_block_size_8 ? 2 : thread_m_blocks * 4); i++) {
-        bool mask = (!m_block_size_8) && (i < (thread_m_blocks - 1) * 4 ||
-                                          8 * (i / 2) + row < prob_m) ||
+        bool mask = (!m_block_size_8) &&
+                        ((!partial_m_tiles && i < (thread_m_blocks - 1) * 4) ||
+                         8 * (i / 2) + row < prob_m) ||
                     (m_block_size_8) && ((threadIdx.x % 4) * 2 + i < prob_m);
         if (mask) {
           if (!first) {
@@ -1379,6 +1391,12 @@ __global__ void Marlin(
 
   // Start global fetch and register load pipelines.
   auto start_pipes = [&]() {
+    if constexpr (partial_m_tiles) {
+      // The physical tile may change between full and partial row extents.
+  #pragma unroll
+      for (int i = 0; i < a_sh_wr_iters; i++)
+        a_sh_wr_pred[i] = a_sh_wr_delta * i + a_sh_wr < a_sh_stride * prob_m;
+    }
 
   #pragma unroll
     for (int i = 0; i < stages - 1; i++) {
