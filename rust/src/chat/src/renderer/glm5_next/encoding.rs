@@ -483,29 +483,30 @@ pub(super) fn messages(messages: &[ChatMessage]) -> Vec<Value> {
         .iter()
         .any(|message| matches!(message, ChatMessage::Developer { .. }))
     {
-        let content = values
-            .drain(..leading)
-            .map(|mut value| value["content"].take())
-            .reduce(append_content);
+        // Empty messages add nothing, as in `ChatContent::append`.
+        let content = messages
+            .iter()
+            .zip(values.drain(..leading))
+            .filter(|(message, _)| {
+                !matches!(
+                    message,
+                    ChatMessage::System { content } | ChatMessage::Developer { content, .. }
+                        if content.is_empty()
+                )
+            })
+            .map(|(_, mut value)| value["content"].take())
+            .reduce(append_content)
+            .unwrap_or_else(|| json!(""));
         values.insert(0, json!({"role": "system", "content": content}));
     }
     values
 }
 
-/// Join `next` to `content` as `ChatContent::append` joins merged messages:
-/// text on either side of the boundary is joined with a blank line, and parts
-/// keep their order.
+/// Join non-empty `next` to non-empty `content` as `ChatContent::append`
+/// joins merged messages: text on either side of the boundary is joined with a
+/// blank line, and parts keep their order.
 fn append_content(content: Value, next: Value) -> Value {
     const SEPARATOR: &str = "\n\n";
-    let is_empty = |value: &Value| {
-        value.as_str().is_some_and(str::is_empty) || value.as_array().is_some_and(Vec::is_empty)
-    };
-    if is_empty(&next) {
-        return content;
-    }
-    if is_empty(&content) {
-        return next;
-    }
     let into_parts = |value: Value| match value {
         Value::Array(parts) => parts,
         text => vec![json!({"type": "text", "text": text})],

@@ -406,6 +406,40 @@ fn developer_messages_match_existing_hf_renderer() {
 }
 
 #[test]
+fn empty_developer_messages_merge_like_existing_hf_renderer() {
+    let empty = || vec![ChatContentPart::text("")];
+    let conversations = [
+        vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::developer(empty(), None),
+            ChatMessage::user("Hi"),
+        ],
+        vec![
+            ChatMessage::developer(empty(), None),
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("Hi"),
+        ],
+    ];
+    for messages in conversations {
+        let request = ChatRequest {
+            messages,
+            ..ChatRequest::for_test()
+        };
+        let native = Glm5NextChatRenderer::default().render(&request).unwrap();
+        for (name, template) in CHECKPOINT_TEMPLATES {
+            assert_eq!(
+                native.prompt,
+                hf_renderer(template).render(&request).unwrap().prompt,
+                "{name}"
+            );
+        }
+        expect_test::expect![[r#"
+            [gMASK]<sop><|system|>Reasoning Effort: Max<|system|>You are a helpful assistant.<|user|>Hi<|assistant|><think>"#]]
+        .assert_eq(&native.prompt.into_text().unwrap());
+    }
+}
+
+#[test]
 fn media_parts_render_reminders_without_multimodal_inputs() {
     let request = ChatRequest {
         messages: vec![ChatMessage::user(vec![
