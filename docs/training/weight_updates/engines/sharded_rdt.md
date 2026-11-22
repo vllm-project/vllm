@@ -92,7 +92,7 @@ vllm serve my-model \
 Everything else — which producers exist, how the model splits into layer groups, the ownership table — arrives from the trainer at the init handshake.
 
 !!! warning "Size the receive buffers before choosing `gpu_memory_utilization`"
-    With GPU staging, each worker holds `min(stages_in_flight, stream_count) * num_rdt_buffers` receive buffers, each large enough for the biggest single slice batch it pulls. Like NCCL and NIXL internals, they do **not** count against `gpu_memory_utilization`, so a fraction that leaves no headroom can OOM during initialization even though model profiling succeeded. With the extensible KV cache (the default on CUDA and ROCm), `gpu_memory_utilization` defaults to 1.0 and the KV cache takes all memory left after warmup, so set it explicitly to leave room for these buffers (see [GPU Memory Utilization](../../configuration/optimization.md#gpu-memory-utilization)). The buffer size is driven by the largest atomic slice — for an untied vocab matrix on a worker that holds it unsliced, that is the whole embedding. Host staging moves this pool to host memory page-locked with `cudaHostRegister` and registered with NIXL, exactly `min(stages_in_flight, stream_count) * num_rdt_buffers * rounded_slot_size` bytes per worker, with the same sizing tradeoff.
+    With GPU staging, each worker holds `min(stages_in_flight, stream_count) * num_rdt_buffers` receive buffers, each large enough for the biggest single slice batch it pulls. Like NCCL and NIXL internals, they do **not** count against `gpu_memory_utilization`, so a fraction that leaves no headroom can OOM during initialization even though model profiling succeeded. With the extensible KV cache (the default on CUDA and ROCm), `gpu_memory_utilization` defaults to 1.0 and the KV cache takes all memory left after warmup, so set it explicitly to leave room for these buffers (see [GPU Memory Utilization](../../../configuration/optimization.md#gpu-memory-utilization)). The buffer size is driven by the largest atomic slice — for an untied vocab matrix on a worker that holds it unsliced, that is the whole embedding. Host staging moves this pool to host memory page-locked with `cudaHostRegister` and registered with NIXL, exactly `min(stages_in_flight, stream_count) * num_rdt_buffers * rounded_slot_size` bytes per worker, with the same sizing tradeoff.
 
 ## Trainer Side
 
@@ -138,6 +138,7 @@ To adapt a trainer that is not a plain `nn.Module` — a Megatron export, a raw 
 | `stall_timeout_s` | 300.0 | Seconds without progress before the sync fails. A liveness backstop for a consumer that dies mid-sync, not a latency target |
 | `staging_device` | `"gpu"` | Receive-slot location: `"gpu"` for GPU memory or `"host"` for pinned host memory |
 | `stages_in_flight` | 1 | Maximum trainer stage streams pulled concurrently; clamped to the plan's stream count |
+| `workers_per_replica` | 0 | Workers per inference replica for slot-sharing across multi-replica deployments (`0` disables grouping) |
 
 ## Limitations
 

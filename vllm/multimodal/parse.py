@@ -534,6 +534,16 @@ ModalityDataParser: TypeAlias = Callable[
 ]
 
 
+def _convert_pil_frames(frames: HfVideoItem) -> HfVideoItem:
+    """Convert PIL video frames to RGB, as is done for PIL images."""
+    if not isinstance(frames, list):
+        return frames
+    return [
+        convert_image_mode(frame, "RGB") if isinstance(frame, PILImage.Image) else frame
+        for frame in frames
+    ]
+
+
 class MultiModalDataParser:
     """Parses [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
     into [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
@@ -653,9 +663,10 @@ class MultiModalDataParser:
             new_video, metadata = self._get_video_with_metadata(video.media)
             return MediaWithBytes(new_video, video.original_bytes), metadata
         if isinstance(video, tuple):
-            return video
+            frames, metadata = video
+            return _convert_pil_frames(frames), metadata
         if isinstance(video, list):
-            return np.array(video), None
+            return np.array(_convert_pil_frames(video)), None
         if isinstance(video, (np.ndarray, torch.Tensor)):
             # Tensors pass through untouched: HF video processors accept them
             # directly, and device tensors (e.g. NVDEC-decoded frames) must
