@@ -13,20 +13,16 @@ if TYPE_CHECKING:
     from vllm.config import SpeculativeConfig
 
 
-def _validate_checkpoint_quantization(
-    config: object, *, allow_nvfp4: bool = False
-) -> None:
+def _validate_checkpoint_quantization(config: object) -> None:
     error = (
         "HYV4 requires native blockwise FP8 or compressed-tensors FP8 "
         "(128x128 weights, dynamic group-128 activations) and/or weight-only "
-        "MXFP4 (group-32 weights, uint8 scales)"
-        + (" and/or NVFP4 (W4A4, group-16, FP8 scales)" if allow_nvfp4 else "")
-        + ", without checkpoint kv_cache_scheme or transforms"
+        "MXFP4 (group-32 weights, uint8 scales), without checkpoint "
+        "kv_cache_scheme or transforms"
     )
     if not isinstance(config, dict) or (
         config.get("kv_cache_scheme") is not None
-        # compressed-tensors serializes "no transforms" as {}
-        or config.get("transform_config")
+        or config.get("transform_config") is not None
     ):
         raise ValueError(error)
     if config.get("quant_method") == "fp8":
@@ -44,7 +40,6 @@ def _validate_checkpoint_quantization(
         "float-quantized",
         "mxfp4-pack-quantized",
         "mixed-precision",
-        *(("nvfp4-pack-quantized",) if allow_nvfp4 else ()),
     ):
         raise ValueError(error)
     groups = config.get("config_groups")
@@ -74,14 +69,6 @@ def _validate_checkpoint_quantization(
         symmetric=True,
         dynamic=False,
     )
-    expected_nvfp4 = dict(
-        num_bits=4,
-        type="float",
-        strategy="tensor_group",
-        group_size=16,
-        symmetric=True,
-    )
-    nvfp4_scale_dtypes = (None, "float8_e4m3fn", "torch.float8_e4m3fn")
     for group in groups.values():
         if not isinstance(group, dict):
             raise ValueError(error)
@@ -102,19 +89,20 @@ def _validate_checkpoint_quantization(
             and all(weights.get(k) == v for k, v in expected_mxfp4_weight.items())
             and weights.get("scale_dtype") in (None, "uint8", "torch.uint8")
         )
-        is_nvfp4 = (
-            allow_nvfp4
-            and group_format == "nvfp4-pack-quantized"
-            and isinstance(activations, dict)
-            and all(weights.get(k) == v for k, v in expected_nvfp4.items())
-            and all(activations.get(k) == v for k, v in expected_nvfp4.items())
-            and weights.get("dynamic") is False
-            and activations.get("dynamic") == "local"
-            and weights.get("scale_dtype") in nvfp4_scale_dtypes
-            and activations.get("scale_dtype") in nvfp4_scale_dtypes
-        )
-        if not (is_fp8 or is_mxfp4 or is_nvfp4):
+        if not (is_fp8 or is_mxfp4):
             raise ValueError(error)
+
+
+def _validate_dfly_quantization(config: object) -> None:
+    if isinstance(config, dict) and config.get("quant_method") == "compressed-tensors":
+        # Any layer scheme works for the target; draft layers check their own.
+        # An empty transform_config means no transforms.
+        if config.get("kv_cache_scheme") is not None or config.get("transform_config"):
+            raise ValueError(
+                "DFly does not support compressed-tensors kv_cache_scheme or transforms"
+            )
+        return
+    _validate_checkpoint_quantization(config)
 
 
 def _derive_dfly_config(
@@ -255,9 +243,7 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
             raise ValueError("DFly requires a BF16 target dtype")
         checkpoint_quantized = target.quantization in ("fp8", "compressed-tensors")
         if checkpoint_quantized:
-            _validate_checkpoint_quantization(
-                target.model_arch_config.quantization_config, allow_nvfp4=True
-            )
+            _validate_dfly_quantization(target.model_arch_config.quantization_config)
         elif target.quantization is not None:
             from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
             from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -271,8 +257,9 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
                 QuantizationConfigArgs(moe=QuantSpec(weight=kFp8Static128BlockSym))
             ):
                 raise ValueError(
-                    "DFly supports only unquantized targets, checkpoint blockwise "
-                    "FP8/MXFP4/NVFP4 or online MoE-only fp8_per_block quantization"
+                    "DFly supports only unquantized targets, compressed-tensors or "
+                    "blockwise FP8 checkpoints, or online MoE-only fp8_per_block "
+                    "quantization"
                 )
         if checkpoint_quantized:
             if draft.quantization != target.quantization or spec.quantization not in (
@@ -280,9 +267,7 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
                 target.quantization,
             ):
                 raise ValueError("DFly must use the checkpoint's quantization")
-            _validate_checkpoint_quantization(
-                draft.model_arch_config.quantization_config, allow_nvfp4=True
-            )
+            _validate_dfly_quantization(draft.model_arch_config.quantization_config)
         elif draft.quantization is not None or spec.quantization is not None:
             raise ValueError("DFly does not support quantized draft weights")
         parallel = spec.target_parallel_config
