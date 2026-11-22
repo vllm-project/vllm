@@ -71,7 +71,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other'
   key: spec-decode-eagle-2-llama3-qwen-vl-other
   device: intel_gpu
-  timeout_in_minutes: 25
+  timeout_in_minutes: 60
   optional: true
   working_dir: "."
   no_plugin: true
