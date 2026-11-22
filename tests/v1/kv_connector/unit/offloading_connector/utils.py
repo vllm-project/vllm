@@ -66,12 +66,14 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     PrepareStoreOutput,
     RequestOffloadingContext,
-    StoreTrigger,
     TransferResult,
     make_offload_key,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
-from vllm.v1.kv_offload.cpu.spec import parse_store_triggers
+from vllm.v1.kv_offload.cpu.spec import (
+    CPUOffloadingSpec,
+    parse_store_triggers,
+)
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -245,7 +247,7 @@ class MockOffloadingSpec(OffloadingSpec):
         _cm.resolve_device_pointers = _tracking_resolve
         # The manager is a mock, so give it the triggers of the CPU spec.
         self.store_triggers = parse_store_triggers(
-            self.extra_config, tuple(StoreTrigger)
+            self.extra_config, CPUOffloadingSpec.STORE_TRIGGERS_ALLOWED
         )
         self.manager.store_triggers = self.store_triggers
 

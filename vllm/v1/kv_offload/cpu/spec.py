@@ -65,22 +65,29 @@ def parse_store_triggers(
         The configured triggers, in the configured order.
 
     Raises:
-        ValueError: on a value that `StoreTrigger` does not know.
+        ValueError: on an empty list, on a name that `StoreTrigger` does not
+            know, or on a trigger that this tier cannot serve.
 
     """
-    store_when = extra_config.get("store_when", [t.value for t in default])
-    assert store_when, "store_when must name at least one store trigger"
+    store_when = extra_config.get("store_when", default)
+    if not store_when:
+        raise ValueError("store_when must name at least one store trigger.")
     triggers = tuple(StoreTrigger(value) for value in store_when)
-    assert set(triggers) <= set(allowed), (
-        f"store_when must be a subset of {[trigger.value for trigger in allowed]}, "
-        f"got {[trigger.value for trigger in triggers]}"
-    )
+    unsupported = [trigger.value for trigger in triggers if trigger not in allowed]
+    if unsupported:
+        raise ValueError(
+            f"store_when must be a subset of "
+            f"{[trigger.value for trigger in allowed]}, got {unsupported}"
+        )
     return triggers
 
 
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
-    STORE_TRIGGERS_ALLOWED: Collection[StoreTrigger] = tuple(StoreTrigger)
+    STORE_TRIGGERS_ALLOWED: Collection[StoreTrigger] = (
+        StoreTrigger.ON_COMPUTE,
+        StoreTrigger.ON_OVERWRITE,
+    )
     SHARED_REGION_PER_RANK = True
 
     @classmethod

@@ -368,32 +368,30 @@ def test_cpu_spec_stores_on_compute_by_default():
 
 
 @pytest.mark.parametrize("store_when", [["fast"], "on_overwrite"])
-def test_cpu_spec_rejects_a_bad_store_when(store_when):
+def test_cpu_spec_rejects_an_unknown_store_when(store_when):
     with pytest.raises(ValueError, match="StoreTrigger"):
         _create_spec(extra_config={"store_when": store_when})
 
 
+def test_cpu_spec_rejects_a_trigger_it_cannot_serve():
+    """The layout adds on_handoff itself, so the config does not name it."""
+    with pytest.raises(ValueError, match="store_when"):
+        _create_spec(extra_config={"store_when": ["on_handoff"]})
+
+
 def test_cpu_spec_rejects_an_empty_store_when():
-    with pytest.raises(AssertionError, match="store_when"):
+    with pytest.raises(ValueError, match="store_when"):
         _create_spec(extra_config={"store_when": []})
 
 
-def test_tiering_spec_rejects_a_lazy_store():
-    with pytest.raises(AssertionError, match="store_when"):
+@pytest.mark.parametrize("store_when", [["on_overwrite"], ["on_handoff"]])
+def test_tiering_spec_rejects_a_trigger_it_cannot_serve(store_when):
+    """The layout adds on_handoff itself, so the config does not name it."""
+    with pytest.raises(ValueError, match="store_when"):
         _create_spec(
             spec_name="TieringOffloadingSpec",
-            extra_config={"store_when": ["on_overwrite"]},
+            extra_config={"store_when": store_when},
         )
-
-
-def test_tiering_spec_allows_the_handoff_trigger():
-    """The layout adds on_handoff, so the config may name it too."""
-    spec = _create_spec(
-        spec_name="TieringOffloadingSpec",
-        extra_config={"store_when": ["on_compute", "on_handoff"]},
-    )
-    assert isinstance(spec, TieringOffloadingSpec)
-    assert spec.store_triggers == (StoreTrigger.ON_COMPUTE, StoreTrigger.ON_HANDOFF)
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])

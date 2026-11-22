@@ -3580,8 +3580,6 @@ def test_req_context_counts_live_until_request_finished(registered):
         ["on_compute"],
         ["on_overwrite"],
         ["on_overwrite", "on_compute"],
-        # Inert here: the layout adds on_handoff itself when it hands off.
-        ["on_handoff"],
     ],
 )
 def test_scheduler_makes_a_handler_per_manager_trigger(request_runner, store_when):
@@ -3650,16 +3648,16 @@ def _offered_keys(offers, trigger: StoreTrigger) -> list:
 
 
 @pytest.mark.parametrize(
-    "extra_config, error",
+    "extra_config",
     [
-        ({"store_when": ["on_overwrite"]}, ValueError),
-        ({"store_when": []}, AssertionError),
-        ({"store_when": ["on_compute", "on_compute"]}, ValueError),
+        {"store_when": ["on_overwrite"]},
+        {"store_when": []},
+        {"store_when": ["on_compute", "on_compute"]},
     ],
 )
-def test_unsupported_store_triggers_raise(request_runner, extra_config, error):
+def test_unsupported_store_triggers_raise(request_runner, extra_config):
     """Self-describing events with lazy stores, or bad manager triggers."""
-    with pytest.raises(error):
+    with pytest.raises(ValueError):
         request_runner(
             block_size=4,
             num_gpu_blocks=10,

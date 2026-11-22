@@ -34,6 +34,7 @@ def _create_handlers(
     kv_cache_config: KVCacheConfig,
     extra_config: dict[str, Any] | None = None,
     vllm_config=None,
+    manager_store_triggers: tuple[StoreTrigger, ...] | None = None,
 ) -> dict[StoreTrigger, StoreTriggerHandler]:
     vllm_config = vllm_config or _make_vllm_config(extra_config=extra_config)
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
@@ -47,7 +48,11 @@ def _create_handlers(
     )
     return StoreHandlerFactory.create_handlers(
         config,
-        spec.get_manager().store_triggers,
+        (
+            spec.get_manager().store_triggers
+            if manager_store_triggers is None
+            else manager_store_triggers
+        ),
         events_tracker,
         vllm_config,
         kv_cache_config,
@@ -66,11 +71,13 @@ def test_the_layout_handler_is_added_first():
 
 
 def test_a_trigger_of_the_layout_and_of_the_manager_raises():
-    """test_unsupported_store_triggers_raise covers an empty set and a
-    repeated manager trigger; only a layout/manager overlap is left."""
+    """test_unsupported_store_triggers_raise covers an empty set, a repeated
+    manager trigger, and a trigger that the config cannot name. A manager can
+    still ask for on_handoff, and the layout already added it."""
     with pytest.raises(ValueError, match="unique and not empty"):
         _create_handlers(
-            _make_mamba_hybrid_kv_cache_config(), {"store_when": ["on_handoff"]}
+            _make_mamba_hybrid_kv_cache_config(),
+            manager_store_triggers=(StoreTrigger.ON_HANDOFF,),
         )
 
 

@@ -334,13 +334,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         return metrics
 
-    # The layout adds the handoff trigger when it needs one, so listing it is
-    # allowed and inert. Every other trigger but the eager one has no
-    # multi-tier support.
-    STORE_TRIGGERS_ALLOWED: Collection[StoreTrigger] = (
-        StoreTrigger.ON_COMPUTE,
-        StoreTrigger.ON_HANDOFF,
-    )
+    # The layout adds the handoff trigger when it needs one, so the config
+    # cannot name it. Only the eager trigger has multi-tier support.
+    STORE_TRIGGERS_ALLOWED: Collection[StoreTrigger] = (StoreTrigger.ON_COMPUTE,)
 
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
