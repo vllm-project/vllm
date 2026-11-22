@@ -427,6 +427,12 @@ class HFConfigParser(ConfigParserBase):
                 # Original checkpoints nest their fields in `thinker_config`
                 audio_config = thinker_config["audio_config"]
                 audio_config["model_type"] = "qwen3_asr_encoder"
+                text_config = thinker_config.get("text_config")
+                if (
+                    isinstance(text_config, dict)
+                    and text_config.get("model_type") == "qwen3_asr_text"
+                ):
+                    text_config["model_type"] = "qwen3"
                 config_dict = {**thinker_config, **config_dict}
                 if thinker_config["model_type"] == "qwen3_forced_aligner":
                     config_dict["architectures"] = [

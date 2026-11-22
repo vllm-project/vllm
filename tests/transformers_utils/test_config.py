@@ -102,6 +102,7 @@ def test_thinker_config_is_served(
     if checkpoint_config == "Qwen3ASRConfig":
         # Original Qwen3-ASR checkpoints nest every field in `thinker_config`
         config_dict["audio_config"]["model_type"] = "qwen3_asr_audio_encoder"
+        config_dict["text_config"]["model_type"] = "qwen3_asr_text"
         config_dict = {"model_type": "qwen3_asr", "thinker_config": config_dict}
     quantization_config = {"quant_method": "awq", "bits": 4, "group_size": 128}
     config_dict.update(
@@ -119,6 +120,8 @@ def test_thinker_config_is_served(
     served_model_type = config_dict["thinker_config"]["model_type"]
     assert config.model_type == served_model_type
     assert config.get_text_config().vocab_size == 1234
+    if checkpoint_config == "Qwen3ASRConfig":
+        assert config.get_text_config().model_type == "qwen3"
     assert config.architectures == [served_architecture]
     assert config.quantization_config == quantization_config
     assert str(config.dtype).removeprefix("torch.") == "float16"
