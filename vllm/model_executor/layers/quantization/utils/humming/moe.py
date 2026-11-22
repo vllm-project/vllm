@@ -249,7 +249,7 @@ def select_humming_moe_experts(
             activation_format,
         )
         if supported:
-            logger.info_once(_make_log_backend(k_cls))
+            logger.debug_once(_make_log_backend(k_cls))
             return k_cls
         else:
             logger.debug_once(_make_log_unsupported(k_cls, reason))
@@ -500,6 +500,10 @@ def _process_single_sublayer(
         input_schema=current_input_schema,
         param_dtype=param_dtype,
         allow_fallback=allow_input_schema_fallback,
+        # Humming's MoE grouped GEMM has no working FP8 path on SM100-SM119
+        # (the tuner can emit an invalid two-CTA UMMA config); keep the BF16
+        # fallback there until it is fixed.
+        allow_fp8_sm100=False,
     )
     config = _prepare_and_transform_sublayer(
         layer=layer,

@@ -11,7 +11,7 @@ formats, the step's KV caches as vLLM's insert writes them.
 Each stage is compared on its own input, so a failure names the stage; the MoE
 is checked on the kernels' own FFN input, where routing cannot differ.
 
-On gfx942 at TP4, `test_mono_decode_942_replays` runs the composed runner on
+On gfx942 at TP4 and TP8, `test_mono_decode_942_replays` runs the composed runner on
 the copies of the weights that the model makes at load, at steps of 6, 8 and 42
 rows, and replays the steps in one CUDA graph. The real model's numerics on
 gfx942 are checked by `test_dsv41_mono_layers.py`."""
@@ -355,6 +355,10 @@ def _check_layers(rank: int, tp: int, device) -> None:
         torch.Generator(device=device).manual_seed(2000),
         inter=2304 // tp,
     )
+    # The flag the model sets at load (mono_decode._keep_row_major_at_load): the
+    # kernels read the shared expert row-major, not preshuffled for AITER.
+    for lin in (moe.shared_experts.gate_up_proj, moe.shared_experts.down_proj):
+        lin.keep_row_major_weight = True
     process_weights_after_loading(moe, vc.model_config, device)
 
     def f32(*shape, s=1.0, gen=g):
@@ -397,10 +401,9 @@ def _check_layers(rank: int, tp: int, device) -> None:
     # the tuned builds' reference (``MonoBuild.generic``): at TP2 the ratio-2
     # steps take the tuned paths, 12 rows the small-width ones, 36 a partial
     # last token tile; their outputs must match the generic builds' bit for bit.
-    # Only TP2 has tuned builds, so only TP2 makes the reference.
     generic = (
         DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device, generic=True)
-        if tp == 2
+        if runner.build(1, 2).tuned_front
         else None
     )
     gw, bias = moe.gate.weight.float(), moe.gate.e_score_correction_bias.float()
@@ -518,7 +521,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
         swa_of = {}
         runs = (
             (generic, runner)
-            if generic is not None and runner.tuned(M, ratio)
+            if generic is not None and runner.build(M, ratio).tuned_front
             else (runner,)
         )
         for r in runs:
@@ -531,8 +534,9 @@ def _check_layers(rank: int, tp: int, device) -> None:
                 topk_indices=s["topk"], comp_cache=s["comp_cache"],
                 comp_block_table=s["comp_block_table"],
             )  # fmt: skip
-            off = scratch_layout(M, tp, tuned=r.tuned(M, ratio))["normed"][0]
-            normed = r.scratch(M, r.tuned(M, ratio))[off : off + M * HIDDEN * 2]
+            b = r.build(M, ratio)
+            off = scratch_layout(M, tp, tuned=b.tuned, front=b.tuned_front)["normed"][0]
+            normed = r.scratch(M, b.tuned, b.tuned_front)[off : off + M * HIDDEN * 2]
             mid = (r.res_mid, r.post_a, r.comb_a, r.pre_a)
             res_of[r] = [t.clone() for t in (*o, normed, *(t[:M] for t in mid))]
             swa_of[r] = s["swa_cache"].clone()
@@ -568,11 +572,23 @@ def _check_layers(rank: int, tp: int, device) -> None:
         assert tok[same].min() > 0.99, tag
 
         # ---- the FFN launch, from the same unreduced wo_b output
-        f = runner.ffn(mw, part, res, post, comb, attn_pre)
-        torch.testing.assert_close(f[1], res2, rtol=2**-8, atol=1e-6)
-        # the FFN launch is a generic build: it writes the generic scratch
+        # (its seam tuned at TP4 / TP8: bit for bit the generic build's; both
+        # write the generic scratch)
         off = scratch_layout(M, tp)["normed"][0]
-        normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
+        ffn_of = {}
+        runs = (
+            (generic, runner)
+            if generic is not None and runner.build(M, 0).tuned_seam  # ratio 0
+            else (runner,)
+        )
+        for r in runs:
+            f = r.ffn(mw, part, res, post, comb, attn_pre)
+            normed = r.scratch(M)[off : off + M * HIDDEN * 2]
+            ffn_of[r] = [t.clone() for t in (*f, normed)]
+        if generic in ffn_of:
+            assert all(map(torch.equal, ffn_of[runner], ffn_of[generic])), tag
+        torch.testing.assert_close(f[1], res2, rtol=2**-8, atol=1e-6)
+        normed = normed.view(bf).view(M, HIDDEN)
         torch.testing.assert_close(normed, xf, rtol=2**-7, atol=1e-6)
         # TODO: back to 0.9999 / 0.015 with the one above (ROCm/aiter#6548)
         assert _cos(f[0], out) > 0.9998 and _rel(f[0], out) < 0.02, tag
@@ -665,8 +681,8 @@ def _mono_replay_942(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
 
 
 def _replay_942(rank: int, tp: int, device) -> None:
-    """The composed gfx942 runner at TP4 on the copies of the weights that the
-    model makes at load. The steps have 6 rows (one GEMV pass), 8 rows (two
+    """The composed gfx942 runner at TP4 or TP8 on the copies of the weights
+    that the model makes at load. The steps have 6 rows (one GEMV pass), 8 rows (two
     passes, the second one padded) and 42 rows (seven passes, the most that
     the gfx942 kernels take). The padded pass must leave the real rows alone,
     and the steps alternating in one CUDA graph must give the first run's
@@ -717,7 +733,7 @@ def _replay_942(rank: int, tp: int, device) -> None:
         moe,
         torch.Generator(device=device).manual_seed(2001 + rank),
         torch.Generator(device=device).manual_seed(2000),
-        inter=mono_decode.INTER_TP4,
+        inter=mono_decode._routed_inter_942(),
     )
     process_weights_after_loading(moe, vc.model_config, device)
 
@@ -809,7 +825,7 @@ def _replay_942(rank: int, tp: int, device) -> None:
             w13=w13, w13_s=w13_s, w2=w2, w2_s=w2_s, sgu=sgu, sgu_s=sgu_s,
             sw2=sw2, sw2_s=sw2_s,
         )  # fmt: skip
-        mw.check_942(moe.n_routed_experts)
+        mw.check_942(tp, moe.n_routed_experts)
         ins = inputs(M)
         # this rank's unreduced wo_b output, for the FFN launch
         part = (torch.randn(M, HIDDEN, generator=gs) * 0.1).to(bf).to(device)
@@ -865,9 +881,12 @@ def _replay_942(rank: int, tp: int, device) -> None:
 
 
 @pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 mono kernels")
-def test_mono_decode_942_replays(monkeypatch: pytest.MonkeyPatch):
-    # The gfx942 kernels build for TP4 only.
-    if torch.accelerator.device_count() < 4:
-        pytest.skip("needs 4 GPUs")
+@pytest.mark.parametrize("tp", [4, 8])
+def test_mono_decode_942_replays(monkeypatch: pytest.MonkeyPatch, tp: int):
+    # The gfx942 kernels build for TP4 and TP8. At TP8 a rank has 8 heads,
+    # one padded 16-wide head tile, and a 288-wide routed intermediate, whose
+    # w2 rows end in a single K block.
+    if torch.accelerator.device_count() < tp:
+        pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
-    multi_process_parallel(monkeypatch, 4, 1, _mono_replay_942)
+    multi_process_parallel(monkeypatch, tp, 1, _mono_replay_942)

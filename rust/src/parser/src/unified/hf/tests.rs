@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use vllm_tokenizer::test_utils::TestTokenizer;
 use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution, Tokenizer as _};
 
-use super::{HfTemplateError, HfUnifiedParser, ResponseTemplate};
+use super::{HfUnifiedParser, ResponseTemplate};
 use crate::tool::Tool;
 use crate::tool::test_utils::split_by_chars;
 use crate::unified::{UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput};
@@ -327,22 +327,21 @@ fn upstream_fixtures_match_transformers_values() {
     }
 }
 
-/// Upstream fixtures whose patterns have no literal prefix are rejected at load.
+/// Zero-width boundaries that match after each other stop before repeating a
+/// scan at the same position, where Transformers would loop: here the field
+/// opens and closes, and the text goes to the implicit field.
 #[test]
-fn patterns_without_literal_prefix_are_unsupported() {
-    let ernie = json!({
-        "start_anchor": "Assistant:",
-        "fields": {"thinking": {"open_pattern": r"(?:^|<think>\s*)", "close": "</think>"}},
-    });
-    let inkling = json!({
-        "start_anchor": "<|message_model|>",
-        "fields": {"content": {"open_pattern": r"(?:<\|message_model\|>)?[^<]*<\|content_text\|>", "close": "<|end_message|>"}},
-    });
-    for template in [ernie, inkling] {
-        assert!(matches!(
-            ResponseTemplate::from_json(&template),
-            Err(HfTemplateError::Unsupported { .. })
-        ));
+fn zero_width_boundary_cycles_end() {
+    let template = compile(json!({
+        "start_anchor": "<|assistant|>",
+        "fields": {
+            "reasoning_content": {"open_pattern": "(?=<x>)", "close_pattern": "(?=<x>)"},
+            "content": {},
+        },
+    }));
+    for chunks in [vec!["a<x>b"], split_by_chars("a<x>b", 1)] {
+        let events = parse_events(&template, &[], "", &chunks).unwrap();
+        assert_eq!(message(&events), json!({"content": "a<x>b"}));
     }
 }
 
@@ -480,7 +479,7 @@ fn gemma4_streams_text_and_starts_calls_at_the_opener() {
                         ToolCallDelta {
                             tool_index: 0,
                             name: None,
-                            arguments: "{\"location\":\"Paris\"}",
+                            arguments: "{\"location\": \"Paris\"}",
                         },
                     ),
                 ],

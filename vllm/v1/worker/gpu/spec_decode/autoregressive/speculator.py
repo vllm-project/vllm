@@ -118,7 +118,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
     def capture(self) -> None:
         logger.info("Capturing autoregressive speculator...")
         self.last_token_indices.zero_()
-        self.idx_mapping.zero_()
+        # As in dummy runs, -1 keeps draft steps from writing KV through a
+        # request-state row's stale block ids.
+        self.idx_mapping.fill_(-1)
         self.current_draft_step.zero_()
 
         assert self.prefill_cudagraph_manager is not None
