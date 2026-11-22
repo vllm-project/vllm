@@ -191,10 +191,13 @@ class _StoreJobSink:
             keys, req_context, trigger=self._trigger
         )
         if output is None:
-            self._scheduler._connector_stats.increase_counter(
-                _ConnectorMetricName.ALLOCATION_FAILURE
-            )
+            self.record_allocation_failure()
         return output
+
+    def record_allocation_failure(self) -> None:
+        self._scheduler._connector_stats.increase_counter(
+            _ConnectorMetricName.ALLOCATION_FAILURE
+        )
 
     def add_job(
         self,
