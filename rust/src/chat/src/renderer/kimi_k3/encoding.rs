@@ -231,7 +231,11 @@ pub(super) fn render_request_with_media_order(
                  You MUST NOT call any tools in the next message.",
             )?;
         }
-        ChatToolChoice::None | ChatToolChoice::Auto | ChatToolChoice::Function { .. } => {}
+        // Like the reference encoder, an object choice injects no message.
+        ChatToolChoice::None
+        | ChatToolChoice::Auto
+        | ChatToolChoice::Function { .. }
+        | ChatToolChoice::AllowedTools { .. } => {}
     }
 
     write_response_format(&mut out, request)?;
