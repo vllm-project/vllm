@@ -24,8 +24,10 @@ TEST_IMAGES = [
 
 EXPECTED_OUTPUTS_VISION = [
     "A red stop sign stands prominently in the foreground.",
-    "A majestic skyscraper stands tall, partially obscured by a vibrant "
-    "canopy of cherry blossoms, against a clear blue sky.",
+    (
+        "A majestic skyscraper stands tall, partially obscured by a vibrant "
+        "canopy of cherry blossoms, against a clear blue sky."
+    ),
 ]
 
 
@@ -58,10 +60,10 @@ def test_gemma4_lora(gemma4_vision_lora_files):
         enable_lora=True,
         enforce_eager=True,
         max_loras=4,
-        trust_remote_code=True,
         limit_mm_per_prompt={"image": 1},
         mm_processor_cache_gb=0,
         enable_tower_connector_lora=True,
+        gpu_memory_utilization=0.8,
     )
 
     generate_and_test(llm, gemma4_vision_lora_files, lora_id=1)
@@ -76,7 +78,6 @@ def test_gemma4_lora_tp2(gemma4_vision_lora_files):
         enforce_eager=True,
         enable_lora=True,
         max_loras=4,
-        trust_remote_code=True,
         tensor_parallel_size=2,
         limit_mm_per_prompt={"image": 1},
         mm_processor_cache_gb=0,
@@ -95,7 +96,6 @@ def test_gemma4_lora_tp4(gemma4_vision_lora_files):
         enforce_eager=True,
         enable_lora=True,
         max_loras=4,
-        trust_remote_code=True,
         tensor_parallel_size=4,
         limit_mm_per_prompt={"image": 1},
         mm_processor_cache_gb=0,

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness test for the Inkling FA4 relative-attention score-mod kernel.
 
-Checks ``_INKLING_FA4_REL_ATTENTION_KERNEL`` against a pure-PyTorch reference
+Checks `_INKLING_FA4_REL_ATTENTION_KERNEL` against a pure-PyTorch reference
 that implements the relative bias exactly as documented in the Inkling architecture
 guide::
 

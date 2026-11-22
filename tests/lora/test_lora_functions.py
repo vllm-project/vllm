@@ -4,16 +4,18 @@
 
 import pytest
 
+from vllm import LLM, RequestOutput, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.launchers.api_server.entry import (
     build_async_engine_client_from_engine_args,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
-LORA_MODULE_PATH = "charent/self_cognition_Alice"
+LORA_MODULE_PATH = "vllm-project/self_cognition_Alice"
 LORA_RANK = 8
 
 
@@ -69,6 +71,17 @@ def test_lora_functions_sync():
     run_check(llm.remove_lora, 11, [10])
     run_check(llm.remove_lora, 10, [])
 
+    # An id in use by another adapter is rejected instead of silently serving
+    # that adapter's weights; removing the adapter frees the id.
+    run_check(llm.add_lora, make_lora_request(1), [1])
+    other = LoRARequest("other", lora_int_id=1, lora_path=LORA_MODULE_PATH)
+    with pytest.raises(VLLMValidationError, match="already used"):
+        llm.add_lora(other)
+    with pytest.raises(VLLMValidationError, match="already used"):
+        llm.add_request("req", "Hi", SamplingParams(max_tokens=1), lora_request=other)
+    run_check(llm.remove_lora, 1, [])
+    run_check(llm.add_lora, other, [1])
+
 
 @pytest.mark.asyncio
 async def test_lora_functions_async():
@@ -116,3 +129,115 @@ async def test_lora_functions_async():
         await run_check(llm.remove_lora, 12, [10, 11])
         await run_check(llm.remove_lora, 11, [10])
         await run_check(llm.remove_lora, 10, [])
+
+
+def test_same_lora_name_with_different_ids(
+    qwen3_meowing_lora_files, qwen3_woofing_lora_files
+):
+    """An adapter unloaded and loaded again under the same name gets a new id
+    while requests for the old id may still be running; each request in the
+    shared batch must use its own adapter."""
+    llm = LLM(
+        model=MODEL_PATH,
+        enable_lora=True,
+        max_loras=2,
+        max_lora_rank=LORA_RANK,
+        max_model_len=128,
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+    )
+    messages = [
+        {"role": "system", "content": "Follow the instructions to make animal noises"},
+        {"role": "user", "content": "Make your favorite animal noise."},
+    ]
+    outputs = llm.chat(
+        [messages, messages],
+        SamplingParams(temperature=0, max_tokens=10),
+        chat_template_kwargs={"enable_thinking": False},
+        lora_request=[
+            LoRARequest("pet", 1, qwen3_meowing_lora_files),
+            LoRARequest("pet", 2, qwen3_woofing_lora_files),
+        ],
+    )
+    assert "Meow Meow Meow" in outputs[0].outputs[0].text
+    assert "Woof Woof Woof" in outputs[1].outputs[0].text
+
+
+@pytest.mark.parametrize(
+    ("specialize_active_lora", "max_loras"), [(True, 1), (True, 4), (False, 1)]
+)
+def test_lora_cuda_graphs_with_base_requests(specialize_active_lora, max_loras):
+    """CUDA graphs must apply an adapter whether its request runs alone or
+    shares the batch with a base model request."""
+    engine_args = EngineArgs(
+        model=MODEL_PATH,
+        enable_lora=True,
+        max_loras=max_loras,
+        max_lora_rank=LORA_RANK,
+        max_model_len=128,
+        gpu_memory_utilization=0.8,
+        specialize_active_lora=specialize_active_lora,
+        compilation_config={"cudagraph_capture_sizes": [1, 2, 4]},
+    )
+    llm = LLMEngine.from_engine_args(engine_args)
+    prompt = llm.get_tokenizer().apply_chat_template(
+        [{"role": "user", "content": "Who are you?"}],
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+    sampling_params = SamplingParams(temperature=0, max_tokens=16)
+
+    def run(lora_by_request_id: dict[str, LoRARequest | None]) -> dict[str, str]:
+        for request_id, lora_request in lora_by_request_id.items():
+            llm.add_request(
+                request_id, prompt, sampling_params, lora_request=lora_request
+            )
+        texts = {}
+        while llm.has_unfinished_requests():
+            for output in llm.step():
+                assert isinstance(output, RequestOutput)
+                if output.finished:
+                    texts[output.request_id] = output.outputs[0].text
+        return texts
+
+    assert "Alice" in run({"alone": make_lora_request(1)})["alone"]
+    mixed = run({"lora": make_lora_request(1), "base": None})
+    assert "Alice" in mixed["lora"]
+    assert "Alice" not in mixed["base"]
+
+
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_dummy_batch_keeps_loras(enforce_eager):
+    """Idle data parallel ranks run dummy batches between steps. Those must
+    not unload adapters, including ones whose ids match the dummy LoRA ids."""
+    engine_args = EngineArgs(
+        model=MODEL_PATH,
+        enable_lora=True,
+        max_loras=2,
+        max_cpu_loras=3,
+        max_lora_rank=LORA_RANK,
+        max_model_len=128,
+        max_num_seqs=8,
+        gpu_memory_utilization=0.8,
+        enforce_eager=enforce_eager,
+    )
+    llm = LLMEngine.from_engine_args(engine_args)
+
+    llm.add_lora(make_lora_request(1))
+    llm.add_lora(make_lora_request(3))
+    assert set(llm.list_loras()) == {1, 3}
+
+    for _ in range(3):
+        llm.engine_core.execute_dummy_batch()
+    assert set(llm.list_loras()) == {1, 3}
+
+    llm.add_request(
+        "req-1",
+        "Who are you?",
+        SamplingParams(max_tokens=4),
+        lora_request=make_lora_request(1),
+    )
+    while llm.has_unfinished_requests():
+        llm.step()
+    assert set(llm.list_loras()) == {1, 3}

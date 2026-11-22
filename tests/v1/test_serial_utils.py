@@ -28,7 +28,7 @@ class UnrecognizedType(UserDict):
         self.an_int = an_int
 
 
-@dataclass
+@dataclass(slots=True)
 class MyType:
     tensor1: torch.Tensor
     a_string: str
@@ -304,7 +304,7 @@ def test_custom_class_serialization_disallowed_without_pickle():
         encoder.encode(obj)
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestWithTensor:
     """Mock request with non-multimodal tensor field like EngineCoreRequest."""
 
