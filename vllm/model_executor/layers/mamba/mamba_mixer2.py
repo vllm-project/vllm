@@ -22,6 +22,15 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.linear_attention.conv1d.decode.selector import (
+    select_conv1d_decode_kernel,
+)
+from vllm.model_executor.layers.linear_attention.conv1d.prefill.base import (
+    Conv1dPrefillKernel,
+)
+from vllm.model_executor.layers.linear_attention.conv1d.prefill.selector import (
+    select_conv1d_prefill_kernel,
+)
 from vllm.model_executor.layers.linear_attention.mamba2.decode.base import (
     MambaSSUKernel,
 )
@@ -37,10 +46,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
-)
-from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-    causal_conv1d_fn,
-    causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -261,6 +266,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
     # --8<-- [end:mamba_mixer2]
 
     ssu_kernel: type[MambaSSUKernel]
+    conv_prefill_kernel: type[Conv1dPrefillKernel]
 
     def __init__(
         self,
@@ -547,6 +553,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         if model_config is None:
             self.ssd_kernel = select_mamba2_ssd_kernel(vllm_config, None)
+            self.conv_prefill_kernel = select_conv1d_prefill_kernel(vllm_config, None)
+            self.conv_decode_kernel = select_conv1d_decode_kernel(vllm_config, None)
         else:
             layer_config = self.get_kv_cache_config(vllm_config)
             assert layer_config is not None
@@ -555,6 +563,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             assert isinstance(params, MambaManager.Params)
             self.ssd_kernel = select_mamba2_ssd_kernel(vllm_config, spec)
             self.ssu_kernel = select_mamba_ssu_kernel(vllm_config, spec)
+            self.conv_prefill_kernel = select_conv1d_prefill_kernel(vllm_config, spec)
+            self.conv_decode_kernel = select_conv1d_decode_kernel(vllm_config, spec)
             num_heads, head_dim, state_size = spec.shapes[1]
             self.ssd_kernel.register_warmup(
                 num_heads=num_heads,
@@ -651,12 +661,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 else self.kv_cache[0].transpose(-1, -2)
             )
             ssm_state = self.kv_cache[1]
-            has_initial_states_p = attn_metadata.has_initial_states_p
             query_start_loc_p = attn_metadata.query_start_loc_p
-            state_indices_tensor_p = attn_metadata.state_indices_tensor_p
             state_indices_tensor_d = attn_metadata.state_indices_tensor_d
-            num_accepted_tokens = attn_metadata.num_accepted_tokens
-            query_start_loc_d = attn_metadata.query_start_loc_d
             num_decodes = attn_metadata.num_decodes
             num_decode_tokens = attn_metadata.num_decode_tokens
             checkpoint_meta = attn_metadata.checkpoint_meta
@@ -695,24 +701,16 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # Process prefill requests
         if has_prefill:
             # 2. Convolution sequence transformation
-            # - It will read the initial states for every sequence,
-            #   that has "has_initial_states_p" == True,
-            #   from "cache_indices", using "state_indices_tensor_p".
-            # - It writes the state at the sequence end to the "conv_state"
-            #   cache in positions pointed to by "state_indices_tensor_p".
             x = hidden_states_B_C_p.transpose(
                 0, 1
             )  # this is the form that causal-conv see
-            hidden_states_B_C_p = causal_conv1d_fn(
+            hidden_states_B_C_p = self.conv_prefill_kernel.forward(
                 x,
+                conv_state,
                 self.conv_weights,
                 self.conv1d.bias,
-                activation=self.activation,
-                conv_states=conv_state,
-                has_initial_state=has_initial_states_p,
-                cache_indices=state_indices_tensor_p,
-                metadata=attn_metadata,
-                query_start_loc=query_start_loc_p,
+                self.activation,
+                attn_metadata,
             ).transpose(0, 1)[:num_prefill_tokens]
 
             hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(
@@ -752,15 +750,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
             assert state_indices_tensor_d is not None
 
             # 2. Convolution sequence transformation
-            hidden_states_B_C_d = causal_conv1d_update(
+            hidden_states_B_C_d = self.conv_decode_kernel.forward(
                 hidden_states_B_C_d,
                 conv_state,
                 self.conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=state_indices_tensor_d,
-                num_accepted_tokens=num_accepted_tokens,
-                query_start_loc=query_start_loc_d,
+                attn_metadata,
                 # The full verify window, even when the decode kernel keeps one
                 # state block per request.
                 max_query_len=1 + self.num_spec,

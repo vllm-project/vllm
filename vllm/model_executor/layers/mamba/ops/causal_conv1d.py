@@ -766,7 +766,10 @@ def causal_conv1d_fn(
     return out.to(original_x_dtype)
 
 
-@triton.jit(do_not_specialize_on_alignment=["num_cache_lines"])
+@triton.jit(
+    do_not_specialize=["stride_state_indices"],
+    do_not_specialize_on_alignment=["num_cache_lines"],
+)
 def _causal_conv1d_update_kernel(
     # Pointers to matrices
     x_ptr,  # (batch, dim, seqlen)
@@ -792,7 +795,7 @@ def _causal_conv1d_update_kernel(
     stride_conv_state_seq: tl.constexpr,
     stride_conv_state_dim: tl.constexpr,
     stride_conv_state_tok: tl.constexpr,
-    stride_state_indices: tl.constexpr,
+    stride_state_indices,
     stride_o_seq: tl.constexpr,
     stride_o_dim: tl.constexpr,
     stride_o_token: tl.int64,

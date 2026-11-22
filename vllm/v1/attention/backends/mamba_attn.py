@@ -160,6 +160,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             layer_names,
         ).values()
         self.ssu_kernel = _shared_kernel([layer.ssu_kernel for layer in layers])
+        self.conv_prefill_kernel = _shared_kernel(
+            [layer.conv_prefill_kernel for layer in layers]
+        )
         # The decode kernel's persistent buffers, which it slices each step.
         self.ssu_buffers: SSUBuffers | None = None
         if self.ssu_kernel is not None:
@@ -432,9 +435,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         query_start_loc_p = None
         query_start_loc_d = None
 
-        # for causal_conv1d
-        nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
-
         state_indices_tensor = mamba_get_block_table_tensor(
             common_attn_metadata.block_table_tensor,
             common_attn_metadata.seq_lens,
@@ -476,18 +476,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 num_computed_tokens[num_reqs - num_prefills : num_reqs] > 0
             )
 
-            if self.needs_causal_conv1d_metadata:
-                query_start_loc_p_cpu = (
-                    common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
-                    - num_decode_tokens
-                )
-                nums_dict, batch_ptr, token_chunk_offset_ptr = (
-                    compute_causal_conv1d_metadata(
-                        query_start_loc_p_cpu,
-                        device=common_attn_metadata.query_start_loc.device,
-                    )
-                )
-
         metadata = self.metadata_cls(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -501,10 +489,30 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             query_start_loc_d=query_start_loc_d,
             num_reqs=num_reqs,
             seq_lens=common_attn_metadata.seq_lens,
-            nums_dict=nums_dict,
-            batch_ptr=batch_ptr,
-            token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
+        if num_prefills > 0:
+            query_start_loc_p_cpu = (
+                common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
+                - num_decode_tokens
+            )
+            if self.conv_prefill_kernel is not None:
+                metadata = self.conv_prefill_kernel.prepare_metadata(
+                    metadata, query_start_loc_p_cpu
+                )
+            elif self.needs_causal_conv1d_metadata:
+                # ShortConv calls the conv op directly.
+                nums_dict, batch_ptr, token_chunk_offset_ptr = (
+                    compute_causal_conv1d_metadata(
+                        query_start_loc_p_cpu,
+                        device=common_attn_metadata.query_start_loc.device,
+                    )
+                )
+                metadata = replace(
+                    metadata,
+                    nums_dict=nums_dict,
+                    batch_ptr=batch_ptr,
+                    token_chunk_offset_ptr=token_chunk_offset_ptr,
+                )
 
         return self._update_metadata_for_cudagraph_capture(metadata)
 

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -9,7 +8,10 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from tests.kernels.mamba.utils import selective_state_update_ref
+from tests.kernels.mamba.utils import (
+    record_triton_compiles,
+    selective_state_update_ref,
+)
 from tests.utils import create_new_process_for_each_test
 from vllm.model_executor.layers.linear_attention.mamba2.prefill.flashinfer import (
     FlashInferSSDKernel,
@@ -1108,26 +1110,6 @@ def test_flashinfer_ssd_exports_a_checkpoint_mid_prefill(has_initial_state):
     )
 
 
-@contextmanager
-def _record_triton_compiles():
-    from triton import knobs
-
-    previous = knobs.runtime.jit_post_compile_hook
-    compiled: list[str] = []
-
-    def hook(**kwargs):
-        compiled.append(getattr(kwargs.get("fn"), "name", "<unknown>"))
-        if previous is not None:
-            return previous(**kwargs)
-        return None
-
-    knobs.runtime.jit_post_compile_hook = hook
-    try:
-        yield compiled
-    finally:
-        knobs.runtime.jit_post_compile_hook = previous
-
-
 @create_new_process_for_each_test("spawn")
 def test_registered_ssd_warmup_leaves_nothing_to_compile_at_first_prefill():
     """After the registry's warmup, the first cold, cached-state and
@@ -1222,7 +1204,7 @@ def test_registered_ssd_warmup_leaves_nothing_to_compile_at_first_prefill():
             metadata,
         )
 
-    with _record_triton_compiles() as compiled:
+    with record_triton_compiles() as compiled:
         prefill((90, 5), [3, 4], [False, False], [0, 0])
         prefill((127, 126, 3), [0, 1, 2], [False, True, False], [0, 5, 0])
         prefill(

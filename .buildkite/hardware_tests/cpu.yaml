@@ -94,6 +94,7 @@ steps:
   - vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
   - vllm/model_executor/layers/mamba/mamba_mixer2.py
   - vllm/model_executor/layers/mamba/ops/cpu/
+  - vllm/model_executor/layers/linear_attention/conv1d/
   - tests/v1/e2e/test_cpu_spec_decode.py
   - tests/v1/spec_decode/
   - tests/v1/worker/
