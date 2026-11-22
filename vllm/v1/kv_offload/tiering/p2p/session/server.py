@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
+from vllm.v1.kv_offload.tiering.base import JobResult
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
     AbortAckMsg,
@@ -58,6 +59,9 @@ class StoreResult(NamedTuple):
     job_id: int
     success: bool
     peer_read_keys: Sequence[OffloadKey] = ()
+
+    def as_job_result(self) -> JobResult:
+        return JobResult(self.job_id, self.success, peer_read_keys=self.peer_read_keys)
 
 
 class StoreDrainResult(NamedTuple):

@@ -3441,11 +3441,8 @@ def test_peer_lookup_counts_as_reuse_only_after_fetch(fetch):
         assert replacement is not None and replacement.evicted_keys == [key]
         stats = primary.get_stats()
         assert stats is not None
-        label = "true" if fetch else "false"
-        assert (
-            stats.reduce()[f"{CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS}:{(label,)}"]
-            == 1
-        )
+        evictions = stats.data["data"][CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS]
+        assert evictions == {("true" if fetch else "false",): 1}
     finally:
         tiering.shutdown()
         consumer.shutdown()

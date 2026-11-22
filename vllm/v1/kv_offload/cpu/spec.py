@@ -29,7 +29,6 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
 
 logger = init_logger(__name__)
 
-# Seconds, up to one day.
 _CHUNK_AGE_BUCKETS = (1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 14400, 86400)
 
 
@@ -91,24 +90,19 @@ class CPUOffloadingSpec(OffloadingSpec):
             CPUOffloadingMetrics.CPU_CHUNK_IDLE_BEFORE_EVICT: (
                 OffloadingHistogramMetadata(
                     documentation=(
-                        "Seconds from the last demand access to capacity eviction "
-                        "of a CPU chunk. Each request context counts once per "
-                        "residency. For untouched chunks, timing starts at readiness."
+                        "Seconds from last demand access (or readiness if unused) "
+                        "to CPU chunk eviction."
                     ),
                     buckets=_CHUNK_AGE_BUCKETS,
                 )
             ),
             CPUOffloadingMetrics.CPU_CHUNK_LIFETIME: OffloadingHistogramMetadata(
-                documentation=(
-                    "Seconds from completion of a CPU chunk's store or promotion "
-                    "to its capacity eviction."
-                ),
+                documentation="Seconds from CPU chunk readiness to capacity eviction.",
                 buckets=_CHUNK_AGE_BUCKETS,
             ),
             CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS: OffloadingCounterMetadata(
                 documentation=(
-                    "Number of CPU chunks evicted to reclaim capacity, split by "
-                    "whether a CPU-to-GPU load or peer transfer confirmed a read."
+                    "Capacity evictions by whether a GPU load or peer read succeeded."
                 ),
                 labelnames=("reused",),
             ),
