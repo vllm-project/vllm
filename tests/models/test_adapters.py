@@ -282,30 +282,41 @@ class MistralLikeModel(torch.nn.Module):
         )
 
 
+_MISTRAL_FORMAT = {
+    "layers.0.attention.wo.weight": "model.layers.0.self_attn.o_proj.weight",
+    "norm.weight": "model.norm.weight",
+    "tok_embeddings.weight": "model.embed_tokens.weight",
+}
+_HF_HEADLESS = {
+    "layers.0.self_attn.o_proj.weight": "model.layers.0.self_attn.o_proj.weight",
+    "norm.weight": "model.norm.weight",
+    "embed_tokens.weight": "model.embed_tokens.weight",
+}
+
+
 @pytest.mark.parametrize(
-    "names",
-    [
-        ("layers.0.attention.wo.weight", "norm.weight", "tok_embeddings.weight"),
-        ("layers.0.self_attn.o_proj.weight", "norm.weight", "embed_tokens.weight"),
-    ],
+    "name_map",
+    [_MISTRAL_FORMAT, _HF_HEADLESS],
     ids=["mistral_format", "hf_headless"],
 )
-def test_pooling_prefix_probe_uses_remap_mistral_name(names):
-    """Mistral-format names resolve to `""`; headless HF names keep `model.`."""
-    shapes = [(8, 8), (4, 8), (8, 4)]
-    ref = {name: torch.randn(shape) for name, shape in zip(names, shapes)}
+@pytest.mark.parametrize("norm_first", [False, True])
+def test_pooling_prefix_probe_uses_remap_mistral_name(name_map, norm_first):
+    """Mistral-format names resolve to `""`; headless HF names keep `model.`.
+
+    `norm.weight` fits both formats, so the result must not depend on whether
+    it comes first (the eager safetensors reader yields keys unordered).
+    """
     model = _make_pooling_model(MistralLikeModel)
+    params = dict(model.named_parameters())
+    names = list(name_map)
+    if norm_first:
+        names.sort(key=lambda n: n != "norm.weight")
+    ref = {n: torch.randn(params[name_map[n]].shape) for n in names}
 
     model.load_weights(iter(ref.items()))
 
-    inner = model.model
-    params = [
-        inner.layers[0].self_attn.o_proj.weight,
-        inner.norm.weight,
-        inner.embed_tokens.weight,
-    ]
-    for name, param in zip(names, params):
-        assert torch.equal(param, ref[name]), name
+    for name in names:
+        assert torch.equal(params[name_map[name]], ref[name]), name
 
 
 def test_pooling_load_weights_skips_clone_for_owned_tensor_formats(monkeypatch):
