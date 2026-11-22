@@ -79,17 +79,32 @@ class EplbRearrangementStall:
 
 @dataclass
 class EplbLoadSample:
-    """Aggregate load sample used to derive rank-skew tail signals."""
+    """Per-layer load sample used to derive expert- and rank-skew signals."""
 
     model_name: str
     phase: str
+    layer: int
     num_ep_ranks: int
     num_local_experts: int
+    expert_tokens: list[int]
+    """Tokens routed to each physical expert in this layer."""
+    expert_gini: float
+    """Gini coefficient of ``expert_tokens``; 0.0 is balanced, 1.0 is concentrated."""
+    expert_top_k: int
+    """Number of hottest experts used for ``expert_topk_share``."""
+    expert_topk_share: float
+    """Share of layer tokens routed to the ``expert_top_k`` hottest experts."""
     rank_tokens: list[int]
-    """Tokens routed to each EP rank over the sample window."""
-    skew: float
-    """``max(rank_tokens) / mean(rank_tokens)``; 1.0 is perfectly balanced."""
-    excess_tokens: int
+    """Tokens routed to each EP rank in this layer."""
+    active_experts_per_rank: list[int]
+    """Physical experts with nonzero load on each EP rank in this layer."""
+    expert_skew: float
+    """``max(expert_tokens) / mean(expert_tokens)``; 1.0 is balanced."""
+    expert_excess_tokens: int
+    """``max(expert_tokens) - mean(expert_tokens)``, rounded down."""
+    rank_skew: float
+    """``max(rank_tokens) / mean(rank_tokens)``; 1.0 is balanced."""
+    rank_excess_tokens: int
     """``max(rank_tokens) - mean(rank_tokens)``, rounded down."""
     timestamp: float
     steps: int

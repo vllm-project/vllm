@@ -211,6 +211,7 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
 | `enable_expert_metrics` | Export per-physical-expert placement and token load to Prometheus. Has high label cardinality | `false` |
 | `expert_metrics_interval` | Steps between per-expert metric samples. `1` gives per-step samples at the cost of an all-reduce per step | `100` |
+| `expert_metrics_top_k` | Number of hottest experts used for top-k concentration metrics | `8` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |

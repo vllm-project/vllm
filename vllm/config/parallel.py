@@ -105,6 +105,8 @@ class EPLBConfig:
     Steps between per-expert metric samples. Set to 1 for per-step samples
     at the cost of an EP-group all-reduce every step.
     """
+    expert_metrics_top_k: int = Field(default=8, ge=1)
+    """Number of hottest experts used for expert concentration metrics."""
     use_async: bool = True
     """
     Whether to use non-blocking EPLB.

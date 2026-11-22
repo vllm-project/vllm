@@ -90,11 +90,19 @@ def test_eplb_prom_exports_topology_and_tokens(monkeypatch):
             EplbLoadSample(
                 model_name="served",
                 phase=EPLB_PHASE_DECODE,
+                layer=0,
                 num_ep_ranks=2,
                 num_local_experts=2,
+                expert_tokens=[4, 1, 2, 1],
+                expert_gini=0.3125,
+                expert_top_k=2,
+                expert_topk_share=0.75,
                 rank_tokens=[5, 3],
-                skew=1.25,
-                excess_tokens=1,
+                active_experts_per_rank=[2, 2],
+                expert_skew=2.0,
+                expert_excess_tokens=2,
+                rank_skew=1.25,
+                rank_excess_tokens=1,
                 timestamp=125.0,
                 steps=10,
             )
@@ -196,6 +204,7 @@ def test_eplb_prom_exports_topology_and_tokens(monkeypatch):
         "engine": "0",
         "model": "served",
         "phase": EPLB_PHASE_DECODE,
+        "layer": "0",
     }
     assert (
         registry.get_sample_value("vllm:eplb_load_rank_skew_count", skew_labels) == 1.0
@@ -209,6 +218,46 @@ def test_eplb_prom_exports_topology_and_tokens(monkeypatch):
         )
         == 1.0
     )
+    assert (
+        registry.get_sample_value("vllm:eplb_load_expert_skew_count", skew_labels)
+        == 1.0
+    )
+    assert (
+        registry.get_sample_value("vllm:eplb_load_expert_skew_sum", skew_labels) == 2.0
+    )
+    assert (
+        registry.get_sample_value(
+            "vllm:eplb_critical_expert_excess_tokens_sum", skew_labels
+        )
+        == 2.0
+    )
+    assert (
+        registry.get_sample_value("vllm:eplb_expert_token_gini_count", skew_labels)
+        == 1.0
+    )
+    assert (
+        registry.get_sample_value("vllm:eplb_expert_token_gini_sum", skew_labels)
+        == 0.3125
+    )
+    topk_labels = {**skew_labels, "top_k": "2"}
+    assert (
+        registry.get_sample_value(
+            "vllm:eplb_expert_topk_token_share_count", topk_labels
+        )
+        == 1.0
+    )
+    assert (
+        registry.get_sample_value("vllm:eplb_expert_topk_token_share_sum", topk_labels)
+        == 0.75
+    )
+    for ep_rank in range(2):
+        active_labels = {**skew_labels, "ep_rank": str(ep_rank)}
+        assert (
+            registry.get_sample_value(
+                "vllm:eplb_active_experts_per_rank", active_labels
+            )
+            == 2.0
+        )
 
 
 def test_eplb_prom_is_disabled_by_default(monkeypatch):

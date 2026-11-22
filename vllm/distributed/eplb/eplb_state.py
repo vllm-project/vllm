@@ -81,6 +81,38 @@ def _compute_eplb_load_stats(
     return avg_tokens, max_tokens
 
 
+def _load_skew(tokens: Sequence[int]) -> tuple[float, int]:
+    """Return max/mean and max-minus-mean for one token distribution."""
+    if not tokens:
+        return 1.0, 0
+    max_load = max(tokens)
+    mean_load = sum(tokens) / len(tokens)
+    if mean_load == 0:
+        return 1.0, 0
+    return max_load / mean_load, int(max_load - mean_load)
+
+
+def _gini_coefficient(tokens: Sequence[int]) -> float:
+    """Return the Gini coefficient of a nonnegative token distribution."""
+    num_experts = len(tokens)
+    total = sum(tokens)
+    if num_experts == 0 or total == 0:
+        return 0.0
+    sorted_tokens = sorted(tokens)
+    weighted_sum = sum((idx + 1) * value for idx, value in enumerate(sorted_tokens))
+    gini = (2 * weighted_sum) / (num_experts * total) - (num_experts + 1) / num_experts
+    return max(0.0, gini)
+
+
+def _topk_token_share(tokens: Sequence[int], top_k: int) -> float:
+    """Return the fraction of tokens held by the ``top_k`` hottest experts."""
+    total = sum(tokens)
+    if total == 0:
+        return 0.0
+    hottest = sorted(tokens, reverse=True)[:top_k]
+    return sum(hottest) / total
+
+
 @dataclass
 class EplbStats:
     """Model stats used in EPLB rebalancing algorithm."""
@@ -891,7 +923,6 @@ class EplbState:
                 expert_load = global_phase_loads[load_idx]
                 load_idx += 1
                 expert_load_cpu = expert_load.cpu()
-                local_load_cpu = model_state.phase_load_accum[phase].cpu()
                 self._pending_expert_tokens.append(
                     EplbExpertTokens(
                         model_name=metrics.model_name,
@@ -916,39 +947,37 @@ class EplbState:
                         metrics.num_ep_ranks,
                         metrics.num_local_experts,
                     )
-                    local_rank_tokens = (
-                        local_load_cpu.reshape(shape).sum(dim=(0, 2)).tolist()
-                    )
-                    # Some EP backends record a global load vector on every rank;
-                    # others record only the local rank. Prefer the global vector
-                    # when the local sample is clearly rank-partitioned.
-                    if any(
-                        tokens and rank != metrics.ep_rank
-                        for rank, tokens in enumerate(local_rank_tokens)
-                    ):
-                        rank_tokens = local_rank_tokens
-                    else:
-                        rank_tokens = (
-                            expert_load_cpu.reshape(shape).sum(dim=(0, 2)).tolist()
+                    layer_loads = expert_load_cpu.reshape(shape)
+                    top_k = self.parallel_config.eplb_config.expert_metrics_top_k
+                    for layer, layer_load in enumerate(layer_loads):
+                        expert_tokens = layer_load.flatten().tolist()
+                        rank_tokens = layer_load.sum(dim=1).tolist()
+                        active_experts_per_rank = (layer_load > 0).sum(dim=1).tolist()
+                        expert_skew, expert_excess = _load_skew(expert_tokens)
+                        rank_skew, rank_excess = _load_skew(rank_tokens)
+                        self._pending_eplb_loads.append(
+                            EplbLoadSample(
+                                model_name=metrics.model_name,
+                                phase=phase,
+                                layer=layer,
+                                num_ep_ranks=metrics.num_ep_ranks,
+                                num_local_experts=metrics.num_local_experts,
+                                expert_tokens=expert_tokens,
+                                expert_gini=_gini_coefficient(expert_tokens),
+                                expert_top_k=top_k,
+                                expert_topk_share=_topk_token_share(
+                                    expert_tokens, top_k
+                                ),
+                                rank_tokens=rank_tokens,
+                                active_experts_per_rank=active_experts_per_rank,
+                                expert_skew=expert_skew,
+                                expert_excess_tokens=expert_excess,
+                                rank_skew=rank_skew,
+                                rank_excess_tokens=rank_excess,
+                                timestamp=timestamp,
+                                steps=steps,
+                            )
                         )
-                    max_load = max(rank_tokens, default=0)
-                    mean_load = (
-                        sum(rank_tokens) / len(rank_tokens) if rank_tokens else 0.0
-                    )
-                    skew = max_load / mean_load if mean_load else 1.0
-                    self._pending_eplb_loads.append(
-                        EplbLoadSample(
-                            model_name=metrics.model_name,
-                            phase=phase,
-                            num_ep_ranks=metrics.num_ep_ranks,
-                            num_local_experts=metrics.num_local_experts,
-                            rank_tokens=rank_tokens,
-                            skew=skew,
-                            excess_tokens=int(max_load - mean_load),
-                            timestamp=timestamp,
-                            steps=steps,
-                        )
-                    )
                 model_state.phase_load_accum[phase].zero_()
         self.expert_metrics_window_step = 0
 

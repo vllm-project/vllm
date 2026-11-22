@@ -39,13 +39,32 @@ mask in every MoE router backend, including CUDA-graph and MegaMoE paths.
 | `vllm:eplb_rearrangement_pause_seconds` | Histogram | Blocking time spent rearranging experts |
 | `vllm:eplb_rearrangement_blocked_request_seconds_total` | Counter | Rearrangement pause weighted by in-flight requests |
 | `vllm:eplb_rearrangement_blocked_token_seconds_total` | Counter | Rearrangement pause weighted by scheduled tokens |
-| `vllm:eplb_load_rank_skew` | Histogram | Max/mean token load across EP ranks per sample |
-| `vllm:eplb_critical_rank_excess_tokens` | Histogram | Tokens above the rank mean on the busiest rank |
+| `vllm:eplb_load_rank_skew` | Histogram | Max/mean token load across EP ranks per layer |
+| `vllm:eplb_critical_rank_excess_tokens` | Histogram | Tokens above the rank mean on the busiest rank per layer |
+| `vllm:eplb_load_expert_skew` | Histogram | Max/mean token load across physical experts per layer |
+| `vllm:eplb_critical_expert_excess_tokens` | Histogram | Tokens above the expert mean on the busiest expert per layer |
+| `vllm:eplb_expert_token_gini` | Histogram | Gini coefficient of per-expert token load per layer |
+| `vllm:eplb_expert_topk_token_share` | Histogram | Share of layer tokens held by the top-k hottest experts |
+| `vllm:eplb_active_experts_per_rank` | Gauge | Experts with nonzero load on each EP rank per layer |
 | `vllm:eplb_expert_topology_timestamp_seconds` | Gauge | When the current topology was committed |
 
 `vllm:eplb_expert_tokens_total` includes the labels `logical_expert` and
 `phase`. It is a counter because each sample adds the tokens observed since the
 previous sample. Use `rate()` or `increase()` to query the token rate over time.
+
+The skew histograms carry a `layer` label. They are computed at the source from
+the complete per-layer load vector, so experts and ranks with zero load are
+included in the max/mean calculation. This differs from aggregating
+`vllm:eplb_expert_tokens_total` in PromQL, where zero-token experts are absent.
+
+`vllm:eplb_expert_token_gini` reports inequality across all physical experts in
+a layer: `0` is perfectly balanced and approaches `1` as load concentrates in
+fewer experts. `vllm:eplb_expert_topk_token_share` reports the fraction of layer
+tokens held by the top `expert_metrics_top_k` experts (default `8`); its `top_k`
+label records the configured value. Both include zero-load experts.
+`vllm:eplb_active_experts_per_rank` reports how many expert slots each rank
+actually touched, which distinguishes sparse routing from a rank that is simply
+idle.
 
 ## Why the sampling interval matters
 
@@ -135,9 +154,10 @@ scrape aliasing:
   `pause_seconds * num_requests` per rearrangement.
 - `vllm:eplb_rearrangement_blocked_token_seconds_total` adds
   `pause_seconds * num_scheduled_tokens` per rearrangement.
-- `vllm:eplb_load_rank_skew` and `vllm:eplb_critical_rank_excess_tokens` are
-  guardrails for sustained rank imbalance. They are not tail predictors on
-  their own.
+- `vllm:eplb_load_rank_skew`, `vllm:eplb_critical_rank_excess_tokens`,
+  `vllm:eplb_load_expert_skew`, and
+  `vllm:eplb_critical_expert_excess_tokens` are guardrails for sustained
+  per-layer imbalance. They are not tail predictors on their own.
 
 The **EPLB tail exposure ratio (ETER)** is the fraction of served
 request-time lost to EPLB stalls:
@@ -204,6 +224,33 @@ vllm:eplb_expert_topology{layer="0", ep_rank="2"}
 time() - max by (model_name, engine, model, phase) (
   vllm:eplb_expert_load_timestamp_seconds
 )
+
+# p95 per-layer rank skew.
+histogram_quantile(
+  0.95,
+  sum by (le, model_name, layer, phase) (
+    rate(vllm:eplb_load_rank_skew_bucket[5m])
+  )
+)
+
+# p95 per-layer expert skew.
+histogram_quantile(
+  0.95,
+  sum by (le, model_name, layer, phase) (
+    rate(vllm:eplb_load_expert_skew_bucket[5m])
+  )
+)
+
+# p95 per-layer expert Gini.
+histogram_quantile(
+  0.95,
+  sum by (le, model_name, layer, phase) (
+    rate(vllm:eplb_expert_token_gini_bucket[5m])
+  )
+)
+
+# Experts touched per rank and layer.
+vllm:eplb_active_experts_per_rank{model_name="my-model"}
 ```
 
 ## Limitations

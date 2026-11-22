@@ -165,46 +165,122 @@ class EplbProm:
             ),
             labelnames=stall_labelnames,
         )
-        load_labelnames = [*labelnames, "model", "phase"]
-        histogram_load_skew = self._histogram_cls(
+        load_labelnames = [*labelnames, "model", "phase", "layer"]
+        skew_buckets = (1.0, 1.02, 1.05, 1.1, 1.2, 1.3, 1.5, 2.0, 3.0, 5.0)
+        excess_buckets = (
+            0.0,
+            10.0,
+            50.0,
+            100.0,
+            250.0,
+            500.0,
+            1000.0,
+            2500.0,
+            5000.0,
+            10000.0,
+            50000.0,
+        )
+        histogram_load_rank_skew = self._histogram_cls(
             name="vllm:eplb_load_rank_skew",
             documentation=(
-                "Max/mean token load across EP ranks for one load sample. "
+                "Max/mean token load across EP ranks for one MoE layer. "
                 "1.0 is perfectly balanced."
             ),
             labelnames=load_labelnames,
-            buckets=(1.0, 1.02, 1.05, 1.1, 1.2, 1.3, 1.5, 2.0, 3.0, 5.0),
+            buckets=skew_buckets,
         )
-        histogram_excess_tokens = self._histogram_cls(
+        histogram_critical_rank_excess = self._histogram_cls(
             name="vllm:eplb_critical_rank_excess_tokens",
             documentation=(
-                "Tokens on the busiest EP rank above the rank mean for one load sample."
+                "Tokens on the busiest EP rank above the rank mean for one MoE layer."
             ),
             labelnames=load_labelnames,
-            buckets=(
-                0.0,
-                10.0,
-                50.0,
-                100.0,
-                250.0,
-                500.0,
-                1000.0,
-                2500.0,
-                5000.0,
-                10000.0,
-                50000.0,
+            buckets=excess_buckets,
+        )
+        histogram_load_expert_skew = self._histogram_cls(
+            name="vllm:eplb_load_expert_skew",
+            documentation=(
+                "Max/mean token load across physical experts for one MoE "
+                "layer. 1.0 is perfectly balanced."
             ),
+            labelnames=load_labelnames,
+            buckets=skew_buckets,
+        )
+        histogram_critical_expert_excess = self._histogram_cls(
+            name="vllm:eplb_critical_expert_excess_tokens",
+            documentation=(
+                "Tokens on the busiest physical expert above the expert mean "
+                "for one MoE layer."
+            ),
+            labelnames=load_labelnames,
+            buckets=excess_buckets,
+        )
+        concentration_buckets = (
+            0.0,
+            0.1,
+            0.2,
+            0.3,
+            0.4,
+            0.5,
+            0.6,
+            0.7,
+            0.8,
+            0.9,
+            1.0,
+        )
+        histogram_expert_gini = self._histogram_cls(
+            name="vllm:eplb_expert_token_gini",
+            documentation=(
+                "Gini coefficient of per-expert token load for one MoE layer. "
+                "0.0 is perfectly balanced and 1.0 is fully concentrated."
+            ),
+            labelnames=load_labelnames,
+            buckets=concentration_buckets,
+        )
+        topk_labelnames = [*load_labelnames, "top_k"]
+        histogram_expert_topk_share = self._histogram_cls(
+            name="vllm:eplb_expert_topk_token_share",
+            documentation=(
+                "Share of layer tokens routed to the top-k hottest physical experts."
+            ),
+            labelnames=topk_labelnames,
+            buckets=concentration_buckets,
+        )
+        gauge_active_experts = self._gauge_cls(
+            name="vllm:eplb_active_experts_per_rank",
+            documentation=(
+                "Physical experts with nonzero token load on one EP rank in "
+                "one MoE layer."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=[*load_labelnames, "ep_rank"],
         )
         self._histogram_stall_metric = histogram_stall
         self._counter_blocked_requests_metric = counter_blocked_requests
         self._counter_blocked_tokens_metric = counter_blocked_tokens
-        self._histogram_load_skew_metric = histogram_load_skew
-        self._histogram_excess_tokens_metric = histogram_excess_tokens
+        self._histogram_load_rank_skew_metric = histogram_load_rank_skew
+        self._histogram_critical_rank_excess_metric = histogram_critical_rank_excess
+        self._histogram_load_expert_skew_metric = histogram_load_expert_skew
+        self._histogram_critical_expert_excess_metric = histogram_critical_expert_excess
+        self._histogram_expert_gini_metric = histogram_expert_gini
+        self._histogram_expert_topk_share_metric = histogram_expert_topk_share
+        self._gauge_active_experts_metric = gauge_active_experts
         self._histogram_stall: dict[tuple[int, str, str, str], object] = {}
         self._counter_blocked_requests: dict[tuple[int, str, str, str], object] = {}
         self._counter_blocked_tokens: dict[tuple[int, str, str, str], object] = {}
-        self._histogram_load_skew: dict[tuple[int, str, str], object] = {}
-        self._histogram_excess_tokens: dict[tuple[int, str, str], object] = {}
+        self._histogram_load_rank_skew: dict[tuple[int, str, str, int], object] = {}
+        self._histogram_critical_rank_excess: dict[
+            tuple[int, str, str, int], object
+        ] = {}
+        self._histogram_load_expert_skew: dict[tuple[int, str, str, int], object] = {}
+        self._histogram_critical_expert_excess: dict[
+            tuple[int, str, str, int], object
+        ] = {}
+        self._histogram_expert_gini: dict[tuple[int, str, str, int], object] = {}
+        self._histogram_expert_topk_share: dict[
+            tuple[int, str, str, int, int], object
+        ] = {}
+        self._gauge_active_experts: dict[tuple[int, str, str, int, int], object] = {}
 
     def _labels(
         self,
@@ -245,6 +321,73 @@ class EplbProm:
         if child is None:
             child = metric.labels(
                 *self.per_engine_labelvalues[engine_idx], model_name, phase
+            )
+            cache[key] = child
+        return child
+
+    def _layer_load_metric(
+        self,
+        cache: dict[tuple[int, str, str, int], object],
+        metric,
+        engine_idx: int,
+        model_name: str,
+        phase: str,
+        layer: int,
+    ):
+        key = (engine_idx, model_name, phase, layer)
+        child = cache.get(key)
+        if child is None:
+            child = metric.labels(
+                *self.per_engine_labelvalues[engine_idx],
+                model_name,
+                phase,
+                str(layer),
+            )
+            cache[key] = child
+        return child
+
+    def _topk_load_metric(
+        self,
+        cache: dict[tuple[int, str, str, int, int], object],
+        metric,
+        engine_idx: int,
+        model_name: str,
+        phase: str,
+        layer: int,
+        top_k: int,
+    ):
+        key = (engine_idx, model_name, phase, layer, top_k)
+        child = cache.get(key)
+        if child is None:
+            child = metric.labels(
+                *self.per_engine_labelvalues[engine_idx],
+                model_name,
+                phase,
+                str(layer),
+                str(top_k),
+            )
+            cache[key] = child
+        return child
+
+    def _active_experts_metric(
+        self,
+        cache: dict[tuple[int, str, str, int, int], object],
+        metric,
+        engine_idx: int,
+        model_name: str,
+        phase: str,
+        layer: int,
+        ep_rank: int,
+    ):
+        key = (engine_idx, model_name, phase, layer, ep_rank)
+        child = cache.get(key)
+        if child is None:
+            child = metric.labels(
+                *self.per_engine_labelvalues[engine_idx],
+                model_name,
+                phase,
+                str(layer),
+                str(ep_rank),
             )
             cache[key] = child
         return child
@@ -317,20 +460,65 @@ class EplbProm:
             ).inc(pause * stall.blocked_tokens)
 
         for load in snapshot.loads:
-            self._load_metric(
-                self._histogram_load_skew,
-                self._histogram_load_skew_metric,
+            self._layer_load_metric(
+                self._histogram_load_rank_skew,
+                self._histogram_load_rank_skew_metric,
                 engine_idx,
                 load.model_name,
                 load.phase,
-            ).observe(load.skew)
-            self._load_metric(
-                self._histogram_excess_tokens,
-                self._histogram_excess_tokens_metric,
+                load.layer,
+            ).observe(load.rank_skew)
+            self._layer_load_metric(
+                self._histogram_critical_rank_excess,
+                self._histogram_critical_rank_excess_metric,
                 engine_idx,
                 load.model_name,
                 load.phase,
-            ).observe(load.excess_tokens)
+                load.layer,
+            ).observe(load.rank_excess_tokens)
+            self._layer_load_metric(
+                self._histogram_load_expert_skew,
+                self._histogram_load_expert_skew_metric,
+                engine_idx,
+                load.model_name,
+                load.phase,
+                load.layer,
+            ).observe(load.expert_skew)
+            self._layer_load_metric(
+                self._histogram_critical_expert_excess,
+                self._histogram_critical_expert_excess_metric,
+                engine_idx,
+                load.model_name,
+                load.phase,
+                load.layer,
+            ).observe(load.expert_excess_tokens)
+            self._layer_load_metric(
+                self._histogram_expert_gini,
+                self._histogram_expert_gini_metric,
+                engine_idx,
+                load.model_name,
+                load.phase,
+                load.layer,
+            ).observe(load.expert_gini)
+            self._topk_load_metric(
+                self._histogram_expert_topk_share,
+                self._histogram_expert_topk_share_metric,
+                engine_idx,
+                load.model_name,
+                load.phase,
+                load.layer,
+                load.expert_top_k,
+            ).observe(load.expert_topk_share)
+            for ep_rank, active_experts in enumerate(load.active_experts_per_rank):
+                self._active_experts_metric(
+                    self._gauge_active_experts,
+                    self._gauge_active_experts_metric,
+                    engine_idx,
+                    load.model_name,
+                    load.phase,
+                    load.layer,
+                    ep_rank,
+                ).set(active_experts)
 
         rearranged_models: dict[str, float] = {}
         for model in snapshot.tokens:

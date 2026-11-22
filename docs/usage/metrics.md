@@ -61,7 +61,16 @@ one series per MoE layer and physical expert:
   `vllm:eplb_rearrangement_blocked_token_seconds_total` weight that pause by
   the in-flight batch. These are the EPLB metrics correlated with tail latency.
 - `vllm:eplb_load_rank_skew` and `vllm:eplb_critical_rank_excess_tokens` are
-  histograms of rank imbalance per load sample, useful as guardrails.
+  per-layer histograms of EP-rank imbalance, useful as guardrails.
+- `vllm:eplb_load_expert_skew` and `vllm:eplb_critical_expert_excess_tokens`
+  are per-layer histograms of physical-expert imbalance. They include
+  zero-load experts and ranks, unlike max/mean computed from
+  `vllm:eplb_expert_tokens_total` in PromQL.
+- `vllm:eplb_expert_token_gini` and `vllm:eplb_expert_topk_token_share` measure
+  per-layer expert concentration. The top-k value is configured with
+  `expert_metrics_top_k` (default `8`).
+- `vllm:eplb_active_experts_per_rank` reports the number of experts with
+  nonzero load on each rank in each layer.
 - `vllm:eplb_expert_topology_timestamp_seconds` marks when the current
   placement was committed.
 
@@ -84,6 +93,17 @@ time() - max by (model_name, engine, model, phase) (
 
 # Current logical expert placement for layer 0 on EP rank 2.
 vllm:eplb_expert_topology{layer="0", ep_rank="2"}
+
+# p95 per-layer expert skew.
+histogram_quantile(
+  0.95,
+  sum by (le, model_name, layer, phase) (
+    rate(vllm:eplb_load_expert_skew_bucket[5m])
+  )
+)
+
+# Experts touched per rank and layer.
+vllm:eplb_active_experts_per_rank{model_name="my-model"}
 
 # p99 rearrangement pause.
 histogram_quantile(

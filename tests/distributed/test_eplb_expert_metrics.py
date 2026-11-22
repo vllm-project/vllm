@@ -108,7 +108,7 @@ def test_phase_load_accumulation_separates_prefill_and_decode():
 def test_sample_expert_metrics_emits_phase_samples_and_resets():
     state = EplbState.__new__(EplbState)
     state.parallel_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(enable_expert_metrics=True)
+        eplb_config=SimpleNamespace(enable_expert_metrics=True, expert_metrics_top_k=2)
     )
     state.expert_metrics_window_step = 7
     state._pending_expert_tokens = []
@@ -145,20 +145,22 @@ def test_sample_expert_metrics_emits_phase_samples_and_resets():
     assert all(torch.count_nonzero(t) == 0 for t in phase_load.values())
 
 
-def test_sample_expert_metrics_emits_rank_skew_and_excess():
+def test_sample_expert_metrics_emits_layer_skew_and_excess():
     state = EplbState.__new__(EplbState)
     state.parallel_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(enable_expert_metrics=True)
+        eplb_config=SimpleNamespace(enable_expert_metrics=True, expert_metrics_top_k=2)
     )
     state.expert_metrics_window_step = 4
     state._pending_expert_tokens = []
     state._pending_eplb_loads = []
     phase_load = {
-        phase: torch.zeros((1, 4), dtype=torch.int32)
+        phase: torch.zeros((2, 4), dtype=torch.int32)
         for phase in (EPLB_PHASE_PREFILL, EPLB_PHASE_DECODE, EPLB_PHASE_MIXED)
     }
-    # Rank 0 gets 7 tokens, rank 1 gets 1 token.
+    # Layer 0: rank 0 gets 7 tokens, rank 1 gets 1 token.
+    # Layer 1: both ranks get 4 tokens.
     phase_load[EPLB_PHASE_DECODE][0] = torch.tensor([3, 4, 1, 0])
+    phase_load[EPLB_PHASE_DECODE][1] = torch.tensor([2, 2, 2, 2])
     model_state = SimpleNamespace(
         phase_load_accum=phase_load,
         metrics=EplbModelMetricsState(
@@ -167,22 +169,43 @@ def test_sample_expert_metrics_emits_rank_skew_and_excess():
             num_ep_ranks=2,
             num_local_experts=2,
         ),
-        physical_to_logical_map=torch.tensor([[0, 1, 0, 1]]),
+        physical_to_logical_map=torch.tensor([[0, 1, 0, 1], [0, 1, 0, 1]]),
     )
     state.model_states = {"model": model_state}
     state._allreduce_list = lambda tensors: tensors
 
     state._sample_expert_metrics(rearranged=False)
 
-    loads = [
-        load for load in state._pending_eplb_loads if load.phase == EPLB_PHASE_DECODE
-    ]
-    assert len(loads) == 1
-    load = loads[0]
-    assert load.rank_tokens == [7, 1]
-    assert load.excess_tokens == 3
-    assert load.skew == pytest.approx(7 / 4)
-    assert load.steps == 4
+    loads = sorted(
+        (load for load in state._pending_eplb_loads if load.phase == EPLB_PHASE_DECODE),
+        key=lambda load: load.layer,
+    )
+    assert [load.layer for load in loads] == [0, 1]
+
+    layer0 = loads[0]
+    assert layer0.expert_tokens == [3, 4, 1, 0]
+    assert layer0.expert_gini == pytest.approx(0.4375)
+    assert layer0.expert_top_k == 2
+    assert layer0.expert_topk_share == pytest.approx(0.875)
+    assert layer0.active_experts_per_rank == [2, 1]
+    assert layer0.expert_excess_tokens == 2
+    assert layer0.expert_skew == pytest.approx(2.0)
+    assert layer0.rank_tokens == [7, 1]
+    assert layer0.rank_excess_tokens == 3
+    assert layer0.rank_skew == pytest.approx(7 / 4)
+    assert layer0.steps == 4
+
+    layer1 = loads[1]
+    assert layer1.expert_tokens == [2, 2, 2, 2]
+    assert layer1.expert_gini == pytest.approx(0.0)
+    assert layer1.expert_top_k == 2
+    assert layer1.expert_topk_share == pytest.approx(0.5)
+    assert layer1.active_experts_per_rank == [2, 2]
+    assert layer1.expert_excess_tokens == 0
+    assert layer1.expert_skew == pytest.approx(1.0)
+    assert layer1.rank_tokens == [4, 4]
+    assert layer1.rank_excess_tokens == 0
+    assert layer1.rank_skew == pytest.approx(1.0)
 
 
 def test_rearrangement_stall_is_attributed_to_each_model():
@@ -231,11 +254,19 @@ def test_take_expert_metrics_snapshot_includes_stalls_and_loads():
         EplbLoadSample(
             model_name="model",
             phase=EPLB_PHASE_DECODE,
+            layer=0,
             num_ep_ranks=2,
             num_local_experts=2,
-            rank_tokens=[5, 3],
-            skew=1.25,
-            excess_tokens=1,
+            expert_tokens=[5, 3, 3, 1],
+            expert_gini=0.25,
+            expert_top_k=2,
+            expert_topk_share=2 / 3,
+            rank_tokens=[8, 4],
+            active_experts_per_rank=[2, 2],
+            expert_skew=5 / 3,
+            expert_excess_tokens=2,
+            rank_skew=4 / 3,
+            rank_excess_tokens=2,
             timestamp=1.0,
             steps=10,
         )
