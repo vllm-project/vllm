@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config.kernel import AmdKernelsConfig, KernelConfig
 from vllm.models.deepseek_v41.amd import akr_eplb as P
 
 SHIPPED = os.path.join(P.CONFIG_DIR, "expert_plan_S49.npz")
@@ -23,10 +24,9 @@ COUNTS = os.path.join(
 
 
 def _cfg(path: str):
+    """The config fields the placement reads, as the real config classes."""
     return types.SimpleNamespace(
-        kernel_config=types.SimpleNamespace(
-            amd_kernels=types.SimpleNamespace(expert_perm=path)
-        )
+        kernel_config=KernelConfig(amd_kernels=AmdKernelsConfig(expert_perm=path))
     )
 
 
@@ -161,8 +161,6 @@ def test_layer_perm_lookup(tmp_path):
 
 
 def test_config_field():
-    from vllm.config.kernel import AmdKernelsConfig
-
     assert AmdKernelsConfig().expert_perm == ""
     assert AmdKernelsConfig(expert_perm="x.npz").expert_perm == "x.npz"
 

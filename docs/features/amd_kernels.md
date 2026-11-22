@@ -103,7 +103,8 @@ the noise floor of uniform routing.
   concurrency 1024), which is why it is not the default.
 - The routers keep choosing logical experts; right before dispatch each id is
   remapped to one of its replicas by a hash of the route (deterministic, CUDA
-  graph safe, uniform over the replicas). Outputs are unchanged.
+  graph safe, uniform over the replicas). Replicas hold the same weights; the
+  8-rank test finds the outputs bitwise identical to the default placement.
 - Memory: each extra slot costs one MXFP4 expert (18.8 MB) per MoE layer, so
   S = 49 adds about 0.8 GB per rank (backbone and draft), taken from the KV
   cache.
@@ -120,8 +121,12 @@ the noise floor of uniform routing.
    run representative traffic. Each DP rank counts the routed (token, expert)
    pairs per layer, separately for decode-only steps and steps that carry
    prefill tokens, and writes `<dir>/expert_counts_dp<rank>.npz` every 60 s
-   and at exit. The counting is one small kernel per MoE layer and is CUDA
-   graph safe; unset, nothing runs.
+   and at exit (a killed server loses at most the last 60 s; counts are a
+   load estimate, not an exact tally). The counting is one small kernel per
+   MoE layer and is CUDA graph safe; unset, nothing runs. It covers
+   DeepSeek-V4.1 on AITER MegaMoE with the V2 model runner, where the model
+   state tells the counters whether a step carries prefill; other models write
+   nothing.
 2. Run the planner (CPU only):
 
    ```bash

@@ -313,10 +313,25 @@ def register_aiter_profile(experts_per_rank: int, hidden: int, inter: int) -> bo
         return False
     from aiter.ops.flydsl.kernels.mega_moe import mega_moe_config as mc
 
+    if not hasattr(mc, "_match_network") or not hasattr(mc, "_NETWORKS"):
+        logger.warning(
+            "MegaMoE: this AITER has no profile table to extend; %d experts per "
+            "rank run AITER's untuned MegaMoE configs",
+            experts_per_rank,
+        )
+        return False
     if mc._match_network(experts_per_rank, hidden, inter) is not None:
         return False
     base = next((p for p in mc._NETWORKS if p.name == _AITER_PROFILE), None)
     if base is None or (base.model_dim, base.inter_dim) != (hidden, inter):
+        logger.warning(
+            "MegaMoE: AITER has no %s profile for hidden %d / intermediate %d; "
+            "%d experts per rank run AITER's untuned MegaMoE configs",
+            _AITER_PROFILE,
+            hidden,
+            inter,
+            experts_per_rank,
+        )
         return False
     mc._NETWORKS = mc._NETWORKS + (
         dataclasses.replace(
