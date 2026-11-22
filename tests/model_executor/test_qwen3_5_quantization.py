@@ -16,7 +16,7 @@ def test_qwen3_5_lm_head_receives_quant_config():
 
     mock_vllm_config = Mock()
     mock_vllm_config.model_config.hf_text_config = mock_hf_config
-    mock_vllm_config.cache_config.mamba_cache_mode = "align"
+    mock_vllm_config.cache_config.enable_prefix_caching = True
     mock_vllm_config.scheduler_config = Mock()
     mock_vllm_config.quant_config = mock_quant_config
     mock_vllm_config.lora_config = None
@@ -55,21 +55,14 @@ def test_qwen3_5_mtp_lm_head_receives_quant_config():
 
     mock_vllm_config = Mock()
     mock_vllm_config.model_config.hf_text_config = mock_hf_config
-    mock_vllm_config.cache_config.mamba_cache_mode = "align"
+    mock_vllm_config.cache_config.enable_prefix_caching = True
     mock_vllm_config.compilation_config.mode = CompilationMode.NONE
     mock_vllm_config.quant_config = mock_quant_config
-
-    mock_pp_group = Mock()
-    mock_pp_group.is_last_rank = True
 
     with (
         patch("vllm.model_executor.models.qwen3_5_mtp.Qwen3_5MultiTokenPredictor"),
         patch("vllm.model_executor.models.qwen3_5_mtp.ParallelLMHead") as MockLMHead,
         patch("vllm.model_executor.models.qwen3_5_mtp.LogitsProcessor"),
-        patch(
-            "vllm.model_executor.models.qwen3_5_mtp.get_pp_group",
-            return_value=mock_pp_group,
-        ),
     ):
         Qwen3_5MTP(vllm_config=mock_vllm_config)
 
