@@ -15,8 +15,6 @@ namespace vllm {
 namespace inkling2 {
 namespace {
 
-// Inkling2's hidden size 4608 in 16-byte chunks.
-constexpr int kRowVecs = 576;
 constexpr int kMaxWorld = 8;
 constexpr int kMaxCtas = 1024;
 
@@ -96,6 +94,7 @@ struct ReduceScatterParams {
   int64_t srcOffset;  // partial rows in the symmetric buffers
   int first;          // rows [first, first + rows) go to out
   int rows;
+  int rowVecs;  // 16-byte chunks per row
   uint4* out;
 };
 
@@ -108,8 +107,8 @@ __global__ void __launch_bounds__(512)
   for (int r = 0; r < W; ++r)
     src[r] = reinterpret_cast<uint4 const*>(p.comm.bases[r] + p.srcOffset);
 
-  int64_t const begin = int64_t(p.first) * kRowVecs;
-  int64_t const n = int64_t(p.rows) * kRowVecs;
+  int64_t const begin = int64_t(p.first) * p.rowVecs;
+  int64_t const n = int64_t(p.rows) * p.rowVecs;
   int64_t const stride = int64_t(gridDim.x) * blockDim.x;
   for (int64_t base = blockIdx.x * blockDim.x + threadIdx.x; base < n;
        base += stride * U) {
@@ -140,8 +139,8 @@ void inkling2_reduce_scatter(int64_t bases, torch::stable::Tensor& epochs,
   using namespace vllm::inkling2;
   int const device = out.get_device_index();
   torch::stable::accelerator::DeviceGuard const device_guard(device);
-  STD_TORCH_CHECK(out.size(1) == kRowVecs * 8,
-                  "Inkling2 reduce-scatter requires hidden size 4608");
+  STD_TORCH_CHECK(out.size(1) == 4608 || out.size(1) == 2304,
+                  "Inkling2 reduce-scatter requires hidden size 4608 or 2304");
   int const ctas = static_cast<int>(epochs.size(0));
   STD_TORCH_CHECK(ctas <= kMaxCtas);
   ReduceScatterParams p{};
@@ -151,6 +150,7 @@ void inkling2_reduce_scatter(int64_t bases, torch::stable::Tensor& epochs,
   p.srcOffset = src_offset;
   p.first = first;
   p.rows = out.size(0);
+  p.rowVecs = out.size(1) / 8;
   p.out = static_cast<uint4*>(out.data_ptr());
   cudaStream_t const stream = get_current_cuda_stream(device);
   switch (world) {

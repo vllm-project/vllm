@@ -18,9 +18,9 @@ constexpr int kVec = 8;
 constexpr int kMaxSources = 9;
 constexpr int kMaxQueries = 3;
 constexpr int kTaps = 4;
-// Threads per token: Inkling2's hidden size 4608 / 8 channels per thread.
-constexpr int kTokenThreads = 576;
-constexpr int kMaxWarps = kTokenThreads / 32;
+// Threads per token (a template parameter): the hidden size (4608 or 2304) / 8
+// channels per thread.
+constexpr int kMaxWarps = 576 / 32;
 constexpr int kClearCtas = 8;
 
 // The partial sum: this rank's bf16 rows `x`, or (MoE) its bf16 expert rows
@@ -70,11 +70,12 @@ struct Params {
   int numStack;
   bf16 const* last;
   float const* queries;    // [Q, D]
-  bf16 const* normWeight;  // [Q, D]
+  bf16 const* normWeight;  // [Q, D], or null: rawOut gets the fp32 mix
   int numQueries;
   float eps;
   float normEps;
-  bf16* out;  // [Q, T, D]
+  bf16* out;      // [Q, T, D]
+  float* rawOut;  // [Q, T, D]
 };
 
 __device__ __forceinline__ float rsqrtApprox(float x) {
@@ -332,10 +333,11 @@ __device__ __forceinline__ void sourceStats(float const (&src)[kVec],
 
 // One token per cluster of C CTAs (`blockIdx.y`), each CTA a 1/C slice of
 // its channels (`blockIdx.x`).
-template <int World, int In, int Q, int C>
-__global__ void __launch_bounds__(kTokenThreads / C, 1)
+template <int World, int In, int Q, int C, int TokenThreads>
+__global__ void __launch_bounds__(TokenThreads / C, 1)
     allReduceConvMixKernel(Params p) {
-  constexpr int kThreads = kTokenThreads / C;
+  constexpr int kThreads = TokenThreads / C;
+  static_assert(kThreads % 32 == 0 && TokenThreads <= kMaxWarps * 32);
   constexpr bool kTwoShot = In == kPartialTwoShot || In == kCombineTwoShot;
   constexpr bool kCombined = In == kCombine || In == kCombineTwoShot;
   // Two-shot rows are read back from the reduced broadcast.
@@ -416,7 +418,8 @@ __global__ void __launch_bounds__(kTokenThreads / C, 1)
   if (p.resAddend) cpAsync(&slot16(slots.add), p.resAddend + rowOff);
 #pragma unroll
   for (int q = 0; q < Q; ++q) {
-    cpAsync(&slot16(kNormSlot + q), p.normWeight + q * p.dim + col);
+    if (p.normWeight)
+      cpAsync(&slot16(kNormSlot + q), p.normWeight + q * p.dim + col);
     cpAsync(&slot16(slots.query + 2 * q), p.queries + q * p.dim + col);
     cpAsync(&slot16(slots.query + 2 * q + 1), p.queries + q * p.dim + col + 4);
   }
@@ -671,9 +674,19 @@ __global__ void __launch_bounds__(kTokenThreads / C, 1)
       sumSq[q] = __fmaf_rn(mix[q][i], mix[q][i], sumSq[q]);
     }
   }
+  if (!p.normWeight) {
+#pragma unroll
+    for (int q = 0; q < Q; ++q) {
+      float4* raw = reinterpret_cast<float4*>(
+          p.rawOut + (int64_t(q) * p.numTokens + t) * p.dim + col);
+      raw[0] = make_float4(mix[q][0], mix[q][1], mix[q][2], mix[q][3]);
+      raw[1] = make_float4(mix[q][4], mix[q][5], mix[q][6], mix[q][7]);
+    }
+  }
+  // (Raw mixes still take part: the cluster's CTAs exchange the sums.)
   rowReduce(sumSq, scratch, sumSqs);
 #pragma unroll
-  for (int q = 0; q < Q; ++q) {
+  for (int q = 0; q < Q && p.normWeight; ++q) {
     float const rstd =
         rsqrtApprox(__fadd_rn(__fdiv_rn(sumSqs[q], float(p.dim)), p.normEps));
     float w[kVec];
@@ -694,36 +707,40 @@ __global__ void __launch_bounds__(kTokenThreads / C, 1)
 using Kernel = void (*)(Params);
 
 template <int World, int In, int Q>
-Kernel clusterKernel(int cluster) {
+Kernel clusterKernel(int dim, int cluster) {
+  // Hidden size 2304 takes clusters of 1 or 3 (whole warps per CTA).
+  if (dim == 2304)
+    return cluster == 1 ? &allReduceConvMixKernel<World, In, Q, 1, 288>
+                        : &allReduceConvMixKernel<World, In, Q, 3, 288>;
   switch (cluster) {
     case 1:
-      return &allReduceConvMixKernel<World, In, Q, 1>;
+      return &allReduceConvMixKernel<World, In, Q, 1, 576>;
     case 2:
-      return &allReduceConvMixKernel<World, In, Q, 2>;
+      return &allReduceConvMixKernel<World, In, Q, 2, 576>;
     case 3:
-      return &allReduceConvMixKernel<World, In, Q, 3>;
+      return &allReduceConvMixKernel<World, In, Q, 3, 576>;
     default:
-      return &allReduceConvMixKernel<World, In, Q, 6>;
+      return &allReduceConvMixKernel<World, In, Q, 6, 576>;
   }
 }
 
 template <int World, int In>
-Kernel queryKernel(int numQueries, int cluster) {
-  return numQueries == 1 ? clusterKernel<World, In, 1>(cluster)
-                         : clusterKernel<World, In, 3>(cluster);
+Kernel queryKernel(int dim, int numQueries, int cluster) {
+  return numQueries == 1 ? clusterKernel<World, In, 1>(dim, cluster)
+                         : clusterKernel<World, In, 3>(dim, cluster);
 }
 
 template <int World>
-Kernel inputKernel(int in, int numQueries, int cluster) {
+Kernel inputKernel(int in, int dim, int numQueries, int cluster) {
   switch (in) {
     case kPartial:
-      return queryKernel<World, kPartial>(numQueries, cluster);
+      return queryKernel<World, kPartial>(dim, numQueries, cluster);
     case kCombine:
-      return queryKernel<World, kCombine>(numQueries, cluster);
+      return queryKernel<World, kCombine>(dim, numQueries, cluster);
     case kPartialTwoShot:
-      return queryKernel<World, kPartialTwoShot>(numQueries, cluster);
+      return queryKernel<World, kPartialTwoShot>(dim, numQueries, cluster);
     default:
-      return queryKernel<World, kCombineTwoShot>(numQueries, cluster);
+      return queryKernel<World, kCombineTwoShot>(dim, numQueries, cluster);
   }
 }
 
@@ -752,8 +769,8 @@ void inkling2_allreduce_conv_mix(
     torch::stable::Tensor& conv_out, torch::stable::Tensor const& stack,
     std::optional<torch::stable::Tensor> last,
     torch::stable::Tensor const& queries,
-    torch::stable::Tensor const& norm_weight, double eps, double norm_eps,
-    torch::stable::Tensor& out) {
+    std::optional<torch::stable::Tensor> norm_weight, double eps,
+    double norm_eps, torch::stable::Tensor& out) {
   using namespace vllm::inkling2;
   int const device = conv_out.get_device_index();
   torch::stable::accelerator::DeviceGuard const device_guard(device);
@@ -803,14 +820,17 @@ void inkling2_allreduce_conv_mix(
   p.numStack = stack.size(0);
   p.last = optionalPtr<bf16>(last);
   p.queries = static_cast<float const*>(queries.data_ptr());
-  p.normWeight = static_cast<bf16 const*>(norm_weight.data_ptr());
+  p.normWeight = optionalPtr<bf16>(norm_weight);
   p.numQueries = queries.size(0);
   p.eps = eps;
   p.normEps = norm_eps;
-  p.out = static_cast<bf16*>(out.data_ptr());
+  if (p.normWeight)
+    p.out = static_cast<bf16*>(out.data_ptr());
+  else
+    p.rawOut = static_cast<float*>(out.data_ptr());
   STD_TORCH_CHECK(p.numStack < kMaxSources && p.numQueries <= kMaxQueries);
-  STD_TORCH_CHECK(p.dim == kTokenThreads * kVec,
-                  "Inkling2 all-reduce requires hidden size 4608");
+  STD_TORCH_CHECK(p.dim == 4608 || p.dim == 2304,
+                  "Inkling2 all-reduce requires hidden size 4608 or 2304");
   STD_TORCH_CHECK(p.numQueries == 1 || p.numQueries == 3);
   STD_TORCH_CHECK(stream_width % kVec == 0 && stream_offset % kVec == 0);
   STD_TORCH_CHECK(world == 2 || world == 4 || world == 8,
@@ -819,12 +839,13 @@ void inkling2_allreduce_conv_mix(
 
   // Each token's channels split over a cluster of CTAs (from e2e sweeps:
   // grids on much more than 100 SMs delay the next kernel's early launch).
-  int const cluster = p.numTokens <= 16   ? 6
+  int const cluster = p.dim == 2304       ? (p.numTokens <= 64 ? 3 : 1)
+                      : p.numTokens <= 16 ? 6
                       : p.numTokens <= 32 ? 3
                       : p.numTokens <= 48 ? 2
                       : p.numTokens <= 64 ? 3
                                           : 1;
-  int const threads = kTokenThreads / cluster;
+  int const threads = p.dim / kVec / cluster;
   cudaLaunchAttribute attrs[2]{};
   attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
   attrs[0].val.programmaticStreamSerializationAllowed = 1;
@@ -842,13 +863,13 @@ void inkling2_allreduce_conv_mix(
   Kernel kernel;
   switch (world) {
     case 2:
-      kernel = inputKernel<2>(in, p.numQueries, cluster);
+      kernel = inputKernel<2>(in, p.dim, p.numQueries, cluster);
       break;
     case 4:
-      kernel = inputKernel<4>(in, p.numQueries, cluster);
+      kernel = inputKernel<4>(in, p.dim, p.numQueries, cluster);
       break;
     default:
-      kernel = inputKernel<8>(in, p.numQueries, cluster);
+      kernel = inputKernel<8>(in, p.dim, p.numQueries, cluster);
       break;
   }
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
