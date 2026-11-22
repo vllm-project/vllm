@@ -16,16 +16,27 @@ from vllm.logger import init_logger
 from vllm.utils.serial_utils import numpy2tensor, tensor2base64
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
-    check_torch_archive_size,
+    load_torch_payload,
     safe_to_dense,
 )
 
 from ..video import VIDEO_LOADER_REGISTRY, DecodedFrames
-from ..video_decoders import incompatible_backend_options
+from ..video_decoders import (
+    SampledFramesCharge,
+    charging_sampled_frames,
+    incompatible_backend_options,
+)
 from .base import MediaIO, MediaWithBytes
 from .image import MAGIC_NUMPY_PREFIX, ImageMediaIO
 
 logger = init_logger(__name__)
+
+
+def _frame_to_hwc(frame: MediaWithBytes[Image.Image | torch.Tensor]) -> npt.NDArray:
+    """Convert a frame loaded by `ImageMediaIO` to an HWC array."""
+    if isinstance(frame.media, torch.Tensor):
+        return frame.media.permute(1, 2, 0).numpy()
+    return np.asarray(frame)
 
 
 class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]):
@@ -122,19 +133,25 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
     def load_bytes(
         self, data: bytes
     ) -> MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]:
-        video = self.video_loader.load_bytes(
-            data, num_frames=self.num_frames, **self.kwargs
-        )
-        frames = video[0] if isinstance(video, tuple) else video
         budget = getattr(self.image_io, "decoded_budget", None)
+        # Decoders charge the sampled frames before decoding them, so an
+        # oversized sample is rejected before its frames are allocated.
+        frames_charge = None if budget is None else SampledFramesCharge(budget.charge)
+        with charging_sampled_frames(frames_charge):
+            video = self.video_loader.load_bytes(
+                data, num_frames=self.num_frames, **self.kwargs
+            )
+        frames = video[0] if isinstance(video, tuple) else video
         shape = getattr(frames, "shape", None)
-        if budget is not None and shape is not None and len(shape) >= 3:
+        if frames_charge is not None and shape is not None and len(shape) >= 3:
             decoded_bytes = (
                 frames.numel() * frames.element_size()
                 if isinstance(frames, torch.Tensor)
                 else frames.nbytes
             )
-            budget.charge(decoded_bytes)
+            # Charge what the decoder did not charge up front, e.g. a custom
+            # loader or frames a loader duplicated after decoding.
+            frames_charge(max(0, decoded_bytes - frames_charge.charged_bytes))
         return MediaWithBytes(video, data)
 
     def load_base64(
@@ -154,7 +171,7 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
                 frame_parts = data.split(",")
 
             frames = np.stack(
-                [np.asarray(load_frame(frame_data)) for frame_data in frame_parts]
+                [_frame_to_hwc(load_frame(frame_data)) for frame_data in frame_parts]
             )
             total = int(frames.shape[0])
             fps = float(self.kwargs.get("fps", 1))
@@ -245,11 +262,7 @@ class VideoEmbeddingMediaIO(MediaIO[torch.Tensor]):
         super().__init__()
 
     def _load_pickled_torch(self, data: bytes) -> torch.Tensor:
-        check_torch_archive_size(data, parameter="video_embeds")
-        buffer = BytesIO(data)
-        with check_sparse_tensor_invariants_threadsafe():
-            tensor = torch.load(buffer, weights_only=True)
-            return safe_to_dense(tensor, parameter="video_embeds")
+        return load_torch_payload(data, parameter="video_embeds")
 
     def _load_numpy(self, data: bytes) -> torch.Tensor:
         with BytesIO(data) as buffer:
