@@ -39,7 +39,7 @@ def test_ranks(
         results = vllm_model.generate_w_logprobs(example_prompts, sampling_params)
 
     assert len(results) == len(example_prompt_tokens)
-    for i, (result, prompt_tokens) in enumerate(zip(results, example_prompt_tokens)):
+    for result, prompt_tokens in zip(results, example_prompt_tokens):
         decode_tokens, _, decode_logprobs, prompt_logprobs = result
 
         # Ensure the return type of logprobs is accurate
@@ -52,9 +52,7 @@ def test_ranks(
         assert len(prompt_tokens) == len(prompt_logprobs)
         # No logprob for first prompt token
         assert not prompt_logprobs[0]
-        for position, (token, logprobs) in enumerate(
-            zip(prompt_tokens[1:], prompt_logprobs[1:]), start=1
-        ):
+        for token, logprobs in zip(prompt_tokens[1:], prompt_logprobs[1:]):
             # Ensure logprobs of prompt token is always returned
             logprob = logprobs.get(token)
             assert logprob is not None
@@ -71,9 +69,7 @@ def test_ranks(
         # Check sample logprobs
         ########################
         assert len(decode_tokens) == len(decode_logprobs)
-        for position, (token, logprobs) in enumerate(
-            zip(decode_tokens, decode_logprobs)
-        ):
+        for token, logprobs in zip(decode_tokens, decode_logprobs):
             # Ensure logprobs of chosen token is always returned
             logprob = logprobs.get(token)
             assert logprob is not None

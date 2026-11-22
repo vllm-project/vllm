@@ -126,10 +126,6 @@ class LRUCachePolicy(CachePolicy):
         self._evictable.discard(key)
 
     @override
-    def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
-        self._update_recency(reversed(list(keys)))
-
-    @override
     def on_request_access(
         self,
         keys: Iterable[OffloadKey],

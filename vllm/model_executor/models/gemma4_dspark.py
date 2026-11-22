@@ -20,9 +20,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.utils import refill_derived
 
 from .gemma4_mtp import Gemma4MTPAttention, Gemma4MTPDecoderLayer
-from .qwen3_dflash import DFlashQwen3Model, _dflash_layer_causal
+from .qwen3_dflash import (
+    DFlashQwen3Model,
+    _dflash_layer_causal,
+    _reads_raw_weights,
+)
 from .qwen3_dspark import (
     DSparkConfidenceHead,
     DSparkMarkovHead,
@@ -141,6 +146,9 @@ class Gemma4DSparkModel(DFlashQwen3Model):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
+        # derived from the weights after loading, refilled in place on reloads
+        self._fused_k_weight: torch.Tensor | None = None
+        self._fused_k_bias: torch.Tensor | None = None
         assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
@@ -223,23 +231,36 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         self._rms_norm_eps = attn0.q_norm.variance_epsilon
         self._attn_layers = [layer.self_attn.attn for layer in self.layers]
 
+    def context_kv_modules(self) -> list[nn.Module]:
+        modules: list[nn.Module] = [self.fc, self.hidden_norm, *self._attn_layers]
+        if self._fused_k_weight is None:
+            modules.extend(self._context_k_projs)
+        return modules
+
     def _build_context_kv_buffers(
         self, layers_attn: list[nn.Module], has_bias: bool
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
-        self._fused_k_weight = torch.cat([a.k_proj.weight for a in layers_attn], dim=0)
-        self._fused_k_bias: torch.Tensor | None = (
-            torch.cat([a.k_proj.bias for a in layers_attn], dim=0) if has_bias else None
-        )
-        self._k_norm_weights = torch.stack(
-            [a.k_norm.weight.data for a in layers_attn], dim=0
-        ).contiguous()
+        self._context_k_projs = [a.k_proj for a in layers_attn]
+        k_weight = k_bias = None
+        if _reads_raw_weights(self._context_k_projs):
+            k_weight = torch.cat([p.weight for p in self._context_k_projs])
+            if has_bias:
+                k_bias = torch.cat([p.bias for p in self._context_k_projs])
+        refill_derived(self, "_fused_k_weight", k_weight)
+        refill_derived(self, "_fused_k_bias", k_bias)
+        k_norm = torch.stack([a.k_norm.weight.data for a in layers_attn], dim=0)
+        refill_derived(self, "_k_norm_weights", k_norm.contiguous())
         # v_norm has no learnable scale; ones matching the K-norm call shape.
-        self._v_norm_weights = torch.ones(
-            len(layers_attn),
-            layers_attn[0].head_dim,
-            dtype=self._k_norm_weights.dtype,
-            device=self._k_norm_weights.device,
+        refill_derived(
+            self,
+            "_v_norm_weights",
+            torch.ones(
+                len(layers_attn),
+                layers_attn[0].head_dim,
+                dtype=self._k_norm_weights.dtype,
+                device=self._k_norm_weights.device,
+            ),
         )
 
     def _project_context_kv(
@@ -256,7 +277,10 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         ops.rms_norm(
             normed, context_states, self._hidden_norm_weight, self._rms_norm_eps
         )
-        all_k_flat = F.linear(normed, self._fused_k_weight, self._fused_k_bias)
+        if self._fused_k_weight is not None:
+            all_k_flat = F.linear(normed, self._fused_k_weight, self._fused_k_bias)
+        else:
+            all_k_flat = torch.cat([p(normed)[0] for p in self._context_k_projs], -1)
         all_k = (
             all_k_flat.view(num_ctx, num_layers, num_kv_heads, head_dim)
             .permute(1, 0, 2, 3)
@@ -310,7 +334,6 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
         params = dict(self.named_parameters())
         params.update(dict(self.named_buffers()))
         loaded: set[str] = set()
-        includes_confidence_head = False
         for name, w in weights:
             if "lm_head" not in name:
                 name = "model." + name
@@ -324,9 +347,4 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
                     p = params[name]
                     getattr(p, "weight_loader", default_weight_loader)(p, w)
                     loaded.add(name)
-                    if "confidence_head" in name:
-                        includes_confidence_head = True
-        if not includes_confidence_head:
-            self.model.confidence_head = None
-        self.model._build_fused_kv_buffers()
         return loaded

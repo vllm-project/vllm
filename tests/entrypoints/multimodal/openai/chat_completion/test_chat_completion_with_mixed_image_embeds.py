@@ -82,7 +82,7 @@ def aligned_content_and_embeds_b64() -> tuple[str, str]:
     with the running vLLM server.
     """
     content = "Describe this image."
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     index_path = hf_api().hf_hub_download(MODEL_NAME, "model.safetensors.index.json")
     with open(index_path) as f:

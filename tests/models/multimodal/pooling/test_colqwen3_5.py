@@ -15,11 +15,11 @@ import torch
 from ....conftest import VllmRunner
 
 MODELS = [
-    "athrael-soju/colqwen3.5-4.5B-v3",
+    "vllm-project/colqwen3.5-4.5B-v3",
 ]
 
 EMBED_DIMS = {
-    "athrael-soju/colqwen3.5-4.5B-v3": 320,
+    "vllm-project/colqwen3.5-4.5B-v3": 320,
 }
 
 TEXT_QUERIES = [
@@ -233,4 +233,4 @@ def test_colqwen3_5_encoder_only_attention_has_no_kv_cache_spec() -> None:
     attention = SimpleNamespace(attn_type=AttentionType.ENCODER_ONLY)
     vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=16))
 
-    assert Attention.get_kv_cache_spec(attention, vllm_config) is None
+    assert Attention.get_kv_cache_config(attention, vllm_config) is None

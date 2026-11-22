@@ -4,6 +4,7 @@
 from typing import NamedTuple
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.nn.parameter import Parameter
 
@@ -200,12 +201,18 @@ class MambaMixer(MambaBase, PluggableLayer):
         self.prefix = prefix
 
     def _ssm_transform(
-        self, x: torch.Tensor
+        self, x: torch.Tensor, batch_start: int, num_batch_tokens: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # LoRA kernel requires contiguous tensor.
+        num_tokens = x.shape[0]
+        if self.is_lora_enabled:
+            # LoRA kernels index rows by the whole batch's token mapping, so
+            # x_proj and dt_proj get a batch-sized input with x at its rows.
+            x = F.pad(
+                x, (0, 0, batch_start, num_batch_tokens - batch_start - num_tokens)
+            )
         # ROCm: Non-contiguous tensors cause incorrect GEMM
         # results when batch > 1.
-        if self.is_lora_enabled or current_platform.is_rocm():
+        elif current_platform.is_rocm():
             x = x.contiguous()
         ssm_params = self.x_proj(x)[0]
         time_step, B, C = torch.split(
@@ -226,8 +233,11 @@ class MambaMixer(MambaBase, PluggableLayer):
         if current_platform.is_rocm():
             time_step = time_step.contiguous()
 
-        discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
-        return discrete_time_step, B, C
+        discrete_time_step = self.dt_proj(time_step)[0]
+        if self.is_lora_enabled:
+            rows = slice(batch_start, batch_start + num_tokens)
+            discrete_time_step, B, C = discrete_time_step[rows], B[rows], C[rows]
+        return discrete_time_step.transpose(-2, -1), B, C
 
     def forward(self, hidden_states: torch.Tensor, output: torch.Tensor):
         torch.ops.vllm.mamba_mixer(
@@ -299,6 +309,7 @@ class MambaMixer(MambaBase, PluggableLayer):
         has_prefill = num_prefill_tokens > 0
         has_decode = num_decode_tokens > 0
         num_actual_tokens = num_prefill_tokens + num_decode_tokens
+        num_batch_tokens = hidden_states.shape[0]
 
         prefill_decode_split = split_batch_to_prefill_and_decode(
             hidden_states_BC,
@@ -328,7 +339,7 @@ class MambaMixer(MambaBase, PluggableLayer):
             )
             # 3. State Space Model sequence transformations.
             discrete_time_step_p, B_p, C_p = self._ssm_transform(
-                conv_out_p.transpose(-2, -1)
+                conv_out_p.transpose(-2, -1), num_decode_tokens, num_batch_tokens
             )
             time_proj_bias = self._time_proj_bias()
 
@@ -368,7 +379,7 @@ class MambaMixer(MambaBase, PluggableLayer):
 
             # 3. State Space Model sequence transformation.
             discrete_time_step_d, B_d, C_d = self._ssm_transform(
-                conv_out_d.transpose(-2, -1)
+                conv_out_d.transpose(-2, -1), 0, num_batch_tokens
             )
             time_proj_bias = self._time_proj_bias()
 
@@ -398,9 +409,12 @@ class MambaMixer(MambaBase, PluggableLayer):
         )
 
         # 5. Final output projection
-        if self.is_lora_enabled:  # Lora kernel requires contiguous tensor.
-            scan_outputs_combined = scan_outputs_combined.transpose(-2, -1).contiguous()
-            out = self.out_proj(scan_outputs_combined)[0]
+        if self.is_lora_enabled:  # LoRA needs every batch row, as in x_proj.
+            scan_outputs_combined = F.pad(
+                scan_outputs_combined.transpose(-2, -1),
+                (0, 0, 0, num_batch_tokens - num_actual_tokens),
+            )
+            out = self.out_proj(scan_outputs_combined)[0][:num_actual_tokens]
         else:
             out = self.out_proj(scan_outputs_combined.transpose(-2, -1))[0]
 

@@ -15,10 +15,14 @@ MAX_MODEL_LEN = 512
 # Example from https://huggingface.co/BAAI/bge-m3
 sentences_1 = ["What is BGE M3?", "Definition of BM25"]
 sentences_2 = [
-    "BGE M3 is an embedding model supporting dense retrieval, "
-    "lexical matching and multi-vector interaction.",
-    "BM25 is a bag-of-words retrieval function that ranks a set "
-    "of documents based on the query terms appearing in each document",
+    (
+        "BGE M3 is an embedding model supporting dense retrieval, "
+        "lexical matching and multi-vector interaction."
+    ),
+    (
+        "BM25 is a bag-of-words retrieval function that ranks a set "
+        "of documents based on the query terms appearing in each document"
+    ),
 ]
 
 similarity_reference = [[0.6259, 0.3474], [0.3309, 0.6734]]

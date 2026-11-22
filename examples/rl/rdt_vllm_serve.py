@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Driver-side helpers to run the inference fleet as a standard ``vllm serve``
+"""Driver-side helpers to run the inference fleet as a standard `vllm serve`
 process for the sharded-RDT examples.
 
 The trainer reaches the server's weight-sync control plane over the RLHF HTTP
-routes (``HTTPVLLMWeightSyncClient``); generation uses ``/v1/completions``. RDT
+routes (`HTTPVLLMWeightSyncClient`); generation uses `/v1/completions`. RDT
 still needs the workers to be RayExecutorV2 tensor-transport actors sharing the
 trainer's Ray cluster, so the server is launched with the Ray v2 executor and
-inherits this process's env (``address=auto``). These helpers run only on the
+inherits this process's env (`address=auto`). These helpers run only on the
 driver — they are not shipped to or imported by the Ray actors.
 """
 
@@ -29,12 +29,13 @@ def launch_vllm_serve(
     data_parallel_size: int = 1,
     enable_expert_parallel: bool = False,
     port: int = 8000,
+    # Leave headroom for the RDT receive buffers, which vLLM doesn't reserve.
     gpu_memory_utilization: float = 0.7,
     extra_args: list[str] | None = None,
 ) -> subprocess.Popen:
-    """Start ``vllm serve`` for the RDT inference fleet.
+    """Start `vllm serve` for the RDT inference fleet.
 
-    ``VLLM_SERVER_DEV_MODE`` exposes the RLHF weight-sync routes; the Ray v2
+    `VLLM_SERVER_DEV_MODE` exposes the RLHF weight-sync routes; the Ray v2
     executor makes the workers tensor-transport actors (RDT's data plane). The
     child inherits our env, so it joins the same Ray cluster (RAY_ADDRESS below)
     and picks up the editable vLLM install via the venv interpreter.
@@ -98,7 +99,7 @@ def launch_vllm_serve(
 def wait_for_server(
     endpoint: str, proc: subprocess.Popen, timeout: float = 1800
 ) -> None:
-    """Block until ``/health`` returns 200, failing fast if the server exits."""
+    """Block until `/health` returns 200, failing fast if the server exits."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if proc.poll() is not None:
@@ -116,7 +117,7 @@ def wait_for_server(
 def http_generate(
     endpoint: str, model: str, prompts: list[str], max_tokens: int = 16
 ) -> list[str]:
-    """Greedy ``/v1/completions`` for each prompt; returns the generated texts."""
+    """Greedy `/v1/completions` for each prompt; returns the generated texts."""
     outs = []
     for p in prompts:
         r = requests.post(
