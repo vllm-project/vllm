@@ -144,7 +144,7 @@ def active_cpu_offload_connector(dist_init):
             },
         ),
     )
-    gpu = torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cuda")
+    gpu = torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device=DEVICE)
     cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[
