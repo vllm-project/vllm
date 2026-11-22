@@ -1,11 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""amd_kernels route config: parsing, hashing and on() gating (CPU only)."""
+"""amd_kernels route config: parsing, hashing and on() gating (CPU only), and the
+stock path with every route off."""
+
+import os
+import subprocess
+import sys
 
 import pytest
+import torch
 
 from vllm.config.kernel import AmdKernelsConfig, KernelConfig
 from vllm.models.kimi_k3.amd import akr_config
+from vllm.platforms import current_platform
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +54,20 @@ def test_hash_changes():
     a = KernelConfig(amd_kernels={"disabled_routes": ["moe", "gemm"]})
     b = KernelConfig(amd_kernels={"disabled_routes": ["gemm", "moe"]})
     assert a.compute_hash() == b.compute_hash() != base
+
+
+def test_hash_follows_env_switches(monkeypatch):
+    """The VLLM_KIMI_AKR* switches change which code the model traces: a cached
+    compile of one setting must not be reused for another."""
+    for k in [k for k in os.environ if k.startswith("VLLM_KIMI_AKR")]:
+        monkeypatch.delenv(k)
+    base = KernelConfig().compute_hash()
+    monkeypatch.setenv("VLLM_KIMI_AKR", "0")
+    off = KernelConfig().compute_hash()
+    monkeypatch.setenv("VLLM_KIMI_AKR", "1")
+    monkeypatch.setenv("VLLM_KIMI_AKR_EXPERTS", "0")
+    experts_off = KernelConfig().compute_hash()
+    assert len({base, off, experts_off}) == 3
 
 
 def test_on_all_when_available(monkeypatch):
@@ -97,3 +118,38 @@ def test_unsupported_reason_warns_once(monkeypatch):
     assert akr_config.unsupported_reason("moe", "tp!=8")
     assert akr_config.unsupported_reason("moe", "tp!=8")
     assert len(msgs) == 1
+
+
+_rocm_only = pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="the ROCm Kimi-K3.1 modules"
+)
+
+
+@_rocm_only
+def test_dsa_post_load_without_amd_kernels(monkeypatch):
+    """Every route off (here: the package is missing): the hook that
+    MLAAttention.process_weights_after_loading calls for every Kimi-K3.1 DSA layer
+    leaves the layer alone and imports no amd_kernels module."""
+    from vllm.models.kimi_k3.amd import dsa
+
+    monkeypatch.setitem(sys.modules, "amd_kernels", None)  # import fails
+    _patch(monkeypatch, _cfg(), available=False)
+    assert akr_config.routes() == frozenset()
+    wrapper = torch.nn.Module()
+    dsa._akr_post_load(wrapper)
+    assert not hasattr(wrapper, "akr_w")
+
+
+@_rocm_only
+def test_sparse_mla_backend_does_not_import_kimi():
+    """The generic ROCm sparse MLA backend reaches the Kimi-K3.1 hooks only through
+    the attribute its DSA layers set: importing it loads no Kimi-K3 module."""
+    code = (
+        "import sys\n"
+        "import vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse\n"
+        "print(sorted(m for m in sys.modules if m.startswith('vllm.models.kimi_k3')))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    ).stdout
+    assert out.strip().splitlines()[-1] == "[]"

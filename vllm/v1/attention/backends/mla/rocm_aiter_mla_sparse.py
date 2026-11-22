@@ -18,7 +18,6 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadata,
     SparseMLACommonMetadataBuilder,
 )
-from vllm.models.kimi_k3.amd import akr_dsa
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -1631,13 +1630,19 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     attn_metadata._dcp_token_pages = token_pages
                 local_scores = self.dcp_scores[:num_actual_toks]
                 local_idx = self.topk_indices_buffer[:num_actual_toks]
-                # amd_kernels: one launch for the score gather + merge
-                merged = akr_dsa.gather_merge(
-                    local_scores,
-                    local_idx,
-                    token_pages,
-                    attn_metadata.block_size,
-                    block_stride_rows,
+                # Kimi-K3.1 amd_kernels (set by its DSA layer): one launch for the
+                # score gather + merge
+                akr_dsa = getattr(self, "_akr_dsa", None)
+                merged = (
+                    akr_dsa.gather_merge(
+                        local_scores,
+                        local_idx,
+                        token_pages,
+                        attn_metadata.block_size,
+                        block_stride_rows,
+                    )
+                    if akr_dsa is not None
+                    else None
                 )
                 if merged is not None:
                     packed, indptr = merged
@@ -1675,8 +1680,10 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 # all topk (same keys in the same order, so the output is unchanged).
                 indptr, packed = _compact_dcp_indices(indices)
                 compact = True
-            if not attn_metadata.num_prefills:
-                # amd_kernels: the DCP decode kernel (bf16 out, natural-log lse)
+            akr_dsa = getattr(self, "_akr_dsa", None)
+            if akr_dsa is not None and not attn_metadata.num_prefills:
+                # Kimi-K3.1 amd_kernels: the DCP decode kernel (bf16 out, natural-log
+                # lse)
                 akr_out = akr_dsa.sparse_mla_decode(
                     q,
                     kv_c_and_k_pe_cache,

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import importlib.util
+import os
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, fields
 from typing import TYPE_CHECKING, Any, Final, Literal
@@ -44,6 +46,13 @@ class AmdKernelsConfig:
     def compute_hash(self) -> str:
         factors = get_hash_factors(self, {"disabled_routes"})
         factors["disabled_routes"] = sorted(set(self.disabled_routes))
+        # The routes also follow whether the package is installed and the
+        # VLLM_KIMI_AKR* A/B switches (not `vllm.envs` entries); both change the
+        # traced graphs, so they must key the compile cache too.
+        factors["installed"] = importlib.util.find_spec("amd_kernels") is not None
+        factors["env"] = sorted(
+            (k, v) for k, v in os.environ.items() if k.startswith("VLLM_KIMI_AKR")
+        )
         return hash_factors(factors)
 
 

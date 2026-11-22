@@ -7,7 +7,9 @@ all-reduce), and the stock-experts latent tail alone.
 
 Spawns 8 ranks (needs 8 GPUs):
 
-    python tests/models/kimi_k3/akr/test_akr_moe_layer_ranks8.py [bench]
+    python tests/models/kimi_k3/akr/moe_layer_ranks8.py [bench]
+
+(A script, not a pytest module: it sets AITER env vars at import.)
 """
 
 import os

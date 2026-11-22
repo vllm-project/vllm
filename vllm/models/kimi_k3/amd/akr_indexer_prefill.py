@@ -6,16 +6,15 @@ Entries `indexer/mxfp4_indexer_common.mxfp4_prefill_score` / `mxfp4_prefill_topk
 tile their `*_unsupported_reason` rejects takes the aiter op
 (`ops/fp4_indexer_prefill.prefill_indexer`).
 
-Sub-switches (env, default on; the `indexer` route of `akr_config` must be on for the
-first two):
+Sub-switches (env, default on; the `indexer` route of `akr_config` must be on):
   VLLM_KIMI_AKR_INDEXER_SCORE=0/1
       amd_kernels `mxfp4_prefill_score` instead of aiter's FP4 prefill scorer
   VLLM_KIMI_AKR_INDEXER_TOPK=0/1
       amd_kernels `mxfp4_prefill_topk` instead of aiter `top_k_per_row_prefill` +
       epilogue
   VLLM_KIMI_AKR_PREFILL_TABLE_BUCKET=0/1
-      power-of-two block-table width for aiter's scorer (no per-step JIT); independent
-      of the route (host-only fix of the stock path)
+      power-of-two block-table width for aiter's scorer, where it still runs (one
+      compiled scorer per bucket, not per chunk width); host-only
 """
 
 import functools
@@ -56,7 +55,7 @@ def _topk_covered(out_width: int) -> bool:
 
 
 def table_bucket_on() -> bool:
-    return _env("VLLM_KIMI_AKR_PREFILL_TABLE_BUCKET")
+    return akr_config.on("indexer") and _env("VLLM_KIMI_AKR_PREFILL_TABLE_BUCKET")
 
 
 def score_on() -> bool:

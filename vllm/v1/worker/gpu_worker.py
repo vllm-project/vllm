@@ -1094,18 +1094,10 @@ class Worker(WorkerBase):
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
 
         if "vllm.models.kimi_k3.amd.kda" in sys.modules:
+            # Kimi-K3.1 on ROCm: compile the amd_kernels prefill routes before serving
             from vllm.models.kimi_k3.amd import akr_prefill_warmup
 
             akr_prefill_warmup.run(self.vllm_config)
-
-        if "amd_kernels" in sys.modules:
-            # its variants compiled during start-up: log any later compile
-            try:
-                from amd_kernels import compile_watch
-
-                compile_watch.arm(logger.warning)
-            except Exception:
-                logger.warning("amd_kernels compile_watch not armed", exc_info=True)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

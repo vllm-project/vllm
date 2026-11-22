@@ -5,16 +5,23 @@ random weights): akr_moe.forward (router+sort aux -> down+quant -> own experts) 
 stock sequence vLLM runs today (fp32 router GEMM + aiter biased_grouped_topk -> hgemm
 down projection -> aiter fused_moe a4w4 SiTUv2)."""
 
-import os
 import types
 
 import pytest
 import torch
 
-os.environ.setdefault("AITER_SITUV2_A4W4", "1")
 if not torch.cuda.is_available():
     pytest.skip("needs a GPU", allow_module_level=True)
 pytest.importorskip("amd_kernels")
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _situv2_a4w4():
+    # the stock reference runs aiter's a4w4 SiTUv2 MoE; scoped to this module
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("AITER_SITUV2_A4W4", "1")
+        yield
+
 
 E, H, LAT, INTER, TOPK = 896, 7168, 3584, 384, 16
 M_LIST = [1, 12, 24, 40, 65, 80, 128, 192]

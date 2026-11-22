@@ -3,10 +3,12 @@
 """Start-up warm-up of the prefill routes (compile every variant before serving:
 `compile_watch` arms afterwards).
 
-`run(vllm_config)` is called once per worker after the model is loaded and before
-`compile_watch.arm` (gpu_worker.py); it touches only scratch buffers it allocates (the
-KDA state / conv rows it writes are its own dummy rows). Failures are logged, never
-raised: an unwarmed variant compiles on its first real use (as without this call).
+`run(vllm_config)` is called once per worker after the model is loaded and its CUDA
+graphs are captured (gpu_worker.py); it touches only scratch buffers it allocates (the
+KDA state / conv rows it writes are its own dummy rows), then arms
+`amd_kernels.compile_watch`, which logs any later amd_kernels compile. Failures are
+logged, never raised: an unwarmed variant compiles on its first real use (as without
+this call). Nothing happens with every route off.
 """
 
 import torch
@@ -164,3 +166,10 @@ def run(vllm_config) -> None:
         logger.info("amd_kernels prefill routes warmed up")
     except Exception:  # noqa: BLE001
         logger.warning("amd_kernels prefill warm-up failed", exc_info=True)
+    try:
+        # every route's variants are compiled by now: log any later compile
+        from amd_kernels import compile_watch
+
+        compile_watch.arm(logger.warning)
+    except Exception:  # noqa: BLE001
+        logger.warning("amd_kernels compile_watch not armed", exc_info=True)

@@ -451,20 +451,14 @@ def _fp4_indexer(
                     starts.numel() - 1, block_table.shape[1] * 64, cache, out
                 )
             )
-            if (
-                prepped
-                and start == 0
-                and q_payload is not None
-                and end <= q_payload.shape[0]
-            ):
-                # the starts are decode rows' (0 .. num_decode_tokens): the clamp
-                # is a no-op unless this first tile ends before the last row
+            if prepped and start == 0 and end == m.num_decode_tokens:
+                # one tile of every decode row (the caller's rows may add graph
+                # padding past them): the starts are its rows', the clamp a no-op
+                assert q_payload is not None
                 assert q_scales is not None and q_weights is not None
                 quantized = (q_payload[:end], q_scales[:end])
                 tile_weights = q_weights[:end]
-                rel_starts = (
-                    starts if end == m.num_decode_tokens else starts.clamp(0, end)
-                )
+                rel_starts = starts
             elif fused_prep or akr_fused:
                 q_payload, q_scales, tile_weights, rel_starts = (
                     quantize_queries_and_weights(
@@ -1394,7 +1388,10 @@ class KimiK3DSAMultiStreamMLAWrapper(MultiHeadLatentAttentionWrapper):
 
 def _akr_post_load(w: MultiHeadLatentAttentionWrapper) -> None:
     """amd_kernels weights of one DSA layer and the compile-only warm-up (called at
-    the end of ``MLAAttention.process_weights_after_loading``)."""
+    the end of ``MLAAttention.process_weights_after_loading``). Nothing (and no
+    amd_kernels import) when every DSA kernel is off, e.g. without the package."""
+    if not any(akr_dsa.on(name) for name in akr_dsa.SWITCHES):
+        return
     w.akr_w = akr_dsa.build_weights(w)  # type: ignore[attr-defined]
     if w.akr_w.w_uv_t is not None:  # type: ignore[attr-defined]
         w.mla_attn.akr_w_uv_t = w.akr_w.w_uv_t  # type: ignore[attr-defined]
@@ -1654,6 +1651,9 @@ class KimiK3DSAAttention(nn.Module):
         if isinstance(self.mla_attn, KimiK3DSAMultiStreamMLAWrapper):
             # The sparse MLA backend takes the aux-stream merge from here.
             self.mla_attn.mla_attn.impl._dsa_ms_state = self.mla_attn.ms_state
+        # The sparse MLA backend's amd_kernels hooks (score gather + merge, decode
+        # kernel) for this layer only; each falls back to the stock ops on its own.
+        self.mla_attn.mla_attn.impl._akr_dsa = akr_dsa  # type: ignore[attr-defined]
         # amd_kernels weights and warm-up, after MLAAttention's own post-load
         self.mla_attn.mla_attn._akr_post_load = functools.partial(
             _akr_post_load, self.mla_attn

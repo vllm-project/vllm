@@ -32,7 +32,7 @@ layout (measured within 0-4% of the load-time shuffled layout; a shuffled copy w
 cost 0.9 GB / 4.7 GB per rank and break the stock fallbacks); the experts' weights are
 views of vLLM's aiter-layout parameters (`moe_weights`).
 
-Extra memory per rank (measured, test_akr_moe_layer_ranks8.py): ~170 MiB of main-stream
+Extra memory per rank (measured, akr/moe_layer_ranks8.py): ~170 MiB of main-stream
 workspaces (experts slot buffer 118 MB + q 30 MB, router slabs, aux tuples per row
 count), lent to each graph-capture stream (`swap_stream_workspaces`,
 akr_runtime.register_stream_workspaces) instead of a set per stream, plus the 8-rank
