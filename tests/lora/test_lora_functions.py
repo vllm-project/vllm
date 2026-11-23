@@ -2,7 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Script to test add_lora, remove_lora, pin_lora, list_loras functions."""
 
+import json
+from pathlib import Path
+from typing import cast
+
 import pytest
+import torch
 
 from vllm import LLM, RequestOutput, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
@@ -10,9 +15,10 @@ from vllm.entrypoints.launchers.api_server.entry import (
     build_async_engine_client_from_engine_args,
 )
 from vllm.exceptions import VLLMValidationError
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequest, _TensorLoRARequest
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.worker.worker_base import WorkerBase
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
 LORA_MODULE_PATH = "vllm-project/self_cognition_Alice"
@@ -241,3 +247,100 @@ def test_dummy_batch_keeps_loras(enforce_eager):
     while llm.has_unfinished_requests():
         llm.step()
     assert set(llm.list_loras()) == {1, 3}
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"_lora_tensors": {"weight": torch.ones(1)}}, "provided together"),
+        ({"_peft_config": {"r": 8}}, "provided together"),
+        ({"_lora_tensors": {}, "_peft_config": {}}, "cannot be empty"),
+    ],
+)
+def test_memory_lora_request_validation(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        _TensorLoRARequest("memory", 1, "worker-local", **kwargs)
+
+
+class _MemoryLoRAWorkerExtension:
+    def load_memory_lora(self, path: str, replace: bool = False):
+        # verl receives tensors on the worker before constructing its request.
+        # Read the real fixture here to exercise that boundary without a trainer.
+        worker = cast(WorkerBase, self)
+        if replace:
+            worker.remove_lora(2)
+        return worker.add_lora(
+            _TensorLoRARequest(
+                "memory",
+                2,
+                "worker-local",
+                _peft_config=json.loads(
+                    (Path(path) / "adapter_config.json").read_text()
+                ),
+                _lora_tensors=torch.load(
+                    Path(path) / "adapter_model.bin",
+                    map_location="cpu",
+                    weights_only=True,
+                ),
+            )
+        )
+
+
+@pytest.mark.parametrize("multiprocessing", ["0", "1"])
+def test_memory_lora_loading_and_reload(
+    vllm_runner,
+    monkeypatch,
+    qwen3_meowing_lora_files,
+    qwen3_woofing_lora_files,
+    multiprocessing,
+):
+    """Worker-local tensor loads match disk loads across a framework update."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", multiprocessing)
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    messages = [
+        {"role": "system", "content": "Follow the instructions to make animal noises"},
+        {"role": "user", "content": "Make your favorite animal noise."},
+    ]
+    with vllm_runner(
+        MODEL_PATH,
+        worker_extension_cls="tests.lora.test_lora_functions._MemoryLoRAWorkerExtension",
+        enable_lora=True,
+        max_loras=2,
+        max_cpu_loras=4,
+        max_lora_rank=8,
+        max_model_len=128,
+        enforce_eager=True,
+        enable_prefix_caching=True,
+        gpu_memory_utilization=0.3,
+    ) as runner:
+        llm = runner.get_llm()
+
+        def generate(request):
+            return llm.chat(
+                [messages],
+                SamplingParams(temperature=0, max_tokens=10),
+                chat_template_kwargs={"enable_thinking": False},
+                lora_request=request,
+            )[0].outputs[0]
+
+        disk = generate(LoRARequest("disk", 1, qwen3_meowing_lora_files))
+        assert all(
+            llm.collective_rpc("load_memory_lora", args=(qwen3_meowing_lora_files,))
+        )
+        # Generation carries only adapter identity, never the training tensors.
+        memory = LoRARequest("memory", 2, "worker-local")
+        loaded = generate(memory)
+        assert "Meow Meow Meow" in loaded.text
+        assert loaded.token_ids == disk.token_ids
+
+        # All generation is complete before the framework replaces the adapter.
+        assert all(
+            llm.collective_rpc(
+                "load_memory_lora", args=(qwen3_woofing_lora_files, True)
+            )
+        )
+        assert llm.llm_engine.reset_prefix_cache()
+        updated = generate(memory)
+        reference = generate(LoRARequest("woof", 3, qwen3_woofing_lora_files))
+        assert "Woof Woof Woof" in updated.text
+        assert updated.token_ids == reference.token_ids
