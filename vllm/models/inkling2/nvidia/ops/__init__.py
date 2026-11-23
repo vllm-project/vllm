@@ -34,8 +34,9 @@ def use_native_conv_mix() -> bool:
 
 @functools.cache
 def use_native_e4m3() -> bool:
-    """Whether Triton converts e4m3 (fp8e4nv) here, SM89+. Below, kernels
-    take e4m3 tensors as uint8 and convert in software (`ops/e4m3.py`)."""
+    """Whether the kernels let Triton convert e4m3 (fp8e4nv), SM90+. Below,
+    they take e4m3 tensors as uint8 and convert in software (`ops/e4m3.py`):
+    on SM89, Triton 3.8 converts fp32 through fp16, rounding twice."""
     from vllm.platforms import current_platform
 
-    return current_platform.has_device_capability(89)
+    return current_platform.has_device_capability(90)

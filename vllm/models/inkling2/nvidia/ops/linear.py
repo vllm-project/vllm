@@ -215,7 +215,8 @@ def k_group_partials(
     tokens, hidden = x.shape
     n = weight.shape[0]
     sm120 = current_platform.is_device_capability_family(120)
-    # SM12x and SM8x have ~100 KB of shared memory per block; SM8x has no TMA.
+    # SM12x, SM86 and SM89 have ~100 KB of shared memory per block; SM80 has
+    # 164 KB but takes the same (untuned) settings. SM8x has no TMA.
     small_smem = sm120 or not use_pdl()
     if tokens >= TMA_MIN_TOKENS and use_pdl():
         from triton.tools.tensor_descriptor import TensorDescriptor
