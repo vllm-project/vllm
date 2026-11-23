@@ -109,6 +109,46 @@ def test_routed_moe_matches_reference(tp: int, rows: int):
     assert err < 2e-2, f"TP{tp}, {rows} rows: relative L2 error {err:.3e}"
 
 
+class _Experts:
+    """The routed experts' gfx942 copies, as the mono decode layer's load hook
+    stores them (`experts.mono942`)."""
+
+    def __init__(self, copies):
+        self.mono942 = copies
+
+
+@pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
+@pytest.mark.parametrize("tp", [8, 4])
+@pytest.mark.parametrize("rows", [48, 144, 256])
+def test_block_matches_reference(tp: int, rows: int):
+    """The whole routed block as the model builds it (`LargeStepMoE`: pick
+    sort, x quantization, both stages, combine, shared scratch) against the
+    reference, so a change in how the block builds or chains its kernels shows
+    up here and not only in the model test."""
+    pytest.importorskip("flydsl")
+    from tests.kernels.models.amd import dsv41_largestep_ref as H
+    from vllm.models.deepseek_v41.amd.largestep.moe import LargeStepMoE
+    from vllm.models.deepseek_v41.amd.mono.weights942 import moe_copies
+
+    dev = torch.device("cuda:0")
+    g = torch.Generator(device=dev).manual_seed(1000 + rows + tp)
+    inter = 2304 // tp
+    w13, w13_s, w2, w2_s = _plain_weights(inter, dev, g)
+    copies = moe_copies(w13.clone(), w13_s, w2.clone(), w2_s, inter)
+    block = LargeStepMoE(_Experts(copies), tp, dev)
+    x = (torch.randn(rows, HID, generator=g, device=dev) * 0.5).to(torch.bfloat16)
+    topk = torch.stack(
+        [torch.randperm(E, generator=g, device=dev)[:TOPK] for _ in range(rows)]
+    )
+    tw = torch.rand(rows, TOPK, generator=g, device=dev) * 0.5
+    got = block(x, topk, tw).float()
+    torch.accelerator.synchronize()
+    ref = H.ref_routed(x, w13, w13_s, w2, w2_s, topk, tw, inter)
+    assert not torch.isnan(got).any()
+    err = ((got - ref).norm() / ref.norm()).item()
+    assert err < 2e-2, f"TP{tp}, {rows} rows: relative L2 error {err:.3e}"
+
+
 @pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
 @pytest.mark.parametrize("rows", [1, 16, 96, 256])
 def test_pick_sort_matches_host(rows: int):

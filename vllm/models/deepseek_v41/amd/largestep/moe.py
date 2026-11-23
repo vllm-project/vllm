@@ -7,10 +7,10 @@ Launches, all graph-capturable: pick sort (`moe_sort`), x to MXFP8
 (`moe_xq`), routed stage 1 (`moe_ug`), h to MXFP8, routed stage 2
 (`moe_down`), combine (`moe_small`). The routed weights are the mono decode
 layer's gfx942 copies (`mono942`). The shared expert is the layer's own
-(`shared_experts`), which was as fast as MXFP8 kernels of its own at 96 rows
-(about 31 us a layer at TP4 on MI300X).
+(`shared_experts`).
 """
 
+import functools
 import weakref
 
 import torch
@@ -52,14 +52,9 @@ class _Scratch:
         self.xs = z(m, HIDDEN // 32, dtype=torch.uint8)
 
 
-_SCRATCH: dict[tuple[int, torch.device], _Scratch] = {}
-
-
+@functools.cache
 def _scratch(tp: int, device: torch.device) -> _Scratch:
-    key = (tp, torch.device(device))
-    if key not in _SCRATCH:
-        _SCRATCH[key] = _Scratch(tp, device)
-    return _SCRATCH[key]
+    return _Scratch(tp, device)
 
 
 class LargeStepMoE:
@@ -73,7 +68,7 @@ class LargeStepMoE:
         self.combine = build_combine()
         self.sort = build_moe_sort()
         self.qx = build_quant_x()
-        self.scratch = _scratch(tp, device)
+        self.scratch = _scratch(tp, torch.device(device))
 
     def __call__(
         self, x: torch.Tensor, topk_ids: torch.Tensor, topk_weights: torch.Tensor
@@ -128,9 +123,6 @@ class LargeStepHook:
         # The decoder layer, whose attention metadata says whether a step is
         # decode-only. A weak reference: the layer owns this hook.
         self._layer = weakref.ref(layer)
-        # Calls that took the block, for tests. A CUDA graph replay does not
-        # count, so it counts eager and capture calls only.
-        self.steps = 0
         self.block = LargeStepMoE(moe_layer.experts.routed_experts, tp, device)
 
     def takes(self, x: torch.Tensor) -> bool:
@@ -149,7 +141,6 @@ class LargeStepHook:
         topk_w, topk_ids = moe_layer.experts.router.select_experts(
             x, logits, input_ids=input_ids
         )
-        self.steps += 1
         # The routed sum in bf16 plus the shared expert in bf16, as the
         # original path adds them before its all-reduce.
         out = self.block(x, topk_ids, topk_w) + moe_layer.shared_experts(x)

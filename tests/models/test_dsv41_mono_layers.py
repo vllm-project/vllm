@@ -77,9 +77,8 @@ def _arch() -> str:
 # run the large-step MoE block (`largestep`) under --monokernel.
 CASES = {
     "cdna4": [(2, 8), (4, 8), (8, 8), (8, 28)],
-    "gfx942": [(4, 8), (4, 42), (4, 48), (8, 8), (8, 42), (8, 48), (8, 96)],
+    "gfx942": [(4, 8), (4, 42), (4, 48), (4, 96), (8, 8), (8, 42), (8, 48), (8, 96)],
 }
-LARGE_STEP_ROWS = 43  # gfx942: steps of more rows run the large-step block
 
 
 @torch.no_grad()
@@ -233,7 +232,20 @@ class MonoProbe:
             )
 
         self._gaps: dict = {}
+        # Calls that took the large-step block, per layer. The test counts them
+        # by wrapping the hook's forward, so the model keeps no test state.
+        # enforce_eager, so every step is a call.
+        self._large: dict = {}
         for i, layer in self._decoder_layers().items():
+            ls = getattr(layer.ffn, "largestep", None)
+            if ls is not None:
+                self._large[i] = 0
+
+                def counted(*a, _f=ls.forward, _i=i, **kw):
+                    self._large[_i] += 1
+                    return _f(*a, **kw)
+
+                ls.forward = counted
             layer.register_forward_hook(_host_reads(hook(i)), with_kwargs=True)
             layer.register_forward_pre_hook(pos_hook, with_kwargs=True)
             gap = gap_hook(i, layer)
@@ -274,8 +286,7 @@ class MonoProbe:
             "layers": layers,
             "epoch": -1 if runner is None else int(runner.epoch[0]),
             "large_steps": {
-                i: getattr(m.ffn.largestep, "steps", None)
-                for i, m in self._decoder_layers().items()
+                i: getattr(self, "_large", {}).get(i) for i in self._decoder_layers()
             },
         }
 
@@ -518,8 +529,11 @@ def _merged_matches_two_launches(vllm_runner, monkeypatch) -> None:
 
 @pytest.mark.parametrize(
     ("tp", "rows"),
-    [(2, 8), (4, 8), (4, 42), (4, 48), (8, 8), (8, 28), (8, 42), (8, 48), (8, 96)],
-)
+    [
+        (2, 8), (4, 8), (4, 42), (4, 48), (4, 96),
+        (8, 8), (8, 28), (8, 42), (8, 48), (8, 96),
+    ],
+)  # fmt: skip
 def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, rows):
     arch = _arch()
     if not arch:
@@ -556,7 +570,9 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
     # in every layer at every decode step.
     launches = len(WHOLE + FFN)  # one launch (pair) a layer a step
     copies = arch == "gfx942"
-    large = arch == "gfx942" and rows >= LARGE_STEP_ROWS
+    from vllm.models.deepseek_v41.amd.largestep.moe import MIN_ROWS
+
+    large = arch == "gfx942" and rows >= MIN_ROWS
     for rank in probe_on:
         assert rank["layers"] == {
             i: ["whole" if i in WHOLE else "ffn", True, copies] for i in WHOLE + FFN

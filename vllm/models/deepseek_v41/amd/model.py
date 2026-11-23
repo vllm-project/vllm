@@ -380,8 +380,7 @@ class DeepseekV4DecoderLayer(nn.Module):
 
     def process_weights_after_loading(self) -> None:
         if self.mono is not None:
-            self.mono.build_runner(self.attn_norm.weight.device)
-            self._build_largestep()
+            self.mono.build_runner(self.attn_norm.weight.device, self)
         if not self.use_mega_mhc or not self.hc_attn_fn.is_cuda:
             return
         # Reloads and in-place updates end here too; refilled in place, so
@@ -405,17 +404,6 @@ class DeepseekV4DecoderLayer(nn.Module):
             )
         if self.mhc_overlap is not None:
             self.mhc_overlap.prepare_mega_mhc(self.hidden_size, self.hc_ffn_fn.device)
-
-    def _build_largestep(self) -> None:
-        """gfx942: the large-step MoE block of this layer
-        (`largestep.moe.LargeStepHook`). It reads the gfx942 weight copies the
-        mono decode layer made at load, so only layers with a mono decode
-        layer get one."""
-        from vllm.models.deepseek_v41.amd import largestep_gate
-
-        hook = largestep_gate.build(self)
-        if hook is not None:
-            self.ffn.largestep = hook
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:

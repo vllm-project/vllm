@@ -13,8 +13,10 @@ is checked on the kernels' own FFN input, where routing cannot differ.
 
 On gfx942 at TP4 and TP8, `test_mono_decode_942_replays` runs the composed runner on
 the copies of the weights that the model makes at load, at steps of 6, 8 and 42
-rows, and replays the steps in one CUDA graph. The real model's numerics on
-gfx942 are checked by `test_dsv41_mono_layers.py`."""
+rows, and replays the steps in one CUDA graph. `test_largestep_hook_matches_moe`
+runs one MoE layer's large-step block (`largestep.moe.LargeStepHook.forward`)
+against `DeepseekV4MoE.forward` at 48, 144 and 256 rows. The real model's
+numerics on gfx942 are checked by `test_dsv41_mono_layers.py`."""
 
 import shutil
 import subprocess
@@ -890,3 +892,86 @@ def test_mono_decode_942_replays(monkeypatch: pytest.MonkeyPatch, tp: int):
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
     multi_process_parallel(monkeypatch, tp, 1, _mono_replay_942)
+
+
+# ------------------------------------------------- gfx942 large-step MoE block
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _largestep_hook(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        m.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        rocm_aiter_ops.refresh_env_variables()
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        init_workspace_manager(device)
+        _check_largestep_hook(rank, tp_size, device)
+
+
+def _check_largestep_hook(rank: int, tp: int, device) -> None:
+    """One MoE layer with random weights, built the way the model builds it at
+    load: the gfx942 copies of the routed experts (`mono942`), then the hook.
+    The block's output (routed + shared, all-reduced) against the layer's own
+    forward on the same input, with the same router."""
+    import types
+
+    from vllm.config import set_current_vllm_config
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.models.deepseek_v41.amd import mono_decode
+    from vllm.models.deepseek_v41.amd.largestep.moe import LargeStepHook
+    from vllm.models.deepseek_v41.amd.model import DeepseekV4MoE
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    vc = EngineArgs(
+        model=MODEL,
+        tensor_parallel_size=tp,
+        moe_backend="aiter",
+        load_format="dummy",
+        max_model_len=65536,
+        language_model_only=True,
+    ).create_engine_config()
+    with set_current_vllm_config(vc), set_default_torch_dtype(torch.bfloat16), device:
+        moe = DeepseekV4MoE(vc, prefix="model.layers.21.ffn")
+    # The load hook that gives the routed experts their gfx942 copies.
+    mono_decode._capture_plain_experts(moe.experts.routed_experts)
+    _random_moe(
+        moe,
+        torch.Generator(device=device).manual_seed(2001 + rank),
+        torch.Generator(device=device).manual_seed(2000),
+        inter=mono_decode._routed_inter_942(),
+    )
+    process_weights_after_loading(moe, vc.model_config, device)
+    hook = LargeStepHook(types.SimpleNamespace(), moe, tp, device)
+    g = torch.Generator(device=device).manual_seed(3000)
+    for rows in (48, 144, 256):
+        x = (torch.randn(rows, HIDDEN, generator=g, device=device) * 0.5).to(
+            torch.bfloat16
+        )
+        ids = torch.randint(0, 1000, (rows,), generator=g, device=device)
+        # The layer has no hook (`moe.largestep` is None), so `moe(...)` is the
+        # original path. Both run under the same forward context.
+        with set_forward_context(None, vc):
+            got = hook.forward(moe, x.clone(), ids).float()
+            want = moe(x.clone(), ids).float()
+        assert not torch.isnan(got).any(), rows
+        err = _rel(got, want)
+        # Both paths quantize x to MXFP8 and round each pick to bf16. The f32
+        # sums run in other orders, so near-tie values can round apart.
+        assert err < 3e-2, f"TP{tp} rank {rank}, {rows} rows: rel L2 {err:.3e}"
+
+
+@pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
+def test_largestep_hook_matches_moe(monkeypatch: pytest.MonkeyPatch):
+    if torch.accelerator.device_count() < 4:
+        pytest.skip("needs 4 GPUs")
+    pytest.importorskip("flydsl")
+    multi_process_parallel(monkeypatch, 4, 1, _largestep_hook)

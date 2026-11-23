@@ -545,10 +545,21 @@ class MonoDecodeLayer:
         logger.info_once("DSv4.1 mono decode: the whole standard backbone layers")
         return MonoDecodeLayer()
 
-    def build_runner(self, device: torch.device) -> None:
+    def build_runner(self, device: torch.device, layer=None) -> None:
         """Build the layer's runner after loading rather than at its first
-        decode step, which must not allocate, exchange handles or sync."""
+        decode step, which must not allocate, exchange handles or sync.
+
+        On gfx942 it also gives `layer` (the decoder layer) the large-step MoE
+        block for the decode steps above this layer's row limit
+        (`largestep.moe.LargeStepHook`), which reads the gfx942 weight copies
+        made here."""
         _mono_runner(device, self if self.draft else None)
+        if layer is not None:
+            from vllm.models.deepseek_v41.amd import largestep_gate
+
+            hook = largestep_gate.build(layer)
+            if hook is not None:
+                layer.ffn.largestep = hook
 
     def weights(self, layer: "DeepseekV4DecoderLayer"):
         if self._weights is not None:
