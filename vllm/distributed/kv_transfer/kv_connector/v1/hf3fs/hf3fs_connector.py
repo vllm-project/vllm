@@ -97,6 +97,17 @@ logger = init_logger(__name__)
 # ============================================================================
 
 
+class _SaveGather:
+    """When a save task has copied its blocks into device buffers."""
+
+    def __init__(self) -> None:
+        # Set once the gather is enqueued, or when the task ends without one.
+        self.enqueued = threading.Event()
+        # Recorded on the save stream after the gather.
+        # None if the task ended before gathering.
+        self.cuda_event: torch.cuda.Event | None = None
+
+
 class AsyncOperationManager:
     """Manages async save/load operations with background threads."""
 
@@ -113,6 +124,7 @@ class AsyncOperationManager:
 
         # Operation tracking
         self._save_futures: dict[str, list[Future]] = {}
+        self._save_gathers: dict[str, list[_SaveGather]] = {}
         self._load_futures: dict[str, Future] = {}
         self._pending_finished_requests: set[str] = set()
 
@@ -170,12 +182,14 @@ class AsyncOperationManager:
         future: Future[Any] = Future()
         main_stream_event = torch.cuda.Event()
         main_stream_event.record()
-        task = (request_id, block_ids, block_hashes, future, main_stream_event)
+        gather = _SaveGather()
+        task = (request_id, block_ids, block_hashes, future, main_stream_event, gather)
         self._save_queue.put(task)
 
         if request_id not in self._save_futures:
             self._save_futures[request_id] = []
         self._save_futures[request_id].append(future)
+        self._save_gathers.setdefault(request_id, []).append(gather)
         return future
 
     def submit_load_operation(self, request_id: str, block_ids, block_hashes) -> Future:
@@ -210,6 +224,7 @@ class AsyncOperationManager:
             if request_id in self._save_futures and self._all_saves_done(request_id):
                 completed.add(request_id)
                 self._save_futures.pop(request_id)
+                self._save_gathers.pop(request_id, None)
                 self._pending_finished_requests.remove(request_id)
 
         # Process newly finished requests
@@ -218,6 +233,7 @@ class AsyncOperationManager:
                 if self._all_saves_done(request_id):
                     completed.add(request_id)
                     self._save_futures.pop(request_id)
+                    self._save_gathers.pop(request_id, None)
                 else:
                     self._pending_finished_requests.add(request_id)
             else:
@@ -238,14 +254,17 @@ class AsyncOperationManager:
         """Check if all save operations for a request are completed."""
         return all(future.done() for future in self._save_futures[request_id])
 
-    def wait_for_saves(self, request_ids: set[str]) -> None:
-        """Block until every queued save of these requests has finished."""
-        futures = [
-            future
-            for request_id in request_ids
-            for future in self._save_futures.get(request_id, ())
-        ]
-        concurrent.futures.wait(futures)
+    def wait_for_gathers(self, request_ids: set[str]) -> None:
+        """Block until every queued save of these requests has gathered its blocks.
+
+        The write to 3FS and the metadata confirm read only the device buffers.
+        So they don't need to finish before the blocks are reused.
+        """
+        for request_id in request_ids:
+            for gather in self._save_gathers.get(request_id, ()):
+                gather.enqueued.wait()
+                if gather.cuda_event is not None:
+                    gather.cuda_event.synchronize()
 
     def _save_worker(self) -> None:
         """Background worker for handling save operations."""
@@ -253,11 +272,15 @@ class AsyncOperationManager:
         while not self._stop_event.is_set():
             try:
                 task = self._save_queue.get(block=True, timeout=1)
-                self._handle_save_task(task)
             except Empty:
                 continue
+            try:
+                self._handle_save_task(task)
             except Exception as e:
                 logger.error("Save worker error: %s", e)
+            finally:
+                # A task that ended without gathering must not block its waiters.
+                task[-1].enqueued.set()
 
     def _load_worker(self) -> None:
         """Background worker for handling load operations."""
@@ -273,7 +296,7 @@ class AsyncOperationManager:
 
     def _handle_save_task(self, task) -> None:
         """Handle individual save task with proper stream synchronization."""
-        request_id, block_ids, block_hashes, future, main_stream_event = task
+        request_id, block_ids, block_hashes, future, main_stream_event, gather = task
         start_time = time.perf_counter()
         buffers = None
         try:
@@ -312,6 +335,8 @@ class AsyncOperationManager:
 
                 save_stream_event = torch.cuda.Event()
                 save_stream_event.record(self._save_stream)  # Record gather completion
+            gather.cuda_event = save_stream_event
+            gather.enqueued.set()
 
             # Step3: Write data in batches
             write_futures = []
@@ -617,19 +642,20 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             raise
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
-        """Finish the saves of preempted requests before their blocks are reused.
+        """Finish the gathers of preempted requests before their blocks are reused.
 
         A save gathers its blocks on the save thread, after the step that wrote them.
         Preemption frees the blocks at once.
-        This step's forward can then write another request's KV into them.
+        This step's forward or a load can then write another request's KV into them.
         Waiting here keeps the gather reading the preempted request's own KV.
+        The host waits for the gather because loads scatter on their own stream.
         """
         if not isinstance(kv_connector_metadata, HF3FSConnectorMetadata):
             return
         manager = getattr(self, "_async_manager", None)
         if manager is None or not kv_connector_metadata.preempted_req_ids:
             return
-        manager.wait_for_saves(kv_connector_metadata.preempted_req_ids)
+        manager.wait_for_gathers(kv_connector_metadata.preempted_req_ids)
 
     def save_kv_layer(
         self,

@@ -107,7 +107,7 @@ class SaveHold:
         hold = self
 
         def held_save(manager, task):
-            _, block_ids, block_hashes, _, _ = task
+            _, block_ids, block_hashes, *_ = task
             with hold.lock:
                 hold.in_flight += 1
             try:
