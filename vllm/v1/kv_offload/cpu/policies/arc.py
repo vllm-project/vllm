@@ -17,7 +17,7 @@ from vllm.v1.kv_offload.cpu.policies.base import (
 
 @dataclass(slots=True)
 class _RunningT1Keys:
-    """T1 chunks inserted by a request that has not finished, by position."""
+    """T1 chunks used by a request that has not finished, by position."""
 
     owner: object
     cache_generation: int
@@ -115,6 +115,26 @@ class ARCCachePolicy(CachePolicy):
         else:
             state.entries.append(entry)
         self._running[key] = (state, position)
+
+    @override
+    def on_request_access(
+        self, keys: Iterable[OffloadKey], req_context: ReqContext
+    ) -> None:
+        for key in keys:
+            if key not in self.t1 or key in self._running:
+                continue
+            position = req_context.get_offload_key_position(key)
+            if position is None:
+                continue
+            # Reused T1 prefixes must age with newly inserted suffixes too.
+            # Frequency promotion still happens only at request finish.
+            state = self._get_running_keys(req_context)
+            entry = (position, key)
+            if state.entries and entry < state.entries[-1]:
+                bisect.insort(state.entries, entry)
+            else:
+                state.entries.append(entry)
+            self._running[key] = (state, position)
 
     @override
     def remove(self, key: OffloadKey) -> None:
