@@ -252,6 +252,17 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    @classmethod
+    def restores_only_local_kv(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        """Whether every external hit restores KV that this engine computed and
+        offloaded itself, as a host or disk tier does.
+
+        The engine then still runs each request's last prompt token, so
+        speculators that need the target's hidden states keep working. False
+        for connectors that hand KV off between engines.
+        """
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
