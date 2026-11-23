@@ -485,6 +485,9 @@ class TestStreaming:
         results = _stream(parser, mock_request, text, chunk_size)
         assert collect_function_name(results) == "get_weather"
         assert collect_tool_arguments(results) == tools[0].arguments
+        # The caller receives the bare args object, not the Inkling
+        # `{"name": ..., "args": ...}` wrapper.
+        assert json.loads(collect_tool_arguments(results)) == {"city": "SF"}
 
     @pytest.mark.parametrize("chunk_size", [1, 9])
     def test_parallel_calls_streaming(self, mock_tokenizer, mock_request, chunk_size):

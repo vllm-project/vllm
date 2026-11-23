@@ -1277,7 +1277,7 @@ class ParserEngine(Parser):
 
     @staticmethod
     def _extract_args_value(parsed: dict) -> str | None:
-        for key in ("arguments", "parameters"):
+        for key in ("args", "arguments", "parameters"):
             if key in parsed:
                 val = parsed[key]
                 if isinstance(val, str):
