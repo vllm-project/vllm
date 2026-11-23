@@ -132,10 +132,11 @@ def mamba_nvfp4_checkpoint(tmp_path):
     not current_platform.is_device_capability_family(120),
     reason="Mamba's configured-B12x override requires SM120/SM121",
 )
+@pytest.mark.parametrize("prompt_tokens", [79, 111])
 def test_mamba_nvfp4_loaded_generation(
-    vllm_runner, mamba_nvfp4_checkpoint, monkeypatch, enable_pickle
+    vllm_runner, mamba_nvfp4_checkpoint, monkeypatch, enable_pickle, prompt_tokens
 ):
-    """Load/pack, run a ragged M=79 prefill, then two recurrent decode steps."""
+    """Load/pack, run a ragged prefill, then two recurrent decode steps."""
     capability = current_platform.get_device_capability()
     assert capability is not None and capability.to_int() in (120, 121), (
         "Run this regression in the DGX Spark Mamba Marlin CI step"
@@ -148,7 +149,9 @@ def test_mamba_nvfp4_loaded_generation(
         else:
             monkeypatch.delenv("VLLM_DISABLED_KERNELS", raising=False)
 
-        def check_model(worker, disable_marlin=disable_marlin):
+        def check_model(
+            worker, disable_marlin=disable_marlin, expected_prefill=prompt_tokens
+        ):
             from vllm.model_executor.kernels.linear.nvfp4.b12x import (
                 B12xNvFp4W4A16LinearKernel,
             )
@@ -175,6 +178,19 @@ def test_mamba_nvfp4_loaded_generation(
                 assert projection.weight.dtype == (
                     torch.uint8 if disable_marlin else torch.int32
                 )
+                rows = []
+                handles = []
+
+                def check_rows(module, args, rows=rows, handles=handles):
+                    inputs = args[0]
+                    actual = inputs.numel() // inputs.shape[-1]
+                    expected = expected_prefill if not rows else 1
+                    assert actual == expected, (actual, expected)
+                    rows.append(actual)
+                    if len(rows) == 2:
+                        handles[0].remove()
+
+                handles.append(projection.register_forward_pre_hook(check_rows))
 
         with vllm_runner(
             mamba_nvfp4_checkpoint,
@@ -191,7 +207,7 @@ def test_mamba_nvfp4_loaded_generation(
         ) as runner:
             runner.collective_rpc(check_model)
             result = runner.generate_w_logprobs(
-                [[1] + [3 + index % 253 for index in range(78)]],
+                [[1] + [3 + index % 253 for index in range(prompt_tokens - 1)]],
                 SamplingParams(
                     temperature=0,
                     max_tokens=3,

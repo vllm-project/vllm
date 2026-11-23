@@ -307,6 +307,24 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
   const bool bolt_input = prob_n == 18560 && prob_k == 4096;
   const bool bolt_output = prob_n == 4096 && prob_k == 8192;
+  #ifdef VLLM_MARLIN_GROUPED_NVFP4
+  if (use_sm121_nvfp4_profile && bolt_output && prob_m >= 97 && prob_m <= 127 &&
+      workspace_size >= sms && max_shared_mem >= 101376) {
+    auto kernel =
+        get_grouped_nvfp4_marlin_kernel(GroupedNvfp4Kernel::M64N256Partial);
+    // Keep two 64-row tiles while masking the final tile to its live rows.
+    constexpr int shared_mem = 101376;
+    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         shared_mem);
+    // clang-format off
+    kernel<<<sms, 256, shared_mem, stream>>>(
+        A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, b_s_ptr, g_s_ptr, zp_ptr,
+        prob_m, prob_n, prob_k, lda, locks, has_bias, use_atomic_add,
+        use_fp32_reduce, shared_mem);
+    // clang-format on
+    return;
+  }
+  #endif
   const bool small_input_profile = use_sm121_nvfp4_profile && bolt_input &&
                                    prob_m <= 8192 && max_shared_mem >= 22528;
   bool use_input_profile = false;

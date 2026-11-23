@@ -48,6 +48,7 @@ enum class GroupedNvfp4Kernel {
   M64Whole,
   M64Partial,
   M64WholeG16,
+  M64N256Partial,
 };
 
 }  // namespace MARLIN_NAMESPACE_NAME

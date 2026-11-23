@@ -413,6 +413,9 @@ def test_marlin_gemm(
                 95,
                 96,
                 97,
+                98,
+                111,
+                126,
                 127,
                 128,
                 129,
@@ -438,8 +441,12 @@ def test_marlin_gemm(
                 8193,
             )
         ],
-        *[(m, 8192, 4096, "strided") for m in (79, 256)],
-        *[(m, 8192, 4096, "minimal_workspace") for m in (256, 2049)],
+        *[(m, 8192, 4096, "strided") for m in (79, 97, 256)],
+        *[(m, 8192, 4096, "minimal_workspace") for m in (97, 111, 127, 256, 2049)],
+        *[
+            (97, 8192, 4096, layout)
+            for layout in ("bias", "atomic", "bf16_reduce", "undersized_workspace")
+        ],
     ],
 )
 def test_marlin_nvfp4_projection_profiles(size_m, size_k, size_n, layout):
@@ -460,21 +467,31 @@ def test_marlin_nvfp4_projection_profiles(size_m, size_k, size_n, layout):
     )
     workspace = marlin_make_workspace_new(inputs.device, max_blocks_per_sm=2)
     workspace_guard = None
-    if layout in ("minimal_workspace", "below_profile_workspace"):
+    if layout in (
+        "minimal_workspace",
+        "below_profile_workspace",
+        "undersized_workspace",
+    ):
         sms = torch.cuda.get_device_properties(inputs.device).multi_processor_count
         workspace_guard = torch.full(
             (2 * sms + 64,), 12345, dtype=torch.int32, device=inputs.device
         )
-        lock_count = sms if layout == "minimal_workspace" else 2 * sms - 1
+        lock_count = {
+            "minimal_workspace": sms,
+            "below_profile_workspace": 2 * sms - 1,
+            "undersized_workspace": sms - 1,
+        }[layout]
         workspace = workspace_guard[:lock_count]
         workspace.zero_()
+    bias = rand_data((size_n,), dtype) if layout == "bias" else None
+    packed_bias = marlin_permute_bias(bias) if bias is not None else None
 
     def run(inputs, output=None):
         return ops.marlin_gemm(
             inputs,
             output,
             weight,
-            None,
+            packed_bias,
             scales,
             global_scale,
             None,
@@ -483,12 +500,19 @@ def test_marlin_nvfp4_projection_profiles(size_m, size_k, size_n, layout):
             size_m,
             size_n,
             size_k,
-            use_atomic_add=False,
-            use_fp32_reduce=True,
+            use_atomic_add=layout == "atomic",
+            use_fp32_reduce=layout != "bf16_reduce",
             is_zp_float=False,
         )
 
+    if layout == "undersized_workspace":
+        with pytest.raises(RuntimeError, match="below min_workspace_size"):
+            run(inputs)
+        return
+
     reference = torch.matmul(inputs, weight_ref)
+    if bias is not None:
+        reference += bias
     guarded_output = torch.full(
         (size_m + 128, size_n), 2048, dtype=dtype, device="cuda"
     )
