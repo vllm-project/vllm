@@ -9,7 +9,6 @@ env:
   VLLM_ROCM_USE_AITER: "1"
 server_args: >-
   --tokenizer-mode deepseek_v4
-  --trust-remote-code
   --max-model-len 8192
   --tensor-parallel-size 4
   --enable-expert-parallel

@@ -64,18 +64,29 @@ that vLLM can hide table lookups behind the compute of the preceding layers
 (see below).
 
 In vLLM, hashing, lookup, and gating run as fused Triton kernels over FP8
-rows with ue8m0 block scales. The layer layout — table sizes, n-gram size,
-head count — is fixed by the checkpoint and is not user-configurable. Only the
+or packed MXFP4 rows with ue8m0 block-32 scales. The layer layout — table
+sizes, n-gram size, head count — is fixed by the checkpoint and is not user-configurable. Only the
 storage and sharding described below are configurable, via
 `--engram-config`, which takes a JSON object and can also be set field by
 field as `--engram-config.<field>`
 ([CLI reference](../cli/serve.md#-engram-config)).
+
+DeepSeek V4.1 checkpoints select packed MXFP4 tables with
+`quantization_config.engram_embed_quant: "mxfp4"`; absent or `"fp8"` keeps
+FP8 tables. MXFP4 stores two E2M1 values per byte, with the even column in
+the low nibble. If specified, `engram_embed_block_size` must be `32`,
+`engram_embed_scale_dtype` must be `"ue8m0"`, and `engram_embed_layers` must
+match `engram_layer_ids`. Mixed per-layer table formats are not supported.
+These fields are read from checkpoint metadata.
 
 ## CPU offload
 
 Engram tables dwarf typical embedding weights: [DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
 carries two Engram layers of roughly 384M table rows each, with 256-byte FP8
 entries plus their ue8m0 block scales — about 200 GB of table weights alone.
+The MXFP4 tables in `nvidia/DeepSeek-V4.1-Flash-NVFP4` use 128-byte rows
+plus 8 scale bytes, reducing the full tables to about 104 GB (97 GiB).
+Packed tables work with CPU offload, shared host storage, and GPU peer reads.
 Because lookups are deterministic — the indices are known from the token ids
 alone, before the forward pass — the tables need not sit in GPU memory at
 all. By default vLLM stores them in **pinned host memory** and serves lookups
@@ -150,8 +161,8 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 ```
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
-Qwen4Exp PLE tables are ETP-sharded instead and honor only `cpu_offload` and
-`disk_offload`.
+Qwen4Exp PLE tables use ETP sharding by default. On NVIDIA they can also use
+the cross-engine Engram pool described below.
 
 ## Sharing host tables across DP replicas
 
@@ -172,6 +183,85 @@ and falls back to per-replica (or DP-sharded) tables with a warning when:
 Requirements: `cpu_offload` enabled, `--data-parallel-size > 1`, and a shared
 IPC namespace across the co-located replicas.
 
+On ROCm, `VLLM_ROCM_ENGRAM_HIP_VMM=1` places the shared tables in HIP VMM host
+memory instead, which is faster to fill than `/dev/shm`. It is off by default:
+on affected amdgpu drivers (for example 6.16.6) the tables' host memory is not
+freed after the replicas exit, until reboot
+([ROCm/rocm-systems#13573](https://github.com/ROCm/rocm-systems/issues/13573)).
+Any HIP VMM failure falls back to `/dev/shm` on every replica.
+
+## Splitting tables across engines (DeepSeek V4.1)
+
+Engines that can reach each other's GPUs, such as the prefill and decode
+engines of a disaggregated deployment, can split each table's rows over all of
+their GPUs instead of keeping a copy per engine. Each GPU holds
+1/`peer_group_size` of every table and reads the other rows from their owner:
+
+```bash
+# Every engine of the group, e.g. 9 DEP2 prefill engines (18 GPUs):
+--engram-config.cpu_offload false \
+--engram-config.peer_group_size 18 \
+--engram-config.peer_group_store "$HOME/engram-peers/$SLURM_JOB_ID/store"
+```
+
+`peer_group_size` is the sum of the engines' GPU counts. `peer_group_store` is
+a file the engines meet through once at startup: give every engine the same
+path, reachable by all of them (a shared filesystem across nodes) and fresh per
+launch. `peer_group_transport` picks how rows move:
+
+- `nvlink` (default): with `cpu_offload=true`, each shard lives in Extended
+  GPU Memory (EGM) on its owner's local Grace NUMA node. Set
+  `cpu_offload=false` to place shards in HBM. Both placements require CUDA
+  FABRIC handles, an IMEX channel, and peer access over NVLink. EGM also
+  requires host NUMA VMM support and enough free Grace memory.
+- `rdma`: the owner's NIC gathers rows from its HBM, or from its host memory
+  with `cpu_offload` enabled, into RDMA WRITEs (RoCE v2 or InfiniBand, through
+  libibverbs) that the fetching GPU builds and hands to the owner itself (it
+  rings the NIC's doorbell); no SM moves rows. Each GPU uses the active mlx5
+  RDMA device closest to it (behind its PCIe switch, else on its NUMA node)
+  and starts a proxy process that posts the WRs it is handed.
+  Peers exchange memory keys at startup, so the network must be trusted.
+
+`peer_group_fetch` picks where the fetch kernels run: `sync` (default) on the
+compute stream, started before the decoder layers with each Engram layer
+waiting for its own rows; `async` on a side stream. Full CUDA graphs capture
+both; piecewise ones break at the start and at each Engram layer's wait.
+
+For Qwen3.8-Flash-Next-FP8, use `peer_group_fetch=sync` with either transport.
+For a cross-node group, set `peer_group_transport=rdma`. Set `cpu_offload=true`
+for pinned host shards or false for HBM shards. Start every engine
+with the same checkpoint and revision. Each worker loads the FP8 PLE rows
+assigned to its peer rank and keeps a local copy of the table's scale. The PLE
+layer reads from the pool on the compute stream. Set `disk_offload` and
+`embedding_across_dp` to false (their defaults).
+
+Use a full checkpoint with the pool. The `ipc_cache` and `sharded_state` loaders
+and online weight updates are unsupported. Restart the peer group to change
+weights.
+
+Prefill and decode engines can share one group (each GPU holds less of every
+table) or form one group each (each group holds a full copy, and neither slows
+the other). With `rdma`, engines that step independently in one group, such as
+prefill and decode engines or several aggregated engines, share the owners'
+NICs: `peer_group_rdma_inflight` (default 8, 0 for no limit) bounds the
+prefill-sized gathers each NIC keeps in flight, so one engine's prefill delays
+another's decode fetches only slightly while prefill fetches keep their rate.
+The DP ranks of one engine step together, so it does not matter within one
+engine.
+
+With `cpu_offload`, each GPU's NIC reads the host shards of its own node
+itself, so the engines of a node must run as one user in one PID namespace
+(they open each other's shards through `/proc`), and no traffic goes from one
+NIC of a node to another. That is required on rail-optimized fabrics, whose
+NICs of one node cannot reach each other. Point `peer_group_thp_dir` at a tmpfs
+mounted with `huge=always` to put host shards on huge pages: NICs gather rows
+at random and miss their address-translation cache on nearly every 4 KB page.
+Mount it with `mount -t tmpfs -o huge=always,size=<size> none <dir>`, or
+inside `unshare -Urm` without root.
+
+Both require TP=1 and PP=1. Weights cannot be reloaded, and restarting one
+engine means restarting the group.
+
 ## Limitations
 
 - CUDA-alike platforms only.
@@ -179,3 +269,5 @@ IPC namespace across the co-located replicas.
   `--enable-dbo` and set `--ubatch-size 0`.
 - `dp_shared_memory` requires `cpu_offload`, `data_parallel_size > 1`, and is
   unsupported with elastic expert parallelism.
+- MXFP4 tables use BF16 row exchange when DP-sharded; the batched FP8
+  exchange optimization is disabled for these tables.

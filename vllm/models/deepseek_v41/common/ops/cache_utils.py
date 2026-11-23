@@ -237,6 +237,7 @@ def _dequantize_and_gather_k_kernel(
         gather_len = seq_len
     start_pos = seq_len - gather_len
 
+    out_row_ptr = out_ptr + batch_idx.to(tl.int64) * out_stride0
     for i in range(worker_id, gather_len, num_workers):
         # Calculate the actual token index in the sequence
         pos = start_pos + i
@@ -268,7 +269,7 @@ def _dequantize_and_gather_k_kernel(
         token_bf16_ptr = token_data_ptr + fp8_dim
 
         # Output pointer for this token (flattened)
-        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        output_row_ptr = out_row_ptr + (offset + i) * out_stride1
 
         # ========== Dequantize FP8 portion using UE8M0 ==========
         for qblock_idx in tl.static_range(n_quant_blocks):
@@ -356,6 +357,7 @@ def _dequantize_and_gather_k_one_pass_kernel(
         gather_len = seq_len
     start_pos = seq_len - gather_len
 
+    out_row_ptr = out_ptr + batch_idx.to(tl.int64) * out_stride0
     for i in range(worker_id, gather_len, num_workers):
         pos = start_pos + i
         block_in_seq = pos // cache_block_size
@@ -372,7 +374,7 @@ def _dequantize_and_gather_k_one_pass_kernel(
             + cache_block_size * token_data_size
             + pos_in_block * scale_dim
         )
-        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        output_row_ptr = out_row_ptr + (offset + i) * out_stride1
 
         # The tile is scale_dim * quant_block = 512 against an fp8 region of
         # 448: the tail reads the token's own bf16 bytes, is scaled by a scale
@@ -436,6 +438,7 @@ def _dequantize_and_gather_k_mxfp8_kernel(
 
     d = tl.arange(0, head_dim)
     s = tl.arange(0, scale_dim)
+    out_row_ptr = out_ptr + batch_idx.to(tl.int64) * out_stride0
     for i in range(worker_id, gather_len, num_workers):
         pos = start_pos + i
         block_in_seq = pos // cache_block_size
@@ -461,7 +464,7 @@ def _dequantize_and_gather_k_mxfp8_kernel(
         scale = tl.exp2(encoded.to(tl.float32) - 127.0)
         dequant = tl.reshape(tiles * tl.reshape(scale, (scale_dim, 1)), (head_dim,))
 
-        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        output_row_ptr = out_row_ptr + (offset + i) * out_stride1
         tl.store(output_row_ptr + d, dequant.to(tl.bfloat16))
 
 
@@ -872,26 +875,10 @@ def combine_topk_swa_indices(
 _COMBINE_TOPK_SWA_NUM_WORKERS = 256
 
 
-# Representative pointer alignment variants for Triton pointer specialization.
+# Representative topk_indices alignment variants for Triton specialization.
 _COMBINE_TOPK_SWA_POINTER_INPUTS = zip_inputs(
-    dict(
-        topk_indices=True,
-        query_start_loc=True,
-        seq_lens=True,
-        gather_lens=True,
-    ),
-    dict(
-        topk_indices=True,
-        query_start_loc=False,
-        seq_lens=False,
-        gather_lens=True,
-    ),
-    dict(
-        topk_indices=False,
-        query_start_loc=False,
-        seq_lens=False,
-        gather_lens=False,
-    ),
+    dict(topk_indices=True),
+    dict(topk_indices=False),
 )
 
 
@@ -916,7 +903,7 @@ def _combine_topk_swa_warmup_inputs(vllm_config: Any) -> _WarmupInputRows:
 class CombineTopkSwaIndicesKernel(
     VllmJitKernel["CombineTopkSwaIndicesKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         TOP_K: int
         COMPRESS_RATIO: int
@@ -926,9 +913,15 @@ class CombineTopkSwaIndicesKernel(
 
     @staticmethod
     @triton.jit(
+        # Each program reads one value from the per-request tensors, so their
+        # alignment buys nothing, while the chunked prefill passes them at any
+        # num_decodes / chunk_start offset.
         do_not_specialize=[
             "combined_indices_stride",
             "topk_indices_stride",
+            "query_start_loc_ptr",
+            "seq_lens_ptr",
+            "gather_lens_ptr",
             "M",
             "N",
         ]
@@ -1019,14 +1012,11 @@ class CombineTopkSwaIndicesKernel(
             combined_len = topk_len + swa_len
             tl.store(combined_lens_ptr + token_idx, combined_len)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         topk_width: int,
         topk_indices: bool,
-        query_start_loc: bool,
-        seq_lens: bool,
-        gather_lens: bool,
         topk: int,
         compress_ratio: int,
         WINDOW_SIZE: int,
@@ -1034,9 +1024,6 @@ class CombineTopkSwaIndicesKernel(
         padded_topk = next_power_of_2(topk_width)
         input_variant = TritonPointerInputVariant.from_alignment(
             topk_indices=topk_indices,
-            query_start_loc=query_start_loc,
-            seq_lens=seq_lens,
-            gather_lens=gather_lens,
         )
         return self.CompileKey(
             TOP_K=topk,
@@ -1065,9 +1052,9 @@ class CombineTopkSwaIndicesKernel(
             int32_ptr,
             input_variant.pointer("topk_indices", torch.int32),
             1,  # do not specialize topk_indices_stride
-            input_variant.pointer("query_start_loc", torch.int32),
-            input_variant.pointer("seq_lens", torch.int32),
-            input_variant.pointer("gather_lens", torch.int32),
+            int32_ptr,  # do not specialize query_start_loc
+            int32_ptr,  # do not specialize seq_lens
+            int32_ptr,  # do not specialize gather_lens
             1,  # do not specialize M
             1,  # do not specialize N
             TOP_K=compile_key.TOP_K,
