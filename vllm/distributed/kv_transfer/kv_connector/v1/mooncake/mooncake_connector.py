@@ -676,8 +676,7 @@ class MooncakeXferMetadata(
     # peer did not send the field, so the run must not be promoted.
     registered_row_offsets: list[int] = msgspec.field(default_factory=list)
     remote_pp_size: int = 1
-    # Transferred layers of every pipeline stage of the peer's engine, by PP
-    # rank. Empty means the peer did not send the field.
+    # Layers of each pipeline stage of the peer's engine. Empty if not sent.
     pipeline_stage_layers: list[list[str]] = msgspec.field(default_factory=list)
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
@@ -1564,7 +1563,6 @@ class MooncakeConnectorWorker:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.kv_cache_config = kv_cache_config
-        # Peers check by these that both engines hold the same layers.
         self._pipeline_stage_layers = pipeline_stage_layers(kv_cache_config)
         self._transfer_layers = [
             layer_name
@@ -3198,8 +3196,8 @@ class MooncakeConnectorWorker:
             return prepared
 
         if meta.pipeline_stage_layers:
-            # Each stage aligns only the layers it holds, so check here that
-            # the stages of both engines together hold the same layers.
+            # Each stage aligns only its own layers; check that both engines
+            # hold the same ones.
             try:
                 pair_pipeline_stages(
                     self._pipeline_stage_layers,

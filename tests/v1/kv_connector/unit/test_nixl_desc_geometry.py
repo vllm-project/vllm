@@ -2729,8 +2729,7 @@ def _make_pp_attn_worker(
 
 
 def _pp_stage_metadata(stages, pp_rank):
-    """The handshake metadata prefill PP stage `pp_rank` of `stages`
-    advertises, with the layers of every stage as its engine plans them."""
+    """The handshake metadata of prefill PP stage `pp_rank` of `stages`."""
     metadata = msgspec.msgpack.decode(
         stages[pp_rank].xfer_handshake_metadata.agent_metadata_bytes,
         type=NixlAgentMetadata,
@@ -3241,8 +3240,7 @@ def test_pull_from_hma_pp_stages_pairs_unequal_blocks_after_prefix_hit():
 
 @pytest.mark.cpu_test
 def test_pull_from_pp_stages_rejects_a_layer_no_stage_holds():
-    """A local layer no prefill PP stage holds would keep stale KV, so the
-    first stage's handshake fails, before any stage registers."""
+    """A local layer no prefill stage holds fails the first handshake."""
     decode = _make_pp_attn_worker("decode", _PP_TARGET_LAYERS, hma=False)
     stages = [
         _make_pp_attn_worker(

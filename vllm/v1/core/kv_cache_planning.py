@@ -1468,8 +1468,7 @@ def get_pipeline_stages(
             bytes_per_block=_pool_bytes_per_block_from_builder(
                 builder, vllm_config, config.kv_cache_groups
             ),
-            # Copies, as a model runner adds KV-sharing layers to the groups
-            # of its own config in place.
+            # Copies: a model runner edits its own groups in place.
             kv_cache_groups=tuple(
                 replace(group, kv_cache_specs=dict(group.kv_cache_specs))
                 for group in config.kv_cache_groups

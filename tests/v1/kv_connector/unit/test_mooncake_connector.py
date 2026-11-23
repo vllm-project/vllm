@@ -3028,9 +3028,7 @@ def test_pp_mismatch_rejects_opaque_row_in_both_directions():
 
 
 def test_prepare_transfer_regions_rejects_engines_holding_different_layers():
-    """Each producer stage aligns only the layers it holds, so a consumer
-    layer that no producer stage holds must fail the transfer instead of
-    keeping stale KV."""
+    """A consumer layer no producer stage holds fails the transfer."""
     worker, _, regions, _ = _register_sliced_packed_mla([0, 1])
     layers = [_layer_name(0), _layer_name(1)]
     meta = _xfer_meta(

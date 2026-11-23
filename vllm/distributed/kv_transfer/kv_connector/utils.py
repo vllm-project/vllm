@@ -519,13 +519,11 @@ def get_current_attn_backend(
     return get_current_attn_backends(vllm_config, layer_names)[0]
 
 
-# ---- Pipeline stages of two engines ----
+# ---- Pipeline stages ----
 
 
 def pipeline_stage_layers(kv_cache_config: KVCacheConfig) -> list[list[str]]:
-    """The layers whose KV transfers externally on every pipeline stage of the
-    engine, by PP rank. Without `pipeline_stages`, one stage with this
-    worker's layers."""
+    """Transferred layers of each pipeline stage of the engine, by PP rank."""
     stages: Sequence[KVCacheStage | KVCacheConfig] = (
         kv_cache_config.pipeline_stages or (kv_cache_config,)
     )
@@ -544,16 +542,7 @@ def pair_pipeline_stages(
     local_layers: Collection[str],
     remote_stages: Sequence[Collection[str]],
 ) -> dict[int, list[str]]:
-    """Which pipeline stage of a remote engine holds each layer of this worker.
-
-    Args:
-        local_stages: The layers of every pipeline stage of this engine.
-        local_layers: The layers of this worker, one of `local_stages`.
-        remote_stages: The layers of every pipeline stage of the remote engine.
-
-    Returns:
-        The layers of this worker that each remote stage holds, by the remote
-        PP rank, for the stages that hold some.
+    """This worker's layers held by each remote pipeline stage, by PP rank.
 
     Raises:
         ValueError: If `local_layers` is not one of `local_stages`, a layer is

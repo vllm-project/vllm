@@ -565,12 +565,11 @@ class NixlBaseConnectorWorker:
         self, nixl_agent_meta: NixlAgentMetadata, layers: Collection[str]
     ) -> _RegionPairs:
         """Pair a peer's regions with the local ones through `layers`, the
-        local layers the peer holds (`_peer_stage_layers`).
+        local layers the peer holds.
 
         A layer's regions pair in order on both sides (two when K and V
-        register apart). The peer's other layers are held by other pipeline
-        stages of this engine. A peer's packed rows are first rewritten as
-        one region per layer when this worker registers its layers apart.
+        register apart). A peer's packed rows are first rewritten as one
+        region per layer when this worker registers its layers apart.
         """
         engine_id = nixl_agent_meta.engine_id
         num_regions = len(nixl_agent_meta.kv_caches_base_addr)
@@ -769,7 +768,6 @@ class NixlBaseConnectorWorker:
             for group in kv_cache_config.transfer_groups
             for name, spec in group.kv_cache_specs.items()
         }
-        # Peers pair their pipeline stages with ours by these layers.
         self._pipeline_stage_layers = pipeline_stage_layers(kv_cache_config)
         # From the groups, not this worker's layers: a PP stage may hold no
         # layer of a group (a draft's, before the last stage), yet requests
@@ -2829,10 +2827,8 @@ class NixlBaseConnectorWorker:
         pp_rank: int,
         pp_size: int,
     ) -> list[str]:
-        """The local layers that PP stage `pp_rank` of a remote engine holds
-        (the whole engine when `pp_size` is 1), from the pipeline stages both
-        engines advertise. Fails unless the engines hold the same layers, so
-        that no layer keeps stale KV."""
+        """The local layers that remote PP stage `pp_rank` holds. Fails unless
+        both engines hold the same layers, so no layer keeps stale KV."""
         engine_id = nixl_agent_meta.engine_id
         remote_stages = nixl_agent_meta.pipeline_stage_layers
         if len(remote_stages) != pp_size:

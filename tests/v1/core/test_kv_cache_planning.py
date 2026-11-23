@@ -795,9 +795,8 @@ def test_project_kv_cache_groups_to_worker():
 
 
 def test_pipeline_stages_describe_every_stage():
-    """Every worker learns each PP stage's group projections and block size in
-    bytes, draft layers on the last stage included; the groups stay fixed when
-    a worker later edits its own."""
+    """Every worker learns each PP stage's groups and block size in bytes,
+    draft layers included; worker edits do not change the stage's groups."""
     layer = new_kv_cache_layer()
     stage0 = {"layer0": layer, "layer1": layer}
     stage1 = {

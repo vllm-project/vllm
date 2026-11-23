@@ -251,16 +251,11 @@ per-layer regions, remain unvalidated for pull PP.
 
 Invariants enforced when pairing:
 
-* every worker advertises the transferred layers of every pipeline stage of
-  its engine (`NixlAgentMetadata.pipeline_stage_layers`, from
-  `KVCacheConfig.pipeline_stages`). On a handshake with any one remote stage,
-  `pair_pipeline_stages` checks that the two engines hold the same layers,
-  each on exactly one stage, and returns the local layers that remote stage
-  holds; a missing or duplicated layer fails that first handshake instead of
-  leaving stale KV. Regions pair only through those layers: for push, the
-  remote D's layers owned by other P stages are skipped;
-* the layers in a remote stage's regions must be the ones it advertises for
-  that stage;
+* every worker advertises the layers of every stage of its engine
+  (`pipeline_stage_layers`). The first handshake fails unless both engines
+  hold the same layers, each on one stage, so no layer keeps stale KV;
+* regions pair only through the local layers the remote stage holds, which
+  must match the layers in its regions;
 * a remote that does not advertise its layers fails the handshake
   instead of falling back to pairing by index;
 * a layer must span the same number of regions on both sides;

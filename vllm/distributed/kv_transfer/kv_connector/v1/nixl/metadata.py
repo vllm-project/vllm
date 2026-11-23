@@ -91,7 +91,7 @@ class NixlAgentMetadata:
     layer_group_ids: dict[str, int] = field(default_factory=dict)
     # Packed member -> (byte offset in its region's block, bytes per page).
     packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
-    # Transferred layers of every pipeline stage of the engine, by PP rank.
+    # Layers of each pipeline stage of the engine, by PP rank.
     pipeline_stage_layers: list[list[str]] = field(default_factory=list)
 
 
