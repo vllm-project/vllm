@@ -45,6 +45,47 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
         return "dspark" in spec.draft_model_config.model.lower()
 
     @classmethod
+    def supports_draft_eplb(cls, draft_model_config: "ModelConfig") -> bool:
+        return dspark_draft_supports_eplb(draft_model_config)
+
+    @classmethod
+    def verify_draft_eplb(cls, spec: "SpeculativeConfig") -> int | None:
+        target_parallel_config = spec.target_parallel_config
+        if target_parallel_config.enable_elastic_ep:
+            raise ValueError(
+                "EPLB for a DSpark draft is not supported with Elastic EP. "
+                "Set speculative_config.draft_enable_eplb=false to disable "
+                "draft EPLB."
+            )
+        assert spec.draft_parallel_config is not None
+        if (
+            spec.draft_parallel_config.tensor_parallel_size == 1
+            and target_parallel_config.prefill_context_parallel_size == 1
+            and target_parallel_config.data_parallel_size == 1
+        ):
+            remediation = (
+                " If you want to disable draft EPLB, remove "
+                "eplb_config.draft_num_redundant_experts and set "
+                "speculative_config.draft_enable_eplb=false."
+                if target_parallel_config.eplb_config.draft_num_redundant_experts
+                is not None
+                else " To disable draft EPLB, set "
+                "speculative_config.draft_enable_eplb=false."
+            )
+            raise ValueError(
+                "EPLB for a DSpark draft requires its tensor parallel size, "
+                "prefill context parallel size, or data parallel size to "
+                "be greater than 1."
+                f"{remediation}"
+            )
+        draft = spec.draft_model_config
+        return (
+            getattr(draft.hf_config, "dspark_n_routed_experts", 0)
+            or getattr(draft.hf_text_config, "dspark_n_routed_experts", 0)
+            or None
+        )
+
+    @classmethod
     def default_model(cls, spec: "SpeculativeConfig") -> str | None:
         target = spec.target_model_config
         if target is None:
@@ -138,14 +179,11 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
         )
 
     @property
-    def num_lookahead_tokens(self) -> int:
+    def sample_from_anchor(self) -> bool:
+        # DSpark checkpoints default to anchor-first; speculators-format
+        # checkpoints set the flag explicitly.
         hf_config = self.spec_config.draft_model_config.hf_config
-        if getattr(hf_config, "sample_from_anchor", True):
-            # Anchor-sampling DSpark drafts a block of num_speculative_tokens
-            # query tokens in which the anchor itself is the first prediction
-            # position (no separate bonus query).
-            return self.num_scheduled_spec_tokens
-        return super().num_lookahead_tokens
+        return bool(getattr(hf_config, "sample_from_anchor", True))
 
     def hash_factors(self) -> list[Any]:
         # Adaptive verification and draft TP both change the draft graph.
