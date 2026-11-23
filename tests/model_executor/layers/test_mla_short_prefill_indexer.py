@@ -1365,7 +1365,11 @@ def test_candidate_indexer_matches_dense(
     )
 
     torch.manual_seed(43)
-    monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "1")
+    # Plan a large dense chunk, then exercise its budgeted fallback below.
+    monkeypatch.setenv(
+        "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB",
+        "16" if batch_kind == "full_prefill" else "1",
+    )
     LlamaConfig(
         architectures=["LlamaForCausalLM"],
         hidden_size=128,
@@ -1447,9 +1451,26 @@ def test_candidate_indexer_matches_dense(
             slot_mapping={},
         )
         with override_forward_context(context):
-            expected = sparse_indexer.SparseAttnIndexer.forward_cuda(
-                indexer, hidden, q, None, weights
-            ).clone()
+            live_before_window: list[int] = []
+            with monkeypatch.context() as memory_check:
+                if batch_kind == "full_prefill":
+                    monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "1")
+                    dense_logits = sparse_indexer.fp8_fp4_mqa_logits
+
+                    def record_live_memory(*args, **kwargs):
+                        live_before_window.append(torch.accelerator.memory_allocated())
+                        return dense_logits(*args, **kwargs)
+
+                    memory_check.setattr(
+                        sparse_indexer, "fp8_fp4_mqa_logits", record_live_memory
+                    )
+                expected = sparse_indexer.SparseAttnIndexer.forward_cuda(
+                    indexer, hidden, q, None, weights
+                ).clone()
+            if batch_kind == "full_prefill":
+                # The previous 1 MiB logits window must not survive into the next.
+                assert len(live_before_window) > 1
+                assert max(live_before_window) - live_before_window[0] < 512 * 1024
             actual = indexer(hidden, q, None, weights).clone()
             # A later consumer reuses the prepared pages but has different Q.
             actual_second = indexer(hidden, q.flip(0), None, weights).clone()
