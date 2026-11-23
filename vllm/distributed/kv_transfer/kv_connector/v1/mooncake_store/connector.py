@@ -15,7 +15,7 @@ import os
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -55,6 +55,11 @@ from .data import MooncakeStoreConnectorMetadata
 from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
 from .worker import MooncakeStoreWorker
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.early_recv import (
+        EarlyKVRecvNotifier,
+    )
 
 logger = init_logger(__name__)
 
@@ -431,13 +436,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(metadata, MooncakeStoreConnectorMetadata)
         return self.connector_worker.get_transfer_results(finished_req_ids, metadata)
 
-    def has_pending_recving(self) -> bool:
+    def bind_early_recv(self, notifier: "EarlyKVRecvNotifier") -> None:
         assert self.connector_worker is not None
-        return self.connector_worker.has_pending_recving()
-
-    def poll_finished_recving(self) -> set[str]:
-        assert self.connector_worker is not None
-        return self.connector_worker.poll_finished_recving()
+        self.connector_worker.bind_early_recv(notifier)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         assert self.connector_worker is not None
