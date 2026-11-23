@@ -1479,6 +1479,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
+        mm_uuids: MultiModalUUIDItems | None,
     ) -> BatchFeature | None:
         """Build only the processor outputs that prompt updates and metadata need.
 
@@ -1534,8 +1535,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         if inputs.metadata_only:
             with timing_ctx.record("apply_hf_processor"):
+                # UUIDs matter only for reuse through a cache.
+                # Without one, the renderer may generate request-scoped UUIDs.
                 mm_metadata_data = self._apply_hf_processor_metadata_only(
-                    inputs.mm_data_items, inputs.hf_processor_mm_kwargs
+                    inputs.mm_data_items,
+                    inputs.hf_processor_mm_kwargs,
+                    inputs.mm_uuid_items if inputs.cache is not None else None,
                 )
             if mm_metadata_data is not None:
                 # These items have no tensors, so they must not enter the cache.

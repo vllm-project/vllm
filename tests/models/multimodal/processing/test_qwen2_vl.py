@@ -654,6 +654,7 @@ def _process_images(
     *,
     metadata_only: bool,
     cache: MultiModalProcessorOnlyCache | None = None,
+    uuids: list[str | None] | None = None,
 ):
     tokenizer = processor.info.get_tokenizer()
     placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
@@ -662,6 +663,7 @@ def _process_images(
         ProcessorInputs(
             prompt,
             processor.info.parse_mm_data({"image": images}),
+            mm_uuid_items=None if uuids is None else {"image": uuids},
             hf_processor_mm_kwargs=mm_processor_kwargs,
             cache=cache,
             metadata_only=metadata_only,
@@ -713,6 +715,7 @@ def test_metadata_only_matches_full_processing(
     [
         ((1120, 672), {"do_resize": False}),
         ((640, 480), {"images_kwargs": {"patch_size": 14}}),
+        ((640, 480), {"images_kwargs": {"image_mean": [0.5, 0.5, 0.5]}}),
     ],
 )
 def test_metadata_only_falls_back_for_unmodeled_options(
@@ -757,3 +760,65 @@ def test_metadata_only_results_do_not_enter_the_cache(metadata_first: bool):
     assert "pixel_values" in results[False]["mm_kwargs"]["image"][0]
     assert "pixel_values" not in results[True]["mm_kwargs"]["image"][0]
     assert results[True]["mm_hashes"] == results[False]["mm_hashes"]
+
+
+def test_metadata_only_falls_back_when_the_saved_processor_does_not_resize(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A processor saved with `do_resize=False` keeps the size, so HF builds grids."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct", limit_mm_per_prompt={"image": 1}
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    image_processor = processor.info.get_image_processor()
+    assert processor.info.get_image_processor() is image_processor
+    monkeypatch.setattr(image_processor, "do_resize", False)
+    # Patch-aligned and above the default max_pixels, so only resizing changes the grid.
+    images = [Image.new("RGB", (4480, 3136), color=(0, 128, 255))]
+
+    full = _process_images(processor, images, {}, metadata_only=False)
+    meta = _process_images(processor, images, {}, metadata_only=True)
+
+    assert "pixel_values" in meta["mm_kwargs"]["image"][0]
+    assert _rendered_features(meta) == _rendered_features(full)
+
+
+def test_metadata_only_keeps_uuid_reuse_through_the_cache():
+    """A metadata-only request may name a cached image by UUID alone."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_cache_gb=1,
+    )
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    image = Image.new("RGB", (640, 480), color=(10, 200, 30))
+
+    # A metadata-only request with a user UUID still fills the cache.
+    first = _process_images(
+        processor, [image], {}, metadata_only=True, cache=cache, uuids=["img-1"]
+    )
+    reused = _process_images(
+        processor, [None], {}, metadata_only=True, cache=cache, uuids=["img-1"]
+    )
+
+    assert "pixel_values" in first["mm_kwargs"]["image"][0]
+    assert reused["mm_hashes"] == first["mm_hashes"]
+    assert reused["prompt_token_ids"] == first["prompt_token_ids"]
+    assert _rendered_features(reused) == _rendered_features(first)
+
+
+def test_metadata_only_keeps_the_fast_path_for_uuids_without_a_cache():
+    """Without a cache, UUIDs cannot be reused, so they do not force the full path."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct", limit_mm_per_prompt={"image": 1}
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [Image.new("RGB", (640, 480), color=(10, 200, 30))]
+
+    full = _process_images(processor, images, {}, metadata_only=False, uuids=["r-0"])
+    meta = _process_images(processor, images, {}, metadata_only=True, uuids=["r-0"])
+
+    assert "pixel_values" not in meta["mm_kwargs"]["image"][0]
+    assert meta["mm_hashes"] == full["mm_hashes"]
+    assert _rendered_features(meta) == _rendered_features(full)

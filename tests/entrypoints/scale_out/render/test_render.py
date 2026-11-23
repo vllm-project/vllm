@@ -275,6 +275,7 @@ async def test_render_responses_returns_generate_request_without_stored_state():
         previous_response_outputs=None,
         tool_server=serving.tool_server,
         skip_mm_cache=True,
+        mm_metadata_only=False,
     )
 
 

@@ -81,6 +81,7 @@ from vllm.multimodal.parse import (
     ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
+    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -1291,21 +1292,11 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
 _METADATA_ONLY_MODEL_TYPES = frozenset(
     {"qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe"}
 )
-# Size options set the grid and are reproduced here; the others only change pixels.
-# Anything else, such as `do_resize` or patch sizes, needs the HF processor.
+# Size options set the grid and are reproduced here.
+# `do_normalize` and `do_rescale` are set by vLLM for device normalization.
+# Other options, even pixel-only ones, go through the HF processor to be validated.
 _METADATA_ONLY_IMAGE_KWARGS = frozenset(
-    {
-        "size",
-        "min_pixels",
-        "max_pixels",
-        "do_normalize",
-        "do_rescale",
-        "rescale_factor",
-        "image_mean",
-        "image_std",
-        "do_convert_rgb",
-        "resample",
-    }
+    {"size", "min_pixels", "max_pixels", "do_normalize", "do_rescale"}
 )
 
 
@@ -1313,11 +1304,14 @@ def image_grids_from_sizes(
     info: Qwen2VLProcessingInfo,
     mm_items: MultiModalDataItems,
     hf_kwargs: Mapping[str, object],
+    mm_uuids: MultiModalUUIDItems | None = None,
 ) -> BatchFeature | None:
     """Compute `image_grid_thw` from image sizes, without the pixel transform.
 
     Returns `None` when the full HF processor is needed: other models or
-    modalities, image embeddings, or image options other than the size ones.
+    modalities, image embeddings, images sent only by UUID, image options
+    other than the size ones, or an image processor that does not resize or
+    patchifies differently from the vision config.
     """
     if info.get_hf_config().model_type not in _METADATA_ONLY_MODEL_TYPES:
         return None
@@ -1325,13 +1319,32 @@ def image_grids_from_sizes(
     if set(mm_items) != {"image"} or not isinstance(images, ImageProcessorItems):
         return None
 
+    # An image sent only by UUID has no size here and may be served from the cache.
+    if any(images.get(idx) is None for idx in range(len(images))):
+        return None
+    # With a cache, a UUID may be reused later without the image.
+    # That needs a cache entry, which only the full path creates.
+    if mm_uuids is not None and any(
+        uuid is not None for uuid in mm_uuids.get("image") or ()
+    ):
+        return None
+
     merged_kwargs = info._merge_and_resolve_mm_processor_kwargs(hf_kwargs)
     image_kwargs = merged_kwargs.get("images_kwargs", {})
     if set(image_kwargs) - _METADATA_ONLY_IMAGE_KWARGS:
         return None
 
-    patch_size = info.get_hf_config().vision_config.patch_size
+    vision_config = info.get_hf_config().vision_config
+    patch_size = vision_config.patch_size
     image_processor = info.get_image_processor()
+    # The grid assumes the processor resizes and patchifies like the vision config.
+    if (
+        not getattr(image_processor, "do_resize", True)
+        or getattr(image_processor, "patch_size", patch_size) != patch_size
+        or getattr(image_processor, "merge_size", vision_config.spatial_merge_size)
+        != vision_config.spatial_merge_size
+    ):
+        return None
     grids = []
     for idx in range(len(images)):
         image_size = images.get_image_size(idx)
@@ -1356,8 +1369,9 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo])
         self,
         mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
+        mm_uuids: MultiModalUUIDItems | None,
     ) -> BatchFeature | None:
-        return image_grids_from_sizes(self.info, mm_items, hf_kwargs)
+        return image_grids_from_sizes(self.info, mm_items, hf_kwargs, mm_uuids)
 
     def _get_prompt_updates(
         self,
