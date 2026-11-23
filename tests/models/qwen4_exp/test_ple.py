@@ -1247,6 +1247,7 @@ def _make_ple_from_checkpoint(
     *,
     disk_offload: bool,
     cpu_offload: bool = False,
+    dp_shared_memory: bool = False,
     device: str = "cpu",
     load: bool = True,
 ) -> Qwen4ExpNGramEmbedding:
@@ -1262,11 +1263,10 @@ def _make_ple_from_checkpoint(
     group = SimpleNamespace(world_size=1)
     vllm_config = SimpleNamespace(
         load_config=SimpleNamespace(load_format="auto"),
-        engram_config=SimpleNamespace(
+        engram_config=EngramConfig(
             disk_offload=disk_offload,
             cpu_offload=cpu_offload,
-            dp_shared_memory=False,
-            peer_group_size=0,
+            dp_shared_memory=dp_shared_memory,
         ),
     )
     monkeypatch.setattr(
@@ -1440,20 +1440,29 @@ def test_ple_pool_checkpoint_shards_and_cuda_graph(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="host staging is CUDA-only")
-@pytest.mark.parametrize("fmt", ["bf16", "fp8", "nvfp4"])
-@pytest.mark.parametrize("source", ["disk", "host_memory"])
+@pytest.mark.parametrize(
+    "source,fmt",
+    [
+        (source, fmt)
+        for source in ("disk", "host_memory")
+        for fmt in ("bf16", "fp8", "nvfp4")
+    ]
+    + [("pageable", "bf16")],
+)
 def test_host_staged_ple_matches_resident_table_under_graph_replay(
     monkeypatch, tmp_path, fmt, source
 ) -> None:
     """Staged rows equal the resident lookup of the same ids in a replayed graph."""
     path = tmp_path / "model.safetensors"
     _save_ple_checkpoint(path, fmt)
+    if source == "pageable":
+        monkeypatch.setattr(current_platform, "is_pin_memory_available", lambda: False)
     gather = _make_ple_from_checkpoint(
         monkeypatch,
         path,
         fmt,
         disk_offload=source == "disk",
-        cpu_offload=source == "host_memory",
+        cpu_offload=source != "disk",
         device="cuda",
     )
     resident = _make_ple_from_checkpoint(
@@ -1465,6 +1474,8 @@ def test_host_staged_ple_matches_resident_table_under_graph_replay(
     else:
         assert isinstance(gather.ngram_embedding, Qwen4ExpPLEHostMemoryEmbedding)
         assert gather.ngram_embedding.weight.device.type == "cpu"
+    if source == "pageable":
+        assert not gather.ngram_embedding._host_ids.is_pinned()
     hidden_states = torch.zeros(8, 64, device="cuda")
     query_start_loc = torch.tensor([0, 5, 8], dtype=torch.int32, device="cuda")
     ngram_context = torch.tensor([[3], [0]], dtype=torch.int32, device="cuda")
@@ -1487,7 +1498,7 @@ def test_host_staged_ple_matches_resident_table_under_graph_replay(
     forward(gather)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        output = forward(gather)
+        output = forward(gather).clone()
     for seed in range(2):
         torch.manual_seed(seed)
         input_ids.copy_(torch.randint(1, 64, (8,)))
@@ -1596,57 +1607,23 @@ def test_host_memory_ple_stages_owned_rows(
 
 @pytest.mark.parametrize("dp_shared_memory", [False, True])
 def test_cpu_offload_without_uva_uses_host_memory_table(
-    monkeypatch: pytest.MonkeyPatch, dp_shared_memory: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dp_shared_memory: bool
 ) -> None:
-    """cpu_offload falls back to the host-memory table when UVA is unavailable.
-
-    The DP-shared table is read through UVA too, so it falls back as well.
-    """
-    _mock_etp_group(monkeypatch)
-    monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(
-        embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
-    )
-    monkeypatch.setattr(
-        nvidia_ngram_embedding_module,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(
-            engram_config=SimpleNamespace(
-                cpu_offload=True,
-                disk_offload=False,
-                dp_shared_memory=dp_shared_memory,
-                peer_group_size=0,
-            )
-        ),
-    )
+    """Both private and shared UVA tables fall back to ordinary host RAM."""
     monkeypatch.setattr(
         nvidia_ngram_embedding_module,
         "get_engram_dp_group",
         lambda: SimpleNamespace(world_size=2, rank_in_group=0),
     )
-    monkeypatch.setattr(
-        nvidia_ngram_embedding_module, "is_uva_available", lambda: False
+    module = _make_ple_from_checkpoint(
+        monkeypatch,
+        tmp_path,
+        "bf16",
+        disk_offload=False,
+        cpu_offload=True,
+        dp_shared_memory=dp_shared_memory,
+        load=False,
     )
-    config = Qwen4ExpTextConfig(
-        ngram_size=3,
-        heads_per_ngram=1,
-        ngram_vocab_size_base=5,
-        make_ngram_vocab_size_divisible_by=8,
-        split_ngram_parts=2,
-        ple_embed_dim=6,
-        eos_token_id=0,
-        vocab_size=64,
-    )
-    module = Qwen4ExpNGramEmbedding(
-        config,
-        embedding_dim=config.ple_embed_dim,
-        ple_dense_layer_id=0,
-        max_total_tokens=4,
-        data_parallel_rank=0,
-        prefix="test.ple_embedding",
-        params_dtype=torch.bfloat16,
-    )
-
     assert type(module.ngram_embedding) is Qwen4ExpPLEHostMemoryEmbedding
     assert module.ngram_embedding.weight.device.type == "cpu"
     assert not module.ngram_embedding.supports_prefetch
