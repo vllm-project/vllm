@@ -507,9 +507,8 @@ class HiSparseCoordinator:
         """Run the per-step residency work for each scheduled request.
 
         `requests` pairs a request id with the number of tokens computed
-        once the step completes. As in `KVCacheCoordinator.cache_blocks`, the
-        last `num_reprefillable_tokens` are not final yet and are not written
-        back.
+        once the step completes. Multi-module MTP may still rewrite the last
+        `num_reprefillable_tokens`, so they are not written back yet.
         """
         if not self.resident_managers:
             return
@@ -1077,6 +1076,7 @@ def get_hisparse_coordinator(
     kv_cache_manager: "KVCacheManager",
     *,
     import_step_tokens: int | None = None,
+    num_reprefillable_tokens: int | None = None,
 ) -> HiSparseCoordinator:
     """Return the coordinator shared by a KV cache manager's HiSparse groups.
 
@@ -1089,12 +1089,16 @@ def get_hisparse_coordinator(
         if coordinator is not None:
             assert isinstance(coordinator, HiSparseCoordinator)
             assert import_step_tokens in (None, coordinator.import_step_tokens)
+            assert num_reprefillable_tokens in (
+                None,
+                coordinator.num_reprefillable_tokens,
+            )
             return coordinator
     coordinator = HiSparseCoordinator(
         kv_cache_manager.kv_cache_config,
         managers,
         kv_cache_manager.max_model_len,
-        num_reprefillable_tokens=kv_cache_manager.coordinator.num_reprefillable_tokens,
+        num_reprefillable_tokens=num_reprefillable_tokens or 0,
         import_step_tokens=import_step_tokens or 0,
     )
     if coordinator.host_manager is None:
