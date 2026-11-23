@@ -355,7 +355,7 @@ class RequestState:
             remote_prefill_cached_tokens=remote_prefill_cached_tokens,
             mm_hashes=[
                 feature.mm_hash
-                for feature in request.mm_features
+                for feature in request.mm_features or []
                 if feature.mm_hash is not None
             ],
         )
