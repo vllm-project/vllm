@@ -317,6 +317,11 @@ class SchedulerOutput:
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
 
+    # Decode-state hold blocks handed out this step: request ID -> each Mamba
+    # group's holds, in group order. From this step on, the worker copies the
+    # recurrent state at each prefix-match boundary a step crosses into them.
+    mamba_decode_hold_block_ids: dict[str, list[int]] | None = None
+
     # Scheduler-local; always None by the time this reaches a worker.
     kv_connector_block_state: KVConnectorBlockState | None = None
 

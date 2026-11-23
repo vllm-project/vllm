@@ -1400,6 +1400,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.kv_block_zeroer is not None
             self.kv_block_zeroer.zero_block_ids(scheduler_output.new_block_ids_to_zero)
 
+        if scheduler_output.mamba_decode_hold_block_ids:
+            index = self.req_states.req_id_to_index
+            self.model_state.set_decode_hold_blocks(
+                {
+                    index[req_id]: block_ids
+                    for req_id, block_ids in (
+                        scheduler_output.mamba_decode_hold_block_ids.items()
+                    )
+                }
+            )
+
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.
         if scheduler_output.kv_cache_block_copies:
@@ -1886,6 +1897,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for req_id, updates in scheduler_output.encoder_input_updates.items():
                     self.encoder_cache.update_encoder_inputs(req_id, updates)
             self.block_tables.apply_staged_writes()
+            self.model_state.apply_decode_hold_writes()
             if self.aux_output_connector is not None:
                 # Register this step before the GPU forward.
                 self.aux_output_connector.begin_step(

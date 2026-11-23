@@ -368,8 +368,8 @@ class KVCacheCoordinator(ABC):
             request: The request.
 
         """
+        self._cache_blocks_on_free(request)
         for manager in self.single_type_managers:
-            manager.cache_blocks_on_free(request)
             manager.free(request.request_id)
 
     def pop_blocks_for_free(self, request: Request) -> list[KVCacheBlock]:
@@ -386,11 +386,48 @@ class KVCacheCoordinator(ABC):
             The request's blocks in allocation order.
 
         """
+        self._cache_blocks_on_free(request)
         blocks: list[KVCacheBlock] = []
         for manager in self.single_type_managers:
-            manager.cache_blocks_on_free(request)
             blocks.extend(manager.pop_blocks_for_free(request.request_id))
         return blocks
+
+    def _cache_blocks_on_free(self, request: Request) -> None:
+        boundaries = [
+            manager.cache_blocks_on_free(request)
+            for manager in self.single_type_managers
+            if isinstance(manager, MambaManager)
+        ]
+        for manager in self.single_type_managers:
+            if not isinstance(manager, MambaManager):
+                manager.cache_blocks_on_free(request)
+        # A hit needs every group, so key the others only where every Mamba
+        # group cached a state.
+        if boundaries and boundaries[0] is not None and len(set(boundaries)) == 1:
+            for manager in self.single_type_managers:
+                manager.cache_decode_boundary_on_free(request, boundaries[0])
+
+    def num_decode_holds_needed(self, request: Request, num_tokens: int) -> int:
+        return sum(
+            manager.num_decode_holds_needed(request, num_tokens)
+            for manager in self.single_type_managers
+            if isinstance(manager, MambaManager)
+        )
+
+    def allocate_decode_holds(self, request: Request, num_tokens: int) -> None:
+        for manager in self.single_type_managers:
+            if isinstance(manager, MambaManager):
+                manager.allocate_decode_holds(request, num_tokens)
+
+    def take_new_decode_holds(self) -> dict[str, list[int]]:
+        """Hold blocks handed out this step: per request, each Mamba group's
+        holds in group order."""
+        holds: dict[str, list[int]] = {}
+        for manager in self.single_type_managers:
+            if isinstance(manager, MambaManager):
+                for req_id, block_ids in manager.take_new_decode_holds().items():
+                    holds.setdefault(req_id, []).extend(block_ids)
+        return holds
 
     def remove_skipped_blocks(
         self,

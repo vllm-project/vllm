@@ -44,7 +44,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, decode_match_holds
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -378,6 +378,8 @@ class Scheduler(SchedulerInterface):
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
+            decode_match_holds=decode_match_holds(vllm_config, kv_cache_config),
+            num_spec_tokens=self.num_spec_tokens,
             enable_mamba_shared_prefix_checkpoint=(
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
@@ -1776,6 +1778,9 @@ class Scheduler(SchedulerInterface):
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             has_sync_kv_loads=has_sync_kv_loads,
             kv_cache_block_copies=pending_kv_cache_block_copies,
+            mamba_decode_hold_block_ids=(
+                self.kv_cache_manager.take_new_decode_holds() or None
+            ),
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             skip_drafts=not drafts_needed,
@@ -1934,6 +1939,14 @@ class Scheduler(SchedulerInterface):
             self.dropped_streaming_updates.append(session)
             return False
 
+        # The next input chunk is prefilled, which may run past a boundary
+        # without writing the decode-state holds. An in-flight step may still
+        # write them, so free them like the request's blocks.
+        if holds := self.kv_cache_manager.release_decode_holds(session):
+            if self._request_blocks_can_be_freed(session):
+                self.kv_cache_manager.block_pool.free_blocks(holds)
+            else:
+                self.deferred_frees.append((self.sched_step_seq, holds))
         # Keep all output tokens but the final sampled one.
         keep_end = session.num_tokens - 1
         assert keep_end >= session.num_computed_tokens
@@ -3600,7 +3613,8 @@ class Scheduler(SchedulerInterface):
         num_tokens = full_num_tokens
         if self.num_spec_tokens:
             num_tokens += 1 + self.num_spec_tokens + self.num_lookahead_tokens
-        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+        coordinator = self.kv_cache_manager.coordinator
+        return coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens,
             new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
@@ -3610,7 +3624,7 @@ class Scheduler(SchedulerInterface):
             num_tokens_main_model=full_num_tokens,
             apply_admission_cap=True,
             prefill_end=max(request.num_prompt_tokens, request.num_tokens - 1),
-        )
+        ) + coordinator.num_decode_holds_needed(request, full_num_tokens)
 
     def _set_kv_fetch_stage(self, request: Request, stage: str | None) -> None:
         kv_fetch_stages = self._kv_fetch_stages

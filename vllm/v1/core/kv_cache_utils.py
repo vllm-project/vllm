@@ -788,6 +788,78 @@ def partial_hash_hits_enabled(
     return True
 
 
+def decode_match_holds(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> tuple[int, int]:
+    """`(prefix_match_unit, holds per request)` for decode states at
+    prefix-match boundaries (`CacheConfig.prefix_cache_decode_retention_interval`
+    = 0), or `(0, 0)` when off.
+
+    The scheduler and the worker both decide from this, so a hold the
+    scheduler caches is always one the worker writes.
+    """
+    from vllm.platforms import current_platform
+    from vllm.v1.core.single_type_kv_cache_manager import (
+        FullAttentionManager,
+        MambaManager,
+    )
+
+    cache_config = vllm_config.cache_config
+    unit = cache_config.prefix_match_unit
+    if (
+        cache_config.prefix_cache_decode_retention_interval is None
+        or unit is None
+        or not cache_config.enable_prefix_caching
+    ):
+        return 0, 0
+    spec_config = vllm_config.speculative_config
+    num_spec = getattr(spec_config, "num_speculative_tokens", None) or 0
+    kv_transfer_config = vllm_config.kv_transfer_config
+    groups = kv_cache_config.kv_cache_groups
+    off_reasons = {
+        # One step crosses at most one boundary, and the writes the scheduler
+        # has not seen (an in-flight step, drafts trimmed past a stop) never
+        # reach the other hold.
+        "prefix_match_unit <= 2 * (num_speculative_tokens + 1)": (
+            unit <= 2 * (num_spec + 1)
+        ),
+        # ReplaySSM/RecoverSSM keep pending inputs instead of the state.
+        "ReplaySSM": cache_config.use_replayssm,
+        "KV connectors": kv_transfer_config is not None,
+        "pipeline parallelism": (
+            vllm_config.parallel_config.pipeline_parallel_size > 1
+        ),
+        "a non-CUDA platform": not current_platform.is_cuda_alike(),
+        # A hit needs every prefix-cacheable group to key the boundary.
+        "KV cache groups other than full attention and Mamba": not all(
+            group.manager_cls in (FullAttentionManager, MambaManager)
+            for group in groups
+            if group.prefix_cacheable
+        ),
+        "no sub-block prefix-cache hits": not partial_hash_hits_enabled(
+            groups,
+            unit,
+            vllm_config.parallel_config.decode_context_parallel_size,
+            [group.manager_cls for group in groups],
+        ),
+    }
+    reasons = [reason for reason, off in off_reasons.items() if off]
+    if reasons:
+        logger.info_once(
+            "Decode states at prefix-match boundaries are off: %s.",
+            ", ".join(reasons),
+        )
+        return 0, 0
+    # An in-flight step, or drafts accepted past a stop and trimmed by the
+    # scheduler, may write the boundary after the last one the scheduler saw;
+    # a second hold keeps that one intact.
+    unseen_writes = bool(
+        vllm_config.scheduler_config.async_scheduling
+        or vllm_config.speculative_config is not None
+    )
+    return unit, 2 if unseen_writes else 1
+
+
 def resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,

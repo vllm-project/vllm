@@ -144,6 +144,8 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
+        decode_match_holds: tuple[int, int] = (0, 0),
+        num_spec_tokens: int = 0,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -185,6 +187,7 @@ class KVCacheManager:
             for manager in self.coordinator.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.shared_prefix_checkpoint = True
+        self._init_decode_match_states(*decode_match_holds, num_spec_tokens)
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.retained_hit_group_ids = tuple(
@@ -553,7 +556,7 @@ class KVCacheManager:
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
                 prefill_end=prefill_end,
-            )
+            ) + self.coordinator.num_decode_holds_needed(request, full_num_tokens)
             required_blocks = num_blocks_to_allocate + watermark_blocks
             if required_blocks > self.block_pool.get_num_free_blocks():
                 return None
@@ -592,8 +595,18 @@ class KVCacheManager:
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
         # additional watermark of headroom for waiting/preempted admissions.
+        # A request whose KV is still loading is not on the worker yet.
+        num_decode_hold_blocks = (
+            0
+            if delay_cache_blocks
+            else self.coordinator.num_decode_holds_needed(
+                request, num_tokens_main_model
+            )
+        )
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
-        required_blocks = num_blocks_to_allocate + watermark_blocks
+        required_blocks = (
+            num_blocks_to_allocate + num_decode_hold_blocks + watermark_blocks
+        )
         if required_blocks > available_blocks:
             # Cannot allocate new blocks
             return None
@@ -619,6 +632,8 @@ class KVCacheManager:
             num_tokens_main_model,
             num_encoder_tokens,
         )
+        if num_decode_hold_blocks:
+            self.coordinator.allocate_decode_holds(request, num_tokens_main_model)
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
@@ -863,6 +878,34 @@ class KVCacheManager:
                 start_idx = start_token // mgr.block_size
                 blocks = mgr.req_to_blocks[request_id]
                 mgr.new_block_ids.extend(blk.block_id for blk in blocks[start_idx:])
+
+    def _init_decode_match_states(
+        self, unit: int, num_holds: int, num_spec_tokens: int
+    ) -> None:
+        """Turn on decode states at prefix-match boundaries; `unit` and
+        `num_holds` come from `decode_match_holds`, which the worker reads
+        too."""
+        if not unit:
+            return
+        for manager in self.coordinator.single_type_managers:
+            manager.decode_match_unit = unit
+            manager.num_decode_holds = num_holds
+            manager.num_decode_spec_tokens = num_spec_tokens
+
+    def release_decode_holds(self, request: Request) -> list[KVCacheBlock]:
+        """Take a request's decode-state holds back, uncached, before it gets
+        prompt tokens again (a streaming session's next input chunk). The
+        caller frees them, after any in-flight step that may write them."""
+        blocks: list[KVCacheBlock] = []
+        for manager in self.coordinator.single_type_managers:
+            if isinstance(manager, MambaManager):
+                blocks.extend(manager.release_decode_holds(request.request_id))
+        return blocks
+
+    def take_new_decode_holds(self) -> dict[str, list[int]]:
+        """Decode-state hold blocks handed out this step, per request, one
+        per Mamba group in group order."""
+        return self.coordinator.take_new_decode_holds()
 
     def take_kv_cache_block_copies(
         self,
