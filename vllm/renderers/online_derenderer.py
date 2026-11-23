@@ -1342,6 +1342,7 @@ class OnlineDerenderer:
                 prompt_tokens=pt,
                 completion_tokens=ct,
                 total_tokens=pt + ct,
+                prompt_tokens_details=u.prompt_tokens_details,
             )
 
         chunk = CompletionStreamResponse(

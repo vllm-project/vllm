@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
+from collections import Counter
 
 import vllm.envs as envs
+from vllm.entrypoints.openai.chat_completion.batch_serving import _sum_or_none
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
+)
+from vllm.entrypoints.openai.chat_completion.serving import (
+    _make_prompt_tokens_details,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponse,
@@ -15,7 +20,11 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import (
+    ErrorResponse,
+    PromptTokenUsageInfo,
+    UsageInfo,
+)
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput
@@ -42,6 +51,28 @@ _STREAM_STOP_STRINGS_ERROR = (
     "already sent cannot be cut. Use non-streaming derender or "
     "output_mode=text on /inference/v1/generate which holds stop strings back."
 )
+
+
+def _sum_prompt_tokens_details(
+    responses: list[GenerateTokensResponse],
+) -> PromptTokenUsageInfo | None:
+    """Sum the generate usages' `prompt_tokens_details` over the prompts, as
+    `/v1/chat/completions/batch` does."""
+    details = [r.usage.prompt_tokens_details if r.usage else None for r in responses]
+    mm_total: Counter[str] = Counter()
+    for d in details:
+        if d is not None and d.multimodal_tokens:
+            mm_total.update(d.multimodal_tokens)
+    return _make_prompt_tokens_details(
+        enable_prompt_tokens_details=True,
+        num_cached_tokens=_sum_or_none(
+            [d.cached_tokens if d else None for d in details]
+        ),
+        num_cache_creation_tokens=_sum_or_none(
+            [d.created_cache_tokens if d else None for d in details]
+        ),
+        mm_token_counts=mm_total,
+    )
 
 
 class ServingDerender(BaseServing):
@@ -276,6 +307,9 @@ class ServingDerender(BaseServing):
             prompt_tokens=total_prompt_tokens,
             completion_tokens=total_completion_tokens,
             total_tokens=total_prompt_tokens + total_completion_tokens,
+            prompt_tokens_details=_sum_prompt_tokens_details(
+                request.generate_responses
+            ),
         )
 
         model_name = request.model or self.models.model_name()
