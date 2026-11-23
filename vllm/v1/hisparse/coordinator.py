@@ -1149,5 +1149,5 @@ def get_hisparse_coordinator(
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")
-    kv_cache_manager.try_preallocate = coordinator.try_preallocate_hot
+    kv_cache_manager.reclaim_blocks = coordinator.try_preallocate_hot
     return coordinator

@@ -196,7 +196,12 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
-        self.try_preallocate: Callable[[str, int, int], bool] | None = None
+        # Optional `reclaim_blocks(request_id, deficit, budget)`, called when an
+        # allocation is `deficit` blocks short. It may free blocks, and may
+        # allocate up to `budget` free blocks to the request that its managers
+        # report in this allocation. It returns True only if the allocation can
+        # now proceed, and changes nothing otherwise.
+        self.reclaim_blocks: Callable[[str, int, int], bool] | None = None
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers
@@ -569,7 +574,7 @@ class KVCacheManager:
             full_sequence_shortfall = (
                 required_blocks - self.block_pool.get_num_free_blocks()
             )
-            if full_sequence_shortfall > 0 and self.try_preallocate is None:
+            if full_sequence_shortfall > 0 and self.reclaim_blocks is None:
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -611,11 +616,11 @@ class KVCacheManager:
         deficit = required_blocks - available_blocks
         if full_sequence_shortfall > 0:
             deficit = max(deficit, full_sequence_shortfall)
-        # Pre-allocation must not evict this request's untouched prefix hits.
+        # Blocks taken by the hook could evict this request's untouched hits.
         if deficit > 0 and (
-            self.try_preallocate is None
+            self.reclaim_blocks is None
             or any(new_computed_block_list)
-            or not self.try_preallocate(
+            or not self.reclaim_blocks(
                 request.request_id,
                 deficit,
                 available_blocks - watermark_blocks,
