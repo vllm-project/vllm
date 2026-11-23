@@ -29,11 +29,11 @@ fn error_body(error: ApiError) -> ErrorResponse {
     let kind = match error {
         ApiError::InvalidRequest { .. }
         | ApiError::JsonParseError { .. }
-        | ApiError::InvalidQuery { .. } => ErrorType::InvalidRequestError,
-        ApiError::ModelNotFound { .. } | ApiError::NotFound { .. } => ErrorType::NotFoundError,
-        ApiError::Conflict { .. } => ErrorType::ConflictError,
-        ApiError::ServiceUnavailable { .. } => ErrorType::OverloadedError,
-        ApiError::ServerError { .. } => ErrorType::ApiError,
+        | ApiError::InvalidQuery { .. } => ErrorType::InvalidRequest,
+        ApiError::ModelNotFound { .. } | ApiError::NotFound { .. } => ErrorType::NotFound,
+        ApiError::Conflict { .. } => ErrorType::Conflict,
+        ApiError::ServiceUnavailable { .. } => ErrorType::Overloaded,
+        ApiError::ServerError { .. } => ErrorType::Api,
     };
     ErrorResponse {
         kind: ErrorResponseType::Error,

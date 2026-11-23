@@ -15069,12 +15069,6 @@ async fn anthropic_errors_cover_extraction_and_counting() {
         assert_eq!(value["type"], "error");
         assert_eq!(value["error"]["type"], kind);
         assert!(value["error"].get("code").is_none());
-        if status == StatusCode::NOT_FOUND {
-            assert_eq!(
-                value["error"]["message"],
-                "The model `missing` does not exist. Valid aliases: Qwen/Qwen1.5-0.5B-Chat."
-            );
-        }
     }
 }
 

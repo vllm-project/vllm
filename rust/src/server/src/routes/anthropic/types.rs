@@ -61,11 +61,13 @@ pub(super) enum AssistantInputBlock {
     },
     Thinking {
         thinking: String,
-        signature: Option<String>,
+        #[serde(rename = "signature")]
+        _signature: Option<String>,
     },
     // Opaque reasoning cannot be rendered, but clients replay the full response.
     RedactedThinking {
-        data: String,
+        #[serde(rename = "data")]
+        _data: String,
     },
 }
 
@@ -75,11 +77,13 @@ pub(super) enum ThinkingConfig {
     Enabled {
         budget_tokens: i64,
         // Like Python, always return reasoning and retain it in history.
-        display: Option<ThinkingDisplay>,
+        #[serde(rename = "display")]
+        _display: Option<ThinkingDisplay>,
     },
     Disabled,
     Adaptive {
-        display: Option<ThinkingDisplay>,
+        #[serde(rename = "display")]
+        _display: Option<ThinkingDisplay>,
     },
     BetweenTools,
 }
@@ -198,11 +202,15 @@ pub(super) struct ErrorDetail {
 }
 
 #[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
 pub(super) enum ErrorType {
-    InvalidRequestError,
-    NotFoundError,
-    ConflictError,
-    OverloadedError,
-    ApiError,
+    #[serde(rename = "invalid_request_error")]
+    InvalidRequest,
+    #[serde(rename = "not_found_error")]
+    NotFound,
+    #[serde(rename = "conflict_error")]
+    Conflict,
+    #[serde(rename = "overloaded_error")]
+    Overloaded,
+    #[serde(rename = "api_error")]
+    Api,
 }
