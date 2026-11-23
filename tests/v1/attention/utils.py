@@ -132,6 +132,13 @@ def create_common_attn_metadata(
     )
 
 
+def builder_id(value: object) -> str | None:
+    """Test id telling a hw-agnostic class from its same-named in-tree one."""
+    if isinstance(value, type) and ".hw_agnostic." in value.__module__:
+        return f"hw_agnostic-{value.__name__}"
+    return None
+
+
 def try_get_attention_backend(
     backend: AttentionBackendEnum,
 ) -> tuple[type[AttentionMetadataBuilder], type[AttentionImplBase]]:
