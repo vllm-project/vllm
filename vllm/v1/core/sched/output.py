@@ -38,12 +38,15 @@ else:
 
 
 def num_prompt_embeds_to_send(request: Request, num_computed_tokens: int) -> int:
-    """Rows of `request.prompt_embeds` at positions not computed yet, the only
-    ones workers need. The scheduler budgets the rows sent, so both use this
-    count."""
+    """Rows of `request.prompt_embeds` at prompt positions not computed yet,
+    the only ones workers need. The scheduler budgets the rows sent, so both
+    use this count.
+
+    Counts up to `num_prompt_tokens`: KV connectors that shorten a P/D prefill
+    trim only the token ids of a mixed prompt."""
     if request.prompt_embeds is None:
         return 0
-    return max(len(request.prompt_embeds) - num_computed_tokens, 0)
+    return max(request.num_prompt_tokens - num_computed_tokens, 0)
 
 
 @dataclass
@@ -80,13 +83,14 @@ class NewRequestData:
         prompt_is_token_ids = request.prompt_is_token_ids
         offset = 0
         if prompt_embeds is not None:
-            offset = len(prompt_embeds) - num_prompt_embeds_to_send(
+            end = request.num_prompt_tokens
+            offset = end - num_prompt_embeds_to_send(
                 request, request.num_computed_tokens
             )
             # A view: the worker transport sends only these rows' bytes.
-            prompt_embeds = prompt_embeds[offset:]
+            prompt_embeds = prompt_embeds[offset:end]
             if prompt_is_token_ids is not None:
-                prompt_is_token_ids = prompt_is_token_ids[offset:]
+                prompt_is_token_ids = prompt_is_token_ids[offset:end]
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,

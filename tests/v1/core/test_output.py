@@ -196,6 +196,33 @@ def test_from_request_sends_only_uncomputed_prompt_embeds() -> None:
     assert new_req.prompt_len == 6
 
 
+def test_from_request_stops_prompt_embeds_at_the_truncated_prompt() -> None:
+    """KV connectors that shorten a P/D prefill trim only the token ids of a
+    mixed prompt. The rows sent end at `num_prompt_tokens` anyway, so the
+    workers drop them in the step the scheduler releases them."""
+    prompt_embeds = torch.randn(6, 4)
+    is_token_ids = [False, False, True, False, False, False]
+    request = Request(
+        request_id="test_req",
+        prompt_token_ids=[0] * 6,
+        sampling_params=SamplingParams(),
+        pooling_params=None,
+        prompt_embeds=prompt_embeds,
+        prompt_is_token_ids=is_token_ids,
+    )
+    # As the connectors' prefill truncation does for a mixed prompt.
+    del request.prompt_token_ids[-2:]
+    request.num_prompt_tokens -= 2
+    request.num_computed_tokens = 1
+
+    new_req = NewRequestData.from_request(request, ([],), request.prefill_token_ids)
+
+    assert new_req.prompt_embeds_offset == 1
+    assert new_req.prompt_embeds is not None
+    torch.testing.assert_close(new_req.prompt_embeds, prompt_embeds[1:4])
+    assert new_req.prompt_is_token_ids == is_token_ids[1:4]
+
+
 def test_from_request_clamps_offset_to_prompt() -> None:
     """A resumed request may have computed past its prompt: it sends no rows."""
     new_req = _embeds_new_request_data(torch.randn(6, 4), 9)
