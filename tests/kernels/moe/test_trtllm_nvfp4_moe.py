@@ -59,7 +59,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.utils.flashinfer import (
+    has_flashinfer_prims_ts_moe_precompile,
+    has_flashinfer_trtllm_fused_moe,
+)
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 
@@ -893,6 +896,12 @@ def test_select_prims_ts_backend():
 @pytest.mark.skipif(
     not PrimsTsNvFp4ExpertsModular._supports_current_device(),
     reason="Requires FlashInfer Prims-TS MoE on SM100/103/107",
+)
+@pytest.mark.skipif(
+    not has_flashinfer_prims_ts_moe_precompile(),
+    reason=(
+        "Requires the optional Prims-TS MoE precompile API (absent in FlashInfer 0.7.4)"
+    ),
 )
 @pytest.mark.parametrize("per_token_activation", [False, True])
 @torch.inference_mode()

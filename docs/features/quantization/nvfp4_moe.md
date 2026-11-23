@@ -47,12 +47,19 @@ compilation during inference.
 
 With `--kernel-config.enable_jit_warmup true` (the default), vLLM precompiles
 the untuned FC1/FC2 configurations for each distinct layer layout before
-serving. The log reports `Precompiled ... Prims-TS MoE expert configurations`.
-If FlashInfer exposes the MoE operation but lacks its precompile helper, vLLM
-warns and leaves compilation to inference.
+serving **only if** FlashInfer provides the optional
+`prims_ts_fp4_block_scale_routed_moe_precompile` API. The log then reports
+`Precompiled ... Prims-TS MoE expert configurations`.
 
-JIT warmup is separate from FlashInfer autotuning. For example, this keeps the
-untuned-kernel precompilation while disabling the autotuning sweep:
+The pinned FlashInfer 0.7.4 release provides the Prims-TS MoE operation but
+not this precompile API. The numerical MoE path remains available; vLLM warns
+and skips the optional precompilation, leaving compilation to inference.
+This fallback does not establish CUDA-graph compatibility for every deployment;
+validate graph capture with the intended model and serving configuration.
+
+JIT warmup is separate from FlashInfer autotuning. When FlashInfer provides the
+optional API, this enables untuned-kernel precompilation while disabling the
+autotuning sweep:
 
 ```bash
 vllm serve <nvfp4-model> \
