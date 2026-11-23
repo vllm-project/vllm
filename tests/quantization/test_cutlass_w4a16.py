@@ -12,6 +12,7 @@ Run `pytest tests/quantization/test_cutlass_w4a16.py`.
 import pytest
 import torch
 
+from tests.models.utils import check_logprobs_close
 from vllm.platforms import current_platform
 
 if not current_platform.has_device_capability(90) or current_platform.is_rocm():
@@ -99,6 +100,7 @@ def test_machete_rejects_invalid_config(
     )
     can_impl, reason = MacheteLinearKernel.can_implement(config)
     assert not can_impl
+    assert reason is not None
     assert expected_reason in reason
 
 
@@ -151,7 +153,7 @@ def test_w4a16_machete_e2e(vllm_runner, model_name):
 
 
 def test_w4a16_machete_bfloat16_deterministic(vllm_runner):
-    """Verify Machete works with bf16 activations and is deterministic."""
+    """Verify Machete works with bf16 activations and gives stable output."""
     model_name = "nm-testing/tinyllama-oneshot-w4a16-channel-v2"
     prompt = "The capital of France is"
 
@@ -172,8 +174,16 @@ def test_w4a16_machete_bfloat16_deterministic(vllm_runner):
 
         llm.apply_model(check_kernel_type)
 
-        out1 = llm.generate_greedy(prompt, max_tokens=10)
-        out2 = llm.generate_greedy(prompt, max_tokens=10)
-        assert out1[0][1] == out2[0][1], (
-            f"Non-deterministic: '{out1[0][1]}' vs '{out2[0][1]}'"
+        # vLLM only guarantees bitwise-identical repeated runs in batch-invariant
+        # mode. This tiny 4-bit model has near-tied logits, so on CI the two
+        # greedy runs have diverged at token 5 ("after" vs "of"). A broken
+        # kernel would emit tokens outside each other's top-k, so compare
+        # logprobs instead of exact strings.
+        out1 = llm.generate_greedy_logprobs([prompt], max_tokens=10, num_logprobs=5)
+        out2 = llm.generate_greedy_logprobs([prompt], max_tokens=10, num_logprobs=5)
+        check_logprobs_close(
+            outputs_0_lst=out1,
+            outputs_1_lst=out2,
+            name_0="run1",
+            name_1="run2",
         )

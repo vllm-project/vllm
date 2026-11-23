@@ -4,7 +4,10 @@ from collections.abc import Mapping
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
+from vllm.multimodal.cache import (
+    BaseMultiModalProcessorCache,
+    processor_only_cache_from_config,
+)
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.registry import MultiModalRegistry
@@ -57,16 +60,13 @@ class MultiModalBudget:
 
         with set_default_torch_num_threads():  # Avoid hang during startup
             cache = (
-                mm_registry.processor_only_cache_from_config(vllm_config)
-                if enable_cache
-                else None
+                processor_only_cache_from_config(vllm_config) if enable_cache else None
             )
             processor = mm_registry.create_processor(model_config)
 
             self.cache = cache
             self.processor = processor
             mm_config = model_config.get_multimodal_config()
-            enable_mm_embeds = mm_config is not None and mm_config.enable_mm_embeds
 
             supported_mm_limits = processor.info.supported_mm_limits
             self.mm_limits = mm_limits = processor.info.allowed_mm_limits
@@ -81,7 +81,9 @@ class MultiModalBudget:
             embed_only_modalities = {
                 modality
                 for modality in supported_mm_limits
-                if enable_mm_embeds and mm_limits.get(modality, 0) == 0
+                if mm_limits.get(modality, 0) == 0
+                and mm_config is not None
+                and mm_config.is_mm_embeds_enabled(modality)
             }
 
             active_modalities = tower_modalities | embed_only_modalities

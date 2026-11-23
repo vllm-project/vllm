@@ -3,39 +3,39 @@
 """AMX-only, high-performance MLA backend for DeepSeek V2/V3/R1 on CPU.
 
 Built on the AMX decode/extend/bmm kernels vendored under
-``csrc/cpu/sgl-kernels/``, plugged into vLLM's ``MLACommonBackend``/
-``MLACommonImpl`` abstraction the same way every other concrete MLA backend
-(``TritonMLAImpl``, etc.) does.
+`csrc/cpu/sgl-kernels/`, plugged into vLLM's `MLACommonBackend`/
+`MLACommonImpl` abstraction the same way every other concrete MLA backend
+(`TritonMLAImpl`, etc.) does.
 
-This is a separate backend from the reference ``CPUMLABackend``
-(``vllm/v1/attention/backends/mla/cpu_mla.py``): that one targets every CPU
-(any dtype, block_size=16, ``mla_decode_kvcache`` decode kernel + inherited
+This is a separate backend from the reference `CPUMLABackend`
+(`vllm/v1/attention/backends/mla/cpu_mla.py`): that one targets every CPU
+(any dtype, block_size=16, `mla_decode_kvcache` decode kernel + inherited
 SDPA-style prefill) as a functional/CI reference, not performance. This
 backend instead requires AMX (bf16 only, block_size a multiple of 32) and is
 selected by the platform layer in preference to the reference backend
-whenever the host supports it -- see ``CpuPlatform.get_attn_backend_cls``.
+whenever the host supports it -- see `CpuPlatform.get_attn_backend_cls`.
 
 Two points where this backend differs structurally from the GPU backends,
 both explained in the CPU MLA design plan:
 
-- ``forward_mha`` is fully overridden (not inherited from
-  ``MLACommonBaseImpl``): the GPU "compute-friendly" prefill path depends on
-  a pluggable ``MLAPrefillBackend`` and CUDA-only chunked-context gather ops,
+- `forward_mha` is fully overridden (not inherited from
+  `MLACommonBaseImpl`): the GPU "compute-friendly" prefill path depends on
+  a pluggable `MLAPrefillBackend` and CUDA-only chunked-context gather ops,
   neither of which exist on CPU. Instead, this attends directly in
-  latent-MQA space via the ``extend_attention_cpu`` kernel, which handles
+  latent-MQA space via the `extend_attention_cpu` kernel, which handles
   cached-prefix continuation and fresh prefill in one causal pass (the KV
   cache already contains the new tokens by the time this runs, since
-  ``do_kv_cache_update`` executes first).
+  `do_kv_cache_update` executes first).
 - Weight absorption for the prefill path is done with this impl's own
-  VNNI-packed copies of ``W_UK``/``W_UV`` (computed in
-  ``process_weights_after_loading``, using ``bmm_cpu``), rather than reading
-  the generic ``layer.W_UK_T``/``layer.W_UV``/``layer._v_up_proj`` the way
-  GPU backends do, since ``forward_mha``'s abstract signature has no
-  ``layer`` parameter (only ``forward_mqa`` does) and that signature is left
-  untouched. The decode path needs no such packing: ``MLAAttention.forward_impl``
-  already absorbs/de-absorbs Q around the ``forward_mqa`` call using the
-  generic (unpacked) ``layer.W_UK_T``/``layer._v_up_proj``, so
-  ``forward_mqa`` here only has to invoke the decode kernel.
+  VNNI-packed copies of `W_UK`/`W_UV` (computed in
+  `process_weights_after_loading`, using `bmm_cpu`), rather than reading
+  the generic `layer.W_UK_T`/`layer.W_UV`/`layer._v_up_proj` the way
+  GPU backends do, since `forward_mha`'s abstract signature has no
+  `layer` parameter (only `forward_mqa` does) and that signature is left
+  untouched. The decode path needs no such packing: `MLAAttention.forward_impl`
+  already absorbs/de-absorbs Q around the `forward_mqa` call using the
+  generic (unpacked) `layer.W_UK_T`/`layer._v_up_proj`, so
+  `forward_mqa` here only has to invoke the decode kernel.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from typing import ClassVar
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
@@ -70,7 +70,7 @@ def _block_quant_to_tensor_quant(
 
     Returns (fp8_weight, dequant_scale) where fp8_weight * dequant_scale
     approximates the original float weight.  dequant_scale is a 0-dim
-    scalar tensor as expected by bmm_cpu's ``scale`` argument.
+    scalar tensor as expected by bmm_cpu's `scale` argument.
 
     NOTE: block->tensor re-quantization may slightly affect accuracy
     (equivalent to SGLang's block_quant_to_tensor_quant for CPU).
@@ -112,7 +112,7 @@ def _compute_num_kv_splits(max_seq_len: int, num_threads: int) -> int:
 def _expand_block_table(block_table: torch.Tensor, block_size: int) -> torch.Tensor:
     """Adapter: vLLM's block-table paging -> the flat per-(request, position)
     physical row index the decode/extend kernels expect. Called once per step
-    from ``AMXMLAMetadataBuilder.build``, not per layer.
+    from `AMXMLAMetadataBuilder.build`, not per layer.
     """
     offsets = torch.arange(
         block_size, device=block_table.device, dtype=block_table.dtype
@@ -130,7 +130,7 @@ class AMXMLABackend(MLACommonBackend):
         return [576]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(32)]
 
     @classmethod
@@ -311,6 +311,7 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
+        skip_scale: bool = False,
     ) -> None:
         # Overrides the default (CUDA-only concat_and_cache_mla).
         if kv_cache.numel() == 0:

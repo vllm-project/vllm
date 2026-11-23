@@ -11,7 +11,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.utils import torch_int
 
 from vllm.model_executor.layers.activation import get_act_fn
@@ -65,7 +65,7 @@ class InternS1VisionPatchEmbeddings(nn.Module):
 
 
 class InternS1VisionEmbeddings(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PreTrainedConfig):
         super().__init__()
         self.config = config
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
@@ -166,7 +166,7 @@ class InternSdpaAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         *,
         num_dummy_heads: int = 0,
         prefix: str = "",
@@ -242,7 +242,7 @@ class InternSdpaAttention(nn.Module):
 class InternS1VisionMLP(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -276,7 +276,7 @@ class InternS1VisionMLP(nn.Module):
 class InternS1VisionLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_dummy_heads: int = 0,
@@ -311,7 +311,7 @@ class InternS1VisionLayer(nn.Module):
 
     def _init_attn(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         num_dummy_heads: int,
@@ -343,7 +343,7 @@ class InternS1VisionLayer(nn.Module):
 class InternS1VisionEncoder(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
@@ -382,7 +382,7 @@ class InternS1VisionEncoder(nn.Module):
 class InternS1VisionModel(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,

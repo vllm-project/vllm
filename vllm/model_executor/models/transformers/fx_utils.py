@@ -35,6 +35,24 @@ _MODULE_CALL = nn.Module.__call__
 """The unpatched `nn.Module.__call__`. During tracing fx patches it to record
 `call_module` nodes; meta execution must call modules for real."""
 
+_MODULE_GETATTR = nn.Module.__getattr__
+"""The unpatched `nn.Module.__getattr__`. During tracing fx patches it to record
+`get_attr` nodes; reading one while inferring a `get_attr`'s own value would
+recurse until the stack runs out, truncating the graph."""
+
+_ALWAYS_NONE = frozenset({"past_key_values", "cache"})
+"""Cache arguments vLLM never passes, made concrete `None` to simplify tracing."""
+
+
+@contextlib.contextmanager
+def _unpatched_modules():
+    """Restores the module hooks fx patches, so meta execution records nothing."""
+    with (
+        mock.patch.object(nn.Module, "__call__", _MODULE_CALL),
+        mock.patch.object(nn.Module, "__getattr__", _MODULE_GETATTR),
+    ):
+        yield
+
 
 def is_leaf_call(node: object) -> TypeIs[fx.Node]:
     """Is node a call recorded by `_as_leaf_call` (e.g. an attention interface)."""
@@ -110,6 +128,13 @@ class _AllLeafTracer(fx.Tracer):
     def is_leaf_module(self, m: nn.Module, module_qualified_name: str) -> bool:
         return True
 
+    def create_args_for_root(self, root_fn, is_module, concrete_args=None):
+        # Trace the undecorated forward. fx can't trace a `(*args, **kwargs)` wrapper
+        # such as Transformers' `deprecate_kwarg`.
+        return super().create_args_for_root(
+            inspect.unwrap(root_fn), is_module, concrete_args
+        )
+
     def proxy(self, node: fx.Node) -> fx.Proxy:
         return _MetaProxy(node, self)
 
@@ -132,7 +157,8 @@ class _AllLeafTracer(fx.Tracer):
                 )
             return _UNKNOWN
         if kind == "get_attr":
-            value = operator.attrgetter(str(target))(self.root)
+            with _unpatched_modules():
+                value = operator.attrgetter(str(target))(self.root)
             if isinstance(value, torch.Tensor):
                 value = torch.empty_like(value, device="meta")
             return value
@@ -159,8 +185,6 @@ class _AllLeafTracer(fx.Tracer):
         if kind == "call_module":
             # Run the child's forward with all its state on "meta", without
             # mutating it (at match time params may be meta but buffers real).
-            # fx patches `nn.Module.__call__` while tracing; restore the real
-            # one so this execution is not itself recorded.
             child = self.root.get_submodule(str(target))
             state = {
                 name: torch.empty_like(tensor, device="meta")
@@ -168,7 +192,7 @@ class _AllLeafTracer(fx.Tracer):
                     child.named_parameters(), child.named_buffers()
                 )
             }
-            with mock.patch.object(nn.Module, "__call__", _MODULE_CALL):
+            with _unpatched_modules():
                 return torch.func.functional_call(child, state, meta_args, meta_kwargs)
         return _UNKNOWN
 
@@ -235,11 +259,7 @@ def _leaf_attention_interfaces():
 def trace(module: nn.Module) -> fx.Graph | None:
     """Trace `module.forward`, returning the partial graph on failure."""
     parameters = forward_parameters(type(module))
-    # vLLM never passes `past_key_values` so it is always the default value of `None`.
-    # Make this concrete to simplify tracing.
-    concrete_args = None
-    if "past_key_values" in parameters:
-        concrete_args = {"past_key_values": None}
+    concrete_args = {name: None for name in _ALWAYS_NONE & parameters.keys()} or None
     # Get the name of the kwargs parameter passed to module.forward (usually "kwargs")
     tracer = _AllLeafTracer()
     tracer.varkw = next(
@@ -684,6 +704,14 @@ def replace_expr(module: ast.AST, old: ast.expr, new: ast.expr) -> None:
             return super().generic_visit(node)
 
     _Replacer().visit(module)
+
+
+def is_complete(graph: fx.Graph) -> bool:
+    """Did the trace run to completion? A partial graph has no `output` node.
+
+    Only a complete graph can be read for the *absence* of an op; in a partial
+    one the tail is exactly what is missing."""
+    return any(node.op == "output" for node in graph.nodes)
 
 
 def find_node(graph: fx.Graph, predicate: Callable[[fx.Node], bool]) -> fx.Node | None:

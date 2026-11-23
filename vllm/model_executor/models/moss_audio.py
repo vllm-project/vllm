@@ -13,7 +13,7 @@ import regex as re
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import BatchFeature, PretrainedConfig, Qwen3Config
+from transformers import BatchFeature, PreTrainedConfig, Qwen3Config
 from transformers.models.whisper import WhisperFeatureExtractor
 from typing_extensions import TypedDict
 
@@ -219,7 +219,7 @@ def _merge_moss_audio_processor_configs(
     return merged
 
 
-@dataclass
+@dataclass(slots=True)
 class MossAudioEncoderConfig:
     d_model: int = 1280
     output_dim: int = 1280
@@ -263,7 +263,7 @@ class MossAudioEncoderConfig:
         return cls(**values)
 
 
-class MossAudioConfig(PretrainedConfig):
+class MossAudioConfig(PreTrainedConfig):
     model_type = "moss_audio"
     is_composition = True
 
@@ -504,9 +504,11 @@ class MossAudioEncoder(nn.Module):
             padding=(1, 1),
         )
 
-        conv_freq = self._compute_downsampled_length(
-            torch.tensor(config.num_mel_bins)
-        ).item()
+        # Use integer arithmetic because meta tensors do not support .item().
+
+        # Three convolutions with kernel=3, stride=2, padding=1 each yield
+        # ceil(n / 2); together they yield ceil(n / 8) = (n + 7) // 8.
+        conv_freq = (config.num_mel_bins + 7) // 8
         self.stem_proj = ReplicatedLinear(
             config.downsample_hidden_size * int(conv_freq),
             config.d_model,
@@ -1343,9 +1345,10 @@ class MossAudioDummyInputsBuilder(BaseDummyInputsBuilder[MossAudioProcessingInfo
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
+        mel_sr = self.info.get_hf_processor().mel_config["mel_sr"]
         return {
             "audio": self._get_dummy_audios(
-                length=16000,
+                length=int(mel_sr * DEFAULT_MAX_AUDIO_SECONDS),
                 num_audios=mm_counts.get("audio", 0),
                 overrides=mm_options.get("audio"),
             )

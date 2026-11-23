@@ -7,30 +7,29 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.int8_utils import block_dequant
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.longcat_flash import FlashConfig
 from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import DeepseekV2DecoderLayer
+from .longcat_flash import scale_mla_lora_norms_on_load
 from .utils import maybe_prefix
 
 
 class LongCatMultiTokenPredictorLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         vllm_config: VllmConfig,
         quant_config: QuantizationConfig | None = None,
@@ -46,6 +45,7 @@ class LongCatMultiTokenPredictorLayer(nn.Module):
             prefix="eh_proj",
         )
         self.mtp_block = DeepseekV2DecoderLayer(vllm_config, prefix)
+        scale_mla_lora_norms_on_load(self.mtp_block.self_attn, config)
         self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -80,9 +80,9 @@ class LongCatMultiTokenPredictor(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
-        vllm_config.model_config.hf_config.intermediate_size = config.intermediate_size
-        self.mtp_start_layer_idx = config.num_hidden_layers * 2
+        config = vllm_config.model_config.hf_config
+        # TODO: Use `num_hidden_layers` once Transformers 5.18.0 is the minimum
+        self.mtp_start_layer_idx = config.num_layers * 2
         self.num_mtp_layers = 1
         self.layers = torch.nn.ModuleDict(
             {
@@ -130,7 +130,7 @@ class LongCatFlashMTP(nn.Module):
         # builds a dense MLP. object.__setattr__ bypasses the ngram remote
         # config's strict validation (it rejects setting the int field to None).
         object.__setattr__(vllm_config.model_config.hf_config, "n_routed_experts", None)
-        self.config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
+        self.config = vllm_config.model_config.hf_config
         self.quant_config = (
             None
             if "mtp" in getattr(self.config, "disable_quant_module", [])
@@ -264,50 +264,6 @@ class LongCatFlashMTP(nn.Module):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
-        spec_layer_id = self.config.num_hidden_layers * 2
-        self_attn = self.model.layers[str(spec_layer_id)].mtp_block.self_attn
-        if (
-            self.quant_config is not None
-            and hasattr(self.quant_config, "weight_block_size")
-            and self_attn.kv_b_proj.weight.dtype
-            in (
-                torch.float8_e4m3fn,
-                torch.float8_e4m3fnuz,
-            )
-        ):
-            weight_block_size = self.quant_config.weight_block_size
-            if weight_block_size is not None:
-                dtype = torch.get_default_dtype()
-                w = block_dequant(
-                    self_attn.kv_b_proj.weight,
-                    self_attn.kv_b_proj.weight_scale_inv,
-                    weight_block_size,
-                ).to(dtype)
-            else:
-                w = self_attn.kv_b_proj.weight
-        else:
-            w = self_attn.kv_b_proj.weight
-        w_kc, w_vc = w.unflatten(
-            0, (-1, self_attn.qk_nope_head_dim + self_attn.v_head_dim)
-        ).split([self_attn.qk_nope_head_dim, self_attn.v_head_dim], dim=1)
-        self_attn.w_kc = w_kc.transpose(1, 2).contiguous().transpose(1, 2)
-        self_attn.w_vc = w_vc.contiguous().transpose(1, 2)
-        # Guard against compounding on incremental load_weights calls (the
-        # in-place *= would otherwise double-apply the LoRA scaling).
-        if self.config.mla_scale_q_lora and not getattr(
-            self_attn, "_mla_q_lora_scaled", False
-        ):
-            self_attn.q_a_layernorm.weight.data *= (
-                self.config.hidden_size / self.config.q_lora_rank
-            ) ** 0.5
-            self_attn._mla_q_lora_scaled = True
-        if self.config.mla_scale_kv_lora and not getattr(
-            self_attn, "_mla_kv_lora_scaled", False
-        ):
-            self_attn.kv_a_layernorm.weight.data *= (
-                self.config.hidden_size / self.config.kv_lora_rank
-            ) ** 0.5
-            self_attn._mla_kv_lora_scaled = True
         return loaded_params
 
     def _rewrite_spec_layer_name(
@@ -353,8 +309,8 @@ class LongCatFlashMTP(nn.Module):
         return name
 
     def get_spec_layer_idx_from_weight_name(
-        self, config: PretrainedConfig, weight_name: str
+        self, config: PreTrainedConfig, weight_name: str
     ) -> int | None:
         if "model.mtp" in weight_name:
-            return config.num_hidden_layers * 2
+            return self.model.mtp_start_layer_idx
         return None

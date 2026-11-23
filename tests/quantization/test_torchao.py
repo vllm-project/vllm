@@ -11,7 +11,6 @@ from tests.quantization.utils import load_model_without_vllm_runner
 from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
@@ -92,8 +91,8 @@ def test_opt_125m_awq_int4wo_model_loading_with_params(vllm_runner):
     reason="requires torchao>=0.18.0 on gfx950",
 )
 def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
-    """Testing online quantization, load_weights integration point,
-    with config dict serialized to json string
+    """Testing online quantization and reload_weights, with config dict
+    serialized to json string
     """
     torch._dynamo.reset()
     model_name = "facebook/opt-125m"
@@ -121,15 +120,7 @@ def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
     ) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
-        load_config = llm.llm.llm_engine.vllm_config.load_config
-        model_config = llm.llm.llm_engine.vllm_config.model_config
-
-        def load_weights(model):
-            model_loader = get_model_loader(load_config)
-            weights_iterator = model_loader.get_all_weights(model_config, model)
-            model.load_weights(weights_iterator)
-
-        llm.apply_model(load_weights)
+        llm.collective_rpc("reload_weights")
 
         reload_output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
         assert output[0][0] == reload_output[0][0]

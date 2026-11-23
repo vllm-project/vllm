@@ -9,7 +9,8 @@ Known Issues:
 """
 
 import sys
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
+from typing import Any, Literal
 
 import pytest
 import torch
@@ -21,21 +22,23 @@ from tests.v1.attention.utils import (
     try_get_attention_backend,
 )
 from vllm import _custom_ops as ops
-from vllm.config.vllm import set_current_vllm_config
+from vllm.config import CUDAGraphMode
+from vllm.config.vllm import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.attention import mla_attention as mla_attention_module
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
     MLACommonBaseImpl,
+    MLACommonMetadataBuilder,
     QueryLenSupport,
     _DecodeConcatQuantFP8,
-    _use_masked_mha,
     build_mla_chunked_context_metadata,
 )
+from vllm.model_executor.layers.attention.sparse_mla_attention import _use_masked_mha
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
+from vllm.v1.attention.backend import CommonAttentionMetadata, MLAAttentionImpl
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
 from vllm.v1.attention.backends.mla import tokenspeed_mla as tokenspeed_mla_module
@@ -47,13 +50,17 @@ from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.selector import (
     MLAPrefillSelectorConfig,
 )
+from vllm.v1.attention.backends.mla.prefill.trtllm_ragged import (
+    is_cute_dsl_mla_prefill_supported,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MLAAttentionSpec,
+    get_block_table_width,
+    is_quantized_kv_cache,
 )
-from vllm.v1.worker.block_table import get_block_table_width
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.CUTLASS_MLA,
@@ -65,7 +72,10 @@ BACKENDS_TO_TEST = [
 ]
 
 if current_platform.is_rocm():
-    BACKENDS_TO_TEST.append(AttentionBackendEnum.ROCM_AITER_MLA)
+    BACKENDS_TO_TEST += [
+        AttentionBackendEnum.ROCM_AITER_MLA,
+        AttentionBackendEnum.ROCM_AITER_TRITON_MLA,
+    ]
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -214,27 +224,56 @@ def test_masked_mha_routing_is_dimension_specific():
         ("fp8_ds_mla", KVQuantMode.FP8_PER_TENSOR),
     ],
 )
+@pytest.mark.parametrize(
+    ("sm120", "kv_lora_rank", "rope_dim", "row_bytes"),
+    [
+        (False, 512, 64, 656),
+        (False, 512, 0, 656),
+        (True, 512, 64, 656),
+        (True, 512, 0, 528),
+        (True, 256, 0, 656),
+    ],
+)
 def test_mla_kv_cache_spec_uses_layer_cache_dtype(
-    cache_dtype: str, expected_quant_mode: KVQuantMode
+    cache_dtype: str,
+    expected_quant_mode: KVQuantMode,
+    sm120: bool,
+    kv_lora_rank: int,
+    rope_dim: int,
+    row_bytes: int,
 ):
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
+        FlashInferMLASparseSM120Impl,
+    )
+    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseImpl
+
+    impl: Any = object.__new__(
+        FlashInferMLASparseSM120Impl if sm120 else FlashMLASparseImpl
+    )
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = rope_dim
     layer = SimpleNamespace(
+        attn_backend=flashmla_module.FlashMLABackend,
+        impl=impl,
         kv_cache_dtype=cache_dtype,
-        head_size=576,
+        head_size=kv_lora_rank + rope_dim,
+        topk_buffer_width=None,
         indexer=None,
-        non_causal_multi_token_decode=False,
         sliding_window=None,
     )
+    layer._uses_flat_kv_cache = MethodType(MLAAttention._uses_flat_kv_cache, layer)
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=64), model_config=None
     )
 
-    spec = MLAAttention.get_kv_cache_spec(layer, vllm_config)
+    spec = MLAAttention.get_kv_cache_config(layer, vllm_config).spec
 
     assert isinstance(spec, MLAAttentionSpec)
     assert spec.cache_dtype_str == cache_dtype
     assert spec.kv_quant_mode == expected_quant_mode
     if cache_dtype == "fp8_ds_mla":
-        assert spec.page_size_bytes == 64 * 656
+        assert spec.state_content_bytes == row_bytes
+        assert spec.page_size_bytes == 64 * row_bytes
 
 
 @pytest.mark.cpu_test
@@ -267,7 +306,8 @@ def test_dcp_chunked_context_accepts_non_virtual_block_aligned_prefix():
         [17],
         [24],
     ]
-    assert [chunk.padded_local_cu_seq_lens.tolist() for chunk in metadata.chunks] == [
+    # set on every chunk when dcp_world_size > 1
+    assert [chunk.padded_local_cu_seq_lens.tolist() for chunk in metadata.chunks] == [  # type: ignore[union-attr]
         [0, 17],
         [0, 24],
     ]
@@ -301,32 +341,52 @@ if AttentionBackendEnum.TOKENSPEED_MLA in BACKENDS_TO_TEST:
         BACKENDS_TO_TEST.remove(AttentionBackendEnum.TOKENSPEED_MLA)
 
 
-def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
+def _bare_mla_layer(
+    monkeypatch,
+    kv_b_weight: torch.Tensor,
+    num_heads: int,
+    qk_nope_head_dim: int,
+    v_head_dim: int,
+) -> MLAAttention:
+    """An MLAAttention with only the state process_weights_after_loading and
+    _v_up_proj use, around an unquantized kv_b_proj weight [N*(P+V), L]."""
     layer = MLAAttention.__new__(MLAAttention)
     torch.nn.Module.__init__(layer)
-    layer.kv_lora_rank = 2
-    layer.num_heads = 2
-    layer.qk_nope_head_dim = 3
-    layer.v_head_dim = 4
+    layer.kv_lora_rank = kv_b_weight.shape[1]
+    layer.num_heads = num_heads
+    layer.qk_nope_head_dim = qk_nope_head_dim
+    layer.v_head_dim = v_head_dim
     layer.kv_b_proj = torch.nn.Module()
-    layer.kv_b_proj.weight = torch.nn.Parameter(
-        torch.arange(28.0, dtype=torch.float16).reshape(14, 2)
-    )
+    layer.kv_b_proj.weight = torch.nn.Parameter(kv_b_weight)
     layer.kv_b_proj.quant_method = None
     layer.is_aiter_triton_fp4_bmm_enabled = False
     layer.is_aiter_triton_fp8_bmm_enabled = False
+    layer.is_aiter_triton_bf16_bmm_enabled = False
     layer.is_amx_bmm_enabled = False
     layer.dcp_q_replicate = False
+    layer.dcp_manager = None
     layer.quant_config = None
     layer.layer_name = "test"
+    layer.act_dtype = torch.float32
     layer.impl = SimpleNamespace(process_weights_after_loading=lambda act_dtype: None)
 
     monkeypatch.setattr(
         mla_attention_module, "set_default_quant_scales", lambda *_, **__: None
     )
+    return layer
+
+
+def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
+    layer = _bare_mla_layer(
+        monkeypatch,
+        torch.arange(28.0, dtype=torch.float16).reshape(14, 2),
+        num_heads=2,
+        qk_nope_head_dim=3,
+        v_head_dim=4,
+    )
 
     with torch.no_grad():
-        layer.process_weights_after_loading(torch.float32)
+        layer.process_weights_after_loading()
         assert isinstance(layer.W_UV, torch.nn.Parameter)
         assert isinstance(layer.W_UK_T, torch.nn.Parameter)
         w_uv_ptr = layer.W_UV.data_ptr()
@@ -335,12 +395,157 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
         old_w_uk_t = layer.W_UK_T.clone()
 
         layer.kv_b_proj.weight.add_(100)
-        layer.process_weights_after_loading(torch.float32)
+        layer.process_weights_after_loading()
 
     assert layer.W_UV.data_ptr() == w_uv_ptr
     assert layer.W_UK_T.data_ptr() == w_uk_t_ptr
     torch.testing.assert_close(layer.W_UV, old_w_uv + 100)
     torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm-only")
+@pytest.mark.parametrize(
+    ("num_heads", "v_head_dim", "kv_lora_rank", "num_tokens", "tuned", "gfx950_only"),
+    [
+        # AITER's gfx942/gfx950 N=1024, K=4096 config tunes up to 1024 tokens.
+        pytest.param(4, 1024, 4096, 32, True, False, id="n1024-k4096-m32"),
+        pytest.param(4, 1024, 4096, 100, True, False, id="n1024-k4096-m100"),
+        pytest.param(4, 1024, 4096, 2048, False, False, id="n1024-k4096-m2048"),
+        # Kimi-K2 W_UV at TP8 (B=8, N=128, K=512): tuned up to 128 tokens.
+        pytest.param(8, 128, 512, 64, True, True, id="kimi-tp8-m64"),
+        pytest.param(8, 128, 512, 256, False, True, id="kimi-tp8-m256"),
+    ],
+)
+def test_mla_v_up_proj_follows_tuned_aiter_triton_bf16_bmm(
+    monkeypatch, num_heads, v_head_dim, kv_lora_rank, num_tokens, tuned, gfx950_only
+):
+    """_v_up_proj runs AITER's Triton bf16 BMM exactly for shapes AITER has a
+    tuned config for, and matches the torch.bmm path it replaces."""
+    import triton
+
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+    from vllm.platforms.rocm import on_gfx950
+
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is not available on this platform")
+    if gfx950_only and not on_gfx950():
+        pytest.skip("AITER tunes this shape for gfx950 only")
+    assert (
+        rocm_aiter_ops.is_triton_bf16_bmm_tuned(
+            num_heads, num_tokens, v_head_dim, kv_lora_rank
+        )
+        is tuned
+    ), "AITER's tuned BATCHED_GEMM-A16W16 configs changed; update this case"
+
+    qk_nope_head_dim = 128
+    set_random_seed(0)
+    kv_b_weight = 0.02 * torch.randn(
+        num_heads * (qk_nope_head_dim + v_head_dim),
+        kv_lora_rank,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    layer = _bare_mla_layer(
+        monkeypatch, kv_b_weight, num_heads, qk_nope_head_dim, v_head_dim
+    )
+    layer.act_dtype = torch.bfloat16
+    with torch.no_grad():
+        layer.process_weights_after_loading()
+    x = torch.randn(
+        num_tokens, num_heads * kv_lora_rank, dtype=torch.bfloat16, device="cuda"
+    )
+
+    # torch.profiler on ROCm can drop kernel records that arrive after the
+    # session's flush (ROCm/rocm-systems#14378), so record Triton launches.
+    launched: list[str] = []
+    monkeypatch.setattr(
+        triton.knobs.runtime,
+        "launch_enter_hook",
+        lambda metadata: launched.append(metadata.get()["name"]),
+    )
+
+    outs, kernels = {}, {}
+    for use_triton in (False, True):
+        layer.is_aiter_triton_bf16_bmm_enabled = use_triton
+        out = torch.full(
+            (num_tokens, num_heads * v_head_dim),
+            float("nan"),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        launched.clear()
+        layer._v_up_proj(x, out)
+        torch.accelerator.synchronize()
+        kernels[use_triton] = list(launched)
+        outs[use_triton] = out
+
+    ran_triton = any("batched_gemm_bf16" in k for k in kernels[True])
+    assert ran_triton is tuned, kernels[True]
+    assert not any("batched_gemm_bf16" in k for k in kernels[False]), kernels[False]
+    torch.testing.assert_close(outs[True], outs[False])
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm-only")
+@pytest.mark.parametrize("num_tokens", [1, 64, 300])
+@pytest.mark.parametrize("q_scale", [1.0, 0.37])
+def test_aiter_fused_decode_query_matches_unfused_ops(num_tokens, q_scale):
+    """The fused AITER decode query (Kimi-K2 at TP8: 8 heads, L=512, P=128) is
+    the padded fp8 query MLAAttention builds otherwise: torch.bmm into a
+    token-major buffer, _DecodeConcatQuantFP8, then get_mla_padded_q."""
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+
+    num_heads, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim = 8, 512, 128, 64
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is not available on this platform")
+    if not rocm_aiter_ops.is_fused_bf16_bmm_cat_quant_pad_mla_tuned(
+        num_heads, kv_lora_rank, qk_nope_head_dim
+    ):
+        pytest.skip("installed AITER has no tuned fused MLA decode query kernel")
+
+    set_random_seed(0)
+    q = torch.randn(
+        num_tokens,
+        num_heads,
+        qk_nope_head_dim + qk_rope_head_dim,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    q_nope, q_pe = q.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
+    q_nope = q_nope.transpose(0, 1)
+    # W_UK^T as split_kv_b_proj + process_weights_after_loading lay it out.
+    kv_b_weight = 0.05 * torch.randn(
+        num_heads * 2 * qk_nope_head_dim,
+        kv_lora_rank,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    w_uk, _ = kv_b_weight.T.view(kv_lora_rank, num_heads, -1).split(
+        [qk_nope_head_dim, qk_nope_head_dim], dim=-1
+    )
+    w_uk_t = w_uk.permute(1, 2, 0)
+    scale = torch.tensor(q_scale, dtype=torch.float32, device="cuda")
+    padded_heads = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+
+    ql_nope = q_nope.new_empty(num_tokens, num_heads, kv_lora_rank)
+    torch.bmm(q_nope, w_uk_t, out=ql_nope.transpose(0, 1))
+    with set_current_vllm_config(VllmConfig()):
+        concat_quant = _DecodeConcatQuantFP8(
+            static=True, group_shape=GroupShape.PER_TENSOR, compile_native=True
+        )
+    ref = AiterMLAHelper.get_mla_padded_q(
+        num_heads, concat_quant.forward_native(ql_nope, q_pe, scale)
+    )
+    out = rocm_aiter_ops.fused_bf16_bmm_cat_quant_pad_mla(
+        q_nope, w_uk_t, q_pe, scale, padded_heads
+    )
+
+    assert out.shape == ref.shape and out.dtype == ref.dtype
+    # A different accumulation order can flip a bf16 rounding of the BMM
+    # result, which moves the fp8 value by at most one step.
+    torch.testing.assert_close(out.float(), ref.float(), atol=2**-9, rtol=2**-3)
+    mismatch = (out.view(torch.uint8) != ref.view(torch.uint8)).float().mean()
+    assert mismatch.item() < 0.01
 
 
 # Validate parameter combinations during collection, before GPU fixtures run.
@@ -355,7 +560,14 @@ if current_platform.is_cuda():
         ]
     )
 elif current_platform.is_rocm():
-    PREFILL_BACKENDS_TO_TEST.append(MLAPrefillBackendEnum.ROCM_AITER_FA)
+    PREFILL_BACKENDS_TO_TEST.extend(
+        [
+            MLAPrefillBackendEnum.ROCM_AITER_FA,
+            MLAPrefillBackendEnum.ROCM_AITER_FLYDSL_FP8,
+        ]
+    )
+elif current_platform.is_xpu():
+    PREFILL_BACKENDS_TO_TEST.append(MLAPrefillBackendEnum.FLASH_ATTN)
 
 MLA_DIMENSIONS_TO_TEST = [
     ("deepseek", 128, 128),
@@ -368,25 +580,20 @@ def _prefill_backend_dimension_params():
     params = []
     for prefill_backend in PREFILL_BACKENDS_TO_TEST:
         for dimensions_id, qk_nope_head_dim, v_head_dim in MLA_DIMENSIONS_TO_TEST:
-            if device_capability is None:
-                invalid_reasons = ["device capability unavailable"]
-            else:
-                try:
-                    invalid_reasons = (
-                        prefill_backend.get_class().validate_configuration(
-                            device_capability,
-                            MLAPrefillSelectorConfig(
-                                dtype=torch.bfloat16,
-                                mla_dimensions=MLADimensions(
-                                    qk_nope_head_dim=qk_nope_head_dim,
-                                    qk_rope_head_dim=64,
-                                    v_head_dim=v_head_dim,
-                                ),
-                            ),
-                        )
-                    )
-                except ImportError:
-                    invalid_reasons = ["ImportError"]
+            try:
+                invalid_reasons = prefill_backend.get_class().validate_configuration(
+                    device_capability,
+                    MLAPrefillSelectorConfig(
+                        dtype=torch.bfloat16,
+                        mla_dimensions=MLADimensions(
+                            qk_nope_head_dim=qk_nope_head_dim,
+                            qk_rope_head_dim=64,
+                            v_head_dim=v_head_dim,
+                        ),
+                    ),
+                )
+            except ImportError:
+                invalid_reasons = ["ImportError"]
 
             marks = []
             if invalid_reasons:
@@ -419,6 +626,11 @@ for backend in BACKENDS_TO_TEST:
     if query_len_support != QueryLenSupport.SINGLE_ONLY:
         SPEC_DECODE_BACKENDS.append(backend)
 
+# Backends whose decode pipeline replays device-trimmed verify batches.
+ADAPTIVE_VARLEN_BACKENDS = [
+    b for b in BACKENDS_TO_TEST if b == AttentionBackendEnum.ROCM_AITER_MLA
+]
+
 BACKEND_BLOCK_SIZES = {}
 for backend in BACKENDS_TO_TEST:
     supported_sizes = backend.get_class().get_supported_kernel_block_sizes()
@@ -432,6 +644,13 @@ for backend in BACKENDS_TO_TEST:
     BACKEND_BLOCK_SIZES[backend] = block_size
 
 torch.manual_seed(42)
+
+
+@pytest.fixture(autouse=True)
+def _reseed_each_test():
+    # Inputs must not depend on which tests ran earlier in the process: CI
+    # shards this file, so the preceding tests differ per shard.
+    set_random_seed(42)
 
 
 def _convert_dtype_to_torch(dtype):
@@ -471,12 +690,21 @@ BATCH_SPECS = {
     "spec_decode_small": BatchSpec(
         seq_lens=[128, 256, 512, 1024], query_lens=[4, 4, 4, 4]
     ),
+    # Adaptive verification: verify requests trimmed to 1..k+1 tokens on device.
+    "spec_decode_ragged_small": BatchSpec(
+        seq_lens=[128, 256, 512, 1024], query_lens=[8, 3, 1, 5]
+    ),
     "spec_decode_medium": BatchSpec(
         seq_lens=[512, 1024, 2048, 512, 1024, 2048], query_lens=[8, 8, 8, 8, 8, 8]
     ),
     "chunked_context_prefill": BatchSpec(
         seq_lens=[1568, 520, 8, 80, 96, 8],
         query_lens=[32, 8, 8, 16, 16, 8],
+    ),
+    # No request has context, so ROCM_AITER_MLA would take its ASM FP8 prefill
+    # unless the FlyDSL FP8 prefill backend is selected.
+    "context_free_prefill": BatchSpec(
+        seq_lens=[128, 300, 17], query_lens=[128, 300, 17]
     ),
 }
 
@@ -536,10 +764,9 @@ def create_and_prepopulate_kv_cache(
     if fp8_attention:
         if use_fp8_ds_mla:
             kv_lora_rank = kv_c_contexts[0].shape[-1]
-            rope_dim = k_pe_contexts[0].shape[-1]
             # 4 * 4: 4 float32 scale values for 128-element tiles
-            # 2 * rope_dim: 16-bit RoPE values
-            kv_entry_size = kv_lora_rank + 4 * 4 + 2 * rope_dim
+            # 2 * 64: 16-bit RoPE values (zero-filled for NoPE models)
+            kv_entry_size = kv_lora_rank + 4 * 4 + 2 * 64
         elif use_nvfp4_ds_mla:
             kv_lora_rank = kv_c_contexts[0].shape[-1]
             rope_dim = k_pe_contexts[0].shape[-1]
@@ -701,7 +928,7 @@ class MockSparseMLAAttentionLayer:
     ) -> torch.Tensor:
         """Forward for sparse MLA - uses forward_mqa for all tokens."""
         kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
-        fp8_attention = kv_cache_dtype.startswith("fp8")
+        fp8_attention = is_quantized_kv_cache(kv_cache_dtype)
 
         # Impls see the bind-time-squeezed [B, N, C] cache; mirror bind_kv_cache.
         if kv_cache.ndim == 4:
@@ -718,7 +945,7 @@ class MockSparseMLAAttentionLayer:
                 scale=self._k_scale,
             )
 
-        if fp8_attention and kv_cache_dtype != "fp8_ds_mla":
+        if fp8_attention and kv_cache_dtype not in ("fp8_ds_mla", "nvfp4_ds_mla"):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         num_tokens = q.shape[0]
@@ -775,9 +1002,14 @@ class MockMLAAttentionLayer(MLAAttention):
     in static_forward_context, which fights what the test sets up below.
     """
 
+    # AttentionLayerBase declares ``impl`` as the dense AttentionImpl; an MLA
+    # layer holds an MLAAttentionImpl (vLLM's own MLAAttention.__init__ ignores
+    # the same mismatch).
+    impl: MLAAttentionImpl
+
     def __init__(
         self,
-        impl,
+        impl: MLAAttentionImpl,
         num_heads: int,
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
@@ -796,6 +1028,7 @@ class MockMLAAttentionLayer(MLAAttention):
         self.v_head_dim = v_head_dim
         self.q_lora_rank = None
         self.kv_lora_rank = kv_lora_rank
+        self.sliding_window = None
 
         # Compute weight matrices from kv_b_proj (like MLAAttention does)
         # This replicates MLAAttention.process_weights_after_loading logic
@@ -829,10 +1062,11 @@ class MockMLAAttentionLayer(MLAAttention):
     def get_attn_backend(self):
         raise NotImplementedError
 
-    def get_kv_cache_spec(self, vllm_config):
+    def get_kv_cache_config(self, vllm_config):
         raise NotImplementedError
 
-    def forward_impl(
+    # test replica takes only the arguments the test passes
+    def forward_impl(  # type: ignore[override]
         self,
         q: torch.Tensor,
         kv_c: torch.Tensor,
@@ -932,8 +1166,8 @@ class MockMLAAttentionLayer(MLAAttention):
 def test_mock_mla_dcp_fp8_decode_gathers_quantized_query(
     monkeypatch, default_vllm_config
 ):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for FP8 decode query quantization path.")
+    if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+        pytest.skip("FP8 decode query quantization path requires a GPU device.")
 
     device = torch.device(f"{DEVICE_TYPE}:0")
     num_tokens = 2
@@ -1096,8 +1330,16 @@ def test_flashinfer_mla_dspark_dcp_supports_target_and_draft(monkeypatch):
         pytest.param(False, 3, 1, 0, id="noncausal-multi-token"),
     ],
 )
+@pytest.mark.parametrize("cp_interleave_size", [1, 16, 896])
+@pytest.mark.parametrize("min_split_kv", [1, 8])
 def test_tokenspeed_mla_decode_contract(
-    monkeypatch, causal, tokens_per_decode, dcp_world_size, dcp_rank
+    monkeypatch,
+    causal,
+    tokens_per_decode,
+    dcp_world_size,
+    dcp_rank,
+    cp_interleave_size,
+    min_split_kv,
 ):
     decode_call = None
     num_decodes = 2
@@ -1133,7 +1375,7 @@ def test_tokenspeed_mla_decode_contract(
     impl = object.__new__(tokenspeed_mla_module.TokenspeedMLAImpl)
     impl.dcp_world_size = dcp_world_size
     impl.dcp_rank = dcp_rank
-    impl.cp_kv_cache_interleave_size = 1
+    impl._parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=1)
     impl.need_to_return_lse_for_decode = True
     impl.kv_lora_rank = kv_lora_rank
     impl.qk_rope_head_dim = qk_rope_head_dim
@@ -1141,7 +1383,12 @@ def test_tokenspeed_mla_decode_contract(
     impl.scale = 1.0
     impl.softmax_scale = 1.0
     impl.output_scale = 1.0
-    impl._workspace_buffer = torch.empty(1, dtype=torch.int8)
+    impl._min_split_kv = min_split_kv
+    impl._max_decode_tokens = num_decode_tokens
+    workspace = torch.empty(1, dtype=torch.int8)
+    monkeypatch.setattr(
+        tokenspeed_mla_module, "_get_workspace", lambda *args: workspace
+    )
 
     metadata = SimpleNamespace(
         num_decodes=num_decodes,
@@ -1162,6 +1409,8 @@ def test_tokenspeed_mla_decode_contract(
         dtype=torch.float8_e4m3fn,
     )
 
+    # NIXL may resolve the interleave size after the implementation is created.
+    impl._parallel_config.cp_kv_cache_interleave_size = cp_interleave_size
     out, lse = impl.forward_mqa(
         q,
         kv_cache,
@@ -1174,6 +1423,8 @@ def test_tokenspeed_mla_decode_contract(
     assert lse.shape == (num_decode_tokens, num_heads)
 
     assert decode_call is not None
+    assert decode_call["workspace_buffer"] is workspace
+    assert decode_call["min_split_kv"] == min_split_kv
     assert decode_call["query"].shape == (
         num_decodes,
         tokens_per_decode,
@@ -1192,6 +1443,155 @@ def test_tokenspeed_mla_decode_contract(
     assert decode_call["return_lse"] is True
     assert decode_call["cp_world"] == dcp_world_size
     assert decode_call["cp_rank"] == dcp_rank
+    assert decode_call.get("cp_interleave_size", 1) == cp_interleave_size
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.TOKENSPEED_MLA not in BACKENDS_TO_TEST,
+    reason="TokenSpeed MLA requires an SM100-family GPU and tokenspeed-mla",
+)
+@pytest.mark.parametrize(
+    ("cp_interleave_size", "seq_len"),
+    [
+        pytest.param(1, 5, id="token-interleave-empty-local-ranks"),
+        pytest.param(1, 8 + 17, id="token-interleave-full-cycle"),
+        pytest.param(896, 5, id="block-interleave-empty-local-ranks"),
+        pytest.param(896, 8 * 896 + 17, id="block-interleave-full-cycle"),
+    ],
+)
+def test_tokenspeed_mla_dcp_matches_unsharded_decode(
+    monkeypatch, cp_interleave_size, seq_len
+):
+    from tokenspeed_mla import tokenspeed_mla_decode
+
+    from vllm.v1.attention.ops.dcp import (
+        _lse_weighted_combine,
+        mask_dcp_empty_shards_,
+    )
+    from vllm.v1.worker.workspace import WorkspaceManager
+
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    workspace_manager = WorkspaceManager(device)
+    monkeypatch.setattr(
+        tokenspeed_mla_module, "current_workspace_manager", lambda: workspace_manager
+    )
+    dcp_world_size = 8
+    kernel_block_size = 64
+    num_heads = 128
+    kv_lora_rank = 512
+    qk_rope_head_dim = 64
+    head_size = kv_lora_rank + qk_rope_head_dim
+
+    def make_paged_cache(tokens: torch.Tensor):
+        # Empty DCP ranks still have the null block in vLLM's physical cache.
+        num_pages = max(1, cdiv(tokens.shape[0], kernel_block_size))
+        cache = torch.zeros(
+            num_pages,
+            kernel_block_size,
+            head_size,
+            dtype=tokens.dtype,
+            device=device,
+        )
+        cache.view(-1, head_size)[: tokens.shape[0]].copy_(tokens)
+        block_table = torch.arange(
+            num_pages, dtype=torch.int32, device=device
+        ).unsqueeze(0)
+        return cache, block_table
+
+    # Four query positions exercise the MTP/DSpark causal-mask path.
+    query = (torch.randn(1, 4, num_heads, head_size, device=device) * 0.1).to(
+        torch.float8_e4m3fn
+    )
+    global_tokens = (torch.randn(seq_len, head_size, device=device) * 0.1).to(
+        torch.float8_e4m3fn
+    )
+    workspace = tokenspeed_mla_module._get_workspace(
+        device, num_heads, kv_lora_rank, 1, query.shape[1]
+    )
+    global_cache, global_block_table = make_paged_cache(global_tokens)
+    global_seq_len = torch.tensor([seq_len], dtype=torch.int32, device=device)
+    reference, _ = tokenspeed_mla_decode(
+        query=query,
+        kv_cache=global_cache,
+        workspace_buffer=workspace,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        block_tables=global_block_table,
+        seq_lens=global_seq_len,
+        max_seq_len=seq_len,
+        softmax_scale=head_size**-0.5,
+        return_lse=True,
+    )
+
+    positions = torch.arange(seq_len, device=device)
+    owners = positions.div(cp_interleave_size, rounding_mode="floor").remainder(
+        dcp_world_size
+    )
+    max_local_seq_len = (
+        cdiv(seq_len, dcp_world_size * cp_interleave_size) * cp_interleave_size
+    )
+    partial_outputs = []
+    partial_lses = []
+    for dcp_rank in range(dcp_world_size):
+        local_tokens = global_tokens[owners == dcp_rank]
+        local_cache, local_block_table = make_paged_cache(local_tokens)
+        local_seq_len = torch.tensor(
+            [local_tokens.shape[0]], dtype=torch.int32, device=device
+        )
+        impl = object.__new__(tokenspeed_mla_module.TokenspeedMLAImpl)
+        impl.dcp_world_size = dcp_world_size
+        impl.dcp_rank = dcp_rank
+        impl._parallel_config = SimpleNamespace(
+            cp_kv_cache_interleave_size=cp_interleave_size
+        )
+        impl.need_to_return_lse_for_decode = True
+        impl.kv_lora_rank = kv_lora_rank
+        impl.qk_rope_head_dim = qk_rope_head_dim
+        impl.num_heads = num_heads
+        impl.scale = head_size**-0.5
+        impl.softmax_scale = None
+        impl.output_scale = None
+        impl._min_split_kv = 1
+        impl._max_decode_tokens = query.shape[1]
+        metadata = SimpleNamespace(
+            num_decodes=1,
+            num_decode_tokens=query.shape[1],
+            max_seq_len=max_local_seq_len,
+            causal=True,
+            decode=SimpleNamespace(
+                block_table=local_block_table,
+                seq_lens=local_seq_len,
+                dcp_tot_seq_lens=global_seq_len,
+            ),
+        )
+        output, lse = impl.forward_mqa(
+            query.view(-1, num_heads, head_size),
+            local_cache,
+            metadata,
+            SimpleNamespace(_q_scale_float=1.0, _k_scale_float=1.0),
+        )
+        assert lse is not None
+        # Empty-shard normalization belongs to the downstream DCP combine path.
+        mask_dcp_empty_shards_(
+            lse,
+            local_seq_len,
+            torch.tensor([0, query.shape[1]], dtype=torch.int32, device=device),
+        )
+        partial_outputs.append(
+            output.view(query.shape[1], num_heads, kv_lora_rank).float()
+        )
+        partial_lses.append(lse.view(query.shape[1], num_heads).float())
+
+    # TokenSpeed returns base-2 LSE. Merge the per-rank partial attention states
+    # the same way MLADCPManager does before comparing to the unsharded result.
+    merged = _lse_weighted_combine(
+        torch.stack(partial_outputs), torch.stack(partial_lses), is_lse_base_on_e=False
+    )
+    assert not isinstance(merged, tuple)
+    merged = merged.unsqueeze(0)
+    # FP8 attention rounds differently when KV is partitioned across DCP ranks.
+    torch.testing.assert_close(merged, reference.float(), atol=1e-2, rtol=1e-2)
 
 
 @pytest.mark.parametrize("is_fp8_kvcache", [False, True], ids=["bf16", "fp8"])
@@ -1267,6 +1667,7 @@ def test_flashmla_dcp_decode_metadata_uses_gathered_query_heads(
         query_start_loc_cpu=query_start_loc,
         query_start_loc_device=query_start_loc,
         num_decode_tokens=2,
+        max_query_len=1,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -1283,6 +1684,102 @@ def test_flashmla_dcp_decode_metadata_uses_gathered_query_heads(
         assert metadata.scheduler_metadata.tile_scheduler_metadata is None
         assert metadata.scheduler_metadata.num_splits is None
         assert fp8_call is None
+
+
+@pytest.mark.skipif(
+    not flash_attn_supports_mla(), reason="FlashAttention MLA is not supported"
+)
+@pytest.mark.parametrize(
+    "cudagraph_mode", [CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.PIECEWISE]
+)
+def test_flash_attn_mla_eager_decode_batch_allocates_no_split_accumulator(
+    dist_init, workspace_init, cudagraph_mode
+):
+    """Decode-path batches beyond the captured CUDA graph sizes run eagerly.
+    Left to FA3, their split count sized an fp32 split-KV accumulator for a
+    varlen bound that assumes one request holds every query: 2.5 GiB for these
+    short prefills over a cached prefix, which OOMed an extensible KV cache."""
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.v1.attention.backends.mla.flashattn_mla import (
+        FlashAttnMLAImpl,
+        FlashAttnMLAMetadataBuilder,
+    )
+
+    num_heads, kv_lora_rank, qk_rope_head_dim = 16, 512, 64
+    qk_nope_head_dim = v_head_dim = 128
+    block_size = 64
+    batch_spec = BatchSpec(seq_lens=[688] * 170, query_lens=[48] * 170)
+    num_tokens = batch_spec.compute_num_tokens()
+    num_blocks = batch_spec.batch_size * cdiv(max(batch_spec.seq_lens), block_size)
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V2-Lite",
+        max_model_len=2048,
+        num_gpu_blocks=num_blocks,
+        block_size=block_size,
+    )
+    vllm_config.compilation_config.cudagraph_mode = cudagraph_mode
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    dtype = torch.bfloat16
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=kv_lora_rank + qk_rope_head_dim,
+        dtype=dtype,
+        cache_dtype_str="auto",
+    )
+    with set_current_vllm_config(vllm_config):
+        kv_b_proj = ColumnParallelLinear(
+            kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim), bias=False
+        ).to(device=device, dtype=dtype)
+        layer = MLAAttention(
+            num_heads=num_heads,
+            scale=(qk_nope_head_dim + qk_rope_head_dim) ** -0.5,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            q_lora_rank=None,
+            kv_lora_rank=kv_lora_rank,
+            kv_b_proj=kv_b_proj,
+            cache_config=vllm_config.cache_config,
+            prefix="model.layers.0.self_attn.attn",
+            attn_backend=AttentionBackendEnum.FLASH_ATTN_MLA.get_class(),
+        )
+        builder = FlashAttnMLAMetadataBuilder(
+            kv_cache_spec, [layer.layer_name], vllm_config, device
+        )
+    assert builder.max_cudagraph_size is not None
+    assert builder.max_cudagraph_size < num_tokens
+    metadata = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=create_common_attn_metadata(
+            batch_spec, block_size, device, arange_block_indices=True
+        ),
+    )
+    assert metadata.num_decode_tokens == num_tokens
+    impl = layer.impl
+    assert isinstance(impl, FlashAttnMLAImpl)
+
+    kv_cache = torch.randn(
+        num_blocks,
+        block_size,
+        kv_lora_rank + qk_rope_head_dim,
+        dtype=dtype,
+        device=device,
+    )
+    q = (
+        torch.randn(num_tokens, num_heads, kv_lora_rank, dtype=dtype, device=device),
+        torch.randn(
+            num_tokens, num_heads, qk_rope_head_dim, dtype=dtype, device=device
+        ),
+    )
+    torch.accelerator.synchronize()
+    torch.accelerator.reset_peak_memory_stats(device)
+    allocated = torch.accelerator.memory_allocated(device)
+    out, _ = impl.forward_mqa(q, kv_cache, metadata, layer)
+    torch.accelerator.synchronize()
+    transient = torch.accelerator.max_memory_allocated(device) - allocated - out.nbytes
+    # One split's fp32 accumulator; FA3 planned ten for this batch.
+    assert transient < num_tokens * num_heads * kv_lora_rank * 4
 
 
 def run_attention_backend(
@@ -1309,9 +1806,12 @@ def run_attention_backend(
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
     builder_cls, impl_cls = try_get_attention_backend(backend)
+    # Every MLA backend's impl derives from MLAAttentionImpl.
+    assert issubclass(impl_cls, MLAAttentionImpl)
 
     # Force the prefill backend selection (None means auto-select).
     vllm_config.attention_config.mla_prefill_backend = prefill_backend
+    mla_attention_module.backend_supports_prefill_query_quantization.cache_clear()
 
     # Set the current vllm config so that get_current_vllm_config() works
     # in the backend implementations
@@ -1394,6 +1894,7 @@ def run_attention_backend(
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
         if chunked_prefill_workspace_size is not None:
+            assert isinstance(builder, MLACommonMetadataBuilder)
             builder.chunked_prefill_workspace_size = chunked_prefill_workspace_size
             builder.chunked_prefill_workspace = (
                 builder.chunked_prefill_workspace.new_empty(
@@ -1419,6 +1920,42 @@ def run_attention_backend(
         return output
 
 
+def _with_even_cpu_query_split(
+    common_attn_metadata: CommonAttentionMetadata,
+) -> CommonAttentionMetadata:
+    """Host query lengths as adaptive verification leaves them.
+
+    The device keeps the trimmed per-request lengths; the host sees the same
+    total spread evenly, the first requests taking the remainder
+    (AdaptiveVerificationManager.compact_batch).
+    """
+    num_reqs = common_attn_metadata.num_reqs
+    total = int(common_attn_metadata.query_start_loc_cpu[num_reqs])
+    cpu_lens = torch.full((num_reqs,), total // num_reqs, dtype=torch.int32)
+    cpu_lens[: total % num_reqs] += 1
+    query_start_loc_cpu = torch.zeros_like(common_attn_metadata.query_start_loc_cpu)
+    torch.cumsum(cpu_lens, dim=0, out=query_start_loc_cpu[1 : num_reqs + 1])
+    return common_attn_metadata.replace(
+        query_start_loc_cpu=query_start_loc_cpu,
+        max_query_len=int(
+            (
+                common_attn_metadata.query_start_loc[1:]
+                - common_attn_metadata.query_start_loc[:-1]
+            )
+            .max()
+            .item()
+        ),
+    )
+
+
+def _fp8_cache_roundtrip(tensor: torch.Tensor, scale: float) -> torch.Tensor:
+    """Reproduce cache storage rounding for the SDPA reference."""
+    fp8_dtype = current_platform.fp8_dtype()
+    limits = torch.finfo(fp8_dtype)
+    quantized = (tensor.float() / scale).clamp(limits.min, limits.max).to(fp8_dtype)
+    return (quantized.float() * scale).to(tensor.dtype)
+
+
 def _run_backend_correctness(
     default_vllm_config,
     dist_init,
@@ -1433,6 +1970,9 @@ def _run_backend_correctness(
     qk_nope_head_dim: int,
     v_head_dim: int,
     chunked_prefill_workspace_size: int | None = None,
+    adaptive_verification: bool = False,
+    trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"] = "trtllm-gen",
+    use_prefill_query_quantization: bool = False,
 ):
     """Test that all backends produce similar outputs to a reference implementation
     using torch.nn.functional.scaled_dot_product_attention.
@@ -1453,6 +1993,7 @@ def _run_backend_correctness(
     multiple GPUs. This tests that backends work correctly with different
     head counts.
     """
+    set_random_seed(42)
     # Filter backends to those that support the requested kv_cache_dtype
     backends_to_test = [
         b
@@ -1464,6 +2005,10 @@ def _run_backend_correctness(
     ) and AttentionBackendEnum.CUTLASS_MLA in backends_to_test:
         # CUTLASS_MLA does not support non-1 Q/K scales
         backends_to_test.remove(AttentionBackendEnum.CUTLASS_MLA)
+    if adaptive_verification:
+        backends_to_test = [
+            b for b in backends_to_test if b in ADAPTIVE_VARLEN_BACKENDS
+        ]
     if not backends_to_test:
         pytest.skip(f"No backends support kv_cache_dtype={kv_cache_dtype}")
 
@@ -1503,19 +2048,33 @@ def _run_backend_correctness(
         block_size=default_block_size,
         hf_config_override=hf_config_override,
     )
+    # model_arch_config is resolved before the override reaches it, so the
+    # backends would otherwise see the full model's heads at every TP size.
+    # Not yet on CUDA, whose backends have head-count limits of their own.
+    if hf_config_override and (current_platform.is_xpu() or current_platform.is_rocm()):
+        vllm_config.model_config.model_arch_config.total_num_attention_heads = (
+            hf_config_override["num_attention_heads"]
+        )
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
+    vllm_config.attention_config.trtllm_ragged_backend = trtllm_ragged_backend
+    vllm_config.attention_config.use_prefill_query_quantization = (
+        use_prefill_query_quantization
+    )
 
     # For spec decode tests, add a speculative_config to set the reorder_batch_threshold
     if is_spec_decode_test:
         from vllm.config import SpeculativeConfig
 
-        # Get the query length from the batch spec (they should all be uniform)
-        query_len = batch_spec.query_lens[0]
+        # Get the query length from the batch spec (they should all be uniform,
+        # except under adaptive verification, where the longest is k+1)
+        query_len = max(batch_spec.query_lens)
         # Set num_speculative_tokens to query_len - 1
         # (since threshold is 1 + num_spec_tokens)
         # Use ngram method which doesn't require a draft model
         vllm_config.speculative_config = SpeculativeConfig(
-            method="ngram", num_speculative_tokens=query_len - 1
+            method="ngram",
+            num_speculative_tokens=query_len - 1,
+            enable_adaptive_verification=adaptive_verification,
         )
 
     device = torch.device(f"{DEVICE_TYPE}:0")
@@ -1565,7 +2124,7 @@ def _run_backend_correctness(
 
     kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
 
-    for i, backend in enumerate(backends_to_test):
+    for _ in backends_to_test:
         all_sdpa_outputs.append([])
 
     for i in range(batch_size):
@@ -1590,6 +2149,19 @@ def _run_backend_correctness(
         # K_PE (rope component): [s_len, 1, qk_rope_head_dim]
         k_pe_full = torch.randn(s_len, 1, qk_rope_head_dim, dtype=dtype, device=device)
 
+        kv_c_cached, k_pe_cached = kv_c_full, k_pe_full
+        kv_c_prefill, k_pe_prefill = kv_c_full, k_pe_full
+        if kv_cache_dtype.startswith("fp8"):
+            kv_c_cached = _fp8_cache_roundtrip(kv_c_full, k_scale)
+            k_pe_cached = _fp8_cache_roundtrip(k_pe_full, k_scale)
+            # Prefill reads cached context and unquantized new tokens.
+            kv_c_prefill = torch.cat(
+                [kv_c_cached[:context_len], kv_c_full[context_len:]]
+            )
+            k_pe_prefill = torch.cat(
+                [k_pe_cached[:context_len], k_pe_full[context_len:]]
+            )
+
         # Determine if this sequence uses the decode pipeline or prefill
         # pipeline for each backend
         # NOTE: For spec decode tests with uniform query_len > 1, backends that
@@ -1599,7 +2171,7 @@ def _run_backend_correctness(
         # pipeline (MHA-style). This ensures the reference implementation
         # matches each backend's actual decode/prefill pipeline path.
         is_decode = []
-        for backend_idx, backend in enumerate(backends_to_test):
+        for backend in backends_to_test:
             builder_cls, _ = try_get_attention_backend(backend)
             if is_spec_decode_test:
                 query_len_support = getattr(
@@ -1639,10 +2211,10 @@ def _run_backend_correctness(
         q_mqa = torch.cat([ql_nope, q_pe], dim=-1)
         # K: [s_len, kv_lora_rank + qk_rope_head_dim]
         # (broadcasted to all heads)
-        k_mqa = torch.cat([kv_c_full, k_pe_full.squeeze(1)], dim=-1)
+        k_mqa = torch.cat([kv_c_cached, k_pe_cached.squeeze(1)], dim=-1)
         k_mqa = k_mqa.unsqueeze(1).expand(-1, num_q_heads, -1)
         # V: [s_len, kv_lora_rank] (broadcasted to all heads)
-        v_mqa = kv_c_full.unsqueeze(1).expand(-1, num_q_heads, -1)
+        v_mqa = kv_c_cached.unsqueeze(1).expand(-1, num_q_heads, -1)
 
         # Create custom attention mask for decode path:
         # - Query tokens can attend to all context tokens
@@ -1671,13 +2243,18 @@ def _run_backend_correctness(
         #######################################################
         # Prefill path: MHA-style attention with full sequence
         # Apply kv_b_proj to the full kv_c tensor
-        kv_nope_full = torch.einsum("sl,lnh->snh", kv_c_full, kv_b_proj_weight)
+        kv_nope_full = torch.einsum("sl,lnh->snh", kv_c_prefill, kv_b_proj_weight)
         k_nope_full, v_full = kv_nope_full.split([qk_nope_head_dim, v_head_dim], dim=-1)
 
         # Build attention inputs for full sequence
         q_mha = torch.cat([q_nope, q_pe], dim=-1)  # [q_len, num_heads, total_dim]
-        k_pe_full_expanded = k_pe_full.expand(-1, num_q_heads, -1)
+        k_pe_full_expanded = k_pe_prefill.expand(-1, num_q_heads, -1)
         k_full = torch.cat([k_nope_full, k_pe_full_expanded], dim=-1)
+        if use_prefill_query_quantization:
+            fp8_dtype = current_platform.fp8_dtype()
+            q_mha = q_mha.to(fp8_dtype).to(dtype)
+            k_full = k_full.to(fp8_dtype).to(dtype)
+            v_full = v_full.to(fp8_dtype).to(dtype)
 
         # Create custom attention mask:
         # - Query tokens can attend to all context tokens
@@ -1699,7 +2276,7 @@ def _run_backend_correctness(
         sdpa_out_i_prefill = sdpa_out_i_prefill.transpose(1, 2).squeeze(0)
         sdpa_out_i_prefill = sdpa_out_i_prefill.flatten(start_dim=-2)
 
-        for backend_idx, backend in enumerate(backends_to_test):
+        for backend_idx in range(len(backends_to_test)):
             if is_decode[backend_idx]:
                 all_sdpa_outputs[backend_idx].append(sdpa_out_i_decode)
             else:
@@ -1785,15 +2362,26 @@ def _run_backend_correctness(
         )
         kv_cache_per_block_size[block_size] = kv_cache
 
+        if adaptive_verification:
+            # Only after the cache is filled: prepopulation reads the context
+            # lengths off the host query lengths.
+            metadata_per_block_size[block_size] = _with_even_cpu_query_split(
+                common_attn_metadata
+            )
+
     # 4. Run vLLM backends and compare
     rtol = 1e-2
     atol = {
-        "auto": 1e-2,
+        "auto": 2e-2,
         "fp8": 1.5e-1,
         "fp8_e4m3": 1.5e-1,
     }[kv_cache_dtype]
+    if prefill_backend == MLAPrefillBackendEnum.ROCM_AITER_FLYDSL_FP8:
+        # Per-tensor e4m3 Q/K/V (3 mantissa bits): a row attending to a few
+        # tokens is off by up to ~2**-4 of max|V| (~4 here).
+        rtol, atol = 2**-4, 3e-1
     failures = []
-    for backend_idx, backend_name in enumerate(backends_to_test):
+    for backend_name in backends_to_test:
         # Skip backends that don't support spec decode for spec decode tests
         if is_spec_decode_test and backend_name not in SPEC_DECODE_BACKENDS:
             continue
@@ -1811,7 +2399,6 @@ def _run_backend_correctness(
             ),
             head_size=vllm_config.model_config.get_head_size(),
             dtype=vllm_config.model_config.dtype,
-            sliding_window=vllm_config.model_config.get_sliding_window(),
             cache_dtype_str=kv_cache_dtype,
         )
 
@@ -1945,6 +2532,11 @@ def test_backend_correctness(
     _prefill_backend_dimension_params(),
 )
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("trtllm_ragged_backend", ["trtllm-gen", "cute-dsl"])
+@pytest.mark.parametrize("use_prefill_query_quantization", [False, True])
+@pytest.mark.parametrize(
+    "batch_spec_name", ["chunked_context_prefill", "context_free_prefill"]
+)
 def test_chunked_context_backend_correctness(
     default_vllm_config,
     dist_init,
@@ -1953,13 +2545,40 @@ def test_chunked_context_backend_correctness(
     qk_nope_head_dim: int,
     v_head_dim: int,
     kv_cache_dtype: str,
+    trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"],
+    use_prefill_query_quantization: bool,
+    batch_spec_name: str,
 ):
     """Split, packed, and context-free requests match the SDPA reference."""
+    if prefill_backend != MLAPrefillBackendEnum.TRTLLM_RAGGED and (
+        trtllm_ragged_backend == "cute-dsl" or use_prefill_query_quantization
+    ):
+        pytest.skip("TRTLLM ragged-specific test configuration")
+    if use_prefill_query_quantization and kv_cache_dtype == "auto":
+        pytest.skip("FP8 prefill queries require an FP8 KV cache")
+    if trtllm_ragged_backend == "cute-dsl":
+        query_dtype = (
+            current_platform.fp8_dtype()
+            if use_prefill_query_quantization
+            else torch.bfloat16
+        )
+        if not is_cute_dsl_mla_prefill_supported(
+            qk_nope_head_dim + 64, v_head_dim, query_dtype
+        ):
+            pytest.skip("Unsupported CuTe DSL prefill dimensions or query dtype")
+    if (
+        batch_spec_name == "context_free_prefill"
+        and prefill_backend != MLAPrefillBackendEnum.ROCM_AITER_FLYDSL_FP8
+    ):
+        pytest.skip(
+            "Covers ROCM_AITER_FLYDSL_FP8 taking over ROCM_AITER_MLA's "
+            "context-free FP8 prefill"
+        )
     _run_backend_correctness(
         default_vllm_config,
         dist_init,
         workspace_init,
-        batch_spec_name="chunked_context_prefill",
+        batch_spec_name=batch_spec_name,
         model="deepseek-ai/DeepSeek-R1",
         tensor_parallel_size=16,
         kv_cache_dtype=kv_cache_dtype,
@@ -1969,4 +2588,32 @@ def test_chunked_context_backend_correctness(
         qk_nope_head_dim=qk_nope_head_dim,
         v_head_dim=v_head_dim,
         chunked_prefill_workspace_size=1024,
+        trtllm_ragged_backend=trtllm_ragged_backend,
+        use_prefill_query_quantization=use_prefill_query_quantization,
+    )
+
+
+@pytest.mark.skipif(
+    not ADAPTIVE_VARLEN_BACKENDS, reason="No adaptive varlen decode backend"
+)
+def test_adaptive_varlen_decode_correctness(
+    default_vllm_config, dist_init, workspace_init
+):
+    """Device query lengths 1..k+1 against an even host split, as adaptive
+    verification hands them to the target model's attention. TP 8 gives 16
+    heads, the padded Kimi-K3 count."""
+    _run_backend_correctness(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        "spec_decode_ragged_small",
+        "deepseek-ai/DeepSeek-R1",
+        8,
+        "fp8",
+        1.0,
+        1.0,
+        None,
+        128,
+        128,
+        adaptive_verification=True,
     )

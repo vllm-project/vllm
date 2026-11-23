@@ -5,6 +5,8 @@ import pytest
 import torch
 from PIL import Image
 
+from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageProcessorItems,
@@ -13,6 +15,83 @@ from vllm.multimodal.parse import (
 )
 
 H, W = 480, 640
+
+
+class AudioMetadataParser(MultiModalDataParser):
+    embedding_fields = {
+        "audio": {"audio_embeds": "values", "audio_num_tokens": "metadata"},
+    }
+
+
+@pytest.mark.parametrize("allow_missing", [False, True])
+def test_audio_metadata_requires_ec_consumer(allow_missing):
+    parser = AudioMetadataParser(allow_missing_mm_embeddings=allow_missing)
+    data = {"audio_num_tokens": torch.tensor([[3], [5]])}
+    if not allow_missing:
+        with pytest.raises(ValueError, match="audio_embeds"):
+            parser.parse_mm_data({"audio": data})
+    else:
+        items = parser.parse_mm_data({"audio": data})["audio"]
+        assert len(items) == 2
+        assert items.get(1)["audio_num_tokens"].item() == 5
+        assert items.get_processor_data() == {}
+
+
+@pytest.mark.parametrize("counts", [[0], [-1], [1.5], [True], [[1, 2]]])
+def test_audio_metadata_rejects_invalid_token_counts(counts):
+    parser = AudioMetadataParser(allow_missing_mm_embeddings=True)
+    with pytest.raises(ValueError, match="positive integer"):
+        parser.parse_mm_data({"audio": {"audio_num_tokens": torch.tensor(counts)}})
+
+
+def test_audio_metadata_checks_supplied_embedding_lengths():
+    parser = AudioMetadataParser()
+    data = {
+        "audio_num_tokens": torch.tensor([3, 5]),
+        "audio_embeds": [torch.zeros(3, 8), torch.zeros(5, 8)],
+    }
+    assert len(parser.parse_mm_data({"audio": data})["audio"]) == 2
+    data["audio_num_tokens"] = torch.tensor([3, 4])
+    with pytest.raises(ValueError, match="does not match"):
+        parser.parse_mm_data({"audio": data})
+
+
+@pytest.mark.parametrize("requires_grad", [False, True])
+def test_parse_audio_tensor_detaches_before_numpy(requires_grad):
+    """Audio tensors are accepted even when they require gradients."""
+    parser = MultiModalDataParser()
+    audio = torch.tensor([0.1, 0.2], requires_grad=requires_grad)
+
+    items = parser.parse_mm_data({"audio": audio})["audio"]
+
+    np.testing.assert_array_equal(items.get(0), audio.detach().numpy())
+
+
+@pytest.mark.parametrize(
+    "modality,shape",
+    [
+        ("image", (3, 8, 8)),
+        ("video", (2, 8, 8, 3)),
+        ("audio", (1, 4, 8)),
+    ],
+)
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_hash_parsed_tensor_with_grad(modality, shape, device):
+    """Image, video, and embedding tensors remain hashable with gradients."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("Requires CUDA")
+
+    tensor = torch.arange(np.prod(shape), device=device).reshape(shape).float()
+    tensor.requires_grad_()
+    data = {modality: [tensor]} if modality == "image" else {modality: tensor}
+    items = MultiModalDataParser().parse_mm_data(data)[modality]
+    item = items.get_all_items_for_hash()[0]
+    assert isinstance(item, torch.Tensor)
+
+    actual = MultiModalHasher.hash_kwargs("blake3", **{modality: item})
+    expected = MultiModalHasher.hash_kwargs("blake3", **{modality: item.detach()})
+
+    assert actual == expected
 
 
 @pytest.mark.parametrize(
@@ -37,6 +116,60 @@ def test_image_size_hwc_chw(image):
     items = ImageProcessorItems([image])
 
     assert items.get_image_size(0) == (W, H)
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2])
+@pytest.mark.skip_global_cleanup
+def test_parse_image_normalizes_negative_strides(axis):
+    """Flipped NumPy images are contiguous before reaching HF processors."""
+    image = np.arange(H * W * 3, dtype=np.uint8).reshape(H, W, 3)
+    flipped = np.flip(image, axis=axis)
+
+    items = MultiModalDataParser().parse_mm_data({"image": flipped})["image"]
+    parsed = items.get(0)
+
+    assert all(stride >= 0 for stride in parsed.strides)
+    assert parsed.flags.c_contiguous
+    np.testing.assert_array_equal(parsed, flipped)
+
+
+@pytest.mark.skip_global_cleanup
+def test_parse_image_preserves_positive_stride_numpy_array():
+    """Positive-stride arrays remain zero-copy through image parsing."""
+    image = np.zeros((H, W, 3), dtype=np.uint8)
+    view = image[:, ::2]
+
+    items = MultiModalDataParser().parse_mm_data({"image": view})["image"]
+
+    assert items.get(0) is view
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2, 3])
+@pytest.mark.parametrize("with_metadata", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_parse_video_normalizes_negative_strides(axis, with_metadata):
+    """Flipped NumPy videos are contiguous before reaching HF processors."""
+    video = np.arange(2 * H * W * 3, dtype=np.uint8).reshape(2, H, W, 3)
+    flipped = np.flip(video, axis=axis)
+    data = (flipped, {"fps": 1.0}) if with_metadata else flipped
+
+    items = MultiModalDataParser().parse_mm_data({"video": data})["video"]
+    parsed = items.get(0)
+
+    assert all(stride >= 0 for stride in parsed.strides)
+    assert parsed.flags.c_contiguous
+    np.testing.assert_array_equal(parsed, flipped)
+
+
+@pytest.mark.skip_global_cleanup
+def test_parse_video_preserves_positive_stride_numpy_array():
+    """Positive-stride arrays remain zero-copy through video parsing."""
+    video = np.zeros((2, H, W, 3), dtype=np.uint8)
+    view = video[:, :, ::2]
+
+    items = MultiModalDataParser().parse_mm_data({"video": view})["video"]
+
+    assert items.get(0) is view
 
 
 @pytest.mark.parametrize(
@@ -93,6 +226,27 @@ def test_parse_video_frame_list_as_single_video(frames):
     video = items.get(0)
     assert isinstance(video, np.ndarray)
     np.testing.assert_array_equal(video, np.stack([np.asarray(f) for f in frames]))
+
+
+@pytest.mark.parametrize("mode", ["L", "LA", "RGBA", "P"])
+@pytest.mark.parametrize("with_metadata", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_parse_video_converts_pil_frames_to_rgb(mode, with_metadata):
+    """PIL video frames are converted to RGB like PIL images."""
+    rng = np.random.default_rng(0)
+    channels = {"L": (), "LA": (2,), "RGBA": (4,), "P": (3,)}[mode]
+    frames = [
+        Image.fromarray(rng.integers(0, 256, (H, W, *channels), dtype=np.uint8))
+        for _ in range(2)
+    ]
+    if mode == "P":
+        frames = [frame.convert("P") for frame in frames]
+    data = (frames, {"fps": 1.0}) if with_metadata else frames
+
+    parsed = MultiModalDataParser().parse_mm_data({"video": data})["video"].get(0)
+
+    expected = [convert_image_mode(frame, "RGB") for frame in frames]
+    np.testing.assert_array_equal(np.array(parsed), np.array(expected))
 
 
 @pytest.mark.parametrize(

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import (
     BlockStored,
     KVCacheEvent,
@@ -66,6 +66,12 @@ class LMCacheKVEvents(KVConnectorKVEvents):
 
 
 class LMCacheConnectorV1(KVConnectorBase_V1):
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return False
+
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """LMCache requires PIECEWISE CUDA graph mode when layerwise
@@ -142,6 +148,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 engine.current_layer = 0
             if hasattr(engine, "layerwise_retrievers"):
                 engine.layerwise_retrievers = []
+            engine.layerwise_storers = []
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """Start loading the KV cache from the connector to vLLM's paged
@@ -257,6 +264,13 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         lmcache_kv_events = LMCacheKVEvents(num_workers=1)
         lmcache_kv_events.add_events(blocks)
         return lmcache_kv_events
+
+    def shutdown(self):
+        # Not forwarded to the LMCache engine's shutdown() for now: it closes
+        # ZMQ sockets from a thread other than the one blocked receiving on
+        # them, which can abort the whole process in libzmq (#67121). Forward
+        # it again once a fixed LMCache release is required.
+        pass
 
     # ==============================
     # Scheduler-side methods

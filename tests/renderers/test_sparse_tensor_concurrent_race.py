@@ -55,19 +55,19 @@ class TestNegativeControlWithoutRace:
 
     def test_malicious_sparse_rejected_by_prompt_loader(self, model_config):
         encoded = _encode_tensor(_create_malicious_sparse_tensor())
-        with pytest.raises((RuntimeError, ValueError, VLLMValidationError)):
+        with pytest.raises(VLLMValidationError):
             safe_load_prompt_embeds(model_config, encoded)
 
     def test_malicious_sparse_rejected_by_image_loader(self):
         io_handler = ImageEmbeddingMediaIO()
         encoded = _encode_tensor(_create_malicious_sparse_tensor())
-        with pytest.raises((RuntimeError, ValueError)):
+        with pytest.raises(VLLMValidationError):
             io_handler.load_base64("", encoded.decode("utf-8"))
 
     def test_malicious_sparse_rejected_by_audio_loader(self):
         io_handler = AudioEmbeddingMediaIO()
         encoded = _encode_tensor(_create_malicious_sparse_tensor())
-        with pytest.raises((RuntimeError, ValueError)):
+        with pytest.raises(VLLMValidationError):
             io_handler.load_base64("", encoded.decode("utf-8"))
 
 
@@ -148,7 +148,7 @@ class TestConcurrentRaceProtection:
             try:
                 safe_load_prompt_embeds(model_config, malicious_encoded)
                 bypassed.append(True)
-            except (RuntimeError, ValueError, VLLMValidationError):
+            except VLLMValidationError:
                 rejected.append(True)
 
         with ThreadPoolExecutor(max_workers=num_workers) as pool:
@@ -193,7 +193,7 @@ class TestGlobalFlagRestoration:
         initial = torch.sparse.check_sparse_tensor_invariants.is_enabled()
         malicious_encoded = _encode_tensor(_create_malicious_sparse_tensor())
 
-        with pytest.raises((RuntimeError, ValueError, VLLMValidationError)):
+        with pytest.raises(VLLMValidationError):
             safe_load_prompt_embeds(model_config, malicious_encoded)
 
         assert torch.sparse.check_sparse_tensor_invariants.is_enabled() == initial
@@ -204,7 +204,7 @@ class TestGlobalFlagRestoration:
         malicious_encoded = _encode_tensor(_create_malicious_sparse_tensor())
 
         def attempt_load(_):
-            with contextlib.suppress(RuntimeError, ValueError, VLLMValidationError):
+            with contextlib.suppress(VLLMValidationError):
                 safe_load_prompt_embeds(model_config, malicious_encoded)
 
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -245,20 +245,22 @@ class TestCrossLoaderLockSharing:
         # serialization — one finishes before the other starts), AND invalid
         # tensors are still rejected.
         malicious = _encode_tensor(_create_malicious_sparse_tensor())
-        with pytest.raises((RuntimeError, ValueError, VLLMValidationError)):
+        with pytest.raises(VLLMValidationError):
             safe_load_prompt_embeds(model_config, malicious)
-        with pytest.raises((RuntimeError, ValueError)):
+        with pytest.raises(VLLMValidationError):
             io_handler.load_base64("", malicious.decode("utf-8"))
 
-    def test_all_loaders_use_same_context_manager(self):
-        """Verify all modules reference the same context manager function."""
+    def test_all_loaders_use_same_payload_loader(self):
+        """Verify all modules share the loader that owns the sparse lock."""
         import vllm.multimodal.media.audio as audio_mod
         import vllm.multimodal.media.image as image_mod
+        import vllm.multimodal.media.video as video_mod
         import vllm.renderers.embed_utils as embed_mod
         from vllm.utils.sparse_utils import (
-            check_sparse_tensor_invariants_threadsafe as cm_from_utils,
+            load_torch_payload as load_from_utils,
         )
 
-        assert embed_mod.check_sparse_tensor_invariants_threadsafe is cm_from_utils
-        assert image_mod.check_sparse_tensor_invariants_threadsafe is cm_from_utils
-        assert audio_mod.check_sparse_tensor_invariants_threadsafe is cm_from_utils
+        assert embed_mod.load_torch_payload is load_from_utils
+        assert image_mod.load_torch_payload is load_from_utils
+        assert audio_mod.load_torch_payload is load_from_utils
+        assert video_mod.load_torch_payload is load_from_utils

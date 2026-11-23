@@ -2,11 +2,13 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
+use winnow::error::ErrMode;
 
 use super::{
     DelimitedReasoningParser, DelimitedReasoningParserBuilder, ReasoningDelta, ReasoningParser,
     Result,
 };
+use crate::utils::{MarkerLike as _, attributed_with_markers};
 
 const M3_THINK_START: &str = "<mm:think>";
 const M3_THINK_END: &str = "</mm:think>";
@@ -37,26 +39,36 @@ impl MiniMaxM3ReasoningParser {
         })
     }
 
-    /// Drop a response-leading `</mm:think>` while preserving later unmatched
-    /// closers as ordinary content.
+    /// Drop a response-leading dedicated `</mm:think>` while preserving later
+    /// unmatched closers as ordinary content.
     fn push_inner(&mut self, delta: DecodedText) -> ReasoningDelta {
         if self.at_response_start && !self.inner.in_reasoning() {
             self.leading_end_buffer.append(delta);
             let mut buffered = self.leading_end_buffer.take();
 
-            if buffered.text.starts_with(M3_THINK_END) {
-                self.at_response_start = false;
-                // The dropped marker span keeps its tokens out of any count.
-                let _ = buffered.drain_prefix(M3_THINK_END.len());
-                return self.inner.push(buffered);
+            let leading_end = self
+                .inner
+                .end_marker()
+                .as_marker()
+                .parse_next(&mut attributed_with_markers(&buffered, &()))
+                .map(str::len);
+            match leading_end {
+                Ok(end_len) => {
+                    self.at_response_start = false;
+                    // The dropped marker span keeps its tokens out of any count.
+                    let _ = buffered.drain_prefix(end_len);
+                    return self.inner.push(buffered);
+                }
+                // The dedicated closer may still be arriving.
+                Err(ErrMode::Incomplete(_)) => {
+                    self.leading_end_buffer = buffered;
+                    return ReasoningDelta::default();
+                }
+                Err(_) => {
+                    self.at_response_start = false;
+                    return self.inner.push(buffered);
+                }
             }
-            if M3_THINK_END.starts_with(buffered.text.as_str()) {
-                self.leading_end_buffer = buffered;
-                return ReasoningDelta::default();
-            }
-
-            self.at_response_start = false;
-            return self.inner.push(buffered);
         }
 
         self.inner.push(delta)
@@ -107,10 +119,14 @@ impl ReasoningParser for MiniMaxM3ReasoningParser {
 mod tests {
     use std::sync::Arc;
 
+    use vllm_tokenizer::Tokenizer as _;
+    use vllm_tokenizer::test_utils::decode_ids;
+
     use super::MiniMaxM3ReasoningParser;
     use crate::reasoning::ReasoningParser;
     use crate::reasoning::tests::{
-        MM_THINK_END_ID, MM_THINK_START_ID, content_str, fake_tokenizer, push_str, reasoning_str,
+        MM_THINK_END_ID, MM_THINK_START_ID, content_str, decode, fake_tokenizer, push_str,
+        reasoning_str,
     };
 
     #[test]
@@ -134,6 +150,21 @@ mod tests {
     }
 
     #[test]
+    fn minimax_m3_keeps_ordinary_leading_end_marker() {
+        let tokenizer = fake_tokenizer();
+        let mut parser = MiniMaxM3ReasoningParser::new(Arc::new(fake_tokenizer())).unwrap();
+
+        // Ordinary bytes spelling `</mm:think>` are content, and a partial one
+        // is not held back.
+        let ordinary =
+            |text: &str| decode_ids(&tokenizer, &tokenizer.encode_ordinary(text).unwrap());
+        let head = parser.push(ordinary("</mm")).unwrap();
+        assert_eq!(content_str(&head), Some("</mm"));
+        let rest = parser.push(ordinary(":think>answer")).unwrap();
+        assert_eq!(content_str(&rest), Some(":think>answer"));
+    }
+
+    #[test]
     fn minimax_m3_preserves_non_leading_end_marker() {
         let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
@@ -148,8 +179,9 @@ mod tests {
         let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
 
-        assert!(push_str(&mut parser, "</mm").is_empty());
-        let delta = push_str(&mut parser, ":think>answer");
+        let [head, rest] = decode(["</mm", ":think>answer"]);
+        assert!(parser.push(head).unwrap().is_empty());
+        let delta = parser.push(rest).unwrap();
         assert_eq!(delta.reasoning, None);
         assert_eq!(content_str(&delta), Some("answer"));
     }

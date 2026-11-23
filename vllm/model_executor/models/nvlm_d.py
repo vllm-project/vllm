@@ -11,7 +11,7 @@ from collections.abc import Mapping
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
@@ -28,7 +28,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
-from vllm.transformers_utils.processors.internvl import InternVLImageProcessor
+from vllm.transformers_utils.processors.internvl import InternVLChatImageProcessor
 from vllm.transformers_utils.processors.nvlm_d import NVLMProcessor
 
 from .intern_vit import InternVisionModel
@@ -52,7 +52,7 @@ class NVLMProcessingInfo(BaseInternVLProcessingInfo):
         kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
         kwargs.setdefault("use_thumbnail", config.use_thumbnail)
 
-        return InternVLImageProcessor(**kwargs)
+        return InternVLChatImageProcessor(**kwargs)
 
     def get_hf_processor(self, **kwargs: object) -> NVLMProcessor:
         config = self.get_hf_config()
@@ -161,7 +161,7 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
     dummy_inputs=NVLMDummyInputsBuilder,
 )
 class NVLM_D_Model(InternVLChatModel):
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
+    def _init_mlp1(self, config: PreTrainedConfig) -> nn.Module:
         vit_hidden_size = config.vision_config.hidden_size
         llm_intermediate_size = config.text_config.intermediate_size
         llm_hidden_size = config.text_config.hidden_size
@@ -179,7 +179,7 @@ class NVLM_D_Model(InternVLChatModel):
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         prefix: str,

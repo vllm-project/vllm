@@ -27,6 +27,7 @@ from functools import cached_property
 import PIL
 import torch
 from transformers import BatchFeature
+from transformers.image_transforms import to_pil_image
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
@@ -110,7 +111,7 @@ class OvisProcessor(ProcessorMixin):
     ) -> BatchFeature:
         """Main method to prepare for the model one or several sequences(s) and image(s). This method forwards the `text`
         and `kwargs` arguments to Qwen2TokenizerFast's [`~Qwen2TokenizerFast.__call__`] if `text` is not `None` to encode
-        the text. To prepare the vision inputs, this method forwards the `vision_infos` and `kwrags` arguments to
+        the text. To prepare the vision inputs, this method forwards the `vision_infos` and `kwargs` arguments to
         Qwen2VLImageProcessor's [`~Qwen2VLImageProcessor.__call__`] if `vision_infos` is not `None`.
 
         Args:
@@ -197,7 +198,7 @@ class OvisProcessor(ProcessorMixin):
                         new_ids = []
 
                         # replace placeholders
-                        for i, token_id in enumerate(ids_list):
+                        for token_id in ids_list:
                             if token_id == image_token_id:
                                 placeholder_ids = image_features["image_placeholders"][
                                     idx
@@ -401,6 +402,7 @@ class OvisProcessor(ProcessorMixin):
                 # pick the partition with maximum covering_ratio and break the tie using #sub_images
                 return sorted(all_grids, key=lambda x: (-x[1], x[0][0] * x[0][1]))[0][0]
 
+        image = to_pil_image(image)
         if do_convert_rgb:
             image = convert_image_mode(image, "RGB")
 

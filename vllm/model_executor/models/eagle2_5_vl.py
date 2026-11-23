@@ -8,7 +8,7 @@ from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -17,8 +17,8 @@ from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.internvl import (
-    InternVLImageProcessor,
-    InternVLProcessor,
+    InternVLChatImageProcessor,
+    InternVLChatProcessor,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -82,9 +82,9 @@ class Eagle2_5_VLProcessingInfo(BaseInternVLProcessingInfo):
         kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
         kwargs.setdefault("use_thumbnail", config.use_thumbnail)
 
-        return InternVLImageProcessor(**kwargs)
+        return InternVLChatImageProcessor(**kwargs)
 
-    def get_hf_processor(self, **kwargs) -> InternVLProcessor:
+    def get_hf_processor(self, **kwargs) -> InternVLChatProcessor:
         config = self.get_hf_config()
         vision_config = config.vision_config
 
@@ -94,7 +94,7 @@ class Eagle2_5_VLProcessingInfo(BaseInternVLProcessingInfo):
         downsample_ratio = config.downsample_ratio
         image_seq_length = int((image_size // patch_size) ** 2 * (downsample_ratio**2))
 
-        return InternVLProcessor(
+        return InternVLChatProcessor(
             tokenizer=self.get_tokenizer(),
             image_processor=image_processor,
             image_seq_length=image_seq_length,
@@ -193,7 +193,7 @@ class Eagle2_5_VLForConditionalGeneration(
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str,
     ):
@@ -220,7 +220,7 @@ class Eagle2_5_VLForConditionalGeneration(
             prefix=prefix,
         )
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
+    def _init_mlp1(self, config: PreTrainedConfig) -> nn.Module:
         """Initialize MLP projection layer."""
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.text_config.hidden_size

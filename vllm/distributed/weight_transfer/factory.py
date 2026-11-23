@@ -174,10 +174,10 @@ class WeightTransferTrainerFactory:
         """Build and rendezvous a ready-to-send trainer engine.
 
         Called on every trainer rank (multi-rank trainers construct on all
-        ranks; the sender is resolved inside the engine's ``trainer_init``).
+        ranks; the sender is resolved inside the engine's `trainer_init`).
 
         The trainer side takes no `WeightTransferConfig` and no separate
-        `backend` argument: the backend is read from ``init_info.backend`` (a
+        `backend` argument: the backend is read from `init_info.backend` (a
         `ClassVar` on each `TrainerInitInfo` subclass), and the static wire
         params ride `init_info`.
 
@@ -243,6 +243,19 @@ WeightTransferEngineFactory.register_engine(
     "ShardedRDTWeightTransferEngine",
 )
 
+WeightTransferEngineFactory.register_engine(
+    "nccl_m2n",
+    "vllm.distributed.weight_transfer.m2n_engine",
+    "M2NWeightTransferEngine",
+)
+
+
+WeightTransferEngineFactory.register_engine(
+    "modelexpress",
+    "vllm.distributed.weight_transfer.modelexpress_engine",
+    "ModelExpressWeightTransferEngine",
+)
+
 
 # Trainer-side engines, parallel to the worker registry above.
 WeightTransferTrainerFactory.register_engine(
@@ -267,4 +280,10 @@ WeightTransferTrainerFactory.register_engine(
     "sharded_rdt",
     "vllm.distributed.weight_transfer.sharded_rdt_trainer",
     "ShardedRDTTrainerWeightTransferEngine",
+)
+
+WeightTransferTrainerFactory.register_engine(
+    "nccl_m2n",
+    "vllm.distributed.weight_transfer.m2n_trainer",
+    "M2NTrainerWeightTransferEngine",
 )

@@ -5,7 +5,7 @@
 This module is deliberately import-light: the frontend process uses it to
 validate per-request params, so importing it must not pull in model-runner
 side modules (torch, triton, worker state). Imports needed to instantiate
-processors are deferred to ``build_custom_logits_processors``.
+processors are deferred to `build_custom_logits_processors`.
 """
 
 import importlib
@@ -28,16 +28,17 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Same entry-points group as
-# vllm.v1.sample.logits_processor.LOGITSPROCS_GROUP; duplicated here so this
-# module stays importable without the V1 sampler machinery.
 LOGITSPROCS_GROUP = "vllm.logits_processors"
+
+STR_POOLING_REJECTS_LOGITSPROCS = (
+    "Pooling models do not support custom logits processors."
+)
 
 
 def _load_v2_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
     """Load installed logits processor plugins.
 
-    Plugins registered under ``LOGITSPROCS_GROUP`` ship V1-interface
+    Plugins registered under `LOGITSPROCS_GROUP` ship V1-interface
     processors today; those crash under the V2 sampler, so reject them at
     load time.
     """
@@ -167,8 +168,6 @@ def build_custom_logits_processors(
         RuntimeError: if an FQCN fails to import.
 
     """
-    from vllm.v1.sample.logits_processor import STR_POOLING_REJECTS_LOGITSPROCS
-
     if is_pooling_model:
         if custom_logitsprocs:
             raise ValueError(STR_POOLING_REJECTS_LOGITSPROCS)
@@ -189,17 +188,17 @@ def build_custom_logits_processors_params_validator(
     """Load custom processor classes once and return a params validator.
 
     Called from the frontend at startup. The returned callable runs each
-    processor's ``validate_params`` at request admission.
+    processor's `validate_params` at request admission.
 
     Raises:
         ValueError: if a loaded class does not implement the V2 interface.
         RuntimeError: if an FQCN fails to import.
 
     """
-    if not custom_logitsprocs:
-        return lambda _: None
+    classes = _cached_load_v2_logitsprocs(tuple(custom_logitsprocs or ()))
 
-    classes = _cached_load_v2_logitsprocs(tuple(custom_logitsprocs))
+    if not classes:
+        return lambda _: None
 
     def validate_params(sampling_params: "SamplingParams") -> None:
         for cls in classes:

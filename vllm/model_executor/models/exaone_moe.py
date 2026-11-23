@@ -20,7 +20,7 @@ from itertools import islice
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -30,11 +30,13 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -63,7 +65,7 @@ from .utils import (
 class ExaoneMoe(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         swiglu_limit: float | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -84,11 +86,9 @@ class ExaoneMoe(nn.Module):
                 f"the number of experts {config.num_experts}."
             )
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
@@ -227,24 +227,31 @@ class ExaoneMoeAttention(nn.Module):
 
         layer_idx = extract_layer_index(prefix)
 
-        if config.sliding_windows is not None:
-            self.sliding_window_size = config.sliding_windows[layer_idx]
-
-        if config.layer_types[layer_idx] == "full_attention":
-            self.sliding_window_size = None
-
+        # Configs published before K-EXAONE 2.0 only have the scalar
+        # `sliding_window` and no MTP fields; their MTP layer follows the main
+        # layer with the same index.
+        layer_types = config.layer_types
+        sliding_windows = getattr(config, "sliding_windows", None)
         if is_mtp:
-            self.sliding_window = (
-                config.mtp_layer_types[layer_idx] == "sliding_attention"
+            layer_types = getattr(config, "mtp_layer_types", None) or layer_types
+            sliding_windows = (
+                getattr(config, "mtp_sliding_windows", None) or sliding_windows
             )
-            if config.mtp_sliding_windows is not None:
-                self.sliding_window_size = config.mtp_sliding_windows[layer_idx]
 
-            if config.mtp_layer_types[layer_idx] == "full_attention":
-                self.sliding_window_size = None
+        if layer_types[layer_idx] == "full_attention":
+            self.sliding_window_size = None
+        elif sliding_windows is not None:
+            self.sliding_window_size = sliding_windows[layer_idx]
+        else:
+            self.sliding_window_size = config.sliding_window
 
-        # apply rotary embeddings to every layer in full attention models
-        self.apply_rope_all_layers = "sliding_attention" not in config.layer_types
+        # Full-attention layers are NoPE when sliding layers are present, except
+        # the MTP layer, which is trained with RoPE.
+        self.use_rope = (
+            bool(self.sliding_window_size)
+            or is_mtp
+            or "sliding_attention" not in config.layer_types
+        )
 
         set_default_rope_theta(config, default_theta=1000000)
         self.rotary_emb = get_rope(
@@ -279,7 +286,7 @@ class ExaoneMoeAttention(nn.Module):
         k = self.k_norm(k)
         k = k.flatten(-2, -1)
 
-        if self.sliding_window_size or self.apply_rope_all_layers:
+        if self.use_rope:
             q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -289,7 +296,7 @@ class ExaoneMoeAttention(nn.Module):
 class ExaoneMoeDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         is_mtp: bool = False,

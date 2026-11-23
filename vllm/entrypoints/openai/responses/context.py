@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from contextlib import AsyncExitStack
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final, Union
@@ -21,13 +22,12 @@ from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, TextContent
 
 from vllm import envs
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-)
-from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.parser.harmony_utils import render_for_completion
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    get_encoding,
+    render_for_completion,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponseRawMessageAndToken,
@@ -36,15 +36,25 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     construct_tool_dicts,
+    response_item_status,
 )
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+)
+from vllm.logprobs import LogprobsOnePosition, SampleLogprobs
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
+from vllm.renderers.chat_utils import (
+    ChatTemplateContentFormatOption,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
+from vllm.utils.gc_utils import untracked_list
 
 if TYPE_CHECKING:
     from mcp.client import ClientSession
 
+    from vllm.parser.harmony import Segment
     from vllm.v1.metrics.stats import RequestStateStats
 
 logger = logging.getLogger(__name__)
@@ -190,8 +200,11 @@ class SimpleContext(ConversationContext):
 
         # Accumulated final output for streaming mode
         self._accumulated_text: str = ""
-        self._accumulated_token_ids: list[int] = []
+        self._accumulated_token_ids: list[int] = untracked_list()
         self._accumulated_logprobs: list = []
+        # Items already sent as output_item.done events; the final
+        # streaming response reuses them instead of reparsing.
+        self.streamed_output_items: list[ResponseOutputItem] | None = None
 
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -310,6 +323,7 @@ class ParsableContext(ConversationContext):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
+        self.num_cache_creation_tokens = 0
         self.num_reasoning_tokens = 0
         # not implemented yet for ParsableContext
         self.all_turn_metrics: list[TurnMetrics] = []
@@ -335,13 +349,14 @@ class ParsableContext(ConversationContext):
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.output_messages: list[ResponseRawMessageAndToken] = []
-        self._accumulated_token_ids: list[int] = []
+        self._accumulated_token_ids: list[int] = untracked_list()
         self.kv_transfer_params: dict[str, Any] | None = None
         self.ec_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
+        self.num_cache_creation_tokens += output.num_cache_creation_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
@@ -359,14 +374,21 @@ class ParsableContext(ConversationContext):
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=completion.token_ids,
             )
+            # Each round is a separate generation, so count it on its own ids.
+            self.num_reasoning_tokens += self.response_parser.count_reasoning_tokens(
+                completion.token_ids or []
+            )
             if not self.request.include_reasoning:
                 reasoning = None
             self.response_messages.extend(
                 build_response_output_items(
                     reasoning=reasoning,
                     content=content,
-                    tool_calls=tool_calls,
+                    tool_calls=maybe_filter_parallel_tool_calls(
+                        tool_calls or [], self.request
+                    ),
                     tools=self.request.tools,
+                    finish_reason=completion.finish_reason,
                 )
             )
         elif completion.text:
@@ -374,7 +396,7 @@ class ParsableContext(ConversationContext):
                 ResponseOutputMessage(
                     type="message",
                     id=f"msg_{random_uuid()}",
-                    status="completed",
+                    status=response_item_status(completion.finish_reason),
                     role="assistant",
                     content=[
                         ResponseOutputText(
@@ -431,7 +453,9 @@ class ParsableContext(ConversationContext):
         return False
 
     async def call_python_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
     ) -> list[ResponseInputOutputItem]:
         self.called_tools.add("python")
         if isinstance(tool_session, Tool):
@@ -446,7 +470,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"mcpo_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -454,7 +478,9 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_search_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
     ) -> list[ResponseInputOutputItem]:
         self.called_tools.add("browser")
         if isinstance(tool_session, Tool):
@@ -472,7 +498,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"fco_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -480,8 +506,10 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_container_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: Message
-    ) -> list[Message]:
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
+    ) -> list[ResponseInputOutputItem]:
         """Call container tool. Expect this to be run in a stateful docker
         with command line terminal.
         The official container tool would at least
@@ -514,7 +542,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"fco_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -615,12 +643,14 @@ class HarmonyContext(ConversationContext):
         available_tools: list[str],
         function_tool_names: frozenset[str],
         response_parser: Parser | None = None,
+        request: ResponsesRequest | None = None,
     ):
         from vllm.parser.harmony import HarmonyParser, Segment
 
         assert isinstance(response_parser, HarmonyParser)
 
         self._messages = messages
+        self.request = request
         self.response_parser: HarmonyParser = response_parser
         self.finish_reason: str | None = None
         self.available_tools = available_tools
@@ -632,11 +662,24 @@ class HarmonyContext(ConversationContext):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
+        self.num_cache_creation_tokens = 0
         self.num_reasoning_tokens = 0
         self.num_tool_output_tokens = 0
 
         self.last_append_segments: list[Segment] = []
         self.last_append_flush_status: bool = False
+        # When logprobs are requested, each output text segment carries its
+        # token's (token_id, logprobs) in Segment.token_logprobs, which drives
+        # streaming deltas. logprobs_by_message groups the same entries per
+        # completed message (keyed by id(message)) for the final output, so
+        # streaming and non-streaming report the same tokens.
+        self.logprobs_by_message: dict[int, list[tuple[int, LogprobsOnePosition]]] = {}
+        self._current_message_logprobs: list[tuple[int, LogprobsOnePosition]] = []
+        # Each completed message with the items sent for it in
+        # output_item.done events, so the final response can reuse their ids.
+        self.streamed_items_by_message: list[
+            tuple[Message, list[ResponseOutputItem]]
+        ] = []
 
         # Turn tracking - replaces multiple individual tracking variables
         self.current_turn_metrics = TurnMetrics()
@@ -673,12 +716,49 @@ class HarmonyContext(ConversationContext):
             self.all_turn_metrics.append(self.current_turn_metrics.copy())
             self.current_turn_metrics.reset()
 
+        logprobs = output.outputs[0].logprobs
+        if logprobs is not None:
+            self._attach_logprobs(segments, output_token_ids, logprobs)
+            if output.finished:
+                self._current_message_logprobs = []
         self.last_append_segments = segments
         self._messages.extend(
             segment.completed_message
             for segment in segments
             if segment.completed_message is not None
         )
+
+    def _attach_logprobs(
+        self,
+        segments: list["Segment"],
+        token_ids: Sequence[int],
+        logprobs: SampleLogprobs,
+    ) -> None:
+        """Attach logprobs to output text segments, in place.
+
+        A token is output text if it was parsed on the final or commentary
+        channel with no recipient (the rule used to build output_text items)
+        and is not a Harmony control token. Tokens with an empty delta (e.g.
+        part of a multi-byte character) still count.
+        """
+        for i, segment in enumerate(segments):
+            if (
+                segment.token_index is not None
+                and segment.completed_message is None
+                and segment.recipient is None
+                and segment.channel in ("final", "commentary")
+            ):
+                token_id = token_ids[segment.token_index]
+                if not get_encoding().is_special_token(token_id):
+                    entry = (token_id, logprobs[segment.token_index])
+                    self._current_message_logprobs.append(entry)
+                    segments[i] = segment._replace(token_logprobs=entry)
+            elif segment.completed_message is not None:
+                if self._current_message_logprobs:
+                    self.logprobs_by_message[id(segment.completed_message)] = (
+                        self._current_message_logprobs
+                    )
+                self._current_message_logprobs = []
 
     def append_tool_output(self, output: list[Message]) -> None:
         output_msgs = output
@@ -748,6 +828,8 @@ class HarmonyContext(ConversationContext):
         if num_cached_token is not None:
             self.num_cached_tokens += num_cached_token
             self.current_turn_metrics.cached_input_tokens = num_cached_token
+
+        self.num_cache_creation_tokens += output.num_cache_creation_tokens or 0
 
     def _update_decode_token_usage(self, output: RequestOutput) -> int:
         """Update token usage statistics for the decode phase of generation.

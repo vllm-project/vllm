@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from functools import partial
+
 import torch
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm import envs
 from vllm.config import get_current_vllm_config
@@ -20,6 +22,7 @@ from vllm.model_executor.layers.linear import (
     QuantizeMethodBase,
     ReplicatedLinear,
     RowParallelLinear,
+    apply_flattened,
 )
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
@@ -98,14 +101,14 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.layer_name = self.base_layer.prefix + ".lora_linear_async"
         compilation_config = vllm_config.compilation_config
         if self.layer_name in compilation_config.static_forward_context:
-            raise ValueError("Duplicate layer name: {}".format(self.layer_name))
+            raise ValueError(f"Duplicate layer name: {self.layer_name}")
         compilation_config.static_forward_context[self.layer_name] = self
 
     def create_lora_weights(
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> None:
         self.lora_config = lora_config
         if isinstance(self.base_layer, ReplicatedLinear):
@@ -208,7 +211,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def _apply_sync(
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        output = self._get_quant_method().apply(self.base_layer, x, bias)
+        apply = partial(self._get_quant_method().apply, self.base_layer, bias=bias)
+        output = apply_flattened(apply, x)
         return self._apply_lora_to_output(x, output)
 
     def _apply_base_forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -254,7 +258,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         output_size = sum(self.output_slices)
 
         def base_fn() -> torch.Tensor:
-            return self._get_quant_method().apply(self.base_layer, x, bias)
+            quant_method = self._get_quant_method()
+            apply = partial(quant_method.apply, self.base_layer, bias=bias)
+            return apply_flattened(apply, x)
 
         def lora_fn() -> torch.Tensor:
             # Must be zeros, not empty: _lora_expand_kernel exits early (without
