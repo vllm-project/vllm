@@ -22,7 +22,6 @@ from transformers.models.gemma4.modeling_gemma4 import (
 )
 
 import vllm
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -140,10 +139,13 @@ def _build(root: Path, tokenizer_dir: Path, multimodal: bool) -> tuple[str, str,
 
 
 def _prompt_logprobs(
-    model: str, lora_path: str | None = None, hf_overrides: dict | None = None
+    vllm_runner,
+    model: str,
+    lora_path: str | None = None,
+    hf_overrides: dict | None = None,
 ) -> list[list[list[float]]]:
     """Prompt logprobs without LoRA, then with `lora_path` if given."""
-    llm = vllm.LLM(
+    with vllm_runner(
         model,
         dtype="bfloat16",
         enforce_eager=True,
@@ -154,8 +156,8 @@ def _prompt_logprobs(
         max_lora_rank=RANK,
         limit_mm_per_prompt={"image": 0},
         hf_overrides=hf_overrides,
-    )
-    try:
+        enable_chunked_prefill=None,
+    ) as runner:
         generator = torch.Generator().manual_seed(1)
         prompts = [
             torch.randint(1000, 10000, (32,), generator=generator).tolist()
@@ -167,16 +169,13 @@ def _prompt_logprobs(
             loras.append(LoRARequest("expert-3d", 1, lora_path))
         results = []
         for lora in loras:
-            outputs = llm.generate(
+            outputs = runner.llm.generate(
                 [{"prompt_token_ids": p} for p in prompts], params, lora_request=lora
             )
             results.append(
                 [_token_logprobs(out, p) for out, p in zip(outputs, prompts)]
             )
         return results
-    finally:
-        del llm
-        cleanup_dist_env_and_memory()
 
 
 def _token_logprobs(output: vllm.RequestOutput, prompt: list[int]) -> list[float]:
@@ -203,12 +202,12 @@ def _mean_abs_diff(x: list[list[float]], y: list[list[float]]) -> float:
     ids=["mm", "text", "mm-checkpoint-text-model"],
 )
 def test_gemma4_moe_3d_expert_lora_matches_merged(
-    tmp_path, gemma4_tokenizer_dir, multimodal, hf_overrides
+    vllm_runner, tmp_path, gemma4_tokenizer_dir, multimodal, hf_overrides
 ):
     base, merged, lora = _build(tmp_path, gemma4_tokenizer_dir, multimodal)
 
-    base_lp, lora_lp = _prompt_logprobs(base, lora, hf_overrides)
-    (merged_lp,) = _prompt_logprobs(merged, hf_overrides=hf_overrides)
+    base_lp, lora_lp = _prompt_logprobs(vllm_runner, base, lora, hf_overrides)
+    (merged_lp,) = _prompt_logprobs(vllm_runner, merged, hf_overrides=hf_overrides)
 
     signal = _mean_abs_diff(merged_lp, base_lp)
     assert signal > 0.1
