@@ -56,8 +56,8 @@ class DFlySpeculatorConfig(DraftModelSpeculatorConfig):
     def apply_options(cls, spec: "SpeculativeConfig") -> None:
         if spec.enable_adaptive_verification:
             raise ValueError("DFly does not support adaptive verification")
-        if spec.rejection_sample_method != "standard":
-            raise ValueError("DFly requires standard target verification")
+        if spec.rejection_sample_method not in ("standard", "synthetic"):
+            raise ValueError("DFly requires standard or synthetic target verification")
 
     @property
     def num_lookahead_tokens(self) -> int:
