@@ -373,6 +373,26 @@ This bounds the scheduler's wait for prefix lookup. It does not cancel a master
 RPC already running inside the worker or apply to KV loads and saves. Store
 reset waits at most 60 seconds.
 
+### Read and write circuit breakers
+
+The worker uses independent circuit breakers for reads (prefix existence checks
+and KV loads) and writes (save existence checks and PUTs). After 3 consecutive
+SDK failures, the affected path backs off for 30 seconds without disabling the
+other path. After the cooldown, one native probe is admitted; other operations
+wait for that probe to return, even if its nominal probe window has elapsed.
+Results from operations started before an outage cannot close a newer breaker.
+
+Missing or evicted KV keys require recomputation, not an outage. Successful
+existence checks alone do not prove that KV loads or PUTs have recovered.
+Load failures also back off the scheduler's prefix lookups; a successful load
+clears that degraded state. Saves rejected by an open breaker complete their
+normal reference-release bookkeeping without writing to the store.
+
+These breakers do not cancel active native calls. GPU buffer references remain
+held until those calls return and every worker reports completion. Set
+`kv_load_failure_policy="recompute"` in the top-level KV transfer configuration
+to recompute failed remote loads locally; `"fail"` terminates affected requests.
+
 ### kv_connector_extra_config
 
 - `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.

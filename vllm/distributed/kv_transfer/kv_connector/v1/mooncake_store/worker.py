@@ -84,6 +84,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.selective_lease
     SelectiveLookupLease,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.store_service import (
+    CacheCircuitOpen,
     MooncakeStoreService,
 )
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
@@ -598,7 +599,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self.stored_requests.setdefault(request.req_id, set()).add(
                 request.store_job_id
             )
-        super().add_request(request)
+        self.store_service.submit_save(request, self.finish_store_job)
 
     def is_live_store_job(self, req_meta: ReqMeta) -> bool:
         with self.done_task_lock:
@@ -757,6 +758,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         start = time.perf_counter()
         try:
             results = self.store_service.check_save_exists(keys)
+        except CacheCircuitOpen:
+            return None
         except Exception as e:
             self._record_operation(
                 "save_exists",
@@ -887,6 +890,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
     def _handle_request(self, req_meta: ReqMeta):
         # The single `finally` is the only way out, so the scheduler releases
         # this job's GPU block references however the job ends.
+        self.store_service.start_save()
         save_completed = False
         available_token_len = 0
         checkpoint_len = 0
@@ -1213,6 +1217,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if self.enable_kv_event and stored_events:
                 self.update_kv_event(stored_events)
         finally:
+            self.store_service.finish_save()
             if save_completed:
                 self._record_saved_offset(req_meta, checkpoint_len)
             if self.enable_kv_event and available_token_len:
@@ -2512,12 +2517,18 @@ class MooncakeStoreWorker:
                 self.kv_send_thread.delete_finished_stored_request(req_id)
 
     def build_connector_worker_meta(self) -> MooncakeStoreWorkerMetadata | None:
-        if self.kv_send_thread is None:
+        read_failures = self.store_service.take_read_failures()
+        completed_saves = (
+            self.kv_send_thread.take_completed_saves()
+            if self.kv_send_thread is not None
+            else {}
+        )
+        if not completed_saves and not read_failures:
             return None
-        completed_saves = self.kv_send_thread.take_completed_saves()
-        if not completed_saves:
-            return None
-        return MooncakeStoreWorkerMetadata(completed_saves=completed_saves)
+        return MooncakeStoreWorkerMetadata(
+            completed_saves=completed_saves,
+            read_failures=read_failures,
+        )
 
     def lookup(
         self, num_tokens: int, block_hashes: Sequence[BlockHash]
@@ -2934,6 +2945,7 @@ class LookupKeyClient:
             max_workers=1, thread_name_prefix="MooncakeLookupClient"
         )
         self._lookups: dict[str, LookupState] = {}
+        self._loads_degraded = False
         prefetch_limit = extra_config.get("lookup_prefetch_limit", 0)
         self._prefetch_slots = (
             threading.BoundedSemaphore(prefetch_limit) if prefetch_limit > 0 else None
@@ -3005,7 +3017,8 @@ class LookupKeyClient:
                 return None
             try:
                 state.result = state.future.result(timeout=max(0, remaining_s))
-                self.circuit_breaker.record_success()
+                if not self._loads_degraded:
+                    self.circuit_breaker.record_success()
             except Exception as e:
                 # Expiring queued behind other lookups says nothing about the
                 # store; cancel() is True only if the lookup never started.
@@ -3048,6 +3061,17 @@ class LookupKeyClient:
             deadline=deadline,
         )
         return True
+
+    def record_read_outcomes(self, failures: int, successes: int) -> None:
+        if failures:
+            self._loads_degraded = True
+            for req_id in list(self._lookups):
+                self.discard(req_id)
+            for _ in range(failures):
+                self.circuit_breaker.record_failure()
+        elif successes:
+            self._loads_degraded = False
+            self.circuit_breaker.record_success()
 
     def discard(self, req_id: str) -> None:
         """Drop any cached/in-flight lookup for `req_id` (e.g. on abort)."""
