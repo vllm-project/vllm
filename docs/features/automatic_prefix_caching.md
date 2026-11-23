@@ -67,7 +67,12 @@ Prefix reuse still requires a shared prefix with a saved Mamba checkpoint. The m
 
 #### Qwen3.5 and Qwen4Exp Gated DeltaNet
 
-On Qwen3.5 and Qwen4Exp models, `--use-replayssm` applies ReplaySSM to the Gated DeltaNet layers. It runs FlashInfer's UMMA kernel, which requires FlashInfer 0.7.3 or later, an SM100-class GPU, and FP16 recurrent state:
+On Qwen3.5 and Qwen4Exp models, `--use-replayssm` applies ReplaySSM to the Gated DeltaNet layers. It requires FlashInfer 0.7.3 or later and FP16 or BF16 recurrent state (`--mamba-ssm-cache-dtype float16` or `bfloat16`). vLLM selects one of two FlashInfer kernels:
+
+- On SM100-class GPUs, FP16 state runs on the UMMA kernel. It supports standard decoding and up to seven MTP draft tokens.
+- BF16 state, and FP16 state on other NVIDIA GPUs from SM90 (Hopper) onward, run on the HMMA kernel. It supports only MTP with three or seven draft tokens.
+
+This example runs the UMMA kernel:
 
 ```bash
 vllm serve nvidia/Qwen3.5-122B-A10B-NVFP4 \
@@ -78,10 +83,10 @@ vllm serve nvidia/Qwen3.5-122B-A10B-NVFP4 \
     --speculative-config '{"method":"mtp","num_speculative_tokens":7}'
 ```
 
-Remove `--speculative-config` for standard decoding. The Gated DeltaNet ReplaySSM path has these limits:
+Remove `--speculative-config` for standard decoding. For the HMMA kernel, use `--mamba-ssm-cache-dtype bfloat16` or run on Hopper, and keep three or seven draft tokens. The Gated DeltaNet ReplaySSM path has these limits:
 
-- Model activations and the convolution state must be BF16, with 128-element key and value heads and at most four value heads per key head.
-- Speculative decoding supports up to seven draft tokens. Adaptive verification is not supported; set `enable_adaptive_verification` to `false`.
+- Model activations and the convolution state must be BF16, with 128-element key and value heads and a whole number of value heads per key head. The UMMA kernel allows at most four value heads per key head.
+- Speculative decoding supports up to seven draft tokens on the UMMA kernel, and three or seven on the HMMA kernel. Adaptive verification is not supported; set `enable_adaptive_verification` to `false`.
 - `--replayssm-buffer-len` must be 16, the default.
 - Mamba cache stochastic rounding, pipeline parallelism, microbatching, and KV connectors are not supported.
 
@@ -91,7 +96,9 @@ For `Qwen/Qwen3.8-Flash-Next-FP8`, add `--tensor-parallel-size 4 --block-size 19
 
 `--gdn-prefill-backend` selects the prefill kernel independently. Triton prefill can run with FlashInfer ReplaySSM decode.
 
-With prefix caching, vLLM sets `GDN_UCACHE_STATE_DTYPE=fp16` before starting its workers, because FlashInfer reads it when first imported. If your own code imports FlashInfer before creating the engine, set this variable before that import.
+FlashInfer reads its GDN settings only when it is first imported. vLLM imports FlashInfer while it creates the model config, so it sets them before that step: `GDN_UCACHE_STATE_DTYPE` is `fp16` or `bf16` to match the recurrent state, and with the HMMA kernel `SGLANG_GDN_WY_STRIDED_QKV` is `1`. If your own code imports FlashInfer before it creates the engine, set these variables before that import.
+
+FlashInfer releases without [flashinfer-ai/flashinfer#8975](https://github.com/flashinfer-ai/flashinfer/pull/8975) compile the HMMA kernel for each new batch size. Full CUDA graph decode compiles its sizes at startup, but mixed prefill and decode steps can stall for about a second the first time each size occurs. vLLM logs a warning in this case. With that change, vLLM compiles the HMMA variants for both Q/K/V layouts and all launch tactics at startup.
 
 ## Example workloads
 

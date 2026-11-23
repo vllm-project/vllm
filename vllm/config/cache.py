@@ -327,7 +327,9 @@ class CacheConfig:
     and skip the per-step full-state store, writing the checkpoint only on flush.
     Mamba2 supports Triton and FlashInfer with prefix caching on and off,
     including speculative decoding. Qwen3.5 and Qwen4Exp Gated DeltaNet require
-    FlashInfer. Qwen4Exp ReplaySSM does not support ROCm. Pipeline parallelism
+    FlashInfer with FP16 or BF16 state; BF16 state and GPUs other than
+    SM100-class support only MTP with 3 or 7 draft tokens. Qwen4Exp ReplaySSM
+    does not support ROCm. Pipeline parallelism
     is not supported. Flushes are most efficient when mamba_block_size is a
     multiple of replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)

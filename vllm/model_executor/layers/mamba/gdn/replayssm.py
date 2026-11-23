@@ -1,9 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Adapter for FlashInfer's FP16-state GDN ReplaySSM decode kernel."""
+"""Adapter for FlashInfer's GDN ReplaySSM decode kernels.
 
+SM100-class GPUs run FP16 state on the UMMA kernel. BF16 state, and Hopper,
+run on the HMMA kernel, which supports MTP with 3 or 7 draft tokens.
+"""
+
+import functools
+import importlib
 from collections.abc import Callable
 from functools import cache
+from typing import Literal
 
 import torch
 
@@ -13,25 +20,54 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 # CuTe loads every kernel input with 16-byte vector accesses.
 _CUTE_ALIGNMENT_BYTES = 16
 
+_STATE_ENV = {torch.float16: "fp16", torch.bfloat16: "bf16"}
+
+
+def _check_flashinfer_state_dtype(
+    imported: torch.dtype, state_dtype: torch.dtype, what: str
+) -> None:
+    # FlashInfer fixes the state dtype when it is first imported.
+    if imported != state_dtype:
+        raise ValueError(
+            f"FlashInfer {what} uses {imported} state because FlashInfer was "
+            "imported before vLLM configured it. Set "
+            f"GDN_UCACHE_STATE_DTYPE={_STATE_ENV[state_dtype]} before starting "
+            "the process."
+        )
+
 
 @cache
-def load_gdn_replayssm_kernel() -> Callable[..., None]:
-    """Import FlashInfer's SM100 UMMA ReplaySSM decode kernel."""
+def load_gdn_replayssm_kernel(
+    backend: Literal["umma", "hmma"], state_dtype: torch.dtype
+) -> Callable[..., None]:
+    """Import FlashInfer's UMMA or HMMA ReplaySSM decode kernel."""
+    if backend == "umma":
+        try:
+            from flashinfer.gdn_kernels.gdn_replay_mtp_umma import (
+                gated_delta_rule_mtp_ucache_flush_umma,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "FlashInfer GDN ReplaySSM requires "
+                "gated_delta_rule_mtp_ucache_flush_umma (FlashInfer >= 0.7.3)"
+            ) from e
+        return gated_delta_rule_mtp_ucache_flush_umma
     try:
-        from flashinfer.gdn_kernels.gdn_replay_mtp_umma import (
-            gated_delta_rule_mtp_ucache_flush_umma,
+        provider = importlib.import_module(
+            "flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_flush"
         )
     except ImportError as e:
         raise ImportError(
             "FlashInfer GDN ReplaySSM requires "
-            "gated_delta_rule_mtp_ucache_flush_umma (FlashInfer >= 0.7.3)"
+            "gated_delta_rule_mtp_ucache_flush (FlashInfer >= 0.7.3)"
         ) from e
-    return gated_delta_rule_mtp_ucache_flush_umma
+    _check_flashinfer_state_dtype(provider.ST_TORCH, state_dtype, "GDN ReplaySSM")
+    return functools.partial(provider.gated_delta_rule_mtp_ucache_flush, backend="hmma")
 
 
 @cache
-def load_gdn_replayssm_materializer() -> Callable[..., None]:
-    """Import FlashInfer's prefix materializer and check its FP16 state dtype."""
+def load_gdn_replayssm_materializer(state_dtype: torch.dtype) -> Callable[..., None]:
+    """Import FlashInfer's prefix materializer and check its state dtype."""
     try:
         from flashinfer.gdn_kernels.gdn_prefix_materialize import (
             gdn_prefix_materialize,
@@ -42,12 +78,9 @@ def load_gdn_replayssm_materializer() -> Callable[..., None]:
             "FlashInfer GDN ReplaySSM prefix caching requires "
             "flashinfer.gdn_kernels.gdn_prefix_materialize (FlashInfer >= 0.7.3)"
         ) from e
-    if state_ty_torch() != torch.float16:
-        raise ValueError(
-            f"FlashInfer GDN prefix materialization uses {state_ty_torch()} "
-            "state because FlashInfer was imported before vLLM configured it. "
-            "Set GDN_UCACHE_STATE_DTYPE=fp16 before starting the process."
-        )
+    _check_flashinfer_state_dtype(
+        state_ty_torch(), state_dtype, "GDN prefix materialization"
+    )
     return gdn_prefix_materialize
 
 
@@ -164,7 +197,8 @@ def run_gdn_replayssm(
         executed_width,
         offsets,
         uniform=uniform,
-        # UMMA makes contiguous Q/K/V copies after splitting the packed view.
+        # HMMA reads the strided Q/K/V rows directly. UMMA makes contiguous
+        # copies after splitting the packed view.
         allow_strided_rows=True,
     )
     # Padded token lanes must not change the state: a=-inf makes the decay

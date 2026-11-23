@@ -627,7 +627,9 @@ class ReplaySSMModelContext:
         )
 
     def _materialize_gdn(self) -> None:
-        materialize_fn = load_gdn_replayssm_materializer()
+        materialize_fn = load_gdn_replayssm_materializer(
+            self.mixers[0].kv_cache[1].dtype
+        )
         for layer_idx, mixer in enumerate(self.mixers):
             u_cache, k_cache, g_cache = mixer.kv_cache[2:5]
             materialize_fn(

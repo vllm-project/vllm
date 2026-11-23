@@ -50,21 +50,75 @@ def gdn_replayssm_executed_width(num_speculative_tokens: int) -> int:
     return num_speculative_tokens + 1
 
 
-def configure_flashinfer_gdn_env() -> None:
-    """Select FP16 state in FlashInfer's GDN prefix materializer.
+GDN_REPLAYSSM_HMMA_WIDTHS = (4, 8)
+"""Tokens per request that FlashInfer's HMMA GDN ReplaySSM kernel supports,
+that is, MTP with 3 or 7 draft tokens."""
 
-    FlashInfer reads `GDN_UCACHE_STATE_DTYPE` once, when `flashinfer` is
-    first imported, so it must be set before vLLM starts its workers.
+
+def gdn_replayssm_backend(state_dtype: torch.dtype) -> Literal["umma", "hmma"]:
+    """Return the FlashInfer GDN ReplaySSM decode kernel for this GPU.
+
+    BF16 state runs on the HMMA kernel. FP16 state runs on the UMMA kernel,
+    except on NVIDIA GPUs other than SM100-class, which use the HMMA kernel.
+    """
+    from vllm.platforms import current_platform
+
+    if state_dtype == torch.bfloat16 or (
+        current_platform.is_cuda()
+        and not current_platform.is_device_capability_family(100)
+    ):
+        return "hmma"
+    return "umma"
+
+
+_FLASHINFER_GDN_STATE_ENV = {
+    torch.float16: ("fp16", ("fp16", "float16", "half")),
+    torch.bfloat16: ("bf16", ("bf16", "bfloat16")),
+}
+
+
+def preset_flashinfer_gdn_env(mamba_ssm_cache_dtype: str) -> None:
+    """Set default FlashInfer GDN variables before vLLM first imports FlashInfer.
+
+    Building the model config imports FlashInfer, and FlashInfer reads these
+    variables only then. A forked engine process keeps that import. This
+    function only sets defaults, which affect only FlashInfer's GDN kernels;
+    `configure_flashinfer_gdn_env` checks them for GDN models.
+    """
+    state_dtype = STR_DTYPE_TO_TORCH_DTYPE.get(mamba_ssm_cache_dtype)
+    if state_dtype not in _FLASHINFER_GDN_STATE_ENV:
+        return
+    os.environ.setdefault(
+        "GDN_UCACHE_STATE_DTYPE", _FLASHINFER_GDN_STATE_ENV[state_dtype][0]
+    )
+    if gdn_replayssm_backend(state_dtype) == "hmma":
+        os.environ.setdefault("SGLANG_GDN_WY_STRIDED_QKV", "1")
+
+
+def configure_flashinfer_gdn_env(state_dtype: torch.dtype, hmma: bool) -> None:
+    """Set the FlashInfer GDN environment that ReplaySSM needs.
+
+    FlashInfer reads these variables once, when `flashinfer` is first
+    imported, so they must be set before vLLM starts its workers.
+    `GDN_UCACHE_STATE_DTYPE` selects the state dtype of the HMMA kernel and
+    the prefix materializer. The HMMA kernel also needs
+    `SGLANG_GDN_WY_STRIDED_QKV=1` to read Q/K/V rows from block-strided pools.
 
     Raises:
-        ValueError: The environment already selects another state dtype.
+        ValueError: The environment already selects another setting.
 
     """
-    state = os.environ.setdefault("GDN_UCACHE_STATE_DTYPE", "fp16")
-    if state.strip().lower() not in ("fp16", "float16", "half"):
+    default, accepted = _FLASHINFER_GDN_STATE_ENV[state_dtype]
+    state = os.environ.setdefault("GDN_UCACHE_STATE_DTYPE", default)
+    if state.strip().lower() not in accepted:
         raise ValueError(
-            f"GDN_UCACHE_STATE_DTYPE={state!r} conflicts with the FP16 recurrent "
-            "state cache that GDN ReplaySSM uses; unset it"
+            f"GDN_UCACHE_STATE_DTYPE={state!r} conflicts with the {state_dtype} "
+            "recurrent state cache that GDN ReplaySSM uses; unset it"
+        )
+    if hmma and os.environ.setdefault("SGLANG_GDN_WY_STRIDED_QKV", "1") == "0":
+        raise ValueError(
+            "SGLANG_GDN_WY_STRIDED_QKV=0 conflicts with FlashInfer's HMMA GDN "
+            "ReplaySSM kernel, which reads Q/K/V from block-strided pools; unset it"
         )
 
 

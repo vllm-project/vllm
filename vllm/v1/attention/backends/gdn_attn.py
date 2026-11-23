@@ -19,6 +19,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointMetadata,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import gdn_replayssm_executed_width
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -312,8 +313,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.replayssm_output_indices = torch.empty(
                 (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
             )
+            # FlashInfer's HMMA kernel needs each int32 cursor row to start at a
+            # 16-byte boundary; layers slice the first rows' columns.
             self.replayssm_cursors = torch.empty(
-                (3, self.vllm_config.scheduler_config.max_num_seqs),
+                (3, round_up(self.vllm_config.scheduler_config.max_num_seqs, 4)),
                 dtype=torch.int32,
                 device=device,
             )

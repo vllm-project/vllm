@@ -3851,9 +3851,28 @@ class VllmConfig:
             raise ValueError(
                 "FlashInfer GDN ReplaySSM requires a bfloat16 convolution cache"
             )
-        if cache_config.mamba_ssm_cache_dtype != "float16":
+        if cache_config.mamba_ssm_cache_dtype not in ("float16", "bfloat16"):
             raise ValueError(
-                "FlashInfer GDN ReplaySSM requires --mamba-ssm-cache-dtype float16"
+                "FlashInfer GDN ReplaySSM requires --mamba-ssm-cache-dtype "
+                "float16 or bfloat16"
+            )
+        from vllm.model_executor.layers.mamba.mamba_utils import (
+            GDN_REPLAYSSM_HMMA_WIDTHS,
+            configure_flashinfer_gdn_env,
+            gdn_replayssm_backend,
+        )
+
+        state_dtype = (
+            torch.float16
+            if cache_config.mamba_ssm_cache_dtype == "float16"
+            else torch.bfloat16
+        )
+        hmma = gdn_replayssm_backend(state_dtype) == "hmma"
+        if hmma and self.num_speculative_tokens + 1 not in GDN_REPLAYSSM_HMMA_WIDTHS:
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM with BF16 state, or on GPUs other than "
+                "SM100-class, uses the HMMA kernel, which supports only MTP with "
+                f"3 or 7 speculative tokens; got {self.num_speculative_tokens}"
             )
         if self.mamba_config.enable_stochastic_rounding:
             raise ValueError(
@@ -3879,12 +3898,8 @@ class VllmConfig:
                 "--use-replayssm is incompatible with KV connectors "
                 "(P/D disaggregation, KV cache offload)"
             )
-        if cache_config.enable_prefix_caching:
-            from vllm.model_executor.layers.mamba.mamba_utils import (
-                configure_flashinfer_gdn_env,
-            )
-
-            configure_flashinfer_gdn_env()
+        if hmma or cache_config.enable_prefix_caching:
+            configure_flashinfer_gdn_env(state_dtype, hmma)
         cache_config.use_kda_recoverssm = False
         return self
 

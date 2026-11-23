@@ -52,6 +52,7 @@ from vllm.model_executor.layers.mamba.gdn.replayssm import (
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
+    gdn_replayssm_backend,
     is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
@@ -924,12 +925,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._fused_gdn_gated_rms_norm = fused_gdn_gated_rms_norm
         self.gdn_decode_kernel = envs.VLLM_GDN_DECODE_KERNEL.strip().lower()
         if self.use_replayssm:
+            state_dtype = self.get_state_dtype()[1]
+            self.replayssm_backend = gdn_replayssm_backend(state_dtype)
             reason = self._flashinfer_replayssm_unsupported_reason()
             if reason is not None:
                 raise ValueError(f"--use-replayssm is not supported: {reason}")
-            self._replayssm_kernel = load_gdn_replayssm_kernel()
+            self._replayssm_kernel = load_gdn_replayssm_kernel(
+                self.replayssm_backend, state_dtype
+            )
             if self.cache_config.enable_prefix_caching:
-                load_gdn_replayssm_materializer()
+                load_gdn_replayssm_materializer(state_dtype)
         elif self.gdn_decode_kernel == "cuda" and current_platform.is_cuda_alike():
             reason = self._fused_gdn_decode_unsupported_reason(vllm_config)
             if reason is not None:
@@ -960,15 +965,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         compilation_config.static_forward_context[prefix] = self
 
     def _flashinfer_replayssm_unsupported_reason(self) -> str | None:
-        # validate_gdn_replayssm checks dtypes and head sizes from the config.
-        if not current_platform.is_device_capability_family(100):
-            return "FlashInfer's UMMA kernel requires an SM100-class GPU"
+        # validate_gdn_replayssm checks dtypes, head sizes and draft counts from
+        # the config.
+        if self.replayssm_backend == "umma":
+            if not current_platform.is_device_capability_family(100):
+                return "FlashInfer's UMMA kernel requires an SM100-class GPU"
+        elif not (
+            current_platform.is_cuda() and current_platform.has_device_capability(90)
+        ):
+            return "FlashInfer's HMMA kernel requires an NVIDIA SM90 or newer GPU"
         if self.gqa_interleaved_layout:
             return "the interleaved GQA layout is not supported"
         if self.num_k_heads % self.tp_size or self.num_v_heads % self.tp_size:
             return "tensor-parallel head counts must divide evenly"
         heads_per_key, remainder = divmod(self.num_v_heads, self.num_k_heads)
-        if remainder or heads_per_key > 4:
+        if remainder:
+            return "FlashInfer needs a whole number of value heads per key head"
+        if self.replayssm_backend == "umma" and heads_per_key > 4:
             return "FlashInfer's UMMA kernel needs 1 to 4 value heads per key head"
         return None
 

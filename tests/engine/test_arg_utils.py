@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import os
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
@@ -1201,3 +1202,40 @@ def test_get_batch_defaults_gb10_stays_on_small_tier(
     tokens, seqs = EngineArgs.get_batch_defaults(1)
     assert tokens[UsageContext.OPENAI_API_SERVER] == expected_api_tokens
     assert seqs[UsageContext.OPENAI_API_SERVER] == expected_api_seqs
+
+
+@pytest.mark.parametrize(
+    ("state", "hmma", "expected"),
+    [("bfloat16", True, ("bf16", "1")), ("float16", False, ("fp16", None))],
+)
+def test_replayssm_presets_flashinfer_gdn_env_before_model_config(
+    monkeypatch, state, hmma, expected
+):
+    """Creating the model config imports FlashInfer, which reads its GDN
+    settings once, so they must be set before that."""
+    from vllm.model_executor.layers.mamba import mamba_utils
+
+    names = ("GDN_UCACHE_STATE_DTYPE", "SGLANG_GDN_WY_STRIDED_QKV")
+    for name in names:
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    monkeypatch.setattr(
+        mamba_utils, "gdn_replayssm_backend", lambda dtype: "hmma" if hmma else "umma"
+    )
+
+    def create_model_config(self):
+        raise RuntimeError(str(tuple(os.environ.get(name) for name in names)))
+
+    monkeypatch.setattr(EngineArgs, "create_model_config", create_model_config)
+    monkeypatch.setattr(
+        "vllm.engine.arg_utils.maybe_override_with_speculators",
+        lambda model, tokenizer, vllm_speculative_config, **kwargs: (
+            model,
+            tokenizer,
+            vllm_speculative_config,
+        ),
+    )
+    args = EngineArgs(model="m", use_replayssm=True, mamba_ssm_cache_dtype=state)
+    with pytest.raises(RuntimeError) as error:
+        args.create_engine_config()
+    assert str(error.value) == str(expected)

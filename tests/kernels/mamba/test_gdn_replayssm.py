@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
 import math
+import os
 import sys
 from types import ModuleType
 
@@ -17,9 +19,19 @@ from vllm.model_executor.layers.mamba.gdn.replayssm import (
     run_gdn_replayssm,
 )
 
+# FlashInfer's HMMA kernel reads Q/K/V rows from block-strided pools only in
+# this mode, which it selects when it is first imported.
+os.environ.setdefault("SGLANG_GDN_WY_STRIDED_QKV", "1")
 
+_HMMA_MODULE = "flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_flush"
+_STATE_ENV = {torch.float16: "fp16", torch.bfloat16: "bf16"}
+
+
+@pytest.mark.parametrize("state_dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("loaded_dtype", [torch.float16, torch.bfloat16])
-def test_materializer_requires_fp16_state(monkeypatch, loaded_dtype):
+def test_materializer_requires_configured_state_dtype(
+    monkeypatch, state_dtype, loaded_dtype
+):
     """A FlashInfer imported before vLLM set its state dtype must be rejected."""
     provider = ModuleType("provider")
     materialize = lambda **kwargs: None
@@ -30,13 +42,40 @@ def test_materializer_requires_fp16_state(monkeypatch, loaded_dtype):
     )
     load_gdn_replayssm_materializer.cache_clear()
     try:
-        if loaded_dtype == torch.float16:
-            assert load_gdn_replayssm_materializer() is materialize
+        if loaded_dtype == state_dtype:
+            assert load_gdn_replayssm_materializer(state_dtype) is materialize
         else:
-            with pytest.raises(ValueError, match="GDN_UCACHE_STATE_DTYPE=fp16"):
-                load_gdn_replayssm_materializer()
+            match = f"GDN_UCACHE_STATE_DTYPE={_STATE_ENV[state_dtype]}"
+            with pytest.raises(ValueError, match=match):
+                load_gdn_replayssm_materializer(state_dtype)
     finally:
         load_gdn_replayssm_materializer.cache_clear()
+
+
+@pytest.mark.parametrize("state_dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("loaded_dtype", [torch.float16, torch.bfloat16])
+def test_hmma_kernel_requires_configured_state_dtype(
+    monkeypatch, state_dtype, loaded_dtype
+):
+    """The HMMA kernel runs with its backend pinned and the configured state."""
+    calls: list[dict] = []
+    provider = ModuleType("provider")
+    provider.ST_TORCH = loaded_dtype  # type: ignore[attr-defined]
+    provider.gated_delta_rule_mtp_ucache_flush = (  # type: ignore[attr-defined]
+        lambda **kwargs: calls.append(kwargs)
+    )
+    monkeypatch.setitem(sys.modules, _HMMA_MODULE, provider)
+    load_gdn_replayssm_kernel.cache_clear()
+    try:
+        if loaded_dtype != state_dtype:
+            match = f"GDN_UCACHE_STATE_DTYPE={_STATE_ENV[state_dtype]}"
+            with pytest.raises(ValueError, match=match):
+                load_gdn_replayssm_kernel("hmma", state_dtype)
+            return
+        load_gdn_replayssm_kernel("hmma", state_dtype)(q=None)
+        assert calls == [{"q": None, "backend": "hmma"}]
+    finally:
+        load_gdn_replayssm_kernel.cache_clear()
 
 
 def test_pack_replayssm_rows_preserves_tokens_and_masks_padding():
@@ -188,27 +227,56 @@ def _reconstruct_replayssm_state(
     )
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10,
-    reason="FlashInfer GDN ReplaySSM requires an SM100-class CUDA device",
-)
+_UMMA_CASES = [
+    (1, 1, 1),
+    (2, 2, 1),
+    (3, 3, 2),
+    (4, 3, 2),
+    (5, 4, 3),
+    (6, 6, 4),
+    (7, 7, 5),
+    (8, 6, 4),
+    (8, 8, 4),
+]
+# The HMMA kernel computes 4 or 8 tokens per request.
+_HMMA_CASES = [(4, 3, 2), (4, 4, 3), (8, 6, 4), (8, 8, 4)]
+
+
+def _skip_unless_backend_runs(backend: str, state_dtype: torch.dtype) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("FlashInfer GDN ReplaySSM requires a CUDA device")
+    major = torch.cuda.get_device_capability()[0]
+    if backend == "umma":
+        if major != 10:
+            pytest.skip("FlashInfer's UMMA kernel requires an SM100-class GPU")
+        return
+    if major < 9:
+        pytest.skip("FlashInfer's HMMA kernel requires an SM90 or newer GPU")
+    # FlashInfer fixes the HMMA state dtype and Q/K/V mode when first imported.
+    provider = importlib.import_module(_HMMA_MODULE)
+    if state_dtype != provider.ST_TORCH or not getattr(provider, "_STRIDED_QKV", True):
+        pytest.skip(
+            "FlashInfer was imported before this module set its GDN settings; set "
+            f"GDN_UCACHE_STATE_DTYPE={_STATE_ENV[state_dtype]} and "
+            "SGLANG_GDN_WY_STRIDED_QKV=1 to run this case"
+        )
+
+
 @pytest.mark.parametrize(
-    "width,query_len,accepted",
-    [
-        (1, 1, 1),
-        (2, 2, 1),
-        (3, 3, 2),
-        (4, 3, 2),
-        (5, 4, 3),
-        (6, 6, 4),
-        (7, 7, 5),
-        (8, 6, 4),
-        (8, 8, 4),
+    "backend,state_dtype,width,query_len,accepted",
+    [("umma", torch.float16, *case) for case in _UMMA_CASES]
+    + [
+        ("hmma", state_dtype, *case)
+        for state_dtype in (torch.bfloat16, torch.float16)
+        for case in _HMMA_CASES
     ],
 )
 @torch.inference_mode()
-def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
+def test_gdn_replayssm_output_and_accepted_state(
+    backend, state_dtype, width, query_len, accepted
+):
     """Check nonzero outputs and accepted state through replay, wrap, and flush."""
+    _skip_unless_backend_runs(backend, state_dtype)
     device, dtype = torch.device("cuda"), torch.bfloat16
     generator = torch.Generator(device=device).manual_seed(20260909 + width)
     ring_slots = 32
@@ -223,7 +291,7 @@ def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
         (1, ring_slots, 128),
         (2, ring_slots),
     ]
-    dtypes = [torch.float16, dtype, dtype, torch.float32]
+    dtypes = [state_dtype, dtype, dtype, torch.float32]
     sizes = [math.prod(shape) * dt.itemsize for shape, dt in zip(shapes, dtypes)]
     pages = torch.zeros(2, sum(sizes) + 16, dtype=torch.uint8, device=device)
     states = []
@@ -247,7 +315,10 @@ def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
     state_indices = torch.tensor(
         [1, 0] if capture else [1], dtype=torch.int32, device=device
     )
-    cursors = torch.empty(3, state_indices.numel(), dtype=torch.int32, device=device)
+    # As in the metadata builder: rows padded to 16 bytes, sliced to the batch.
+    num_rows = state_indices.numel()
+    cursors = torch.empty(3, 4 * -(-num_rows // 4), dtype=torch.int32, device=device)
+    cursors = cursors[:, :num_rows]
 
     def replay_step(**inputs):
         # The model plans once per cache group, inside the captured graph.
@@ -295,7 +366,7 @@ def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
                 dtype=torch.int32,
                 device=device,
             ),
-            kernel=load_gdn_replayssm_kernel(),
+            kernel=load_gdn_replayssm_kernel(backend, state_dtype),
             executed_width=width,
             uniform_query_length=query_len,
             num_k_heads=1,

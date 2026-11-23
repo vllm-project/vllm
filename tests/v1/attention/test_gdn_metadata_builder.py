@@ -154,6 +154,7 @@ def _create_gdn_builder(
     full_cuda_graph: bool = False,
     adaptive_verification: bool = False,
     use_replayssm: bool = False,
+    max_num_seqs: int | None = None,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
@@ -161,6 +162,8 @@ def _create_gdn_builder(
         block_size=BLOCK_SIZE,
     )
     vllm_config.cache_config.use_replayssm = use_replayssm
+    if max_num_seqs is not None:
+        vllm_config.scheduler_config.max_num_seqs = max_num_seqs
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
@@ -347,6 +350,16 @@ def test_replayssm_cursors_stay_per_group():
     assert source.replayssm_cursors is src.replayssm_cursors
     assert meta.replayssm_cursors is dst.replayssm_cursors
     assert dst.replayssm_cursors is not src.replayssm_cursors
+
+
+def test_replayssm_cursor_rows_stay_16_byte_aligned():
+    """FlashInfer's HMMA kernel rejects cursor rows off a 16-byte boundary."""
+    builder = _create_gdn_builder(
+        num_speculative_tokens=3, use_replayssm=True, max_num_seqs=6
+    )
+    assert builder.replayssm_cursors is not None
+    for row in builder.replayssm_cursors[:, :5]:
+        assert row.data_ptr() % 16 == 0
 
 
 def test_full_cudagraph_spec_metadata_uses_request_count():

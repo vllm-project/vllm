@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+import os
 from collections.abc import Generator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
@@ -11,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     flashinfer_replayssm_autotune_supported,
 )
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -231,12 +234,12 @@ def _warm_gdn_replayssm_materializer(
         load_gdn_replayssm_materializer,
     )
 
-    materialize = load_gdn_replayssm_materializer()
     warmed: set[tuple[Any, ...]] = set()
     for module in runner.get_model().modules():
         if not (isinstance(module, GatedDeltaNetAttention) and module.use_replayssm):
             continue
         state = module.kv_cache[1]
+        materialize = load_gdn_replayssm_materializer(state.dtype)
         u_cache, k_cache, g_cache = module.replayssm_rings
         signature = tuple(
             (t.device, t.dtype, tuple(t.shape), tuple(t.stride()))
@@ -261,6 +264,114 @@ def _warm_gdn_replayssm_materializer(
             active_request_indices=inactive,
             num_active=torch.zeros(1, dtype=torch.int32, device=state.device),
         )
+
+
+def hmma_warmup_batch_sizes(
+    num_v_heads: int, num_sms: int, max_num_reqs: int
+) -> list[int]:
+    """Return one batch size for each launch tactic of the HMMA kernel.
+
+    FlashInfer compiles one HMMA kernel per `min_blocks_per_mp`, which it sets
+    to `min(ceil(num_v_heads * batch / num_sms) + 1, 7)`, that is, 2 to 7.
+    `GDN_WY_MBP` overrides that policy with one value.
+    """
+    batches = {1}
+    if not os.environ.get("GDN_WY_MBP"):
+        batches.update(i * num_sms // num_v_heads + 1 for i in range(1, 6))
+    return sorted(b for b in batches if b <= max_num_reqs)
+
+
+def _warm_gdn_replayssm_hmma(runner: "GPUModelRunner", max_num_reqs: int) -> None:
+    """Compile the HMMA kernel for each layout and tactic outside full graphs.
+
+    Full-graph decode passes Q/K/V as strided views of the QKVZ projection.
+    Mixed prefill/decode steps pack them into compact rows. FlashInfer
+    compiles each row stride and launch tactic separately, so warm both
+    strides at every tactic. With flashinfer-ai/flashinfer#8975 the compiled
+    kernels then serve every batch and pool size.
+    """
+    from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+    from vllm.model_executor.layers.mamba.gdn.replayssm import run_gdn_replayssm
+
+    modules = [
+        module
+        for module in runner.get_model().modules()
+        if isinstance(module, GatedDeltaNetAttention)
+        and module.use_replayssm
+        and module.replayssm_backend == "hmma"
+    ]
+    if not modules:
+        return
+    provider = importlib.import_module(
+        "flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_flush"
+    )
+    if not getattr(provider, "SUPPORTS_DYNAMIC_STRIDED_SHAPES", False):
+        logger.warning_once(
+            "This FlashInfer version compiles the HMMA GDN ReplaySSM kernel "
+            "for each new batch and pool size, so the first mixed "
+            "prefill/decode steps of each size can stall for about a second. "
+            "FlashInfer with flashinfer-ai/flashinfer#8975 avoids this."
+        )
+        return
+    warmed: set[tuple[Any, ...]] = set()
+    for module in modules:
+        state = module.kv_cache[1]
+        u_cache, k_cache, g_cache = module.replayssm_rings
+        signature = tuple(
+            (t.device, t.dtype, tuple(t.shape[1:]), tuple(t.stride()))
+            for t in (state, u_cache, k_cache, g_cache)
+        )
+        if signature in warmed:
+            continue
+        warmed.add(signature)
+        width = module.replayssm_executed_width
+        assert width is not None
+        _, num_v_heads, head_v_dim, head_k_dim = state.shape
+        num_k_heads = k_cache.shape[1]
+        qkv_width = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim
+        # Compact rows, and views of the QKVZ projection rows.
+        row_strides = (qkv_width, qkv_width + num_v_heads * head_v_dim)
+        num_sms = torch.cuda.get_device_properties(state.device).multi_processor_count
+        for num_reqs in hmma_warmup_batch_sizes(num_v_heads, num_sms, max_num_reqs):
+            num_tokens = num_reqs * width
+            # Rows with state index -1 make the kernel exit before it reads or
+            # writes any state or ring. Each cursor row starts at a 16-byte
+            # boundary, as in the metadata builder.
+            cursors = torch.zeros(
+                3, round_up(num_reqs, 4), dtype=torch.int32, device=state.device
+            )[:, :num_reqs]
+            cursors[0].fill_(-1)
+            query_start_loc = torch.arange(
+                0, num_tokens + 1, width, dtype=torch.int32, device=state.device
+            )
+            gates = torch.zeros(
+                num_tokens, num_v_heads, dtype=torch.bfloat16, device=state.device
+            )
+            for row_stride in row_strides:
+                qkv = torch.zeros(
+                    num_tokens, row_stride, dtype=torch.bfloat16, device=state.device
+                )[:, :qkv_width]
+                run_gdn_replayssm(
+                    kernel=module._replayssm_kernel,
+                    executed_width=width,
+                    mixed_qkv=qkv,
+                    a=gates,
+                    b=gates,
+                    A_log=module.A_log,
+                    dt_bias=module.dt_bias,
+                    checkpoint_state=state,
+                    replayssm_cache=(u_cache, k_cache, g_cache),
+                    cursors=cursors,
+                    query_start_loc=query_start_loc,
+                    output_indices=torch.empty(
+                        0, dtype=torch.int64, device=state.device
+                    ),
+                    num_k_heads=num_k_heads,
+                    num_v_heads=num_v_heads,
+                    head_k_dim=head_k_dim,
+                    head_v_dim=head_v_dim,
+                    uniform_query_length=width,
+                )
 
 
 def gdn_replayssm_warmup(runner: "GPUModelRunner") -> None:
@@ -307,5 +418,6 @@ def gdn_replayssm_warmup(runner: "GPUModelRunner") -> None:
     with _temporary_replayssm_autotune_state(runner, max_decode_reqs):
         for num_reqs in sorted(capture_reqs):
             runner._dummy_run(num_tokens=num_reqs * query_len, **decode_kwargs)
+        _warm_gdn_replayssm_hmma(runner, max_decode_reqs)
         if config.cache_config.enable_prefix_caching:
             _warm_gdn_replayssm_materializer(runner, max_num_reqs)
