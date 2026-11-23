@@ -460,22 +460,8 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       int32_t* row_attention =
           attention_indices + static_cast<int64_t>(row) * attention_row_stride;
       __syncthreads();
-      if (tid == 0) s_chunk_off[0] = 0;
-      __syncthreads();
-      // Rows without a hole before a valid index are already packed.
-      int local_valid = 0;
-      int has_hole = 0;
-      for (int i = tid; i < top_k; i += blockDim.x) {
-        const bool valid = row_attention[i] >= 0;
-        local_valid += valid;
-        has_hole |= !valid && i + 1 < top_k && row_attention[i + 1] >= 0;
-      }
-      if (local_valid != 0) atomicAdd(&s_chunk_off[0], local_valid);
-      if (__syncthreads_or(has_hole) == 0) {
-        if (tid == 0) {
-          valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
-              s_chunk_off[0];
-        }
+      // Phase 1 already wrote the count of rows that need no compaction.
+      if (valid_counts[static_cast<int64_t>(row) * valid_count_stride] >= 0) {
         continue;
       }
       for (int i = tid; i < num_chunks + 1; i += blockDim.x) {
@@ -517,11 +503,39 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
 
   // Phase 1: translate every row's request-relative positions in one pass,
   // resolve resident rows directly, and count the host-backed positions.
-  // s_chunk_off holds per-row valid counts until phase 2.
+  // Until phase 2, s_chunk_off holds per-row valid counts, or when packing,
+  // top_k - (first invalid column), with s_evict_off holding
+  // 1 + (last valid column). A row needs compaction iff an invalid column
+  // precedes a valid one.
   int32_t* s_row_valid = s_chunk_off;
+  int32_t* s_first_invalid = s_chunk_off;
+  int32_t* s_last_valid = s_evict_off;
   const int num_positions = (end_row - first_row) * top_k;
+  const auto record_validity = [&](const unsigned int active, const int r,
+                                   const int col, const bool valid) {
+    const int leader = __ffs(active) - 1;
+    if (__all_sync(active, r == __shfl_sync(active, r, leader))) {
+      const unsigned int valid_bits = __ballot_sync(active, valid);
+      const unsigned int invalid_bits = active & ~valid_bits;
+      if (lane_id == leader) {
+        const int base_col = col - lane_id;
+        if (valid_bits != 0) {
+          atomicMax(&s_last_valid[r], base_col + kWarpSize - __clz(valid_bits));
+        }
+        if (invalid_bits != 0) {
+          atomicMax(&s_first_invalid[r],
+                    top_k - (base_col + __ffs(invalid_bits) - 1));
+        }
+      }
+    } else if (valid) {
+      atomicMax(&s_last_valid[r], col + 1);
+    } else {
+      atomicMax(&s_first_invalid[r], top_k - col);
+    }
+  };
   const auto resolve_position = [&](const int position,
-                                    const int32_t token_index) {
+                                    const int32_t token_index,
+                                    const unsigned int active) {
     const int row = first_row + position / top_k;
     const int i = position % top_k;
     int32_t* row_out = hot_indices + static_cast<int64_t>(row) * top_k;
@@ -537,8 +551,11 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
         source_num_blocks, source_block_size, resident_bt_stride,
         resident_num_reqs, resident_num_blocks, resident_block_size,
         resident_row);
-    if (!pack_attention && (resident_row >= 0 || g >= 0))
+    if (pack_attention) {
+      record_validity(active, row - first_row, i, resident_row >= 0 || g >= 0);
+    } else if (resident_row >= 0 || g >= 0) {
       atomicAdd(&s_row_valid[row - first_row], 1);
+    }
     if (resident_row >= 0) {
       store_hot_index(row_out, row_attention, i, resident_row, hot_block_size,
                       attention_block_stride);
@@ -554,6 +571,8 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
 #pragma unroll
   for (int k = 0; k < kPrefetchedTopK; ++k) {
     const int position = tid + k * blockDim.x;
+    const unsigned int active =
+        __ballot_sync(0xFFFFFFFF, position < num_positions);
     if (position < num_positions) {
       resolve_position(position,
                        position < top_k
@@ -561,24 +580,38 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
                            : global_indices[static_cast<int64_t>(
                                                 first_row + position / top_k) *
                                                 input_row_stride +
-                                            position % top_k]);
+                                            position % top_k],
+                       active);
     }
   }
-  for (int position = tid + kPrefetchedTopK * blockDim.x;
-       position < num_positions; position += blockDim.x) {
-    resolve_position(
-        position,
-        global_indices[static_cast<int64_t>(first_row + position / top_k) *
-                           input_row_stride +
-                       position % top_k]);
+  for (int warp_position = tid - lane_id + kPrefetchedTopK * blockDim.x;
+       warp_position < num_positions; warp_position += blockDim.x) {
+    const int position = warp_position + lane_id;
+    const unsigned int active =
+        __ballot_sync(0xFFFFFFFF, position < num_positions);
+    if (position < num_positions) {
+      resolve_position(
+          position,
+          global_indices[static_cast<int64_t>(first_row + position / top_k) *
+                             input_row_stride +
+                         position % top_k],
+          active);
+    }
   }
   __syncthreads();
   for (int row = first_row + tid; row < end_row; row += blockDim.x) {
-    if (valid_counts != nullptr && !pack_attention) {
+    const int r = row - first_row;
+    if (pack_attention) {
+      const int last_valid = s_last_valid[r] - 1;
+      // -1 marks rows that pack_valid_to_front must compact.
       valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
-          s_row_valid[row - first_row];
+          top_k - s_first_invalid[r] < last_valid ? -1 : last_valid + 1;
+      s_last_valid[r] = 0;
+    } else if (valid_counts != nullptr) {
+      valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
+          s_row_valid[r];
     }
-    s_row_valid[row - first_row] = 0;
+    s_row_valid[r] = 0;
   }
   // Fully resident rows need only request-relative page translation. Avoid
   // building the table or touching the hot LRU when no row can consult it.
