@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Callable, Iterator
-from contextlib import ExitStack, contextmanager
+from collections.abc import Callable
 from typing import TypeVar
 
 import torch
 from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.config.lora import LoRAConfig
+from vllm.config.lora import LoRAConfig, LoRAVocabModule
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseClassificationHeadWithLoRA,
@@ -18,7 +18,6 @@ from vllm.lora.layers import (
     ClassificationHeadWithLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
-    LogitsProcessorWithLoRA,
     LoRAMapping,
     LoRAMappingType,
     TokenClassificationHeadWithLoRA,
@@ -167,11 +166,6 @@ class LoRAModelManager:
         )
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
         self._create_lora_modules()
-        self._lm_head_modules = {
-            name: module
-            for name, module in self.modules.items()
-            if isinstance(module, LogitsProcessorWithLoRA)
-        }
 
         self._classification_head: tuple[str, BaseClassificationHeadWithLoRA] | None = (
             None
@@ -359,20 +353,6 @@ class LoRAModelManager:
     def adapter_slots(self) -> int:
         return self.lora_slots
 
-    def has_lm_head_lora(self, lora_id: int) -> bool:
-        adapter = self._registered_adapters.peek(lora_id)
-        return adapter is not None and any(
-            self._get_lora_layer_weights(adapter, name) is not None
-            for name in self._lm_head_modules
-        )
-
-    @contextmanager
-    def skip_lm_head_lora(self) -> Iterator[None]:
-        with ExitStack() as stack:
-            for module in self._lm_head_modules.values():
-                stack.enter_context(module.skip_lora())
-            yield
-
     def activate_adapter(
         self,
         lora_id: int,
@@ -506,6 +486,18 @@ class LoRAModelManager:
         # Layers that share a suffix with a LoRA layer but are not wrapped,
         # such as BERT's pooler.dense. Adapters with LoRA on them are refused.
         self.unsupported_lora_modules: set[str] = set()
+        self.disabled_vocab_modules: dict[str, LoRAVocabModule] = {}
+        if self.lora_config.target_modules is None:
+            enabled = self.lora_config.enable_vocab_modules or ()
+            # Use model declarations so every pipeline rank can check adapter
+            # weights, even when the corresponding layer is on another rank.
+            for module in self.model.modules():
+                for name in getattr(module, "embedding_modules", None) or ():
+                    kind: LoRAVocabModule = (
+                        "lm_head" if "lm_head" in name else "embedding"
+                    )
+                    if kind not in enabled:
+                        self.disabled_vocab_modules[name] = kind
 
         named_modules = list(self.model.named_modules(remove_duplicate=False))
         runners = [f"{n}." for n, m in named_modules if isinstance(m, MoERunner)]
@@ -515,6 +507,8 @@ class LoRAModelManager:
 
         for module_name, module in named_modules:
             if isinstance(module, PPMissingLayer):
+                continue
+            if module_name.rsplit(".", 1)[-1] in self.disabled_vocab_modules:
                 continue
 
             is_classifier_head = module_name in self.supported_modules_to_save
@@ -1289,6 +1283,35 @@ class LoRAModelManager:
             if text_name is not None:
                 org_module_name = text_name
         return lora_model.get_lora(org_module_name)
+
+    def validate_vocab_modules(
+        self, lora_model: LoRAModel, *, allow_disabled: bool = False
+    ) -> None:
+        if not self.disabled_vocab_modules:
+            return
+        disabled = {
+            kind
+            for name in lora_model.loras
+            if (kind := self.disabled_vocab_modules.get(name.rsplit(".", 1)[-1]))
+            is not None
+        }
+        if disabled:
+            modules = ", ".join(sorted(disabled))
+            enable = " ".join(
+                sorted(disabled.union(self.lora_config.enable_vocab_modules or ()))
+            )
+            message = (
+                f"LoRA adapter has weights for disabled vocabulary modules: "
+                f"{modules}. Enable them with --lora-enable-vocab-modules {enable}."
+            )
+            if allow_disabled:
+                logger.warning_once(
+                    "Ignoring disabled weights for LoRA adapter ID %d. %s",
+                    lora_model.id,
+                    message,
+                )
+            else:
+                raise VLLMValidationError(message)
 
     def _pop_lora_weights(self, lora_model: LoRAModel, module_names: list[str]) -> None:
         for module in module_names:

@@ -130,7 +130,13 @@ def test_lora_on_input_embeddings_not_named_embed_tokens(tmp_path):
     hf_model = AutoModelForCausalLM.from_pretrained(model_path, device_map=device)
     get_peft_model(hf_model, lora_config).save_pretrained(tmp_path)
 
-    llm = vllm.LLM(model_path, enable_lora=True, max_lora_rank=8, max_model_len=256)
+    llm = vllm.LLM(
+        model_path,
+        enable_lora=True,
+        lora_enable_vocab_modules=["embedding"],
+        max_lora_rank=8,
+        max_model_len=256,
+    )
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=16)
     lora_request = LoRARequest("embed_in", 1, str(tmp_path))
     prompt = "The capital of France is"

@@ -67,6 +67,7 @@ def test_qwen3_unembed_lora():
         llm = LLM(
             model=MODEL_PATH,
             enable_lora=True,
+            lora_enable_vocab_modules=["lm_head"],
             max_loras=4,
             max_lora_rank=8,
             max_model_len=128,

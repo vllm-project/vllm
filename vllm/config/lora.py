@@ -10,12 +10,14 @@ from pydantic import ConfigDict, Field, model_validator
 from vllm import envs
 from vllm.config.kernel import MEGA_MOE_BACKENDS, KernelConfig
 from vllm.config.utils import CompileFactors, config, get_compile_factors
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.config.cache import CacheConfig
+    from vllm.sampling_params import SamplingParams
 else:
     ModelConfig = Any
     CacheConfig = Any
@@ -23,6 +25,7 @@ else:
 logger = init_logger(__name__)
 
 LoRADType = Literal["auto", "float16", "bfloat16"]
+LoRAVocabModule = Literal["embedding", "lm_head"]
 MaxLoRARanks = Literal[1, 8, 16, 32, 64, 128, 256, 320, 512]
 
 
@@ -46,8 +49,12 @@ class LoRAConfig:
     """Data type for LoRA. If auto, will default to base model dtype."""
     target_modules: list[str] | None = None
     """Restrict LoRA to specific module suffixes (e.g., ["o_proj", "qkv_proj"]).
-    If None, all supported LoRA modules are used. This allows deployment-time
-    control over which modules have LoRA applied, useful for performance tuning."""
+    If None, supported modules follow the default policy for vocabulary layers.
+    An explicit list takes precedence over `lora_enable_vocab_modules`."""
+    enable_vocab_modules: list[LoRAVocabModule] | None = None
+    """Enable LoRA on `embedding`, `lm_head`, or both alongside the default
+    LoRA modules. Neither vocabulary module is enabled by default. Ignored
+    when `lora_target_modules` is specified."""
     default_mm_loras: dict[str, str] | None = None
     """Dictionary mapping specific modalities to LoRA model paths; this field
     is only applicable to multimodal models and should be leveraged when a
@@ -87,6 +94,20 @@ class LoRAConfig:
     """Maximum output size for LoRA classification heads. Defaults to the
     base classification head size."""
 
+    def validate_prompt_logprobs(self, params: "SamplingParams") -> None:
+        if params.prompt_logprobs is None and params.prompt_logprob_token_ids is None:
+            return
+        lm_head_enabled = (
+            any("lm_head" in name for name in self.target_modules)
+            if self.target_modules is not None
+            else "lm_head" in (self.enable_vocab_modules or ())
+        )
+        if lm_head_enabled:
+            raise VLLMValidationError(
+                "prompt_logprobs and prompt_logprob_token_ids are unsupported "
+                "when lm_head LoRA is enabled for the deployment."
+            )
+
     def compile_factors(self) -> CompileFactors:
         """WARNING: Whenever a new field is added to this config, add it to
         `ignored_factors` if it does not affect the computation graph.
@@ -107,6 +128,8 @@ class LoRAConfig:
         if self.target_modules is not None:
             # Order is not semantic
             factors["target_modules"] = sorted(self.target_modules)
+        if self.enable_vocab_modules is not None:
+            factors["enable_vocab_modules"] = sorted(set(self.enable_vocab_modules))
         return factors
 
     @model_validator(mode="after")

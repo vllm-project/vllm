@@ -1261,6 +1261,10 @@ class EngineCore:
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """
+        params = request.sampling_params
+        if params is not None and self.vllm_config.lora_config is not None:
+            self.vllm_config.lora_config.validate_prompt_logprobs(params)
+
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
         # and will only be accessed in the input processing thread afterwards.
@@ -1270,7 +1274,6 @@ class EngineCore:
             )
 
         watermark_config = self.vllm_config.watermark_config
-        params = request.sampling_params
         # Greedy decoding and trace replay cannot be watermarked; leave their
         # flag as the frontend resolved it.
         if (

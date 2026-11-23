@@ -89,7 +89,7 @@ from vllm.config.kernel import (
 )
 from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.logging import LogLevel
-from vllm.config.lora import MaxLoRARanks
+from vllm.config.lora import LoRAVocabModule, MaxLoRARanks
 from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
 from vllm.config.model import (
     ConvertOption,
@@ -254,10 +254,13 @@ def collection_to_kwargs(type_hints: set[TypeHint], type: TypeHint) -> dict[str,
         )
         elem_type = str
 
-    return {
+    kwargs = {
         "type": elem_type,
         "nargs": "+" if type is not tuple or Ellipsis in types else len(types),
     }
+    if get_origin(elem_type) is Literal:
+        kwargs.update(literal_to_kwargs({elem_type}))
+    return kwargs
 
 
 def is_not_builtin(type_hint: TypeHint) -> bool:
@@ -691,6 +694,9 @@ class EngineArgs:
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
     lora_target_modules: list[str] | None = LoRAConfig.target_modules
+    lora_enable_vocab_modules: list[LoRAVocabModule] | None = (
+        LoRAConfig.enable_vocab_modules
+    )
     enable_tower_connector_lora: bool = LoRAConfig.enable_tower_connector_lora
     specialize_active_lora: bool = LoRAConfig.specialize_active_lora
     enable_mixed_moe_lora_format: bool = LoRAConfig.enable_mixed_moe_lora_format
@@ -1642,6 +1648,9 @@ class EngineArgs:
         )
         lora_group.add_argument(
             "--lora-target-modules", **lora_kwargs["target_modules"]
+        )
+        lora_group.add_argument(
+            "--lora-enable-vocab-modules", **lora_kwargs["enable_vocab_modules"]
         )
         lora_group.add_argument("--default-mm-loras", **lora_kwargs["default_mm_loras"])
         lora_group.add_argument(
@@ -2733,6 +2742,7 @@ class EngineArgs:
                 fully_sharded_loras=self.fully_sharded_loras,
                 lora_dtype=self.lora_dtype,
                 target_modules=self.lora_target_modules,
+                enable_vocab_modules=self.lora_enable_vocab_modules,
                 enable_tower_connector_lora=self.enable_tower_connector_lora,
                 specialize_active_lora=self.specialize_active_lora,
                 enable_mixed_moe_lora_format=self.enable_mixed_moe_lora_format,

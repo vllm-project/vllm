@@ -2287,7 +2287,6 @@ class Scheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
-        worker_request_errors = model_runner_output.request_errors
 
         failed_kv_load_req_ids: set[str] = set()
         if kv_connector_output and kv_connector_output.failed_recving:
@@ -2326,8 +2325,6 @@ class Scheduler(SchedulerInterface):
                     output_is_stale = True
                     request.num_stale_output_tokens -= num_tokens_scheduled
                     assert request.num_stale_output_tokens >= 0
-            if worker_request_errors and req_id in worker_request_errors:
-                continue
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
                 continue
@@ -2579,8 +2576,6 @@ class Scheduler(SchedulerInterface):
         request_errors = self.grammar_compile_error_reqs
         self.grammar_compile_error_reqs = {}
         error_req_ids = set(request_errors)
-        if worker_request_errors:
-            error_req_ids.update(worker_request_errors)
         error_req_ids.update(self.encoder_cache_mismatch_reqs)
         self.encoder_cache_mismatch_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
@@ -2595,20 +2590,14 @@ class Scheduler(SchedulerInterface):
                 error_req_ids, RequestStatus.FINISHED_ERROR
             )
             for request in error_reqs:
-                worker_error = (
-                    worker_request_errors.get(request.request_id)
-                    if worker_request_errors
-                    else None
-                )
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=request.request_id,
                         new_token_ids=[],
                         finish_reason=request.get_finished_reason(),
-                        stop_reason=worker_error.message if worker_error else None,
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
-                        error=worker_error or request_errors.get(request.request_id),
+                        error=request_errors.get(request.request_id),
                     )
                 )
 

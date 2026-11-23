@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import contextmanager
 from typing import Any, Literal
 
 import torch
@@ -103,7 +103,9 @@ class WorkerLoRAManager:
         self._adapter_manager = lora_manager
         return lora_manager.model
 
-    def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
+    def _load_adapter(
+        self, lora_request: LoRARequest, *, on_demand: bool = False
+    ) -> LoRAModel:
         try:
             supported_lora_modules = self._adapter_manager.supported_lora_modules
             packed_modules_mapping = self._adapter_manager.packed_modules_mapping
@@ -155,6 +157,7 @@ class WorkerLoRAManager:
             # 3D->2D conversion when running under the universal 2D wrapper.
             lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
             self._adapter_manager._validate_moe_lora_format(lora)
+            self._adapter_manager.validate_vocab_modules(lora, allow_disabled=on_demand)
 
             # Validate classification-head weights.
             self._adapter_manager._validate_classification_head_lora(lora)
@@ -197,12 +200,6 @@ class WorkerLoRAManager:
         if mapping is not None:
             self._adapter_manager.set_adapter_mapping(mapping)
 
-    def has_lm_head_lora(self, lora_id: int) -> bool:
-        return self._adapter_manager.has_lm_head_lora(lora_id)
-
-    def skip_lm_head_lora(self) -> AbstractContextManager[None]:
-        return self._adapter_manager.skip_lm_head_lora()
-
     def supports_tower_connector_lora(self) -> bool:
         return (
             self._adapter_manager.supports_mm
@@ -226,14 +223,18 @@ class WorkerLoRAManager:
         for adapter_id in existing_adapters - requested_ids:
             self.remove_adapter(adapter_id)
         for adapter_id in requested_ids - existing_adapters:
-            self.add_adapter(models_map[adapter_id])
+            self.add_adapter(models_map[adapter_id], on_demand=True)
 
-    def add_adapter(self, adapter_request: Any) -> bool:
+    def add_adapter(self, adapter_request: Any, *, on_demand: bool = False) -> bool:
         if adapter_request.adapter_id in self.list_adapters():
+            if not on_demand:
+                adapter = self._adapter_manager.get_adapter(adapter_request.adapter_id)
+                assert adapter is not None
+                self._adapter_manager.validate_vocab_modules(adapter)
             return False
         # One-time per adapter
         with gpu_sync_allowed():
-            loaded_adapter = self._load_adapter(adapter_request)
+            loaded_adapter = self._load_adapter(adapter_request, on_demand=on_demand)
             loaded = self._adapter_manager.add_adapter(loaded_adapter)
             self._adapter_manager.activate_adapter(loaded_adapter.id)
         return loaded
@@ -290,9 +291,11 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 f"({self._adapter_manager.lora_slots})."
             )
         for lora in loras_map.values():
-            self.add_adapter(lora)
+            self.add_adapter(lora, on_demand=True)
 
-    def add_adapter(self, lora_request: LoRARequest) -> bool:
+    def add_adapter(
+        self, lora_request: LoRARequest, *, on_demand: bool = False
+    ) -> bool:
         # Note that this method is not thread-safe. It may be invoked multiple
         # times for the same adapter when using multiple API servers.
         # This is ok because it's currently only called from
@@ -307,7 +310,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 # evicting any existing adapters.
                 # This may cause the # of loaded lora adapters to very temporarily
                 # exceed `--max-cpu-loras`.
-                lora = self._load_adapter(lora_request)
+                lora = self._load_adapter(lora_request, on_demand=on_demand)
 
                 # Remove the existing adapter if it exists
                 # Use case for LoRA inplace
@@ -323,9 +326,11 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             else:
                 # If the lora is already loaded, just touch it to
                 # update its position in the caches
-                loaded = (
-                    self._adapter_manager.get_adapter(lora_request.lora_int_id)
-                    is not None
+                cached_lora = self._adapter_manager.get_adapter(
+                    lora_request.lora_int_id
                 )
+                loaded = cached_lora is not None
+                if cached_lora is not None and not on_demand:
+                    self._adapter_manager.validate_vocab_modules(cached_lora)
             self._adapter_manager.activate_adapter(lora_request.lora_int_id)
         return loaded

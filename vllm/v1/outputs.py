@@ -11,7 +11,6 @@ import numpy as np
 import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
-from vllm.outputs import RequestError
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -316,9 +315,6 @@ class ModelRunnerOutput:
 
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
-
-    # Requests rejected by the worker. Other requests in the batch can complete.
-    request_errors: dict[str, RequestError] | None = None
 
     @staticmethod
     def with_kv_conn_output_only(

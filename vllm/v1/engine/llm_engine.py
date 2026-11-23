@@ -264,6 +264,8 @@ class LLMEngine:
                 )
             request_params = request.params
             if isinstance(request_params, SamplingParams):
+                if (lora_config := self.vllm_config.lora_config) is not None:
+                    lora_config.validate_prompt_logprobs(request_params)
                 # This request object is owned by the engine from here on.
                 self.input_processor.apply_watermarking(
                     request_params,
