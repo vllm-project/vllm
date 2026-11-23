@@ -71,6 +71,9 @@ class HYV4FlashAttention(HYV4MLAAttention):
 
         if not on_gfx950():
             raise NotImplementedError("Flash sparse MLA on ROCm requires gfx950")
+        # The ROCm fp8_ds_mla sparse path cannot apply the learnable sink.
+        if vllm_config.cache_config.cache_dtype not in ("auto", "bfloat16"):
+            raise ValueError("HYV4 Flash on ROCm requires BF16 KV storage")
         if self.kv_lora_rank != 512 or self.qk_rope_head_dim != 64:
             raise ValueError("Flash sparse MLA requires latent512 + rotary64 KV")
         if (
