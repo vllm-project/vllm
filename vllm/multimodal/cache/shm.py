@@ -27,6 +27,7 @@ from ..inputs import (
 from .base import (
     BaseMultiModalProcessorCache,
     BaseMultiModalReceiverCache,
+    MultiModalCacheMissError,
     MultiModalProcessorCacheInItem,
     MultiModalProcessorCacheOutItem,
 )
@@ -311,12 +312,15 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
         assert mm_item is not None
         if (handle := _get_shm_handle(mm_item)) is not None:
             address, monotonic_id, signature = handle
-            self._shm_cache.touch(
-                mm_hash,
-                address=address,
-                monotonic_id=monotonic_id,
-                signature=signature,
-            )
+            try:
+                self._shm_cache.touch(
+                    mm_hash,
+                    address=address,
+                    monotonic_id=monotonic_id,
+                    signature=signature,
+                )
+            except ValueError as e:
+                raise MultiModalCacheMissError([mm_hash]) from e
 
     @override
     def clear_cache(self) -> None:
