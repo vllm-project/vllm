@@ -137,6 +137,14 @@ def _dsml_arg_converter(
     return json.dumps(params, ensure_ascii=False)
 
 
+_JSON_VALUE_START = frozenset('{["-0123456789tfnNI')
+
+
+def _cannot_start_json(value: str) -> bool:
+    stripped = value.lstrip(" \t\r\n")
+    return bool(stripped) and stripped[0] not in _JSON_VALUE_START
+
+
 def _dsml_arg_value_extender(
     raw_args: str,
     *,
@@ -147,8 +155,11 @@ def _dsml_arg_value_extender(
 ) -> ArgValueExtender | None:
     # ``arg_structural_chars`` skips every delta without ``>``, so a long
     # string value would wait for its closing tag. Extend the open trailing
-    # ``string="true"`` value instead. The lexer can flush a held partial
-    # tag as text, so keep a tail to catch a tag split across deltas.
+    # value instead. A non-string value that cannot start JSON never parses,
+    # so the converter already drops it until its tag closes: extend it with
+    # no output rather than reconverting on every ``>``. The lexer can flush
+    # a held partial tag as text, so keep a tail to catch a tag split across
+    # deltas.
     names = set()
     last_end = 0
     for m in param_re.finditer(raw_args):
@@ -157,8 +168,11 @@ def _dsml_arg_value_extender(
     open_param = _match_open_param(raw_args, last_end, partial_param_re, param_start)
     if open_param is None:
         return None
-    name, is_str, _, held_back = open_param
-    if is_str != "true" or name in names or held_back:
+    name, is_str, value, held_back = open_param
+    if name in names or held_back:
+        return None
+    streams = is_str == "true"
+    if not streams and not _cannot_start_json(value):
         return None
 
     keep = max(len(param_start), len(param_close)) - 1
@@ -170,6 +184,8 @@ def _dsml_arg_value_extender(
         if param_start in text or param_close in text:
             return None
         tail = text[-keep:]
+        if not streams:
+            return ""
         return json.dumps(delta, ensure_ascii=False)[1:-1]
 
     return extend
