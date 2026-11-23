@@ -111,6 +111,9 @@ _NON_CRYPTO_HASH_FUNCTIONS = frozenset({xxhash, xxhash_cbor})
 # The seed NONE_HASH was derived from, set by init_none_hash.
 _NONE_HASH_SEED: str | None = None
 
+# How many tokens a request block hasher hashes between calls to its `yield_fn`.
+HASH_YIELD_INTERVAL_TOKENS = 1024
+
 
 def resolve_none_hash_seed(hash_fn: Callable[[Any], bytes]) -> str:
     """Resolve the seed to derive NONE_HASH from.
@@ -919,6 +922,7 @@ def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
     num_hash_lookahead_tokens: int = 0,
+    yield_fn: Callable[[], None] | None = None,
 ) -> Callable[[Request], list[BlockHash]]:
     """Returns a function which computes the list of un-computed block hashes
     of a request.
@@ -933,7 +937,11 @@ def get_request_block_hasher(
     depends on, so it is emitted only once those tokens exist. The block tokens
     stay the hashed tokens; the extra keys become `(E, *tokens)`, where `E`
     covers the block and those tokens.
+
+    If given, `yield_fn` is called after every `HASH_YIELD_INTERVAL_TOKENS`
+    hashed tokens, e.g. to release the GIL while hashing a long prompt.
     """
+    blocks_per_yield = max(1, HASH_YIELD_INTERVAL_TOKENS // hash_block_size)
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
         start_token_idx = len(request.block_hashes) * hash_block_size
@@ -997,6 +1005,8 @@ def get_request_block_hasher(
             new_block_hashes.append(block_hash)
             start_token_idx += hash_block_size
             prev_block_hash_value = block_hash
+            if yield_fn is not None and len(new_block_hashes) % blocks_per_yield == 0:
+                yield_fn()
 
         return new_block_hashes
 

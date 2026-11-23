@@ -1156,6 +1156,26 @@ def test_request_block_hasher(hash_fn):
     )
 
 
+def test_request_block_hasher_calls_yield_fn(monkeypatch):
+    """`yield_fn` runs once per `HASH_YIELD_INTERVAL_TOKENS` hashed tokens and
+    leaves the hashes unchanged."""
+    monkeypatch.setattr(kv_cache_utils, "HASH_YIELD_INTERVAL_TOKENS", 6)
+    calls: list[None] = []
+    hashes = []
+    for yield_fn in (None, lambda: calls.append(None)):
+        request = Request(
+            request_id="0",
+            prompt_token_ids=list(range(20)),
+            sampling_params=SamplingParams(max_tokens=1),
+            pooling_params=None,
+            block_hasher=get_request_block_hasher(2, sha256, yield_fn=yield_fn),
+        )
+        hashes.append(request.block_hashes)
+    assert hashes[0] == hashes[1]
+    # 10 full blocks of 2 tokens, a yield after every 3 blocks.
+    assert len(calls) == 3
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_request_continues_from_frontend_block_hashes(hash_fn):
     """Frontend-computed prompt block hashes are used as is, and blocks that

@@ -255,6 +255,7 @@ class EngineCore:
                 hash_block_size,
                 caching_hash_fn,
                 vllm_config.num_hash_lookahead_tokens,
+                yield_fn=self._block_hash_yield_fn(),
             )
             self.prefix_hash_config = PrefixHashConfig(
                 hash_algo=vllm_config.cache_config.prefix_caching_hash_algo,
@@ -733,6 +734,10 @@ class EngineCore:
     def _wait_for_output(self, future: Future[Any]) -> Any:
         """Block until a step's model output is ready."""
         return future.result()
+
+    def _block_hash_yield_fn(self) -> Callable[[], None] | None:
+        """Called periodically while a request's blocks are hashed."""
+        return None
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -1349,6 +1354,7 @@ class EngineCoreProc(EngineCore):
         # Inputs taken from input_queue while waiting for a step's output that
         # must not be handled until the step completes (see _wait_for_output).
         self._deferred_inputs = deque[tuple[EngineCoreRequestType, Any]]()
+        self._input_thread_ident: int | None = None
 
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
@@ -1968,6 +1974,17 @@ class EngineCoreProc(EngineCore):
 
         return future.result()
 
+    def _block_hash_yield_fn(self) -> Callable[[], None] | None:
+        return self._yield_gil_on_input_thread
+
+    def _yield_gil_on_input_thread(self) -> None:
+        # Hashing a long prompt on the input thread would otherwise hold the GIL
+        # for up to a whole switch interval at a time, delaying the busy loop
+        # from seeing a finished step (and under DP, all ranks waiting on it).
+        # Hashing on the busy loop's own thread must not hand over the GIL.
+        if threading.get_ident() == self._input_thread_ident:
+            time.sleep(0)
+
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
@@ -2190,6 +2207,7 @@ class EngineCoreProc(EngineCore):
         ready_event: threading.Event,
     ):
         """Input socket IO thread."""
+        self._input_thread_ident = threading.get_ident()
         # Msgpack serialization decoding with optional tensor IPC receiver.
         add_request_decoder = MsgpackDecoder(
             EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
