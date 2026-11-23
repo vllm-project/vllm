@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -791,6 +791,13 @@ class KVCacheManager:
             )
 
         return cached_tokens or 0
+
+    def has_mamba_prefill_checkpoint(self, request_ids: Collection[str]) -> bool:
+        return any(
+            isinstance(manager, MambaManager)
+            and manager.has_prefill_checkpoint(request_ids)
+            for manager in self.coordinator.single_type_managers
+        )
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request, if enabled.

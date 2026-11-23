@@ -18,23 +18,31 @@ import pytest
 import torch
 
 from vllm.config import (
+    CacheConfig,
     CompilationConfig,
+    CompilationMode,
     CUDAGraphMode,
     ModelConfig,
     ParallelConfig,
+    SchedulerConfig,
     VllmConfig,
 )
 from vllm.forward_context import create_forward_context
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
-from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+from vllm.v1.attention.backends.utils import (
+    NULL_BLOCK_ID,
+    PAD_SLOT_ID,
+    get_dcp_local_seq_lens,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
 from vllm.v1.worker.gpu import cudagraph_utils, dp_utils
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
+    ModelCudaGraphManager,
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -43,6 +51,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchState,
     _slice_input_batch,
     create_ubatch_slices,
+    maybe_build_ubatch_runner,
     merge_ubatch_outputs,
     slice_model_inputs,
 )
@@ -240,7 +249,7 @@ def test_dummy_batch_can_be_microbatched():
 def _sync_dp(
     num_tokens_per_rank: list[int],
     uniform_token_count_per_rank: list[int] | None = None,
-    allow_ubatching: bool = True,
+    allow_ubatching: bool | list[bool] = True,
     cudagraph_manager: Any = None,
 ) -> tuple[BatchExecutionDescriptor, dp_utils.DPSyncState | None]:
     """Run the DP handshake with the all-reduce stubbed out.
@@ -252,12 +261,17 @@ def _sync_dp(
     """
     dp_size = len(num_tokens_per_rank)
     uniform_token_counts = uniform_token_count_per_rank or [0] * dp_size
+    votes = (
+        [allow_ubatching] * dp_size
+        if isinstance(allow_ubatching, bool)
+        else allow_ubatching
+    )
     reduced = torch.zeros(7, dp_size, dtype=torch.int32)
     reduced[0] = torch.tensor(num_tokens_per_rank, dtype=torch.int32)
     reduced[1] = CUDAGraphMode.NONE.value
     reduced[2] = torch.tensor(uniform_token_counts, dtype=torch.int32)
     reduced[3] = -1  # max_query_len, -1 means None
-    reduced[4] = int(allow_ubatching)
+    reduced[4] = torch.tensor(votes, dtype=torch.int32)
     reduced[5] = 8  # num_reqs
     reduced[6] = 0  # allow_skip_drafts
 
@@ -280,7 +294,7 @@ def _sync_dp(
                 dbo_decode_token_threshold=DECODE_THRESHOLD,
                 dbo_prefill_token_threshold=PREFILL_THRESHOLD,
             ),
-            allow_ubatching=allow_ubatching,
+            allow_ubatching=votes[0],
             uniform_decode=uniform_token_counts[0] == DECODE_QUERY_LEN,
         )
 
@@ -326,11 +340,7 @@ def test_microbatching_survives_a_rank_that_cannot_fill_it():
 
 
 def test_all_padding_microbatch_has_no_work_to_do():
-    """The microbatch past the last real token is well-formed and empty.
-
-    It carries the last request with none of its query tokens, so attention and
-    sampling see nothing to do while the microbatch still runs.
-    """
+    """A padding-only eager microbatch keeps its tokens and owns no requests."""
     query_lens, seq_lens = [1] * 6, [64] * 6
     num_tokens_padded = 16  # split at 8, past all 6 real tokens
 
@@ -339,34 +349,15 @@ def test_all_padding_microbatch_has_no_work_to_do():
         query_lens, seq_lens, buffers, num_tokens_padded=num_tokens_padded
     )
     ubatch_slices_padded = create_ubatch_slices(input_batch, num_ubatches=2)
-    ubatch_buffers = _make_ubatch_buffers()
-
-    first = _slice_input_batch(input_batch, ubatch_slices_padded[0], *ubatch_buffers[0])
-    last = _slice_input_batch(input_batch, ubatch_slices_padded[1], *ubatch_buffers[1])
-
-    # The first microbatch keeps every real request; the second gets none.
-    assert first.num_reqs == 6
-    assert first.num_tokens == 6
-    assert last.num_tokens == 0
-    assert last.num_reqs == 1
-    assert last.num_reqs_after_padding == 1
-    assert last.num_tokens_after_padding == 8
-
-    # Zero query tokens for the one request it holds, so no attention work.
-    torch.testing.assert_close(
-        last.query_start_loc, torch.tensor([0, 0], dtype=torch.int32)
-    )
-    assert last.num_scheduled_tokens.tolist() == [0]
-    # ...and its sequence still ends where its tokens do: they all live in the
-    # first microbatch, which computes them before this one runs.
-    torch.testing.assert_close(last.seq_lens, torch.tensor([64], dtype=torch.int32))
-    torch.testing.assert_close(
-        last.seq_lens_cpu_upper_bound, torch.tensor([64], dtype=torch.int32)
-    )
+    assert ubatch_slices_padded == [
+        UBatchSlice(slice(0, 6), slice(0, 8)),
+        UBatchSlice(slice(6, 6), slice(8, 16)),
+    ]
 
 
 def test_microbatching_off_when_a_rank_does_not_allow_it():
-    assert _sync_dp([256, 256], allow_ubatching=False)[0].num_ubatches == 1
+    # A remote rank can veto the split while the local rank is eligible.
+    assert _sync_dp([256, 256], allow_ubatching=[True, False])[0].num_ubatches == 1
 
 
 def test_slice_model_inputs_handles_mrope_positions():
@@ -524,6 +515,349 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
     torch.testing.assert_close(
         capturer.device_buffer[:, 0, 0], model_inputs["input_ids"].int()
     )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.cuda is None,
+    reason="Hybrid DBO requires CUDA",
+)
+@pytest.mark.parametrize("cache_mode", ["none", "align"])
+@pytest.mark.parametrize(
+    "batch_case", ["mixed", "prefill_tail", "decode", "empty_prefill", "full_decode"]
+)
+@torch.inference_mode()
+def test_hybrid_ubatches_continue_state(
+    cache_mode, batch_case, tmp_path, dist_init, workspace_init
+):
+    """Compare whole and interleaved forwards through real recurrent kernels."""
+    from transformers import Qwen3NextConfig
+
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import override_forward_context
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        QwenGatedDeltaNetAttention,
+    )
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateCopyFuncCalculator,
+    )
+    from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+        initialize_mamba_ssu_backend,
+    )
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+    from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
+    from vllm.v1.kv_cache_interface import KVCacheGroup, MambaSpec
+    from vllm.v1.worker.gpu.block_table import BlockTables
+    from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+    from vllm.v1.worker.utils import AttentionGroup
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    device = torch.device("cuda:0")
+    init_workspace_manager(device, num_ubatches=2)
+    use_full_graph = batch_case == "full_decode"
+    max_num_reqs = 4 if use_full_graph else 2
+    hf_config = Qwen3NextConfig(
+        architectures=["Qwen3NextForCausalLM"],
+        hidden_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=32,
+        linear_num_key_heads=2,
+        linear_num_value_heads=2,
+        linear_key_head_dim=32,
+        linear_value_head_dim=32,
+        linear_conv_kernel_dim=4,
+        layer_types=["linear_attention", "full_attention"],
+        max_position_embeddings=128,
+        chunk_size=32,
+    )
+    hf_config.save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            dtype="float16",
+            enforce_eager=not use_full_graph,
+            seed=0,
+        ),
+        parallel_config=ParallelConfig(
+            data_parallel_size=2,
+            enable_expert_parallel=True,
+            enable_dbo=True,
+            all2all_backend="deepep_low_latency",
+            is_moe_model=True,
+            dbo_decode_token_threshold=2,
+        ),
+        scheduler_config=SchedulerConfig.default_factory(
+            max_model_len=128,
+            max_num_seqs=max_num_reqs,
+            max_num_batched_tokens=64,
+            async_scheduling=False,
+        ),
+        cache_config=CacheConfig(
+            enable_prefix_caching=cache_mode == "align",
+            mamba_block_size=32 if cache_mode == "align" else 128,
+            mamba_ssm_cache_dtype="float32",
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.NONE,
+            cudagraph_mode=(
+                CUDAGraphMode.FULL_DECODE_ONLY if use_full_graph else CUDAGraphMode.NONE
+            ),
+            decode_cudagraph_capture_request_sizes=[max_num_reqs],
+        ),
+        additional_config={"gdn_prefill_backend": "triton"},
+    )
+    dtype = config.model_config.dtype
+    torch.manual_seed(0)
+
+    class RecurrentLayers(torch.nn.Sequential):
+        def get_mamba_state_copy_funcs(self, mamba_types):
+            calculator = MambaStateCopyFuncCalculator
+            return {
+                self[0].mamba_type: calculator.gated_delta_net_state_copy_func(),
+                self[1].mamba_type: calculator.mamba2_state_copy_func(),
+            }
+
+        def forward(self, inputs_embeds=None, input_ids=None, **kwargs):
+            if inputs_embeds is None:
+                inputs_embeds = input_ids[:, None].repeat(1, 64).to(dtype) * 0.05
+            hidden_states = self[0](inputs_embeds)
+            # Stand in for a MoE handoff between recurrent layers.
+            dbo_yield()
+            for layer in list(self)[1:]:
+                hidden_states = layer(hidden_states)
+            return hidden_states
+
+    with set_current_vllm_config(config), set_default_torch_dtype(dtype), device:
+        gdn = QwenGatedDeltaNetAttention(hf_config, config, prefix="layers.0.gdn")
+        mamba = MambaMixer2(
+            hidden_size=64,
+            ssm_state_size=16,
+            conv_kernel_size=4,
+            intermediate_size=64,
+            use_conv_bias=True,
+            use_bias=False,
+            num_heads=2,
+            head_dim=32,
+            model_config=config.model_config,
+            cache_config=config.cache_config,
+            prefix="layers.1.mamba",
+        )
+        layers = [gdn, mamba]
+        if cache_mode == "align" and batch_case == "empty_prefill":
+            # A second GDN cache group uses the same spec and builder type.
+            layers.append(
+                QwenGatedDeltaNetAttention(hf_config, config, prefix="layers.2.gdn")
+            )
+        model = RecurrentLayers(*layers)
+        for param in model.parameters():
+            param.uniform_(-0.25, 0.25)
+        mamba.A.fill_(-0.5)
+
+    num_blocks = 2 * len(model) * max_num_reqs + 1
+    groups = []
+    cache_groups = []
+    for group_id, layer in enumerate(model):
+        layer_config = layer.get_kv_cache_config(config)
+        assert layer_config is not None
+        spec = layer_config.spec
+        assert isinstance(spec, MambaSpec)
+        cache_groups.append(KVCacheGroup.from_layers({layer.prefix: layer_config}))
+        layer.kv_cache = tuple(
+            torch.randn((num_blocks, *shape), dtype=state_dtype, device=device) * 0.03
+            for shape, state_dtype in zip(spec.shapes, spec.dtypes)
+        )
+        group = AttentionGroup(layer.get_attn_backend(), [layer.prefix], spec, group_id)
+        group.create_metadata_builders(config, device, num_metadata_builders=2)
+        groups.append(group)
+    cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=cache_groups,
+    )
+    initialize_mamba_ssu_backend(config.mamba_config, cache_config)
+    tables = BlockTables(
+        [group.kv_cache_spec.block_size for group in groups],
+        max_num_reqs=max_num_reqs,
+        max_num_batched_tokens=64,
+        max_num_blocks_per_group=[3 if cache_mode == "align" else 1] * len(groups),
+        device=device,
+    )
+    if batch_case == "mixed":
+        # In align, A ends at 63 and would select the null column. The full
+        # step ends at 95, with a distinct working slot in each group.
+        query_lens, context, is_prefilling = [1, 63], [31, 32], [False, True]
+        if cache_mode == "none":
+            context[-1] = 0
+        padded_tokens = 64
+    elif batch_case == "prefill_tail":
+        # The second microbatch gets a one-token continuation plus DP padding.
+        query_lens, context, is_prefilling = [33], [0], [True]
+        padded_tokens = 64
+    elif batch_case == "decode":
+        query_lens, context, is_prefilling = [1, 1], [31, 32], [False, False]
+        padded_tokens = 2
+    elif use_full_graph:
+        query_lens, context, is_prefilling = [1] * 4, [8, 9, 10, 11], [False] * 4
+        padded_tokens = 4
+    else:
+        query_lens, context, is_prefilling = [3], [0], [True]
+        padded_tokens = 8
+    seq_lens = [prefix + query for prefix, query in zip(context, query_lens)]
+    for row, (prefix, seq_len) in enumerate(zip(context, seq_lens)):
+        block_rows = []
+        for group_id, group in enumerate(groups):
+            state_id = 2 * max_num_reqs * group_id + 2 * row + 1
+            block_size = group.kv_cache_spec.block_size
+            block_row = [0] * ((seq_len - 1) // block_size + 1)
+            if prefix:
+                block_row[(prefix - 1) // block_size] = state_id
+            if block_row[-1] == 0:
+                block_row[-1] = state_id + 1
+            block_rows.append(block_row)
+        tables.append_block_ids(row, tuple(block_rows), overwrite=True)
+    tables.apply_staged_writes()
+
+    buffers = InputBuffers(max_num_reqs, 64, device)
+    state = MambaHybridModelState(config, model, None, device)
+    state.initialize_kv_cache(cache_config, tables)
+    caches = [cache for layer in model for cache in layer.kv_cache]
+    attn_groups = [[group] for group in groups]
+    runner = maybe_build_ubatch_runner(
+        config, device, state, attn_groups, cache_config, max_num_reqs
+    )
+    assert runner is not None
+
+    manager = None
+    if use_full_graph:
+        manager = ModelCudaGraphManager(
+            config,
+            device,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            decode_query_lens={1: max_num_reqs},
+            ubatch_runner=runner,
+        )
+        with set_current_vllm_config(config):
+            manager.capture(
+                model, state, buffers, None, tables, attn_groups, cache_config
+            )
+
+    # Replay the same dummy graph with a full, partially padded, and empty B.
+    request_counts = (4, 3, 2, 4) if use_full_graph else (len(query_lens),)
+    for num_reqs in request_counts:
+        batch = replace(
+            _make_input_batch(
+                query_lens[:num_reqs],
+                seq_lens[:num_reqs],
+                buffers,
+                num_reqs_padded=max_num_reqs if use_full_graph else num_reqs,
+                num_tokens_padded=padded_tokens,
+            ),
+            is_prefilling_np=np.array(is_prefilling[:num_reqs]),
+            idx_mapping=torch.arange(num_reqs, dtype=torch.int32, device=device),
+        )
+        batch.is_padding[: batch.num_tokens].fill_(False)
+        batch.is_padding[batch.num_tokens :].fill_(True)
+        batch.input_ids[: batch.num_tokens].fill_(num_reqs)
+        block_tables = tables.gather_block_tables(
+            batch.idx_mapping, batch.num_reqs_after_padding
+        )
+        slot_mappings = tables.compute_slot_mappings(
+            batch.idx_mapping, batch.query_start_loc, batch.positions, padded_tokens
+        )
+        state.preprocess_state(
+            batch,
+            block_tables,
+            cache_config,
+            torch.tensor(context[:num_reqs], dtype=torch.int32, device=device),
+        )
+        initial = [cache.clone() for cache in caches]
+        inputs = {
+            "input_ids": batch.input_ids,
+            "positions": batch.positions,
+            "inputs_embeds": (
+                None
+                if use_full_graph
+                else torch.randn((padded_tokens, 64), dtype=dtype, device=device)
+            ),
+        }
+        reference_batch = replace(
+            batch,
+            num_reqs_after_padding=num_reqs,
+            query_start_loc=batch.query_start_loc[: num_reqs + 1],
+            query_start_loc_np=batch.query_start_loc_np[: num_reqs + 1],
+        )
+        full_metadata = state.prepare_attn(
+            reference_batch,
+            CUDAGraphMode.NONE,
+            tuple(table[:num_reqs] for table in block_tables),
+            slot_mappings,
+            attn_groups,
+            cache_config,
+        )
+        with override_forward_context(
+            create_forward_context(full_metadata, config, is_padding=batch.is_padding)
+        ):
+            expected = model(**inputs)
+        expected_state = [cache.clone() for cache in caches]
+        for cache, saved in zip(caches, initial):
+            cache.copy_(saved)
+
+        if manager is not None:
+            desc = manager.dispatch(num_reqs, padded_tokens, 1, 0, num_ubatches=2)
+            assert desc.cg_mode == CUDAGraphMode.FULL
+            runner.prepare(batch, block_tables, slot_mappings, desc)
+            actual = manager.run_fullgraph(desc)
+        else:
+            split = runner.prepare(
+                batch,
+                block_tables,
+                slot_mappings,
+                BatchExecutionDescriptor(
+                    cg_mode=CUDAGraphMode.NONE,
+                    num_tokens=padded_tokens,
+                    num_reqs=num_reqs,
+                    num_ubatches=2,
+                ),
+            )
+            actual = runner.run(model, inputs, split)
+            if batch_case == "empty_prefill":
+                assert split.slices[1].request_slice == slice(num_reqs, num_reqs)
+                padding_context = split.forward_contexts[1]
+                assert padding_context.is_padding is not None
+                assert padding_context.is_padding.all()
+                assert isinstance(padding_context.slot_mapping, dict)
+                for slots in padding_context.slot_mapping.values():
+                    assert (slots == PAD_SLOT_ID).all()
+                metadata = padding_context.attn_metadata
+                assert isinstance(metadata, dict)
+                for layer in model:
+                    if isinstance(layer, QwenGatedDeltaNetAttention):
+                        gdn_metadata = metadata[layer.prefix]
+                        assert isinstance(gdn_metadata, GDNAttentionMetadata)
+                        assert gdn_metadata.num_decode_tokens == 1
+                        indices = gdn_metadata.non_spec_state_indices_tensor
+                        assert indices is not None
+                        assert (indices == NULL_BLOCK_ID).all()
+                mamba_metadata = metadata[mamba.prefix]
+                assert isinstance(mamba_metadata, Mamba2AttentionMetadata)
+                assert mamba_metadata.num_decode_tokens == 1
+                assert mamba_metadata.state_indices_tensor_d is not None
+                assert (mamba_metadata.state_indices_tensor_d == NULL_BLOCK_ID).all()
+                for cache, saved in zip(caches, initial):
+                    torch.testing.assert_close(
+                        cache[NULL_BLOCK_ID], saved[NULL_BLOCK_ID], atol=0, rtol=0
+                    )
+        torch.testing.assert_close(
+            actual[: batch.num_tokens],
+            expected[: batch.num_tokens],
+            atol=1e-3,
+            rtol=1e-3,
+        )
+        for cache, expected_cache in zip(caches, expected_state):
+            torch.testing.assert_close(cache, expected_cache, atol=1e-3, rtol=1e-3)
 
 
 def test_merge_keeps_aux_hidden_states_per_layer():
@@ -783,29 +1117,27 @@ def test_capturable_run_replays_as_a_cudagraph():
     assert (capturer.device_buffer == 3).all()
 
 
-def _request_slices(input_batch: InputBatch) -> list[slice]:
-    return [s.request_slice for s in create_ubatch_slices(input_batch, 2)]
-
-
-def test_captured_split_survives_a_replay_with_enough_requests():
-    """Replay preserves the captured split only if real requests reach it."""
+@pytest.mark.parametrize("query_len", [1, 3])
+def test_full_graph_keeps_captured_request_slices(query_len):
+    """Replay keeps the captured rows even if the second ubatch is all padding."""
     buffers = _make_buffers()
-    captured = _request_slices(InputBatch.make_dummy(16, 16, buffers))
-
-    def replay(num_reqs: int) -> list[slice]:
-        return _request_slices(
-            _make_input_batch(
-                [1] * num_reqs,
-                [128] * num_reqs,
-                buffers,
-                num_reqs_padded=16,
-                num_tokens_padded=16,
-            )
+    num_tokens_padded = 16 * query_len
+    captured = [
+        UBatchSlice(slice(0, 8), slice(0, 8 * query_len)),
+        UBatchSlice(slice(8, 16), slice(8 * query_len, num_tokens_padded)),
+    ]
+    for num_reqs in (16, 9, 8, 4):
+        batch = _make_input_batch(
+            [query_len] * num_reqs,
+            [128] * num_reqs,
+            buffers,
+            num_reqs_padded=16,
+            num_tokens_padded=num_tokens_padded,
         )
-
-    assert replay(16) == captured
-    assert replay(9) == captured
-    assert replay(4) != captured
+        assert (
+            create_ubatch_slices(batch, 2, query_len, cg_mode=CUDAGraphMode.FULL)
+            == captured
+        )
 
 
 def _make_cudagraph_manager(capture_sizes: list[int]) -> CudaGraphManager:
@@ -870,6 +1202,9 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
     uniform = [1, 1]
 
     desc, _ = _sync_dp([64, 64], uniform, cudagraph_manager=manager)
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.num_ubatches == 2
+    desc, _ = _sync_dp([32, 64], uniform, cudagraph_manager=manager)
     assert desc.cg_mode == CUDAGraphMode.FULL
     assert desc.num_ubatches == 2
 

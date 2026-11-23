@@ -43,7 +43,21 @@ Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
 
 ## Limitations
 
-DBO cannot be combined with LoRA, pipeline parallelism, prefill context parallelism, multimodal, encoder-decoder or hybrid models, or encoder-only models. Multimodal models are supported under `all-reduce-overlap`. CUDA graphs must be Full or disabled: the runner rejects `PIECEWISE`.
+DBO cannot be combined with LoRA, pipeline parallelism, prefill context parallelism,
+encoder-decoder or encoder-only models. The `all-reduce-overlap` schedule supports
+multimodal models. Use Full CUDA graphs or eager execution.
+
+Text-only hybrid models with the standard model state and GDN or Mamba2 state
+backends support two microbatches with `--enable-dbo` and the default
+`dispatch-combine-overlap` schedule in CUDA DP+EP with TP=1 and no context
+parallelism. Use `--no-async-scheduling` and a DBO-capable expert parallel backend.
+Steps can run eagerly or replay a compatible Full CUDA graph for single-token
+decode. Hybrid DBO requires speculative decoding, ReplaySSM, RecoverSSM and KV
+transfer to be disabled.
+Use `--no-enable-prefix-caching` for compact recurrent state or
+`--enable-prefix-caching` for aligned recurrent state. A step runs
+unsplit across all ranks if any rank runs a dummy batch or reserved an internal
+Mamba prefill checkpoint.
 
 ## DBO Components
 
@@ -55,13 +69,23 @@ DBO cannot be combined with LoRA, pipeline parallelism, prefill context parallel
 
 Before each step, the DP ranks agree on whether to microbatch, in `sync_cudagraph_and_dp_padding`. Microbatching must be uniform across all DP ranks. It only happens if every rank allows it and the rank with the fewest tokens meets the applicable threshold. Every rank then pads to the token count of the largest rank, since the expert all-to-all requires all ranks to split and pad equally. The result is a `BatchExecutionDescriptor` with `num_ubatches` set to 2, which selects a captured Full CUDA graph if one matches, and otherwise runs the step eagerly.
 
-For a step with `num_ubatches > 1`, the runner calls `UBatchRunner.prepare` to split the batch and then `UBatchRunner.run` to execute it, instead of calling the model directly.
+For a step with `num_ubatches > 1`, the runner calls `UBatchRunner.prepare` to
+split the batch and prepare its metadata. It then calls `UBatchRunner.run` in
+eager mode or replays the captured Full graph.
 
 ### UBatchRunner
 
 `UBatchRunner`, in `vllm/v1/worker/gpu/ubatch_utils.py`, is built by `maybe_build_ubatch_runner` when DBO is enabled and there is more than one DP rank, or the [schedule](#schedules) is `all-reduce-overlap`.
 
-The batch is sliced before its attention metadata is built. `prepare` splits the batch at the midpoint of the DP-padded token count. A uniform batch of multi-token queries (speculative decoding verification) is split on a request boundary instead, so that each microbatch stays a uniform decode. `prepare` then builds the attention metadata for each microbatch and stores it in that microbatch's own `ForwardContext`. A microbatch that falls entirely inside the padding has no query tokens, and runs like a dummy batch.
+The batch is sliced before its attention metadata is built. `prepare` splits the
+batch at the midpoint of the DP-padded token count. A uniform batch of multi-token
+queries (speculative decoding verification) is split on a request boundary
+instead, so that each microbatch stays a uniform decode. An eager microbatch
+with only padding uses a one-token dummy decode for attention metadata. Its
+block tables contain null blocks, and its slot mapping disables KV writes.
+The model still uses the whole padded token slice for expert collectives.
+Full CUDA graph replay keeps the captured request boundary and updates the
+per-microbatch metadata in place. Padding rows use null recurrent-state indices.
 
 `run` starts one UBatch thread per microbatch, each of which runs the model on its slice of the model inputs, then joins them and merges their outputs. The threads are synchronized using `UBatchContext`.
 

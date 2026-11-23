@@ -3629,8 +3629,30 @@ class VllmConfig:
             or model_config.is_encoder_decoder
         ):
             unsupported.append("dual batch overlap with multimodal models")
-        if model_config is not None and model_config.is_hybrid:
-            unsupported.append("dual batch overlap with hybrid models")
+        if (
+            model_config is not None
+            and (model_config.is_hybrid or model_config.is_attention_free)
+            and (
+                not current_platform.is_cuda()
+                or self.scheduler_config.async_scheduling
+                or self.speculative_config is not None
+                or self.cache_config.use_replayssm
+                or self.cache_config.use_kda_recoverssm
+                or self.kv_transfer_config is not None
+                or schedule != "dispatch-combine-overlap"
+                or not parallel_config.enable_expert_parallel
+                or parallel_config.data_parallel_size <= 1
+                or parallel_config.tensor_parallel_size != 1
+                or parallel_config.decode_context_parallel_size != 1
+                or parallel_config.num_ubatches != 2
+            )
+        ):
+            unsupported.append(
+                "dual batch overlap with hybrid models outside CUDA "
+                "DP+EP with TP=1, DCP=1, two microbatches, synchronous "
+                "scheduling and no speculative decoding, ReplaySSM, RecoverSSM "
+                "or KV transfer"
+            )
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             # DBO captures FULL graphs only.
             unsupported.append("dual batch overlap with PIECEWISE CUDA graphs")

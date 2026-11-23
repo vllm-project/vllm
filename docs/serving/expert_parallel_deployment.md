@@ -94,6 +94,13 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
     --enable-expert-parallel         # Enable expert parallelism
 ```
 
+### Dual Batch Overlap for hybrid models
+
+CUDA expert-parallel deployments of text-only GDN and Mamba2 hybrid models can
+enable DBO with `--enable-dbo --no-async-scheduling`. Use TP=1, at least two DP
+ranks, and an expert parallel backend that supports DBO. See the
+[DBO limitations](../design/dbo.md#limitations) for the supported execution modes.
+
 ### MoRI EP (ROCm)
 
 `--all2all-backend mori` moves MoE tokens with MoRI. It runs MoRI EPv2 (`mori.ops.dispatch_combine_v2`, which reads and writes peer GPU memory directly through a MoRI CCO symmetric-memory window) where EPv2 is supported, and MoRI EPv1 otherwise.

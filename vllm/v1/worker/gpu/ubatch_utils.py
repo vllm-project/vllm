@@ -23,10 +23,11 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -55,20 +56,42 @@ class UBatchState(NamedTuple):
 
 
 def create_ubatch_slices(
-    input_batch: InputBatch, num_ubatches: int, uniform_token_count: int | None = None
+    input_batch: InputBatch,
+    num_ubatches: int,
+    uniform_token_count: int | None = None,
+    *,
+    cg_mode: CUDAGraphMode = CUDAGraphMode.NONE,
 ) -> UBatchSlices:
     """Split a DP-padded batch into the slices its microbatches run on.
 
-    Splitting at the midpoint of the DP-padded token count leaves the trailing
-    microbatch anywhere from full to entirely inside the padding. Clamping its
-    request slice onto the last request leaves it holding that request with
-    zero query tokens -- the shape a straddling request already takes -- so it
-    stays well-formed with no work to do, like a dummy run.
+    An eager microbatch containing only padding has an empty request slice.
+    Its token slice still determines the model input and collective sizes.
 
     A uniform batch of multi-token queries (spec decode verification) is split
     on a request boundary instead, so each microbatch stays a uniform decode.
-    `uniform_token_count` must be agreed across DP ranks.
+    `uniform_token_count` must be agreed across DP ranks. For FULL, use the
+    captured uniform layout, including rows that are currently padding.
     """
+    num_reqs_padded = input_batch.num_reqs_after_padding
+    if (
+        cg_mode == CUDAGraphMode.FULL
+        and uniform_token_count is not None
+        and num_reqs_padded >= num_ubatches
+    ):
+        assert input_batch.num_tokens_after_padding == (
+            num_reqs_padded * uniform_token_count
+        )
+        reqs_per_ubatch = num_reqs_padded // num_ubatches
+        boundaries = [i * reqs_per_ubatch for i in range(num_ubatches)]
+        boundaries.append(num_reqs_padded)
+        return [
+            UBatchSlice(
+                slice(start, stop),
+                slice(start * uniform_token_count, stop * uniform_token_count),
+            )
+            for start, stop in zip(boundaries, boundaries[1:])
+        ]
+
     split_point = None
     if uniform_token_count is not None and uniform_token_count > 1:
         num_tokens = input_batch.num_tokens_after_padding
@@ -84,16 +107,20 @@ def create_ubatch_slices(
         split_point=split_point,
     )
     assert ubatch_slices is not None
-    return [
-        UBatchSlice(
-            slice(
+    slices = []
+    for s in ubatch_slices:
+        if (
+            cg_mode == CUDAGraphMode.NONE
+            and s.token_slice.start >= input_batch.num_tokens
+        ):
+            request_slice = slice(input_batch.num_reqs, input_batch.num_reqs)
+        else:
+            request_slice = slice(
                 min(s.request_slice.start, input_batch.num_reqs - 1),
                 min(s.request_slice.stop, input_batch.num_reqs_after_padding),
-            ),
-            s.token_slice,
-        )
-        for s in ubatch_slices
-    ]
+            )
+        slices.append(UBatchSlice(request_slice, s.token_slice))
+    return slices
 
 
 def _slice_input_batch(
@@ -350,6 +377,9 @@ class UBatchRunner:
             else None
             for _ in range(self.num_ubatches)
         ]
+        self._padding_attn_inputs: (
+            tuple[InputBatch, tuple[torch.Tensor, ...]] | None
+        ) = None
         self.comm_stream = torch.cuda.Stream(
             device=device, priority=dbo_comm_stream_priority()
         )
@@ -372,6 +402,31 @@ class UBatchRunner:
             (current_stream(), self.capture_stream, self.comm_stream),
             self.num_ubatches,
         )
+
+    def _get_padding_attn_inputs(
+        self, block_tables: tuple[torch.Tensor, ...]
+    ) -> tuple[InputBatch, tuple[torch.Tensor, ...]]:
+        """Reuse a one-token decode shape for metadata on padding-only slices."""
+        if self._padding_attn_inputs is None:
+            buffers = InputBuffers(1, 1, self.device)
+            batch = InputBatch.make_dummy(1, 1, buffers)
+            if self.dcp_size > 1:
+                batch.dcp_local_seq_lens = prepare_dcp_local_seq_lens(
+                    buffers.dcp_local_seq_lens,
+                    batch.seq_lens,
+                    1,
+                    self.dcp_size,
+                    self.dcp_rank,
+                    self.cp_interleave,
+                )
+            self._padding_attn_inputs = (
+                batch,
+                tuple(
+                    table.new_full((1, table.shape[1]), NULL_BLOCK_ID)
+                    for table in block_tables
+                ),
+            )
+        return self._padding_attn_inputs
 
     def prepare(
         self,
@@ -399,26 +454,45 @@ class UBatchRunner:
             else dp_sync_state.uniform_token_count
         )
         ubatch_slices = create_ubatch_slices(
-            input_batch, self.num_ubatches, uniform_token_count
+            input_batch, self.num_ubatches, uniform_token_count, cg_mode=cg_mode
+        )
+        if cg_mode == CUDAGraphMode.FULL and uniform_token_count is not None:
+            input_batch = replace(input_batch, max_query_len=uniform_token_count)
+        ubatch_attn_inputs = self.model_state.prepare_ubatch_attn_inputs(
+            input_batch, ubatch_slices
         )
 
         attn_metadata = []
         slot_mappings_by_layer = []
         is_padding = []
         for i, ubatch_slice in enumerate(ubatch_slices):
-            ubatch = _slice_input_batch(
-                input_batch,
-                ubatch_slice,
-                self.ubatch_query_start_loc[i],
-                self.ubatch_seq_lens[i],
-                self.ubatch_dcp_local_seq_lens[i],
-                dcp_size=self.dcp_size,
-                dcp_rank=self.dcp_rank,
-                cp_interleave=self.cp_interleave,
-            )
-            ubatch_slot_mappings = slot_mappings[:, ubatch_slice.token_slice]
-            ubatch_block_tables = tuple(
-                block_table[ubatch_slice.request_slice] for block_table in block_tables
+            token_slice = ubatch_slice.token_slice
+            is_padding.append(input_batch.is_padding[token_slice])
+            ubatch_slot_mappings = slot_mappings[:, token_slice]
+            if cg_mode == CUDAGraphMode.NONE and ubatch_slice.is_empty():
+                # The real slot mapping is already all PAD_SLOT_ID. The
+                # dummy row has no state of its own and no access to A's table.
+                ubatch, ubatch_block_tables = self._get_padding_attn_inputs(
+                    block_tables
+                )
+            else:
+                ubatch = _slice_input_batch(
+                    input_batch,
+                    ubatch_slice,
+                    self.ubatch_query_start_loc[i],
+                    self.ubatch_seq_lens[i],
+                    self.ubatch_dcp_local_seq_lens[i],
+                    dcp_size=self.dcp_size,
+                    dcp_rank=self.dcp_rank,
+                    cp_interleave=self.cp_interleave,
+                )
+                ubatch_block_tables = tuple(
+                    table[ubatch_slice.request_slice] for table in block_tables
+                )
+            extra_kwargs = (
+                {"model_specific_attn_metadata": ubatch_attn_inputs[i]}
+                if ubatch_attn_inputs is not None
+                else {}
             )
             attn_metadata.append(
                 self.model_state.prepare_attn(
@@ -430,12 +504,12 @@ class UBatchRunner:
                     self.kv_cache_config,
                     ubatch_idx=i,
                     for_capture=for_capture,
+                    **extra_kwargs,
                 )
             )
             slot_mappings_by_layer.append(
                 build_slot_mappings_by_layer(ubatch_slot_mappings, self.kv_cache_config)
             )
-            is_padding.append(ubatch.is_padding)
 
         return UBatchState(
             slices=ubatch_slices,
@@ -628,6 +702,33 @@ def maybe_build_ubatch_runner(
         and parallel_config.dbo_schedule == "dispatch-combine-overlap"
     ):
         return None
+
+    model_config = vllm_config.model_config
+    has_mamba_layers = kv_cache_config.has_mamba_layers
+    if has_mamba_layers or (
+        model_config is not None
+        and (model_config.is_hybrid or model_config.is_attention_free)
+    ):
+        from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+        from vllm.v1.attention.backends.mamba2_attn import (
+            Mamba2AttentionMetadataBuilder,
+        )
+        from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+
+        if (
+            not has_mamba_layers
+            or type(model_state) is not MambaHybridModelState
+            or any(
+                type(group.get_metadata_builder(0))
+                not in (GDNAttentionMetadataBuilder, Mamba2AttentionMetadataBuilder)
+                for groups in attn_groups
+                for group in groups
+                if isinstance(group.kv_cache_spec, MambaSpec)
+            )
+        ):
+            raise ValueError(
+                "Hybrid DBO requires the standard GDN or Mamba2 state backends."
+            )
 
     logger.info_once("Dual batch overlap is enabled.")
     return UBatchRunner(
