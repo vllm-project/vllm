@@ -17,9 +17,13 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
     "layer_cls,kv_cache_dtype,reject_swa",
     [
         (MLAAttention, "auto", False),
+        (MLAAttention, "fp8", True),
+        (MLAAttention, "fp8_e4m3", True),
         (MLAAttention, "fp8_ds_mla", True),
         (MLAAttention, "nvfp4_ds_mla", True),
         (HYV4FlashMLAAttention, "auto", False),
+        (HYV4FlashMLAAttention, "fp8", False),
+        (HYV4FlashMLAAttention, "fp8_e4m3", False),
         (HYV4FlashMLAAttention, "fp8_ds_mla", False),
         (HYV4FlashMLAAttention, "nvfp4_ds_mla", True),
     ],
@@ -40,8 +44,11 @@ def test_sliding_window_kv_cache_dtype(
     ) as init_quant:
         rejected = sliding_window is not None and reject_swa
         error = ValueError if rejected else RuntimeError
+        reported_dtype = (
+            "fp8_ds_mla" if kv_cache_dtype in ("fp8", "fp8_e4m3") else kv_cache_dtype
+        )
         match = (
-            f"kv_cache_dtype={kv_cache_dtype}"
+            f"kv_cache_dtype={reported_dtype}"
             if rejected
             else "KV cache initialization reached"
         )

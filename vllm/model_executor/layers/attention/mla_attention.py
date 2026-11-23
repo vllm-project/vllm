@@ -529,16 +529,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache_dtype,
             )
 
-        if sliding_window is not None and (
-            kv_cache_dtype == "nvfp4_ds_mla"
-            or (
-                kv_cache_dtype == "fp8_ds_mla"
-                and not self.supports_fp8_ds_mla_sliding_window
-            )
-        ):
-            raise ValueError(
-                f"Sliding-window MLA does not support kv_cache_dtype={kv_cache_dtype}."
-            )
         dtype = torch.get_default_dtype()
         self.act_dtype = dtype
         if attn_backend is not None:
@@ -569,6 +559,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "Using %s KV cache format for %s backend.",
                 kv_cache_dtype,
                 self.attn_backend.get_name(),
+            )
+
+        # Judge aliases after FLASHMLA_SPARSE rewrites fp8 / fp8_e4m3 to fp8_ds_mla.
+        if sliding_window is not None and (
+            kv_cache_dtype == "nvfp4_ds_mla"
+            or (
+                kv_cache_dtype == "fp8_ds_mla"
+                and not self.supports_fp8_ds_mla_sliding_window
+            )
+        ):
+            raise ValueError(
+                f"Sliding-window MLA does not support kv_cache_dtype={kv_cache_dtype}."
             )
 
         if (
