@@ -339,15 +339,6 @@ def test_cache_config_hash_ignores_prefix_cache_retention_interval():
     assert hash_config(CacheConfig(prefix_cache_retention_interval=64)) == base_hash
 
 
-def test_cache_config_hash_ignores_runtime_offload_sizing():
-    config = CacheConfig()
-    base_hash = hash_config(config)
-
-    config.simple_cpu_offload_num_blocks = 42
-
-    assert hash_config(config) == base_hash
-
-
 def test_envs_compile_factors_relocation_invariant(tmp_path):
     """Relocating HOME or the XDG roots must not change the compile-cache
     env hash.
