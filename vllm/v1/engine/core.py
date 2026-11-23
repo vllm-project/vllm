@@ -135,7 +135,7 @@ class EngineCore:
         self,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         executor_fail_callback: Callable | None = None,
         include_finished_set: bool = False,
     ):
@@ -158,7 +158,7 @@ class EngineCore:
                 vllm_config,
             )
 
-        self.log_stats = log_stats
+        self.collect_stats = collect_stats
         # Opaque weight version supplied by the caller.
         self._weight_version = "default"
 
@@ -206,7 +206,7 @@ class EngineCore:
             kv_cache_config=kv_cache_config,
             structured_output_manager=self.structured_output_manager,
             include_finished_set=include_finished_set,
-            log_stats=self.log_stats,
+            collect_stats=self.collect_stats,
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
         )
@@ -628,7 +628,7 @@ class EngineCore:
             # With GPU timing the worker returns the iteration's record later.
             and not self.vllm_config.gpu_iteration_timing
         )
-        if not self.log_stats or not enable_details:
+        if not self.collect_stats or not enable_details:
             return None
         # 0-token step: DPEngineCoreProc logs the dummy batch it runs instead
         # (avoids double-log).
@@ -1338,7 +1338,7 @@ class EngineCoreProc(EngineCore):
         local_client: bool,
         handshake_address: str,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
         *,
@@ -1399,7 +1399,7 @@ class EngineCoreProc(EngineCore):
             super().__init__(
                 vllm_config,
                 executor_class,
-                log_stats,
+                collect_stats,
                 executor_fail_callback,
                 internal_dp_balancing,
             )
@@ -2586,7 +2586,7 @@ class DPEngineCoreProc(EngineCoreProc):
         local_client: bool,
         handshake_address: str,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
@@ -2620,7 +2620,7 @@ class DPEngineCoreProc(EngineCoreProc):
             local_client,
             handshake_address,
             executor_class,
-            log_stats,
+            collect_stats,
             client_handshake_address,
             engine_index=dp_rank,
             tensor_queue=tensor_queue,
@@ -3122,7 +3122,7 @@ class DPMoEEngineCoreActor(EngineCoreActorMixin, DPEngineCoreProc):
         local_client: bool,
         addresses: EngineZmqAddresses,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
@@ -3132,7 +3132,7 @@ class DPMoEEngineCoreActor(EngineCoreActorMixin, DPEngineCoreProc):
             self, vllm_config, addresses, dp_rank, local_dp_rank
         )
         DPEngineCoreProc.__init__(
-            self, vllm_config, local_client, "", executor_class, log_stats
+            self, vllm_config, local_client, "", executor_class, collect_stats
         )
 
 
@@ -3145,7 +3145,7 @@ class EngineCoreActor(EngineCoreActorMixin, EngineCoreProc):
         local_client: bool,
         addresses: EngineZmqAddresses,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
@@ -3159,6 +3159,6 @@ class EngineCoreActor(EngineCoreActorMixin, EngineCoreProc):
             local_client,
             "",
             executor_class,
-            log_stats,
+            collect_stats,
             engine_index=dp_rank,
         )
