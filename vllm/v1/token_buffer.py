@@ -186,7 +186,26 @@ class TokenIdsView(Sequence[int]):
     def __getitem__(self, index: slice) -> list[int]: ...
 
     def __getitem__(self, index: int | slice) -> int | list[int]:
-        return self._as_list()[index]
+        if self._list is not None:
+            return self._list[index]
+        num_tokens = min(len(self._tokens), self._len)
+        if isinstance(index, int):
+            if index < 0:
+                index += self._len
+            if index < 0 or index >= self._len:
+                raise IndexError("TokenIdsView index out of range")
+            if index < num_tokens:
+                return int(self._tokens[index])
+            return self._suffix[index - num_tokens]
+        start, stop, step = index.indices(self._len)
+        if step != 1:
+            return self._as_list()[index]
+        out: list[int] = []
+        if start < num_tokens:
+            extend_from_slice(out, self._tokens, start, min(stop, num_tokens))
+        if stop > num_tokens:
+            out.extend(self._suffix[max(0, start - num_tokens) : stop - num_tokens])
+        return out
 
     def __iter__(self) -> Iterator[int]:
         return iter(self._as_list())

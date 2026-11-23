@@ -738,13 +738,80 @@ class TestImplicitReasoningEnd:
     def test_reasoning_end_token_ids_drop_multi_token_tool_opener(
         self, thinking_parser
     ):
-        # Like the real DeepSeek-V4 tokenizer, the mock vocab has no single
-        # token for the DSML tool opener, so only </think> is tracked on the
-        # token-ID fast path; the implicit tool-call exit still goes through
-        # the text lexer.
+        # Without real encode/decode round-trip on the bare mock tokenizer,
+        # only </think> is in reasoning_end_token_ids.
         assert thinking_parser.reasoning_end_token_ids == {_THINK_END_ID}
         assert thinking_parser.find_reasoning_end([7, _THINK_END_ID, 8]) == (1, False)
         assert thinking_parser.find_reasoning_end([7, 8]) == (2, False)
+
+    def test_multi_token_tool_opener_ends_reasoning(self):
+        # Mirror the real DeepSeek-V4 tokenizer split of <｜DSML｜tool_calls>:
+        # ['<', '｜DSML｜', 'tool', '_c', 'alls', '>'].
+        subwords = {
+            DSML_THINK_START: _THINK_START_ID,
+            DSML_THINK_END: _THINK_END_ID,
+            "<": 30,
+            "｜DSML｜": 128825,
+            "tool": 72461,
+            "_c": 4941,
+            "alls": 12548,
+            "calls": 12549,
+            ">": 32,
+        }
+        pieces_sorted = sorted(subwords, key=len, reverse=True)
+
+        def encode_fn(text: str, add_special_tokens: bool = False) -> list[int]:
+            out: list[int] = []
+            i = 0
+            while i < len(text):
+                matched = next(
+                    (piece for piece in pieces_sorted if text.startswith(piece, i)),
+                    None,
+                )
+                if matched is not None:
+                    out.append(subwords[matched])
+                    i += len(matched)
+                else:
+                    out.append(ord(text[i]))
+                    i += 1
+            return out
+
+        tok = make_mock_tokenizer(subwords)
+        tok.encode.side_effect = encode_fn
+
+        parser = DeepSeekV4ParserReasoningAdapter(
+            tok, chat_template_kwargs={"thinking": True}
+        )
+        opener = encode_fn(DSML_TOOL_START)
+        assert opener == [30, 128825, 72461, 4941, 12548, 32]
+        assert tuple(opener) in parser.implicit_reasoning_end_sequences
+
+        # Plain '<' inside reasoning must not trigger reasoning end.
+        reasoning = encode_fn("Check a < b.")
+        assert not parser.is_reasoning_end([_THINK_START_ID, *reasoning])
+
+        # Streaming one token at a time only flips on the closing '>'.
+        streamed = [
+            parser.is_reasoning_end_streaming(
+                reasoning + opener[: idx + 1], [opener[idx]]
+            )
+            for idx in range(len(opener))
+        ]
+        assert streamed == [False, False, False, False, False, True]
+        assert parser.is_reasoning_end(reasoning + opener)
+
+        # In-window and cross-step split find_reasoning_end + content extraction.
+        tail = encode_fn('{"a":1}')
+        end = parser.find_reasoning_end(reasoning + opener + tail)
+        assert end == (len(reasoning) + len(opener) - 1, True)
+        assert end is not None and end.token_len == len(opener)
+
+        split_end = parser.find_reasoning_end(
+            opener[4:] + tail, prefix_token_ids=reasoning + opener[:4]
+        )
+        assert split_end == (1, True)
+        assert split_end is not None and split_end.token_len == len(opener)
+        assert parser.extract_content_ids(reasoning + opener + tail) == opener + tail
 
     def test_streaming_reasoning_implicit_end(self, thinking_parser):
         chunks = [
