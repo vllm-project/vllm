@@ -267,10 +267,8 @@ def collect_shapes(args: argparse.Namespace) -> list[tuple[int, int]]:
             shapes = {(x[0], x[1]) for x in json.load(f)}
     else:
         shapes = shapes_from_hf(args.model, args.tp) | extra_shapes(args.model, args.tp)
-    usable = [(n, k) for n, k in shapes if n % 8 == 0 and k % 8 == 0]
-    skipped = sorted(shapes - set(usable))
-    print(f"{len(usable)} shapes, skipped {len(skipped)} (N or K % 8 != 0): {skipped}")
-    return sorted(usable, key=lambda nk: -nk[0] * nk[1])
+    print(f"{len(shapes)} shapes")
+    return sorted(shapes, key=lambda nk: -nk[0] * nk[1])
 
 
 # CUDA graph token sizes of vLLM (`_set_cudagraph_sizes`) plus the default
