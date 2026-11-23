@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""`method: eagle3` without `model` takes the draft that the target checkpoint
-ships in its `eagle3/` subfolder, and still fails clearly without one."""
+"""`subfolder` without `model` takes the draft that the target checkpoint ships
+in that subfolder, and fails clearly when it is missing."""
 
 import json
 
@@ -10,7 +10,6 @@ import pytest
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
-from vllm.v1.worker.gpu.spec_decode.eagle.config import EAGLE3_SUBFOLDER
 
 _TARGET_CONFIG = {
     "architectures": ["LlamaForCausalLM"],
@@ -38,44 +37,35 @@ _DRAFT_CONFIG = {
 }
 
 
-def _write_target(tmp_path, with_draft: bool):
+def _make_spec(tmp_path, with_draft: bool) -> SpeculativeConfig:
     (tmp_path / "config.json").write_text(json.dumps(_TARGET_CONFIG))
     if with_draft:
-        draft_dir = tmp_path / EAGLE3_SUBFOLDER
-        draft_dir.mkdir()
-        (draft_dir / "config.json").write_text(json.dumps(_DRAFT_CONFIG))
-    return ModelConfig(
+        (tmp_path / "eagle3").mkdir()
+        (tmp_path / "eagle3" / "config.json").write_text(json.dumps(_DRAFT_CONFIG))
+    target = ModelConfig(
         model=str(tmp_path),
         tokenizer=str(tmp_path),
         skip_tokenizer_init=True,
         max_model_len=128,
     )
-
-
-@pytest.mark.cpu_test
-def test_bundled_eagle3_draft_is_the_default_model(tmp_path):
-    target = _write_target(tmp_path, with_draft=True)
-
-    spec = SpeculativeConfig(
+    return SpeculativeConfig(
         method="eagle3",
+        subfolder="eagle3",
         num_speculative_tokens=3,
         target_model_config=target,
         target_parallel_config=ParallelConfig(),
     )
 
-    assert spec.model == str(tmp_path / EAGLE3_SUBFOLDER)
-    assert spec.method == "eagle3"
+
+@pytest.mark.cpu_test
+def test_draft_from_target_subfolder(tmp_path):
+    spec = _make_spec(tmp_path, with_draft=True)
+
+    assert spec.model == str(tmp_path / "eagle3")
     assert spec.draft_model_config.hf_config.architectures == ["Eagle3LlamaForCausalLM"]
 
 
 @pytest.mark.cpu_test
-def test_eagle3_without_model_or_bundled_draft_raises(tmp_path):
-    target = _write_target(tmp_path, with_draft=False)
-
-    with pytest.raises(ValueError, match="without speculative model"):
-        SpeculativeConfig(
-            method="eagle3",
-            num_speculative_tokens=3,
-            target_model_config=target,
-            target_parallel_config=ParallelConfig(),
-        )
+def test_missing_draft_subfolder_raises(tmp_path):
+    with pytest.raises(ValueError, match="no draft checkpoint in the 'eagle3/'"):
+        _make_spec(tmp_path, with_draft=False)

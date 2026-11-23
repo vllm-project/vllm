@@ -58,21 +58,22 @@ for output in outputs:
 
 ## Eagle3 Draft Bundled With the Target Checkpoint
 
-A target checkpoint can ship its EAGLE-3 draft in an `eagle3/` subfolder
-(the draft's own `config.json` and weights). Then `model` can be omitted from
-the speculative config, and vLLM downloads only that subfolder:
+A target checkpoint can ship its EAGLE-3 draft in a subfolder (the draft's own
+`config.json` and weights). Set `subfolder` and omit `model`, and vLLM
+downloads only that subfolder of the target:
 
 ```python
 llm = LLM(
     model="ibm-granite/granite-for-docling-2b",
     speculative_config={
         "method": "eagle3",
+        "subfolder": "eagle3",
         "num_speculative_tokens": 5,
     },
 )
 ```
 
-A `model` given explicitly is used as before.
+With `model` set, `subfolder` is a subfolder of that checkpoint instead.
 
 ## Pipeline Parallelism
 
