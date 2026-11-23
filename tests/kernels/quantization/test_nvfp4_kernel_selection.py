@@ -44,7 +44,7 @@ def test_w4a16_kernel_does_not_precede_w4a4_kernels(w4a4_kernel):
         ((10, 3), False, True),
         ((12, 0), True, True),
         ((12, 0), False, False),
-        ((12, 1), True, False),
+        ((12, 1), True, True),
         ((9, 0), True, False),
     ],
 )

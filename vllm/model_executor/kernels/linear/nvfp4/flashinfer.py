@@ -30,9 +30,10 @@ from vllm.utils.torch_utils import direct_register_custom_op, eager_bypass_custo
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
-# On SM120, FlashInfer cute-dsl beats FlashInfer CUTLASS up to this many tokens
-# and loses above it (RTX PRO 6000, Qwen3.8-27B MLP and lm_head shapes). Its
-# SM12x runner only writes BF16 output; other dtypes use CUTLASS.
+# On SM12x, FlashInfer cute-dsl beats FlashInfer CUTLASS up to this many tokens
+# and loses above it (RTX PRO 6000 SM120 and GB10 SM121, Qwen3.8-27B MLP and
+# lm_head shapes). Its SM12x runner only writes BF16 output; other dtypes use
+# CUTLASS.
 SM120_CUTEDSL_MAX_TOKENS = 64
 
 
@@ -206,7 +207,7 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
         super().__init__(config)
         # Read once here: querying the device in apply_weights breaks
         # torch.compile fullgraph capture.
-        self.is_sm120 = current_platform.is_device_capability(120)
+        self.is_sm120 = current_platform.is_device_capability_family(120)
 
     def input_quant_key(self) -> QuantKey | None:
         return kNvfp4Dynamic
@@ -215,13 +216,13 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if current_platform.is_device_capability(120):
+        if current_platform.is_device_capability_family(120):
             # Runs cute-dsl for decode-sized inputs and CUTLASS above
-            # SM120_CUTEDSL_MAX_TOKENS. SM121 (GB10) is not measured yet.
+            # SM120_CUTEDSL_MAX_TOKENS, on SM120 and SM121 (GB10).
             if not has_flashinfer_sm12x_cutedsl_fp4_gemm():
-                return False, "FlashInfer cutedsl on SM120 requires its SM12x runner"
+                return False, "FlashInfer cutedsl on SM12x requires its SM12x runner"
         elif not current_platform.is_device_capability_family(100):
-            return False, "FlashInfer cutedsl requires sm_10x or SM120"
+            return False, "FlashInfer cutedsl requires sm_10x or sm_12x"
         if not has_flashinfer():
             return False, "FlashInfer required"
         return True, None

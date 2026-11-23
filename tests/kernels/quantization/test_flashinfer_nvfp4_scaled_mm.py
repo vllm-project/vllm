@@ -104,14 +104,14 @@ def test_flashinfer_nvfp4_gemm(
     if backend == "cute-dsl" and not (
         current_platform.is_device_capability_family(100)
         or (
-            current_platform.is_device_capability(120)
+            current_platform.is_device_capability_family(120)
             and has_flashinfer_sm12x_cutedsl_fp4_gemm()
         )
     ):
-        pytest.skip("FlashInfer cutedsl backend requires SM10x or SM120")
+        pytest.skip("FlashInfer cutedsl backend requires SM10x or SM12x")
     if (
         backend == "cute-dsl"
-        and current_platform.is_device_capability(120)
+        and current_platform.is_device_capability_family(120)
         and dtype != torch.bfloat16
     ):
         pytest.skip("FlashInfer cutedsl on SM120 only supports BF16 output")
@@ -200,7 +200,7 @@ def test_flashinfer_nvfp4_gemm(
 @torch.inference_mode()
 def test_sm120_cutedsl_nvfp4_mm_matches_cutlass(m: int, dtype: torch.dtype) -> None:
     if not (
-        current_platform.is_device_capability(120)
+        current_platform.is_device_capability_family(120)
         and has_flashinfer_sm12x_cutedsl_fp4_gemm()
     ):
         pytest.skip("Requires SM120 and FlashInfer's SM12x cute-dsl runner")
@@ -247,7 +247,7 @@ def _make_nvfp4_linear_layer(
 @torch.inference_mode()
 def test_sm120_cutedsl_nvfp4_linear_matches_cutlass(n: int, k: int, m: int) -> None:
     if not (
-        current_platform.is_device_capability(120)
+        current_platform.is_device_capability_family(120)
         and FlashInferCuteDslNvFp4LinearKernel.is_supported()[0]
     ):
         pytest.skip("Requires SM120 and FlashInfer's SM12x cute-dsl runner")
@@ -273,7 +273,7 @@ def test_sm120_cutedsl_nvfp4_linear_matches_cutlass(n: int, k: int, m: int) -> N
 @torch.inference_mode()
 def test_sm120_cutedsl_nvfp4_linear_fullgraph_compile() -> None:
     if not (
-        current_platform.is_device_capability(120)
+        current_platform.is_device_capability_family(120)
         and FlashInferCuteDslNvFp4LinearKernel.is_supported()[0]
     ):
         pytest.skip("Requires SM120 and FlashInfer's SM12x cute-dsl runner")
