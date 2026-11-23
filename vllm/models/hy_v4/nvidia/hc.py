@@ -394,10 +394,10 @@ class HYV4HCLayer(nn.Module):
 class IHCBoundary(nn.Module):
     """Fused iHC boundary: optional post step, then pre and RMSNorm.
 
-    Called as `forward(residual)` it replaces `pre` + `norm`; called as
-    `forward(x, residual, post_gates)` it first applies the previous sub-block's
-    post step. Owns no parameters: it reads the weights of the pre layer and
-    RMSNorm it replaces.
+    With only `residual` it replaces `pre` + `norm`; given the previous
+    sub-block's output `x` and its `post_gates`, it first applies that post
+    step. Owns no parameters: it reads the weights of the pre layer and RMSNorm
+    it replaces.
     """
 
     def __init__(self, pre_owner: HYV4HCPreLayer, norm_owner: nn.Module) -> None:
@@ -412,10 +412,11 @@ class IHCBoundary(nn.Module):
 
     def forward(
         self,
-        *args: torch.Tensor,
+        residual: torch.Tensor,
+        x: torch.Tensor | None = None,
+        post_gates: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns `(residual, hidden_states, post_gates)`."""
-        x, residual, post_gates = (None, *args, None) if len(args) == 1 else args
         pre = self._pre
         residual, hidden, post_gates, _ = ops.hy_v4_ihc_boundary(
             residual.contiguous(),

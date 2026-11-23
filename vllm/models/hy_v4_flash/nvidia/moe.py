@@ -31,6 +31,30 @@ def _post_norm(norm: RMSNorm | None, x: torch.Tensor, reduce: bool) -> torch.Ten
     return fused_allreduce_rms_norm(x, None, norm)[0] if reduce else norm(x)
 
 
+class LatentUpProjection(ReplicatedLinear):
+    """Routed latent-to-hidden projection.
+
+    When bias-free and unquantized it commutes with the TP sum, so the routed
+    and shared outputs share one all-reduce, and it takes the shared output as
+    the GEMM's accumulate input instead of a separate add.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        plain = self.bias is None and isinstance(
+            self.quant_method, UnquantizedLinearMethod
+        )
+        self.reduce_commutative = self.accumulates_residual = plain
+
+    def forward(
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, None]:
+        if residual is None:
+            return super().forward(x)
+        assert self.accumulates_residual
+        return residual.addmm_(x, self.weight.t()), None
+
+
 class HYV4FlashFeedForward(HYV4FeedForward):
     def __init__(
         self,
@@ -75,16 +99,13 @@ class HYV4FlashMoE(HYV4MoEFused):
                 quant_config=quant_config,
                 prefix=f"{prefix}.routed_expert_down_proj",
             )
-            up = ReplicatedLinear(
+            up = LatentUpProjection(
                 latent,
                 config.hidden_size,
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.routed_expert_up_proj",
             )
-            # A bias-free, unquantized projection commutes with the TP sum, so
-            # the routed and shared outputs share one all-reduce.
-            up.reduce_commutative = isinstance(up.quant_method, UnquantizedLinearMethod)
         defer_allreduce = _defers_allreduce(config)
         super().__init__(
             config,
@@ -96,8 +117,6 @@ class HYV4FlashMoE(HYV4MoEFused):
             reduce_results=not defer_allreduce,
         )
         self.defer_allreduce = defer_allreduce
-        self.routed_expert_down_proj = down
-        self.routed_expert_up_proj = up
         self.combine_output_norm = (
             RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             if config.sandwich_norm

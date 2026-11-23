@@ -7,14 +7,16 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["hashes_stride", "vocab_start", "vocab_end"])
 def _lookup_norm_kernel(
-    rows_ptr,
+    table_ptr,
     scales_ptr,
     hashes_ptr,
     gamma_ptr,
     out_ptr,
     hashes_stride,
+    vocab_start,
+    vocab_end,
     eps,
     HEADS: tl.constexpr,
     DIM: tl.constexpr,
@@ -27,38 +29,46 @@ def _lookup_norm_kernel(
     lanes = tl.arange(0, BLOCK_D)[None, :]
     head_mask = heads < HEADS
     mask = head_mask & (lanes < DIM)
-    offsets = (token * HEADS + heads) * DIM + lanes
 
-    x = tl.load(rows_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
-    if HAS_SCALES:
-        scale = tl.load(scales_ptr + token * HEADS + heads, mask=head_mask, other=0.0)
-        x *= scale.to(tl.float32)
-    hashes = tl.load(
+    bucket = tl.load(
         hashes_ptr + token * hashes_stride + heads, mask=head_mask, other=-1
-    )
-    x = tl.where(mask & (hashes >= 0), x, 0.0)
+    ).to(tl.int64)
+    found = head_mask & (bucket >= vocab_start) & (bucket < vocab_end)
+    row = tl.where(found, bucket - vocab_start, 0)
+    x = tl.load(table_ptr + row * DIM + lanes, mask=mask & found, other=0.0)
+    x = x.to(tl.float32)
+    if HAS_SCALES:
+        x *= tl.load(scales_ptr + row, mask=found, other=0.0).to(tl.float32)
     rstd = tl.rsqrt(tl.sum(x * x, axis=1) / DIM + eps)[:, None]
     gamma = tl.load(gamma_ptr + heads * DIM + lanes, mask=mask, other=0.0)
     tl.store(
-        out_ptr + offsets,
+        out_ptr + (token * HEADS + heads) * DIM + lanes,
         (x * rstd * gamma.to(tl.float32)).to(out_ptr.dtype.element_ty),
         mask=mask,
     )
 
 
 def lookup_norm(
-    rows: torch.Tensor,
+    table: torch.Tensor,
     scales: torch.Tensor | None,
     hashes: torch.Tensor,
+    vocab_start: int,
+    vocab_end: int,
     gamma: torch.Tensor,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Dequantize, mask and RMS-normalize looked-up Engram rows per head.
+    """Gather, dequantize and RMS-normalize Engram table rows per head.
 
     Args:
-        rows: `[T, heads, dim]` table rows (FP8 or BF16), contiguous.
-        scales: `[T, heads]` FP8 row scales, or None for BF16 tables.
-        hashes: `[T, heads]` hash columns; a negative hash zeroes its head.
+        table: `[vocab_end - vocab_start, dim]` local table rows (FP8 or
+            BF16), possibly a CUDA view of pinned host memory.
+        scales: `[vocab_end - vocab_start]` FP8 row scales, or None for BF16
+            tables.
+        hashes: `[T, heads]` global buckets; a bucket outside
+            `[vocab_start, vocab_end)`, including a negative one, zeroes its
+            head.
+        vocab_start: First global bucket of `table`.
+        vocab_end: End of the global buckets of `table`.
         gamma: `[heads, dim]` per-head norm weights.
         dtype: output dtype.
 
@@ -66,18 +76,22 @@ def lookup_norm(
         `[T, heads * dim]` normalized rows.
 
     """
-    num_tokens, heads, dim = rows.shape
-    assert rows.is_contiguous() and gamma.is_contiguous() and hashes.stride(1) == 1
-    out = torch.empty(num_tokens, heads * dim, dtype=dtype, device=rows.device)
+    num_tokens, heads = hashes.shape
+    dim = table.shape[1]
+    assert table.is_contiguous() and gamma.shape == (heads, dim)
+    assert gamma.is_contiguous() and hashes.stride(1) == 1
+    out = torch.empty(num_tokens, heads * dim, dtype=dtype, device=hashes.device)
     if num_tokens == 0 or heads == 0:
         return out.zero_()
     _lookup_norm_kernel[(num_tokens,)](
-        rows,
-        rows if scales is None else scales,
+        table,
+        table if scales is None else scales,
         hashes,
         gamma,
         out,
         hashes.stride(0),
+        vocab_start,
+        vocab_end,
         torch.finfo(torch.float32).eps,
         HEADS=heads,
         DIM=dim,
@@ -220,3 +234,190 @@ def gated_update(
         num_warps=8 if block >= 2048 else 4,
     )
     return out
+
+
+# Batch and token counts change every step; keep them out of the cache key.
+@triton.jit(
+    do_not_specialize=[
+        "num_tokens",
+        "num_live",
+        "num_requests",
+        "skip0",
+        "skip1",
+        "skip2",
+    ]
+)
+def _ngram_hash_kernel(
+    input_ids_ptr,
+    token_map_ptr,
+    lookback_ptr,
+    starts_ptr,
+    seq_lens_ptr,
+    multipliers_ptr,
+    primes_ptr,
+    offsets_ptr,
+    out_ptr,
+    num_tokens,
+    num_live,
+    num_requests,
+    vocab,
+    pad_id,
+    skip0,
+    skip1,
+    skip2,
+    lookback_depth,
+    lookback_row,
+    lookback_col,
+    MAX_NGRAM: tl.constexpr,
+    HEADS: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    token = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
+    layer = tl.program_id(1)
+    valid = token < num_tokens
+
+    # Request of each token: the first request whose end exceeds it.
+    lo = tl.full((BLOCK_T,), 0, tl.int32)
+    hi = tl.full((BLOCK_T,), num_requests, tl.int32)
+    while tl.sum((lo < hi).to(tl.int32), 0) > 0:
+        active = lo < hi
+        mid = (lo + hi) // 2
+        right = token >= tl.load(starts_ptr + mid + 1, active, other=0)
+        lo = tl.where(active & right, mid + 1, lo)
+        hi = tl.where(active & ~right, mid, hi)
+    request = tl.minimum(lo, num_requests - 1).to(tl.int64)
+    start = tl.load(starts_ptr + request)
+    end = tl.load(starts_ptr + request + 1)
+    chunk_start = (tl.load(seq_lens_ptr + request) - (end - start)).to(tl.int64)
+    position = chunk_start + token - start
+
+    own = tl.load(input_ids_ptr + token, valid, other=-1).to(tl.int64)
+    skip = (
+        (own < 0)
+        | (own >= vocab)
+        | (token >= num_live)
+        | (token >= tl.load(starts_ptr + num_requests))
+        | (own == skip0)
+        | (own == skip1)
+        | (own == skip2)
+    )
+
+    head = tl.arange(0, BLOCK_H)
+    head_mask = head < HEADS
+    blocked = tl.full((BLOCK_T,), False, tl.int1)
+    rolling = tl.full((BLOCK_T,), 0, tl.int64)
+    for shift in tl.static_range(MAX_NGRAM):
+        history = position - shift
+        in_batch = history >= chunk_start
+        batch_id = tl.load(
+            input_ids_ptr + tl.maximum(token - shift, 0), valid & in_batch, other=0
+        ).to(tl.int64)
+        col = chunk_start - 1 - history
+        in_window = valid & ~in_batch & (col >= 0) & (col < lookback_depth)
+        window_id = tl.load(
+            lookback_ptr
+            + request * lookback_row
+            + tl.minimum(tl.maximum(col, 0), lookback_depth - 1) * lookback_col,
+            in_window,
+            other=-1,
+        ).to(tl.int64)
+        known = window_id >= 0
+        source_id = tl.where(in_batch, batch_id, window_id)
+        dead = tl.where(
+            in_batch, (batch_id < 0) | (batch_id >= vocab), window_id >= vocab
+        )
+        mapped = tl.load(
+            token_map_ptr + tl.minimum(tl.maximum(source_id, 0), vocab - 1),
+            valid & (in_batch | known),
+            other=0,
+        ).to(tl.int64)
+        source = tl.where(in_batch | known, mapped, pad_id)
+        blocked |= (history < 0) | ((in_batch | known) & dead)
+        rolling ^= tl.where(blocked, pad_id, source) * tl.load(
+            multipliers_ptr + layer * MAX_NGRAM + shift
+        )
+        if shift > 0:
+            col = (shift - 1) * HEADS + head
+            param = layer * (MAX_NGRAM - 1) * HEADS + col
+            prime = tl.load(primes_ptr + param, head_mask, other=1)
+            bucket = rolling[:, None] % prime[None, :]
+            bucket = tl.where(bucket < 0, bucket + prime[None, :], bucket)
+            bucket += tl.load(offsets_ptr + param, head_mask, other=0)[None, :]
+            row = (layer * num_tokens + token).to(tl.int64)
+            tl.store(
+                out_ptr + row[:, None] * ((MAX_NGRAM - 1) * HEADS) + col[None, :],
+                tl.where(skip[:, None], -1, bucket).to(tl.int32),
+                valid[:, None] & head_mask[None, :],
+            )
+
+
+def ngram_hashes(
+    input_ids: torch.Tensor,
+    lookback: torch.Tensor,
+    starts: torch.Tensor,
+    seq_lens: torch.Tensor,
+    num_live: int,
+    token_map: torch.Tensor,
+    multipliers: torch.Tensor,
+    primes: torch.Tensor,
+    offsets: torch.Tensor,
+    pad_id: int,
+    skip_ids: tuple[int, ...],
+    out: torch.Tensor,
+) -> None:
+    """Write the global Engram buckets of the n-grams ending at each token.
+
+    Args:
+        input_ids: `[T]` token ids of the batch.
+        lookback: `[requests, depth]` ids preceding each request's chunk,
+            nearest first; negative ids are unknown.
+        starts: `[requests + 1]` query start offsets.
+        seq_lens: `[requests]` sequence lengths including the chunk.
+        num_live: Rows at or past this count are padding.
+        token_map: `[vocab]` compressed id of each token.
+        multipliers: `[layers, max_ngram]` per-layer hash multipliers.
+        primes: `[layers, columns]` bucket count of each hash column.
+        offsets: `[layers, columns]` first global bucket of each column.
+        pad_id: Compressed id standing in for missing history.
+        skip_ids: Up to three token ids (pad and visual tokens) whose rows
+            get no buckets.
+        out: `[layers, T, columns]` INT32 buckets; skipped rows are -1.
+
+    """
+    num_tokens = input_ids.numel()
+    layers, max_ngram = multipliers.shape
+    heads = primes.shape[1] // (max_ngram - 1)
+    assert out.shape == (layers, num_tokens, primes.shape[1]) and out.is_contiguous()
+    assert input_ids.is_contiguous() and len(skip_ids) <= 3
+    if num_tokens == 0:
+        return
+    skip0, skip1, skip2 = (*skip_ids, -1, -1, -1)[:3]
+    block = 32
+    _ngram_hash_kernel[(triton.cdiv(num_tokens, block), layers)](
+        input_ids,
+        token_map,
+        lookback,
+        starts,
+        seq_lens,
+        multipliers,
+        primes,
+        offsets,
+        out,
+        num_tokens,
+        min(num_live, num_tokens),
+        starts.numel() - 1,
+        token_map.numel(),
+        pad_id,
+        skip0,
+        skip1,
+        skip2,
+        lookback.shape[1],
+        lookback.stride(0),
+        lookback.stride(1),
+        MAX_NGRAM=max_ngram,
+        HEADS=heads,
+        BLOCK_T=block,
+        BLOCK_H=triton.next_power_of_2(heads),
+        num_warps=4,
+    )

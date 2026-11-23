@@ -188,10 +188,11 @@ class HYV4FlashModel(HYV4Model):
                     self._record_part(name, None)
                     self.engram_hash.load_lookup(value)
                     continue
-                module = self.layers[int(layer)].engram_layer
-                for local_name in module.load_weights([(leaf, value)]):
+                filled = self.layers[int(layer)].engram_layer.load_weight(leaf, value)
+                if filled is not None:
+                    local_name, part = filled
                     target = f"layers.{layer}.engram_layer.{local_name}"
-                    self._record_part(target, None)
+                    self._record_part(target, part)
                     loaded.add(target)
                 continue
             expert = _EXPERT_WEIGHT.fullmatch(name)
@@ -279,8 +280,11 @@ class HYV4FlashModel(HYV4Model):
                 )
                 shards = ("w1", "w3") if leaf.startswith("w13_") else ("w2",)
                 expected = {(i, s) for i in local_ids for s in shards}
-            else:
+            elif hasattr(module, "output_sizes"):
                 expected = set(range(len(module.output_sizes)))
+            else:
+                # Engram stacks one checkpoint tensor per parameter row.
+                expected = set(range(getattr(module, leaf).shape[0]))
             if parts != expected:
                 raise ValueError(f"Incomplete Flash checkpoint shards: {name}")
 
@@ -293,6 +297,10 @@ class HYV4FlashForCausalLM(HYV4ForCausalLM):
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     hf_to_vllm_mapper = HYV4_MLP_MAPPER | WeightsMapper(
         orig_to_new_substr={".compressed_indexer.": ".indexer."},
+        orig_to_new_stacked={
+            ".indexer.key_value_projection.": (".indexer.key_projection.", 0),
+            ".indexer.key_gate_projection.": (".indexer.key_projection.", 1),
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:

@@ -8,7 +8,9 @@ kernel instead of a chain of eager elementwise ops.
 
 import torch
 
+from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
 from vllm.triton_utils import tl, tldevice, triton
+from vllm.utils.math_utils import round_up
 
 INDEX_DIM = 128
 _ROPE_DIM = 64
@@ -169,30 +171,31 @@ def _quantize_query_kernel(
 
 
 @triton.jit
-def _pool_lanes(
-    gate_row, value_row, Ape, lanes, mask, R: tl.constexpr, BM: tl.constexpr
-):
-    """Softmax over the `R` group members, then the weighted value sum."""
+def _pool_lanes(value_row, Ape, lanes, mask, R: tl.constexpr, BM: tl.constexpr):
+    """Softmax over the `R` group members, then the weighted value sum.
+
+    Each member row holds 128 values followed by 128 gate logits.
+    """
+    gate_row = value_row + 128
     peak = tl.full((BM, 32), float("-inf"), tl.float32)
     for r in tl.static_range(R):
-        logit = tl.load(gate_row + r * 128 + lanes, mask, 0)
+        logit = tl.load(gate_row + r * 256 + lanes, mask, 0)
         peak = tl.maximum(peak, logit + tl.load(Ape + r * 128 + lanes))
     total = tl.zeros((BM, 32), tl.float32)
     for r in tl.static_range(R):
-        logit = tl.load(gate_row + r * 128 + lanes, mask, 0)
+        logit = tl.load(gate_row + r * 256 + lanes, mask, 0)
         total += tldevice.exp(logit + tl.load(Ape + r * 128 + lanes) - peak)
     pooled = tl.zeros((BM, 32), tl.float32)
     for r in tl.static_range(R):
-        logit = tl.load(gate_row + r * 128 + lanes, mask, 0)
+        logit = tl.load(gate_row + r * 256 + lanes, mask, 0)
         weight = tldevice.exp(logit + tl.load(Ape + r * 128 + lanes) - peak) / total
-        pooled += tl.load(value_row + r * 128 + lanes, mask, 0) * weight
+        pooled += tl.load(value_row + r * 256 + lanes, mask, 0) * weight
     return pooled
 
 
 @triton.jit
 def _pool_quantize_write_kernel(
-    Values,
-    Gates,
+    Projection,
     Ape,
     NormWeight,
     Pos,
@@ -228,12 +231,11 @@ def _pool_quantize_write_kernel(
     mask = live[:, None]
 
     # Lanes are gathered as [0:32), [32:64), rotary evens and rotary odds.
-    gate_row = Gates + slot64[:, None] * (R * 128)
-    value_row = Values + slot64[:, None] * (R * 128)
-    pooled0 = _pool_lanes(gate_row, value_row, Ape, col, mask, R, BM)
-    pooled1 = _pool_lanes(gate_row, value_row, Ape, 32 + col, mask, R, BM)
-    pooled2 = _pool_lanes(gate_row, value_row, Ape, 64 + 2 * col, mask, R, BM)
-    pooled3 = _pool_lanes(gate_row, value_row, Ape, 65 + 2 * col, mask, R, BM)
+    value_row = Projection + slot64[:, None] * (R * 256)
+    pooled0 = _pool_lanes(value_row, Ape, col, mask, R, BM)
+    pooled1 = _pool_lanes(value_row, Ape, 32 + col, mask, R, BM)
+    pooled2 = _pool_lanes(value_row, Ape, 64 + 2 * col, mask, R, BM)
+    pooled3 = _pool_lanes(value_row, Ape, 65 + 2 * col, mask, R, BM)
     square = (
         tl.sum(pooled0 * pooled0, 1)
         + tl.sum(pooled1 * pooled1, 1)
@@ -348,8 +350,7 @@ def quantize_query(query, head_weights, positions, parameters, padded_heads):
 
 
 def pool_quantize_write(
-    values,
-    gates,
+    projection,
     ape,
     norm_weight,
     eps,
@@ -365,8 +366,8 @@ def pool_quantize_write(
     """Gate-pool raw keys, RoPE, FWHT, FP8-quantize and write pool pages.
 
     Args:
-        values: `[slots, ratio, 128]` FP32 value projections.
-        gates: `[slots, ratio, 128]` FP32 gate projections.
+        projection: `[slots, ratio, 256]` FP32 value projections followed
+            by gate projections.
         ape: `[ratio, 128]` intra-group position bias.
         norm_weight: `[128]` key RMSNorm weight.
         eps: RMSNorm epsilon.
@@ -380,16 +381,15 @@ def pool_quantize_write(
         mx_scales: Store scales as four UE8M0 bytes instead of FP32.
 
     """
-    slots, ratio, dim = values.shape
-    assert dim == INDEX_DIM and values.is_contiguous() and gates.is_contiguous()
+    slots, ratio, dim = projection.shape
+    assert dim == 2 * INDEX_DIM and projection.is_contiguous()
     assert cache.dtype == torch.uint8 and cache.stride(0) % 4 == 0
     if slots == 0:
         return
     page = cache.shape[1]
     block = 16
     _pool_quantize_write_kernel[(triton.cdiv(slots, block),)](
-        values,
-        gates,
+        projection,
         ape.contiguous(),
         norm_weight,
         positions,
@@ -409,30 +409,19 @@ def pool_quantize_write(
         MX=mx_scales,
         BM=block,
         enable_fp_fusion=False,
-        **_rope_arguments(positions, parameters, values.device),
+        **_rope_arguments(positions, parameters, projection.device),
     )
 
 
-@triton.jit
-def _mask_columns_kernel(Logits, Upper, ROW, width, BLOCK: tl.constexpr):
-    row = tl.program_id(0).to(tl.int64)
-    column = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    upper = tl.load(Upper + row)
-    tl.store(
-        Logits + row * ROW + column,
-        float("-inf"),
-        (column < width) & (column >= upper),
-    )
-
-
-@triton.jit
+# COUNT follows the context length below the group budget; keep it runtime.
+@triton.jit(do_not_specialize=["COUNT"])
 def _expand_groups_kernel(
-    Values,
     Indices,
     Logical,
     Active,
     Out,
-    COUNT: tl.constexpr,
+    COUNT,
+    INDEX_ROW,
     COUNT_P2: tl.constexpr,
     RATIO: tl.constexpr,
     OUT_WIDTH: tl.constexpr,
@@ -442,10 +431,9 @@ def _expand_groups_kernel(
     row = tl.program_id(0).to(tl.int64)
     k = tl.arange(0, COUNT_P2)
     selected = k < COUNT
-    value = tl.load(Values + row * COUNT + k, selected, float("-inf"))
-    index = tl.load(Indices + row * COUNT + k, selected, 0).to(tl.int32)
+    index = tl.load(Indices + row * INDEX_ROW + k, selected, -1)
     sentinel: tl.constexpr = 2147483647
-    group = tl.sort(tl.where(value != float("-inf"), index, sentinel))
+    group = tl.sort(tl.where(index >= 0, index, sentinel))
 
     position = tl.load(Logical + row)
     live = (position >= 0) & tl.load(Active + row).to(tl.int1)
@@ -469,11 +457,20 @@ def _expand_groups_kernel(
     tl.store(out + column, -1, (column >= filled) & (column < OUT_WIDTH))
 
 
-def select_expand_groups(logits, upper, budget, logical, active, ratio, out):
+def select_expand_groups(
+    logits: torch.Tensor,
+    upper: torch.Tensor,
+    budget: int,
+    logical: torch.Tensor,
+    active: torch.Tensor,
+    ratio: int,
+    out: torch.Tensor,
+    topk: SparseIndexerTopk,
+) -> None:
     """Pick each row's top pool groups and expand them to sorted token indices.
 
     Args:
-        logits: `[rows, width]` FP32 group scores; masked in place.
+        logits: `[rows, width]` FP32 group scores.
         upper: `[rows]` number of complete groups visible to each row.
         budget: Maximum number of recalled groups.
         logical: `[rows]` logical query positions (negative when padded).
@@ -481,6 +478,7 @@ def select_expand_groups(logits, upper, budget, logical, active, ratio, out):
         ratio: Tokens per group.
         out: `[rows, budget * ratio + ratio]` INT32 destination. Live indices
             are packed in ascending order, followed by `-1` padding.
+        topk: The sparse indexer top-k stage that selects the groups.
 
     """
     rows, width = logits.shape
@@ -489,19 +487,18 @@ def select_expand_groups(logits, upper, budget, logical, active, ratio, out):
     if rows == 0:
         return
     assert logits.stride(1) == 1
-    block = 1024
-    _mask_columns_kernel[(rows, triton.cdiv(width, block))](
-        logits, upper, logits.stride(0), width, block
-    )
     count = min(budget, width)
-    values, indices = logits.topk(count, dim=-1, sorted=False)
+    # Selects within each row's first `upper` groups, -1 past them. A 32-byte
+    # row pitch suits every backend's output stride.
+    indices = out.new_empty(rows, round_up(count, 8))[:, :count]
+    topk.forward(logits, upper, 1, indices, count, width)
     _expand_groups_kernel[(rows,)](
-        values,
         indices,
         logical,
         active,
         out,
         COUNT=count,
+        INDEX_ROW=indices.stride(0),
         COUNT_P2=triton.next_power_of_2(count),
         RATIO=ratio,
         OUT_WIDTH=out_width,

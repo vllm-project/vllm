@@ -209,11 +209,18 @@ class HYV4DecoderLayer(nn.Module):
         """
         assert self.ihc_attn_boundary is not None
         assert self.ihc_mlp_boundary is not None
-        args = carry or (self.hc_attn_layer.prepare_input(hidden_states),)
-        residual, hidden_states, post_gates = self.ihc_attn_boundary(*args)
+        if carry is None:
+            boundary = self.ihc_attn_boundary(
+                self.hc_attn_layer.prepare_input(hidden_states)
+            )
+        else:
+            boundary = self.ihc_attn_boundary(
+                carry.residual, carry.mlp_out, carry.post_gates
+            )
+        residual, hidden_states, post_gates = boundary
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         residual, hidden_states, post_gates = self.ihc_mlp_boundary(
-            hidden_states, residual, post_gates
+            residual, hidden_states, post_gates
         )
         return IHCCarry(self.mlp(hidden_states), residual, post_gates)
 

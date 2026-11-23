@@ -8,8 +8,12 @@ from torch import nn
 from vllm import envs
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     fp8_fp4_paged_mqa_logits,
@@ -33,6 +37,9 @@ class FlashCompressedIndexer(nn.Module):
             raise RuntimeError("Flash IndexPool requires DeepGEMM paged MQA")
         self.ratio = config.compressed_indexer_compress_ratio
         self.group_budget = config.compressed_indexer_group_topk - 1
+        self.topk = get_indexer_topk(
+            vllm_config.kernel_config.sparse_indexer_topk_backend
+        )
         self.num_heads = config.compressed_indexer_num_attention_heads
         if not 1 <= self.num_heads <= 64:
             raise ValueError("IndexPool requires 1..64 scoring heads")
@@ -60,8 +67,16 @@ class FlashCompressedIndexer(nn.Module):
                 ),
             )
         self.token_key_norm = RMSNorm(128, eps=self.eps)
-        self.key_value_projection = nn.Linear(128, 128, bias=False, dtype=torch.float32)
-        self.key_gate_projection = nn.Linear(128, 128, bias=False, dtype=torch.float32)
+        # Value then gate projection, replicated, so one GEMM produces both.
+        self.key_projection = MergedColumnParallelLinear(
+            128,
+            [128, 128],
+            bias=False,
+            params_dtype=torch.float32,
+            prefix=f"{prefix}.key_projection",
+            return_bias=False,
+            disable_tp=True,
+        )
         self.key_norm = nn.RMSNorm(128, eps=self.eps, dtype=torch.float32)
         self.intra_group_ape = nn.Parameter(
             torch.empty(self.ratio, 128, dtype=torch.float32)
@@ -80,10 +95,9 @@ class FlashCompressedIndexer(nn.Module):
 
     def forward(self, hidden_states, q_c, positions, rope=None):
         output = self.topk_indices_buffer[: hidden_states.shape[0]]
-        output.fill_(-1)
         metadata = get_forward_context().attn_metadata
         if metadata is None:
-            return output
+            return output.fill_(-1)
         if not isinstance(metadata, dict):
             raise TypeError("IndexPool requires per-layer metadata")
         km = metadata[self.k_cache.prefix]
@@ -94,7 +108,10 @@ class FlashCompressedIndexer(nn.Module):
             raise TypeError("IndexPool cache metadata has an incompatible type")
         tokens = km.num_actual_tokens
         if tokens == 0 or km.seq_lens.numel() == 0:
-            return output
+            return output.fill_(-1)
+        # Scoring rows below `tokens` are fully written, padding included.
+        if tokens < output.shape[0]:
+            output[tokens:].fill_(-1)
         keys = self.token_key_norm(
             self.token_key_projection(hidden_states)[0]
         ).bfloat16()
@@ -108,12 +125,15 @@ class FlashCompressedIndexer(nn.Module):
             owner,
             logical,
             upper,
+            score_lengths,
+            token_table,
             live,
         ) = prepare_groups(
             keys,
             positions,
             tail,
             tm.block_table,
+            km.block_table,
             km.query_start_loc,
             km.seq_lens,
             tokens,
@@ -121,8 +141,7 @@ class FlashCompressedIndexer(nn.Module):
         )
         if raw.shape[0]:
             pool_quantize_write(
-                self.key_value_projection(raw.float()),
-                self.key_gate_projection(raw.float()),
+                self.key_projection(raw),
                 self.intra_group_ape,
                 self.key_norm.weight,
                 self.eps,
@@ -162,12 +181,12 @@ class FlashCompressedIndexer(nn.Module):
         for begin in range(0, tokens, chunk):
             end = min(tokens, begin + chunk)
             bounds = upper[begin:end]
-            lengths = bounds.clamp_min(1).int()[:, None].contiguous()
-            indices = owner[begin:end].int().contiguous() if self.varlen else None
+            lengths = score_lengths[begin:end]
+            indices = owner[begin:end] if self.varlen else None
             schedule = get_paged_mqa_logits_metadata(
                 lengths, POOL_PAGE_SIZE, self.num_sms, indices=indices
             )
-            table = km.block_table[owner[begin:end]]
+            table = token_table[begin:end]
             logits = fp8_fp4_paged_mqa_logits(
                 (
                     quant_q[begin:end],
@@ -189,5 +208,6 @@ class FlashCompressedIndexer(nn.Module):
                 live[begin:end],
                 self.ratio,
                 output[begin:end],
+                self.topk,
             )
         return output

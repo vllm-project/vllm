@@ -85,7 +85,7 @@ def _inputs(num_tokens, hidden_size, offset_views):
     [1, 7, 16, 17, 24, 32, 33, 48, 49, 57, 96, 97, 128, 129, 192, 193, 256, 257]
     + [513, 1025, 2051, 8193],
 )
-@pytest.mark.parametrize("hidden_size", [1088, 2048, 4096, 5120, 6144, 7168])
+@pytest.mark.parametrize("hidden_size", [1088, 2048, 3072, 4096, 5120, 6144, 7168])
 @pytest.mark.parametrize("with_post", [True, False])
 @pytest.mark.parametrize("with_norm", [True, False])
 @pytest.mark.parametrize("offset_views", [False, True])
@@ -99,15 +99,19 @@ def test_boundary_matches_reference(
 
 
 # More than 1024 tokens with a post step take the TMA stats kernel on B200 /
-# B300 (k-split counts 1-3 at these sizes, partial 64-token tiles).
+# B300 (k-split counts 1-3 at these sizes, partial 64-token tiles), for both the
+# HY V4 and HY V4 Flash hidden sizes.
 @pytest.mark.parametrize("num_tokens", [1024, 1025, 1100, 2051, 4096, 8193, 16384])
+@pytest.mark.parametrize("hidden_size", [3072, 6144])
 @pytest.mark.parametrize("with_post", [True, False])
 @pytest.mark.parametrize("with_norm", [True, False])
 @pytest.mark.parametrize("round_before_norm", [False, True])
 def test_long_prefill_boundary_matches_reference(
-    num_tokens, with_post, with_norm, round_before_norm
+    num_tokens, hidden_size, with_post, with_norm, round_before_norm
 ):
-    _check_boundary(num_tokens, 6144, with_post, with_norm, False, round_before_norm)
+    _check_boundary(
+        num_tokens, hidden_size, with_post, with_norm, False, round_before_norm
+    )
 
 
 def _check_boundary(
@@ -161,8 +165,13 @@ def _check_boundary(
             new_residual, weight, scale, base, norm_weight
         )
     torch.testing.assert_close(gates, ref_gates, rtol=1e-4, atol=1e-4)
-    rel_l2 = (hidden.float() - ref_hidden.float()).norm() / ref_hidden.float().norm()
-    assert rel_l2 < 2e-4, rel_l2
+    diff = (hidden.float() - ref_hidden.float()).abs()
+    rel_l2 = diff.norm() / ref_hidden.float().norm()
+    # One flipped BF16 rounding can dominate a one-token row on its own.
+    one_flip = (diff > 0).sum() <= 1 and (
+        diff <= ref_hidden.float().abs() * 2.0**-7
+    ).all()
+    assert rel_l2 < 2e-4 or one_flip, rel_l2
 
 
 def test_tma_path_writes_the_two_kernel_residual():
@@ -201,7 +210,7 @@ def test_boundary_is_deterministic(num_tokens):
 @pytest.mark.parametrize(
     "num_tokens", [1, 3, 17, 30, 45, 64, 89, 130, 250, 2051, 3000, 16384]
 )
-@pytest.mark.parametrize("hidden_size", [2048, 6144])
+@pytest.mark.parametrize("hidden_size", [2048, 3072, 6144])
 @pytest.mark.parametrize("with_post", [True, False])
 def test_fp8_out_matches_separate_quant(num_tokens, hidden_size, with_post):
     xa, residual, post, weight, scale, base, norm_weight = _inputs(

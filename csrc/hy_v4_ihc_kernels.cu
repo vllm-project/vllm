@@ -1888,9 +1888,13 @@ inline int small_threads(int64_t hidden, SmallConfig cfg) {
                   cfg.tokens * ((vecs + 31) / 32) * 32);
 }
 
-// Only HY V4's hidden size, which the configurations are tuned for.
+// The configurations are tuned for HY V4's hidden size; smaller ones (HY V4
+// Flash) split into narrower slices with fewer threads. Slices stay whole FP8
+// scale groups, and fp8_out must not change the configuration (it would change
+// the BF16 result's summation order).
 inline bool small_fits(int64_t hidden, SmallConfig cfg) {
-  return hidden == kSmallHidden && small_threads(hidden, cfg) <= kSmallBlock;
+  return hidden <= kSmallHidden && hidden % (cfg.cluster * kQuantGroup) == 0 &&
+         small_threads(hidden, cfg) <= kSmallBlock;
 }
 
 // Clusters of a small-path variant resident at once, cached per device,
@@ -2079,12 +2083,12 @@ inline bool coop_fits(int ctas, int tile, bool has_post, bool fp8_out,
   return ctas <= resident;
 }
 
-// The TMA stats path: HY V4's hidden size on SM 10.0 / 10.3 (B200, B300), the
-// targets ihc_stats_tma_kernel is compiled for.
+// The TMA stats path: whole 128-column chunks on SM 10.0 / 10.3 (B200, B300),
+// the targets ihc_stats_tma_kernel is compiled for.
 inline bool tma_supported(int64_t hidden, int device) {
   constexpr int kMaxDevices = 64;
   static std::atomic<int> cache[kMaxDevices] = {};  // 0 unknown, 1 yes, -1 no
-  if (hidden != kSmallHidden) {
+  if (hidden % tma::kChunkK != 0) {
     return false;
   }
   STD_TORCH_CHECK(device >= 0 && device < kMaxDevices,
@@ -2371,12 +2375,18 @@ hy_v4_ihc_boundary(torch::stable::Tensor const& residual,
                bf16_tensor_map(res_out, num_tokens, k_total, tma::kTileM),
                reinterpret_cast<float const*>(post->data_ptr()), partials_ptr,
                m, h, ksplits);
+    // HY V4's hidden size issues its residual loads before the gates.
     constexpr int kPrefetch = kSmallHidden / (kBlock * kVec);
+    bool const prefetch = hidden == kSmallHidden;
     launch_pdl(
-        fp8_out
-            ? pick_finish_kernel<true, kPrefetch>(fuse_norm, round_before_norm)
-            : pick_finish_kernel<false, kPrefetch>(fuse_norm,
-                                                   round_before_norm),
+        fp8_out ? (prefetch
+                       ? pick_finish_kernel<true, kPrefetch>(fuse_norm,
+                                                             round_before_norm)
+                       : pick_finish_kernel<true>(fuse_norm, round_before_norm))
+                : (prefetch ? pick_finish_kernel<false, kPrefetch>(
+                                  fuse_norm, round_before_norm)
+                            : pick_finish_kernel<false>(fuse_norm,
+                                                        round_before_norm)),
         m, kBlock, 1, 0, stream, static_cast<__nv_bfloat16 const*>(res_out),
         static_cast<float const*>(partials_ptr),
         reinterpret_cast<float const*>(hc_scale.data_ptr()),
