@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen4Exp n-gram embeddings with device, pinned-host and disk storage."""
 
-import mmap
-import os
 from collections.abc import Iterable
 
 import torch
@@ -17,6 +15,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
+from vllm.model_executor.model_loader.checkpoint_rows import CheckpointRows
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -47,18 +46,6 @@ __all__ = [
     "Qwen4ExpPLEUnquantizedEmbeddingMethod",
     "Qwen4ExpNGramEmbedding",
 ]
-
-
-def _maps_entry(ptr: int) -> tuple[str, int]:
-    """Return the path and file offset of `ptr` from `/proc/self/maps`."""
-    with open("/proc/self/maps") as maps:
-        for line in maps:
-            fields = line.split(maxsplit=5)
-            low, high = (int(bound, 16) for bound in fields[0].split("-"))
-            if low <= ptr < high:
-                path = fields[5].rstrip("\n") if len(fields) > 5 else ""
-                return path, ptr - low + int(fields[2], 16)
-    return "", 0
 
 
 class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
@@ -119,11 +106,12 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
                 (*rows, embedding_dim), dtype=params_dtype, device=device
             )
             self._row_ids = torch.arange(rows[0] * rows[1], device=device)
-        self._shards: dict[str, dict[int, torch.Tensor]] = {n: {} for n in self._planes}
-        self._shard_size = 0
-        self._bound = False
-        self._fds: dict[str, int] = {}
-        self._sources: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._checkpoint_rows = {
+            name: CheckpointRows(
+                f"PLE {name}", self.org_vocab_size, getattr(self, name).dtype
+            )
+            for name in self._planes
+        }
 
     def allocate_embedding_weight(
         self,
@@ -142,45 +130,13 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
         name: str,
     ) -> None:
         """Keep a checkpoint shard as a zero-copy byte view of its storage."""
-        if self._bound:
-            raise RuntimeError("PLE disk offload does not support weight reload")
-        dtype = getattr(self, name).dtype
-        if loaded_weight.dtype != dtype:
-            raise ValueError(
-                f"PLE shard {name} dtype {loaded_weight.dtype} must match the "
-                f"embedding dtype {dtype}; disk offload serves rows as stored"
-            )
-        if shard_index in self._shards[name]:
-            raise ValueError(f"Duplicate PLE embedding shard {shard_index} {name}")
-        self._shards[name][shard_index] = loaded_weight.view(torch.uint8)
-        self._shard_size = shard_size
+        self._checkpoint_rows[name].add(shard_index, loaded_weight, shard_size)
 
     def bind_file_shards(self) -> None:
         """Record each shard's file and offset and release the loader's views."""
-        if self._bound or self._dummy:
-            self._bound = True
-            return
-        for name, shards in self._shards.items():
-            rows = sum(shard.shape[0] for shard in shards.values())
-            if rows != self.org_vocab_size:
-                raise ValueError(
-                    f"PLE {name} shards cover {rows} of {self.org_vocab_size} rows"
-                )
-            fds, bases = torch.zeros(2, len(shards)).long()
-            for index, shard in shards.items():
-                # The loader hands over mmap views, so find their files here.
-                path, offset = _maps_entry(shard.data_ptr())
-                if not path or not os.path.isfile(path):
-                    raise ValueError(
-                        f"PLE embedding shard {index} {name} is not a "
-                        f"file-backed view ({path or 'anonymous'})"
-                    )
-                if path not in self._fds:
-                    self._fds[path] = os.open(path, os.O_RDONLY)
-                fds[index], bases[index] = self._fds[path], offset
-            self._sources[name] = (fds, bases)
-        self._shards.clear()
-        self._bound = True
+        if not self._dummy:
+            for rows in self._checkpoint_rows.values():
+                rows.bind()
 
     def copy_ids_to_host(self, ids: torch.Tensor) -> None:
         self._host_ids[: ids.shape[0]].copy_(ids, non_blocking=True)
@@ -188,51 +144,17 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
     def stage_rows(self, num_tokens: int) -> None:
         """Read the rows of `_host_ids[:num_tokens]` and copy them to staging."""
         ids = self._host_ids[:num_tokens].flatten()
-        if not self._fds:
+        if self._dummy:
             for _, host, _ in self._planes.values():
                 host[:num_tokens].view(torch.uint8).zero_()
         else:
             ids, inverse = ids.unique(return_inverse=True)
-            if ids.numel() and not 0 <= ids[0] <= ids[-1] < self.org_vocab_size:
-                raise IndexError(f"PLE id out of range for {self.org_vocab_size} rows")
-            shard = ids // self._shard_size
-            local = ids - shard * self._shard_size
             for name, (_, host, rows) in self._planes.items():
                 out = host[:num_tokens].flatten(0, 1).view(torch.uint8)
-                self._read_rows(name, shard, local, rows[: ids.numel()])
+                self._checkpoint_rows[name].read(ids, rows[: ids.numel()])
                 torch.index_select(rows[: ids.numel()], 0, inverse, out=out)
         for staging, host, _ in self._planes.values():
             staging[:num_tokens].copy_(host[:num_tokens], non_blocking=True)
-
-    def _read_rows(
-        self,
-        name: str,
-        shard: torch.Tensor,
-        local: torch.Tensor,
-        rows: torch.Tensor,
-    ) -> None:
-        """Read one plane's rows for sorted distinct ids into `rows`."""
-        fds, bases = self._sources[name]
-        page, row_bytes = mmap.PAGESIZE, rows.shape[1]
-        start = bases[shard] + local * row_bytes
-        first, last = start // page, (start + row_bytes - 1) // page
-        run = torch.ones_like(first, dtype=torch.bool)
-        run[1:] = (first[1:] > last[:-1] + 1) | (shard[1:] != shard[:-1])
-        # Queue every page run before the serial reads.
-        for fd, lo, hi in zip(
-            fds[shard[run]].tolist(),
-            first[run].tolist(),
-            last[run.roll(-1)].tolist(),
-        ):
-            os.posix_fadvise(
-                fd, lo * page, (hi - lo + 1) * page, os.POSIX_FADV_WILLNEED
-            )
-        for row, fd, offset in zip(rows.numpy(), fds[shard].tolist(), start.tolist()):
-            if os.preadv(fd, [row], offset) != row_bytes:
-                raise ValueError(
-                    f"PLE shard file {os.readlink(f'/proc/self/fd/{fd}')} is "
-                    f"truncated at offset {offset}"
-                )
 
     def staged_rows(self, num_tokens: int) -> torch.Tensor:
         """Return this step's staged rows, decoded if they are NVFP4."""
