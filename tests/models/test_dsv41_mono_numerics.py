@@ -920,8 +920,6 @@ def _check_largestep_hook(rank: int, tp: int, device) -> None:
     load: the gfx942 copies of the routed experts (`mono942`), then the hook.
     The block's output (routed + shared, all-reduced) against the layer's own
     forward on the same input, with the same router."""
-    import types
-
     from vllm.config import set_current_vllm_config
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
@@ -950,7 +948,9 @@ def _check_largestep_hook(rank: int, tp: int, device) -> None:
         inter=mono_decode._routed_inter_942(),
     )
     process_weights_after_loading(moe, vc.model_config, device)
-    hook = LargeStepHook(types.SimpleNamespace(), moe, tp, device)
+    # The hook keeps a weak reference to its decoder layer, used only by
+    # `takes`. forward does not read it, so an empty module stands in.
+    hook = LargeStepHook(torch.nn.Module(), moe, tp, device)
     g = torch.Generator(device=device).manual_seed(3000)
     for rows in (48, 144, 256):
         x = (torch.randn(rows, HIDDEN, generator=g, device=device) * 0.5).to(
@@ -963,10 +963,14 @@ def _check_largestep_hook(rank: int, tp: int, device) -> None:
             got = hook.forward(moe, x.clone(), ids).float()
             want = moe(x.clone(), ids).float()
         assert not torch.isnan(got).any(), rows
-        err = _rel(got, want)
-        # Both paths quantize x to MXFP8 and round each pick to bf16. The f32
-        # sums run in other orders, so near-tie values can round apart.
-        assert err < 3e-2, f"TP{tp} rank {rank}, {rows} rows: rel L2 {err:.3e}"
+        cos, err = _cos(got, want), _rel(got, want)
+        # The block quantizes x and the intermediate to MXFP8, while vLLM's
+        # a16w4 MoE keeps them in bf16, so the two differ by that rounding:
+        # cos 0.99902 and rel L2 0.044 at 48, 144 and 256 rows on MI325X TP4.
+        # A wrong expert, weight or scale gives rel L2 near 1.
+        assert cos > 0.998 and err < 6e-2, (
+            f"TP{tp} rank {rank}, {rows} rows: cos {cos:.6f}, rel L2 {err:.3e}"
+        )
 
 
 @pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
