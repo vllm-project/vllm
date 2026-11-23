@@ -1,13 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The tool-call grammar must only admit encodings the parser recognises.
-
-xgrammar's builtin structural tags spell markers such as ``<tool_call>`` as
-strings, so the grammar also accepts the marker assembled from ordinary
-sub-tokens. The streaming parser engine keys those markers by dedicated token
-ID and treats the assembled spelling as content. ``bind_marker_tokens`` closes
-that gap by matching the markers at the token level.
-"""
+"""Test marker binding and grammar compatibility with the streaming parser."""
 
 import pytest
 import xgrammar as xgr
@@ -28,6 +21,7 @@ from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.glm47_moe import Glm47MoeParser
 from vllm.tokenizers import get_tokenizer
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 from vllm.tool_parsers.structural_tag_markers import bind_marker_tokens
@@ -293,18 +287,14 @@ def test_constrained_grammar_only_admits_parseable_markers(case, tool_choice):
     tag = parser.get_structural_tag(request)
 
     assert tag is not None
-    # What the grammar admits, the parser parses cleanly ...
     assert _accepts(tokenizer, tag, atomic)
     assert _parse(parser, tokenizer, atomic) == (["get_weather"], "")
-    # ... and the encoding the parser cannot parse cleanly (GLM finds no
-    # tool call at all, Qwen leaks the marker into content) is rejected.
     assert _parse(parser, tokenizer, split) != (["get_weather"], "")
     assert not _accepts(tokenizer, tag, split)
 
 
-def test_auto_grammar_keeps_free_text_and_dedicated_calls(case):
+def test_auto_preserves_builtin_grammar(case):
     parser, tokenizer, body = case
-    atomic, _ = _encodings(tokenizer, body)
     strict_tools = [
         {"type": "function", "function": {**tool["function"], "strict": True}}
         for tool in TOOLS
@@ -313,27 +303,11 @@ def test_auto_grammar_keeps_free_text_and_dedicated_calls(case):
         messages=[], model="m", tools=strict_tools, tool_choice="auto"
     )
 
+    builtin_tag = ToolParser.get_structural_tag(parser, request)
+    assert builtin_tag is not None
     tag = parser.get_structural_tag(request)
-
-    assert tag is not None
+    assert tag == builtin_tag
+    atomic, _ = _encodings(tokenizer, body)
     prose = tokenizer.encode("Sure, one moment.", add_special_tokens=False)
     assert _accepts(tokenizer, tag, prose)
     assert _accepts(tokenizer, tag, [*prose, *atomic, *prose])
-    # The string excludes of the builtin tag became token excludes. Where the
-    # builtin forbids </tool_call> in free text, the dedicated token is still
-    # rejected ...
-    end = tokenizer.get_vocab()["</tool_call>"]
-    assert isinstance(tag.format, TokenTriggeredTagsFormat)
-    if "</tool_call>" in tag.format.exclude_tokens:
-        assert not _accepts(tokenizer, tag, [*prose, end])
-    # ... while the same text spelled from ordinary tokens is admitted, and
-    # the parser reads it as content, which is what the token excludes model.
-    split_end = [
-        *tokenizer.encode("</", add_special_tokens=False),
-        *tokenizer.encode("tool_call", add_special_tokens=False),
-        *tokenizer.encode(">", add_special_tokens=False),
-    ]
-    assert end not in split_end
-    stray = [*prose, *split_end, *prose]
-    assert _accepts(tokenizer, tag, stray)
-    assert _parse(parser, tokenizer, stray) == ([], tokenizer.decode(stray))

@@ -170,14 +170,7 @@ class ParserEngine(Parser):
 
     @property
     def token_id_markers(self) -> frozenset[str]:
-        """Marker strings the streaming engine recognises only by token ID.
-
-        These are the ``token_id_terminals`` of the engine config that
-        resolve to a single token in the vocabulary. Once token IDs have
-        been seen, the engine treats the same text spelled from ordinary
-        tokens as content, so any grammar constraining tool calls must
-        require the dedicated tokens for these markers.
-        """
+        """Markers the streaming engine matches by dedicated token ID."""
         vocab = self.vocab
         return frozenset(
             text

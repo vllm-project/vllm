@@ -1,19 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Bind structural-tag marker strings to their dedicated token IDs.
-
-xgrammar's builtin structural tags spell tool-call markers such as
-``<tool_call>`` as plain strings, so the grammar admits *any* tokenization of
-that text. The streaming parser engine, once it has seen token IDs, recognises
-the markers listed in ``token_id_terminals`` only by their dedicated token ID
-and treats the same text spelled from ordinary tokens as content. Under
-``tool_choice="required"`` a generation can therefore satisfy the grammar
-while the parser reports no tool call at all.
-
-:func:`bind_marker_tokens` rewrites a structural tag so that every marker the
-parser keys by token ID is matched by xgrammar as that single token. The
-grammar then admits exactly the encodings the parser recognises.
-"""
+"""Bind structural-tag markers to the token IDs used by the streaming parser."""
 
 from collections.abc import Collection, Mapping
 
@@ -40,18 +27,7 @@ def bind_marker_tokens(
     markers: Collection[str],
     vocab: Mapping[str, int],
 ) -> StructuralTag:
-    """Match ``markers`` by dedicated token ID instead of by string.
-
-    Args:
-        tag: A structural tag, typically from xgrammar's builtin templates.
-        markers: Marker strings the parser recognises by token ID.
-        vocab: The tokenizer vocabulary. Markers that are not a single token
-            are left as strings, which matches how the parser handles them.
-
-    Returns:
-        The rewritten tag, or ``tag`` itself when nothing needs rewriting.
-
-    """
+    """Bind markers present in the vocabulary, preserving untouched formats."""
     resolved = {m for m in markers if m and m in vocab}
     if not resolved:
         return tag
@@ -163,16 +139,13 @@ class _MarkerBinder:
             None,
         )
         if marker is None:
-            # The trigger is ordinary text (e.g. Llama's JSON prefix); keep
-            # string dispatch but still bind markers inside the tags.
+            # Preserve text triggers such as Llama's JSON prefix.
             return _replace(
                 fmt, "tags", [self._bind_tag(tag, keep_begin=True) for tag in fmt.tags]
             )
         return TokenTriggeredTagsFormat(
             trigger_tokens=[marker],
             tags=[self._bind_tag(tag, begin_marker=marker) for tag in fmt.tags],
-            # Only whole tokens can be excluded at the token level. A string
-            # that is not a single token cannot be emitted as a marker anyway.
             exclude_tokens=[text for text in fmt.excludes if text in self._vocab],
             at_least_one=fmt.at_least_one,
             stop_after_first=fmt.stop_after_first,

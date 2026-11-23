@@ -14,6 +14,11 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
+from openai.types.responses import ToolChoiceFunction
+
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+)
 from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
@@ -209,11 +214,15 @@ class ParserEngineToolAdapter(ToolParser):
         tag = super().get_structural_tag(
             request, reasoning=reasoning, strict_level=strict_level
         )
-        if tag is None:
-            return None
-        # The engine keys these markers by token ID, so the grammar must
-        # require the dedicated tokens too; otherwise a generation spelled
-        # from ordinary tokens satisfies the grammar but parses as content.
+        # Optional calls need the original grammar for free text.
+        if tag is None or (
+            request.tool_choice != "required"
+            and not isinstance(
+                request.tool_choice,
+                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+            )
+        ):
+            return tag
         engine = self._parser_engine
         return bind_marker_tokens(tag, engine.token_id_markers, engine.vocab)
 
