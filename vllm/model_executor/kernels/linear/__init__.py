@@ -689,8 +689,12 @@ def _check_activation_fallback(
 
 def _quant_scheme_check(
     weight_key: QuantKey, activation_key: QuantKey | None
-) -> Callable[[type[MxFp4LinearKernel | Mxfp8LinearKernel]], str | None]:
-    def check(kernel_cls: type[MxFp4LinearKernel | Mxfp8LinearKernel]) -> str | None:
+) -> Callable[
+    [type[MxFp4LinearKernel | MxFp6LinearKernel | Mxfp8LinearKernel]], str | None
+]:
+    def check(
+        kernel_cls: type[MxFp4LinearKernel | MxFp6LinearKernel | Mxfp8LinearKernel],
+    ) -> str | None:
         if kernel_cls._supports_quant_scheme(weight_key, activation_key):
             return None
         return f"quantization scheme {weight_key}x{activation_key} not supported"
@@ -1233,28 +1237,21 @@ def init_mxfp6_linear_kernel(
     if LinearKernelOracle.maybe_skip_for_requantization_source():
         return FakeMxFp6LinearKernel()
 
+    activation_quant_key = _resolve_linear_activation_key(activation_quant_key)
     config = MxFp6LinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
     )
 
-    linear_backend = _get_linear_backend(quantization="mxfp6")
-
     platform = current_platform._enum
     possible = list(_POSSIBLE_MXFP6_KERNELS.get(platform, []))
-
-    # Apply --linear-backend filtering when set.
-    if linear_backend != "auto":
-        filtered = _filter_kernels_by_backend(linear_backend, possible)
-        if not filtered:
-            raise ValueError(
-                f"--linear-backend={linear_backend} was requested but no "
-                f"'{linear_backend}' kernel exists for MXFP6 layers."
-            )
-        possible = filtered
+    possible = _resolve_backend_kernels(possible, "MXFP6", quantization="mxfp6")
 
     kernel_cls, failure_reasons = _first_usable_kernel(
-        possible, config, activation_quant_key
+        possible,
+        config,
+        activation_quant_key,
+        _quant_scheme_check(weight_quant_key, activation_quant_key),
     )
     if kernel_cls is not None:
         logger.debug_once("Using %s for MXFP6 GEMM", kernel_cls.__name__)

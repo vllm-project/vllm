@@ -3,7 +3,11 @@
 
 from dataclasses import dataclass
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp6E2M3Static,
+    kMxfp6E3M2Static,
+)
 
 from ..base import LinearKernel
 
@@ -32,6 +36,13 @@ class MxFp6LinearKernel(LinearKernel[MxFp6LinearLayerConfig]):
 
     Each subclass implements a specific GEMM backend (CUTLASS, Marlin, etc).
     The kernel selection mechanism iterates over registered subclasses in
-    priority order,calling `is_supported` and `can_implement` to find the best
-    match for the current hardware.
+    priority order, calling `is_supported`, `_supports_quant_scheme` and
+    `can_implement` to find the best match for the current hardware.
     """
+
+    @classmethod
+    def _supports_quant_scheme(
+        cls, weight_key: QuantKey | None, activation_key: QuantKey | None
+    ) -> bool:
+        """By default, let registered kernels validate activations in can_implement."""
+        return weight_key in (kMxfp6E2M3Static, kMxfp6E3M2Static)

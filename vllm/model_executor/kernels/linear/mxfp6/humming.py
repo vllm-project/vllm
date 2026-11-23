@@ -41,6 +41,18 @@ class HummingMxFp6LinearKernel(MxFp6LinearKernel):
         return True, None
 
     @classmethod
+    def _supports_quant_scheme(
+        cls, weight_key: QuantKey | None, activation_key: QuantKey | None
+    ) -> bool:
+        if not super()._supports_quant_scheme(weight_key, activation_key):
+            return False
+        try:
+            quant_key_to_input_schema(activation_key)
+        except ValueError:
+            return False
+        return True
+
+    @classmethod
     def can_implement(cls, config: MxFp6LinearLayerConfig) -> tuple[bool, str | None]:
         try:
             quant_key_to_input_schema(config.activation_quant_key)

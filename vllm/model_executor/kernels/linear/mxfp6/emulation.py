@@ -61,17 +61,20 @@ class EmulationMxfp6LinearKernel(MxFp6LinearKernel):
         return True, None
 
     @classmethod
+    def _supports_quant_scheme(
+        cls, weight_key: QuantKey | None, activation_key: QuantKey | None
+    ) -> bool:
+        return weight_key in _WEIGHT_DEQUANT_FUNCS and (
+            activation_key is None or activation_key in _ACTIVATION_QUANT_DEQUANT_FUNCS
+        )
+
+    @classmethod
     def can_implement(cls, config: MxFp6LinearLayerConfig) -> tuple[bool, str | None]:
-        if config.weight_quant_key not in (
-            kMxfp6E2M3Static,
-            kMxfp6E3M2Static,
-        ):
+        if config.weight_quant_key not in _WEIGHT_DEQUANT_FUNCS:
             return False, "only supports MXFP6 weights"
-        if config.activation_quant_key not in (
-            None,
-            kMxfp4Dynamic,
-            kMxfp6E3M2Dynamic,
-            kMxfp6E2M3Dynamic,
+        if (
+            config.activation_quant_key is not None
+            and config.activation_quant_key not in _ACTIVATION_QUANT_DEQUANT_FUNCS
         ):
             return False, "only supports MXFP4 or MXFP6 or unquantized activations"
 

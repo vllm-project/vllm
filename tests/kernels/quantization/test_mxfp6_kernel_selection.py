@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm.config.quantization import QuantSpec, layer_target_spec_scope
 from vllm.model_executor.kernels.linear import (
     EmulationMxfp6LinearKernel,
     MxFp6LinearKernel,
@@ -148,3 +149,33 @@ def test_init_mxfp6_linear_kernel_raises_when_no_kernel_matches(platform_mock):
 
     with pytest.raises(ValueError, match="Failed to find a kernel"):
         init_mxfp6_linear_kernel(weight_quant_key=kMxfp6E3M2Static)
+
+
+@pytest.mark.parametrize("weight_key", _WEIGHT_QUANT_KEYS)
+@pytest.mark.parametrize("override", ["mxfp4", None])
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_init_mxfp6_linear_kernel_uses_activation_override(
+    platform_mock, weight_key, override
+):
+    platform_mock._enum = PlatformEnum.ROCM
+    target_spec = QuantSpec(activation=override)
+
+    with layer_target_spec_scope(target_spec):
+        kernel = init_mxfp6_linear_kernel(weight_key, kMxfp6E3M2Dynamic)
+
+    assert isinstance(kernel, EmulationMxfp6LinearKernel)
+    assert kernel.config.weight_quant_key == weight_key
+    assert kernel.config.activation_quant_key == target_spec.activation
+
+
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_init_mxfp6_linear_kernel_rejects_unsupported_activation_override(
+    platform_mock,
+):
+    platform_mock._enum = PlatformEnum.ROCM
+
+    with (
+        layer_target_spec_scope(QuantSpec(activation="mxfp8")),
+        pytest.raises(ValueError, match="quantization scheme .* not supported"),
+    ):
+        init_mxfp6_linear_kernel(kMxfp6E3M2Static, kMxfp6E3M2Dynamic)

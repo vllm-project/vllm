@@ -5,6 +5,7 @@ import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from contextlib import nullcontext
+from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -14,6 +15,7 @@ from transformers import PreTrainedConfig
 
 if TYPE_CHECKING:
     from vllm.config.cache import CacheDType
+    from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
@@ -42,6 +44,28 @@ class QuantizeMethodBase(ABC):
     `weights_already_processed`. Methods must skip tensor transforms in
     that mode; the loader driver rejects methods that do not declare support.
     """
+
+    _layer_target_spec: "QuantSpec | None" = None
+    """Activation override for a checkpoint method that selects its kernel later."""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+
+        def with_layer_target_spec(method):
+            @wraps(method)
+            def wrapped(self, *args, **kwargs):
+                if self._layer_target_spec is None:
+                    return method(self, *args, **kwargs)
+                from vllm.config.quantization import layer_target_spec_scope
+
+                with layer_target_spec_scope(self._layer_target_spec):
+                    return method(self, *args, **kwargs)
+
+            return wrapped
+
+        for name in ("create_weights", "process_weights_after_loading"):
+            if name in cls.__dict__:
+                setattr(cls, name, with_layer_target_spec(cls.__dict__[name]))
 
     @abstractmethod
     def create_weights(
@@ -357,6 +381,8 @@ def resolve_quant_method(
     if online_target is not None:
         current_platform.verify_quantization("online")
 
+    # A target without a weight key only overrides the checkpoint activation.
+    checkpoint_target_spec = target_spec if online_target is None else None
     # With an online target, the checkpoint method is never used for compute: it
     # is either a dequantization source or discarded in favour of the online
     # method (all paths below return the online method or raise). It therefore
@@ -367,11 +393,11 @@ def resolve_quant_method(
             if online_target is not None
             else nullcontext()
         ),
-        layer_target_spec_scope(target_spec if online_target is None else None),
+        layer_target_spec_scope(checkpoint_target_spec),
     ):
-        # A `targets` spec without a weight key overrides the activation of the
-        # checkpoint method.
         base_quant_method = quant_config.get_quant_method(layer, prefix)
+    if base_quant_method is not None and checkpoint_target_spec is not None:
+        base_quant_method._layer_target_spec = checkpoint_target_spec
     if online_config is None:
         # No online configuration: retain the checkpoint method.
         return base_quant_method
