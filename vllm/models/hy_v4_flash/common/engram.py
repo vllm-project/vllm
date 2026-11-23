@@ -70,7 +70,6 @@ class FlashEngramLayout:
         self.compressed_vocab_size = int(lookup.max()) + 1
         self.lookup_table = lookup.copy()
         self.token_map = lookup.tolist()
-        # Ids past the frozen map (vocabulary padding) hash as the pad id.
         pad = self.token_map[self.pad_token_id]
         self.token_map.extend([pad] * (self.vocab_size - len(self.token_map)))
         bound = max(1, (np.iinfo(np.int64).max // self.compressed_vocab_size) // 2)
