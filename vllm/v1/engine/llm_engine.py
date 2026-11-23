@@ -264,8 +264,6 @@ class LLMEngine:
                 )
             request_params = request.params
             if isinstance(request_params, SamplingParams):
-                if (lora_config := self.vllm_config.lora_config) is not None:
-                    lora_config.validate_prompt_logprobs(request_params)
                 # This request object is owned by the engine from here on.
                 self.input_processor.apply_watermarking(
                     request_params,
@@ -286,6 +284,11 @@ class LLMEngine:
                 kv_hints=kv_hints,
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
+
+        # Surface validation errors synchronously before registering request state.
+        lora_config = self.vllm_config.lora_config
+        if lora_config is not None and request.sampling_params is not None:
+            lora_config.validate_prompt_logprobs(request.sampling_params)
 
         if request.lora_request is not None:
             self._register_lora(request.lora_request)

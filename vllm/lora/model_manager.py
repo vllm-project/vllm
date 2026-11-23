@@ -10,7 +10,6 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig, LoRAVocabModule
-from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseClassificationHeadWithLoRA,
@@ -1284,9 +1283,7 @@ class LoRAModelManager:
                 org_module_name = text_name
         return lora_model.get_lora(org_module_name)
 
-    def validate_vocab_modules(
-        self, lora_model: LoRAModel, *, allow_disabled: bool = False
-    ) -> None:
+    def warn_disabled_vocab_modules(self, lora_model: LoRAModel) -> None:
         if not self.disabled_vocab_modules:
             return
         disabled = {
@@ -1300,18 +1297,13 @@ class LoRAModelManager:
             enable = " ".join(
                 sorted(disabled.union(self.lora_config.enable_vocab_modules or ()))
             )
-            message = (
-                f"LoRA adapter has weights for disabled vocabulary modules: "
-                f"{modules}. Enable them with --lora-enable-vocab-modules {enable}."
+            logger.warning_once(
+                "Ignoring weights for disabled vocabulary modules in LoRA adapter "
+                "ID %d: %s. Enable them with --lora-enable-vocab-modules %s.",
+                lora_model.id,
+                modules,
+                enable,
             )
-            if allow_disabled:
-                logger.warning_once(
-                    "Ignoring disabled weights for LoRA adapter ID %d. %s",
-                    lora_model.id,
-                    message,
-                )
-            else:
-                raise VLLMValidationError(message)
 
     def _pop_lora_weights(self, lora_model: LoRAModel, module_names: list[str]) -> None:
         for module in module_names:

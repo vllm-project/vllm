@@ -492,6 +492,6 @@ vllm serve model --enable-lora --lora-enable-vocab-modules embedding
 vllm serve model --enable-lora --lora-enable-vocab-modules embedding lm_head
 ```
 
-If an adapter contains weights for a vocabulary module excluded by default, explicit loading returns an error with the applicable opt-in values. When a generation request loads an adapter on demand, vLLM logs a warning and applies the remaining enabled weights. An explicit `--lora-target-modules` list selects which adapter weights are applied.
+If an adapter contains weights for a vocabulary module excluded by default, vLLM logs a warning with the applicable opt-in values, skips those weights, and applies the remaining enabled weights. An explicit `--lora-target-modules` list selects which adapter weights are applied.
 
 Enabling `lm_head` LoRA through either option disables prompt scoring for the deployment. Requests using `prompt_logprobs` (including `0`) or `prompt_logprob_token_ids` receive a validation error. This restriction also applies to base-model requests because they can be batched with LoRA requests. Input embedding LoRA supports prompt scoring when `lm_head` LoRA is disabled.

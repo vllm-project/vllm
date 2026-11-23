@@ -146,8 +146,6 @@ class InputProcessor:
             if not supported_generation_tasks:
                 raise VLLMValidationError("This model does not support generation")
 
-            if self.lora_config is not None:
-                self.lora_config.validate_prompt_logprobs(params)
             params.verify(
                 self.model_config,
                 self.speculative_config,
