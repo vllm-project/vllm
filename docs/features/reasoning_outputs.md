@@ -92,6 +92,8 @@ The `reasoning` field contains the reasoning steps that led to the final conclus
 
 Streaming chat completions are also supported for reasoning models. The `reasoning` field is available in the `delta` field in [chat completion response chunks](https://platform.openai.com/docs/api-reference/chat/streaming).
 
+For first-generation Inkling, use `--tokenizer-mode inkling --reasoning-parser inkling` to stream unmarked answer text from an ordinary tool-free chat request. Set `reasoning_effort` to `"none"` or `"minimal"` and leave `truncate_prompt_tokens` unset. With truncation enabled, the parser buffers unmarked text until it can distinguish an answer from a tool name.
+
 ??? console "Json"
 
     ```json
