@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         AuxOutputConnectorMetadata,
     )
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
+    from vllm.distributed.ec_transfer.ec_events import ECCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
@@ -328,6 +329,10 @@ class SchedulerOutput:
     # (non-final prefill chunks, or requests sure to reach max_tokens), so the
     # drafter can skip proposing them.
     skip_drafts: bool = False
+
+    # Publish these events once this step's worker output is processed, even
+    # when the step schedules no tokens but frees encoder cache entries.
+    encoder_cache_events: "list[ECCacheEvent] | None" = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
