@@ -13,10 +13,10 @@ The OpenAI batch file format consists of a series of json objects on new lines.
 Each line represents a separate request. See the [OpenAI package reference](https://platform.openai.com/docs/api-reference/batch/requestInput) for more details.
 
 ```{note}
-We currently support `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
-`/score`, `/rerank`, `/v1/audio/transcriptions`, and `/v1/audio/translations`
-endpoints. Score and rerank match any URL ending in `/score` or `/rerank`, such as
-`/v1/score`.
+We currently support `/v1/chat/completions`, `/v1/completions`, `/v1/responses`,
+`/v1/embeddings`, `/score`, `/rerank`, `/v1/audio/transcriptions`, and
+`/v1/audio/translations` endpoints. Score and rerank match any URL ending in
+`/score` or `/rerank`, such as `/v1/score`.
 ```
 
 ## Pre-requisites
@@ -42,7 +42,13 @@ Once you've created your batch file it should look like this
 cat examples/features/openai_batch/openai_example_batch.jsonl
 {"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": "Hello world!"}],"max_completion_tokens": 1000}}
 {"custom_id": "request-2", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are an unhelpful assistant."},{"role": "user", "content": "Hello world!"}],"max_completion_tokens": 1000}}
+{"custom_id": "request-3", "method": "POST", "url": "/v1/responses", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "input": "Hello world!", "max_output_tokens": 1000}}
 ```
+
+Lines with `url` set to `/v1/responses` run through the [Responses API](https://platform.openai.com/docs/api-reference/responses).
+`background` must be omitted or `false` (batch lines run to completion), and
+`previous_response_id` chaining is not available because batch lines run
+concurrently without a response store.
 
 ### Step 2: Run the batch
 
