@@ -190,7 +190,7 @@ class MooncakeStoreScheduler:
 
         # Per-request state
         self.load_specs: dict[str, LoadSpec] = {}  # to be loaded
-        # Bypass stale hits for the request lifetime, including preemption.
+        # Bypass stale hits until local allocation succeeds.
         self._load_failure_bypass_req_ids: set[str] = set()
         # Save progress starts when a request is scheduled for compute.
         self._request_trackers: dict[str, RequestTracker] = {}
@@ -213,8 +213,7 @@ class MooncakeStoreScheduler:
         """Start an async lookup as soon as the request is added, so it can
         complete while the request waits to be scheduled."""
         if (
-            request.request_id in self._load_failure_bypass_req_ids
-            or not self.enable_lookup
+            not self.enable_lookup
             or not self.lookup_async
             or request.skip_reading_external_kv
             or request.num_tokens < self._lookup_align()
@@ -299,6 +298,7 @@ class MooncakeStoreScheduler:
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
         self._unfinished_request_ids.add(request.request_id)
+        self._load_failure_bypass_req_ids.discard(request.request_id)
 
         if request.request_id not in self.load_specs:
             return
@@ -780,11 +780,8 @@ class MooncakeStoreScheduler:
             )
 
     def on_load_failure(self, request_ids: set[str]) -> None:
-        """Keep failed requests local through allocation and later preemption."""
+        """Skip external lookups until requests are allocated for recompute."""
         self._load_failure_bypass_req_ids.update(request_ids)
-        for request_id in request_ids:
-            self.load_specs.pop(request_id, None)
-            self.client.discard(request_id)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Drop the block references of store jobs every rank has finished."""

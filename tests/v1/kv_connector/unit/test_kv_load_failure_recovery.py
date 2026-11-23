@@ -404,12 +404,6 @@ def persistent_store(request, monkeypatch, tmp_path):
     from transformers import OPTConfig
 
     from tests.v1.kv_connector.umbp_test_utils import MemoryRuntime
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
-        scheduler as mooncake_scheduler,
-    )
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
-        MooncakeLookupResult,
-    )
     from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.factory import (
         UMBPRuntimeFactory,
     )
@@ -421,15 +415,7 @@ def persistent_store(request, monkeypatch, tmp_path):
 
         def lookup(self, *args, **kwargs):
             self.calls.append(args)
-            if len(args) == 1:
-                return [self.enabled] * len(args[0])
-            return MooncakeLookupResult(32 if self.enabled else 0)
-
-        def discard(self, request_id):
-            pass
-
-        def prefetch(self, *args):
-            pass
+            return [self.enabled] * len(args[0])
 
         def close(self):
             pass
@@ -441,16 +427,13 @@ def persistent_store(request, monkeypatch, tmp_path):
             return lookup
 
     monkeypatch.setitem(UMBPRuntimeFactory._builders, "embedded", lambda _: Runtime())
-    monkeypatch.setattr(mooncake_scheduler, "LookupKeyClient", lambda _: lookup)
     OPTConfig().save_pretrained(tmp_path)
     return request.param, lookup, str(tmp_path)
 
 
 @pytest.mark.parametrize("hybrid", [False, True])
 @pytest.mark.parametrize("policy", ["fail", "recompute"])
-@pytest.mark.parametrize(
-    "persistent_store", ["UMBPStoreConnector", "MooncakeStoreConnector"], indirect=True
-)
+@pytest.mark.parametrize("persistent_store", ["UMBPStoreConnector"], indirect=True)
 def test_store_failure_recovery_survives_preemption(persistent_store, hybrid, policy):
     """Real connectors must not reload a failed request after GPU-only preemption."""
     connector_name, lookup, model = persistent_store
@@ -522,9 +505,7 @@ def test_store_failure_recovery_survives_preemption(persistent_store, hybrid, po
     scheduler.shutdown()
 
 
-@pytest.mark.parametrize(
-    "persistent_store", ["UMBPStoreConnector", "MooncakeStoreConnector"], indirect=True
-)
+@pytest.mark.parametrize("persistent_store", ["UMBPStoreConnector"], indirect=True)
 def test_failed_store_load_stays_local_after_capacity_preemption(persistent_store):
     """Growing the first request must not send the evicted second one back to IO."""
     connector_name, lookup, model = persistent_store

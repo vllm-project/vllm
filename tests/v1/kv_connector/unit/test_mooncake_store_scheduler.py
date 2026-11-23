@@ -128,7 +128,7 @@ def _make_bare_scheduler(
     return scheduler
 
 
-def test_load_failure_bypass_survives_allocation():
+def test_load_failure_bypasses_external_lookup_until_allocation():
     scheduler = _make_bare_scheduler()
     scheduler.load_specs["req-0"] = object()
     scheduler.on_load_failure({"req-0"})
@@ -144,10 +144,10 @@ def test_load_failure_bypass_survives_allocation():
     scheduler.update_state_after_alloc(
         request, SimpleNamespace(), num_external_tokens=0
     )
-    assert scheduler._load_failure_bypass_req_ids == {"req-0"}
+    assert scheduler._load_failure_bypass_req_ids == set()
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
-    assert scheduler.client.num_tokens == []
+    assert scheduler.client.num_tokens == [32]
 
 
 def _make_connector_block_state(
