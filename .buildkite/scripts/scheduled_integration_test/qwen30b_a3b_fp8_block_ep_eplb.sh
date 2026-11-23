@@ -28,6 +28,11 @@ if command -v rocm-smi &> /dev/null || [[ -d /opt/rocm ]] || [[ -n "${ROCM_PATH:
 else
   # Non-ROCm platform (CUDA/other)
   BACKENDS=("deepep_high_throughput" "deepep_low_latency")
+  # DeepEP low-latency fails on B200: NVSHMEM RC queue-pair setup errors out.
+  # https://github.com/pytorch/test-infra/issues/9101
+  if [[ -n "${SKIP_DEEPEP_LL:-}" ]]; then
+    BACKENDS=("deepep_high_throughput")
+  fi
 fi
 
 cleanup() {
