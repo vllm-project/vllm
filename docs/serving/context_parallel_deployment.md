@@ -51,7 +51,10 @@ upconversion:
   batches.
 - **Sparse MLA (`FlashMLASparseImpl`) under PCP + DCP** with `fp8_ds_mla`:
   transfers raw 656 B FP8 cache rows, upconverts on the receiver, and stages
-  the current chunk's new rows locally (layer 0 keeps the serial all-gather).
+  the current chunk's new rows locally. Layers that reuse a shared indexer
+  top-k prefetch only the union of historical rows that top-k selects, using
+  predicted per-peer union sizes with a single receive/top-up kernel (layer 0
+  keeps the serial all-gather).
 
 It acts in eager mode and under piecewise/breakable CUDA graphs, requires
 symmetric memory across the DCP group, and falls back to the serial all-gather

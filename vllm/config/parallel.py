@@ -594,9 +594,11 @@ class ParallelConfig:
       multi-request batches.
     - **Sparse MLA (`FlashMLASparseImpl`) under PCP + DCP** with `fp8_ds_mla`:
       transfers raw 656 B FP8 cache rows in <=16 MiB chunks, upconverts on the
-      receiver, and stages the current chunk's new rows locally (layer 0 keeps
-      the serial all-gather). Under pure TP + DCP (`PCP = 1`), sparse MLA
-      attends local shards directly without a KV gather.
+      receiver, and stages the current chunk's new rows locally; layers reusing
+      an index group's shared top-k fetch only the union of selected historical
+      rows (layer 0 keeps the serial all-gather). Under pure TP + DCP
+      (`PCP = 1`), sparse MLA attends local shards directly without a KV
+      gather.
 
     Requires symmetric memory across the DCP group and a single micro-batch;
     acts in eager mode and under piecewise/breakable CUDA graphs, falling back

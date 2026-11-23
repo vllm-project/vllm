@@ -928,6 +928,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                         "KV shards without a DCP KV gather; leaving it inactive."
                     )
             if self.kv_ce_overlap is not None:
+                topk_buffer = self.topk_indices_buffer
+                if self.index_group_index > 0 and topk_buffer is not None:
+                    # This layer reuses its index group's top-k: its prefetch can
+                    # carry only the rows that top-k selects.
+                    self.kv_ce_overlap.enable_union(tuple(topk_buffer.shape))
                 # Its own buffers replace both views. They cannot alias other
                 # scratch, so they add memory where the workspace is shared.
                 shard_rows = gathered_rows = 1
@@ -1151,6 +1156,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             dist.all_gather_into_tensor(
                 gathered_kv, shard, group=get_dcp_group().device_group
             )
+        elif self.kv_ce_overlap is not None:
+            # A layer that reuses the previous layer's top-k got only its selected
+            # rows, compacted; its top-k was remapped onto them.
+            compact = self.kv_ce_overlap.take_joined_topk()
+            if compact is not None:
+                assert compact[0].shape == topk_indices.shape
+                return gathered_kv, compact[0], compact[1]
 
         topk_indices, topk_length = self._convert_prefill_topk(
             chunk, topk_indices, attn_metadata, prefill_meta
@@ -1180,6 +1192,27 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             dcp_rank=self.dcp_rank,
             cp_kv_cache_interleave_size=attn_metadata.cp_kv_cache_interleave_size,
             return_valid_counts=True,
+        )
+
+    def _kv_ce_overlap_convert(
+        self, layer_name: str, topk_indices: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert `topk_indices` as layer `layer_name` will in this step, on the
+        current stream."""
+        metadata = _kv_ce_overlap_metadata(layer_name)
+        prefill = _kv_ce_overlap_prefill(layer_name)
+        assert metadata is not None and prefill is not None
+        stream = current_stream()
+        # The step's metadata may be freed before the main stream joins.
+        for tensor in (
+            metadata.req_id_per_token,
+            metadata.block_table,
+            prefill.request_ids,
+            prefill.workspace_starts,
+        ):
+            tensor.record_stream(stream)
+        return self._convert_prefill_topk(
+            prefill.chunks[0], topk_indices, metadata, prefill
         )
 
     def _forward_fp8_kv_separate_prefill_decode(
@@ -1350,6 +1383,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     num_decode_tokens,
                     attn_metadata.cp_kv_cache_interleave_size,
                     step_info,
+                    _kv_ce_overlap_metadata,
                 )
             for chunk_index, chunk in enumerate(fp8_metadata.prefill.chunks):
                 chunk_workspace = prefill_bf16_workspace[: chunk.chunk_tot_seqlen]
@@ -1410,7 +1444,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     chunk_topk_length = topk_length[chunk.tokens_slice]
 
                 if overlap is not None:
-                    overlap.start_next()
+                    overlap.start_next(
+                        _kv_ce_overlap_prefill,
+                        topk_indices[chunk.tokens_slice],
+                        self._kv_ce_overlap_convert,
+                    )
                 chunk_out, chunk_lse = self._bf16_flash_mla_kernel(
                     chunk_q,
                     chunk_workspace,

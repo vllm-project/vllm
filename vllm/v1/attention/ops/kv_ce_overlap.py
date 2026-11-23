@@ -15,6 +15,10 @@ context in an alternating ping-pong region over peer-mapped symmetric memory:
   `HEAD_READY`, eliminating `(world - 1)`-to-1 NVLink incast while `side`
   overlaps own-slot upconversion and pipelines per-peer upconverts behind
   per-peer CUDA events (falling back to a batched fast path at short contexts).
+- **Selected-row union on reusing layers**: layers reusing an earlier layer's
+  top-k fetch only the cross-rank union of selected rows (`kv_ce_sel_union`),
+  pulling a predicted row count with copy engines and completing any shortfall
+  on-device in one launch (`kv_ce_topup`) with zero host synchronization.
 - **Deferred two-channel barriers & deterministic planning**: `HEAD_DONE` is
   deferred until the next pack (`head_done_owed`) so no SM-blocking barrier sits
   on `join()`. Every rank derives the same `KVCEOverlapPlan` from
@@ -29,6 +33,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import hashlib
+import math
 import struct
 import weakref
 from collections.abc import Callable
@@ -41,7 +46,7 @@ import torch.distributed as dist
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import current_stream
-from vllm.v1.attention.ops import kv_ce_rows
+from vllm.v1.attention.ops import kv_ce_rows, kv_ce_topup
 from vllm.v1.attention.ops.cp_common import (
     direct_cp_enabled,
     symm_mem,
@@ -55,6 +60,14 @@ from vllm.v1.attention.ops.cuda_direct import (
     OnStream,
     cuda_driver,
 )
+from vllm.v1.attention.ops.kv_ce_sel_union import (
+    PACK_ROWS,
+    GroupState,
+    SelUnion,
+    sel_digest,
+    sel_union_positions,
+    topk_use,
+)
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
@@ -65,6 +78,10 @@ logger = init_logger(__name__)
 BARRIER_TIMEOUT_MS = 60_000
 CHANNEL_HEAD_READY = 1
 CHANNEL_HEAD_DONE = 2
+CHANNEL_SEL_MARKS = 3
+# A predicted union pull copies the last sizes plus this margin and these rows.
+PRED_MARGIN_PERCENT = 10.0
+PRED_SLACK_ROWS = 64
 # Bytes of one fp8_ds_mla cache row: 512 FP8 values, 4 FP32 scales, 64 BF16 rope.
 KV_ENTRY_BYTES = 656
 # Rows per block when an FP8 staging buffer is read as a paged cache.
@@ -100,6 +117,31 @@ def plan_hash(digest: list[int]) -> tuple[int, int]:
     packed = struct.pack(f"<{len(digest)}q", *digest)
     low, high = struct.unpack("<II", hashlib.blake2b(packed, digest_size=8).digest())
     return low, high
+
+
+def tables_readable(chunk: Any) -> bool:
+    """Whether the union's kernels can read a chunk's block table and workspace
+    start as one request's."""
+    table, starts = chunk.block_table, chunk.workspace_starts
+    return (
+        table.dim() == 2
+        and table.shape[0] == 1
+        and table.dtype == starts.dtype == torch.int32
+    )
+
+
+def predict_rows(last: list[int] | None, head_rows: int, world_size: int) -> list[int]:
+    """Rows of every slot a predicted union pull copies: the union sizes `last` of
+    the slots in the last step whose readback reached the host, plus
+    `PRED_MARGIN_PERCENT` and `PRED_SLACK_ROWS`, at most the head. Without them,
+    the whole head, which needs no top-up."""
+    if last is None:
+        return [head_rows] * world_size
+    grown = 100.0 + PRED_MARGIN_PERCENT
+    return [
+        min(head_rows, max(0, math.ceil(int(u) * grown / 100.0) + PRED_SLACK_ROWS))
+        for u in last
+    ]
 
 
 def chunk_copies(
@@ -171,6 +213,10 @@ class KVCEOverlapPlan:
     old_lens: tuple[int, ...] = ()
     new_lens: tuple[int, ...] = ()
     seq_end: int = 0
+    # Positions whose head carries only the selected rows, and those of them that
+    # build their index group's union.
+    sel_positions: frozenset[int] = frozenset()
+    sel_builds: frozenset[int] = frozenset()
 
     def digest(self) -> list[int]:
         """Everything of the plan a rank acts on, as integers: the DCP ranks
@@ -181,6 +227,7 @@ class KVCEOverlapPlan:
             self.head_rows,
             self.context_start,
             self.seq_end,
+            *sel_digest(self.sel_positions, self.sel_builds),
         ]
 
     def serves(self, chunk: Any) -> bool:
@@ -277,6 +324,17 @@ class _Pending:
     position: int
     # The layer's new rows are in its region.
     staged: bool = False
+    # The head carries only the rows of its index group's union.
+    compact: bool = False
+
+
+@dataclass
+class _PredWatch:
+    """A predicted union pull whose sizes the host has not seen yet."""
+
+    state: GroupState
+    # The build whose readback the pull belongs to (`UnionSizes.builds`).
+    build: int
 
 
 Span = tuple[int, int, "torch.Tensor | None"]
@@ -302,6 +360,20 @@ class _WholeHead:
     pipelined: bool
 
 
+@dataclass
+class _CompactCopies:
+    """A compact head's copies for one set of row counts."""
+
+    chunks: list[CopyList]
+    # Every peer's whole head is copied: its slots are upconverted whole.
+    whole: bool
+    # Per peer in pull order: its staging part, its slot and its spans.
+    spans: list[tuple[int, int, list[Span]]]
+    # The destination rows of the spans past `head_rows` in either region, made
+    # on first use; the packed rows go through the receive kernel.
+    views: list[list[torch.Tensor] | None]
+
+
 class _Step:
     """What the layers of one step share, made once when its plan is taken."""
 
@@ -311,8 +383,11 @@ class _Step:
         "regions",
         "slot",
         "checked",
+        "rest",
         "head",
+        "compact",
         "kept",
+        "tables",
     )
 
     def __init__(
@@ -330,9 +405,23 @@ class _Step:
         # The plan word of the step, and whether the ranks' words were compared.
         self.slot = slot
         self.checked = False
+        self.rest: list[list[Span]] | None = None
         self.head: _WholeHead | None = None
+        self.compact: dict[tuple[int, ...], _CompactCopies] = {}
         # Chunks whose tensors the auxiliary stream already keeps alive.
         self.kept: set[int] = set()
+        # Per chunk: the addresses of its block table and workspace start.
+        self.tables: dict[int, tuple[int, int]] = {}
+
+
+@dataclass
+class _LayerProgram:
+    """What one layer's heads reuse in every step."""
+
+    kv_cache: torch.Tensor
+    group_id: int
+    # `_pack_kernel` bound to the layer's cache; None where it cannot read it.
+    pack: KernelLaunch | None
 
 
 class DCPCopyEngineBase:
@@ -533,6 +622,7 @@ class KVCEOverlap(DCPCopyEngineBase):
         self.stage_launch: KernelLaunch | None = None
         self.slots_launch: KernelLaunch | None = None
         self.slots_identity_launch: KernelLaunch | None = None
+        self.receive_launch: KernelLaunch | None = None
 
         self.order = LayerOrder()
         self.plan: KVCEOverlapPlan | None = None
@@ -541,6 +631,13 @@ class KVCEOverlap(DCPCopyEngineBase):
         self.position: int | None = None
         self.forward: weakref.ref | None = None
         self.layers: dict[str, Any] = {}
+        self.programs: dict[str, _LayerProgram] = {}
+        self.unpackable: set[str] = set()
+        self.sel: SelUnion | None = None
+        self.sel_requested = False
+        self.joined_topk: tuple[torch.Tensor, torch.Tensor] | None = None
+        self.pred_last: dict[int, list[int]] = {}
+        self.pred_watch: list[_PredWatch] = []
 
         self.ready = self._allocate()
         if self.ready and block_size and max_num_batched_tokens:
@@ -603,21 +700,22 @@ class KVCEOverlap(DCPCopyEngineBase):
         self,
     ) -> tuple[DirectKernel, DirectKernel, DirectKernel, DirectKernel]:
         """The staging and plan-check kernels, compiled and loaded for direct
-        launches; raises where they cannot be launched that way."""
+        launches; raises where they cannot be launched that way, and the KV
+        prefetch is then unavailable."""
         slots = kv_ce_rows.stage_slots_kernel(has_restore=True)
-        slots_id = kv_ce_rows.stage_slots_kernel(has_restore=False)
+        slots_identity = kv_ce_rows.stage_slots_kernel(has_restore=False)
         rows = kv_ce_rows.stage_rows_kernel()
         check = kv_ce_rows.plan_check_kernel(self.world_size)
-        if slots is None or slots_id is None or rows is None or check is None:
+        if slots is None or slots_identity is None or rows is None or check is None:
             raise RuntimeError("its Triton kernels cannot be launched directly")
-        return slots, slots_id, rows, check
+        return slots, slots_identity, rows, check
 
     def _load_kernels(self) -> None:
         """Bind the staging and plan-check kernels and run every device operation
         of a head and of the staging once on the auxiliary stream, with nothing
         to do, so the first step with history pays no kernel load or first
         launch."""
-        slots, slots_id, rows, check = self.kernels
+        slots, slots_identity, rows, check = self.kernels
         handle = self.side_handle
         # A launch of zero tokens reads and writes nothing.
         anchor = self.gathered_ptr
@@ -629,7 +727,7 @@ class KVCEOverlap(DCPCopyEngineBase):
             per_rank=1,
         )
         self.slots_launch(handle, 1)
-        self.slots_identity_launch = slots_id.bind(
+        self.slots_identity_launch = slots_identity.bind(
             restore_ptr=anchor,
             slots_ptr=anchor,
             interleave=1,
@@ -678,6 +776,60 @@ class KVCEOverlap(DCPCopyEngineBase):
             )
         torch.accelerator.synchronize()
 
+    def enable_union(self, topk_shape: tuple[int, int]) -> None:
+        """Allocate the union pull's buffers for a top-k buffer of `topk_shape`,
+        once. Collective over the DCP group; falls back to whole heads on failure."""
+        if self.sel_requested:
+            return
+        self.sel_requested = True
+        sel, receive, ok = None, None, 1
+        try:
+            sel = SelUnion(self, *topk_shape)
+            sel.compile_kernels()
+            receive = kv_ce_topup.receive_kernel()
+            if receive is None:
+                raise RuntimeError("the receive kernel cannot be launched directly")
+        except (RuntimeError, ValueError, AssertionError) as error:
+            logger.warning("The KV prefetch copies whole heads: %s", error)
+            ok = 0
+        if not self._agree([ok]) or sel is None or receive is None:
+            return
+        sel.connect()
+        sel.load_kernels(self.side)
+        self.sel = sel
+        self._receive_setup(receive)
+
+    def _receive_setup(self, kernel: DirectKernel) -> None:
+        """Bind and warm the compact-head receive kernel in staggered pull order."""
+        assert self.sel is not None
+        order = self.pull_order
+        i32, device = torch.int32, self.device
+        self.receive_peers = torch.tensor(order, dtype=i32, device=device)
+        self.receive_parts = torch.tensor(
+            [self.wire_peers.index(p) for p in order], dtype=i32, device=device
+        )
+        self.receive_deltas = kv_ce_topup.peer_deltas(
+            self.wire_stage, [self.remote[p] for p in order]
+        )
+        zero_deltas = torch.zeros_like(self.receive_deltas)
+        zero_ends = torch.zeros(self.world_size + 1, dtype=i32, device=device)
+        torch.accelerator.synchronize()
+        launch = kernel.bind(
+            anchor_ptr=self.stage_ptr,
+            deltas_ptr=zero_deltas.data_ptr(),
+            ends_ptr=zero_ends.data_ptr(),
+            slots_ptr=self.receive_peers.data_ptr(),
+            parts_ptr=self.receive_parts.data_ptr(),
+            stage_rows=self.wire_rows,
+        )
+        kv_ce_topup.launch_receive(
+            launch, self.side_handle, [0] * len(order), 1, self.gathered_ptr, 1
+        )
+        torch.accelerator.synchronize()
+        launch.set("deltas_ptr", self.receive_deltas.data_ptr())
+        launch.set("ends_ptr", self.sel.ends.data_ptr())
+        self.receive_launch = launch
+
     def _allocate_wire(self) -> None:
         """Allocate symmetric `own_wire` and per-peer paged staging buffers."""
         rows = -(-self.gathered_capacity // (2 * self.world_size))
@@ -711,6 +863,12 @@ class KVCEOverlap(DCPCopyEngineBase):
             return self.gathered[: self.world_size * shard_rows]
         return self._region(self.position, shard_rows)
 
+    def _abandon(self) -> None:
+        super()._abandon()
+        self.joined_topk = None
+        if self.sel is not None:
+            self.sel.reset()
+
     def begin_layer(
         self,
         layer: Any,
@@ -719,15 +877,23 @@ class KVCEOverlap(DCPCopyEngineBase):
         num_decode_tokens: int,
         interleave: int,
         step_info: DCPPrefillStep | None,
+        metadata_of: Callable[[str], Any] | None = None,
     ) -> None:
         """Track the layer's position in `forward`; its first layer plans it.
 
         A plan and a prefetch belong to the forward that made them: both are
         dropped when another forward starts, so no layer joins rows that were
-        laid out for another step's shard length.
+        laid out for another step's shard length. `step_info` provides the
+        schedule-level context bounds shared identically across all DCP ranks;
+        `metadata_of` gives another layer's whole metadata, for the union
+        positions.
         """
         name = layer.layer_name
         self.layers[name] = layer
+        if self.sel is not None and name not in self.programs:
+            # Bound when the layer is first seen (a forward that learns the
+            # order), so no head pays for it.
+            self._program(name)
         seen = self.forward() if self.forward is not None else None
         new_forward = seen is not forward
         if new_forward:
@@ -738,7 +904,7 @@ class KVCEOverlap(DCPCopyEngineBase):
             self._abandon()
         elif self.position == 0:
             self._derive_plan(
-                name, prefill_of, num_decode_tokens, interleave, step_info
+                name, prefill_of, num_decode_tokens, interleave, step_info, metadata_of
             )
 
     def _derive_plan(
@@ -748,14 +914,16 @@ class KVCEOverlap(DCPCopyEngineBase):
         num_decode_tokens: int,
         interleave: int,
         step_info: DCPPrefillStep | None,
+        metadata_of: Callable[[str], Any] | None = None,
     ) -> None:
         """Derive the step's plan and take it, or leave the step serial.
 
         Whether the step is planned and every number of the plan follow from
-        `step_info` (which every DCP rank derives identically from the global
-        schedule), the configuration and the layer order: no rank asks another.
-        This rank's own metadata is checked against them; a mismatch raises
-        rather than leaving peers waiting at barriers.
+        `step_info` (derived identically across all DCP ranks from the global
+        schedule), the configuration and the layers: no rank waits for another.
+        This rank's own metadata is only checked against them. A mismatch means
+        this rank would issue barriers its peers do not, so it is an error and
+        not a reason to gather serially.
         """
         if step_info is None:
             return
@@ -793,22 +961,31 @@ class KVCEOverlap(DCPCopyEngineBase):
         )
         if plan is None or not self._wire_serves(name, plan):
             return
+        union = self.sel is not None and metadata_of is not None
+        if union and self.unpackable:
+            return
         names = self.order.names
         chunks: list[Any] = []
-        # Layers that share a prefill object share the answer.
+        metadata: list[Any] = []
+        # Layers that share a metadata object share the answer.
         served: dict[int, Any] = {}
         for other in names:
-            other_prefill = prefill_of(other)
-            key = id(other_prefill)
+            layer_metadata = (
+                metadata_of(other) if metadata_of is not None else prefill_of(other)
+            )
+            key = id(layer_metadata)
             if key not in served:
+                other_prefill = prefill_of(other)
                 served[key] = (
                     other_prefill.chunks[0]
                     if self._same_plan(other_prefill, plan)
+                    and (not union or tables_readable(other_prefill.chunks[0]))
                     else None
                 )
             if served[key] is None:
                 return
             chunks.append(served[key])
+            metadata.append(layer_metadata)
         restore = step_info.restore_idx
         if restore is not None and restore.shape[0] != end - start:
             raise RuntimeError(
@@ -822,7 +999,21 @@ class KVCEOverlap(DCPCopyEngineBase):
         plan = dataclasses.replace(
             plan, old_lens=old_lens, new_lens=new_lens, seq_end=end
         )
+        if union:
+            positions, builds = self._sel_positions(names, metadata)
+            plan = dataclasses.replace(plan, sel_positions=positions, sel_builds=builds)
         self._take_plan(plan, chunks)
+
+    def _sel_positions(
+        self, names: list[str], metadata: list[Any]
+    ) -> tuple[frozenset[int], frozenset[int]]:
+        """`sel_union_positions` of the step's layers."""
+        return sel_union_positions(
+            [
+                topk_use(self.layers.get(other), layer_metadata)
+                for other, layer_metadata in zip(names, metadata)
+            ]
+        )
 
     def _take_plan(self, plan: KVCEOverlapPlan, chunks: list[Any]) -> None:
         """Make `plan` the step's: what its layers share, and its tables, written
@@ -872,13 +1063,26 @@ class KVCEOverlap(DCPCopyEngineBase):
         """A layer that gathers serially settles the owed barrier first."""
         self._pay_head_done("main", scheduled)
 
-    def start_next(self) -> None:
+    def start_next(
+        self,
+        prefill_of: Callable[[str], Any] | None = None,
+        topk: torch.Tensor | None = None,
+        convert: (
+            Callable[[str, torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None
+        ) = None,
+    ) -> None:
         """Start the next layer's head rows; call right before attention launches.
+
+        `topk` is this layer's chunk of the shared top-k buffer, before conversion;
+        `convert(name, topk)` converts it as layer `name` would. A next layer that
+        reuses this top-k prefetches only the rows it selects.
 
         The next layer is always in this forward: the learned order ends at a
         forward's last layer, and every layer's chunk was checked against the
         plan when the forward was planned.
         """
+        if self.pred_watch:
+            self._pred_poll()
         step, position = self.step, self.position
         if step is None or position is None:
             return
@@ -892,6 +1096,14 @@ class KVCEOverlap(DCPCopyEngineBase):
         plan = step.plan
         name = self.order.names[position]
         chunk = step.chunks[position]
+        compact = position in plan.sel_positions
+        converted = None
+        if position in plan.sel_builds:
+            # The next layer's own conversion of the top-k, which the shared
+            # buffer already holds in full: on this stream, whose allocator the
+            # auxiliary stream then never needs.
+            assert topk is not None and convert is not None
+            converted = convert(name, topk)
         main = current_stream()
         driver = self.driver
         driver.record(self.fence, main.cuda_stream)
@@ -909,12 +1121,281 @@ class KVCEOverlap(DCPCopyEngineBase):
                     channel=CHANNEL_HEAD_DONE, timeout_ms=BARRIER_TIMEOUT_MS
                 )
                 self.head_done_owed = False
-            self._fp8_head(self.layers[name].kv_cache, chunk, position, plan)
+            if compact:
+                self._compact_head(name, position, chunk, converted)
+            else:
+                self._fp8_head(self.layers[name].kv_cache, chunk, position, plan)
         finally:
             torch.cuda.set_stream(main)
-        # No barrier follows the head copies; see module doc.
+        # No barrier follows the head copies; see the module doc.
         self.head_done_owed = True
-        self.pending = _Pending(name, position)
+        self.pending = _Pending(name, position, compact=compact)
+
+    def _program(self, name: str) -> _LayerProgram:
+        layer = self.layers[name]
+        program = self.programs.get(name)
+        if program is None or program.kv_cache is not layer.kv_cache:
+            assert self.sel is not None
+            program = self.programs[name] = _LayerProgram(
+                layer.kv_cache,
+                id(layer.impl.index_group),
+                self.sel.pack_launch(layer.kv_cache, self.own_wire),
+            )
+            if program.pack is None:
+                logger.warning_once(
+                    "PCP + DCP KV prefetch: the union pack cannot read the KV "
+                    "cache of %s; steps gather serially.",
+                    name,
+                )
+                self.unpackable.add(name)
+            else:
+                self.unpackable.discard(name)
+        return program
+
+    def _chunk_tables(self, step: _Step, chunk: Any) -> tuple[int, int]:
+        """The addresses of the chunk's block table and workspace start; the plan
+        checked that the kernels can read them (`tables_readable`)."""
+        key = id(chunk)
+        tables = step.tables.get(key)
+        if tables is None:
+            tables = step.tables[key] = (
+                chunk.block_table.data_ptr(),
+                chunk.workspace_starts.data_ptr(),
+            )
+        return tables
+
+    def _marks_barrier(self) -> None:
+        self.handle.barrier(channel=CHANNEL_SEL_MARKS, timeout_ms=BARRIER_TIMEOUT_MS)
+
+    def _compact_head(
+        self,
+        name: str,
+        position: int,
+        chunk: Any,
+        converted: tuple[torch.Tensor, torch.Tensor] | None,
+    ) -> None:
+        """On the current (auxiliary) stream: build (or reuse) the union, pack this
+        rank's union rows and its rows past `head_rows`, pass HEAD_READY and copy
+        the peers' rows: a predicted number of them, completed on the device. A
+        layer that builds the union passes its top-k, converted on the main
+        stream.
+
+        Every rank takes this path at the same positions and builds at the same
+        positions (both agreed in the plan), so the barriers pair up.
+        """
+        plan, sel, step = self.plan, self.sel, self.step
+        assert plan is not None and sel is not None and step is not None
+        program = self._program(name)
+        group_id = program.group_id
+        if position in plan.sel_builds:
+            assert converted is not None
+            topk, topk_length = converted
+            # Converted on the main stream; the build reads it here, and the
+            # caller drops it before this stream is done with it.
+            topk.record_stream(self.side)
+            topk_length.record_stream(self.side)
+            sel.build(
+                group_id,
+                position,
+                topk,
+                topk_length,
+                plan.shard_rows,
+                plan.head_rows,
+                self._marks_barrier,
+                self.side,
+            )
+        state = sel.state
+        assert state is not None and state.group_id == group_id
+        shard_rows, head_rows = plan.shard_rows, plan.head_rows
+        kv_cache = program.kv_cache
+        # A plan is taken only while every layer's cache can be packed.
+        launch = program.pack
+        assert launch is not None
+        tables = self._chunk_tables(step, chunk)
+        slots, index = launch.slots, launch.index
+        slots[index["block_table_ptr"]] = tables[0]
+        slots[index["workspace_starts_ptr"]] = tables[1]
+        slots[index["region_ptr"]] = (
+            step.regions[position % 2] + self.rank * shard_rows * self.row_bytes
+        )
+        slots[index["slot_start"]] = self.rank * head_rows
+        slots[index["head_rows"]] = head_rows
+        launch(self.side_handle, -(-head_rows // PACK_ROWS))
+        self._pack_rest(plan, kv_cache, chunk, position)
+        self._head_ready()
+        rows = predict_rows(
+            self.pred_last.get(state.built_position), head_rows, self.world_size
+        )
+        # The receive kernel also takes what the prediction missed: the head is
+        # complete in stream order and ends like any head.
+        self._compact_copies(plan, position, rows)
+        watch = self.pred_watch
+        build = state.sizes.builds
+        if not watch or watch[-1].state is not state or watch[-1].build != build:
+            watch.append(_PredWatch(state, build))
+
+    def _pred_poll(self) -> None:
+        """Keep the union sizes whose readback landed as their group's history;
+        never waits. A group's readback is reused by its next build, so sizes not
+        seen by then are dropped."""
+        left = []
+        for watch in self.pred_watch:
+            sizes = watch.state.sizes
+            if sizes.builds != watch.build:
+                continue
+            exact = sizes.exact()
+            if exact is None:
+                left.append(watch)
+            else:
+                self.pred_last[watch.state.built_position] = exact
+        self.pred_watch = left
+
+    def _pack_rest(
+        self,
+        plan: KVCEOverlapPlan,
+        kv_cache: torch.Tensor,
+        chunk: Any,
+        position: int,
+    ) -> None:
+        """On the current stream: this rank's rows of a compact head past
+        `head_rows` (`_rest_spans`), raw into the buffer peers read and upconverted
+        from the cache into its slot of the region of `position`."""
+        me = self.rank
+        spans = self._rest(plan)[me]
+        if not spans:
+            return
+        region = self._region(position, plan.shard_rows)
+        for begin, end, starts in spans:
+            ops.cp_gather_cache(
+                kv_cache,
+                self.own_wire[begin:end],
+                chunk.block_table,
+                self.wire_bounds,
+                1,
+                starts,
+            )
+            start = me * plan.shard_rows
+            ops.cp_gather_and_upconvert_fp8_kv_cache(
+                kv_cache,
+                region[start + begin : start + end],
+                chunk.block_table,
+                chunk.workspace_starts,
+                1,
+                starts,
+            )
+
+    def _rest(self, plan: KVCEOverlapPlan) -> list[list[Span]]:
+        """`_rest_spans` of every rank, computed once per step."""
+        step = self.step
+        if step is None or step.plan is not plan:
+            return [self._rest_spans(plan, peer) for peer in range(self.world_size)]
+        if step.rest is None:
+            step.rest = [
+                self._rest_spans(plan, peer) for peer in range(self.world_size)
+            ]
+        return step.rest
+
+    def _rest_spans(self, plan: KVCEOverlapPlan, peer: int) -> list[Span]:
+        """The rows of `peer`'s slot a compact head copies whole, as
+        `(begin, end, offset tensor)`: its old rows past `head_rows` and its
+        padding rows."""
+        spans: list[Span] = []
+        old, new, shard_rows = plan.old_lens[peer], plan.new_lens[peer], plan.shard_rows
+        if old > plan.head_rows:
+            spans.append((plan.head_rows, old, self.seq_starts))
+        if new < shard_rows:
+            spans.append((new, shard_rows, self.peer_new[peer : peer + 1]))
+        return spans
+
+    def _compact_program(
+        self, plan: KVCEOverlapPlan, rows: list[int]
+    ) -> _CompactCopies:
+        """The copies of a compact head that takes the first `rows[p]` packed rows
+        of every peer `p`, in staggered order, and its rows past `head_rows`."""
+        entry, wire_rows = KV_ENTRY_BYTES, self.wire_rows
+        rest = self._rest(plan)
+        spans = []
+        copies = []
+        for peer in self.pull_order:
+            index = self.wire_index[peer]
+            peer_spans: list[Span] = []
+            if rows[peer] > 0:
+                peer_spans.append((0, rows[peer], None))
+            peer_spans += rest[peer]
+            spans.append((index, peer, peer_spans))
+            copies += [
+                (
+                    self.stage_ptr + (index * wire_rows + begin) * entry,
+                    self.remote_ptrs[peer] + begin * entry,
+                    (end - begin) * entry,
+                )
+                for begin, end, _ in peer_spans
+                if end > begin
+            ]
+        whole = all(rows[peer] >= plan.head_rows for peer in self.pull_order)
+        return _CompactCopies(head_chunks(copies, entry), whole, spans, [None, None])
+
+    def _compact_copies(
+        self, plan: KVCEOverlapPlan, position: int, rows: list[int]
+    ) -> None:
+        """The copies of a compact head after HEAD_READY: the first `rows[p]` packed
+        rows of every peer `p` (in staggered order) and its rows past `head_rows`,
+        each upconverted into the peer's slot; the packed rows by one launch for
+        all peers, which also takes the rows of a union larger than `rows[p]`
+        (`_receive`). This rank's union rows were packed into its slot; its rows
+        past `head_rows` were upconverted from its cache."""
+        step = self.step
+        key = tuple(rows)
+        program = None if step is None else step.compact.get(key)
+        if program is None:
+            program = self._compact_program(plan, rows)
+            if step is not None and step.plan is plan:
+                step.compact[key] = program
+        self._copy(program.chunks)
+        shard_rows = plan.shard_rows
+        if program.whole:
+            self._upconvert_slots(self._region(position, shard_rows), shard_rows)
+            return
+        # The rows past `head_rows`, where a peer has any (`_rest_spans`).
+        parity = position % 2
+        views = program.views[parity]
+        if views is None:
+            region = self._region(position, shard_rows)
+            views = program.views[parity] = [
+                region[peer * shard_rows + begin : peer * shard_rows + end]
+                for _, peer, spans in program.spans
+                for begin, end, starts in spans
+                if starts is not None
+            ]
+        at = 0
+        upconvert = ops.cp_gather_and_upconvert_fp8_kv_cache
+        for index, _, spans in program.spans:
+            table = self.wire_part_table[index]
+            for _, _, starts in spans:
+                if starts is not None:
+                    upconvert(
+                        self.wire_cache, views[at], table, self.wire_zero, 1, starts
+                    )
+                    at += 1
+        self._receive(plan, position, rows)
+
+    def _receive(self, plan: KVCEOverlapPlan, position: int, rows: list[int]) -> None:
+        """On the current (auxiliary) stream, after copy-engine copies of the first
+        `rows[p]` packed rows of every peer `p` into the head of `position`: one
+        launch of the kernel of `kv_ce_topup` upconverts rows `[0, U_p)` of every
+        peer into its slot, from the staging below `rows[p]` and from the peer's
+        peer-mapped buffer past it (also into the staging), with `U` read from
+        the union's slot ends on the device."""
+        launch, step = self.receive_launch, self.step
+        assert launch is not None and step is not None
+        kv_ce_topup.launch_receive(
+            launch,
+            current_stream().cuda_stream,
+            [rows[peer] for peer in self.pull_order],
+            plan.head_rows,
+            step.regions[position % 2],
+            plan.shard_rows,
+        )
 
     def _copy(self, chunks: list[CopyList]) -> None:
         """Enqueue a head's copies on the current (auxiliary) stream, one call per
@@ -995,6 +1476,13 @@ class KVCEOverlap(DCPCopyEngineBase):
                 )
             )
         return runs
+
+    def _upconvert_slots(self, region: torch.Tensor, shard_rows: int) -> None:
+        """Upconvert every peer's whole slot, `[0, shard_rows)` of its staging:
+        for a head with staged new rows, whose copies miss only the rows the
+        staging writes after it."""
+        for run in self._slot_runs(region, shard_rows):
+            ops.cp_gather_and_upconvert_fp8_kv_cache(*run)
 
     def _whole_head(self, step: _Step) -> _WholeHead:
         """The step's whole head with staged new rows: each rank's old and padding
@@ -1233,7 +1721,11 @@ class KVCEOverlap(DCPCopyEngineBase):
             self.stage_launch.set("cache_ptr", self.stage_cache.data_ptr())
 
     def join(self, chunk: Any, scheduled: bool = True) -> torch.Tensor | None:
-        """Finish this layer's gather, or return None if it must gather serially."""
+        """Finish this layer's gather, or return None if it must gather serially.
+
+        A layer served with only its selected rows attends with the remapped top-k
+        of `take_joined_topk`.
+        """
         if self.plan is not None and not self.plan.serves(chunk):
             self._abandon()
             self._serial(scheduled)
@@ -1252,7 +1744,18 @@ class KVCEOverlap(DCPCopyEngineBase):
             # The new rows never reached the region: the layer gathers serially.
             self._serial(scheduled)
             return None
-        return self._region(pending.position, plan.shard_rows)
+        region = self._region(pending.position, plan.shard_rows)
+        if pending.compact:
+            assert self.sel is not None and self.sel.state is not None
+            state = self.sel.state
+            self.joined_topk = (self.sel.topk[: state.tokens], state.topk_length)
+        return region
+
+    def take_joined_topk(self) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """The remapped top-k and lengths of the layer `join` served with only its
+        selected rows, once."""
+        topk, self.joined_topk = self.joined_topk, None
+        return topk
 
 
 @functools.cache

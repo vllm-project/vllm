@@ -28,6 +28,7 @@ from vllm.v1.attention.ops.kv_ce_overlap import (
     build_kv_ce_overlap_plan,
     dcp_min_shard_rows,
     dcp_shard_rows,
+    predict_rows,
     shard_lens,
 )
 
@@ -339,6 +340,30 @@ def test_staged_rows_land_where_the_serial_gather_puts_them(
     assert torch.equal(region, expected)
 
 
+def test_ranks_that_pull_the_union_elsewhere_do_not_share_a_plan():
+    """A union build adds a SEL_MARKS barrier and a compact head pairs its copies
+    with its peers' packs: the digest must tell where both happen."""
+    plan = KVCEOverlapPlan(12, 10, 40)
+    compact = dataclasses.replace(
+        plan, sel_positions=frozenset({3, 4}), sel_builds=frozenset({3})
+    )
+    built_later = dataclasses.replace(compact, sel_builds=frozenset({4}))
+    digests = [plan.digest(), compact.digest(), built_later.digest()]
+    assert len({tuple(digest) for digest in digests}) == 3
+
+
+def test_a_prediction_adds_a_margin_to_the_last_union_sizes():
+    # 10% and 64 rows are added to the last sizes seen, at most the head.
+    assert predict_rows([100, 0, 1000, 3800], 4096, 4) == [174, 64, 1164, 4096]
+    # A new request starts from the sizes of the last one, capped at its head.
+    assert predict_rows([100, 0, 1000, 3800], 512, 4) == [174, 64, 512, 512]
+
+
+def test_without_history_the_whole_head_is_copied():
+    """The whole head needs no top-up: every union row lies below it."""
+    assert predict_rows(None, 4096, 4) == [4096] * 4
+
+
 def test_chunks_cut_only_at_rows_and_may_span_copies():
     """No chunk exceeds the chunk size; the chunks still move every byte of every
     copy exactly once, in order."""
@@ -571,6 +596,8 @@ def _planner(world: int, names: tuple[str, ...] = ("a",)):
         for name in names:
             overlap.order.advance(name, name == names[0])
     overlap.layers = {name: _layer(name) for name in names}
+    overlap.sel, overlap.programs = None, {}
+    overlap.unpackable = set()
     overlap.plan = overlap.step = overlap.pending = overlap.forward = None
     overlap.position = None
     overlap.plan_count = overlap.plan_seq = 0
