@@ -422,20 +422,26 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
     }
 
 
-def test_indexer_warmup_includes_pcp_normalized_dcp_key(monkeypatch):
+# PCP+DCP and DCP ShardQ steps launch the normalized rank 0 / world 1 key.
+@pytest.mark.parametrize(
+    "pcp,shard_q,normalized", [(4, False, True), (1, True, True), (1, False, False)]
+)
+def test_indexer_warmup_includes_pcp_normalized_dcp_key(
+    monkeypatch, pcp, shard_q, normalized
+):
     monkeypatch.setattr(
         "vllm.v1.attention.backends.mla.indexer.get_dcp_group",
         lambda: SimpleNamespace(rank_in_group=2),
     )
     config = SimpleNamespace(
-        attention_config=SimpleNamespace(sparse_mla_shard_q=False),
+        attention_config=SimpleNamespace(sparse_mla_shard_q=shard_q),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
         model_config=SimpleNamespace(
             hf_text_config=SimpleNamespace(compress_ratios=[32], index_kpool=32)
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=4,
-            prefill_context_parallel_size=4,
+            prefill_context_parallel_size=pcp,
             cp_kv_cache_interleave_size=1,
         ),
     )
@@ -444,7 +450,8 @@ def test_indexer_warmup_includes_pcp_normalized_dcp_key(monkeypatch):
 
     # Triton's compile key normalizes generic i32 values to 2 and divisible
     # i32 values (including zero) to 16.
-    assert {(key.dcp_rank, key.dcp_world) for key in keys} == {(2, 2), (16, 1)}
+    expected = {(2, 2), (16, 1)} if normalized else {(2, 2)}
+    assert {(key.dcp_rank, key.dcp_world) for key in keys} == expected
     assert {
         (
             key.input_variant.is_aligned("uncompressed_seq_lens"),
