@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from vllm.config import ECEventsConfig
 from vllm.distributed.ec_transfer.ec_events import (
     AllECCleared,
     ECRemoved,
@@ -619,3 +622,25 @@ def test_events_report_full_clear():
     manager.reset()
 
     assert manager.take_events() == [AllECCleared()]
+
+
+class LegacyCacheManager(EncoderCacheManager):
+    """A custom manager whose constructor only accepts `cache_size`."""
+
+    def __init__(self, cache_size: int):
+        super().__init__(cache_size=cache_size)
+
+
+@pytest.mark.parametrize("enable_events", [True, False])
+def test_create_manager_keeps_custom_constructor_compatible(enable_events):
+    vllm_config = SimpleNamespace(
+        ec_events_config=ECEventsConfig(enable_ec_cache_events=enable_events)
+    )
+
+    manager = LegacyCacheManager.create_manager(cache_size=4, vllm_config=vllm_config)
+    req = MockRequest("req1", ["img1"], [4])
+    assert manager.can_allocate(req, 0, int(1e9), 0)
+    manager.allocate(req, 0)
+
+    expected = [ECStored(mm_hashes=["img1"], medium="GPU")] if enable_events else []
+    assert manager.take_events() == expected

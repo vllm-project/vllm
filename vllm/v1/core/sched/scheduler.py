@@ -21,7 +21,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.ec_transfer.ec_connector.utils import PlaceholderMetadataResolver
-from vllm.distributed.ec_transfer.ec_events import ECEventBatch
+from vllm.distributed.ec_transfer.ec_events import ECCacheEvent, ECEventBatch
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.utils import MROPE_POSITION_DELTA_KEY
@@ -471,6 +471,12 @@ class Scheduler(SchedulerInterface):
         # queries, hits): async KV loads started once processed_step_seq >=
         # fence_seq.
         self.deferred_loads: dict[str, tuple[int, int, int, int]] = {}
+
+        # FIFO of encoder cache events, one entry per non-empty step. A step's
+        # events are published with that step's output; async scheduling runs
+        # `schedule()` ahead of `update_from_output()`, so draining the cache
+        # manager at publish time would advertise not-yet-cached embeddings.
+        self.pending_ec_events: deque[list[ECCacheEvent]] = deque()
 
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
@@ -1817,6 +1823,10 @@ class Scheduler(SchedulerInterface):
         if self.defer_block_free and total_num_scheduled_tokens > 0:
             self.sched_step_seq += 1
 
+        # Hold this step's encoder cache events until its output is processed.
+        if total_num_scheduled_tokens > 0:
+            self.pending_ec_events.append(self.encoder_cache_manager.take_events())
+
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
@@ -2758,7 +2768,7 @@ class Scheduler(SchedulerInterface):
         # Updates dropped at turn end follow the turn's final output.
         self._emit_dropped_streaming_updates(outputs)
 
-        self._publish_ec_events()
+        self._publish_step_ec_events(scheduler_output)
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -2800,10 +2810,27 @@ class Scheduler(SchedulerInterface):
 
         return engine_core_outputs
 
-    def _publish_ec_events(self) -> None:
-        """Publish the encoder cache events queued by the cache manager and the
-        EC connector."""
-        ec_events = self.encoder_cache_manager.take_events()
+    def _publish_step_ec_events(self, scheduler_output: SchedulerOutput) -> None:
+        """Publish the EC events of the step whose output was just processed.
+
+        Async scheduling runs `schedule()` for the next step before the current
+        step's output arrives, so draining everything the cache manager queued
+        would advertise embeddings that are not cached yet.
+        """
+        ec_events: list[ECCacheEvent] = []
+        if scheduler_output.total_num_scheduled_tokens > 0 and self.pending_ec_events:
+            ec_events = self.pending_ec_events.popleft()
+        self._publish_ec_events(ec_events)
+
+    def _publish_ec_events(self, ec_events: list[ECCacheEvent] | None = None) -> None:
+        """Publish EC events together with the ones queued by the EC connector.
+
+        Args:
+            ec_events: Events to publish. Drains the cache manager when omitted.
+
+        """
+        if ec_events is None:
+            ec_events = self.encoder_cache_manager.take_events()
         if self.ec_connector is not None:
             ec_events.extend(self.ec_connector.take_events())
         if ec_events:

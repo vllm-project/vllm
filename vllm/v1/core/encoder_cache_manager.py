@@ -81,13 +81,14 @@ class EncoderCacheManager:
     def create_manager(
         cls, *, cache_size: int, vllm_config: "VllmConfig"
     ) -> "EncoderCacheManager":
+        # Custom managers may only accept `cache_size`, so the event flag is set
+        # after construction instead of being passed to the constructor.
+        manager = cls(cache_size=cache_size)
         ec_events_config = vllm_config.ec_events_config
-        return cls(
-            cache_size=cache_size,
-            enable_events=(
-                ec_events_config is not None and ec_events_config.enable_ec_cache_events
-            ),
+        manager.enable_events = (
+            ec_events_config is not None and ec_events_config.enable_ec_cache_events
         )
+        return manager
 
     def __init__(self, cache_size: int, enable_events: bool = False):
         self.cache_size = cache_size
