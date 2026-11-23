@@ -294,6 +294,10 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         supported: tuple[str, ...] = ("auto", "bfloat16")
         if current_platform.is_device_capability_family(120):
             supported += ("float16", "fp8", "fp8_e4m3")
+        elif current_platform.is_device_capability_family(90):
+            # Hopper runs the same Triton attention (ops/attention_sm90.py),
+            # which loads E4M3 keys and values.
+            supported += ("fp8", "fp8_e4m3")
         if cache_dtype not in supported:
             raise ValueError(f"Inkling2 KV cache dtype must be one of {supported}")
         self.fp8_kv = cache_dtype in ("fp8", "fp8_e4m3")
