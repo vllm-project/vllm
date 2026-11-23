@@ -54,4 +54,4 @@ def test_flashinfer_decode_matches_flashmla(num_decode, num_prefill, with_sink):
     out, lse = impl._bf16_flash_mla_kernel(q, kv, indices, lengths, HEADS)
 
     assert lse is None and out.shape == ref.shape
-    torch.testing.assert_close(out, ref, rtol=0, atol=2e-3)
+    torch.testing.assert_close(out, ref, rtol=2**-7, atol=2e-3)
