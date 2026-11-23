@@ -31,7 +31,10 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     make_kv_cache_group_from_specs,
 )
 from vllm.config import ParallelConfig, set_current_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    KVOutputAggregator,
+    pipeline_stage_layers,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
@@ -535,6 +538,7 @@ def _register_overlaid_mla_worker(
         ],
         kv_cache_groups=groups,
     )
+    worker._pipeline_stage_layers = pipeline_stage_layers(worker.kv_cache_config)
 
     with (
         patch.object(bw, "TransferTopology", return_value=MagicMock()),
@@ -938,6 +942,8 @@ def _make_remote_meta(
         region_members=region_members,
         region_group_ids=region_group_ids,
         layer_group_ids=layer_group_ids,
+        # The peer runs the same pipeline stages.
+        pipeline_stage_layers=worker._pipeline_stage_layers,
     )
 
 

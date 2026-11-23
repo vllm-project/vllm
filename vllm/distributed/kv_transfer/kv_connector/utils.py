@@ -558,6 +558,7 @@ def pair_pipeline_stages(
     Raises:
         ValueError: If `local_layers` is not one of `local_stages`, a layer is
             on two stages of one engine, or the engines hold different layers.
+
     """
     if set(local_layers) not in [set(layers) for layers in local_stages]:
         raise ValueError(
