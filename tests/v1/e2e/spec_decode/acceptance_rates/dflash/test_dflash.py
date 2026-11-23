@@ -49,6 +49,31 @@ QWEN3_8_DFLASH2_NVFP4 = DFlashCorrectnessConfig(
     chat_template_kwargs={"enable_thinking": False},
 )
 
+# Anchor-first DFlash2 draft (`sample_from_anchor: true`): K queries per request.
+QWEN3_8_DFLASH2_ANCHOR = DFlashCorrectnessConfig(
+    model="Qwen/Qwen3.8-27B",
+    draft_model="DaoCloud/Qwen3.8-27B-DFlash2-Exp",
+    expected_accuracy=0.90,
+    expected_acceptance_len=6.03 * 0.95,
+    num_speculative_tokens=7,
+    max_num_seqs=32,
+    use_chat_completions=True,
+    language_model_only=True,
+    chat_template_kwargs={"enable_thinking": False},
+)
+
+QWEN3_8_DSPINE = DFlashCorrectnessConfig(
+    model="Qwen/Qwen3.8-27B",
+    draft_model="tencent/Qwen3.8-27B-DSpine-b16",
+    expected_accuracy=0.90,
+    expected_acceptance_len=7.87 * 0.95,
+    num_speculative_tokens=15,
+    max_num_seqs=32,
+    use_chat_completions=True,
+    language_model_only=True,
+    chat_template_kwargs={"enable_thinking": False},
+)
+
 QWEN3_5_4B_DFLASH2 = DFlashCorrectnessConfig(
     model="Qwen/Qwen3.5-4B",
     draft_model="vllm-project/Qwen3.5-4B-DFlash2",
@@ -81,7 +106,6 @@ def test_dflash_reference_acceptance_lengths(vllm_runner):
         vllm_runner,
         spec_config={
             "model": QWEN3_DFLASH.model,
-            "trust_remote_code": True,
             "speculative_config": {
                 "method": "dflash",
                 "model": QWEN3_DFLASH.draft_model,
@@ -110,6 +134,8 @@ def test_dflash_reference_acceptance_lengths(vllm_runner):
         pytest.param(QWEN3_DFLASH, id="qwen3"),
         pytest.param(LAGUNA_DFLASH_NVFP4, id="laguna-nvfp4"),
         pytest.param(QWEN3_8_DFLASH2_NVFP4, id="qwen3.8-dflash2-nvfp4"),
+        pytest.param(QWEN3_8_DFLASH2_ANCHOR, id="qwen3.8-dflash2-anchor"),
+        pytest.param(QWEN3_8_DSPINE, id="qwen3.8-dspine"),
         pytest.param(QWEN3_5_4B_DFLASH2, id="qwen3.5-4b-dflash2"),
     ],
 )
@@ -125,7 +151,6 @@ def test_dflash_correctness(
     with vllm_runner(
         config.model,
         block_size=None,
-        trust_remote_code=True,
         speculative_config={
             "method": "dflash",
             "model": config.draft_model,

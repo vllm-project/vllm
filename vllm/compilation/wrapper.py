@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dis
+import inspect
 import itertools
 import os
 import sys
 from abc import abstractmethod
 from collections.abc import Callable, Generator
 from contextlib import contextmanager, nullcontext
-from types import CodeType
+from types import CodeType, FrameType
 from typing import Any, ParamSpec, TypeVar
 
 import torch
@@ -29,6 +30,18 @@ logger = init_logger(__name__)
 
 R = TypeVar("R")
 P = ParamSpec("P")
+
+
+def _bound_instance(frame: FrameType) -> Any:
+    """The instance a method frame is bound to. Also handles frames of wrappers
+    that take `(*args, **kwargs)`, such as Transformers' `deprecate_kwarg`."""
+    code = frame.f_code
+    if code.co_argcount:
+        return frame.f_locals[code.co_varnames[0]]
+    if code.co_flags & inspect.CO_VARARGS:
+        args = frame.f_locals[code.co_varnames[code.co_kwonlyargcount]]
+        return args[0] if args else None
+    return None
 
 
 @contextmanager
@@ -250,7 +263,7 @@ class TorchCompileWithNoGuardsWrapper:
         frame = frame.f_locals["frame"]
         assert frame.f_code == old_code
 
-        if frame.f_locals["self"] is not self:
+        if _bound_instance(frame) is not self:
             return
 
         self._compiled_bytecode = new_code
