@@ -23,6 +23,12 @@
 /CMakeLists.txt @tlrmchlsmth @LucasWilkinson @Harry-Chen
 /cmake @tlrmchlsmth @LucasWilkinson @Harry-Chen
 
+# Disaggregated encoder (EPD)
+/vllm/distributed/ec_transfer/ @gty111
+/examples/disaggregated/disaggregated_encoder/ @gty111
+/tests/v1/ec_connector/ @gty111
+/docs/features/disagg_encoder.md @gty111
+
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
 /vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @yewentao256 @ProExpertProg
