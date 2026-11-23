@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, cast
@@ -440,6 +441,30 @@ class MoERunner(MoERunnerInterface):
                 fused_output *= self.routed_scaling_factor
         return shared_output, fused_output
 
+    def _scale_in_shared_add(
+        self,
+        shared_output: torch.Tensor | None,
+        fused_output: torch.Tensor,
+    ) -> bool:
+        """Whether `shared + scale * routed` can be one `torch.add(alpha=)`.
+
+        Only where it is bit-identical to scaling, then adding: a power-of-two
+        scale multiplies exactly, and BF16 / FP32 adds round once either way.
+        FP16 keeps the separate scale (OUTPUT_FP16_GUARD may divide the shared
+        output instead), and so does a routed output transform.
+        """
+        scale = self.routed_scaling_factor
+        return (
+            shared_output is not None
+            and scale != 1.0
+            and scale > 0
+            and math.frexp(scale)[0] == 0.5
+            and self.routed_output_transform is None
+            and fused_output.dtype in (torch.bfloat16, torch.float32)
+            and shared_output.dtype == fused_output.dtype
+            and shared_output.shape == fused_output.shape
+        )
+
     @property
     def _fused_output_is_reduced(self) -> bool:
         return (
@@ -827,17 +852,24 @@ class MoERunner(MoERunnerInterface):
             shared_output, fused_output_is_reduced
         )
 
-        shared_output, fused_output = self._maybe_apply_routed_scale_to_output(
-            shared_output, fused_output
-        )
-
-        # Apply output transform (e.g. latent -> full dim)
-        fused_output = self.apply_routed_output_transform(fused_output)
-
-        if shared_output is not None:
-            result = shared_output + fused_output
+        if self._scale_in_shared_add(shared_output, fused_output):
+            # shared + scale * routed in one launch instead of a scale and an add.
+            assert shared_output is not None
+            result = torch.add(
+                shared_output, fused_output, alpha=self.routed_scaling_factor
+            )
         else:
-            result = fused_output
+            shared_output, fused_output = self._maybe_apply_routed_scale_to_output(
+                shared_output, fused_output
+            )
+
+            # Apply output transform (e.g. latent -> full dim)
+            fused_output = self.apply_routed_output_transform(fused_output)
+
+            if shared_output is not None:
+                result = shared_output + fused_output
+            else:
+                result = fused_output
 
         result = self._maybe_reduce_final_output(
             result, og_hidden_dim_post_xform, fused_output_is_reduced
