@@ -288,7 +288,14 @@ class LLMEngine:
         # Surface validation errors synchronously before registering request state.
         lora_config = self.vllm_config.lora_config
         if lora_config is not None and request.sampling_params is not None:
-            lora_config.validate_prompt_logprobs(request.sampling_params)
+            try:
+                lora_config.validate_prompt_logprobs(request.sampling_params)
+            except VLLMValidationError:
+                if request.mm_features:
+                    self.renderer.queue_mm_cache_invalidations(
+                        [f.mm_hash or f.identifier for f in request.mm_features]
+                    )
+                raise
 
         if request.lora_request is not None:
             self._register_lora(request.lora_request)
