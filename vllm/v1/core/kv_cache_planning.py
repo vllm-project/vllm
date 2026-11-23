@@ -22,10 +22,7 @@ from vllm.v1.core.kv_cache_utils import (
     _kv_cache_device_name,
     update_kv_cache_capacity,
 )
-from vllm.v1.core.sched.prompt_embeds_budget import (
-    prompt_embeds_freed_bytes,
-    prompt_embeds_row_bytes,
-)
+from vllm.v1.core.sched.prompt_embeds_budget import prompt_embeds_row_bytes
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,
@@ -1860,38 +1857,21 @@ def finalize_extensible_kv_cache(
         # graphs and warmup took their share; fit it again to the measured one.
         builder = get_kv_cache_config_builder(vllm_config)
         groups_per_worker = [config.kv_cache_groups for config in kv_cache_configs]
-        bytes_per_block = [
-            _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
-            for groups in groups_per_worker
-            if groups
-        ]
         # Workers measured after keeping the prompt_embeds rows of the
-        # provisional max_model_len free; fit against that memory too, and give
-        # the rows a shorter context does not need back to the KV cache.
-        row_bytes = prompt_embeds_row_bytes(vllm_config)
-        provisional_len = vllm_config.model_config.max_model_len
+        # provisional max_model_len free, so the measured blocks are KV cache
+        # only. A shorter context leaves the rows it no longer needs unused:
+        # handing them to the KV cache would need each worker's own block
+        # sizing (see prompt_embeds_budget_rows).
         available_memory = [
             (num_blocks - 1)
             * _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
-            + provisional_len * row_bytes
             if groups
             else 0
             for groups in groups_per_worker
         ]
         _auto_fit_max_model_len(
-            builder,
-            vllm_config,
-            groups_per_worker,
-            available_memory,
-            after_warmup=True,
-            extra_bytes_per_token=row_bytes,
+            builder, vllm_config, groups_per_worker, available_memory, after_warmup=True
         )
-        freed_bytes = prompt_embeds_freed_bytes(
-            vllm_config, provisional_len, vllm_config.model_config.max_model_len
-        )
-        if freed_bytes and bytes_per_block:
-            num_blocks += min(freed_bytes // b for b in bytes_per_block)
-            num_blocks = min(num_blocks, scheduler_kv_cache_config.num_blocks)
     shrink_kv_cache_configs(
         vllm_config, kv_cache_configs + [scheduler_kv_cache_config], num_blocks
     )

@@ -18,7 +18,9 @@ def prompt_embeds_budget_rows(
     requests whose prompts are not computed yet: one max-length prompt still
     being prefilled plus a full step of new prompts."""
     # TODO(LuisRobaina): Shrink this worst case by copying each step's
-    # rows from pinned host memory, or by capping prompt_embeds length.
+    # rows from pinned host memory, or by capping prompt_embeds length. Then
+    # it no longer depends on max_model_len, and an auto-fit shortened after
+    # warmup no longer leaves the rows of the difference unused.
     return max_model_len + scheduler_config.max_num_batched_tokens
 
 
@@ -47,16 +49,6 @@ def prompt_embeds_budget_bytes(
         max_model_len = vllm_config.model_config.max_model_len
     rows = prompt_embeds_budget_rows(max_model_len, vllm_config.scheduler_config)
     return rows * row_bytes
-
-
-def prompt_embeds_freed_bytes(
-    vllm_config: "VllmConfig", old_max_model_len: int, new_max_model_len: int
-) -> int:
-    """GPU memory of the `prompt_embeds` rows a shorter `max_model_len` no
-    longer needs, or 0 without prompt embeds."""
-    return prompt_embeds_budget_bytes(
-        vllm_config, old_max_model_len
-    ) - prompt_embeds_budget_bytes(vllm_config, new_max_model_len)
 
 
 class PromptEmbedsBudget:
