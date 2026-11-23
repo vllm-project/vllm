@@ -59,5 +59,6 @@ class FSOffloadingSpec(OffloadingSpec):
                 file_mapper=self.file_mapper,
                 blocks_per_file=self.blocks_per_chunk,
                 device=kv_caches.tensors[0].tensor.device,
+                kv_caches=kv_caches,
             )
         return self._worker
