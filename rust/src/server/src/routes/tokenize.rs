@@ -81,20 +81,20 @@ fn estimate_chat_tokens(
                     total += estimate_content_tokens(tokenizer, content);
                 }
                 if let Some(reasoning) = reasoning {
-                    total += tokenizer.estimate_max_token(reasoning);
+                    total += tokenizer.estimate_min_token(reasoning);
                 }
                 if let Some(tool_calls) = tool_calls {
                     for tool_call in tool_calls {
-                        total += tokenizer.estimate_max_token(&tool_call.function.name);
+                        total += tokenizer.estimate_min_token(&tool_call.function.name);
                         if let Some(arguments) = &tool_call.function.arguments {
-                            total += tokenizer.estimate_max_token(arguments);
+                            total += tokenizer.estimate_min_token(arguments);
                         }
                     }
                 }
             }
             ChatMessage::Function { content, name } => {
-                total += tokenizer.estimate_max_token(name);
-                total += tokenizer.estimate_max_token(content);
+                total += tokenizer.estimate_min_token(name);
+                total += tokenizer.estimate_min_token(content);
             }
         }
     }
@@ -106,16 +106,16 @@ fn estimate_content_tokens(
     content: &MessageContent,
 ) -> usize {
     match content {
-        MessageContent::Text(text) => tokenizer.estimate_max_token(text),
+        MessageContent::Text(text) => tokenizer.estimate_min_token(text),
         MessageContent::Parts(parts) => {
             let mut sum = 0;
             for part in parts {
                 match part {
                     ContentPart::Text { text } | ContentPart::Refusal { refusal: text } => {
-                        sum += tokenizer.estimate_max_token(text);
+                        sum += tokenizer.estimate_min_token(text);
                     }
                     ContentPart::ToolReference { name } => {
-                        sum += tokenizer.estimate_max_token(name);
+                        sum += tokenizer.estimate_min_token(name);
                     }
                     ContentPart::ImageUrl { .. }
                     | ContentPart::VideoUrl { .. }
@@ -166,7 +166,7 @@ fn tokenize_completion(
     state.base_model_names().check(req.model.as_deref())?;
     let tokenizer = state.chat.text().tokenizer();
     if let Some(limit) = max_tokenize_tokens {
-        let estimated = tokenizer.estimate_max_token(&req.prompt);
+        let estimated = tokenizer.estimate_min_token(&req.prompt);
         check_max_tokenize_tokens(estimated, limit, "at least ")?;
     }
     let return_token_strs = req.return_token_strs;
@@ -326,7 +326,7 @@ mod tests {
             fn id_to_token(&self, _id: u32) -> Option<String> {
                 None
             }
-            fn estimate_max_token(&self, text: &str) -> usize {
+            fn estimate_min_token(&self, text: &str) -> usize {
                 text.len().checked_div(self.0).unwrap_or(0)
             }
         }

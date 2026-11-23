@@ -526,7 +526,7 @@ impl Tokenizer for TiktokenTokenizer {
         self.metadata.vocab_upper_bound as usize
     }
 
-    fn estimate_max_token(&self, text: &str) -> usize {
+    fn estimate_min_token(&self, text: &str) -> usize {
         text.len().checked_div(self.metadata.max_token_len).unwrap_or(0)
     }
 }
@@ -654,14 +654,14 @@ mod tests {
     }
 
     #[test]
-    fn tiktoken_estimate_max_token() {
+    fn tiktoken_estimate_min_token() {
         let (backends, _dir) = tiktoken_backends();
         for backend in &backends {
             let max_token_len = backend.metadata.max_token_len;
             assert!(max_token_len > 0);
-            assert_eq!(backend.estimate_max_token(""), 0);
+            assert_eq!(backend.estimate_min_token(""), 0);
             let text = "a".repeat(max_token_len * 3 + 1);
-            assert_eq!(backend.estimate_max_token(&text), 3);
+            assert_eq!(backend.estimate_min_token(&text), 3);
         }
     }
 

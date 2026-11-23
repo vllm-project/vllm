@@ -71,11 +71,11 @@ pub trait Tokenizer: Send + Sync {
         false
     }
 
-    /// Estimate the maximum token count for a text input.
+    /// Estimate the minimum token count for a text input.
     ///
     /// The estimate is based on the formula:
     /// `length of the text / max_token_len_in_vocabulary`.
-    fn estimate_max_token(&self, text: &str) -> usize {
+    fn estimate_min_token(&self, text: &str) -> usize {
         text.len()
     }
 

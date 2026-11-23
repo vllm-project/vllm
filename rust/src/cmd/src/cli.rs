@@ -773,9 +773,9 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub max_n_sequences: Option<i64>,
 
-    /// Maximum number of tokens allowed for /tokenize, /detokenize, and
-    /// /v1/messages/count_tokens requests. Defaults to max(max_model_len * 2, 131072);
-    /// set <= 0 to disable. The --max-tokenize-tokens CLI flag takes precedence.
+    /// Maximum number of tokens allowed for /tokenize and /detokenize
+    /// requests. Defaults to max(max_model_len * 2, 131072); set <= 0 to
+    /// disable. The --max-tokenize-tokens CLI flag takes precedence.
     #[arg(
         long,
         env = "VLLM_MAX_TOKENIZE_TOKENS",

@@ -403,7 +403,7 @@ impl Tokenizer for HuggingFaceTokenizer {
         self.special_token_ids.binary_search(&token_id).is_ok()
     }
 
-    fn estimate_max_token(&self, text: &str) -> usize {
+    fn estimate_min_token(&self, text: &str) -> usize {
         text.len().checked_div(self.max_token_len).unwrap_or(0)
     }
 }
@@ -737,12 +737,12 @@ mod tests {
         let fast = HuggingFaceTokenizer::new_fastokens(&path).unwrap();
         assert_eq!(fast.vocab_size(), hf.vocab_size());
         assert_eq!(fast.vocab_size(), 10);
-        assert_eq!(fast.estimate_max_token(""), 0);
-        assert_eq!(hf.estimate_max_token(""), 0);
+        assert_eq!(fast.estimate_min_token(""), 0);
+        assert_eq!(hf.estimate_min_token(""), 0);
         assert_eq!(fast.max_token_len, hf.max_token_len);
         let text = "a".repeat(fast.max_token_len * 4 + 2);
-        assert_eq!(fast.estimate_max_token(&text), 4);
-        assert_eq!(hf.estimate_max_token(&text), 4);
+        assert_eq!(fast.estimate_min_token(&text), 4);
+        assert_eq!(hf.estimate_min_token(&text), 4);
         assert_eq!(
             fast.encode("hello<|im_end|>", false).unwrap(),
             hf.encode("hello<|im_end|>", false).unwrap()

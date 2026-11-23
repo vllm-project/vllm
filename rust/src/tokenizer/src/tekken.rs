@@ -82,7 +82,7 @@ impl Tokenizer for TekkenTokenizer {
         self.inner.is_special_token(token_id)
     }
 
-    fn estimate_max_token(&self, text: &str) -> usize {
+    fn estimate_min_token(&self, text: &str) -> usize {
         text.len().checked_div(self.max_token_len).unwrap_or(0)
     }
 }
@@ -122,14 +122,14 @@ mod tests {
     }
 
     #[test]
-    fn estimate_max_token_uses_max_token_len_in_vocabulary() {
+    fn estimate_min_token_uses_max_token_len_in_vocabulary() {
         let tokenizer = test_tokenizer();
         // In test_tokenizer, vocab tokens are 1 byte each, but "<control>" special token is 9 bytes.
         // Therefore max_token_len = 9.
-        assert_eq!(tokenizer.estimate_max_token(""), 0);
-        assert_eq!(tokenizer.estimate_max_token("12345678"), 0);
-        assert_eq!(tokenizer.estimate_max_token("123456789"), 1);
-        assert_eq!(tokenizer.estimate_max_token("123456789012345678"), 2);
+        assert_eq!(tokenizer.estimate_min_token(""), 0);
+        assert_eq!(tokenizer.estimate_min_token("12345678"), 0);
+        assert_eq!(tokenizer.estimate_min_token("123456789"), 1);
+        assert_eq!(tokenizer.estimate_min_token("123456789012345678"), 2);
     }
 
     #[test]
