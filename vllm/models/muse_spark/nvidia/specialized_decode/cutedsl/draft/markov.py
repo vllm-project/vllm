@@ -6,8 +6,7 @@ Per draft step the Markov w2 GEMV runs unchanged, then `markov_step`
 (bias, output transform, cache store, Gumbel block argmax, and in the row's
 last block the final argmax, token and next w1 row). With a vocab-parallel w2
 each rank works on its vocab range, its last block writes a packet instead of
-the token, and `markov_pick` picks the winner from the gathered per-rank
-packets; `cache_fill` scatters the gathered draft-logits shards after the
+the token; `cache_fill` scatters the gathered draft-logits shards after the
 loop. `anchor_embed` starts a call.
 
 The arithmetic is bit for bit that of the speculator's eager loop: its
@@ -1547,11 +1546,6 @@ class MarkovKernels:
             )
             compile_cache_fill(vectorized=fill_vector)
 
-    @property
-    def step_variants(self) -> frozenset[tuple[int, bool, bool]]:
-        """The `(block, PDL, vector)` of the compiled steps."""
-        return frozenset(self._steps)
-
     def _step(self, block: int, pdl: bool, vector: bool):
         kernel = self._steps.get((block, pdl, vector))
         if kernel is None:
@@ -1638,8 +1632,6 @@ class MarkovKernels:
         step: int,
         emb: torch.Tensor,
     ) -> None:
-        """`markov_pick` over this loop's w1, `emb` a row view of
-        `embeds`."""
         _launch_pick(self._pick, packets, rows, tokens, step, self.w1, emb)
 
 
@@ -1757,27 +1749,6 @@ def markov_step(
         inv_cap,
         cap,
     )
-
-
-def markov_pick(
-    packets: torch.Tensor,
-    rows: int,
-    tokens: torch.Tensor,
-    step: int,
-    w1: torch.Tensor,
-    emb: torch.Tensor,
-    *,
-    tp: int,
-    pdl: bool,
-) -> None:
-    """`tokens[r, step]` and `emb[r]` (its w1 row) of the winner over the
-    gathered int32 `[tp, rows, 4]` packets."""
-    assert packets.dtype == torch.int32 and tokens.dtype == torch.int64
-    row_bytes, chunk = _row_copy(w1, emb, PICK_THREADS)
-    kernel = compile_pick(
-        tp=tp, pdl=pdl, row_bytes=row_bytes, chunk=chunk, w1_rows=w1.shape[0]
-    )
-    _launch_pick(kernel, packets, rows, tokens, step, w1, emb)
 
 
 def cache_fill(

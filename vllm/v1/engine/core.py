@@ -61,6 +61,7 @@ from vllm.v1.core.kv_cache_planning import (
     finalize_extensible_kv_cache,
     get_global_kv_cache_groups,
     get_kv_cache_configs,
+    resolve_mamba_block_size,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -289,6 +290,11 @@ class EngineCore:
 
         # Get all kv cache needed by the model
         layer_configs = self.model_executor.get_kv_cache_layer_configs()
+        mamba_block_size = resolve_mamba_block_size(vllm_config, layer_configs)
+        if mamba_block_size is not None:
+            vllm_config.cache_config.mamba_block_size = mamba_block_size
+            self.model_executor.set_mamba_block_size(mamba_block_size)
+            layer_configs = self.model_executor.get_kv_cache_layer_configs()
 
         # Resolve the KV cache layout before memory profiling: workers that
         # capture full cudagraphs initialize a minimal KV cache during it.
@@ -2119,6 +2125,7 @@ class EngineCoreProc(EngineCore):
     def _make_ready_response(self) -> EngineCoreReadyResponse:
         parallel_config = self.vllm_config.parallel_config
         scheduler_config = self.vllm_config.scheduler_config
+        mm_config = self.vllm_config.model_config.multimodal_config
         return EngineCoreReadyResponse(
             max_model_len=self.vllm_config.model_config.max_model_len,
             num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
@@ -2179,6 +2186,12 @@ class EngineCoreProc(EngineCore):
             enable_expert_parallel=parallel_config.enable_expert_parallel,
             supports_prompt_logprobs=(
                 not self.vllm_config.cache_config.kv_sharing_fast_prefill
+            ),
+            allow_missing_mm_embeddings=(
+                mm_config is not None and mm_config.allow_missing_mm_embeddings
+            ),
+            max_mm_embeds_per_request=getattr(
+                self.scheduler, "max_mm_embeds_per_request", None
             ),
         )
 
