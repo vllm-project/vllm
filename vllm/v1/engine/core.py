@@ -1269,8 +1269,13 @@ class EngineCore:
                 request.mm_features
             )
 
-        watermark_config = self.vllm_config.watermark_config
+        # The sender cache has already been updated, even for rejected requests.
+        lora_config = self.vllm_config.lora_config
         params = request.sampling_params
+        if lora_config is not None and params is not None:
+            lora_config.validate_prompt_logprobs(params)
+
+        watermark_config = self.vllm_config.watermark_config
         # Greedy decoding and trace replay cannot be watermarked; leave their
         # flag as the frontend resolved it.
         if (
@@ -2176,7 +2181,6 @@ class EngineCoreProc(EngineCore):
         ready_event: threading.Event,
     ):
         """Input socket IO thread."""
-        lora_config = self.vllm_config.lora_config
         # Msgpack serialization decoding with optional tensor IPC receiver.
         add_request_decoder = MsgpackDecoder(
             EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
@@ -2241,9 +2245,6 @@ class EngineCoreProc(EngineCore):
                     if request_type == EngineCoreRequestType.ADD:
                         req: EngineCoreRequest = add_request_decoder.decode(data_frames)
                         try:
-                            params = req.sampling_params
-                            if lora_config is not None and params is not None:
-                                lora_config.validate_prompt_logprobs(params)
                             request = self.preprocess_add_request(req)
                         except MultiModalCacheMissError as e:
                             # P0/P1 shadow drift -- return a retryable signal (P0
@@ -2251,6 +2252,10 @@ class EngineCoreProc(EngineCore):
                             self._handle_mm_cache_miss(req, e)
                             continue
                         except VLLMValidationError as e:
+                            # Note(arpera):
+                            # Currently we validate in engine core
+                            # only if request uses the same structured output backend
+                            # as engine core latched
                             self._handle_request_validation_error(req, e)
                             continue
                         except Exception:
