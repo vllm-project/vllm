@@ -1,0 +1,14 @@
+schema_version: 1
+name: smoke
+description: Fast Phase 0 end-to-end smoke suite exercising HTTP bench, direct bench, and GSM8K eval.
+benchmarks:
+  - type: http_smoke
+    num_requests: 4
+    concurrency: [1]
+  - type: direct_smoke
+    iterations: 2
+evals:
+  - name: gsm8k
+    num_questions: 6
+    repeats: 1
+    concurrency: [1]
