@@ -14,6 +14,9 @@ Constraints (any failure falls back to the stock path before anything is written
   divisible by 8, the gate / state / index layouts).
 - No spec-decode rows in the batch (`spec_sequence_masks is None`): a mixed prefill +
   spec-verify step takes the stock path.
+- A mixed step (length-1 decodes first, then prefills) needs at least
+  `MIXED_MIN_PREFILL_TOKENS` prefill tokens; below that it takes the stock path (see
+  the constant).
 - The hand-over flags of the one-launch path are one persistent buffer per device: two
   KDA prefill layers must never run concurrently on two streams (KDA layers run on the
   main stream only).
@@ -36,6 +39,15 @@ logger = init_logger(__name__)
 _ATTR_W = "_akr_kda_conv_w"
 _STEP = "_akr_kda_table"
 _SIDX = "_akr_kda_sidx"
+
+# Mixed steps (decodes + prefills, no spec rows) run the decodes as three more stock
+# launches (conv update, packed decode, gated norm) ahead of the kernel, while stock
+# folds them into its prefill conv; that fixed cost is mostly host time. Speed vs stock
+# per layer call (eager, MI355X, the shapes of amd_prefill/check_kda_prefill.py), 1-32
+# decodes plus: 1024-5000 prefill tokens 0.73-0.94x, 8192 0.92-1.03x, 10240
+# 1.05-1.09x, 12000-16000 1.11-1.33x. Pure prefill steps are 1.2-1.9x faster at every
+# size and are not gated.
+MIXED_MIN_PREFILL_TOKENS = 10240
 
 
 def _env_on() -> bool:
@@ -73,6 +85,8 @@ def _unsupported(m) -> str | None:
         return "off"
     if m.spec_sequence_masks is not None:
         return "spec"
+    if m.num_decodes > 0 and m.num_prefill_tokens < MIXED_MIN_PREFILL_TOKENS:
+        return "short mixed"
     if getattr(m, "akr_chunk_counts", None) is None or m.chunk_indices is None:
         return "no chunk counts"
     return None

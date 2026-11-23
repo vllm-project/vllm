@@ -47,8 +47,10 @@ def env():
 
 @pytest.mark.parametrize("name,nd,plens,ctxs", CASES, ids=[c[0] for c in CASES])
 @torch.inference_mode()
-def test_strided_state_indices(env, name, nd, plens, ctxs):
+def test_strided_state_indices(monkeypatch, env, name, nd, plens, ctxs):
     layer, patch = env
+    # the mixed case is short: lift the mixed-step gate so the kernel path runs
+    monkeypatch.setattr(C.ak, "MIXED_MIN_PREFILL_TOKENS", 0)
     b = C.make_batch(nd, plens, ctxs)
     slots = b["m"].non_spec_state_indices_tensor
     assert not slots.is_contiguous()

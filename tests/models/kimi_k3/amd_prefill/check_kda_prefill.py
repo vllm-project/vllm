@@ -5,7 +5,8 @@
 `KimiK3DeltaAttention._forward` with VLLM_KIMI_AKR_KDA_PREFILL=0 (stock conv +
 chunk_kda_prefill + o_norm) vs =1, on realistic chunk shapes (ragged batches, cached
 context -> initial states, decode-first mixed steps, checkpoint export). Single GPU.
-usage: python check_kda_prefill.py"""
+Mixed steps below `MIXED_MIN_PREFILL_TOKENS` prefill tokens report used=False (the hook
+declines them). usage: python check_kda_prefill.py"""
 
 import os
 from types import SimpleNamespace
@@ -194,6 +195,7 @@ def main():
         ("ragged 10240 = 6000+4240", 0, [6000, 4240], [200_000, 0]),
         ("mixed 12 decodes + 2x2000", 12, [2000, 2000], [50_000, 0]),
         ("mixed 40 decodes + 5000", 40, [5000], [10_000]),
+        ("mixed 8 decodes + 12288", 8, [12288], [20_000]),
         ("tiny 1+1+1", 0, [1, 1, 3], [10, 0, 5]),
     ]
     for name, nd, plens, ctxs in cases:
