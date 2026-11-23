@@ -14,8 +14,6 @@ from typing import Any, Literal
 
 import pytest
 import torch
-from torch.autograd import DeviceType
-from torch.profiler import ProfilerActivity, profile
 
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -423,6 +421,8 @@ def test_mla_v_up_proj_follows_tuned_aiter_triton_bf16_bmm(
 ):
     """_v_up_proj runs AITER's Triton bf16 BMM exactly for shapes AITER has a
     tuned config for, and matches the torch.bmm path it replaces."""
+    import triton
+
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
     from vllm.platforms.rocm import on_gfx950
 
@@ -455,6 +455,15 @@ def test_mla_v_up_proj_follows_tuned_aiter_triton_bf16_bmm(
         num_tokens, num_heads * kv_lora_rank, dtype=torch.bfloat16, device="cuda"
     )
 
+    # torch.profiler on ROCm can drop kernel records that arrive after the
+    # session's flush (ROCm/rocm-systems#14378), so record Triton launches.
+    launched: list[str] = []
+    monkeypatch.setattr(
+        triton.knobs.runtime,
+        "launch_enter_hook",
+        lambda metadata: launched.append(metadata.get()["name"]),
+    )
+
     outs, kernels = {}, {}
     for use_triton in (False, True):
         layer.is_aiter_triton_bf16_bmm_enabled = use_triton
@@ -464,12 +473,10 @@ def test_mla_v_up_proj_follows_tuned_aiter_triton_bf16_bmm(
             dtype=torch.bfloat16,
             device="cuda",
         )
-        with profile(activities=[ProfilerActivity.CUDA]) as prof:
-            layer._v_up_proj(x, out)
-            torch.accelerator.synchronize()
-        kernels[use_triton] = [
-            e.name for e in prof.events() if e.device_type == DeviceType.CUDA
-        ]
+        launched.clear()
+        layer._v_up_proj(x, out)
+        torch.accelerator.synchronize()
+        kernels[use_triton] = list(launched)
         outs[use_triton] = out
 
     ran_triton = any("batched_gemm_bf16" in k for k in kernels[True])
