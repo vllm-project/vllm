@@ -2512,6 +2512,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "memmap2"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b0ca1155a9ecc25aa12e8313a119f32edf0255fea2f44839c4ac0a12b2ac157"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "memo-map"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5945,6 +5954,20 @@ dependencies = [
  "vllm-text",
  "vllm-tokenizer",
  "zeromq",
+]
+
+[[package]]
+name = "vllm-shm-object-storage"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "memmap2",
+ "rand 0.9.5",
+ "rustix",
+ "sha2",
+ "thiserror 2.0.18",
+ "thiserror-ext",
+ "tracing",
 ]
 
 [[package]]
