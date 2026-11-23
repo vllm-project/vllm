@@ -30,7 +30,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     make_kv_cache_group,
     make_kv_cache_group_from_specs,
 )
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -43,8 +43,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
+from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerBackend
-from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerBackend,
+    Glm5NextIndexerBackend,
+)
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
@@ -56,6 +60,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheGroup,
+    KVCacheLayerConfig,
     KVCacheLayout,
     KVCacheTensor,
     MambaSpec,
@@ -161,6 +166,7 @@ def _make_packed_mla_view_worker(
     num_blocks=4,
     pp_size=1,
     backend_names=("FLASHMLA",),
+    indexer_layer=None,
     worker_cls=NixlPushConnectorWorker,
 ):
     """Register real strided views; only NIXL and distributed runtime are fake."""
@@ -173,6 +179,9 @@ def _make_packed_mla_view_worker(
             num_kv_heads=1,
             head_size=page_size // block_size,
             dtype=torch.uint8,
+            cache_role=SparseCacheRole.INDEXER
+            if name == indexer_layer
+            else SparseCacheRole.SPARSE,
         )
         tensor = KVCacheTensor(
             size=raw.nbytes,
@@ -191,8 +200,18 @@ def _make_packed_mla_view_worker(
     config.parallel_config.pipeline_parallel_size = pp_size
     config.kv_transfer_config.kv_role = "kv_producer"
     config.cache_config.kv_cache_layout = "BLHNC"
+    if indexer_layer in layouts:
+        # The cache layer registers itself in the config's forward context.
+        with set_current_vllm_config(config):
+            DeepseekV32IndexerCache(
+                128, torch.uint8, indexer_layer, config.cache_config
+            )
     backends = []
     for name in backend_names:
+        # A backend class is used as is.
+        if isinstance(name, type):
+            backends.append(name)
+            continue
         backend = MagicMock()
         backend.get_supported_kernel_block_sizes.return_value = [block_size]
         backend.get_name.return_value = name
@@ -271,7 +290,7 @@ def test_packed_rows_reject_a_peer_packing_rows_differently():
 @pytest.mark.parametrize(
     "remote_backends, compatible",
     [
-        (("INDEXER", "FLASHMLA"), True),
+        (("FLASH_ATTN", "FLASHMLA"), True),
         (("FLASHMLA", "OTHER"), False),
         (("FLASHMLA",), False),
     ],
@@ -283,12 +302,40 @@ def test_packed_push_compatibility_hash_uses_all_backends_in_stable_order(
         {"L0": (0, 128)},
         128,
         pp_size=2,
-        backend_names=("FLASHMLA", "INDEXER"),
+        backend_names=("FLASHMLA", "FLASH_ATTN"),
     )
     consumer, _ = _make_packed_mla_view_worker(
         {"L0": (0, 128)}, 128, backend_names=remote_backends
     )
     assert (producer.compat_hash == consumer.compat_hash) is compatible
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "worker_cls", [NixlPullConnectorWorker, NixlPushConnectorWorker]
+)
+def test_compatibility_hash_ignores_indexer_backends(worker_cls):
+    """GLM-5.x builds an indexer on some layers only, so a PP stage starting
+    on a layer without one lists the sparse MLA backend first, or holds no
+    indexer at all, while its PP=1 peer starts with the indexer. All must
+    hash alike."""
+    indexer = DeepseekV32IndexerBackend
+    cases = [
+        ({"IDX": (0, 64), "L0": (64, 128)}, (indexer, "FLASHMLA_SPARSE")),
+        ({"L0": (0, 128), "IDX": (128, 64)}, ("FLASHMLA_SPARSE", indexer)),
+        ({"L0": (0, 128)}, ("FLASHMLA_SPARSE",)),
+    ]
+    hashes = {
+        _make_packed_mla_view_worker(
+            layouts,
+            192,
+            backend_names=backends,
+            indexer_layer="IDX",
+            worker_cls=worker_cls,
+        )[0].compat_hash
+        for layouts, backends in cases
+    }
+    assert len(hashes) == 1
 
 
 @pytest.mark.cpu_test
@@ -390,6 +437,7 @@ def _register_overlaid_mla_worker(
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
+    from vllm.v1.attention.backends.mla.flashmla import FlashMLABackend
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
         KVCacheTensor,
@@ -431,7 +479,7 @@ def _register_overlaid_mla_worker(
     worker.use_mla = True
     worker.model_config = MagicMock()
     worker.model_config.get_total_num_kv_heads.return_value = 1
-    worker.attn_backends = []
+    worker.attn_backends = [FlashMLABackend]
     worker._has_mamba = False
     worker._is_csa_linear = False
     worker.vllm_config = MagicMock()
@@ -844,6 +892,110 @@ def test_nixl_compressed_kernel_split(layout, kernel_block_size, raises):
     ):
         worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
         worker.shutdown()
+
+
+def _register_kernel_rows_worker(layer, layout, transfer_block_size):
+    """Register views whose kernel rows are the manager block, while NIXL picks
+    `transfer_block_size` (e.g. for a drafter in another group)."""
+    spec = layer.spec if isinstance(layer, KVCacheLayerConfig) else layer
+    num_blocks, layer_names = 3, ["layer.0", "layer.1"]
+    layer_stride = num_blocks * spec.page_size_bytes
+    tensor = KVCacheTensor(
+        size=len(layer_names) * layer_stride,
+        layers=layer_names,
+        layer_stride=layer_stride,
+        block_stride=spec.page_size_bytes,
+    )
+    caches = create_kv_cache_views(
+        torch.zeros(tensor.size, dtype=torch.int8), spec, num_blocks, layout, tensor
+    )
+    vllm_config = create_vllm_config(block_size=spec.block_size)
+    vllm_config.cache_config.kv_cache_layout = layout.name
+    vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
+    backend = MagicMock()
+    backend.get_name.return_value = "TEST"
+    with (
+        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=[backend]),
+        patch.object(bw, "select_common_block_size", return_value=transfer_block_size),
+        patch("threading.Thread"),
+        set_current_vllm_config(vllm_config),
+    ):
+        worker = NixlPullConnectorWorker(
+            vllm_config,
+            "local-engine",
+            KVCacheConfig(
+                num_blocks, [tensor], [make_kv_cache_group(layer_names, layer)]
+            ),
+        )
+        worker.use_mla = isinstance(spec, MLAAttentionSpec)
+        worker.register_kv_caches(dict(zip(layer_names, caches)))
+    return worker, caches
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("kernel_block_size", [128, 256])
+@pytest.mark.parametrize(
+    "make_layer, layout",
+    [
+        (
+            lambda bs: MLAAttentionSpec(
+                block_size=bs, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+            ),
+            KVCacheLayout.LBHNC,
+        ),
+        (
+            lambda bs: SlidingWindowManager.layer_config(
+                MLAAttentionSpec(
+                    block_size=bs, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+                ),
+                sliding_window=128,
+            ),
+            KVCacheLayout.LBHNC,
+        ),
+        (
+            lambda bs: AttentionSpec(
+                block_size=bs, num_kv_heads=4, head_size=64, dtype=torch.bfloat16
+            ),
+            KVCacheLayout.LBNHC,
+        ),
+    ],
+    ids=["mla", "sliding-window-mla", "attention-lbnhc"],
+)
+def test_token_major_kernel_rows_split_into_transfer_blocks(
+    make_layer, layout, kernel_block_size
+):
+    """NIXL pages tile a token-major kernel row larger than NIXL's block."""
+    transfer_block_size = 64
+    worker, caches = _register_kernel_rows_worker(
+        make_layer(kernel_block_size), layout, transfer_block_size
+    )
+
+    split = kernel_block_size // transfer_block_size
+    page = caches[0].stride(0) * caches[0].element_size() // split
+    assert worker.block_size == transfer_block_size
+    assert worker.num_blocks == caches[0].shape[0] * split
+    expected_descs = [
+        [cache.data_ptr() + block * page, page, 0]
+        for cache in caches
+        for block in range(worker.num_blocks)
+    ]
+    np.testing.assert_array_equal(
+        expand_strided_descs(worker.src_blocks_data),
+        np.asarray(expected_descs, dtype=np.uint64),
+    )
+
+
+@pytest.mark.cpu_test
+def test_head_major_kernel_rows_larger_than_transfer_block_rejected():
+    """A head-major row cannot be split into NIXL's smaller blocks."""
+    spec = AttentionSpec(
+        block_size=128, num_kv_heads=4, head_size=64, dtype=torch.bfloat16
+    )
+    with pytest.raises(NotImplementedError, match="cannot split"):
+        _register_kernel_rows_worker(spec, KVCacheLayout.LBHNC, 64)
 
 
 def _make_remote_meta(

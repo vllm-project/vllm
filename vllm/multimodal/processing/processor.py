@@ -1865,6 +1865,19 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
     skip_decoder_start_token: bool = False
+    """Set this if the decoder prompt always carries its complete prefix,
+    so the decoder start token must not be prepended to it."""
+
+    def should_skip_decoder_start_token(
+        self,
+        decoder_prompt_token_ids: list[int],
+    ) -> bool:
+        """Whether to leave the decoder start token out of this decoder prompt.
+
+        Override this instead of setting `skip_decoder_start_token` if only
+        some decoder prompts carry their complete prefix.
+        """
+        return self.skip_decoder_start_token
 
     @abstractmethod
     def create_encoder_prompt(
