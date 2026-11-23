@@ -19,38 +19,43 @@ steps:
   source_file_dependencies:
   - vllm/entrypoints
   - tests/entrypoints/unit_tests
-  - tests/entrypoints/rl/weight_transfer
   - tests/entrypoints/launchers
+  - tests/entrypoints/common
+  - tests/entrypoints/rl/weight_transfer
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s entrypoints/unit_tests &&
+    pytest -v -s entrypoints/common &&
     pytest -v -s entrypoints/rl/weight_transfer'
 
 - label: ":intel: (BMG) Entrypoints Integration (LLM)"
   key: entrypoints-integration-llm-intel
   timeout_in_minutes: 70
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/vllm-workspace/"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
+    VLLM_WORKER_MULTIPROC_METHOD: spawn
+  optional: true
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/llm
   commands:
+  - export PYTEST_ADDOPTS="--num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
+  - cd tests
   - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-    cd tests &&
-    pytest -v -s entrypoints/llm/test_generate.py'
+    pytest -v -s
+    entrypoints/llm
+    --ignore=entrypoints/llm/test_generate.py
+    --ignore=entrypoints/llm/test_collective_rpc.py
+    --ignore=entrypoints/llm/offline_mode
+  - pytest -v -s entrypoints/llm/test_generate.py
+  parallelism: 2
 
 - label: ":intel: (BMG) Entrypoints Offline Mode"
   key: entrypoints-offline-mode-intel-k8s
@@ -203,3 +208,78 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s entrypoints/openai/correctness/'
+
+- label: ":intel: (BMG) Entrypoints Launchers"
+  key: entrypoints-launchers-intel
+  timeout_in_minutes: 45
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/vllm-workspace/"
+  env:
+    VLLM_TEST_DEVICE: "xpu"
+  optional: true
+  source_file_dependencies:
+  - vllm/entrypoints
+  - vllm/utils/flashinfer.py
+  - tests/entrypoints/launchers
+  commands:
+  - cd tests
+  - pytest -v -s entrypoints/launchers
+
+- label: ":intel: (BMG) Entrypoints Integration (OpenAI API completion)"
+  key: entrypoints-integration-openai-completion-intel
+  timeout_in_minutes: 45
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/entrypoints/openai
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+    cd tests &&
+    pytest -v -s
+    entrypoints/openai/completion
+    --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py &&
+    pytest -v -s
+    entrypoints/openai
+    --ignore=entrypoints/openai/completion
+    --ignore=entrypoints/openai/chat_completion
+    --ignore=entrypoints/openai/responses
+    --ignore=entrypoints/openai/correctness'
+
+- label: ":intel: (BMG) Entrypoints Integration (Pooling)"
+  key: entrypoints-integration-pooling-intel
+  timeout_in_minutes: 75
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/vllm-workspace/"
+  env:
+    VLLM_TEST_DEVICE: "xpu"
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/entrypoints/pooling
+  commands:
+  - export PYTEST_ADDOPTS="--num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
+  - cd tests
+  - >-
+    pytest -v -s entrypoints/pooling
+    --deselect=tests/entrypoints/pooling/token_embed/test_offline.py::test_bge_m3_late_chunking_keeps_special_tokens
+    --deselect=tests/entrypoints/pooling/token_embed/test_offline.py::test_nomic_late_chunking_without_special_tokens
+  parallelism: 4
