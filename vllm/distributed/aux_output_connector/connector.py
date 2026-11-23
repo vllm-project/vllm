@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections import Counter, OrderedDict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
@@ -12,23 +13,41 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     get_routed_experts_bytes_per_token,
 )
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import (
     maybe_convert_block_hash,
     resolve_kv_cache_block_sizes,
 )
+from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import AuxOutputConfig, VllmConfig
     from vllm.distributed.kv_events import ExternalBlockHash
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+
+
+def check_aux_output_config(config: AuxOutputConfig) -> None:
+    """Startup checks of the auxiliary-output configuration as a whole; the
+    legacy routed-experts flag is applied after the config is built."""
+    if config.object_key_prefix is None:
+        return
+    if not config.enabled:
+        raise ValueError("object_key_prefix requires enable_return_routed_experts.")
+
+
+def object_put_timeout_s() -> float:
+    """Seconds an object write may take from being queued: 80% of the
+    execute-model timeout, so that a step waiting on a full queue returns in
+    time."""
+    return 0.8 * envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
 
 
 def retained_objects(
@@ -51,6 +70,11 @@ def retained_objects(
     return num_blocks * (block_size // hash_block_size), hash_block_size
 
 
+AuxObject = tuple[str, int, int]
+"""`(key, start, end)`: positions `[start, end)` are the first `end - start`
+rows of the object `key`, whose first position is `start`."""
+
+
 @dataclass(slots=True)
 class PackedBlockHashes:
     """Contiguous, self-contained block hashes for scheduler-worker IPC."""
@@ -71,12 +95,32 @@ class AuxOutputConnectorMetadata:
     finished_requests: tuple[str, ...]
     retained_block_hashes: PackedBlockHashes | None = None
     released_block_hashes: PackedBlockHashes | None = None
+    # Namespace requests whose worker keeps the rows they compute from now
+    # on, in a new run; and the objects to write from them.
+    namespace_runs: list[str] | None = None
+    object_writes: dict[str, list[AuxObject]] | None = None
+    # Positions per object.
+    object_block_size: int = 0
 
 
 @dataclass(slots=True)
 class AuxRequestOutput:
     token_start: int
     rows: np.ndarray
+
+
+@dataclass(slots=True)
+class _NamespaceRequest:
+    request: Request
+    namespace: str
+    prompt_start: int
+    # Start of its current run, end of the spans its runs wrote, and
+    # positions computed when it was last preempted.
+    start: int = 0
+    written: int = 0
+    computed: int = 0
+    running: bool = False
+    in_worker: bool = False
 
 
 class AuxOutputSchedulerConnector:
@@ -86,6 +130,7 @@ class AuxOutputSchedulerConnector:
         self,
         kv_cache_manager: KVCacheManager,
         num_objects: int,
+        key_prefix: str | None = None,
     ) -> None:
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
@@ -94,10 +139,16 @@ class AuxOutputSchedulerConnector:
         self._generation = 0
         coordinator = kv_cache_manager.coordinator
         self._group_id = getattr(coordinator, "full_attention_group_id", None) or 0
-        self._block_pool = kv_cache_manager.block_pool
         self._manager = coordinator.single_type_managers[self._group_id]
         self._block_size = self._manager.block_size
-        self._hash_block_size = self._block_pool.hash_block_size
+        self._hash_block_size = kv_cache_manager.block_pool.hash_block_size
+        # Positions per object: every prefix-cache hit ends on an object
+        # boundary.
+        self._object_size = (
+            self._hash_block_size
+            if key_prefix is not None and coordinator.enable_partial_hash_hits
+            else self._block_size
+        )
         self._kv_cached: OrderedDict[ExternalBlockHash, Sequence[BlockHash]] = (
             OrderedDict()
         )
@@ -117,6 +168,20 @@ class AuxOutputSchedulerConnector:
         self._capacity = num_objects // (self._block_size // self._hash_block_size)
         self._retained_hashes: list[bytes] = []
         self._released_hashes: list[bytes] = []
+        if key_prefix is not None and not kv_cache_manager.enable_caching:
+            raise ValueError("AuxOutputConfig.object_key_prefix needs prefix caching.")
+        if key_prefix is not None and any(
+            group.prefix_replay_tokens
+            for group in kv_cache_manager.kv_cache_config.kv_cache_groups
+        ):
+            raise ValueError(
+                "AuxOutputConfig.object_key_prefix does not support prefix "
+                "replay: pass --no-swa-bounded-replay."
+            )
+        self._key_prefix = key_prefix
+        self._namespaces: dict[str, _NamespaceRequest] = {}
+        self._runs: list[str] = []
+        self._writes: dict[str, list[AuxObject]] = {}
 
     def build_connector_meta(
         self,
@@ -130,6 +195,9 @@ class AuxOutputSchedulerConnector:
             request = requests[request_id]
             if self._skips(request):
                 self._mark_rowless(request)
+                continue
+            if (namespace := self._namespace(request)) is not None:
+                self._run_namespace(request, namespace)
                 continue
             self._sent_hash_counts.setdefault(request_id, 0)
             self._computed_from.setdefault(request_id, request.num_computed_tokens)
@@ -150,6 +218,21 @@ class AuxOutputSchedulerConnector:
                 packed = self._take_new_hashes(request, request.num_computed_tokens)
                 if packed is not None:
                     block_hashes_by_request[request_id] = packed
+        return self._take_metadata(scheduled_requests, block_hashes_by_request)
+
+    def flush_metadata(self) -> AuxOutputConnectorMetadata | None:
+        """Metadata that hands the worker the writes due when the engine
+        pauses, which no step would send before it resumes. Nothing waits
+        for them. `None` without an object key prefix."""
+        if self._key_prefix is None:
+            return None
+        return self._take_metadata({}, {})
+
+    def _take_metadata(
+        self,
+        scheduled_requests: dict[str, int],
+        block_hashes_by_request: dict[str, PackedBlockHashes],
+    ) -> AuxOutputConnectorMetadata:
         # Sending transfers ownership of these one-shot events.
         finished_requests = tuple(self._finished_requests)
         block_hashes_by_request.update(
@@ -158,6 +241,10 @@ class AuxOutputSchedulerConnector:
             if block_hashes is not None
         )
         self._finished_requests = {}
+        for state in self._namespaces.values():
+            if state.running:
+                # Only settled steps publish.
+                self._write_blocks(state, self._settled(state.request))
         metadata = AuxOutputConnectorMetadata(
             self._generation,
             scheduled_requests,
@@ -165,24 +252,111 @@ class AuxOutputSchedulerConnector:
             finished_requests,
             self._pack_hashes(self._retained_hashes),
             self._pack_hashes(self._released_hashes),
+            self._runs or None,
+            self._writes or None,
+            self._object_size,
         )
         self._retained_hashes, self._released_hashes = [], []
+        self._runs, self._writes = [], {}
         return metadata
+
+    def _namespace(self, request: Request) -> str | None:
+        """The namespace of a request that delivers its rows as objects."""
+        params = request.sampling_params
+        if self._key_prefix is None or params is None:
+            return None
+        return params.aux_namespace
+
+    def _run_namespace(self, request: Request, namespace: str) -> None:
+        """Start a run of a scheduled namespace request, in which the worker
+        keeps the rows it computes. A preempted request runs again from its
+        prefix-cache hit, a span boundary: the positions after it are
+        computed again, and their rows replace the earlier ones, as for inline
+        rows. The blocks before it were written at the preemption. A hit of
+        the whole prompt computes its last position again; the run starts at
+        the end of the hit, so that row is neither written nor listed."""
+        state = self._namespaces.get(request.request_id)
+        if state is None:
+            state = _NamespaceRequest(request, namespace, self._emit_start(request))
+            self._namespaces[request.request_id] = state
+        if state.running:
+            return
+        state.running = state.in_worker = True
+        state.start = state.written = round_up(
+            request.num_computed_tokens, self._object_size
+        )
+        self._runs.append(request.request_id)
+
+    def _object_key(self, state: _NamespaceRequest, start: int) -> str:
+        block_hash = state.request.block_hashes[
+            (start + self._object_size) // self._hash_block_size - 1
+        ]
+        return f"{self._key_prefix}/{state.namespace}/{block_hash.hex()}"
+
+    def _write_blocks(self, state: _NamespaceRequest, limit: int) -> None:
+        """Write the full spans of the current run that end at `limit` or
+        before and are hashed, whatever any KV cache group keeps: every span
+        another request can hit was computed by a run that writes it."""
+        request, size = state.request, self._object_size
+        end = min(limit, len(request.block_hashes) * self._hash_block_size)
+        writes = [
+            (self._object_key(state, start), start, start + size)
+            for start in range(state.written, end - end % size, size)
+        ]
+        if writes:
+            self._writes.setdefault(request.request_id, []).extend(writes)
+            state.written = writes[-1][2]
+
+    def _end_run(
+        self, state: _NamespaceRequest, end: int, limit: int, tail: bool = True
+    ) -> list[AuxObject]:
+        """End the run of a finished request: write its blocks up to `limit`,
+        and list its positions from the block holding its prompt start up to
+        `end`. A listing names only objects that are written: the blocks the
+        run wrote, one object per span, and one tail object, written from the
+        run's rows, for the positions after them. A run that holds no rows,
+        or none before `end`, lists its written blocks up to `end` and no
+        tail."""
+        request = state.request
+        end = min(end, request.num_tokens - 1)
+        self._write_blocks(state, limit)
+        size = self._object_size
+        first = state.prompt_start - state.prompt_start % size
+        written = min(state.written, end)
+        boundary = max(written - written % size, first)
+        listing = [
+            (self._object_key(state, start), start, start + size)
+            for start in range(first, boundary, size)
+        ]
+        if tail and end > max(boundary, state.prompt_start) and boundary >= state.start:
+            key = f"{self._key_prefix}/{state.namespace}/tail-{uuid.uuid4().hex}"
+            listing.append((key, boundary, end))
+            self._writes.setdefault(request.request_id, []).append((key, boundary, end))
+        return listing
+
+    @staticmethod
+    def _settled(request: Request) -> int:
+        """Positions the current run computed whose step outputs were
+        processed. Stale output still in flight belongs to the run a
+        preemption ended, not to this one."""
+        in_flight = request.num_in_flight_tokens - request.num_stale_output_tokens
+        return request.num_computed_tokens - in_flight
 
     @staticmethod
     def _emit_start(request: Request) -> int:
         if request.num_output_tokens:
             return request.num_tokens - 1
-        assert request.sampling_params is not None
+        params = request.sampling_params
+        assert params is not None
+        start = params.aux_prompt_start or params.routed_experts_prompt_start
         # A P/D prefiller may cut the prompt short of the requested start.
-        return min(
-            request.sampling_params.routed_experts_prompt_start,
-            request.num_prompt_tokens,
-        )
+        return min(start, request.num_prompt_tokens)
 
     def max_cache_hit(self, request: Request) -> int:
         if self._skips(request):
             self._mark_rowless(request, lookup=True)
+            return request.num_tokens - 1
+        if self._namespace(request) is not None:
             return request.num_tokens - 1
         num_blocks = 0
         for block, keys in self._kv_blocks(request.block_hashes):
@@ -201,6 +375,10 @@ class AuxOutputSchedulerConnector:
         if self._skips(request):
             return num_external
         num_hit = num_local + num_external
+        if self._namespace(request) is not None:
+            hashed = len(request.block_hashes) * self._hash_block_size
+            usable = num_hit % self._object_size == 0 and num_hit <= hashed
+            return num_external if usable else 0
         if num_hit <= self._emit_start(request):
             for block, keys in islice(
                 self._kv_blocks(request.block_hashes),
@@ -214,7 +392,7 @@ class AuxOutputSchedulerConnector:
         return num_external
 
     def request_loading(self, request: Request, num_tokens: int) -> None:
-        if self._skips(request):
+        if self._skips(request) or self._namespace(request) is not None:
             return
         blocks = islice(
             self._kv_blocks(request.block_hashes), cdiv(num_tokens, self._block_size)
@@ -268,6 +446,8 @@ class AuxOutputSchedulerConnector:
             # Its new tokens can complete a block before the next schedule caches it.
             self._mark_rowless(request)
             return None
+        if self._namespace(request) is not None:
+            return None
         request_id = request.request_id
         # The block this request started mid-block has no rows here. Its hash
         # exists only once its last token is known; record the block before
@@ -311,6 +491,9 @@ class AuxOutputSchedulerConnector:
         # A session can change return_aux_outputs between chunks: drop all state.
         self._skip_marked.pop(request_id, None)
         self._drop_skip_holds(request_id)
+        if self._namespace(request) is not None:
+            self._finish_namespace(request)
+            return
         self._loading.pop(request_id, None)
         if request_id in self._sent_hash_counts:
             # The next metadata delivers this terminal event to the worker.
@@ -386,6 +569,56 @@ class AuxOutputSchedulerConnector:
         params = request.sampling_params
         return params is not None and not params.return_aux_outputs
 
+    def loads_failed(self, request_ids: set[str]) -> None:
+        """Requests about to end with an error because KV they hold failed to
+        load: what their steps in flight compute is not written."""
+        for request_id in request_ids:
+            if (state := self._namespaces.get(request_id)) is not None:
+                state.running = False
+
+    def _finish_namespace(self, request: Request) -> None:
+        """Write the full blocks a preempted namespace request computed, which
+        the prefix cache keeps; it runs again from its prefix-cache hit.
+        End the run of a finished one and keep its listing for its final
+        output: the positions whose tokens it returned. One that ended with an
+        error lists nothing and writes what it computed, which other requests
+        may hit, unless KV it held failed to load (`loads_failed`).
+        """
+        request_id = request.request_id
+        state = self._namespaces.get(request_id)
+        if state is None:
+            return
+        num_computed = request.num_computed_tokens
+        if not request.is_finished():
+            self._write_blocks(state, num_computed)
+            state.running = False
+            state.computed = num_computed
+            return
+        del self._namespaces[request_id]
+        if state.in_worker:
+            self._finished_requests[request_id] = None
+        if request.status == RequestStatus.FINISHED_ERROR:
+            if state.running:
+                self._write_blocks(state, num_computed)
+            return
+        tail = True
+        if state.running and self._settled(request) >= state.written:
+            end, limit = self._settled(request), num_computed
+        elif state.running or not state.in_worker:
+            # Its run holds no rows to list: a recompute of a failed load
+            # took it back below the blocks it wrote, or a prefix-cache reset
+            # dropped the run. It lists its written blocks.
+            end = limit = state.written
+            tail = False
+        else:
+            # Preempted: its run still holds the rows it computed, and rows
+            # computed over a draft it did not keep end before its last token.
+            end = state.computed
+            limit = min(state.computed, request.num_tokens - 1)
+        listing = self._end_run(state, end, limit, tail)
+        aborted = request.status == RequestStatus.FINISHED_ABORTED
+        request.aux_objects = None if aborted and not listing else listing
+
     @staticmethod
     def _pack_hashes(hashes: Sequence[bytes]) -> PackedBlockHashes | None:
         if not hashes:
@@ -405,7 +638,13 @@ class AuxOutputSchedulerConnector:
         return self._pack_hashes(block_hashes[num_sent:num_keyed])
 
     def reset(self) -> None:
-        """Start a new auxiliary output namespace after a prefix-cache reset."""
+        """Start a new auxiliary output namespace after a prefix-cache reset.
+
+        The worker drops its runs: a preempted namespace request starts a new
+        one when it runs again.
+        """
+        for state in self._namespaces.values():
+            state.in_worker = False
         # The worker drops temporary state on generation changes; resend hashes.
         self._sent_hash_counts.clear()
         self._computed_from.clear()

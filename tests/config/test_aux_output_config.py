@@ -8,6 +8,10 @@ import pytest
 
 from vllm.config import AuxOutputConfig, VllmConfig
 from vllm.config.utils import hash_config
+from vllm.distributed.aux_output_connector.connector import (
+    check_aux_output_config,
+    object_put_timeout_s,
+)
 from vllm.engine.arg_utils import EngineArgs
 
 pytestmark = pytest.mark.cpu_test
@@ -71,6 +75,45 @@ def test_legacy_routed_experts_flag_updates_aux_output_config():
     assert args.aux_output_config.enable_return_routed_experts
 
 
+@pytest.mark.parametrize("as_config", [False, True], ids=["dict", "config"])
+def test_legacy_routed_experts_flag_enables_an_object_key_prefix(as_config):
+    aux_output_config = {"object_key_prefix": "run-1"}
+    args = EngineArgs(
+        enable_return_routed_experts=True,
+        aux_output_config=(
+            AuxOutputConfig(**aux_output_config) if as_config else aux_output_config
+        ),
+    )
+
+    assert args.aux_output_config.object_key_prefix == "run-1"
+    assert args.aux_output_config.enable_return_routed_experts
+
+
+@pytest.mark.parametrize(
+    "kwargs,error",
+    [
+        ({}, 400.0),
+        (
+            {"enable_return_routed_experts": False},
+            "requires enable_return_routed_experts",
+        ),
+    ],
+    ids=["derived-timeout", "no-routed-experts"],
+)
+def test_object_key_prefix_startup_checks(monkeypatch, kwargs, error):
+    # Not the default execute-model timeout: the derived default follows it.
+    monkeypatch.setenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "500")
+    config = AuxOutputConfig(
+        **{"enable_return_routed_experts": True, "object_key_prefix": "run-1", **kwargs}
+    )
+    if not isinstance(error, str):
+        check_aux_output_config(config)
+        assert object_put_timeout_s() == error
+        return
+    with pytest.raises(ValueError, match=error):
+        check_aux_output_config(config)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "error"),
     [
@@ -105,3 +148,16 @@ def test_aux_output_guards_are_inactive_when_capture_is_disabled():
     config.aux_output_config = AuxOutputConfig()
 
     config._verify_aux_output_compatibility()
+
+
+@pytest.mark.parametrize(
+    "kwargs,error",
+    [
+        ({"object_key_prefix": ""}, "non-empty"),
+        ({"object_key_prefix": "runs/1"}, "without '/'"),
+    ],
+    ids=["empty-prefix", "slash"],
+)
+def test_object_key_prefix_config_is_validated(kwargs, error):
+    with pytest.raises(ValueError, match=error):
+        AuxOutputConfig(**{"enable_return_routed_experts": True, **kwargs})

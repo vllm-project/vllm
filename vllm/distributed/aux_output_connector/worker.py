@@ -14,9 +14,16 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
+    AuxObject,
     AuxOutputConnectorMetadata,
     AuxRequestOutput,
+    object_put_timeout_s,
     retained_objects,
+)
+from vllm.distributed.aux_output_connector.object_store import (
+    AuxObjects,
+    AuxObjectWriter,
+    create_aux_object_store,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -33,11 +40,73 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.input_batch import InputBatch
+
+
+@dataclass(slots=True)
+class _ObjectRun:
+    """Rows a namespace request computed since it was last scheduled, by KV
+    block, and the objects still to write from them. A block a step computes
+    whole is a view of that step's rows; a block computed over several steps
+    is filled in place in its own buffer. Runs start on a block boundary and
+    every object starts at one; a tail object may span blocks."""
+
+    block_size: int
+    end: int = -1
+    blocks: dict[int, np.ndarray] = field(default_factory=dict)
+    writes: list[AuxObject] = field(default_factory=list)
+
+    def add(self, token_start: int, rows: np.ndarray) -> None:
+        if 0 <= self.end < token_start:
+            # A step scheduled while drafts were in flight starts after the
+            # ones rejected: its rows follow those kept.
+            token_start = self.end
+        size = self.block_size
+        self.end = token_start + len(rows)
+        while len(rows):
+            block, offset = divmod(token_start, size)
+            part, rows = rows[: size - offset], rows[size - offset :]
+            token_start += len(part)
+            if len(part) == size:
+                self.blocks[block] = part
+                continue
+            if (buffer := self.blocks.get(block)) is None:
+                buffer = self.blocks[block] = np.empty(
+                    (size, *part.shape[1:]), part.dtype
+                )
+            buffer[offset : offset + len(part)] = part
+
+    def take_ready(self) -> AuxObjects:
+        """Objects whose rows are all here. Later writes start at or after
+        the start of the last one, so earlier blocks are dropped."""
+        ready = [write for write in self.writes if write[2] <= self.end]
+        if not ready:
+            return []
+        self.writes = [write for write in self.writes if write[2] > self.end]
+        size = self.block_size
+        objects = [
+            (key, {"routed_experts": self._rows(start, end)})
+            for key, start, end in ready
+        ]
+        keep = min(
+            (start for _, start, _ in self.writes),
+            default=max(start for _, start, _ in ready),
+        )
+        for block in [block for block in self.blocks if block < keep // size]:
+            del self.blocks[block]
+        return objects
+
+    def _rows(self, start: int, end: int) -> np.ndarray:
+        size = self.block_size
+        first = start // size
+        if end - start <= size:
+            return self.blocks[first][: end - start]
+        blocks = [self.blocks[block] for block in range(first, cdiv(end, size))]
+        return np.concatenate(blocks)[: end - start]
 
 
 @dataclass(slots=True)
@@ -51,6 +120,7 @@ class _WorkerRequestState:
     pending_outputs: int = 0
     # Terminal event received; teardown waits for in-flight step outputs.
     finished: bool = False
+    run: _ObjectRun | None = None
 
 
 @dataclass(slots=True)
@@ -67,6 +137,7 @@ class PendingAuxOutput:
     routed_experts: np.ndarray | None = None
     num_sampled: np.ndarray | None = None
     num_rejected: np.ndarray | None = None
+    runs: dict[str, _ObjectRun] = field(default_factory=dict)
 
     def enqueue_cpu_copy(
         self, num_sampled: np.ndarray, num_rejected: np.ndarray
@@ -100,6 +171,7 @@ class AuxOutputWorkerConnector:
         self._vllm_config = vllm_config
         self._store: BackgroundBlockObjectStore | None = None
         self._buffer: RoutedExpertsBuffer | None = None
+        self._writer: AuxObjectWriter | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
         self._step_metadata: AuxOutputConnectorMetadata | None = None
@@ -135,6 +207,14 @@ class AuxOutputWorkerConnector:
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.max_concurrent_batches,
         )
+        config = vllm_config.aux_output_config
+        if config.object_key_prefix is not None:
+            self._writer = AuxObjectWriter(
+                create_aux_object_store(
+                    config.object_store, config.object_store_extra_config
+                ),
+                timeout_s=object_put_timeout_s(),
+            )
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
@@ -159,8 +239,11 @@ class AuxOutputWorkerConnector:
             )
             self._pending_outputs.append(pending_output)
             for request_id in pending_output.request_ids:
-                if (state := self._requests.get(request_id)) is not None:
-                    state.pending_outputs += 1
+                if (state := self._requests.get(request_id)) is None:
+                    continue
+                state.pending_outputs += 1
+                if state.run is not None:
+                    pending_output.runs[request_id] = state.run
         return pending_output
 
     def process_output(self, pending: PendingAuxOutput) -> dict[str, AuxRequestOutput]:
@@ -207,6 +290,7 @@ class AuxOutputWorkerConnector:
         materialize_outputs: list[tuple[str, int, int]] = []
         block_batches = []
         outputs: dict[str, AuxRequestOutput] = {}
+        objects: AuxObjects = []
 
         # Use the ModelRunner's actual batch boundaries rather than rebuilding them.
         for request_id, token_start, start, end, sampled, rejected in zip(
@@ -232,6 +316,10 @@ class AuxOutputWorkerConnector:
                 "auxiliary output rejected-token count is invalid"
             )
             rows = routed_experts[start : end - rejected]
+            if (run := pending.runs.get(request_id)) is not None:
+                run.add(int(token_start), rows)
+                objects.extend(run.take_ready())
+                continue
 
             capture_start = token_start
             capture_cursor = state.capture_cursor
@@ -269,6 +357,7 @@ class AuxOutputWorkerConnector:
                 else:
                     materialize_outputs.append((request_id, emit_start, token_end))
 
+        self._put_objects(objects)
         # A consumer may reuse a block produced earlier in the same batch.
         self._publish_blocks(block_batches)
 
@@ -333,6 +422,12 @@ class AuxOutputWorkerConnector:
             for _, rows in blocks:
                 buffer.release_block(rows)
 
+    def _put_objects(self, objects: AuxObjects) -> None:
+        """One put per step, so a step waits for the writer at most once."""
+        if objects:
+            assert self._writer is not None
+            self._writer.put(objects)
+
     def _teardown(self, request_ids: Iterable[str]) -> None:
         """Drop finished requests' temporary state after publishing key releases."""
         buffer = self._buffer
@@ -359,6 +454,13 @@ class AuxOutputWorkerConnector:
             "auxiliary output metadata generation moved backwards"
         )
         with self._lock:
+            objects: AuxObjects = []
+            for request_id, writes in (metadata.object_writes or {}).items():
+                run = self._requests[request_id].run
+                assert run is not None
+                run.writes.extend(writes)
+                objects.extend(run.take_ready())
+            self._put_objects(objects)
             namespace = str(self._generation)
             hashes = metadata.retained_block_hashes or ()
             retained_keys = routed_experts_keys(hashes, namespace)
@@ -388,6 +490,9 @@ class AuxOutputWorkerConnector:
                     assert emit_start <= state.emit_cursor, (
                         "auxiliary output Scheduler emit cursor moved ahead"
                     )
+            for request_id in metadata.namespace_runs or ():
+                state = self._requests.setdefault(request_id, _WorkerRequestState())
+                state.run = _ObjectRun(metadata.object_block_size)
             block_batches: list[
                 tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
             ] = []
@@ -411,11 +516,16 @@ class AuxOutputWorkerConnector:
     def close(self) -> None:
         with self._lock:
             self._pending_outputs.clear()
-            if self._store is not None:
-                try:
-                    self._store.close()
-                finally:
-                    self._store = None
+            writer, self._writer = self._writer, None
+            try:
+                if writer is not None:
+                    writer.close()
+            finally:
+                if self._store is not None:
+                    try:
+                        self._store.close()
+                    finally:
+                        self._store = None
 
 
 def get_aux_output_connector(

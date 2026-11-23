@@ -1005,6 +1005,13 @@ class EngineCore:
             if clear_cache:
                 self._reset_caches(reset_connector=reset_connector)
                 self._set_kv_cache_reclaimable(True)
+            connector = getattr(self.scheduler, "aux_output_connector", None)
+            if (
+                connector is not None
+                and (metadata := connector.flush_metadata()) is not None
+            ):
+                # Queue the object writes due; the pause does not wait for them.
+                self.collective_rpc("flush_aux_output", args=(metadata,))
             if preparing:
                 self.release_kv_cache_memory()
                 self.collective_rpc("checkpoint_prepare")
@@ -2547,11 +2554,15 @@ class EngineCoreProc(EngineCore):
         client_index: int,
         finish_reason: FinishReason,
         error: RequestError | None = None,
+        aux_objects: dict[str, list[tuple[str, int, int]] | None] | None = None,
     ) -> None:
         outputs = [
             EngineCoreOutput(req_id, [], finish_reason=finish_reason, error=error)
             for req_id in req_ids
         ]
+        if aux_objects is not None:
+            for output in outputs:
+                output.aux_objects = aux_objects.get(output.request_id)
         eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
         self.output_queue.put_nowait((client_index, eco))
 
@@ -2572,8 +2583,16 @@ class EngineCoreProc(EngineCore):
             by_client = defaultdict[int, set[str]](set)
             for request in aborted_reqs:
                 by_client[request.client_index].add(request.request_id)
+            aux_objects = None
+            if getattr(self.scheduler, "aux_output_connector", None) is not None:
+                aux_objects = {r.request_id: r.aux_objects for r in aborted_reqs}
             for client_index, req_ids in by_client.items():
-                self._send_abort_outputs_to_client(list(req_ids), client_index)
+                self._send_finish_outputs_to_client(
+                    list(req_ids),
+                    client_index,
+                    FinishReason.ABORT,
+                    aux_objects=aux_objects,
+                )
 
 
 class DPEngineCoreProc(EngineCoreProc):
