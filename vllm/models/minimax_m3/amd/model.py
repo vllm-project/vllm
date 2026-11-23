@@ -545,7 +545,11 @@ class MiniMaxM3MoE(nn.Module):
         # always-on shared expert; aiter applies the routed scaling internally.
         # Every other path (vLLM top-k bias router, or no fusion) applies the
         # routed scaling to the MoE output here.
+        # VLLM_ROCM_FUSED_MOE_GATE_TOPK: the runner holds the gate, so it can run
+        # the gate GEMM and the sigmoid top-k as one fused step.
+        self.runner_holds_gate = envs.VLLM_ROCM_FUSED_MOE_GATE_TOPK
         self.experts = FusedMoEFactory(
+            gate=self.gate if self.runner_holds_gate else None,
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -595,11 +599,17 @@ class MiniMaxM3MoE(nn.Module):
             assert self.shared_experts is not None
             self.shared_experts.set_prequant(hidden_states, shared_prequant)
 
-        # router_logits: (num_tokens, n_experts); GateLinear casts to fp32.
-        router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        if self.runner_holds_gate:
+            # The runner applies the gate; the logits argument is a placeholder.
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states, router_logits=hidden_states
+            )
+        else:
+            # router_logits: (num_tokens, n_experts); GateLinear casts to fp32.
+            router_logits, _ = self.gate(hidden_states)
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states, router_logits=router_logits
+            )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, cast
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
@@ -40,8 +41,14 @@ from vllm.model_executor.layers.fused_moe.routed_experts import (
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     get_moe_padding_mask,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_gate_topk_bias import (
+    fused_gate_sigmoid_topk_bias,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    FusedTopKBiasRouter,
 )
 from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
     RoutingSimulatorRouter,
@@ -66,6 +73,10 @@ from vllm.utils.torch_utils import (
 )
 
 logger = init_logger(__name__)
+
+# Largest batch for the fused MoE gate + top-k (VLLM_ROCM_FUSED_MOE_GATE_TOPK):
+# decode-sized batches, where the separate launches dominate.
+_FUSED_GATE_TOPK_MAX_TOKENS = 1024
 
 
 def register_layer_for_moe_forward_op(
@@ -293,6 +304,9 @@ class MoERunner(MoERunnerInterface):
         # in a single launch.
         self._fse_fuse_gate = gate is not None and shared_expert_gate is not None
         self._combined_gate_weight: torch.Tensor | None = None
+        # Whether the fused gate + top-k can replace the gate and the router;
+        # decided on first use, once the quant method is known.
+        self._fused_gate_topk: bool | None = None
 
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
@@ -624,6 +638,7 @@ class MoERunner(MoERunnerInterface):
         input_ids: torch.Tensor | None = None,
         shared_experts_overlapping: bool = False,
         hidden_states_scale: torch.Tensor | None = None,
+        precomputed_routing: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
@@ -636,7 +651,8 @@ class MoERunner(MoERunnerInterface):
         stream, so the results only have to be awaited here.
 
         `hidden_states_scale` is set when `hidden_states` were quantized before
-        the PCP all-gather.
+        the PCP all-gather. `precomputed_routing` is (topk_weights, topk_ids)
+        from the fused gate + top-k, which then replaces the router.
         """
         self._maybe_apply_shared_experts(
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
@@ -675,12 +691,15 @@ class MoERunner(MoERunnerInterface):
         else:
             assert hidden_states_scale is None
             # Modular kernels: select experts first, then call routed_experts
-            topk_weights, topk_ids = self.router.select_experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                topk_indices_dtype=self._quant_method.topk_indices_dtype,
-                input_ids=input_ids,
-            )
+            if precomputed_routing is not None:
+                topk_weights, topk_ids = precomputed_routing
+            else:
+                topk_weights, topk_ids = self.router.select_experts(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    topk_indices_dtype=self._quant_method.topk_indices_dtype,
+                    input_ids=input_ids,
+                )
 
             fused_out = self.routed_experts.forward_modular(
                 x=hidden_states,
@@ -947,6 +966,81 @@ class MoERunner(MoERunnerInterface):
         else:
             return hidden_states
 
+    def _fused_gate_topk_supported(self) -> bool:
+        """Whether the gate and the router are an fp32 gate GEMM and a plain
+        sigmoid top-k with a score-correction bias, feeding a modular kernel
+        on this rank's own rows (no naive dispatch or PCP gather of logits)."""
+        from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+        router, gate = self.router, self.gate
+        if (
+            not envs.VLLM_ROCM_FUSED_MOE_GATE_TOPK
+            or not current_platform.is_rocm()
+            or gate is None
+            or self._fse_fuse_gate
+            or type(router) is not FusedTopKBiasRouter
+        ):
+            return False
+        assert isinstance(router, FusedTopKBiasRouter)
+        bias = router.e_score_correction_bias
+        weight = getattr(gate, "weight", None)
+        return (
+            router.scoring_func == "sigmoid"
+            and bias is not None
+            and bias.dtype == torch.float32
+            and router.eplb_state is None
+            and router.num_fused_shared_experts == 0
+            and router._hash_indices_table is None
+            and router.bias_vl is None
+            and isinstance(weight, torch.Tensor)
+            and weight.dtype == torch.float32
+            and weight.dim() == 2
+            and weight.is_contiguous()
+            and getattr(gate, "bias", None) is None
+            and getattr(gate, "out_dtype", None) == torch.float32
+            and isinstance(getattr(gate, "quant_method", None), UnquantizedLinearMethod)
+            and not self.routed_experts.quant_method.is_monolithic
+            and not self.do_naive_dispatch_combine
+            and self.moe_config.pcp_size == 1
+        )
+
+    def _maybe_fused_gate_topk(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """(topk_weights, topk_ids) from the fused gate + top-k, or None to
+        run the gate and the router."""
+        if self._fused_gate_topk is None:
+            self._fused_gate_topk = self._fused_gate_topk_supported()
+            if self._fused_gate_topk:
+                logger.info_once("MoE gate GEMM and sigmoid top-k run fused.")
+        num_tokens = hidden_states.shape[0]
+        if (
+            not self._fused_gate_topk
+            or not 0 < num_tokens <= _FUSED_GATE_TOPK_MAX_TOKENS
+            or hidden_states.dtype != torch.bfloat16
+            or hidden_states.dim() != 2
+            or hidden_states.stride(-1) != 1
+        ):
+            return None
+        router = self.router
+        assert isinstance(router, FusedTopKBiasRouter) and self.gate is not None
+        if router.capture_fn is not None or router._routing_replay_out is not None:
+            return None
+        assert router.e_score_correction_bias is not None
+        topk_weights, topk_ids = fused_gate_sigmoid_topk_bias(
+            hidden_states,
+            self.gate.weight,
+            router.e_score_correction_bias.data,
+            router.top_k,
+            router.renormalize,
+            router.routed_scaling_factor,
+            get_moe_padding_mask(num_tokens) if router.masks_padding else None,
+        )
+        indices_dtype = self._quant_method.topk_indices_dtype
+        if indices_dtype is not None and indices_dtype != topk_ids.dtype:
+            topk_ids = topk_ids.to(indices_dtype)
+        return topk_weights, topk_ids
+
     def _forward_impl(
         self,
         hidden_states: torch.Tensor,
@@ -985,8 +1079,12 @@ class MoERunner(MoERunnerInterface):
         # If the Runner holds the gate, apply it after the stream sync,
         # so it can run overlapped with the
         # NOTE: in future PR, MoE runner will always hold the gate.
+        precomputed_routing = None
         if self.gate is not None:
-            if self._fse_fuse_gate:
+            precomputed_routing = self._maybe_fused_gate_topk(hidden_states)
+            if precomputed_routing is not None:
+                pass  # the router logits are never formed
+            elif self._fse_fuse_gate:
                 router_logits = dispatch_unquantized_gemm()(
                     self, hidden_states, self._combined_gate_weight, None
                 )
@@ -1009,6 +1107,7 @@ class MoERunner(MoERunnerInterface):
                 input_ids=input_ids,
                 shared_experts_overlapping=shared_experts_overlapping,
                 hidden_states_scale=hidden_states_scale,
+                precomputed_routing=precomputed_routing,
             )
 
             return self._maybe_combine(
