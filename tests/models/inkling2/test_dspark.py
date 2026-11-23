@@ -11,8 +11,12 @@ import torch.multiprocessing as mp
 
 from vllm.platforms import current_platform
 
-if not current_platform.is_device_capability_family(100):
-    pytest.skip("Inkling2 requires Blackwell", allow_module_level=True)
+if not (
+    current_platform.is_device_capability_family(100)
+    or current_platform.is_device_capability(90)
+    or current_platform.is_device_capability_family(120)
+):
+    pytest.skip("Inkling2 requires Hopper or Blackwell", allow_module_level=True)
 
 from vllm.models.inkling2.nvidia.dspark import (  # noqa: E402
     Inkling2MarkovHead,

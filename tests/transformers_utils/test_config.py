@@ -70,6 +70,61 @@ def test_gemma4_dspark_rope_config_preserves_parameters(tmp_path, layout):
         assert set(config.rope_parameters) == set(per_layer)
 
 
+@pytest.mark.parametrize(
+    ("checkpoint_config", "checkpoint_architecture", "served_architecture"),
+    [
+        (
+            "Qwen2_5OmniConfig",
+            "Qwen2_5OmniForConditionalGeneration",
+            "Qwen2_5OmniThinkerForConditionalGeneration",
+        ),
+        (
+            "Qwen3OmniMoeConfig",
+            "Qwen3OmniMoeForConditionalGeneration",
+            "Qwen3OmniMoeThinkerForConditionalGeneration",
+        ),
+        (
+            "Qwen3ASRConfig",
+            "Qwen3ASRForConditionalGeneration",
+            "Qwen3ASRForConditionalGeneration",
+        ),
+    ],
+)
+def test_thinker_config_is_served(
+    tmp_path, checkpoint_config, checkpoint_architecture, served_architecture
+):
+    """Checkpoints nesting the served model in `thinker_config` load as that
+    model, keeping the checkpoint-wide quantization and dtype."""
+    import transformers
+
+    config = getattr(transformers, checkpoint_config)()
+    config_dict = json.loads(config.to_json_string(use_diff=False))
+    if checkpoint_config == "Qwen3ASRConfig":
+        # Original Qwen3-ASR checkpoints nest every field in `thinker_config`
+        config_dict["audio_config"]["model_type"] = "qwen3_asr_audio_encoder"
+        config_dict = {"model_type": "qwen3_asr", "thinker_config": config_dict}
+    quantization_config = {"quant_method": "awq", "bits": 4, "group_size": 128}
+    config_dict.update(
+        architectures=[checkpoint_architecture],
+        quantization_config=quantization_config,
+        torch_dtype="float16",
+    )
+    config_dict.pop("dtype", None)
+    config_dict["thinker_config"].pop("dtype", None)
+    config_dict["thinker_config"]["text_config"]["vocab_size"] = 1234
+    (tmp_path / "config.json").write_text(json.dumps(config_dict))
+
+    _, config = config_module.HFConfigParser().parse(tmp_path, trust_remote_code=False)
+
+    served_model_type = config_dict["thinker_config"]["model_type"]
+    assert config.model_type == served_model_type
+    assert config.get_text_config().vocab_size == 1234
+    assert config.architectures == [served_architecture]
+    assert config.quantization_config == quantization_config
+    assert str(config.dtype).removeprefix("torch.") == "float16"
+    assert config.name_or_path == str(tmp_path)
+
+
 def test_patch_legacy_rope_type_preserves_nope_layers():
     """NoPE layers stay disabled while later RoPE layers are normalized."""
     rope_parameters = {
