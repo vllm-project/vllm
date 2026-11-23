@@ -170,6 +170,8 @@ class Request:
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
+        # In-flight steps that added to num_output_placeholders.
+        self.num_output_placeholder_steps = 0
         # Tokens of output in flight when the request was preempted: delivered
         # on return, but must not mutate the reset counters.
         self.num_stale_output_tokens = 0
@@ -306,7 +308,7 @@ class Request:
             self.block_hashes.extend(self._block_hasher(self))
 
     def truncate_block_hashes(
-        self, hash_block_size: int, num_hash_lookahead_tokens: int = 0
+        self, hash_block_size: int, num_hash_lookahead_tokens: int
     ) -> None:
         """Discard hashes invalidated by truncating the request's tokens."""
         num_valid_hashes = (
