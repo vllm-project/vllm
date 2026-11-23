@@ -15,26 +15,13 @@ INDEX_ROW = 132  # DSA indexer key row: 128 E4M3 bytes + one fp32 scale
 
 
 def model_refusals(model, config: DecodeConfig) -> list[str]:
-    """After load: the layer mix, each kernel layer's weights, the device."""
+    """After load: ROCm and FlyDSL, the layer mix, each kernel layer's weights,
+    the device."""
     from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.runtime.consensus import (  # noqa: E501
         MonoUnsupported,
     )
 
-    from .weights import check_moe_layer, moe_kinds
-
     reasons: list[str] = []
-    layers = list(model.layers)
-    try:
-        moe_kinds(layers)
-    except MonoUnsupported as err:
-        reasons.append(str(err))
-    for layer in layers[1:]:
-        try:
-            check_moe_layer(layer, config.tp_size)
-        except (MonoUnsupported, AttributeError) as err:
-            reasons.append(f"layer {layer.self_attn.spec.layer_idx}: {err}")
-    # aux hidden-state taps (DSpark) are cloned off the residual stream between
-    # launches by MonoRunner.forward
     if not current_platform.is_rocm():
         reasons.append("requires ROCm")
         return reasons
@@ -49,6 +36,21 @@ def model_refusals(model, config: DecodeConfig) -> list[str]:
     except ImportError as err:
         reasons.append(f"requires FlyDSL and AITER FlyDSL helpers ({err})")
         return reasons
+    # after the FlyDSL check: the kernels' weight formats import FlyDSL
+    from .weights import check_moe_layer, moe_kinds
+
+    layers = list(model.layers)
+    try:
+        moe_kinds(layers)
+    except MonoUnsupported as err:
+        reasons.append(str(err))
+    for layer in layers[1:]:
+        try:
+            check_moe_layer(layer, config.tp_size)
+        except (MonoUnsupported, AttributeError) as err:
+            reasons.append(f"layer {layer.self_attn.spec.layer_idx}: {err}")
+    # aux hidden-state taps (DSpark) are cloned off the residual stream between
+    # launches by MonoRunner.forward
     cdna = get_cdna_version()
     if cdna not in (3, 4):
         reasons.append("requires CDNA3 / gfx942 or CDNA4 / gfx950")
