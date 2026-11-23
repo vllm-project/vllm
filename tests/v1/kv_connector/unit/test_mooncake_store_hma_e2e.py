@@ -4,6 +4,8 @@
 (SWA + Full) attention config, using a dict-backed mock store."""
 
 import ctypes
+import functools
+import random
 import sys
 import threading
 import types
@@ -27,9 +29,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator imp
     MooncakeStoreCoordinator,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
+    BlobBlockHashes,
     BoundaryPut,
     ChunkedTokenDatabase,
     LoadSpec,
+    MooncakeLookupResult,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # noqa: E501
@@ -1499,3 +1503,160 @@ def test_selective_lease_requires_probe_support(monkeypatch):
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
     with pytest.raises(RuntimeError, match="batch_probe_key"):
         _full_plus_mamba_worker(_DictStore())
+
+
+class _HashedDictStore(_LeaseTrackingStore):
+    """Adds Mooncake's hashed batch calls, building keys the way Mooncake does."""
+
+    @staticmethod
+    def _keys(hashes, hash_len, prefixes, indices, separator):
+        blob = bytes(hashes)
+        return [
+            f"{prefix}{separator}{blob[i * hash_len : (i + 1) * hash_len].hex()}"
+            for group_prefixes, group_indices in zip(prefixes, indices)
+            for i in group_indices.tolist()
+            for prefix in group_prefixes
+        ]
+
+    def batch_is_exist_hashed(self, hashes, hash_len, prefixes, indices, sep="@"):
+        keys = self._keys(hashes, hash_len, prefixes, indices, sep)
+        return bytes(r & 0xFF for r in self.batch_is_exist(keys))
+
+    def batch_probe_key_hashed(self, hashes, hash_len, prefixes, indices, sep="@"):
+        keys = self._keys(hashes, hash_len, prefixes, indices, sep)
+        return bytes(r & 0xFF for r in self.batch_probe_key(keys))
+
+
+def _swa_plus_full_worker(store):
+    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    swa = sliding_window_layer(
+        block_size=16, num_kv_heads=8, head_size=64, dtype=None, sliding_window=32
+    )
+    cfg = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * page_size,
+                layers=[layer],
+                layer_stride=4 * page_size,
+                block_stride=page_size,
+            )
+            for layer, page_size in (
+                ("L0", full.page_size_bytes),
+                ("L1", swa.spec.page_size_bytes),
+            )
+        ],
+        kv_cache_groups=[
+            make_kv_cache_group(["L0"], full),
+            make_kv_cache_group(["L1"], swa),
+        ],
+    )
+    return _build_worker_with_dict_store(_minimal_vllm_config(16), cfg, store)
+
+
+def _chunked_full_worker(store, *, partial_hash_hits=False):
+    """Two full-attention groups with 64-token pages stored as 16-token chunks,
+    so the page-prefix rule decides which chunks of a page are loadable."""
+    full = AttentionSpec(block_size=64, num_kv_heads=8, head_size=64, dtype=None)
+    cfg = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * full.page_size_bytes,
+                layers=[layer],
+                layer_stride=4 * full.page_size_bytes,
+                block_stride=full.page_size_bytes,
+            )
+            for layer in ("L0", "L1")
+        ],
+        kv_cache_groups=[
+            make_kv_cache_group(["L0"], full),
+            make_kv_cache_group(["L1"], full),
+        ],
+    )
+    vllm_config = _minimal_vllm_config(64)
+    vllm_config.cache_config.prefix_match_unit = 16
+    worker = _build_worker_with_dict_store(vllm_config, cfg, store)
+    # Store chunks smaller than the page, as `store_chunk_size` gives.
+    for db in worker.token_dbs:
+        db.chunk_size = 16
+    worker.coord.enable_partial_hash_hits = partial_hash_hits
+    return worker
+
+
+@pytest.mark.parametrize("seed", range(10))
+@pytest.mark.parametrize("selective_lease", [False, True])
+@pytest.mark.parametrize(
+    "make_worker",
+    [
+        _swa_plus_full_worker,
+        _full_plus_mamba_worker,
+        functools.partial(_full_plus_mamba_worker, partial_hash_hits=True),
+        _chunked_full_worker,
+        functools.partial(_chunked_full_worker, partial_hash_hits=True),
+    ],
+    ids=[
+        "swa+full",
+        "full+mamba",
+        "full+mamba-partial-hits",
+        "chunked-full",
+        "chunked-full-partial-hits",
+    ],
+)
+def test_native_lookup_matches_python_lookup(
+    monkeypatch, make_worker, selective_lease, seed
+):
+    """The native lookup (keys built by Mooncake from the hash buffer) finds the
+    same hits as the Python one, for random stored subsets and prompt lengths."""
+    if selective_lease:
+        monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
+    rng = random.Random(seed)
+    store = _HashedDictStore()
+    worker = make_worker(store)
+    assert worker._native_lookup
+    num_blocks = rng.randint(1, 12)
+    hs = [BlockHash(rng.randbytes(32)) for _ in range(num_blocks * 4)]
+    keep = rng.random()
+    for g_idx in range(len(worker.token_dbs)):
+        for h in hs:
+            if rng.random() < keep:
+                for key in _store_keys(worker, g_idx, h):
+                    store._data[key] = b"x"
+    blob = BlobBlockHashes(memoryview(b"".join(hs)), 32)
+    hash_tokens = len(hs) * worker.hash_block_size
+    for num_tokens in sorted({rng.randint(1, hash_tokens + 1) for _ in range(8)}):
+        num_hashes = min(len(hs), num_tokens // worker.hash_block_size)
+        for block_hashes in (hs[:num_hashes], blob[:num_hashes]):
+            worker._native_lookup = False
+            expected = worker.lookup(num_tokens, block_hashes)
+            worker._native_lookup = True
+            assert worker.lookup(num_tokens, block_hashes) == expected
+        worker._native_lookup = True
+        assert (
+            worker.lookup(
+                num_tokens, BlobBlockHashes(memoryview(b"".join(hs[:num_hashes])), 32)
+            )
+            == expected
+        )
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_native_lookup_reports_failed_probe_like_python(native):
+    """A probe with failed keys is a failed lookup (None) on both paths, and a
+    lookup with nothing to probe is a zero hit."""
+    store = _HashedDictStore()
+    worker = _swa_plus_full_worker(store)
+    worker._native_lookup = native
+    hs = [BlockHash(bytes([i + 1]) * 32) for i in range(4)]
+    for g_idx in range(2):
+        for h in hs:
+            for key in _store_keys(worker, g_idx, h):
+                store._data[key] = b"x"
+    assert worker.lookup(65, hs).hit_length == 64
+
+    def failing(keys):
+        return [-1] + [1] * (len(keys) - 1)
+
+    store.batch_is_exist = failing
+    assert worker.lookup(65, hs) is None
+    assert worker.lookup(65, []) == MooncakeLookupResult(0)

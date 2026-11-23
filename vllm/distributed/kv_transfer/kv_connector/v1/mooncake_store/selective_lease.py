@@ -11,6 +11,7 @@ outside a sliding window or states at earlier block boundaries. With
 
 import time
 from collections.abc import Callable, Sequence
+from collections.abc import Set as AbstractSet
 from typing import Any, Protocol, cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # noqa: E501
@@ -83,14 +84,24 @@ class SelectiveLookupLease:
         """Existence of `keys`, without granting a lease."""
         return self.store.batch_probe_key(keys)
 
+    def probe_hashed(
+        self,
+        hashes: memoryview,
+        hash_len: int,
+        prefixes: list[list[str]],
+        indices: list[Any],
+    ) -> bytes:
+        """`probe` with the keys built by Mooncake (`batch_probe_key_hashed`)."""
+        return self.store.batch_probe_key_hashed(hashes, hash_len, prefixes, indices)
+
     def lease_hit(
         self,
         block_hashes: Sequence[BlockHash],
         hit: MooncakeLookupResult,
         load_masks: tuple[list[bool], ...],
-        exists_set: set[tuple[int, bytes]],
+        exists_set: AbstractSet[tuple[int, bytes]],
         longest_hit: Callable[
-            [set[tuple[int, bytes]]],
+            [AbstractSet[tuple[int, bytes]]],
             tuple[MooncakeLookupResult, tuple[list[bool], ...]],
         ],
     ) -> MooncakeLookupResult:

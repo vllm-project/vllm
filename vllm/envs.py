@@ -258,6 +258,7 @@ if TYPE_CHECKING:
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
     VLLM_MOONCAKE_STORE_SELECTIVE_LEASE: bool = False
+    VLLM_MOONCAKE_STORE_NATIVE_LOOKUP: bool = True
     VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
     VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO: float = 0.9
     MOONCAKE_PREFERRED_SEGMENT: str | None = None
@@ -1923,6 +1924,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOONCAKE_STORE_SELECTIVE_LEASE": lambda: (
         os.getenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "False").lower()
         in ("true", "1")
+    ),
+    # Build and probe Mooncake store lookup keys in Mooncake's native code,
+    # without the GIL, when the installed Mooncake has `batch_is_exist_hashed`.
+    # The Python key building otherwise holds worker rank 0's GIL.
+    "VLLM_MOONCAKE_STORE_NATIVE_LOOKUP": lambda: (
+        os.getenv("VLLM_MOONCAKE_STORE_NATIVE_LOOKUP", "True").lower() in ("true", "1")
     ),
     # Number of parallel KV-load receive threads per worker rank. Lets the
     # per-request control overhead (Python prep + master key lookup) of one

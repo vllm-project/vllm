@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """External-store cache-hit coordinator for MooncakeStoreConnector."""
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
+
+import numpy as np
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -30,13 +33,79 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+class LoadablePairs(AbstractSet[tuple[int, bytes]]):
+    """The `(group, hash)` pairs a native lookup found loadable.
+
+    Kept as one boolean array per group over the request's hash indices, so
+    the lookup does not build a set entry per stored candidate. Membership maps
+    a hash to its index through a dict over the hashes loadable in any group.
+    """
+
+    def __init__(
+        self, blob: memoryview, hash_len: int, loadable: dict[int, np.ndarray]
+    ) -> None:
+        self._blob = blob
+        self._hash_len = hash_len
+        self._loadable = loadable
+        self._index: dict[bytes, int] | None = None
+        self._all_of: dict[tuple[int, ...], np.ndarray] = {}
+
+    def _hash_index(self) -> dict[bytes, int]:
+        if self._index is None:
+            any_group = np.zeros(len(self._blob) // self._hash_len, dtype=bool)
+            for group_loadable in self._loadable.values():
+                any_group |= group_loadable
+            hl = self._hash_len
+            self._index = {
+                bytes(self._blob[i * hl : (i + 1) * hl]): i
+                for i in np.flatnonzero(any_group).tolist()
+            }
+        return self._index
+
+    def __contains__(self, pair: object) -> bool:
+        group_id, block_hash = pair  # type: ignore[misc]
+        group_loadable = self._loadable.get(group_id)
+        if group_loadable is None:
+            return False
+        idx = self._hash_index().get(block_hash)
+        return idx is not None and bool(group_loadable[idx])
+
+    def contains_all(self, group_ids: Sequence[int], block_hash: bytes) -> bool:
+        """Whether every group in `group_ids` has `block_hash` loadable."""
+        key = tuple(group_ids)
+        all_of = self._all_of.get(key)
+        if all_of is None:
+            arrays = [self._loadable.get(g) for g in key]
+            all_of = self._all_of[key] = (
+                np.logical_and.reduce(arrays)
+                if all(a is not None for a in arrays)
+                else np.zeros(len(self._blob) // self._hash_len, dtype=bool)
+            )
+        idx = self._hash_index().get(block_hash)
+        return idx is not None and bool(all_of[idx])
+
+    def __iter__(self) -> Iterator[tuple[int, bytes]]:
+        hl = self._hash_len
+        for group_id, group_loadable in self._loadable.items():
+            for i in np.flatnonzero(group_loadable).tolist():
+                yield group_id, bytes(self._blob[i * hl : (i + 1) * hl])
+
+    def __len__(self) -> int:
+        return sum(int(g.sum()) for g in self._loadable.values())
+
+    @classmethod
+    def _from_iterable(cls, it):
+        # Set operations (e.g. the selective lease's difference) give a set.
+        return set(it)
+
+
 class ExternalCachedBlockPool:
     """Duck-typed BlockPool backed by a `(group_id, hash)` exists set."""
 
     def __init__(
         self,
         hash_block_size: int,
-        exists: set[tuple[int, bytes]] | None = None,
+        exists: AbstractSet[tuple[int, bytes]] | None = None,
     ) -> None:
         # ``exists=None`` is used on the recv side where hit_length is already
         # determined and we just want each spec's manager to apply its own mask.
@@ -56,9 +125,11 @@ class ExternalCachedBlockPool:
         if self._exists is None:
             return [self._present_block] * len(group_ids)
         h = bytes(block_hash)
-        if all((g, h) in self._exists for g in group_ids):
-            return [self._present_block] * len(group_ids)
-        return None
+        if isinstance(self._exists, LoadablePairs):
+            hit = self._exists.contains_all(group_ids, h)
+        else:
+            hit = all((g, h) in self._exists for g in group_ids)
+        return [self._present_block] * len(group_ids) if hit else None
 
     def contains(self, group_id: int, block_hash: BlockHash) -> bool:
         """Return whether a group has a loadable key for this hash."""

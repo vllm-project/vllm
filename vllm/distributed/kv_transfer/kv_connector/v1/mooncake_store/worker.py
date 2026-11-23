@@ -19,11 +19,13 @@ import socket
 import threading
 import time
 from collections.abc import Callable, Sequence
+from collections.abc import Set as AbstractSet
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from typing import Any, Literal, TypeVar, cast
 
+import numpy as np
 import torch
 import zmq
 
@@ -49,6 +51,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_regis
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
+    LoadablePairs,
     MooncakeStoreCoordinator,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # noqa: E501
@@ -1530,11 +1533,16 @@ def _reused_transfer_engine() -> SharedMooncakeTransferEngine:
     return shared
 
 
+# Returned by the lookup probes when no candidate key needed probing.
+_NO_CANDIDATES: AbstractSet[tuple[int, bytes]] = frozenset()
+
+
 class MooncakeStoreWorker:
     """Worker-side component for MooncakeStoreConnector."""
 
-    # Bare workers built with __new__ in tests read this default.
+    # Bare workers built with __new__ in tests read these defaults.
     _reuse_pd_transfer_engine: bool = False
+    _native_lookup: bool = False
 
     @staticmethod
     def _create_mem_pool(
@@ -1782,6 +1790,10 @@ class MooncakeStoreWorker:
         )
         self.token_dbs = self._build_token_databases(metadata, store_group_plans)
         self._init_lookup_key_prefixes()
+        # Checked on the type so that mocked stores keep the Python path.
+        self._native_lookup = envs.VLLM_MOONCAKE_STORE_NATIVE_LOOKUP and hasattr(
+            type(self.store), "batch_is_exist_hashed"
+        )
         if envs.VLLM_MOONCAKE_STORE_SELECTIVE_LEASE:
             self._selective_lease = SelectiveLookupLease(
                 self.store,
@@ -2535,6 +2547,34 @@ class MooncakeStoreWorker:
         if not block_hashes or token_len <= 0:
             return MooncakeLookupResult(0)
 
+        exists_set: AbstractSet[tuple[int, bytes]] | None = (
+            self._lookup_exists_native(token_len, block_hashes)
+            if self._native_lookup
+            else self._lookup_exists_python(token_len, block_hashes)
+        )
+        if exists_set is None:
+            return None
+        if exists_set is _NO_CANDIDATES:
+            return MooncakeLookupResult(0)
+
+        hit, load_masks = self._longest_hit(
+            num_tokens, token_len, block_hashes, exists_set
+        )
+        if self._selective_lease is None:
+            return hit
+        return self._selective_lease.lease_hit(
+            block_hashes,
+            hit,
+            load_masks,
+            exists_set,
+            functools.partial(self._longest_hit, num_tokens, token_len, block_hashes),
+        )
+
+    def _lookup_exists_python(
+        self, token_len: int, block_hashes: Sequence[BlockHash]
+    ) -> AbstractSet[tuple[int, bytes]] | None:
+        """Loadable `(group, hash)` pairs; None when the probe failed, and
+        `_NO_CANDIDATES` when there was nothing to probe."""
         # Build per-(group, hash) candidate keys expanded across rank namespaces.
         # candidate_meta stores (group, hash_bytes, end_token) for each key slice.
         candidate_keys: list[str] = []
@@ -2567,7 +2607,7 @@ class MooncakeStoreWorker:
                 candidate_meta.append((g_idx, bytes(h), end_token))
 
         if not candidate_keys:
-            return MooncakeLookupResult(0)
+            return _NO_CANDIDATES
 
         exists_fn = (
             self.store.batch_is_exist
@@ -2625,26 +2665,127 @@ class MooncakeStoreWorker:
             if end_token % self.token_dbs[g_idx].chunk_size == 0:
                 preceding_chunks_present &= present
             pos += count
+        return exists_set
 
-        hit, load_masks = self._longest_hit(
-            num_tokens, token_len, block_hashes, exists_set
+    def _lookup_exists_native(
+        self, token_len: int, block_hashes: Sequence[BlockHash]
+    ) -> AbstractSet[tuple[int, bytes]] | None:
+        """Same as `_lookup_exists_python`, but Mooncake builds and probes the
+        keys from the raw hash buffer without the GIL; the per-candidate rules
+        run on numpy arrays.
+        """
+        if isinstance(block_hashes, BlobBlockHashes):
+            blob, hash_len = block_hashes.blob, block_hashes.hash_len
+        else:
+            hash_list = [bytes(h) for h in block_hashes]
+            hash_len = len(hash_list[0])
+            assert all(len(h) == hash_len for h in hash_list), (
+                "Native Mooncake lookup needs equal-length block hashes"
+            )
+            blob = memoryview(b"".join(hash_list))
+
+        fine_grained = self.coord.enable_partial_hash_hits
+        lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
+        group_ids: list[int] = []
+        group_end_tokens: list[np.ndarray] = []
+        group_prefixes: list[list[str]] = []
+        group_hash_ids: list[np.ndarray] = []
+        num_keys = 0
+        for g_idx, db in enumerate(self.token_dbs):
+            group = self._kv_cache_groups[g_idx]
+            if not group.prefix_cacheable:
+                continue
+            unit_size = self.hash_block_size if fine_grained else db.chunk_size
+            max_units = (
+                min(token_len, len(block_hashes) * self.hash_block_size) // unit_size
+            )
+            units = np.arange(max_units, dtype=np.int64)
+            lookup_mask = None if lookup_masks is None else lookup_masks[g_idx]
+            if lookup_mask is not None:
+                block_ids = units * unit_size // group.block_size
+                mask = np.asarray(lookup_mask, dtype=bool)
+                in_range = block_ids < len(mask)
+                keep = np.zeros(max_units, dtype=bool)
+                keep[in_range] = mask[block_ids[in_range]]
+                units = units[keep]
+            end_tokens = (units + 1) * unit_size
+            group_ids.append(g_idx)
+            group_end_tokens.append(end_tokens)
+            group_prefixes.append(list(self._lookup_key_prefixes[g_idx]))
+            group_hash_ids.append(end_tokens // self.hash_block_size - 1)
+            num_keys += len(units) * len(group_prefixes[-1])
+
+        if num_keys == 0:
+            return _NO_CANDIDATES
+
+        probe = (
+            self.store.batch_is_exist_hashed
+            if self._selective_lease is None
+            else self._selective_lease.probe_hashed
         )
-        if self._selective_lease is None:
-            return hit
-        return self._selective_lease.lease_hit(
-            block_hashes,
-            hit,
-            load_masks,
-            exists_set,
-            functools.partial(self._longest_hit, num_tokens, token_len, block_hashes),
+        lookup_start = time.perf_counter()
+        try:
+            raw = probe(blob, hash_len, group_prefixes, group_hash_ids)
+        except Exception as e:
+            self._record_kv_connector_operation(
+                "lookup_exists",
+                time.perf_counter() - lookup_start,
+                num_keys,
+                status="error",
+                num_failed_keys=num_keys,
+            )
+            logger.error("Remote connection failed in lookup: %s", e)
+            return None
+        res = np.frombuffer(raw, dtype=np.int8)
+        if len(res) != num_keys:
+            logger.warning(
+                "Mooncake returned %d results for %d keys", len(res), num_keys
+            )
+            res = np.full(num_keys, -1, dtype=np.int8)
+        failed_keys = int((res < 0).sum())
+        status = "ok"
+        if failed_keys:
+            status = "error" if failed_keys == num_keys else "partial_failure"
+        self._record_kv_connector_operation(
+            "lookup_exists",
+            time.perf_counter() - lookup_start,
+            num_keys,
+            status=status,
+            num_failed_keys=failed_keys,
         )
+        if failed_keys:
+            return None
+
+        loadable_by_group: dict[int, np.ndarray] = {}
+        pos = 0
+        for g_idx, end_tokens, prefixes, hash_ids in zip(
+            group_ids, group_end_tokens, group_prefixes, group_hash_ids
+        ):
+            n, count = len(end_tokens), len(prefixes)
+            # Present only when every namespace that will be loaded has it.
+            present = (res[pos : pos + n * count].reshape(n, count) == 1).all(axis=1)
+            pos += n * count
+            # A page-prefix hit covers every Store chunk before its final
+            # chunk: a candidate counts only if no chunk end before it on the
+            # same page is missing.
+            pages = (end_tokens - 1) // self._kv_cache_groups[g_idx].block_size
+            missing_end = (end_tokens % self.token_dbs[g_idx].chunk_size == 0) & (
+                ~present
+            )
+            missing_before = np.cumsum(missing_end) - missing_end
+            page_start = np.searchsorted(pages, pages, side="left")
+            loadable = present & (missing_before == missing_before[page_start])
+            group_loadable = np.zeros(len(blob) // hash_len, dtype=bool)
+            group_loadable[hash_ids[loadable]] = True
+            loadable_by_group[g_idx] = group_loadable
+        return LoadablePairs(blob, hash_len, loadable_by_group)
 
     def _longest_hit(
         self,
         num_tokens: int,
         token_len: int,
         block_hashes: Sequence[BlockHash],
-        exists_set: set[tuple[int, bytes]],
+        exists_set: AbstractSet[tuple[int, bytes]],
     ) -> tuple[MooncakeLookupResult, tuple[list[bool], ...]]:
         """Longest prefix hit and its load masks over the stored group/hash pairs."""
         cached_block_pool = ExternalCachedBlockPool(
