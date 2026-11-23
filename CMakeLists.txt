@@ -1148,7 +1148,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
   if(FUSED_GDN_DECODE_ARCHS)
     set(FUSED_GDN_DECODE_SRC
-      "csrc/gdn/fused_gdn_decode_kernel.cu")
+      "csrc/gdn/fused_gdn_decode_kernel.cu"
+      "csrc/gdn/fused_gdn_decode_16bit_kernel.cu")
     set_gencode_flags_for_srcs(
       SRCS "${FUSED_GDN_DECODE_SRC}"
       CUDA_ARCHS "${FUSED_GDN_DECODE_ARCHS}")
@@ -1659,14 +1660,17 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # N_in, see skinny_gemms_int4.h): with the whole op in one unit the 9-arch
   # build spends its entire length compiling that single file.
   # skinny_gemms_int4_api.cu keeps the public entry point and dispatches on N_in,
-  # with extern template keeping the device code in the five units.
+  # with extern template keeping the device code in the per-N_in units.
   set(VLLM_SKINNY_INT4_SRC
     "csrc/rocm/skinny_gemms_int4_api.cu"
     "csrc/rocm/skinny_gemms_int4_n1.cu"
     "csrc/rocm/skinny_gemms_int4_n2.cu"
     "csrc/rocm/skinny_gemms_int4_n3.cu"
     "csrc/rocm/skinny_gemms_int4_n4.cu"
-    "csrc/rocm/skinny_gemms_int4_n5.cu")
+    "csrc/rocm/skinny_gemms_int4_n5.cu"
+    "csrc/rocm/skinny_gemms_int4_n6.cu"
+    "csrc/rocm/skinny_gemms_int4_n7.cu"
+    "csrc/rocm/skinny_gemms_int4_n8.cu")
   # Both families are built into _rocm_C_skinny below.
   list(APPEND VLLM_SKINNY_SRC ${VLLM_SKINNY_INT4_SRC})
 
@@ -1817,6 +1821,15 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/rdna35_gdn_chunked.cu")
   endif()
 
+  # The W4A8 MoE decode kernel supports every gfx11 GPU (gfx1100-gfx1103,
+  # gfx1150, gfx1151), so it does not need gfx1100 in the target list.
+  set(VLLM_ROCM_HAS_GFX11 OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx11[0-9]+")
+    set(VLLM_ROCM_HAS_GFX11 ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/moe_w4a8_decode_rdna3.cu")
+  endif()
+
   # RDNA3.5 attention kernels (gfx1151 only).
   set(VLLM_ROCM_HAS_RDNA_ATTN OFF)
   if("gfx1151" IN_LIST VLLM_GPU_ARCHES)
@@ -1866,6 +1879,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_ROCM_HAS_RDNA_ATTN)
     target_link_libraries(_rocm_C PRIVATE _rocm_C_rdna_attn)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_RDNA_ATTN)
+  endif()
+  if(VLLM_ROCM_HAS_GFX11)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX11)
   endif()
 endif()
 
