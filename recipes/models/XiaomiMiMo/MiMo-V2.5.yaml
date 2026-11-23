@@ -59,8 +59,6 @@ variants:
     tp: 4
     description: "Native FP8 weights (block-wise e4m3 128x128); 4x H200 with TP4"
     extra_args:
-      - "--gpu-memory-utilization"
-      - "0.95"
       - "--max-model-len"
       - "auto"
 
@@ -106,7 +104,6 @@ guide: |
   vllm serve XiaomiMiMo/MiMo-V2.5 \
     --tensor-parallel-size 4 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
     --max-model-len auto \
     --generation-config vllm
   ```
@@ -117,7 +114,6 @@ guide: |
   vllm serve XiaomiMiMo/MiMo-V2.5 \
     --tensor-parallel-size 4 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
     --max-model-len auto \
     --reasoning-parser mimo \
     --tool-call-parser mimo \
@@ -128,7 +124,6 @@ guide: |
   Tunable flags:
   - `--max-model-len` — full context is 1,048,576; use `auto` to size to KV budget.
   - `--max-num-batched-tokens=32768` for prompt-heavy workloads; lower for latency.
-  - `--gpu-memory-utilization=0.95` to maximize KV cache.
 
   ## Client Usage
 

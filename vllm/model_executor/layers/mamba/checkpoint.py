@@ -13,7 +13,7 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
-    get_mamba_prefill_checkpoint_position,
+    get_reusable_prefix_length,
     is_mamba_prefill_checkpoint_valid,
 )
 
@@ -24,9 +24,8 @@ def compute_mamba_prefill_checkpoints(
     hash_block_size: int,
     mamba_block_size: int,
     checkpoint_alignment: int | None,
-    drop_eagle_block: bool,
     cache_hit_alignment_tokens: int,
-    num_hash_lookahead_tokens: int = 0,
+    num_hash_lookahead_tokens: int,
 ) -> tuple[list[int], list[int]]:
     """Per-row internal prefill checkpoint offsets and cache block columns.
 
@@ -44,11 +43,10 @@ def compute_mamba_prefill_checkpoints(
     cols: list[int] = []
     for seq_len, query_len in zip(seq_lens, query_lens):
         query_start = seq_len - query_len
-        position = get_mamba_prefill_checkpoint_position(
+        position = get_reusable_prefix_length(
             seq_len,
-            cache_hit_alignment_tokens,
-            drop_eagle_block=drop_eagle_block,
             num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+            alignment_tokens=cache_hit_alignment_tokens,
         )
         valid = is_mamba_prefill_checkpoint_valid(
             query_start=query_start,
@@ -100,24 +98,24 @@ class MambaPrefillCheckpointMetadata:
 class MambaPrefillCheckpointBuilder:
     """Build backend-neutral prefill checkpoint locations."""
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_spec: MambaSpec) -> None:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_spec: MambaSpec,
+        checkpoint_alignment: int | None,
+    ) -> None:
         self.vllm_config = vllm_config
         self.kv_cache_spec = kv_cache_spec
-        speculative_config = vllm_config.speculative_config
-        self.drop_eagle_block = (
-            speculative_config is not None
-            and speculative_config.use_eagle_block_drop()
-            and not vllm_config.num_hash_lookahead_tokens
-        )
+        self.checkpoint_alignment = checkpoint_alignment
 
     def build(
         self,
         m: CommonAttentionMetadata,
         request_rows: list[int],
     ) -> MambaPrefillCheckpointMetadata | None:
-        if self.vllm_config.cache_config.mamba_cache_mode != "align":
+        if not self.vllm_config.cache_config.enable_prefix_caching:
             return None
-        if self.kv_cache_spec.num_prefill_checkpoint_blocks == 0:
+        if self.checkpoint_alignment is None:
             return None
         cache_config = self.vllm_config.cache_config
         hash_block_size = cache_config.hash_block_size
@@ -135,8 +133,7 @@ class MambaPrefillCheckpointBuilder:
             query_lens,
             hash_block_size=hash_block_size,
             mamba_block_size=block_size,
-            checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
-            drop_eagle_block=self.drop_eagle_block,
+            checkpoint_alignment=self.checkpoint_alignment,
             cache_hit_alignment_tokens=cache_hit_alignment_tokens,
             num_hash_lookahead_tokens=self.vllm_config.num_hash_lookahead_tokens,
         )

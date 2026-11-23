@@ -124,12 +124,12 @@ class BlockPool:
             where different KV cache groups have different block sizes, the
             actual block size can be a multiple of hash_block_size.
         enable_kv_cache_events: Whether to enable kv cache events.
-        verify_content_on_hit: Whether to verify block content on cache
-            insertion to detect hash collisions. Enabled automatically when
-            using non-cryptographic hash algorithms (xxhash/xxhash_cbor).
         metrics_collector: Optional metrics collector for tracking block residency.
         num_hash_lookahead_tokens: Tokens after each block covered by its hash.
         medium: Storage medium reported in KV cache events.
+        verify_content_on_hit: Whether to verify block content on cache
+            insertion to detect hash collisions. Enabled automatically when
+            using non-cryptographic hash algorithms (xxhash/xxhash_cbor).
 
     """
 
@@ -139,10 +139,10 @@ class BlockPool:
         enable_caching: bool,
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
-        verify_content_on_hit: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_hash_lookahead_tokens: int = 0,
         medium: str = MEDIUM_GPU,
+        verify_content_on_hit: bool = False,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
@@ -264,8 +264,8 @@ class BlockPool:
         group_suffix = make_block_hash_with_group_id(BlockHash(b""), kv_cache_group_id)
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null or masked out when enabling sparse attention
-            # like sliding window attention, or Mamba models with prefix-caching
-            # in align mode. We skip null blocks here.
+            # like sliding window attention, or Mamba models with prefix caching.
+            # We skip null blocks here.
             if blk.is_null or (block_mask is not None and not block_mask[i]):
                 continue
             block_hash = new_block_hashes[i]
@@ -649,7 +649,12 @@ class BlockPool:
                 is not None
             ):
                 removed_hashes.append(block_hash)
-                self._block_fingerprints.pop(block_hash, None)
+                if (
+                    self.verify_content_on_hit
+                    and self.cached_block_hash_to_block.get_one_block(block_hash)
+                    is None
+                ):
+                    self._block_fingerprints.pop(block_hash, None)
         block.reset_hash()
         return removed_hashes
 
@@ -723,9 +728,21 @@ class BlockPool:
         assert dst_block.block_hash is None
         assert dst_block.block_id not in self.cached_block_hashes_by_block
         num_tokens = src_block.block_hash_num_tokens
+        fingerprints = {}
+        if self.verify_content_on_hit and src_block.block_hash is not None:
+            src_hashes = self.cached_block_hashes_by_block.get(src_block.block_id, ())
+            fingerprints = {
+                key: self._block_fingerprints.get(key)
+                for key in (src_block.block_hash, *src_hashes)
+            }
         for block_hash in self._remove_cached_block_hashes(src_block):
             # `num_tokens` only applies to the first (primary) insertion.
-            self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
+            self._insert_block_hash(
+                block_hash,
+                dst_block,
+                num_tokens=num_tokens,
+                content_fingerprint=fingerprints.get(block_hash),
+            )
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.

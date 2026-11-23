@@ -25,6 +25,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
     ScheduleEndContext,
+    StoreTrigger,
     make_offload_key,
 )
 from vllm.v1.kv_offload.config import (
@@ -75,6 +76,7 @@ def _make_offloading_config(
         parallel=OffloadingParallelConfig(
             rank=rank,
             world_size=world_size,
+            local_world_size=world_size,
             tp_size=tp_size,
             pp_size=1,
             pcp_size=1,
@@ -311,6 +313,28 @@ def lookup_and_wait(
 def test_invalid_locality_raises_at_construction(locality):
     with pytest.raises(ValueError, match="Locality"):
         _make_tier(locality=locality)
+
+
+@pytest.mark.parametrize("access_mode", ["both", "ro", ""])
+def test_invalid_access_mode_raises_at_construction(access_mode):
+    with pytest.raises(ValueError, match="Invalid access_mode"):
+        _make_tier(access_mode=access_mode)
+
+
+@pytest.mark.parametrize(
+    "access_mode, can_read, can_write",
+    [
+        (None, True, True),
+        ("readwrite", True, True),
+        ("read", True, False),
+        ("write", False, True),
+    ],
+)
+def test_access_mode_sets_can_read_and_can_write(access_mode, can_read, can_write):
+    kwargs = {} if access_mode is None else {"access_mode": access_mode}
+    tier, _ = _make_tier(**kwargs)
+    assert tier.access_mode.can_read is can_read
+    assert tier.access_mode.can_write is can_write
 
 
 class TestMockObjTierBasic:
@@ -612,9 +636,13 @@ class TestMockObjTierFailures:
         )
 
         keys = [key(1)]
-        primary_result = primary_tier.prepare_store(keys, _CTX)
+        primary_result = primary_tier.prepare_store(
+            keys, _CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
         assert primary_result is not None
-        primary_tier.complete_store(keys, _CTX, success=True)
+        primary_tier.complete_store(
+            keys, _CTX, trigger=StoreTrigger.ON_COMPUTE, success=True
+        )
         job = manager.create_store_job(keys, _CTX)
         obj_tier.submit_store(job)
 
