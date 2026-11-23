@@ -213,6 +213,20 @@ _ALL_OF_DEFS = {
         ({"$ref": "#/$defs/Home"}, '{"city": "Tokyo"}', {"city": "Tokyo"}),
         # A branch without type information does not narrow the type.
         ({"allOf": [{"type": "integer"}, {"minimum": 1}]}, "7", 7),
+        # Neither does a nested `allOf` without type information.
+        ({"allOf": [{"type": "integer"}, {"allOf": [{"minimum": 0}]}]}, "7", 7),
+        # A nested `allOf` with type information still narrows the type.
+        ({"allOf": [{"allOf": [{"type": "integer"}]}, {"minimum": 0}]}, "7", 7),
+        (
+            {
+                "allOf": [
+                    {"type": ["integer", "string"]},
+                    {"allOf": [{"type": "string"}]},
+                ]
+            },
+            "7",
+            "7",
+        ),
         # Only the types that every branch allows remain.
         ({"allOf": [{"type": ["integer", "string"]}, {"type": "string"}]}, "7", "7"),
         # Without any type information the value stays a string.

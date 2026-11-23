@@ -400,27 +400,41 @@ def _get_schema_options(arg_schema: dict[str, Any]) -> list[dict[str, Any]]:
 
     all_of = arg_schema.get("allOf")
     if isinstance(all_of, list):
-        # A value has to satisfy every branch, so only the types that all
-        # branches allow remain. A branch without type information (e.g. only
-        # a description) does not narrow them.
-        common_types: set[str] | None = None
-        for branch in all_of:
-            if not isinstance(branch, dict) or not any(
-                key in branch for key in _SCHEMA_TYPE_KEYS_WITH_ALL_OF
-            ):
-                continue
-            branch_types = {
-                _normalize_type(option.get("type", "string"))
-                for option in _get_schema_options(branch)
-            }
-            if common_types is None:
-                common_types = branch_types
-            else:
-                common_types &= branch_types
+        common_types = _get_all_of_types(all_of)
         if common_types:
             return [{"type": type_name} for type_name in common_types]
 
     return [{"type": "string"}]
+
+
+def _get_all_of_types(all_of: list[Any]) -> set[str] | None:
+    """Return the types that every typed `allOf` branch allows.
+
+    A value has to satisfy every branch, so only the types that all branches
+    allow remain. A branch without type information (e.g. only a description
+    or `minimum`, or a nested `allOf` of such branches) does not narrow them.
+    `None` means that no branch has type information.
+    """
+    common_types: set[str] | None = None
+    for branch in all_of:
+        if not isinstance(branch, dict):
+            continue
+        if any(key in branch for key in _SCHEMA_TYPE_KEYS):
+            branch_types: set[str] | None = {
+                _normalize_type(option.get("type", "string"))
+                for option in _get_schema_options(branch)
+            }
+        elif isinstance(branch.get("allOf"), list):
+            branch_types = _get_all_of_types(branch["allOf"])
+        else:
+            branch_types = None
+        if branch_types is None:
+            continue
+        if common_types is None:
+            common_types = branch_types
+        else:
+            common_types &= branch_types
+    return common_types
 
 
 def _get_types(arg_schema: dict[str, Any]) -> set[str]:
