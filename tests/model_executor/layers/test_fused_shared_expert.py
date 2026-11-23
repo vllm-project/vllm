@@ -435,6 +435,32 @@ def get_fse_test_model_config(
         config.mla_use_nope = False
         config.num_nextn_predict_layers = 1
         return config, Glm5NextModel
+    if model_type == "mistral_large4":
+        from vllm.models.mistral.mistral_large4.amd.model import MistralLarge4Model
+
+        config = SimpleNamespace(
+            vocab_size=256,
+            hidden_size=128,
+            intermediate_size=32,
+            moe_intermediate_size=32,
+            num_hidden_layers=2,
+            n_routed_experts=2,
+            n_shared_experts=1,
+            num_experts_per_tok=1,
+            first_k_dense_replace=0,
+            scoring_func="softmax",
+            topk_method=None,
+            n_group=None,
+            norm_topk_prob=True,
+            routed_scaling_factor=1.0,
+            rms_norm_eps=1e-6,
+            kv_lora_rank=32,
+            qk_rope_head_dim=64,
+            max_position_embeddings=128,
+            rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+            quantization_config=quantization_config,
+        )
+        return config, MistralLarge4Model
     raise ValueError(f"Unsupported FSE test model: {model_type}")
 
 
@@ -1341,6 +1367,44 @@ def _load_minimax_m3_weights(
     return AutoWeightsLoader(model).load_weights(weights, mapper=mapper)
 
 
+_MISTRAL_CKPT_PROJECTIONS = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
+
+
+def _load_mistral_large4_weights(
+    model: nn.Module, weights: list[tuple[str, torch.Tensor]]
+) -> set[str]:
+    """Load like `MistralLarge4ForCausalLM`, which requires every parameter, so
+    fill everything but the shared experts under test with zeros."""
+    from vllm.models.mistral.mistral_large4.amd.model import _load_weights
+
+    holder = nn.Module()
+    holder.model = model
+    filler: list[tuple[str, torch.Tensor]] = []
+    for name, param in model.named_parameters():
+        if ".mlp.experts." not in name and ".mlp.shared_experts." not in name:
+            filler.append((f"model.{name}", torch.zeros_like(param)))
+    # Routed expert 0 in the Mistral checkpoint layout, so unfused layers load
+    # their routed tensors too without touching the appended shared slot.
+    for idx, layer in enumerate(model.layers):
+        routed = layer.mlp.experts.routed_experts
+        for suffix in ("weight", "weight_scale"):
+            w13 = getattr(routed, f"w13_{suffix}")[0]
+            w2 = getattr(routed, f"w2_{suffix}")[0]
+            for projection, tensor in (
+                ("w1", w13.chunk(2, dim=0)[0]),
+                ("w3", w13.chunk(2, dim=0)[1]),
+                ("w2", w2),
+            ):
+                filler.append(
+                    (
+                        f"layers.{idx}.experts.0.{projection}.{suffix}",
+                        torch.zeros_like(tensor),
+                    )
+                )
+    loaded = _load_weights(holder, model, filler + weights)
+    return {name.removeprefix("model.") for name in loaded}
+
+
 @pytest.mark.parametrize(
     "model_type",
     [
@@ -1357,6 +1421,7 @@ def _load_minimax_m3_weights(
         "deepseek_v32",
         "glm5_next",
         "qwen4_exp",
+        "mistral_large4",
     ],
 )
 @pytest.mark.parametrize("shared_expert_precision", ["all_mxfp4", "mixed"])
@@ -1396,6 +1461,7 @@ def test_models_fse_init(
             "glm4_moe_lite",
             "deepseek_v32",
             "glm5_next",
+            "mistral_large4",
         }
         else "shared_expert"
     )
@@ -1527,6 +1593,14 @@ def test_models_fse_init(
         monkeypatch.setattr(
             qwen4_exp_model, "Qwen3NextAttention", _StubGlm5NextAttention
         )
+    if model_type == "mistral_large4":
+        from vllm.models.mistral.mistral_large4.amd import model as mistral_model
+
+        # The sparse-MLA attention needs a real MLA backend; only the MoE
+        # wiring is under test here.
+        monkeypatch.setattr(
+            mistral_model, "MistralMLAAttention", _StubGlm5NextAttention
+        )
 
     import vllm.envs as envs
     from vllm._aiter_ops import rocm_aiter_ops
@@ -1639,7 +1713,11 @@ def test_models_fse_init(
                         else (32, 128 // pack_factor)
                     )
                     weight = torch.full(shape, idx + 1).to(dtype)
-                    name = f"layers.{idx}.{moe_attr}.{shared_name}.{projection}"
+                    if model_type == "mistral_large4":
+                        ckpt_projection = _MISTRAL_CKPT_PROJECTIONS[projection]
+                        name = f"layers.{idx}.{shared_name}.{ckpt_projection}"
+                    else:
+                        name = f"layers.{idx}.{moe_attr}.{shared_name}.{projection}"
                     checkpoint.append((f"{name}.weight", weight))
                     if not exclude:
                         scale_shape = (128, 1) if projection == "down_proj" else (32, 4)
@@ -1678,6 +1756,8 @@ def test_models_fse_init(
             with set_current_vllm_config(vllm_config):
                 if model_type == "minimax_m3":
                     loaded = _load_minimax_m3_weights(model, checkpoint)
+                elif model_type == "mistral_large4":
+                    loaded = _load_mistral_large4_weights(model, checkpoint)
                 else:
                     loaded = model.load_weights(checkpoint)
                 base = config.num_hidden_layers

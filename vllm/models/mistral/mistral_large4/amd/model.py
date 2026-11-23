@@ -31,7 +31,9 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle3
 from vllm.model_executor.models.utils import (
     WeightsMapper,
+    get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
+    maybe_fuse_shared_experts,
     maybe_prefix,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
@@ -207,6 +209,11 @@ class MistralLarge4Model(nn.Module, EagleModelMixin):
                 quant_config=vllm_config.quant_config,
             )
             for spec in self.layer_specs
+        )
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
+            MistralMoE,
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -392,17 +399,28 @@ def _load_weights(
     """
     config = mistral_model.config
     params = dict(model.named_parameters())
+    n_routed_experts = getattr(config, "n_routed_experts", None) or 0
+    fused_shared_expert_layers = mistral_model.fused_shared_expert_layers
     expert_mapping = fused_moe_make_expert_params_mapping(
         model,
         ckpt_gate_proj_name="w1",
         ckpt_down_proj_name="w2",
         ckpt_up_proj_name="w3",
-        num_experts=getattr(config, "n_routed_experts", None) or 0,
+        num_experts=n_routed_experts + (1 if fused_shared_expert_layers else 0),
     )
     loaded: set[str] = set()
     lerope_alpha: torch.Tensor | None = None
 
-    for ckpt_name, weight in weights:
+    # Renames a fused layer's `layers.N.shared_experts.*` to
+    # `layers.N.mlp.experts.{n_routed_experts}.*`, which `_to_vllm_weight_name`
+    # then maps like a routed expert.
+    for ckpt_name, weight in maybe_fuse_shared_experts(
+        weights,
+        n_routed_experts=n_routed_experts,
+        n_shared_experts=1,
+        fused_shared_expert_layers=fused_shared_expert_layers,
+        ckpt_prefix="shared_experts",
+    ):
         if ckpt_name == "lerope.alpha":
             lerope_alpha = weight
             continue

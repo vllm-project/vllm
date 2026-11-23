@@ -11,6 +11,9 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
 )
+from vllm.model_executor.layers.fused_moe.utils import (
+    resolve_layer_fused_shared_expert,
+)
 from vllm.models.mistral.amd.mlp import MistralMLP
 
 
@@ -38,17 +41,24 @@ class MistralMoE(nn.Module):
             out_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )
-        self.shared_experts = (
-            MistralMLP(
+        # maybe_fuse_shared_experts splits several shared experts only along
+        # `down_proj`-named weights; the Mistral checkpoint names them `w2`.
+        self.is_fused_shared_expert_enabled = (
+            config.n_shared_experts == 1
+            and resolve_layer_fused_shared_expert(
+                quant_config, prefix, disable_under_ep=True
+            )
+        )
+        if not config.n_shared_experts or self.is_fused_shared_expert_enabled:
+            self.shared_experts = None
+        else:
+            self.shared_experts = MistralMLP(
                 config.hidden_size,
                 config.moe_intermediate_size * config.n_shared_experts,
                 quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
-            if config.n_shared_experts
-            else None
-        )
         self.experts = FusedMoEFactory(
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -65,6 +75,11 @@ class MistralMoE(nn.Module):
             router_logits_dtype=torch.float32,
             reduce_results=reduce_results,
             shared_experts=self.shared_experts,
+            n_shared_experts=config.n_shared_experts
+            if self.is_fused_shared_expert_enabled
+            else None,
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
+            shared_expert_prefix=f"{prefix}.shared_experts",
         )
         # A deferred reduction must not be applied by the MoE layer itself.
         assert reduce_results or self.experts.moe_config.skip_final_all_reduce
