@@ -1,0 +1,43 @@
+schema_version: 1
+name: gsm8k
+kind: eval
+description: Real 5-shot GSM8K math reasoning eval over OpenAI /v1/completions.
+execution_mode: server
+lifecycle: reset_cache
+allow_lifecycle_fallback: false
+evidence_source: harness
+platforms:
+  - nvidia
+  - rocm
+entrypoint: tools.byog.executor.evals.gsm8k.plugin:GSM8KEvalRunner
+protocol_version: "1.0"
+assets:
+  gsm8k_train:
+    id: gsm8k_train
+    source: https://vllm-public-assets.s3.us-west-2.amazonaws.com/ci-datasets/gsm8k/train.jsonl
+    revision: vllm-ci-gsm8k-v1
+    sha256: 17f347dc51477c50d4efb83959dbb7c56297aba886e5544ee2aaed3024813465
+    tier: small_permissive
+  gsm8k_test:
+    id: gsm8k_test
+    source: https://vllm-public-assets.s3.us-west-2.amazonaws.com/ci-datasets/gsm8k/test.jsonl
+    revision: vllm-ci-gsm8k-v1
+    sha256: 3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14
+    tier: small_permissive
+publication_policy:
+  reviewed: true
+  allow_question_text: true
+  allow_reference_answer: true
+  allow_model_response: true
+  note: MIT-licensed OpenAI GSM8K dataset.
+defaults:
+  num_questions: 20
+  num_shots: 5
+  repeats: 1
+  concurrency: [1]
+  max_tokens: 256
+  temperature: 0.0
+quality_thresholds:
+  - metric: accuracy
+    min_value: 0.3
+required_for_quality: true
