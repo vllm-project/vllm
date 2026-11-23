@@ -39,6 +39,34 @@ def _dtype_from_name(dtype_name: str) -> torch.dtype:
     }[dtype_name]
 
 
+def test_dcp_a2a_buffers_reserve_configured_token_capacity(monkeypatch):
+    manager = MagicMock()
+    send_workspace = torch.empty(2 * 8 * 3 * 5)
+    recv_workspace = torch.empty(2 * 8 * 3 * 5)
+    manager.get_simultaneous.return_value = [send_workspace, recv_workspace]
+    monkeypatch.setattr(
+        dcp, "current_workspace_manager", lambda: manager, raising=False
+    )
+
+    send_buffer, recv_buffer = dcp._dcp_a2a_send_recv_buffers(
+        (2, 3, 3, 5),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        workspace_max_num_tokens=8,
+    )
+
+    manager.get_simultaneous.assert_called_once_with(
+        ((2 * 8 * 3 * 5,), torch.float32),
+        ((2 * 8 * 3 * 5,), torch.float32),
+    )
+    assert send_buffer.shape == (2, 3, 3, 5)
+    assert recv_buffer.shape == (2, 3, 3, 5)
+    assert send_buffer.is_contiguous()
+    assert recv_buffer.is_contiguous()
+    assert send_buffer.data_ptr() == send_workspace.data_ptr()
+    assert recv_buffer.data_ptr() == recv_workspace.data_ptr()
+
+
 def _assert_close(
     actual: torch.Tensor,
     expected: torch.Tensor,
@@ -345,7 +373,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
 
     group = MagicMock(world_size=2)
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: group)
-    direct_a2a = MagicMock(max_num_tokens=16)
+    direct_a2a = MagicMock(max_num_tokens=4)
     direct_query = MagicMock(max_num_tokens=16)
     direct_kv = MagicMock()
     monkeypatch.setattr(
@@ -397,6 +425,29 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     )
     direct_a2a.lse_reduce.assert_called_once_with(
         output, lse, False, seq_lens, query_start_loc
+    )
+
+    fallback_combine = MagicMock(return_value=torch.empty(5, 1, 4))
+    monkeypatch.setattr(dcp_manager, "dcp_a2a_lse_reduce", fallback_combine)
+    large_output = torch.empty(5, 2, 4)
+    large_lse = torch.empty(5, 2)
+    assert (
+        manager.combine(
+            large_output,
+            large_lse,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+        )
+        is fallback_combine.return_value
+    )
+    fallback_combine.assert_called_once_with(
+        large_output,
+        large_lse,
+        cp_group=group,
+        is_lse_base_on_e=False,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
+        workspace_max_num_tokens=16,
     )
 
 
@@ -461,6 +512,7 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch):
         query_start_loc=query_start_loc,
         cp_group=group,
         is_lse_base_on_e=True,
+        workspace_max_num_tokens=16,
     )
     assert isinstance(manager.v_up_proj_combine, functools.partial)
     assert manager.v_up_proj_combine.func is dcp_manager.dcp_a2a_v_up_proj_lse_reduce

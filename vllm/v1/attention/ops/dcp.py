@@ -7,6 +7,7 @@ from __future__ import annotations
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import prod
 from typing import TYPE_CHECKING, Any, Protocol
 
 import torch
@@ -39,6 +40,7 @@ from vllm.v1.attention.ops.cp_common import (
     direct_cp_multicast_enabled,
 )
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
 
@@ -619,17 +621,36 @@ def _dcp_a2a_send_recv_buffers(
     shape: tuple[int, ...],
     device: torch.device,
     dtype: torch.dtype,
+    workspace_max_num_tokens: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # Don't use the shared WorkspaceManager here. A FULL cudagraph bakes in the
-    # buffer address at capture, but the workspace is growable and sized only to
-    # the largest *captured* batch (the cudagraph capture cap). Any eager a2a
-    # with a bigger batch regrows it, freeing that address and poisoning every
-    # captured graph -> illegal memory access on replay. This bites the very
-    # first request: the post-capture warmup runs an eager decode at
-    # max_num_seqs (> the cap), so the graphs are already dangling before the
-    # server is ready. torch.empty buffers instead live in the graph's private
-    # pool and stay valid for its lifetime (as the unpack output and the
-    # AG+RS combine path already rely on).
+    if workspace_max_num_tokens is not None:
+        # Always request the configured maximum so profiling grows the shared
+        # workspace before CUDA graph capture and memory budgeting. The manager
+        # is locked after capture, keeping every address baked into a graph
+        # stable while eager fallback calls reuse the same allocation.
+        num_tokens = shape[1]
+        if num_tokens > workspace_max_num_tokens:
+            raise ValueError(
+                f"DCP A2A batch has {num_tokens} tokens, exceeding its "
+                f"workspace capacity of {workspace_max_num_tokens}."
+            )
+        workspace_shape = (
+            shape[0],
+            workspace_max_num_tokens,
+            *shape[2:],
+        )
+        workspace_numel = prod(workspace_shape)
+        send_workspace, recv_workspace = current_workspace_manager().get_simultaneous(
+            ((workspace_numel,), dtype),
+            ((workspace_numel,), dtype),
+        )
+        actual_numel = prod(shape)
+        return (
+            send_workspace[:actual_numel].view(shape),
+            recv_workspace[:actual_numel].view(shape),
+        )
+
+    # Standalone callers do not have a configured capacity to pre-reserve.
     return (
         torch.empty(shape, device=device, dtype=dtype),
         torch.empty(shape, device=device, dtype=dtype),
@@ -1034,6 +1055,7 @@ def dcp_a2a_lse_reduce(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
+    workspace_max_num_tokens: int | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Combine partial attention outputs across DCP ranks using All-to-All.
 
@@ -1050,6 +1072,8 @@ def dcp_a2a_lse_reduce(
         seq_lens: Local KV lengths. Empty shards contribute zero weight.
         query_start_loc: Cumulative query-token offsets for each request.
         out: Optional [B, H/N, D] buffer the combined output is written to.
+        workspace_max_num_tokens: Configured token capacity for reusable A2A
+            send/receive buffers. Standalone callers may leave this unset.
 
     Returns:
         Combined output [B, H/N, D] (head-scattered)
@@ -1073,6 +1097,7 @@ def dcp_a2a_lse_reduce(
         (world_size, B, H_per_rank, D + lse_pack_dim),
         device=cp_attn_out.device,
         dtype=cp_attn_out.dtype,
+        workspace_max_num_tokens=workspace_max_num_tokens,
     )
 
     # The empty-shard mask is fused into the pack kernel below rather than
@@ -1687,6 +1712,9 @@ class MLADCPManager:
         self.device = torch.device(device)
         self.num_ubatches = max(parallel_config.num_ubatches, 1)
         self.max_num_tokens = get_dcp_workspace_max_num_tokens(vllm_config)
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
         self.use_a2a = parallel_config.dcp_comm_backend == "a2a"
         self.padded_num_heads = padded_num_heads
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
@@ -1803,11 +1831,13 @@ class MLADCPManager:
             if use_pcp
             else cp_lse_ag_out_rs
         )
-        return functools.partial(
-            combine_fn,
-            cp_group=self.group,
-            is_lse_base_on_e=is_lse_base_on_e,
-        )
+        combine_kwargs: dict[str, Any] = {
+            "cp_group": self.group,
+            "is_lse_base_on_e": is_lse_base_on_e,
+        }
+        if self.use_a2a:
+            combine_kwargs["workspace_max_num_tokens"] = self.max_num_batched_tokens
+        return functools.partial(combine_fn, **combine_kwargs)
 
     def _direct_workspace_combine(
         self,
@@ -1836,6 +1866,7 @@ class MLADCPManager:
             is_lse_base_on_e=is_lse_base_on_e,
             seq_lens=seq_lens,
             query_start_loc=query_start_loc,
+            workspace_max_num_tokens=self.max_num_batched_tokens,
         )
 
     def _init_query_gather(

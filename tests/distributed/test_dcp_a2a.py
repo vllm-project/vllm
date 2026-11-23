@@ -557,6 +557,7 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
             _FakeCPGroup(world_size, dist.group.WORLD),
             return_lse=return_lse,
             is_lse_base_on_e=is_lse_base_on_e,
+            workspace_max_num_tokens=8 if use_workspace else None,
         )
 
         gathered_out = [torch.empty_like(cp_attn_out) for _ in range(world_size)]
@@ -622,7 +623,7 @@ def test_distributed_packed_a2a_with_workspace_matches_reference():
         world_size=4,
         extra_env={
             "TEST_DTYPE": "bfloat16",
-            "RETURN_LSE": "1",
+            "RETURN_LSE": "0",
             "LSE_BASE_E": "1",
             "USE_WORKSPACE": "1",
         },
