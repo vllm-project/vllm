@@ -256,21 +256,28 @@ def test_decode_renews_waiting_requests_until_it_reads_them(clock):
         return meta.read_lease_renewals
 
     # A prefill that does not advertise a lease predates renewals.
-    scheduler.add_request(_waiting_request(scheduler, 1, lease=LEASE))
+    request = _waiting_request(scheduler, 1, lease=LEASE)
+    scheduler.add_request(request)
     scheduler.add_request(_waiting_request(scheduler, 2, lease=None))
     assert renewals() == {target: ["tx-1"]}
 
-    # Throttled to one renewal per LEASE / 6.
+    # Throttled to one renewal per LEASE / 6, except a new lease: prefill's
+    # lease started before decode admitted the request, so it is renewed at once.
     clock.now += LEASE / 6 - 1
     assert renewals() == {}
+    scheduler.add_request(_waiting_request(scheduler, 3, lease=LEASE))
+    assert renewals() == {target: ["tx-3"]}
     clock.now += 1
-    assert renewals() == {target: ["tx-1"]}
+    assert renewals() == {target: ["tx-1", "tx-3"]}
 
-    # Scheduling allocates the request and posts its read: one last renewal
-    # covers the read, then none.
-    assert scheduler.schedule().kv_connector_metadata.read_lease_renewals == {
-        target: ["tx-1"]
-    }
+    # Renewed past two leases, the request is still read. Scheduling posts its
+    # read: one last renewal covers it, then none.
+    for _ in range(12):
+        clock.now += LEASE / 6
+        renewals()
+    meta = scheduler.schedule().kv_connector_metadata
+    assert meta.read_lease_renewals == {target: ["tx-1", "tx-3"]}
+    assert any(meta.reqs_to_recv[request.request_id].local_block_ids)
     clock.now += LEASE
     assert scheduler.schedule().kv_connector_metadata.read_lease_renewals == {}
 
@@ -319,22 +326,6 @@ def test_renewal_after_a_pause_does_not_revive_a_lapsed_lease(clock):
     assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
 
 
-def test_decode_reads_a_request_whose_lease_was_renewed(clock):
-    scheduler = _decode_scheduler()
-    request = _waiting_request(scheduler, 1, lease=LEASE)
-    scheduler.add_request(request)
-    connector = scheduler.connector.connector_scheduler
-    for _ in range(12):
-        clock.now += LEASE / 6
-        connector._package_read_lease_renewals(MoRIIOConnectorMetadata())
-
-    out = scheduler.schedule()
-    # READ recomputes only the last token.
-    assert out.num_scheduled_tokens[request.request_id] == 1
-    meta = out.kv_connector_metadata
-    assert any(meta.reqs_to_recv[request.request_id].local_block_ids)
-
-
 def test_decode_stops_relying_on_a_lease_near_the_renewal_cap(clock):
     """The prefill frees a request at its renewal cap however often it is
     renewed, so a request held that long is computed locally."""
@@ -350,22 +341,6 @@ def test_decode_stops_relying_on_a_lease_near_the_renewal_cap(clock):
 
     out = scheduler.schedule()
     assert out.num_scheduled_tokens[request.request_id] == request.num_tokens
-
-
-def test_decode_renews_a_new_lease_in_its_next_step(clock):
-    """Prefill's lease started when the prefill finished, before decode
-    admitted the request, so decode renews it at once, not an interval later."""
-    scheduler = _decode_scheduler()
-    connector = scheduler.connector.connector_scheduler
-    target = moriio_common.ReadLeaseTarget("127.0.0.1", 4789, 1, 2, LEASE)
-    scheduler.add_request(_waiting_request(scheduler, 1, lease=LEASE))
-    connector._package_read_lease_renewals(MoRIIOConnectorMetadata())
-
-    clock.now += 1
-    scheduler.add_request(_waiting_request(scheduler, 2, lease=LEASE))
-    meta = MoRIIOConnectorMetadata()
-    connector._package_read_lease_renewals(meta)
-    assert meta.read_lease_renewals == {target: ["tx-2"]}
 
 
 def test_decode_reads_a_new_request_whose_lease_exceeds_the_cap(clock):
@@ -390,10 +365,15 @@ def test_decode_abort_while_queued_stops_renewing(clock):
     assert meta.read_lease_renewals == {}
 
 
-def test_decode_does_not_track_an_infinite_lease():
+def test_decode_tracks_only_well_formed_leases():
     scheduler = _decode_scheduler()
     scheduler.add_request(_waiting_request(scheduler, 1, lease=float("inf")))
-    assert scheduler.connector.connector_scheduler._read_leases == {}
+    request = _waiting_request(scheduler, 2, lease=LEASE)
+    request.kv_transfer_params["remote_dp_rank"] = None
+    scheduler.add_request(request)
+    leases = scheduler.connector.connector_scheduler._read_leases
+    assert list(leases) == [request.request_id]
+    assert leases[request.request_id].target.dp_rank == 0
 
 
 def test_malformed_renewal_does_not_stop_the_notify_listener():
@@ -406,15 +386,6 @@ def test_malformed_renewal_does_not_stop_the_notify_listener():
             {"type": "renew_lease", "transfer_ids": ["tx-3"]}
         )
     assert wrapper.pop_renewed_lease_transfer_ids() == set()
-
-
-def test_decode_tracks_a_lease_with_a_null_dp_rank():
-    scheduler = _decode_scheduler()
-    request = _waiting_request(scheduler, 1, lease=LEASE)
-    request.kv_transfer_params["remote_dp_rank"] = None
-    scheduler.add_request(request)
-    lease = scheduler.connector.connector_scheduler._read_leases[request.request_id]
-    assert lease.target.dp_rank == 0
 
 
 def test_decode_tp_rank_0_renews_on_every_prefill_tp_rank():
