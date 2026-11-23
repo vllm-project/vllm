@@ -17,6 +17,8 @@ def prompt_embeds_budget_rows(
     """`prompt_embeds` rows the workers may hold at once, summed over the
     requests whose prompts are not computed yet: one max-length prompt still
     being prefilled plus a full step of new prompts."""
+    # TODO(LuisRobaina): Shrink this worst case by copying each step's
+    # rows from pinned host memory, or by capping prompt_embeds length.
     return max_model_len + scheduler_config.max_num_batched_tokens
 
 
