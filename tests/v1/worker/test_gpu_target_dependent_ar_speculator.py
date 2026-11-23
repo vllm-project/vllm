@@ -564,6 +564,297 @@ def test_run_model_uses_complete_pcp_padding(monkeypatch, partitioned):
 
 
 @pytest.mark.parametrize(
+    ("cg_mode", "use_pcp", "expected_prefill_mode"),
+    [
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            False,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+        ),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, True, CUDAGraphMode.PIECEWISE),
+        (CUDAGraphMode.FULL_DECODE_ONLY, True, CUDAGraphMode.NONE),
+        (CUDAGraphMode.PIECEWISE, True, CUDAGraphMode.PIECEWISE),
+    ],
+)
+def test_pcp_draft_prefill_skips_full_cudagraphs(
+    monkeypatch, cg_mode, use_pcp, expected_prefill_mode
+):
+    # A FULL draft-prefill replay would skip the PCP hidden-state all-gather.
+    modes = []
+    monkeypatch.setattr(
+        spec_module,
+        "SpeculatorCudaGraphManager",
+        lambda vllm_config, device, mode, *args, **kwargs: modes.append(mode),
+    )
+    monkeypatch.setattr(
+        spec_module.AutoRegressiveSpeculator,
+        "init_cudagraph_manager",
+        lambda self, mode: modes.append(
+            CUDAGraphMode.FULL_DECODE_ONLY
+            if mode.decode_mode() == CUDAGraphMode.FULL
+            else CUDAGraphMode.NONE
+        ),
+    )
+    speculator = object.__new__(_TestSpeculator)
+    speculator.vllm_config = SimpleNamespace(
+        get_decode_cudagraph_query_lens=lambda qlen: [qlen],
+    )
+    speculator.device = torch.device("cpu")
+    speculator.num_speculative_steps = 3
+    speculator.enable_adaptive_verification = False
+    speculator.pcp_manager = object() if use_pcp else None
+
+    speculator.init_cudagraph_manager(cg_mode)
+
+    expected_decode_mode = (
+        CUDAGraphMode.FULL_DECODE_ONLY
+        if cg_mode.decode_mode() == CUDAGraphMode.FULL
+        else CUDAGraphMode.NONE
+    )
+    assert modes == [expected_prefill_mode, expected_decode_mode]
+
+
+@pytest.mark.parametrize("pcp_rank", [0, 1])
+def test_pcp_sharded_decode_propose_preserves_uniform_token_count_and_pad_alignment(
+    monkeypatch, pcp_rank
+):
+    """When PCP shards a single uniform decode request (query_len=3) across 2
+    ranks and draft prefill pads from 3 to a 4-token PIECEWISE bucket, rank 1
+    gets local_num_tokens=0 and num_tokens_after_padding=3. propose() must
+    classify uniform_token_count from the global batch, extend the draft prefill
+    views to 4 tokens, and restore the gathered hidden states across the 4-token
+    padded stride.
+    """
+    from dataclasses import replace
+
+    import numpy as np
+
+    from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
+    from vllm.v1.worker.gpu.dp_utils import DPSyncState
+    from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
+        SpeculatorCudaGraphManager,
+    )
+
+    device = torch.device("cpu")
+    monkeypatch.setattr(
+        pcp_manager_module,
+        "async_tensor_h2d",
+        lambda val, device=None, dtype=None, out=None: (
+            out.copy_(torch.from_numpy(val) if isinstance(val, np.ndarray) else val)
+            if out is not None
+            else (torch.from_numpy(val) if isinstance(val, np.ndarray) else val)
+        ),
+    )
+    monkeypatch.setattr(base_spec_module, "_target_feeds_hc_residual", lambda _: False)
+
+    def _prepare_prefill_inputs_cpu(
+        last_token_indices,
+        draft_current_step,
+        input_buffers,
+        input_batch,
+        num_sampled,
+        num_rejected,
+        last_sampled,
+        next_prefill_tokens,
+        max_num_reqs,
+    ):
+        draft_current_step.zero_()
+        last_token_indices[:1] = 2
+        input_buffers.input_ids[:3] = torch.tensor([21, 22, 23], dtype=torch.int32)
+        input_buffers.positions[:3] = input_batch.positions[:3]
+
+    monkeypatch.setattr(
+        spec_module, "prepare_prefill_inputs", _prepare_prefill_inputs_cpu
+    )
+    monkeypatch.setattr(
+        spec_module,
+        "set_forward_context",
+        lambda *args, **kwargs: nullcontext(),
+    )
+
+    class _ConcatDraftModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen_shapes: list[tuple[torch.Size, torch.Size, torch.Size]] = []
+
+        def forward(
+            self, input_ids, positions, hidden_states, inputs_embeds=None, **kw
+        ):
+            self.seen_shapes.append(
+                (input_ids.shape, positions.shape, hidden_states.shape)
+            )
+            assert input_ids.shape[0] == positions.shape[0] == hidden_states.shape[0]
+            return hidden_states + input_ids.unsqueeze(-1).to(hidden_states.dtype)
+
+        def compute_logits(self, hidden_states):
+            logits = torch.zeros((hidden_states.shape[0], 16), dtype=torch.float32)
+            logits[:, 7] = hidden_states[:, 0]
+            return logits
+
+    draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(),
+        get_hidden_size=lambda: 3,
+        get_vocab_size=lambda: 16,
+    )
+    speculative_config = SimpleNamespace(
+        method="mtp",
+        num_speculative_tokens=2,
+        draft_model_config=draft_model_config,
+        draft_decode_context_parallel_size=1,
+        use_local_argmax_reduction=False,
+        draft_sample_method="greedy",
+        enable_adaptive_verification=False,
+    )
+    compilation_config = SimpleNamespace(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        prefill_cudagraph_capture_token_sizes=[4],
+        decode_cudagraph_capture_request_sizes=[1, 2],
+        max_cudagraph_capture_size=4,
+        cudagraph_num_of_warmups=0,
+        use_breakable_cudagraph=False,
+        use_inductor_graph_partition=False,
+        splitting_ops=[],
+        compile_ranges_endpoints=[],
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        compilation_config=compilation_config,
+        cache_config=SimpleNamespace(use_kda_recoverssm=False),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=4,
+            max_num_batched_tokens=8,
+        ),
+        model_config=SimpleNamespace(
+            max_model_len=64,
+            dtype=torch.float32,
+            head_dtype=torch.float32,
+            use_fp64_gumbel=False,
+            supports_multimodal_inputs=False,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            prefill_context_parallel_size=2,
+            data_parallel_size=2,
+            data_parallel_rank=0,
+            decode_context_parallel_size=1,
+            use_ubatching=False,
+            enable_fault_tolerance=False,
+        ),
+        uniform_decode_query_len=3,
+        get_decode_cudagraph_query_lens=lambda qlen: {qlen: 4},
+    )
+
+    _mock_base_model_load(monkeypatch)
+    speculator = _TestSpeculator(vllm_config, device)
+    speculator.test_draft_model = _ConcatDraftModel()
+    speculator.load_model(torch.nn.Module())
+    speculator.pcp_manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=pcp_rank,
+        device=device,
+        shard_decode_requests=True,
+        max_num_reqs=4,
+        max_num_tokens=8,
+        moe_gathers_tokens=True,
+    )
+    speculator.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
+        vllm_config,
+        device,
+        CUDAGraphMode.PIECEWISE,
+        {3: 4},
+        varlen_decode=False,
+    )
+    monkeypatch.setattr(
+        speculator.prefill_cudagraph_manager,
+        "run_pw_graph",
+        lambda model, model_inputs: model(**model_inputs),
+    )
+
+    global_buffers = InputBuffers(4, 8, device)
+    base_batch = InputBatch.make_dummy(1, 3, global_buffers)
+    global_buffers.input_ids[:3] = torch.tensor([11, 12, 13], dtype=torch.int32)
+    global_buffers.positions[:3] = torch.tensor([10, 11, 12], dtype=torch.int64)
+    global_buffers.seq_lens[:1] = torch.tensor([13], dtype=torch.int32)
+    global_buffers.query_start_loc[:2] = torch.tensor([0, 3], dtype=torch.int32)
+    global_batch = replace(
+        base_batch,
+        req_ids=["req_0"],
+        num_reqs=1,
+        num_reqs_after_padding=1,
+        idx_mapping=torch.tensor([0], dtype=torch.int64, device=device),
+        idx_mapping_np=np.array([0], dtype=np.int64),
+        num_scheduled_tokens=np.array([3], dtype=np.int32),
+        num_tokens=3,
+        num_tokens_after_padding=3,
+        query_start_loc=global_buffers.query_start_loc[:2],
+        query_start_loc_np=np.array([0, 3], dtype=np.int32),
+        seq_lens=global_buffers.seq_lens[:1],
+        seq_lens_cpu_upper_bound=torch.tensor([13], dtype=torch.int32),
+        num_computed_tokens_np=np.array([10], dtype=np.int32),
+        prefill_len_np=np.array([10], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([10], dtype=np.int32),
+        is_prefilling_np=np.array([False], dtype=np.bool_),
+        has_prefill=False,
+        decode_graph_eligible=True,
+        input_ids=global_buffers.input_ids[:3],
+        positions=global_buffers.positions[:3],
+        is_padding=global_buffers.is_padding[:3],
+    )
+    speculator.pcp_manager.partition_batch(
+        global_batch,
+        BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.FULL,
+            num_tokens=3,
+            num_reqs=1,
+            uniform_token_count=3,
+        ),
+    )
+
+    rank0_out = torch.tensor(
+        [[101.0, 1.0, 1.0], [102.0, 1.0, 1.0], [103.0, 1.0, 1.0], [0.0, 0.0, 0.0]]
+    )
+    rank1_out = torch.zeros((4, 3))
+    monkeypatch.setattr(
+        pcp_manager_module,
+        "get_pcp_group",
+        lambda: SimpleNamespace(
+            all_gather=lambda tensor, dim=0: torch.cat([rank0_out, rank1_out], dim=dim)
+        ),
+    )
+
+    dp_sync_state = DPSyncState(
+        num_tokens_across_dp=torch.tensor([3, 3], dtype=torch.int32),
+        uniform_token_count=3,
+        max_query_len=3,
+        eager=False,
+        num_reqs=2,
+    )
+    drafts = speculator.propose(
+        input_batch=global_batch,
+        attn_metadata={},
+        slot_mappings={},
+        last_hidden_states=torch.full((3, 3), 80.0),
+        aux_hidden_states=None,
+        num_sampled=torch.ones(1, dtype=torch.int32),
+        num_rejected=torch.zeros(1, dtype=torch.int32),
+        last_sampled=torch.zeros(4, dtype=torch.int32),
+        next_prefill_tokens=torch.zeros(4, dtype=torch.int32),
+        temperature=torch.zeros(4, dtype=torch.float32),
+        seeds=torch.zeros(4, dtype=torch.int64),
+        dp_sync_state=dp_sync_state,
+        skip_attn_for_dummy_run=True,
+        num_speculative_tokens=1,
+    )
+
+    assert speculator.test_draft_model.seen_shapes == [
+        (torch.Size([4]), torch.Size([4]), torch.Size([4, 3]))
+    ]
+    assert drafts.tolist() == [[7]]
+    assert torch.equal(speculator.hidden_states[0], rank0_out[2])
+
+
+@pytest.mark.parametrize(
     (
         "method_name",
         "cg_mode",

@@ -60,12 +60,16 @@ def sync_cudagraph_and_dp_padding(
     allow_ubatching: bool = False,
     uniform_decode: bool = False,
     allow_skip_drafts: bool = False,
+    num_reqs_for_dispatch: int | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Coordinates the batch descriptor and DP padding across all ranks.
 
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
+    dispatch_num_reqs = (
+        num_reqs if num_reqs_for_dispatch is None else num_reqs_for_dispatch
+    )
     tensor = torch.zeros(7, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
@@ -148,7 +152,7 @@ def sync_cudagraph_and_dp_padding(
                 # Match a FULL microbatched CUDA graph, falling back to an eager
                 # descriptor if no graph matches.
                 ubatch_desc = cudagraph_manager.dispatch(
-                    num_reqs,
+                    dispatch_num_reqs,
                     ubatch_num_tokens,
                     synced_uniform_token_count,
                     num_active_loras=num_active_loras,
@@ -162,7 +166,7 @@ def sync_cudagraph_and_dp_padding(
                 ubatch_desc = BatchExecutionDescriptor(
                     cg_mode=CUDAGraphMode.NONE,
                     num_tokens=ubatch_num_tokens,
-                    num_reqs=num_reqs,
+                    num_reqs=dispatch_num_reqs,
                     num_ubatches=num_ubatches,
                 )
             # Refresh the token count to include CUDA graph padding.
@@ -186,7 +190,7 @@ def sync_cudagraph_and_dp_padding(
             BatchExecutionDescriptor(
                 cg_mode=CUDAGraphMode.NONE,
                 num_tokens=num_tokens,
-                num_reqs=num_reqs,
+                num_reqs=dispatch_num_reqs,
                 num_active_loras=desired_batch_desc.num_active_loras,
             ),
             DPSyncState(
@@ -205,11 +209,11 @@ def sync_cudagraph_and_dp_padding(
     )
     synced_num_tokens = int(num_tokens_across_dp.max())
 
-    # Dispatch for the final synced values, use num_reqs instead of synced_num_reqs
-    # so we don't perform request padding for PIECEWISE graphs.
+    # Dispatch for the final synced values, use dispatch_num_reqs instead of
+    # synced_num_reqs so we don't perform request padding for PIECEWISE graphs.
     # num_active_loras is per-rank and doesn't need cross-rank agreement.
     synced_desc = cudagraph_manager.dispatch(
-        num_reqs,
+        dispatch_num_reqs,
         synced_num_tokens,
         synced_uniform_token_count,
         num_active_loras=num_active_loras,
@@ -244,6 +248,7 @@ def dispatch_cg_and_sync_dp(
     uniform_decode: bool = False,
     allow_skip_drafts: bool = False,
     dp_sync_state: DPSyncState | None = None,
+    num_reqs_for_dispatch: int | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Pick a cudagraph descriptor for this batch, agreeing it across DP ranks.
 
@@ -284,19 +289,26 @@ def dispatch_cg_and_sync_dp(
             same `uniform_token_count`; `num_reqs` may differ, as neither
             depends on it. Passing a sync from a different batch is a caller
             error and trips an assert.
+        num_reqs_for_dispatch: Request count to size CUDA graph descriptors
+            against when it differs from `num_reqs` (e.g., PCP rank-local
+            sharded decode request count while `num_reqs` remains the global
+            replica request count synced in `DPSyncState.num_reqs`).
 
     Returns:
         (batch_desc, sync), where `sync` is this batch's agreement for a later
         dispatch to reuse. It is None when `dp_size` is 1 or no rank has work.
 
     """
+    dispatch_num_reqs = (
+        num_reqs if num_reqs_for_dispatch is None else num_reqs_for_dispatch
+    )
     reuse_eager = dp_sync_state is not None and dp_sync_state.eager
 
     if need_eager or reuse_eager:
         batch_desc = BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE,
             num_tokens=num_tokens,
-            num_reqs=num_reqs,
+            num_reqs=dispatch_num_reqs,
             num_active_loras=num_active_loras,
         )
     else:
@@ -305,7 +317,7 @@ def dispatch_cg_and_sync_dp(
             "where need_eager must be True"
         )
         batch_desc = cudagraph_manager.dispatch(
-            num_reqs,
+            dispatch_num_reqs,
             num_tokens,
             dp_sync_state.uniform_token_count if dp_sync_state else uniform_token_count,
             num_active_loras=num_active_loras,
@@ -327,7 +339,7 @@ def dispatch_cg_and_sync_dp(
             batch_desc = BatchExecutionDescriptor(
                 cg_mode=CUDAGraphMode.NONE,
                 num_tokens=num_tokens,
-                num_reqs=num_reqs,
+                num_reqs=dispatch_num_reqs,
                 num_active_loras=num_active_loras,
                 num_ubatches=get_num_ubatches(parallel_config),
             )
@@ -366,4 +378,5 @@ def dispatch_cg_and_sync_dp(
         allow_ubatching=allow_ubatching,
         uniform_decode=uniform_decode,
         allow_skip_drafts=allow_skip_drafts,
+        num_reqs_for_dispatch=dispatch_num_reqs,
     )

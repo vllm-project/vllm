@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+import pytest
 import torch
 
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -187,6 +188,44 @@ def test_padded_prompt_tail_with_prior_context_is_uniform_decode():
     state, uniform_tok_count = runner.gather_batch_req_state(scheduler_output, False)
     assert not state.decode_graph_eligible
     assert uniform_tok_count is None
+
+
+@pytest.mark.parametrize("shard_decode_requests", [True, False])
+def test_pcp_one_token_prompt_tail_runs_as_decode(
+    shard_decode_requests: bool,
+):
+    batch = {"d0": (16, 16), "tail": (128, 129), "fresh": (0, 1)}
+    runner = _make_runner(batch, decode_query_len=4)
+    runner.pcp_manager = SimpleNamespace(
+        shard_decode_requests=shard_decode_requests,
+    )
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"d0": 4, "tail": 4, "fresh": 1},
+        total_num_scheduled_tokens=9,
+        scheduled_spec_decode_tokens={"d0": [1, 2, 3], "tail": [-1] * 3},
+    )
+    state, _ = runner.gather_batch_req_state(scheduler_output, False)
+    assert state is not None
+    assert state.prefill_runs_as_decode_np is not None
+    assert dict(zip(state.req_ids, state.prefill_runs_as_decode_np)) == {
+        "d0": False,
+        "tail": True,
+        "fresh": False,
+    }
+
+    # A batch with only decodes and a cached 1-token prompt tail is eligible
+    # for FULL decode graphs under PCP.
+    uniform_scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"d0": 4, "tail": 4},
+        total_num_scheduled_tokens=8,
+        scheduled_spec_decode_tokens={"d0": [1, 2, 3], "tail": [-1] * 3},
+    )
+    state, uniform_tok_count = runner.gather_batch_req_state(
+        uniform_scheduler_output, False
+    )
+    assert state is not None
+    assert state.decode_graph_eligible is True
+    assert uniform_tok_count == 4
 
 
 def test_dummy_batches_stay_uniform_decode():

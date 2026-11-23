@@ -40,10 +40,17 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         self.inputs_embeds: torch.Tensor | None = None
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        prefill_cudagraph_mode = cudagraph_mode
+        if self.pcp_manager is not None:
+            # PCP draft prefill runs on each rank's local slice of the target
+            # batch and all-gathers its hidden states afterwards. FULL graphs
+            # capture neither, and only the rank owning a lone decode request
+            # would match one, leaving the other ranks' all-gather unpaired.
+            prefill_cudagraph_mode = cudagraph_mode.mixed_mode()
         self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config,
             self.device,
-            cudagraph_mode,
+            prefill_cudagraph_mode,
             self.vllm_config.get_decode_cudagraph_query_lens(
                 self.num_speculative_steps + 1
             ),
@@ -173,16 +180,6 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             self.max_num_reqs,
         )
 
-        if self.pcp_manager is not None:
-            self.pcp_manager.prepare_draft_prefill(
-                input_batch, self.input_buffers.input_ids[:num_tokens_padded]
-            )
-            prefill = self.pcp_manager.draft_prefill_batch
-            if prefill is not None:
-                num_tokens = prefill.num_tokens
-                num_tokens_padded = prefill.num_tokens_after_padding
-        self.hidden_states[:num_tokens_padded].copy_(hidden_states)
-
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
         uniform_token_count = get_uniform_decode_token_count(
@@ -193,6 +190,17 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             max_query_len,
             input_batch.decode_graph_eligible,
         )
+
+        if self.pcp_manager is not None:
+            self.pcp_manager.prepare_draft_prefill(
+                input_batch, self.input_buffers.input_ids[:num_tokens_padded]
+            )
+            prefill = self.pcp_manager.draft_prefill_batch
+            if prefill is not None:
+                num_tokens = prefill.num_tokens
+                num_tokens_padded = prefill.num_tokens_after_padding
+        self.hidden_states[:num_tokens_padded].copy_(hidden_states)
+
         prefill_batch_desc, prefill_batch_sync = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,
             num_reqs,
@@ -207,6 +215,10 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             dp_sync_state=dp_sync_state,
             parallel_config=self.vllm_config.parallel_config,
         )
+        if prefill_batch_desc.num_tokens > num_tokens_padded:
+            self.hidden_states[
+                num_tokens_padded : prefill_batch_desc.num_tokens
+            ].zero_()
         num_tokens_across_dp = (
             prefill_batch_sync.num_tokens_across_dp
             if prefill_batch_sync is not None
