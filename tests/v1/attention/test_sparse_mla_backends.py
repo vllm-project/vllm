@@ -3359,6 +3359,7 @@ def test_hisparse_swap_in_packs_valid_rows_to_front(top_k, request_of_row):
         device_buffer_size=2 * top_k,
         max_num_reqs=num_reqs,
         row_width=row_width,
+        max_swap_rows=num_rows,
     )
     runtime.bind_source_cache(kv_pool)
     cache = HiSparseCacheHandle(runtime)
