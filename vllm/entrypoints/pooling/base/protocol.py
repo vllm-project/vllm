@@ -65,9 +65,9 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description="Additional kwargs to pass to the HF processor.",
+    skip_mm_cache: bool = Field(
+        default=False,
+        description=("If true, skip the multimodal processor cache for this request."),
     )
     cache_salt: str | None = Field(
         default=None,
@@ -81,6 +81,10 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
             "to 256 bit)."
         ),
+    )
+    mm_processor_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description="Additional kwargs to pass to the HF processor.",
     )
     # --8<-- [end:pooling-common-extra-params]
 

@@ -145,18 +145,41 @@ class OfflineInputsContext:
     add_special_tokens: bool | None = None
     tokenization_kwargs: dict[str, Any] | None = None
 
+    # mm_params:
+    skip_mm_cache: bool = False
+    cache_salt: str | None = None
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None
+    mm_processor_kwargs: dict[str, Any] | None = None
+
     def build_tok_params(
         self,
         default_tok_params: TokenizeParams,
     ) -> TokenizeParams:
-        # User-provided `tokenization_kwargs` still wins over the default.
-        tok_kwargs: dict[str, Any] = {}
+        # Priority:
+        # explicit `add_special_tokens` > `tokenization_kwargs` > per-path default.
+        tok_kwargs: dict[str, Any] = dict(self.tokenization_kwargs or {})
         if self.add_special_tokens is not None:
             tok_kwargs["add_special_tokens"] = self.add_special_tokens
-        tok_kwargs.update(self.tokenization_kwargs or {})
         if not tok_kwargs:
             return default_tok_params
         return default_tok_params.with_kwargs(**tok_kwargs)
+
+    def build_engine_prompt_extras(self, params: PoolingParams):
+        # Priority: explicit mm_processor_kwargs / cache_salt
+        #         > params.extra_kwargs["chat_template_kwargs"]
+        prompt_extras: dict[str, Any] = dict(params.extra_kwargs or {})
+        merged = {
+            k: v
+            for k in ("mm_processor_kwargs", "cache_salt")
+            if (v := prompt_extras.get(k)) is not None
+        }
+        if self.mm_processor_kwargs is not None:
+            merged["mm_processor_kwargs"] = self.mm_processor_kwargs
+
+        if self.cache_salt is not None:
+            merged["cache_salt"] = self.cache_salt
+
+        return merged
 
 
 @dataclass(slots=True)
