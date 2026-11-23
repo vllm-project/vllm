@@ -20,7 +20,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 import torch
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 from transformers.conversion_mapping import WeightTransform
 
 from vllm.distributed import in_single_pp_stage
@@ -52,7 +52,13 @@ class MTPMixin(CausalMixin):
         self.check_version("5.20.0", "MTP")
         from transformers.modeling_layers import MtpModel
 
-        main_model = AutoModelForCausalLM.from_config(**self._from_config_kwargs)
+        # `MtpModel` needs the main model with its LM head, which for a multimodal
+        # config is not registered with `AutoModelForCausalLM`
+        if self.text_config is not self.config:
+            auto_cls = AutoModelForImageTextToText
+        else:
+            auto_cls = AutoModelForCausalLM
+        main_model = auto_cls.from_config(**self._from_config_kwargs)
         num_mtp_layers = getattr(self.text_config, "num_mtp_layers", None)
         mtp_model = MtpModel(main_model, num_mtp_layers)
         self.mtp_weights = MtpModel.get_mtp_weights_regex(main_model)

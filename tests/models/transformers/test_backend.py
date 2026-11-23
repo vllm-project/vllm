@@ -16,9 +16,11 @@ import torch
 import torch.nn as nn
 from safetensors.torch import load_file, save_file
 from transformers import (
+    CONFIG_MAPPING,
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
+    AutoModelForImageTextToText,
     PreTrainedConfig,
 )
 
@@ -1001,6 +1003,82 @@ def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch)
             torch.testing.assert_close(
                 layer.get_parameter(param_name).cpu(),
                 weights[f"{mtp}.{ckpt_name}"].to(torch.bfloat16),
+            )
+
+
+def test_mtp_draft_for_multimodal_model(tmp_path, tp_init):
+    """An MTP draft is built for a multimodal model, whose main model is not an
+    `AutoModelForCausalLM`, from the MTP layers stored in the target's checkpoint."""
+    model_type = "granite_docling"
+    if model_type not in CONFIG_MAPPING:
+        pytest.skip(f"Transformers has no {model_type}")
+    from transformers.modeling_layers import MtpModel
+
+    hidden_size = 64
+    num_mtp_layers = 2
+    config = AutoConfig.for_model(
+        model_type,
+        text_config=dict(
+            vocab_size=128,
+            hidden_size=hidden_size,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            pad_token_id=0,
+            bos_token_id=1,
+            eos_token_id=1,
+            num_mtp_layers=num_mtp_layers,
+        ),
+        vision_config=dict(
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            image_size=32,
+            out_hidden_size=hidden_size,
+            deepstack_visual_indexes=[0],
+        ),
+        image_token_id=2,
+        pad_token_id=0,
+    )
+    model_cls = AutoModelForImageTextToText._model_mapping[type(config)]
+    config.architectures = [model_cls.__name__]
+    main_model = model_cls(config)
+    main_model.save_pretrained(tmp_path)
+    # Granite Docling stores MTP layer `k` under `mtp.layers.{k}`
+    weights = load_file(tmp_path / "model.safetensors")
+    mtp_weights = {
+        f"mtp.{name.replace('.mtp_block.', '.')}": torch.randn_like(param)
+        for name, param in MtpModel(main_model, num_mtp_layers).named_parameters()
+        if name.startswith("layers.")
+    }
+    save_file(weights | mtp_weights, tmp_path / "model.safetensors", {"format": "pt"})
+
+    target = ModelConfig(str(tmp_path), model_impl="transformers", dtype="bfloat16")
+    speculative_config = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=num_mtp_layers,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+    draft = speculative_config.draft_model_config
+    assert draft.architecture == "TransformersForMTP"
+    vllm_config = VllmConfig(model_config=target, speculative_config=speculative_config)
+    with set_current_vllm_config(vllm_config):
+        model = model_loader.get_model(vllm_config=vllm_config, model_config=draft)
+
+    assert len(model.model.layers) == num_mtp_layers
+    for k, layer in enumerate(model.model.layers):
+        for ckpt_name, param_name in {
+            "enorm.weight": "enorm.weight",
+            "eh_proj.weight": "eh_proj.weight",
+            "post_norm.weight": "post_norm.weight",
+            "self_attn.o_proj.weight": "mtp_block.self_attn.o_proj.weight",
+        }.items():
+            torch.testing.assert_close(
+                layer.get_parameter(param_name).cpu(),
+                mtp_weights[f"mtp.layers.{k}.{ckpt_name}"].to(torch.bfloat16),
             )
 
 
