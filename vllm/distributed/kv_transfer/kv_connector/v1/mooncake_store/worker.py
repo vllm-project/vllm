@@ -1678,6 +1678,7 @@ class MooncakeStoreWorker:
             local_hostname = rdma_utils.get_requester_local_hostname(get_ip())
 
         self.store = MooncakeDistributedStore()
+        self.store_service = MooncakeStoreService(self.store)
         setup_mooncake_store(
             self.store, store_config, local_hostname, engine=shared_engine
         )
@@ -1814,7 +1815,7 @@ class MooncakeStoreWorker:
                 )
             self._compression = CompressedStore(self.store, self.block_size)
             self.store = self._compression
-        self.store_service = MooncakeStoreService(self.store)
+            self.store_service.store = self._compression
         self._init_lookup_key_prefixes()
         if envs.VLLM_MOONCAKE_STORE_SELECTIVE_LEASE:
             self._selective_lease = SelectiveLookupLease(
