@@ -31,11 +31,13 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
 from vllm.model_executor.layers.quantization.online.loading import quantize_on_load
-from vllm.model_executor.model_loader.reload import finish_reload, start_reload
+from vllm.model_executor.model_loader.reload import direct, finish_reload, start_reload
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
+    direct_reload_enabled,
     finish_direct_reload,
     record_checkpoint_layout,
+    reloads_directly,
     track_loaded_params,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -389,10 +391,19 @@ class TestRefusals:
             begin_direct_reload(model)
         _assert_same(_state(model), before, addresses=True)
 
-    def test_online_quantization_refused(self, monkeypatch):
+    @pytest.mark.parametrize("wrapped", [False, True])
+    def test_online_quantization_refused(self, monkeypatch, wrapped):
         # finish clears the guard that keeps online quantization from
         # quantizing its converted bytes again
+        from vllm.model_executor.layers.quantization.input_hadamard import (
+            InputHadamardLinearMethod,
+        )
+
         online = object.__new__(Fp8PerTensorOnlineLinearMethod)
+        if wrapped:
+            wrapper = object.__new__(InputHadamardLinearMethod)
+            wrapper.quant_method = online
+            online = wrapper
         init = _ToyModel.__init__
 
         def with_online_layer(self):
@@ -674,7 +685,7 @@ def _config(**overrides) -> SimpleNamespace:
     "mode,overrides,match",
     [
         ("direct", {}, None),
-        ("layerwise", {"lora_config": object()}, None),
+        ("direct", {"lora_config": object()}, None),
         (
             "direct",
             {
@@ -713,7 +724,6 @@ def _config(**overrides) -> SimpleNamespace:
             {"model_config": SimpleNamespace(quantization="torchao")},
             "torchao",
         ),
-        ("direct", {"lora_config": object()}, "LoRA"),
         (
             "direct",
             {"speculative_config": SimpleNamespace(draft_lm_head_quantization="fp8")},
@@ -727,12 +737,11 @@ def _config(**overrides) -> SimpleNamespace:
     ],
     ids=[
         "defaults",
-        "layerwise-lora",
+        "lora",
         "offload-backend",
         "offload-prefetch",
         "offload-uva",
         "torchao",
-        "lora",
         "draft-lm-head-quant",
         "sharded-rdt",
     ],
@@ -745,3 +754,44 @@ def test_verify_direct_reload_compat(monkeypatch, mode, overrides, match):
     else:
         with pytest.raises(ValueError, match=match):
             VllmConfig._verify_direct_reload_compat(config)
+
+
+_IPC = SimpleNamespace(backend="ipc")
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        ({"weight_transfer_config": _IPC}, True),
+        ({}, False),
+        ({"weight_transfer_config": _IPC, "lora_config": object()}, False),
+    ],
+    ids=["updates", "no-updates", "lora"],
+)
+def test_direct_reload_enabled(monkeypatch, overrides, expected):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "auto")
+    config = _config(**overrides)
+    monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
+    assert direct_reload_enabled() is expected
+
+
+def test_auto_refused_model_reloads_layerwise(monkeypatch):
+    from vllm.model_executor.model_loader.reload import lifecycle
+
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "auto")
+    config = _config(weight_transfer_config=_IPC)
+    monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
+    target = _ToyModel()
+    target.proj.shared_expert_online_loader = object()  # refused in direct mode
+    record_checkpoint_layout(target)
+    calls = []
+    monkeypatch.setattr(
+        lifecycle, "initialize_layerwise_reload", lambda m: calls.append("init")
+    )
+    monkeypatch.setattr(
+        lifecycle, "finalize_layerwise_reload", lambda m, c: calls.append("finalize")
+    )
+    start_reload(target)
+    finish_reload(target, _MODEL_CONFIG, _DEVICE)
+    assert calls == ["init", "finalize"]
+    assert reloads_directly(_cold_start(_checkpoint()))
