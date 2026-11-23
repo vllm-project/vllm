@@ -73,7 +73,7 @@ class DraftBench:
                 self.num_rejected,
                 self.last_sampled,
                 runner.req_states.next_prefill_tokens,
-                runner.sampler.sampling_states.temperature.gpu,
+                runner.sampler.sampling_states.draft_temperature.gpu,
                 runner.sampler.sampling_states.seeds.gpu,
                 dp_sync_state=self.dp_sync_state,
                 num_speculative_tokens=runner.num_speculative_steps,

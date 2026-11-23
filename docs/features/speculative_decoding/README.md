@@ -280,8 +280,8 @@ An unset scale preserves existing behavior: greedy drafting uses argmax, and
 probabilistic drafting inherits the target temperature. A scale of `1` also
 inherits the target temperature; `0` selects greedy drafting without allocating
 a draft-logits cache. Positive scales require probabilistic drafting. Scaling is
-only supported by model-based speculators, not lookup methods such as n-gram or
-suffix decoding.
+supported by model-based speculators except XPress. Lookup methods such as n-gram
+and suffix decoding do not support this option.
 
 Benchmark both acceptance and throughput: retaining draft logits for
 probabilistic drafting uses extra memory, and higher acceptance may not offset
