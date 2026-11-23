@@ -1108,17 +1108,14 @@ class RocmPlatform(Platform):
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
         use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
 
-        if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
-            compilation_config.custom_ops.append("+quant_fp8")
+        if use_aiter_fp8_linear:
+            compilation_config.enable_custom_op_by_default("quant_fp8")
 
         # Only RMSNorm's custom op reaches rms_norm_batch_invariant. Inductor
         # lowers the native one to a reduction whose block size it picks by
         # benchmarking, so the summation order varies with the batch and run.
-        if (
-            envs.VLLM_BATCH_INVARIANT
-            and "-rms_norm" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+rms_norm")
+        if envs.VLLM_BATCH_INVARIANT:
+            compilation_config.enable_custom_op_by_default("rms_norm")
 
         if use_aiter_fused_se and "-grouped_topk" in compilation_config.custom_ops:
             logger.warning_once(
@@ -1129,26 +1126,17 @@ class RocmPlatform(Platform):
             compilation_config.custom_ops.remove("-grouped_topk")
         # Ensure grouped_topk is always enabled when using AITER if
         # its not disabled by user
-        if (
-            use_aiter_fused_moe
-            and "+grouped_topk" not in compilation_config.custom_ops
-            and "-grouped_topk" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+grouped_topk")
+        if use_aiter_fused_moe:
+            compilation_config.enable_custom_op_by_default("grouped_topk")
 
         # Default dispatch to rocm's sparse_attn_indexer implementation
-        compilation_config.custom_ops.append("+sparse_attn_indexer")
+        compilation_config.enable_custom_op_by_default("sparse_attn_indexer")
 
         # Default the gated RMSNorm custom op on for unquantized models. Quantized
         # is untested in serving.
         model_config = vllm_config.model_config
-        if (
-            model_config is not None
-            and model_config.quantization is None
-            and "+rms_norm_gated" not in compilation_config.custom_ops
-            and "-rms_norm_gated" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+rms_norm_gated")
+        if model_config is not None and model_config.quantization is None:
+            compilation_config.enable_custom_op_by_default("rms_norm_gated")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
