@@ -348,6 +348,7 @@ steps:
   key: examples
   device: intel_gpu
   timeout_in_minutes: 120
+  parallelism: 4
   optional: true
   working_dir: "."
   no_plugin: true

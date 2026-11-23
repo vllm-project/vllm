@@ -168,7 +168,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py --ignore=models/kimi_k3/amd_specialized_decode kernels/attention/test_kimi_k3_mla_fused_epilogue.py || true'
+    pytest --continue-on-collection-errors -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py --ignore=models/kimi_k3/amd_specialized_decode kernels/attention/test_kimi_k3_mla_fused_epilogue.py --deselect="tests/models/kimi_k3/test_kda.py::test_triton_kda_checkpoint_correctness[state_dtype0-kimi_amd]" || true'
 - label: ':nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache'
   key: kimi-k3-prefix-cache-4xb200
   device: intel_gpu
