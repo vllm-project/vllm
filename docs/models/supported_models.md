@@ -746,6 +746,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 !!! note
     `GraniteDoclingForConditionalGeneration` checkpoints with a fine connector path (`vision_config.use_fine_route`)
     accept `fine_route=True` in `--mm-processor-kwargs` or per request, for four times as many image tokens per tile.
+    To choose the route of each page with the checkpoint's density router, see
+    [examples/generate/multimodal/granite_docling_density_router_online.py](../../examples/generate/multimodal/granite_docling_density_router_online.py).
 
 !!! note
     For `InternVLChatModel`, only InternVL2.5 with Qwen2.5 text backbone (`OpenGVLab/InternVL2.5-1B` etc.), InternVL3 and InternVL3.5 have video inputs support currently.
