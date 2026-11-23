@@ -483,9 +483,7 @@ class M2NWeightTransferEngine(
                 )
             requested.append((name, index))
 
-        from vllm.model_executor.model_loader.mtp_validation import (
-            disable_mtp_completeness_check,
-        )
+        from vllm.model_executor.model_loader.reload.direct import mark_loaded
 
         stream = torch.cuda.current_stream()
 
@@ -515,21 +513,22 @@ class M2NWeightTransferEngine(
                     # has to have landed before it runs.
                     stream.synchronize()
                     yield name, buffer
+                else:
+                    mark_loaded(self.model, name)  # for the completeness check
 
         has_fallback = any(
             self._parameter_destinations[index].tensor is None for _, index in requested
         )
-        with disable_mtp_completeness_check():
-            received_weights = reshard_requested_weights()
-            if has_fallback:
-                # Some model loaders keep invocation-local state to combine
-                # related checkpoint tensors, so preserve one iterable scope.
-                self.model.load_weights(received_weights)
-            else:
-                # The iterator performs the reshards. With nothing to yield to
-                # `load_weights`, exhaust it here to execute direct transfers.
-                for _ in received_weights:
-                    pass
+        received_weights = reshard_requested_weights()
+        if has_fallback:
+            # Some model loaders keep invocation-local state to combine
+            # related checkpoint tensors, so preserve one iterable scope.
+            self.model.load_weights(received_weights)
+        else:
+            # The iterator performs the reshards. With nothing to yield to
+            # `load_weights`, exhaust it here to execute direct transfers.
+            for _ in received_weights:
+                pass
 
     def _reshard(
         self,

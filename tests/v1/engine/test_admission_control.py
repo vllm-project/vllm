@@ -141,7 +141,7 @@ def _make_request_test_llm(
     add_request_async: Callable[[EngineCoreRequest], Awaitable[None]],
 ) -> AsyncLLM:
     llm = _make_async_llm(max_num_queued_reqs=max_num_queued_reqs)
-    llm.output_processor = OutputProcessor(None, log_stats=False)
+    llm.output_processor = OutputProcessor(None, collect_stats=False)
     llm.engine_core = SimpleNamespace(
         resources=SimpleNamespace(engine_dead=False),
         add_request_async=AsyncMock(side_effect=add_request_async),
@@ -392,7 +392,7 @@ def test_admission_req_limit_checked_before_token_limit():
 
 @pytest.mark.parametrize("params", [SamplingParams(), PoolingParams()])
 def test_admission_params_without_explicit_n_count_as_one_slot(params):
-    """PoolingParams has no ``.n``; add_request must fall back to 1."""
+    """PoolingParams has no `.n`; add_request must fall back to 1."""
     llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=9)
     llm.check_admission(getattr(params, "n", 1) or 1)
 

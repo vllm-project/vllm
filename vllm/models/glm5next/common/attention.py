@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
+from functools import partial
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -17,13 +20,19 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    LinearBase,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.dequant_linear import bf16_linear
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
+from vllm.model_executor.layers.sparse_attn_indexer import (
+    fuse_indexer_wk_weights_proj,
+    init_indexer_wk_weights_proj,
+)
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV32IndexerCache,
@@ -35,7 +44,12 @@ from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
-from vllm.v1.kv_cache_interface import CircularBufferSpec, MLAAttentionSpec
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayerConfig,
+    MLAAttentionSpec,
+)
 
 logger = init_logger(__name__)
 
@@ -79,18 +93,18 @@ def _pad_indexer_heads(x: torch.Tensor, pad: int) -> torch.Tensor:
 class Glm5NextIndexerCache(DeepseekV32IndexerCache):
     """Indexer K cache that stores kpool-compressed entries.
 
-    Setting ``tokens_per_state = index_kpool`` on the KV cache spec makes vLLM's
-    indexer metadata builder emit pool-granular ``slot_mapping`` /
-    ``seq_lens`` / ``cu_seq_lens`` / ``page_table`` for free, and shrinks the
-    cache allocation store one state per ``index_kpool`` tokens. The pool
+    Setting `tokens_per_state = index_kpool` on the KV cache spec makes vLLM's
+    indexer metadata builder emit pool-granular `slot_mapping` /
+    `seq_lens` / `cu_seq_lens` / `page_table` for free, and shrinks the
+    cache allocation store one state per `index_kpool` tokens. The pool
     *content* (softmax-weighted sum vs keep-every-Nth) is computed by the
     kpool compress kernel inside the indexer op — the cache only provides the
     addressing, which is identical for both schemes.
 
     The indexer shares one block with the co-located MLA (a single
-    ``MLAAttentionSpec`` / block_table), so ``block_size`` is the model-wide
-    ``cache_config.block_size``. DeepGEMM's paged-MQA kernel takes 32- or
-    64-state pages (only 64 on SM120), which ``Glm5NextIndexerBackend``
+    `MLAAttentionSpec` / block_table), so `block_size` is the model-wide
+    `cache_config.block_size`. DeepGEMM's paged-MQA kernel takes 32- or
+    64-state pages (only 64 on SM120), which `Glm5NextIndexerBackend`
     declares as its kernel block sizes.
     """
 
@@ -109,14 +123,17 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
         assert index_kpool > 1, "Glm5NextIndexerCache expects index_kpool > 1"
         self._index_kpool = index_kpool
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig):
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         from dataclasses import replace
 
-        spec = super().get_kv_cache_spec(vllm_config)
+        layer_config = super().get_kv_cache_config(vllm_config)
         # ``tokens_per_state`` is the KV-spec representation of kpool
         # compression in the current cache-layout API.
-        assert isinstance(spec, MLAAttentionSpec)
-        return replace(spec, tokens_per_state=self._index_kpool)
+        assert isinstance(layer_config.spec, MLAAttentionSpec)
+        return replace(
+            layer_config,
+            spec=replace(layer_config.spec, tokens_per_state=self._index_kpool),
+        )
 
     def get_attn_backend(self):
         return Glm5NextIndexerBackend
@@ -126,16 +143,16 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
     """Paged circular buffer for the kpool indexer's in-progress (tail) pool.
 
     Holds the trailing incomplete pool's raw K + gate score: one block of
-    ``ring`` slots per request, overwritten in place by ``pos % ring``
+    `ring` slots per request, overwritten in place by `pos % ring`
     as decode/spec-decode advances. Prefill seeds it (instead of discarding the
     tail raw K+gate); the connector transfers it across PD; decode reads it to
-    compress the boundary pool correctly. ``CircularBufferSpec`` provides the
+    compress the boundary pool correctly. `CircularBufferManager` provides the
     no-prune, 1-block/req allocation that lets the in-progress pool survive
     across steps and across transfer.
 
-    Stores raw bf16 K (``head_dim``) as the "K" half of each block and the
-    bf16 gate score (``head_dim``) as the "V" half -- not the fp8-compressed
-    entry, which lives in ``Glm5NextIndexerCache``.
+    Stores raw bf16 K (`head_dim`) as the "K" half of each block and the
+    bf16 gate score (`head_dim`) as the "V" half -- not the fp8-compressed
+    entry, which lives in `Glm5NextIndexerCache`.
     """
 
     def __init__(
@@ -153,7 +170,7 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
         assert index_kpool > 1, "Glm5NextTailCache expects index_kpool > 1"
         self._index_kpool = index_kpool
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig):
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # The two head slots form [K, gate score] in the generic
         # [block, head, state, content] cache view.
         # Drafts are stashed before acceptance. With a one-pool ring, the
@@ -167,7 +184,7 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
             f"({self.cache_config.block_size}) must be a multiple of the "
             f"tail ring ({ring})"
         )
-        return CircularBufferSpec(
+        spec = AttentionSpec(
             block_size=ring,
             num_kv_heads=2,
             head_size=self.head_dim,
@@ -177,11 +194,34 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
             # rank owning a pool can compress it.
             dcp_sharded=False,
         )
+        return CircularBufferManager.layer_config(spec)
 
     def get_attn_backend(self):
         from vllm.v1.attention.backends.mla.indexer import KpoolTailBackend
 
         return KpoolTailBackend
+
+
+class Glm5NextIndexerWkWeightsLinear(MergedColumnParallelLinear):
+    """Fused `wk`/`weights_proj`: returns `k` and the FP32 head gate.
+
+    BF16 error in the gate can change near-tie pool rankings on long-context
+    tasks, so it is recomputed in FP32 from a copy built after loading.
+    """
+
+    _gate_weight_fp32: torch.Tensor | None = None
+
+    def process_weights_after_loading(self) -> None:
+        """Build the FP32 gate weight from the loaded weights; reloads refill it
+        in place."""
+        head_dim = self.output_sizes[0]
+        gate = self.weight.data[head_dim:, :].t().contiguous().float()
+        refill_derived(self, "_gate_weight_fp32", gate)
+
+    def forward(self, input_: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        head_dim = self.output_sizes[0]
+        kw, _ = super().forward(input_)
+        return kw[:, :head_dim], torch.mm(input_.float(), self._gate_weight_fp32)
 
 
 class Indexer(nn.Module):
@@ -233,15 +273,14 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.wq_b",
         )
-        # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
-        # FP8 wk weights are upcasted to BF16 during loading to maintain fusion.
-        self.wk_weights_proj = MergedColumnParallelLinear(
+        # wk + weights_proj run as one BF16 GEMM (wk_weights_proj); unlike the
+        # rest of the indexer, wk may be block-FP8 in the checkpoint
+        init_indexer_wk_weights_proj(
+            self,
             hidden_size,
-            [self.head_dim, self.n_head],
-            bias=False,
-            quant_config=None,
-            disable_tp=True,
-            prefix=f"{prefix}.wk_weights_proj",
+            vllm_config.quant_config,
+            prefix,
+            fused_linear_cls=Glm5NextIndexerWkWeightsLinear,
         )
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
         self.softmax_scale = self.head_dim**-0.5
@@ -252,7 +291,6 @@ class Indexer(nn.Module):
         self.scale_fmt = "ue8m0"
         self.quant_block_size = 128  # TODO: get from config
         self.topk_indices_buffer = topk_indices_buffer
-        self._wp_fp32: torch.Tensor | None = None
 
         # NOTE: (zyongye) we use fp8 naive cache,
         #       where we store value in fp8 and scale in fp32
@@ -295,15 +333,9 @@ class Indexer(nn.Module):
         )
 
     def process_weights_after_loading(self) -> None:
-        """Build the fp32 head-gate projection from the loaded weights; reloads
-        refill it in place."""
-        wp = (
-            self.wk_weights_proj.weight.data[self.head_dim :, :]
-            .t()
-            .contiguous()
-            .float()
-        )
-        refill_derived(self, "_wp_fp32", wp)
+        """Refresh the fused projection and FP32 gate after loading."""
+        fuse_indexer_wk_weights_proj(self)
+        self.wk_weights_proj.process_weights_after_loading()
 
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
@@ -311,13 +343,7 @@ class Indexer(nn.Module):
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
 
-        # Compute the head gate in fp32; bf16 error can change near-tie pool
-        # rankings on long-context tasks. Built after weights are loaded.
-        kw, _ = self.wk_weights_proj(hidden_states)
-        k = kw[:, : self.head_dim]
-        if self._wp_fp32 is None:  # only when post-load processing never ran
-            self.process_weights_after_loading()
-        weights = torch.mm(hidden_states.float(), self._wp_fp32)
+        k, weights = self.wk_weights_proj(hidden_states)
 
         k = _fused_indexer_k_norm(
             k, self.k_norm.weight, self.k_norm.bias, self.head_dim, self.k_norm.eps
@@ -407,6 +433,7 @@ class Glm5NextMLAAttention(nn.Module):
         topk_indices_buffer: torch.Tensor | None = None,
         input_size: int | None = None,
         skip_rope: bool | None = False,
+        shardq_eligible: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -430,30 +457,43 @@ class Glm5NextMLAAttention(nn.Module):
         # otherwise default to hidden_size (used in Eagle3 Deepseek with MLA)
         proj_input_size = input_size if input_size is not None else self.hidden_size
 
+        def proj(build: Callable[..., LinearBase]) -> LinearBase:
+            # Without a quant_config, the model runs these projections in
+            # BF16; a quantized checkpoint may store them in FP8.
+            if quant_config is not None:
+                return build(quant_config=quant_config)
+            return bf16_linear(build, vllm_config.quant_config)
+
         if self.q_lora_rank is not None:
-            self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(
-                proj_input_size,
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                quant_config=quant_config,
-                prefix=f"{prefix}.fused_qkv_a_proj",
+            self.fused_qkv_a_proj = proj(
+                partial(
+                    DeepSeekV2FusedQkvAProjLinear,
+                    proj_input_size,
+                    [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                    prefix=f"{prefix}.fused_qkv_a_proj",
+                )
             )
         else:
-            self.kv_a_proj_with_mqa = ReplicatedLinear(
-                proj_input_size,
-                self.kv_lora_rank + self.qk_rope_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.kv_a_proj_with_mqa",
+            self.kv_a_proj_with_mqa = proj(
+                partial(
+                    ReplicatedLinear,
+                    proj_input_size,
+                    self.kv_lora_rank + self.qk_rope_head_dim,
+                    bias=False,
+                    prefix=f"{prefix}.kv_a_proj_with_mqa",
+                )
             )
 
         if self.q_lora_rank is not None:
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-            self.q_b_proj = ColumnParallelLinear(
-                self.q_lora_rank,
-                self.num_heads * self.qk_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.q_b_proj",
+            self.q_b_proj = proj(
+                partial(
+                    ColumnParallelLinear,
+                    self.q_lora_rank,
+                    self.num_heads * self.qk_head_dim,
+                    bias=False,
+                    prefix=f"{prefix}.q_b_proj",
+                )
             )
         else:
             self.q_proj = ColumnParallelLinear(
@@ -471,12 +511,14 @@ class Glm5NextMLAAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj",
         )
-        self.o_proj = RowParallelLinear(
-            self.num_heads * self.v_head_dim,
-            self.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
+        self.o_proj = proj(
+            partial(
+                RowParallelLinear,
+                self.num_heads * self.v_head_dim,
+                self.hidden_size,
+                bias=False,
+                prefix=f"{prefix}.o_proj",
+            )
         )
 
         # `Glm5NextTextConfig` is NoPE-only and so declares no `rope_parameters`;
@@ -572,6 +614,7 @@ class Glm5NextMLAAttention(nn.Module):
             prefix,
             skip_topk=False,
             fuse_qkv_rmsnorm=True,
+            shardq_eligible=shardq_eligible,
         )
 
     def forward(

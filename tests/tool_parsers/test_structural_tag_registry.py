@@ -613,7 +613,7 @@ def _as_strict(tools: list[ChatCompletionToolsParam]) -> list[ChatCompletionTool
 
 def _k3_grammar(tool_choice, tools=None, *, strict: bool = True):
     """Build the K3 grammar; tools are strict by default so the typed
-    argument channel is exercised (an unset ``strict`` leaves arguments free)."""
+    argument channel is exercised (an unset `strict` leaves arguments free)."""
     tools = tools if tools is not None else _k3_tools_by_name()
     tag = get_model_structural_tag(
         model="kimi_k3",
@@ -1338,7 +1338,7 @@ def test_tool_strict_level_function_pins_envelope_only(
     model: str,
     sample_tools: list[ChatCompletionToolsParam],
 ):
-    """The request's own tools stay untouched; unset ``strict`` stays free."""
+    """The request's own tools stay untouched; unset `strict` stays free."""
     tag = get_model_structural_tag(
         model=model,
         tools=sample_tools,
@@ -1386,7 +1386,7 @@ def test_tool_strict_level_function_keeps_client_strict_tools_strict(
 
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
 def test_absent_strict_is_not_pinned_next_to_a_strict_tool(model: str):
-    """A strict tool must not drag a neighbour with unset ``strict`` into
+    """A strict tool must not drag a neighbour with unset `strict` into
     schema enforcement."""
     weather = ChatCompletionToolsParam(
         type="function",
@@ -1441,7 +1441,7 @@ def test_forced_tool_choice_pins_schema_only_for_strict_tools(
     sample_tools_strict: list[ChatCompletionToolsParam],
 ):
     """Required / named always constrain the call; the argument schema
-    follows the per-tool ``strict`` (or the parameter level)."""
+    follows the per-tool `strict` (or the parameter level)."""
     free = get_model_structural_tag(
         model=model,
         tools=sample_tools,
@@ -2210,22 +2210,28 @@ _SINGLE_CALL_CASES = [
     (
         "mimo",
         "",
-        "<tool_call><function=get_weather><parameter=city>Paris</parameter>"
-        "</function></tool_call>",
+        (
+            "<tool_call><function=get_weather><parameter=city>Paris</parameter>"
+            "</function></tool_call>"
+        ),
         "",
     ),
     (
         "hermes",
         "",
-        '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}'
-        "\n</tool_call>",
+        (
+            '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}'
+            "\n</tool_call>"
+        ),
         "",
     ),
     (
         "qwen3_xml",
         "",
-        "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n"
-        "</parameter>\n</function>\n</tool_call>",
+        (
+            "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n"
+            "</parameter>\n</function>\n</tool_call>"
+        ),
         "",
     ),
     (

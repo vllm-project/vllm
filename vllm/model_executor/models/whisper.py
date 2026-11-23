@@ -742,6 +742,19 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 
 
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
+    def should_skip_decoder_start_token(
+        self,
+        decoder_prompt_token_ids: list[int],
+    ) -> bool:
+        # A prompted decoder input opens with `<|startofprev|>`, ahead of the
+        # SOT sequence (reference layout), so nothing may be prepended to it.
+        tokenizer = self.info.ctx.tokenizer
+        if tokenizer is None or not decoder_prompt_token_ids:
+            return False
+
+        startofprev_id = tokenizer.convert_tokens_to_ids("<|startofprev|>")
+        return decoder_prompt_token_ids[0] == startofprev_id
+
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
@@ -858,7 +871,7 @@ class WhisperForConditionalGeneration(
         stt_config = stt_params.stt_config
         language = stt_params.language
         task_type = stt_params.task_type
-        request_prompt = stt_params.request_prompt
+        request_prompt = stt_params.request_prompt.strip()
 
         if language is None:
             raise ValueError(
@@ -866,7 +879,7 @@ class WhisperForConditionalGeneration(
             )
 
         decoder_text = (
-            f"<|prev|>{request_prompt}" if request_prompt else ""
+            f"<|startofprev|> {request_prompt}" if request_prompt else ""
         ) + f"<|startoftranscript|><|{language}|><|{task_type}|><|notimestamps|>"
 
         return ExplicitEncoderDecoderPrompt(
@@ -884,7 +897,7 @@ class WhisperForConditionalGeneration(
     ) -> list[int]:
         """Return token IDs for all supported language tokens.
 
-        Used with ``SamplingParams.allowed_token_ids`` to constrain
+        Used with `SamplingParams.allowed_token_ids` to constrain
         language detection to only produce valid language tokens.
         """
         token_ids = [
@@ -901,8 +914,8 @@ class WhisperForConditionalGeneration(
     ) -> PromptType:
         """Return a prompt that elicits a single language token from Whisper.
 
-        Feed only ``<|startoftranscript|>`` as the decoder input so the model
-        predicts the most likely language token (e.g. ``<|de|>``).
+        Feed only `<|startoftranscript|>` as the decoder input so the model
+        predicts the most likely language token (e.g. `<|de|>`).
         """
         return ExplicitEncoderDecoderPrompt(
             encoder_prompt=TextPrompt(
@@ -921,7 +934,7 @@ class WhisperForConditionalGeneration(
         """Parse the language token predicted by Whisper.
 
         Decodes the first token ID and extracts the language code from the
-        ``<|xx|>`` format. Expects a valid language token from constrained generation.
+        `<|xx|>` format. Expects a valid language token from constrained generation.
         """
         decoded = tokenizer.decode(
             [token_ids[0]],
@@ -1057,7 +1070,7 @@ def _create_fake_bias_for_k_proj(
     So that the bias for k_proj in qkv_proj or kv_proj can be initialized with
     zeros.
 
-    If the checkpoint already provides a real ``.bias`` entry for the given
+    If the checkpoint already provides a real `.bias` entry for the given
     weight, it is forwarded as-is and no fake bias is injected for that layer.
     """
     # Map the weight-name suffix to the corresponding bias-name suffix, e.g.
