@@ -1295,12 +1295,18 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             "_wo_a_e8m0_scale",
             e8m0_scale.view(groups, out_per_group // 128, in_features // 128),
         )
+        # Held on the rotary module, which `get_rope` shares across layers, so
+        # all layers read one pair instead of each holding its own copy.
         cache = getattr(self.rotary_emb, "cos_sin_cache_bf16", None)
         if cache is None:
             cache = self.rotary_emb.cos_sin_cache.to(dtype=torch.bfloat16)
         cos_cache, sin_cache = cache.chunk(2, dim=-1)
-        refill_derived(self, "_wo_a_cos_cache", cos_cache.contiguous())
-        refill_derived(self, "_wo_a_sin_cache", sin_cache.contiguous())
+        self._wo_a_cos_cache = refill_derived(
+            self.rotary_emb, "_wo_a_cos_cache", cos_cache.contiguous()
+        )
+        self._wo_a_sin_cache = refill_derived(
+            self.rotary_emb, "_wo_a_sin_cache", sin_cache.contiguous()
+        )
 
     def prepare_compressor_gemm_fusion(self) -> bool:
         if self._fused_compressor_weight is not None:
