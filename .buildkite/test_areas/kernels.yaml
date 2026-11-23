@@ -295,17 +295,6 @@ steps:
       - tests/kernels/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (B200) HY4 Flash Kernels"
-  key: hy4-flash-kernel-test-b200
-  timeout_in_minutes: 20
-  device: b200-k8s
-  source_file_dependencies:
-  - vllm/models/hy_v4_flash/
-  - vllm/model_executor/layers/indexer_topk.py
-  - tests/models/hy_v4_flash/
-  commands:
-    - pytest -v -s models/hy_v4_flash/test_flash_fused_kernels.py
-
 - label: ":nvidia: (B200) FLA Ops Kernels"
   key: kernels-fla-ops-test-b200
   automatic_shard: true

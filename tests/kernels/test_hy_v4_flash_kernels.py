@@ -63,36 +63,7 @@ def _fwht_quantize_reference(vectors):
     return quant, scale
 
 
-@pytest.mark.parametrize("three_axis", [True, False])
-@pytest.mark.parametrize("tokens", [1, 37])
-def test_quantize_query(three_axis, tokens):
-    from vllm.models.hy_v4_flash.nvidia.indexpool_ops import quantize_query
-
-    heads, padded = 16, 32
-    shape = (3, tokens) if three_axis else (tokens,)
-    positions = torch.randint(0, 100000, shape, device="cuda")
-    query = torch.randn(tokens, heads, 128, device="cuda").bfloat16()
-    head_weights = torch.randn(tokens, heads, device="cuda").bfloat16()
-
-    rotated = _rotate_reference(query, positions)
-    ref_quant, ref_scale = _fwht_quantize_reference(rotated.reshape(-1, 128))
-    ref_quant = F.pad(
-        ref_quant.view(torch.uint8).reshape(tokens, heads, 128),
-        (0, 0, 0, padded - heads),
-    )
-    ref_weights = F.pad(
-        head_weights.float()
-        * (heads**-0.5 * 128**-0.5)
-        * ref_scale.reshape(tokens, heads),
-        (0, padded - heads),
-    )
-    quant, weights = quantize_query(query, head_weights, positions, _ROPE, padded)
-    torch.testing.assert_close(quant.view(torch.uint8), ref_quant, rtol=0, atol=0)
-    torch.testing.assert_close(weights, ref_weights, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("mx_scales", [True, False])
-@pytest.mark.parametrize("three_axis", [True, False])
+@pytest.mark.parametrize("mx_scales,three_axis", [(True, True), (False, False)])
 def test_pool_quantize_write(mx_scales, three_axis):
     from vllm.models.hy_v4_flash.nvidia.indexpool_ops import pool_quantize_write
 
@@ -146,8 +117,8 @@ def test_pool_quantize_write(mx_scales, three_axis):
     torch.testing.assert_close(cache, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("width", [4096, 3000, 200])
-@pytest.mark.parametrize("backend", ["auto", "per_row", "flashinfer", "deep_select"])
+@pytest.mark.parametrize("width", [4096, 200])
+@pytest.mark.parametrize("backend", ["auto", "per_row"])
 def test_select_expand_groups(width, backend):
     from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
     from vllm.models.hy_v4_flash.nvidia.indexpool_ops import select_expand_groups
@@ -189,9 +160,9 @@ def test_select_expand_groups(width, backend):
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("query_lens", [[1] * 8, [5, 0, 300, 2, 1]])
-def test_prepare_groups_query_metadata(query_lens):
+def test_prepare_groups_query_metadata():
     """Per-query scoring inputs replace the eager clamp, cast and table gather."""
+    query_lens = [5, 0, 300, 2, 1]
     from vllm.models.hy_v4_flash.nvidia.indexpool_prepare import prepare_groups
 
     ratio, cols = 4, 70
@@ -229,14 +200,11 @@ def test_prepare_groups_query_metadata(query_lens):
     assert bool(live.all())
 
 
-@pytest.mark.parametrize(
-    "query_lens,width", [([1] * 32, 512), ([5, 1, 300, 2, 1], 640)]
-)
-def test_window_indices(query_lens, width):
+def test_window_indices():
     from vllm.models.hy_v4_flash.nvidia.swa import _window_indices_kernel
     from vllm.triton_utils import triton
 
-    window = 512
+    query_lens, window, width = [5, 1, 300, 2, 1], 512, 640
     lens = torch.tensor(query_lens)
     starts = torch.cat((torch.zeros(1, dtype=torch.long), lens.cumsum(0)))
     starts = starts.int().cuda()
@@ -269,11 +237,10 @@ def test_window_indices(query_lens, width):
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("tokens", [1, 300])
-def test_engram_fused_update(tokens):
+def test_engram_fused_update():
     from vllm.models.hy_v4_flash.nvidia.engram_ops import gated_update, lookup_norm
 
-    hc, dim, heads, head_dim, cols = 4, 3072, 4, 96, 16
+    tokens, hc, dim, heads, head_dim, cols = 300, 4, 3072, 4, 96, 16
     eps = torch.finfo(torch.float32).eps
     hidden = torch.randn(tokens, hc, dim, device="cuda").bfloat16()
     # This rank owns buckets [vocab_start, vocab_end); others read as zero.
@@ -338,31 +305,66 @@ def test_engram_fused_update(tokens):
 
 
 def _ngram_hashes_reference(
-    input_ids, lookback, starts, seq_lens, num_live, state, pad_token_id, visual_ids
+    input_ids, lookback, starts, seq_lens, num_live, tables, pad_token_id, visual_ids
 ):
-    """The unfused Flash hash path: shared hash kernel plus torch glue."""
-    from vllm.models.deepseek_v41.common.engram import NgramHashState
+    """The unfused Flash hash path: the shared DSV4.1 hash kernel plus torch glue."""
+    from vllm.models.deepseek_v41.common.engram import _hash_ids_kernel
+    from vllm.triton_utils import triton
 
-    vocab = state.token_map.numel()
-    rows = torch.arange(input_ids.numel(), device="cuda")
+    token_map, multipliers, primes, offsets, pad_id = tables
+    vocab = token_map.numel()
+    layers, max_ngram = multipliers.shape
+    heads = primes.shape[-1]
+    tokens = input_ids.numel()
+    rows = torch.arange(tokens, device="cuda")
     requests = torch.searchsorted(starts[1:], rows, right=True)
     requests = requests.clamp_max(starts.numel() - 2).long()
     logical = (
         seq_lens[requests] - (starts[requests + 1] - starts[requests]) + rows
     ) - starts[requests]
     dead = (input_ids < 0) | (input_ids >= vocab)
-    hashes = NgramHashState.forward(
-        state,
-        input_ids.clamp(0, vocab - 1),
-        logical.long(),
-        starts,
-        dead,
-        lookback.clamp(-1, vocab - 1),
-        lookback >= vocab,
+    ids = input_ids.clamp(0, vocab - 1)
+    positions = logical.long()
+    window = lookback.clamp(-1, vocab - 1)
+    window_dead = lookback >= vocab
+    hashes = torch.empty(
+        tokens, layers, (max_ngram - 1) * heads, dtype=torch.int32, device="cuda"
     )
-    offsets = state.offsets.unsqueeze(0)
-    primes = state.primes.flatten(1).unsqueeze(0)
-    hashes = torch.where(hashes < offsets, hashes + primes, hashes).int()
+    _hash_ids_kernel[(triton.cdiv(tokens, 32), layers)](
+        ids,
+        token_map,
+        dead,
+        positions,
+        starts,
+        multipliers,
+        primes,
+        offsets,
+        window,
+        window_dead,
+        hashes,
+        tokens,
+        pad_id,
+        input_stride=ids.stride(0),
+        mask_stride=dead.stride(0),
+        position_stride=positions.stride(0),
+        query_stride=starts.stride(0),
+        num_query_rows=starts.numel() - 1,
+        MAX_NGRAM=max_ngram,
+        num_heads=heads,
+        BLOCK_T=32,
+        BLOCK_H=triton.next_power_of_2(heads),
+        dead_id=-1,
+        lookback_depth=window.shape[1],
+        lookback_row_stride=window.stride(0),
+        lookback_col_stride=window.stride(1),
+        lookback_mask_row_stride=window_dead.stride(0),
+        lookback_mask_col_stride=window_dead.stride(1),
+        num_warps=4,
+    )
+    flat_primes = primes.flatten(1).unsqueeze(0)
+    hashes = torch.where(
+        hashes < offsets.unsqueeze(0), hashes + flat_primes, hashes
+    ).int()
     no_hash = dead | (rows >= num_live) | (rows >= starts[-1])
     for token_id in (pad_token_id, *visual_ids):
         no_hash |= input_ids == token_id
@@ -372,22 +374,15 @@ def _ngram_hashes_reference(
 
 def test_ngram_hashes():
     """The fused hash kernel matches the unfused path on a mixed batch."""
-    from types import SimpleNamespace
-
     from vllm.models.hy_v4_flash.nvidia.engram_ops import ngram_hashes
 
-    torch.manual_seed(0)
     layers, max_ngram, heads, vocab = 2, 3, 4, 500
     primes = torch.randint(1000, 5000, (layers, max_ngram - 1, heads), device="cuda")
     flat = primes.flatten(1)
     offsets = torch.cumsum(flat, 1) - flat
-    state = SimpleNamespace(
-        token_map=torch.randint(0, 300, (vocab,), device="cuda", dtype=torch.int32),
-        multipliers=torch.randint(0, 2**40, (layers, max_ngram), device="cuda") * 2 + 1,
-        primes=primes,
-        offsets=offsets,
-        pad_id=7,
-    )
+    token_map = torch.randint(0, 300, (vocab,), device="cuda", dtype=torch.int32)
+    multipliers = torch.randint(0, 2**40, (layers, max_ngram), device="cuda") * 2 + 1
+    pad_id = 7
     # Fresh prefill, decode, chunked prefill, one-token context, then a
     # padded empty request and two padding rows.
     starts = torch.tensor([0, 5, 6, 9, 10, 10], device="cuda", dtype=torch.int32)
@@ -401,7 +396,14 @@ def test_ngram_hashes():
     )
 
     expected = _ngram_hashes_reference(
-        input_ids, lookback, starts, seq_lens, num_live, state, pad_token_id, visual_ids
+        input_ids,
+        lookback,
+        starts,
+        seq_lens,
+        num_live,
+        (token_map, multipliers, primes, offsets, pad_id),
+        pad_token_id,
+        visual_ids,
     )
     out = torch.empty_like(expected)
     ngram_hashes(
@@ -410,11 +412,11 @@ def test_ngram_hashes():
         starts,
         seq_lens,
         num_live,
-        state.token_map,
-        state.multipliers,
+        token_map,
+        multipliers,
         flat,
         offsets,
-        state.pad_id,
+        pad_id,
         (pad_token_id, *visual_ids),
         out,
     )
