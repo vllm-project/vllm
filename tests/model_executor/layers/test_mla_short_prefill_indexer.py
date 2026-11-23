@@ -874,20 +874,33 @@ def test_candidate_blocks_to_sparse_indices_matches_reference(
     assert not end_buf[1 - end_offset :: 2].any()
 
 
-def test_prefill_top_k_backend():
-    """'auto' ranks prefill logits with DeepSelect wherever it runs (SM100/SM103)
-    and its extension loaded, except in batch-invariant mode; an explicit backend
-    keeps its choice."""
+def test_prefill_top_k_backend(monkeypatch):
+    """Prefill ranks BF16 logits with DeepSelect wherever it runs (SM100/SM103)
+    for 'deep_select', and for 'auto' except in batch-invariant mode; FP32
+    logits, DCP and the other backends keep the FP32 per-row top-k."""
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
         has_deep_select,
     )
-    from vllm.model_executor.layers.indexer_topk import _HAS_DEEP_SELECT_C
+    from vllm.model_executor.layers.indexer_topk import (
+        _HAS_DEEP_SELECT_C,
+        SparseIndexerTopk,
+    )
 
-    choose = sparse_indexer._prefill_uses_deep_select
-    assert choose("auto", False) is (_HAS_DEEP_SELECT_C and has_deep_select())
-    assert choose("auto", True) is False
-    assert choose("deep_select", True) is True
-    assert choose("persistent", False) is False
+    available = _HAS_DEEP_SELECT_C and has_deep_select()
+    bf16 = torch.zeros(4, 2048, dtype=torch.bfloat16)
+
+    def takes(backend, logits=bf16, dcp_world_size=1):
+        selector = SparseIndexerTopk(backend)
+        return selector.prefill_takes_bf16_logits(logits, 512, dcp_world_size)
+
+    assert takes("auto") == available
+    assert takes("deep_select") == available
+    assert not takes("auto", logits=bf16.float())
+    assert not takes("auto", dcp_world_size=2)
+    assert not takes("persistent")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    assert not takes("auto")
+    assert takes("deep_select") == available
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -925,12 +938,13 @@ def test_sparse_topk_remap_bounds_nan_rows():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_dense_prefill_deep_select_bounds_nan_rows():
-    """The dense prefill path turns DeepSelect's out-of-range sentinel in NaN
-    rows into -1, as `sparse_topk_remap` does."""
+def test_deep_select_topk_bounds_nan_rows():
+    """DeepSelect writes an out-of-range index to slot 0 of NaN rows (the rest
+    is left untouched); `mask_out_of_range` turns it into -1."""
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
         has_deep_select,
     )
+    from vllm.model_executor.layers.indexer_topk import deep_select_topk
 
     if not has_deep_select():
         pytest.skip("DeepSelect extension (vllm._deepselect_C) required")
@@ -942,7 +956,7 @@ def test_dense_prefill_deep_select_bounds_nan_rows():
     )
     out = torch.full((rows, topk), -1, dtype=torch.int32, device="cuda")
 
-    sparse_indexer._deep_select_prefill_topk(logits, topk, row_ends, out)
+    deep_select_topk(logits, topk, end=row_ends, output_idx=out, mask_out_of_range=True)
     assert (out[1:, 0] == -1).all()
     assert (out < row_ends.unsqueeze(1)).all()
     assert (out[0] >= 0).all()

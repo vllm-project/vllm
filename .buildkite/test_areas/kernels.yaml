@@ -228,6 +228,7 @@ steps:
   - vllm/model_executor/kernels/attention/dsa/
   - vllm/model_executor/layers/sparse_mqa_indexer.py
   - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/model_executor/layers/indexer_topk.py
   - tests/model_executor/layers/test_mla_short_prefill_indexer.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
