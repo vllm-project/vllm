@@ -6,6 +6,7 @@
 /vllm/compilation/breakable_cudagraph.py @ZJY0516
 /vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery @xuechendi @ivanium @wzhao18
 /vllm/distributed/kv_transfer/kv_connector/v1/hisparse @MatthewBonanni @LucasWilkinson
+/vllm/distributed/kv_transfer/kv_connector/v1/mooncake @wangxiyuan
 /vllm/lora @jeejeelee
 /vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
 /vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye @wzhao18 @bnellnm
@@ -111,7 +112,7 @@
 /vllm/v1/sample @houseroad @njhill
 /vllm/v1/spec_decode @benchislett @MatthewBonanni
 /vllm/v1/structured_output @mgoin @aarnphm @benchislett @arpera
-/vllm/v1/kv_cache_interface.py @heheda12345 @ivanium @ZJY0516
+/vllm/v1/kv_cache_interface.py @heheda12345 @ivanium @ZJY0516 @wangxiyuan
 /vllm/v1/kv_offload @ApostaC @orozery
 /vllm/v1/simple_kv_offload @ivanium
 /vllm/v1/hisparse @MatthewBonanni @LucasWilkinson
@@ -177,6 +178,9 @@ mkdocs.yaml @hmellor
 .pre-commit-config.yaml @hmellor
 /tools/pre_commit @hmellor
 /tools/pre_commit/*_allowlist.txt
+
+# Platform
+/vllm/platforms/interface.py @wangxiyuan
 
 # CPU
 /vllm/v1/worker/cpu* @bigPYJ1151 @xuechendi
