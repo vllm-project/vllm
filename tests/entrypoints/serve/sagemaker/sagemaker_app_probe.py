@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Report what `build_app` leaves on the server, from a fresh interpreter.
+"""Report what `vllm serve` loads before and while it builds the app.
 
-The import check is only conclusive in a process that has not imported
-`model_hosting_container_standards` yet, so the tests run this script instead
-of building the app in the pytest process, where an earlier test may have
-imported it already.
+The tests need a process that has not imported `model_hosting_container_standards`
+yet: the pytest process may have, because an earlier test built a server with the
+integration enabled. The probe therefore runs in a fresh interpreter, imports the
+module `vllm serve` starts from, and prints the state the build left behind.
+Nothing is subtracted from that state, so a module-level import anywhere on the
+startup path shows up in it.
 
 Usage: `python sagemaker_app_probe.py [vllm serve args ...]`
 
-Prints one JSON object with the modules of that package the build imported and
-the middleware classes of that package it installed.
+Prints one JSON object: every module of that package in `sys.modules`, and the
+middleware classes of that package installed on the app.
 """
 
 import json
@@ -20,6 +22,9 @@ PACKAGE = "model_hosting_container_standards"
 
 
 def main() -> None:
+    # This is the module `vllm serve` starts from; importing it loads the rest
+    # of the launch path, so its module-level imports are part of the check.
+    import vllm.entrypoints.cli.serve  # noqa: F401
     from vllm.entrypoints.common.cli_args import make_arg_parser
     from vllm.entrypoints.launchers.app import build_app
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -29,14 +34,12 @@ def main() -> None:
     make_arg_parser(serve_parser)
     args = serve_parser.parse_args(sys.argv[1:])
 
-    imported_before = {name for name in sys.modules if name.startswith(PACKAGE)}
     app = build_app(args, supported_tasks=())
     print(
         json.dumps(
             {
-                "imported": sorted(
-                    {name for name in sys.modules if name.startswith(PACKAGE)}
-                    - imported_before
+                "loaded": sorted(
+                    name for name in sys.modules if name.startswith(PACKAGE)
                 ),
                 "middleware": [
                     middleware.cls.__module__ for middleware in app.user_middleware

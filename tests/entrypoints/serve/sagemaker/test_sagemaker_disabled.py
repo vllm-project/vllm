@@ -28,7 +28,7 @@ MARKER = "imported"
 
 
 def _probe(tmp_path: Path, *cli_args: str, env: dict[str, str] | None = None) -> dict:
-    """Build the app in a fresh interpreter and return what the build left.
+    """Build the app in a fresh interpreter and return what the launch left.
 
     A fresh process is what makes the import check meaningful: `sys.modules`
     in this one may already hold the package because an earlier test built a
@@ -112,14 +112,15 @@ def test_native_lora_adapter_endpoints_still_work(
 def test_sagemaker_integration_is_not_imported(tmp_path, runtime_lora_updating: bool):
     """The flag skips the bootstrap, which is what imports `model.py` from
     `SAGEMAKER_MODEL_PATH` and installs the `CUSTOM_*` hooks, and it skips the
-    runtime LoRA import of the same package."""
+    runtime LoRA import of the same package. The probe imports the launch path
+    first, so a module-level import anywhere on it fails this too."""
     probe = _probe(
         tmp_path,
         "--disable-sagemaker-integration",
         env={"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "1" if runtime_lora_updating else "0"},
     )
 
-    assert probe["imported"] == []
+    assert probe["loaded"] == []
     assert _sagemaker_middleware(probe) == []
     assert not (tmp_path / MARKER).exists()
 
@@ -129,6 +130,6 @@ def test_sagemaker_integration_runs_by_default(tmp_path):
     package, its middleware and the imported `model.py`."""
     probe = _probe(tmp_path, env={"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "1"})
 
-    assert probe["imported"]
+    assert probe["loaded"]
     assert _sagemaker_middleware(probe)
     assert (tmp_path / MARKER).exists()
