@@ -30,7 +30,7 @@ _CHUNK = 64  # K values per warp step (four m16n8k16 k-tiles)
 _NACC = 8  # accumulator sets per lane, rotated over k-tiles
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class GemvConfig:
     warps: int
     split: int

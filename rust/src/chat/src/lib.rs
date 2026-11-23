@@ -43,8 +43,8 @@ pub use renderer::{
     MediaPartSource, RenderedPrompt, RendererSelection,
 };
 pub use request::{
-    ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
-    ChatToolChoice, GenerationPromptMode, ResolvedToolContext, SamplingParams,
+    AllowedToolsMode, ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest,
+    ChatRole, ChatTool, ChatToolChoice, GenerationPromptMode, ResolvedToolContext, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
 pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
@@ -201,16 +201,19 @@ impl ChatRequestProcessor {
             .backend
             .multimodal_model_info()
             .ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let features = match media {
-            multimodal::MultimodalInput::Raw(parts) => {
-                let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
-                info.prepare_multimodal(parts, token_ids, model_dtype, self.max_model_len)
-                    .await?
-            }
-            multimodal::MultimodalInput::Preprocessed(features) => {
-                info.prepare_preprocessed(features, token_ids.len())?
-            }
-        };
+        let multimodal::MultimodalInput { preprocessed, raw } = media;
+        let mut features = info.prepare_preprocessed(preprocessed, token_ids.len())?;
+        if !raw.is_empty() {
+            let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
+            info.append_multimodal(
+                &mut features,
+                raw,
+                token_ids,
+                model_dtype,
+                self.max_model_len,
+            )
+            .await?;
+        }
         Ok(Some(features))
     }
 
@@ -461,7 +464,8 @@ impl ChatLlm {
 
     /// Prepare media for an already-tokenized request.
     /// Raw content is preprocessed; inline features are checked against model
-    /// capabilities, modality limits, and the final prompt positions.
+    /// capabilities, modality limits, and the final prompt positions. With
+    /// both, raw content expands only the tokens after the last feature range.
     pub async fn prepare_media(
         &self,
         media: impl Into<multimodal::MultimodalInput>,
@@ -590,6 +594,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: beam, cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hf, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, mimo, minimax_m2, minimax_m3, muse, musespark, nemotron_v3, qwen3, seed_oss, step3, step3p5, step5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: beam, cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hf, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, mimo, minimax_m2, minimax_m3, mistral, muse, musespark, nemotron_v3, qwen3, seed_oss, step3, step3p5, step5)"].assert_eq(&error.to_report_string());
     }
 }
