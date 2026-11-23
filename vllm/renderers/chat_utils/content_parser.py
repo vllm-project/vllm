@@ -288,6 +288,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             self._connector.fetch_video(
                 video_url=video_url,
                 video_processor=self._tracker.video_processor_name,
+                video_io_defaults=self._tracker.video_io_defaults,
             )
             if video_url
             else None
@@ -514,6 +515,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             await self._connector.fetch_video_async(
                 video_url,
                 video_processor=self._tracker.video_processor_name,
+                video_io_defaults=self._tracker.video_io_defaults,
             )
             if video_url
             else None
