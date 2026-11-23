@@ -108,11 +108,8 @@ class EncoderCudaGraphConfig:
     `num_budgets * prod(len(axis) for axis in capture_axes)`."""
 
     eager_fallback_fast_path: bool = False
-    """Skip item selection and batch compact eager output views on full fallback.
-
-    Models opt in when eager forward accepts the original batch directly and
-    does not benefit from sorting items by output length.
-    """
+    """Opt in to skip full-fallback staging when eager accepts unsorted inputs.
+    Oversized output views are compacted in a batch."""
 
 
 @dataclass(slots=True)
