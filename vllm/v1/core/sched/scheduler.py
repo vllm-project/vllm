@@ -2757,15 +2757,6 @@ class Scheduler(SchedulerInterface):
 
         # Updates dropped at turn end follow the turn's final output.
         self._emit_dropped_streaming_updates(outputs)
-        # collect encoder cache events from cache manager and connector
-        ec_events = self.encoder_cache_manager.take_events()
-        if self.ec_connector is not None:
-            ec_events.extend(self.ec_connector.take_events())
-
-        # publish collected encoder cache events
-        if ec_events:
-            batch = ECEventBatch(ts=time.time(), events=ec_events)
-            self.ec_event_publisher.publish(batch)
 
         self._publish_ec_events()
 
