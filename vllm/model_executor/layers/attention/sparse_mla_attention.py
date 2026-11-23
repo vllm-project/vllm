@@ -16,6 +16,7 @@ from vllm.distributed import (
     get_dcp_group,
     get_tensor_model_parallel_world_size,
 )
+from vllm.kernel_buckets import m_in_range
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
@@ -837,7 +838,7 @@ def _build_topk_mask(
     mask_row_stride = out.stride(-2)
     block_words = triton.next_power_of_2(num_words)
 
-    if batch_size == 1:
+    if m_in_range(batch_size, start=1, stop=2):
         topk_packed = topk_indices_per_req[0]
         num_topk = topk_packed.shape[1]
         _scatter_topk_single_req_kernel[(max_q_len,)](

@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
 )
@@ -207,12 +208,14 @@ def pinned_mm(
     rows = a.shape[0]
     key = (n, k, rows)
     if key not in _pinned:
-        tactic = next((t for max_rows, t in ranges if rows <= max_rows), None)
+        tactic = next(
+            (t for max_rows, t in ranges if m_in_range(rows, stop=max_rows + 1)), None
+        )
         # The runner reads only the operands' shapes and the output's layout.
         out = torch.empty(rows, n, dtype=out_dtype, device=a.device)
         operands = [a, layer.weight, None, None, out_dtype, out, None]
         valid = runner.get_valid_tactics(operands, None)  # type: ignore[arg-type]
-        runs = rows > LOW_BATCH_MAX_ROWS and tactic in valid
+        runs = m_in_range(rows, start=LOW_BATCH_MAX_ROWS + 1) and tactic in valid
         _pinned[key] = tactic if runs else None
     tactic = _pinned[key]
     if tactic is None:
@@ -242,7 +245,9 @@ def _wide_supported() -> bool:
 def wide_tactic(n: int, k: int, rows: int) -> tuple[int, Tactic] | None:
     """(activation tile, tactic) of the wide low-latency GEMM of an (N, K)
     weight at `rows` rows; None where it does not run."""
-    if not LOW_BATCH_MAX_ROWS < rows <= WIDE_LOW_LATENCY_MAX_ROWS:
+    if not m_in_range(
+        rows, start=LOW_BATCH_MAX_ROWS + 1, stop=WIDE_LOW_LATENCY_MAX_ROWS + 1
+    ):
         return None
     tile = (rows + 15) // 16 * 16
     tactic = WIDE_TACTICS.get((n, k), {}).get(tile)
@@ -460,7 +465,10 @@ def pinned_tactics() -> Generator[None]:
         # The runner computes out.T: its problem is (N, M, K, L).
         n, rows, k, _ = problem_sizes_mnkl
         pinned = PINNED_TACTICS.get((n, k))
-        if _PINNED_MIN_ROWS <= rows <= LOW_BATCH_MAX_ROWS and pinned in tactics:
+        if (
+            m_in_range(rows, start=_PINNED_MIN_ROWS, stop=LOW_BATCH_MAX_ROWS + 1)
+            and pinned in tactics
+        ):
             return [pinned]
         return tactics
 

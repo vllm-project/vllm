@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the V2 model runner's InputBatch (vllm.v1.worker.gpu.input_batch)."""
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 import torch
 
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
+from vllm.kernel_buckets import KernelPhase
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
@@ -164,3 +167,45 @@ def test_prepare_dcp_local_seq_lens_matches_reference(
         )
         assert batch.dcp_local_seq_lens is not None
         assert torch.equal(batch.dcp_local_seq_lens.cpu(), expected.to(torch.int32))
+
+
+def test_kernel_phase_uses_live_request_metadata_and_microbatch_slice():
+    """Equal M and padding cannot identify prefill, decode or verification."""
+    buffers = InputBuffers(2, 8, torch.device("cpu"))
+    dummy = InputBatch.make_dummy(2, 8, buffers)
+    flags = np.array([True, False])
+    batch = replace(
+        dummy,
+        is_prefilling_np=flags,
+        has_prefill=True,
+        prefill_len_np=np.array([4, 4], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([0, 4], dtype=np.int32),
+        num_draft_tokens=1,
+        num_draft_tokens_per_req=np.array([0, 1], dtype=np.int32),
+    )
+    assert batch.kernel_phase == KernelPhase.MIXED
+    assert batch.kernel_phase_for_slice(slice(0, 1)) == KernelPhase.PREFILL
+    assert batch.kernel_phase_for_slice(slice(1, 2)) == KernelPhase.VERIFY
+    prefill = replace(batch, num_reqs=1)
+    assert prefill.kernel_phase == KernelPhase.PREFILL
+    without_draft_rows = replace(batch, num_draft_tokens_per_req=None)
+    assert without_draft_rows.kernel_phase == KernelPhase.MIXED
+    assert without_draft_rows.kernel_phase_for_slice(slice(0, 1)) == KernelPhase.PREFILL
+    assert without_draft_rows.kernel_phase_for_slice(slice(1, 2)) == KernelPhase.UNKNOWN
+    decode = replace(
+        batch,
+        is_prefilling_np=np.zeros(2, dtype=np.bool_),
+        has_prefill=False,
+        num_draft_tokens=0,
+        num_draft_tokens_per_req=np.zeros(2, dtype=np.int32),
+    )
+    assert decode.num_tokens == batch.num_tokens
+    assert decode.kernel_phase == KernelPhase.DECODE
+    verify = replace(
+        decode,
+        num_draft_tokens=1,
+        num_draft_tokens_per_req=np.array([0, 1], dtype=np.int32),
+    )
+    assert verify.kernel_phase == KernelPhase.VERIFY
+    padded = replace(decode, num_tokens_after_padding=4096)
+    assert padded.kernel_phase == KernelPhase.DECODE

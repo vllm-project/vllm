@@ -7,9 +7,12 @@ import logging
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Literal
 
 import torch
+
+from vllm.kernel_buckets import MBucketTable, m_in_range
 
 from ._ll_router_common import (
     current_cuda_stream,
@@ -75,21 +78,41 @@ _SM90_TUNED_SPLITK_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = 
 }
 
 
+_DEFAULT_BS_BUCKETS = MBucketTable((), (_DEFAULT_DOTPROD_BS,))
+_DEFAULT_SPLITK_BUCKETS = MBucketTable((), (_DEFAULT_SPLITK_CONFIG,))
+_SM100F_DOTPROD_BUCKETS = {
+    shape: MBucketTable.from_points(points, _DEFAULT_DOTPROD_BS)
+    for shape, points in _SM100F_TUNED_DOTPROD_BS.items()
+}
+_SM90_DOTPROD_BUCKETS = {
+    shape: MBucketTable.from_points(points, _DEFAULT_DOTPROD_BS)
+    for shape, points in _SM90_TUNED_DOTPROD_BS.items()
+}
+_SM100F_SPLITK_BUCKETS = {
+    shape: MBucketTable.from_points(points, _DEFAULT_SPLITK_CONFIG)
+    for shape, points in _SM100F_TUNED_SPLITK_CONFIGS.items()
+}
+_SM90_SPLITK_BUCKETS = {
+    shape: MBucketTable.from_points(points, _DEFAULT_SPLITK_CONFIG)
+    for shape, points in _SM90_TUNED_SPLITK_CONFIGS.items()
+}
+
+
 def _arch_tuned_configs() -> tuple[
-    dict[tuple[int, int], dict[int, int]],
-    dict[tuple[int, int], dict[int, tuple[int, int]]],
+    dict[tuple[int, int], MBucketTable[int]],
+    dict[tuple[int, int], MBucketTable[tuple[int, int]]],
 ]:
     from vllm.platforms import current_platform
 
     if current_platform.is_device_capability_family(100):
         return (
-            _SM100F_TUNED_DOTPROD_BS,
-            _SM100F_TUNED_SPLITK_CONFIGS,
+            _SM100F_DOTPROD_BUCKETS,
+            _SM100F_SPLITK_BUCKETS,
         )
     if current_platform.is_device_capability(90):
         return (
-            _SM90_TUNED_DOTPROD_BS,
-            _SM90_TUNED_SPLITK_CONFIGS,
+            _SM90_DOTPROD_BUCKETS,
+            _SM90_SPLITK_BUCKETS,
         )
     return {}, {}
 
@@ -112,20 +135,22 @@ class LLBf16Gemm:
         # Split-K is shape-dynamic; both caches distinguish output dtype.
         self._splitk_cache: dict[tuple[int, int, torch.dtype], Any] = {}
 
+    @staticmethod
+    @lru_cache(maxsize=256)
     def dispatch(
-        self, *, M: int, K: int, N: int, output_dtype: torch.dtype = torch.float32
+        *, M: int, K: int, N: int, output_dtype: torch.dtype = torch.float32
     ) -> CompileKey:
         tuned_bs, tuned_splitk = _arch_tuned_configs()
-        if M <= _DEFAULT_DOTPROD_MAX_M or K < 2048:
-            bs = tuned_bs.get((K, N), {}).get(M, _DEFAULT_DOTPROD_BS)
-            return self.CompileKey(
+        if m_in_range(M, stop=_DEFAULT_DOTPROD_MAX_M + 1) or K < 2048:
+            bs = tuned_bs.get((K, N), _DEFAULT_BS_BUCKETS).select(M)
+            return LLBf16Gemm.CompileKey(
                 backend="dotprod", M=M, K=K, bs=bs, output_dtype=output_dtype
             )
 
-        split_k, num_stages = tuned_splitk.get((K, N), {}).get(
-            M, _DEFAULT_SPLITK_CONFIG
+        split_k, num_stages = tuned_splitk.get((K, N), _DEFAULT_SPLITK_BUCKETS).select(
+            M
         )
-        return self.CompileKey(
+        return LLBf16Gemm.CompileKey(
             backend="splitk",
             split_k=split_k,
             num_stages=num_stages,
@@ -344,7 +369,7 @@ def ll_bf16_gemm(
 ) -> torch.Tensor:
     kernel = (
         ll_bf16_gemm_c1_pdl_kernel
-        if hidden_states.shape[0] == 1
+        if m_in_range(hidden_states.shape[0], start=1, stop=2)
         else ll_bf16_gemm_kernel
     )
     return kernel(hidden_states, router_weight, output_dtype)

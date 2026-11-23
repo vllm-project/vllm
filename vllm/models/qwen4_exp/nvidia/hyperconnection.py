@@ -26,6 +26,7 @@ import torch
 from torch import nn
 
 import vllm.envs as envs
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
@@ -150,7 +151,7 @@ class GatedResidual(nn.Module):
         use_fused = (
             self._use_hc_down_silu
             and not envs.VLLM_BATCH_INVARIANT
-            and 1 <= xn.shape[0] <= MAX_FUSED_M
+            and m_in_range(xn.shape[0], start=1, stop=MAX_FUSED_M + 1)
         )
         if use_fused:
             return hc_down_silu(
@@ -168,7 +169,7 @@ class GatedResidual(nn.Module):
         """Up projection, sigmoid gate and gated mean over the HC streams."""
         if (
             self._use_hc_up_gate_mix
-            and xn.shape[0] >= MIN_FUSED_UP_M
+            and m_in_range(xn.shape[0], start=MIN_FUSED_UP_M)
             # LoRA wraps the module after __init__, so this can't be folded into
             # _use_hc_up_gate_mix; the wrapper's delta must not be skipped.
             and isinstance(self.input_mix_weight_up, ReplicatedLinear)

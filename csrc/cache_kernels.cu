@@ -1,3 +1,4 @@
+#include "core/kernel_buckets.h"
 #include "torch_utils.h"
 #include "dispatch_utils.h"
 
@@ -1546,7 +1547,8 @@ void gather_and_maybe_dequant_cache(
   const int64_t cache_block_stride = src_cache.stride(0);
   const int64_t cache_entry_stride = src_cache.stride(1);
   const int64_t dst_entry_stride = dst.stride(0);
-  const int32_t page_threads = num_tokens >= (1 << 20) ? 128 : 256;
+  const int32_t page_threads =
+      vllm::kernel_buckets::m_in_range(num_tokens, 1 << 20) ? 128 : 256;
   const int32_t required_blocks =
       div_ceil(static_cast<int32_t>(num_tokens), block_size) + 2 * num_reqs;
   const dim3 grid(required_blocks);
@@ -2148,15 +2150,15 @@ void cp_gather_indexer_k_quant_cache(
       kv_cache.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
-  if (num_tokens < 32) {
+  if (vllm::kernel_buckets::m_in_range(num_tokens, 0, 32)) {
     CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(1);
-  } else if (num_tokens < 64) {
+  } else if (vllm::kernel_buckets::m_in_range(num_tokens, 0, 64)) {
     CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(2);
-  } else if (num_tokens < 128) {
+  } else if (vllm::kernel_buckets::m_in_range(num_tokens, 0, 128)) {
     CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(4);
-  } else if (num_tokens < 256) {
+  } else if (vllm::kernel_buckets::m_in_range(num_tokens, 0, 256)) {
     CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(8);
-  } else if (num_tokens < 512) {
+  } else if (vllm::kernel_buckets::m_in_range(num_tokens, 0, 512)) {
     CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(16);
   } else {
     CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(32);

@@ -32,6 +32,7 @@ import torch
 from cutlass import BFloat16, Float32, Int32, Int64, Uint32
 from cutlass.cute.runtime import make_fake_stream, make_ptr
 
+from vllm.kernel_buckets import m_in_range
 from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
 from .codecs import (
@@ -489,7 +490,7 @@ def indexer_q_rope_quant(
     values = torch.empty((tokens, heads, 64), dtype=torch.uint8, device=q.device)
     scales = torch.empty((tokens, heads, 4), dtype=torch.uint8, device=q.device)
     weights_out = torch.empty((tokens, heads), dtype=torch.float32, device=q.device)
-    if tokens > 0:
+    if m_in_range(tokens, start=1):
         _query_kernel(q.device.index, weights.dtype)(
             _pointer(BFloat16, q, 2),
             _pointer(cutlass.Int64, positions, 8),

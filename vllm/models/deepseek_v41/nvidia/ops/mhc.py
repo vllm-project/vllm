@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group
+from vllm.kernel_buckets import m_in_range
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_fused_post_pre_delayed_tilelang,
@@ -122,7 +123,9 @@ def prepare_ampere_mhc(hidden_size: int) -> None:
 
 def _ampere_mhc(residual: torch.Tensor, norm_weight: torch.Tensor | None) -> bool:
     """Whether a boundary over `residual` takes the SM80 CuTe DSL kernels."""
-    if norm_weight is None or not 0 < residual.shape[0] <= ampere_mhc_max_tokens():
+    if norm_weight is None or not m_in_range(
+        residual.shape[0], start=1, stop=ampere_mhc_max_tokens() + 1
+    ):
         return False
     from ..specialized_decode.ampere.mhc import supports
 
@@ -147,7 +150,9 @@ def _split_projection(
     """Whether a boundary over `residual` projects its `width`-wide rows
     on the SM80 split-k kernel: on SM80, above the rows the SM80 boundary
     kernels take."""
-    if norm_weight is None or residual.shape[0] <= AMPERE_MHC_MAX_TOKENS:
+    if norm_weight is None or m_in_range(
+        residual.shape[0], stop=AMPERE_MHC_MAX_TOKENS + 1
+    ):
         return False
     if not ampere_projection_splits():
         return False
@@ -590,7 +595,7 @@ def mhc_shifted_post_pre(
             or (
                 reduce_results
                 and stream is not None
-                and residual.shape[0] <= mhc_all_reduce_max_tokens()
+                and m_in_range(residual.shape[0], stop=mhc_all_reduce_max_tokens() + 1)
             )
         )
     ):
@@ -756,7 +761,7 @@ def mhc_shifted_post_pre(
         if (
             stream is not None
             and _all_reduce_mhc is not None
-            and 0 < x.shape[0] <= MHC_OVERLAP_MAX_TOKENS
+            and m_in_range(x.shape[0], start=1, stop=MHC_OVERLAP_MAX_TOKENS + 1)
         ):
             assert _all_reduce_mhc is not None, "init_mhc_all_reduce was not called"
             assert pre_mix is not None and norm_weight is not None

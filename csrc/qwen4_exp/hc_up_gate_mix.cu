@@ -20,6 +20,7 @@
 //              output through shared memory with one TMA store per
 //              warpgroup.
 
+#include "core/kernel_buckets.h"
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/ScalarType.h>
@@ -562,7 +563,7 @@ void qwen4_exp_hc_up_gate_mix(torch::stable::Tensor& out,
       lowrank.get_device_index());
   const cudaDeviceProp* prop = get_device_prop();
   STD_TORCH_CHECK(prop->major == 10, "requires an SM100-family GPU");
-  if (M >= kLargeM) {
+  if (vllm::kernel_buckets::m_in_range(M, kLargeM)) {
     launch<LargeM>(out, lowrank, xn, w_up, M, prop);
   } else {
     launch<SmallM>(out, lowrank, xn, w_up, M, prop);

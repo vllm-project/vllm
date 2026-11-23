@@ -78,6 +78,7 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cute.runtime import make_fake_stream, make_ptr
 from cutlass.cutlass_dsl import T, dsl_user_op
 
+from vllm.kernel_buckets import m_in_range
 from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
 SAMPLES = 2048  # keys sampled a row, over the cluster
@@ -1238,7 +1239,10 @@ def cluster_for(rows: int, width: int, device_index: int) -> int:
     waves when they outnumber the resident clusters."""
     if vectors_for(width, 8) is None:
         return 16
-    if rows <= _resident_clusters(device_index, 8) or vectors_for(width, 4) is None:
+    if (
+        m_in_range(rows, stop=_resident_clusters(device_index, 8) + 1)
+        or vectors_for(width, 4) is None
+    ):
         return 8
     return 4
 
@@ -1275,11 +1279,11 @@ def supports_decode_topk(
     width = logits.shape[1]
     if vectors_for(width, 8) is None and (
         vectors_for(width, 16) is None
-        or rows > 2 * _resident_clusters(logits.device.index, 16)
+        or m_in_range(rows, start=2 * _resident_clusters(logits.device.index, 16) + 1)
     ):
         return False
     return (
-        0 < rows <= 64
+        m_in_range(rows, start=1, stop=65)
         and k in TOP_KS
         and width % 8 == 0
         and logits.stride(0) % 8 == 0

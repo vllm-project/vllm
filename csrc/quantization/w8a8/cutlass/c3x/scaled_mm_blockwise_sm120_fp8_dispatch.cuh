@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/kernel_buckets.h"
 #include <torch/headeronly/util/shim_utils.h>
 
 #include "cutlass/cutlass.h"
@@ -257,10 +258,10 @@ void cutlass_gemm_blockwise_sm120_fp8_dispatch(torch::stable::Tensor& out,
                                                int max_swizzle_size) {
   int M = a.size(0);
   // more heuristic tuning can be done here by checking N/K dimensions as well
-  bool swap_ab = (M <= 64);
+  bool swap_ab = (vllm::kernel_buckets::m_in_range(M, 0, 65));
 
   if (!swap_ab) {
-    if (M <= 256) {
+    if (vllm::kernel_buckets::m_in_range(M, 0, 257)) {
       using Gemm = typename sm120_blockwise_fp8_config_pingpong<OutType>::Gemm;
       return cutlass_gemm_caller_blockwise<Gemm>(
           out, a, b, a_scales, b_scales, max_swizzle_size);

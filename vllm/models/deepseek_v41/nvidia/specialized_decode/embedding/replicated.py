@@ -35,6 +35,7 @@ from cutlass.cute.runtime import make_fake_stream, make_ptr
 from torch import nn
 
 from vllm.distributed import get_tp_group
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
@@ -233,7 +234,7 @@ class ReplicatedEmbedding:
         return (
             ids.dtype == torch.int32
             and ids.dim() == 1
-            and ids.shape[0] > 0
+            and m_in_range(ids.shape[0], start=1)
             and ids.is_contiguous()
         )
 

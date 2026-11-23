@@ -8,10 +8,12 @@ from functools import lru_cache
 
 import torch
 
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
 from vllm.models.qwen4_exp.nvidia.ops import qsa_fp8
+from vllm.models.qwen4_exp.nvidia.ops.qsa_buckets import QSA_PHASE_BUCKETS
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
@@ -525,94 +527,25 @@ def _compress_qsa_groups_kernel(
 def _select_sm120_config(
     base_programs: int, use_prefill_config: bool, is_fp8: bool
 ) -> tuple[int, int, int]:
-    """(block_n, target_splits, num_warps) retuned on sm_120 (RTX PRO 6000
-    Blackwell), split by cache dtype: bf16 and fp8 favour different configs on
-    sm_120, most visibly on the large-prefill region. Each entry is the fastest
-    config that stays correct on its own path; the main win is more warps.
-    """
-    if is_fp8:
-        if base_programs > 2048:
-            return (32, 2, 1) if use_prefill_config else (64, 1, 2)
-        if base_programs <= 24:
-            return 64, 64, 8
-        if base_programs <= 32:
-            return 128, 8, 4
-        if base_programs <= 64:
-            return 64, 8, 4
-        if base_programs <= 128:
-            return 32, 4, 4
-        if base_programs <= 256:
-            return 128, 4, 4
-        if base_programs <= 512:
-            return 64, 4, 4
-        return 32, 2, 1
-    # bf16 K/V cache.
-    if base_programs > 2048:
-        return 64, 2, 2
-    if base_programs <= 24:
-        return 64, 64, 8
-    if base_programs <= 64:
-        return 64, 8, 8
-    if base_programs <= 128:
-        return 32, 8, 8
-    if base_programs <= 256:
-        return 32, 8, 1
-    if base_programs <= 512:
-        return 64, 4, 2
-    return 32, 4, 1
+    return QSA_PHASE_BUCKETS["sm120", is_fp8, use_prefill_config].select_current(
+        base_programs
+    )
 
 
 def _select_sm90_config(
     base_programs: int, use_prefill_config: bool, is_fp8: bool
 ) -> tuple[int, int, int]:
-    """(block_n, target_splits, num_warps) tuned on sm_90 (H20)."""
-    if base_programs > 2048:
-        return (32, 1, 1) if use_prefill_config else (64, 1, 2)
-    if is_fp8:
-        if base_programs <= 24:
-            return 64, 64, 2
-        if base_programs <= 32:
-            return 32, 16, 1
-        if base_programs <= 64:
-            return 32, 8, 1
-        if base_programs <= 128:
-            return 32, 4, 1
-        if base_programs <= 256:
-            return 32, 8, 1
-        return 32, 4, 1
-    if base_programs <= 32:
-        return 64, 64, 2
-    if base_programs <= 64:
-        return 32, 16, 1
-    if base_programs <= 256:
-        return 32, 8, 1
-    return 32, 4, 1
+    return QSA_PHASE_BUCKETS["sm90", is_fp8, use_prefill_config].select_current(
+        base_programs
+    )
 
 
 def _select_sm100_config(
     base_programs: int, use_prefill_config: bool, is_fp8: bool
 ) -> tuple[int, int, int]:
-    """(block_n, target_splits, num_warps) for sm_100 (B200/GB200). Tuned on B200
-    up to 64 programs; above that the entries are the GB300 table's values. fp8
-    above 64 programs takes the qsa_fp8 kernel.
-    """
-    if base_programs > 2048:
-        return (32, 1, 1) if use_prefill_config else (64, 1, 2)
-    if is_fp8 and base_programs <= 4:
-        return 32, 64, 4
-    if base_programs <= 24:
-        return 64, 64, 2
-    if base_programs <= 32:
-        return (32, 32, 1) if is_fp8 else (32, 16, 1)
-    if base_programs <= 64:
-        return (32, 16, 1) if is_fp8 else (32, 8, 1)
-    if base_programs <= 128:
-        return 32, 4, 1
-    if base_programs <= 256:
-        return 32, 8, 1
-    if base_programs <= 512:
-        return 64, 4, 2
-    return 64, 1, 2
+    return QSA_PHASE_BUCKETS["sm100", is_fp8, use_prefill_config].select_current(
+        base_programs
+    )
 
 
 def _select_config(
@@ -644,24 +577,10 @@ def _select_config(
         BLOCK_N, target_splits, num_warps = _select_sm100_config(
             base_programs, use_prefill_config, is_fp8
         )
-    elif base_programs > 2048:
-        BLOCK_N, target_splits, num_warps = (
-            (32, 1, 1) if use_prefill_config else (64, 1, 2)
-        )
-    elif base_programs <= 24:
-        BLOCK_N, target_splits, num_warps = 32, 64, 4
-    elif base_programs <= 32:
-        BLOCK_N, target_splits, num_warps = 32, 16, 1
-    elif base_programs <= 64:
-        BLOCK_N, target_splits, num_warps = 32, 8, 1
-    elif base_programs <= 128:
-        BLOCK_N, target_splits, num_warps = 32, 4, 1
-    elif base_programs <= 256:
-        BLOCK_N, target_splits, num_warps = 32, 8, 1
-    elif base_programs <= 512:
-        BLOCK_N, target_splits, num_warps = 64, 4, 2
     else:
-        BLOCK_N, target_splits, num_warps = 64, 1, 2
+        BLOCK_N, target_splits, num_warps = QSA_PHASE_BUCKETS[
+            "default", is_fp8, use_prefill_config
+        ].select_current(base_programs)
     if is_fp8 and _is_sm80():
         # Wider tiles measured faster for the byte-decode path on A100;
         # unmeasured on sm_86, which keeps the table's tiles.
@@ -1163,7 +1082,7 @@ def qsa_compress_groups_with_ratio(
         raise ValueError(
             "QSA compressor-state block table must contain one block per request"
         )
-    if query_start_loc.ndim != 1 or query_start_loc.shape[0] < 2:
+    if query_start_loc.ndim != 1 or m_in_range(query_start_loc.shape[0], stop=2):
         raise ValueError("QSA query starts must contain a terminal offset")
     num_requests = query_start_loc.shape[0] - 1
     if compressor_state_block_table.shape[0] < num_requests:

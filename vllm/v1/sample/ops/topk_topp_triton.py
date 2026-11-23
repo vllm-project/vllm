@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupChoices,
     WarmupIntRange,
@@ -892,7 +893,10 @@ def _topk_topp_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     batch_size: Any = WarmupIntRange(1, _max_sampler_batch_size(vllm_config) + 1)
     topk_enabled = mode[0]
     topp_enabled = mode[1]
-    _when(topk_enabled or not (split_enabled and batch_size <= _SPLIT_MAX_BATCH))
+    _when(
+        topk_enabled
+        or not (split_enabled and m_in_range(batch_size, stop=_SPLIT_MAX_BATCH + 1))
+    )
     logits = TritonWarmupTensor(
         torch.float32,
         shape=(batch_size, vocab_size),
@@ -946,7 +950,7 @@ def _topk_topp(
     split_covers_ponly = (
         current_platform.is_cuda_alike()
         and topp_enabled
-        and batch_size <= _SPLIT_MAX_BATCH
+        and m_in_range(batch_size, stop=_SPLIT_MAX_BATCH + 1)
     )
     return (num_programs,), dict(
         K=k_ptr,
@@ -998,7 +1002,8 @@ _TRITON_SPLIT_CACHE: dict[torch.device, dict[str, torch.Tensor]] = {}
 def _topp_split_count(batch_size: int, vocab_size: int, num_sm: int) -> int:
     splits = 1
     while splits < _SPLIT_MAX_SPLITS and (
-        splits * 2 * batch_size <= num_sm or splits * 2 * _SPLIT_MIN_SLICE <= vocab_size
+        m_in_range(splits * 2 * batch_size, stop=num_sm + 1)
+        or splits * 2 * _SPLIT_MIN_SLICE <= vocab_size
     ):
         splits *= 2
     return splits
@@ -1679,7 +1684,9 @@ def apply_top_k_top_p_triton(
     # covers only rows whose top-k is a no-op (k < vocab but <= k finite
     # logits, e.g. grammar masks), which the split pipeline skips.
     use_split = (
-        topp_enabled and batch_size <= _SPLIT_MAX_BATCH and logits.device.type == "cuda"
+        topp_enabled
+        and m_in_range(batch_size, stop=_SPLIT_MAX_BATCH + 1)
+        and logits.device.type == "cuda"
     )
     if use_split and not topk_enabled:
         _apply_topp_split(logits, None, p_ptr, mask_value, num_sm)

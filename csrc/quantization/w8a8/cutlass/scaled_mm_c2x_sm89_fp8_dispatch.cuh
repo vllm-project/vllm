@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/kernel_buckets.h"
 #include <torch/headeronly/util/shim_utils.h>
 
 #include "scaled_mm_c2x.cuh"
@@ -354,23 +355,23 @@ inline void cutlass_gemm_sm89_fp8_dispatch(torch::stable::Tensor& out,
   uint32_t const mp2 =
       std::max(static_cast<uint32_t>(16), next_pow_2(m));  // next power of 2
 
-  if (mp2 <= 16) {
+  if (vllm::kernel_buckets::m_in_range(mp2, 0, 17)) {
     // M in [1, 16]
     return sm89_fp8_config_M16::dispatch<InType, OutType, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
-  } else if (mp2 <= 32) {
+  } else if (vllm::kernel_buckets::m_in_range(mp2, 0, 33)) {
     // M in (16, 32]
     return sm89_fp8_config_M32::dispatch<InType, OutType, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
-  } else if (mp2 <= 64) {
+  } else if (vllm::kernel_buckets::m_in_range(mp2, 0, 65)) {
     // M in (32, 64]
     return sm89_fp8_config_M64::dispatch<InType, OutType, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
-  } else if (mp2 <= 128) {
+  } else if (vllm::kernel_buckets::m_in_range(mp2, 0, 129)) {
     // M in (64, 128]
     return sm89_fp8_config_M128::dispatch<InType, OutType, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
-  } else if (mp2 <= 256) {
+  } else if (vllm::kernel_buckets::m_in_range(mp2, 0, 257)) {
     // M in (128, 256]
     return sm89_fp8_config_M256::dispatch<InType, OutType, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(args)...);

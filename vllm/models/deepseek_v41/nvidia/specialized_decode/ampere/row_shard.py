@@ -29,6 +29,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
+from vllm.kernel_buckets import m_in_range
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillChunkMetadata,
@@ -63,7 +64,7 @@ def balanced_prefill_row_shard(
     balanced by their compressed keys, from the prefill requests' sequence
     lengths and new tokens; None with fewer rows than ranks."""
     num_rows = int(query_lens_cpu.sum())
-    if tp_size < 2 or num_rows < tp_size:
+    if tp_size < 2 or m_in_range(num_rows, stop=tp_size):
         return None
 
     query_lens = query_lens_cpu.to(torch.int64)

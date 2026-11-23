@@ -85,6 +85,7 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cute.runtime import make_fake_stream
 from cutlass.cutlass_dsl import T, dsl_user_op
 
+from vllm.kernel_buckets import m_in_range
 from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
 from . import is_ampere
@@ -1486,7 +1487,7 @@ def _uses_mma(streams: int, hidden: int) -> bool:
 def supports(rows: int, hidden: int, hc_mult: int) -> bool:
     """Whether these kernels take a boundary of `rows` rows."""
     return (
-        0 < rows <= MAX_ROWS
+        m_in_range(rows, start=1, stop=MAX_ROWS + 1)
         and hc_mult == HC
         and hidden % SLICE == 0
         and hidden % (VEC * 32) == 0

@@ -1,3 +1,4 @@
+#include "core/kernel_buckets.h"
 #include <numeric>
 
 #include "torch_utils.h"
@@ -254,7 +255,10 @@ void rms_norm(torch::stable::Tensor& out,    // [..., hidden_size]
   // For large num_tokens, use smaller blocks to increase SM concurrency.
   const bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
   const int max_block_size =
-      batch_invariant_launch ? 1024 : ((num_tokens < 256) ? 1024 : 256);
+      batch_invariant_launch
+          ? 1024
+          : ((vllm::kernel_buckets::m_in_range(num_tokens, 0, 256)) ? 1024
+                                                                    : 256);
   dim3 grid(num_tokens);
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -337,7 +341,10 @@ void fused_add_rms_norm(torch::stable::Tensor& input,     // [..., hidden_size]
      across batches; lock it to 1024 to keep results bit-exact. */
   const bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
   const int max_block_size =
-      batch_invariant_launch ? 1024 : ((num_tokens < 256) ? 1024 : 256);
+      batch_invariant_launch
+          ? 1024
+          : ((vllm::kernel_buckets::m_in_range(num_tokens, 0, 256)) ? 1024
+                                                                    : 256);
   dim3 block(std::min(hidden_size, max_block_size));
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());

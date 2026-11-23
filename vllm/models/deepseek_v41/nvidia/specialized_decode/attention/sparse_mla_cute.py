@@ -76,6 +76,7 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 
 from vllm.cute_utils import _tcgen05, recast_val
 from vllm.cute_utils import mbarrier as mbar_ops
+from vllm.kernel_buckets import m_in_range
 from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
 HEADS = 16
@@ -920,7 +921,7 @@ def supports_sparse_mla_cute(
     if not (_is_pool(swa_kv_cache) and _is_pool(compressed_kv_cache)):
         return False
     chunks = (sparse_indices.shape[1] + ROWS - 1) // ROWS
-    return 0 < tokens <= _max_tokens(query.device.index, chunks)
+    return m_in_range(tokens, start=1, stop=_max_tokens(query.device.index, chunks) + 1)
 
 
 def sparse_mla_decode(

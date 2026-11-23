@@ -11,6 +11,11 @@ EPLB layer state, routing ids are mapped to physical replicas on the way.
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.kernel_buckets import (
+    MBucketTable,
+    PhaseBucketTable,
+    m_in_range,
+)
 from vllm.model_executor.layers.fused_moe.eplb_triton import eplb_map_and_record
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP8_DTYPE,
@@ -19,6 +24,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+
+_MEGAMOE_INPUT_BUCKETS_LEGACY = MBucketTable((64, 1024), (1, 8, 32))
+MEGAMOE_INPUT_BUCKETS = PhaseBucketTable(
+    operator="vllm.model_executor.layers.fused_moe.prepare_megamoe.prepare_megamoe_inputs",
+    fallback=_MEGAMOE_INPUT_BUCKETS_LEGACY,
+    prefill=_MEGAMOE_INPUT_BUCKETS_LEGACY,
+    decode=_MEGAMOE_INPUT_BUCKETS_LEGACY,
+)
 
 _E8M0_SCALE_DTYPES = (torch.uint8, torch.float8_e8m0fnu)
 # Inverse of the NVFP4 range: E2M1 max (6) times E4M3 max (448).
@@ -616,7 +629,7 @@ def prepare_megamoe_inputs(
 
     # On GB200, 8-row tiles win from 64 tokens and 32-row tiles from 1024 (1.3-1.6x
     # over 8 rows); smaller batches stay untiled.
-    block_m = 32 if num_tokens >= 1024 else 8 if num_tokens >= 64 else 1
+    block_m = MEGAMOE_INPUT_BUCKETS.select_current(num_tokens)
     grid = (triton.cdiv(num_tokens, block_m), triton.cdiv(hidden_size, block_k))
     block_topk = triton.next_power_of_2(top_k)
     padding_stride_m = is_padding.stride(0) if is_padding is not None else 0
@@ -737,7 +750,7 @@ def prepare_megamoe_nvfp4_inputs(
     # Up to 512 tokens each row is split over programs; larger batches fill the
     # GPU with one program per row looping over wider chunks.
     block_h = triton.next_power_of_2(hidden_size)
-    if num_tokens <= 512:
+    if m_in_range(num_tokens, stop=513):
         block_k = min(1024, block_h)
         num_splits = triton.cdiv(hidden_size, block_k)
     else:

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/kernel_buckets.h"
 #include <torch/headeronly/util/shim_utils.h>
 
 #include "scaled_mm_c2x.cuh"
@@ -99,19 +100,19 @@ inline void cutlass_gemm_sm75_dispatch(torch::stable::Tensor& out,
   uint32_t const m = a.size(0);
   uint32_t const mp2 =
       std::max(static_cast<uint32_t>(32), next_pow_2(m));  // next power of 2
-  if (mp2 <= 32) {
+  if (vllm::kernel_buckets::m_in_range(mp2, 0, 33)) {
     // M in [1, 32]
     return fallback_cutlass_gemm_caller<Cutlass2xGemmM32, FallbackGemm>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
-  } else if (mp2 <= 64) {
+  } else if (vllm::kernel_buckets::m_in_range(mp2, 0, 65)) {
     // M in (32, 64]
     return fallback_cutlass_gemm_caller<Cutlass2xGemmM64, FallbackGemm>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
-  } else if (mp2 <= 128) {
+  } else if (vllm::kernel_buckets::m_in_range(mp2, 0, 129)) {
     // M in (64, 128]
     return fallback_cutlass_gemm_caller<Cutlass2xGemmM128, FallbackGemm>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
-  } else if (mp2 <= 256) {
+  } else if (vllm::kernel_buckets::m_in_range(mp2, 0, 257)) {
     // M in (128, 256]
     return fallback_cutlass_gemm_caller<Cutlass2xGemmM256, FallbackGemm>(
         out, a, b, std::forward<EpilogueArgs>(args)...);

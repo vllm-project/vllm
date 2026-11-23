@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 from typing import ClassVar
 
 import torch
 
 import vllm.envs as envs
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -306,7 +306,7 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
     if envs.VLLM_BATCH_INVARIANT:
         return run_deepgemm(input, weight, weight_scale)
 
-    condition = input.shape[0] < 32
+    condition = m_in_range(input.shape[0], stop=32)
 
     # PyTorch's torch.compile cannot handle input-dependent control flow in standard
     # Python conditionals. torch.cond() explicitly registers both code paths in the

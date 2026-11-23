@@ -90,6 +90,7 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cute.runtime import make_fake_stream
 from cutlass.cutlass_dsl import T, dsl_user_op
 
+from vllm.kernel_buckets import m_in_range
 from vllm.models.common.ops.moe_tail_fusion.primitives import (
     LAMPORT_GENERATIONS,
     NEGATIVE_ZERO_BF16_PAIR,
@@ -708,7 +709,7 @@ class AmpereAllReduce:
         rows of `hidden` values, 16-byte aligned."""
         return (
             x.dim() == 2
-            and 0 < x.shape[0] <= self.capacity
+            and m_in_range(x.shape[0], start=1, stop=self.capacity + 1)
             and x.shape[1] == self.hidden
             and x.dtype == torch.bfloat16
             and x.is_contiguous()

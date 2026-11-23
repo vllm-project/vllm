@@ -1,3 +1,4 @@
+#include "core/kernel_buckets.h"
 #include <cudaTypedefs.h>
 
 #include "torch_utils.h"
@@ -142,12 +143,12 @@ void run_cutlass_moe_mm_sm90(torch::stable::Tensor& out_tensors,
   uint32_t const k = a_tensors.size(1);
 
   // Use swap_ab for M <= 64 by default to reduce padding
-  if (m <= 4) {
+  if (vllm::kernel_buckets::m_in_range(m, 0, 5)) {
     cutlass_group_gemm_caller<Cutlass3xGemmM4>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
         problem_sizes, a_strides, b_strides, c_strides, per_act_token,
         per_out_ch);
-  } else if (m <= 64) {
+  } else if (vllm::kernel_buckets::m_in_range(m, 0, 65)) {
     cutlass_group_gemm_caller<Cutlass3xGemmM64>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
         problem_sizes, a_strides, b_strides, c_strides, per_act_token,

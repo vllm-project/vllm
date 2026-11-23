@@ -12,6 +12,11 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.kernel_buckets import (
+    MBucketTable,
+    PhaseBucketTable,
+    select_nearest_m,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -36,6 +41,14 @@ from vllm.utils.deep_gemm import (
     transform_sf_into_required_layout,
 )
 from vllm.utils.platform_utils import get_device_name_as_file_name
+
+_SILU_FP8_PACKED_BUCKETS_LEGACY = MBucketTable((512,), ((1, 2), (4, 1)))
+SILU_FP8_PACKED_BUCKETS = PhaseBucketTable(
+    operator="vllm.model_executor.layers.quantization.utils.fp8_utils.silu_mul_quant_fp8_packed_triton",
+    fallback=_SILU_FP8_PACKED_BUCKETS_LEGACY,
+    prefill=_SILU_FP8_PACKED_BUCKETS_LEGACY,
+    decode=_SILU_FP8_PACKED_BUCKETS_LEGACY,
+)
 
 logger = init_logger(__name__)
 
@@ -310,8 +323,7 @@ def silu_mul_quant_fp8_packed_triton(
         BM = 1
         packs_per_cta = 8
     else:
-        BM = 1 if M < 512 else 4
-        packs_per_cta = 2 if M < 512 else 1
+        BM, packs_per_cta = SILU_FP8_PACKED_BUCKETS.select_current(M)
 
     grid_n = triton.cdiv(packs_per_row, packs_per_cta)
     grid_m = min(triton.cdiv(M, BM), 4096)
@@ -1048,7 +1060,7 @@ def w8a8_triton_block_scaled_mm(
         configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
     if configs:
         # Get the optimal config if there is one
-        config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
+        config = select_nearest_m(configs, M)
     else:
         # Default config
         # Block-wise quant: BLOCK_SIZE_N must be divisible by block_size[0]

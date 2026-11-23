@@ -1,6 +1,7 @@
 // Cooperative cluster TopK for DeepSeek V3 sparse attention indexer.
 // See cooperative_topk.cuh for kernel implementation.
 
+#include "core/kernel_buckets.h"
 #include <cuda_runtime.h>
 
 #include "torch_utils.h"
@@ -61,7 +62,7 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
 
   const uint32_t stride = static_cast<uint32_t>(logits.stride(0));
   STD_TORCH_CHECK(
-      num_rows <= 64,
+      vllm::kernel_buckets::m_in_range(num_rows, 0, 65),
       "cooperative_topk supports <=64 rows; use persistent_topk for "
       "larger batches");
 
@@ -91,11 +92,11 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
       "workspace too small");
 
   const bool supports_cluster16 = get_device_prop()->major >= 10;
-  if (num_rows <= 4 && supports_cluster16) {
+  if (vllm::kernel_buckets::m_in_range(num_rows, 0, 5) && supports_cluster16) {
     launch_cooperative_cluster<TopK, 16>(params, ct::kSmemSize8<InT>, stream);
-  } else if (num_rows <= 8) {
+  } else if (vllm::kernel_buckets::m_in_range(num_rows, 0, 9)) {
     launch_cooperative_cluster<TopK, 8>(params, ct::kSmemSize8<InT>, stream);
-  } else if (num_rows <= 33) {
+  } else if (vllm::kernel_buckets::m_in_range(num_rows, 0, 34)) {
     launch_cooperative_cluster<TopK, 4>(params, ct::kSmemSize4<InT>, stream);
   } else {
     launch_cooperative_cluster<TopK, 2>(params, ct::kSmemSize2<InT>, stream);

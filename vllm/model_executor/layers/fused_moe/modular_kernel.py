@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from typing import Any, final
 import torch
 
 import vllm.envs as envs
+from vllm.kernel_buckets import m_in_range
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
@@ -622,7 +624,7 @@ class FusedMoEExperts(ABC):
                 )
 
     def _uses_post_gemm2_hook(self, num_tokens: int) -> bool:
-        return self.post_gemm2_hook is not None and num_tokens > 0
+        return self.post_gemm2_hook is not None and m_in_range(num_tokens, start=1)
 
     def _run_post_gemm2_hook(
         self,

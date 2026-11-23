@@ -1,3 +1,4 @@
+#include "core/kernel_buckets.h"
 #include "torch_utils.h"
 
 #include <cmath>
@@ -575,7 +576,10 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 #define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                                 \
   int d = input.size(-1) / 2;                                                 \
   int64_t num_tokens = input.numel() / input.size(-1);                        \
-  dim3 grid(num_tokens, num_tokens > 16 ? num_tokens > 32 ? 1 : 2 : 4);       \
+  dim3 grid(num_tokens,                                                       \
+            vllm::kernel_buckets::m_in_range(num_tokens, 17)                  \
+                ? vllm::kernel_buckets::m_in_range(num_tokens, 33) ? 1 : 2    \
+                : 4);                                                         \
   dim3 block(std::min(d, 512));                                               \
   const torch::stable::accelerator::DeviceGuard device_guard(                 \
       input.get_device_index());                                              \

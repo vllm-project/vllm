@@ -22,6 +22,7 @@ from cutlass.utils import get_smem_capacity_in_bytes
 
 from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
 from vllm.distributed import get_tp_group
+from vllm.kernel_buckets import m_in_range
 
 
 @dsl_user_op
@@ -714,7 +715,7 @@ class GemmRsAr:
         )
 
         grid_m = (max_M + 127) // 128
-        cta_group = 2 if max_M >= 1024 or grid_m % 2 == 0 else 1
+        cta_group = 2 if m_in_range(max_M, start=1024) or grid_m % 2 == 0 else 1
         grid_m = (grid_m + cta_group - 1) // cta_group * cta_group
         self.num_sms = torch.cuda.get_device_properties(device).multi_processor_count
         max_flags = grid_m * (N // 128) + self.num_sms
@@ -757,7 +758,7 @@ class GemmRsAr:
 
         grid_m = (M + 127) // 128
         # Avoid padding small odd grids; 2-CTA wins consistently for M >= 1024.
-        cta_group = 2 if M >= 1024 or grid_m % 2 == 0 else 1
+        cta_group = 2 if m_in_range(M, start=1024) or grid_m % 2 == 0 else 1
         grid_m = (grid_m + cta_group - 1) // cta_group * cta_group
         BN = 256 if M * K >= 24 * 1024 * 1024 else 128
         assert N % BN == 0

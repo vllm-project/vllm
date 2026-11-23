@@ -12,6 +12,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.kernel_buckets import m_in_range
 
 
 def _custom_collective(name: str, x: torch.Tensor) -> torch.Tensor | None:
@@ -60,7 +61,7 @@ def _has_fused_all_gather_matmul() -> bool:
 def can_sp_all_gather_matmul(x: torch.Tensor, weight: torch.Tensor) -> bool:
     """Whether `sp_all_gather_matmul` applies to this shard and weight."""
     return (
-        x.shape[0] >= _FUSED_AG_MATMUL_MIN_TOKENS_PER_RANK
+        m_in_range(x.shape[0], start=_FUSED_AG_MATMUL_MIN_TOKENS_PER_RANK)
         and x.dtype == weight.dtype == torch.bfloat16
         and weight.ndim == 2
         and not torch.cuda.is_current_stream_capturing()

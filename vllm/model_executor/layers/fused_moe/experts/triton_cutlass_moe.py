@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -49,7 +49,7 @@ class TritonOrCutlassExperts(FallbackExperts):
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # Small batch fallback for sm100.
-        if self.is_sm100 and M <= 8:
+        if self.is_sm100 and m_in_range(M, stop=9):
             return self.fallback_experts.workspace_shapes(
                 M,
                 N,
@@ -79,7 +79,7 @@ class TritonOrCutlassExperts(FallbackExperts):
         w2: torch.Tensor,
     ) -> mk.FusedMoEExpertsModular:
         # Small batch fallback for sm100.
-        if self.is_sm100 and hidden_states.shape[0] <= 8:
+        if self.is_sm100 and m_in_range(hidden_states.shape[0], stop=9):
             return self.fallback_experts
         else:
             return self.experts

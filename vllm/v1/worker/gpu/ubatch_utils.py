@@ -19,6 +19,7 @@ from vllm.forward_context import (
     create_forward_context,
     override_forward_context,
 )
+from vllm.kernel_buckets import KernelPhase
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -405,6 +406,7 @@ class UBatchRunner:
         attn_metadata = []
         slot_mappings_by_layer = []
         is_padding = []
+        kernel_phases = []
         for i, ubatch_slice in enumerate(ubatch_slices):
             ubatch = _slice_input_batch(
                 input_batch,
@@ -436,11 +438,20 @@ class UBatchRunner:
                 build_slot_mappings_by_layer(ubatch_slot_mappings, self.kv_cache_config)
             )
             is_padding.append(ubatch.is_padding)
+            kernel_phases.append(
+                KernelPhase.UNKNOWN
+                if for_capture
+                else input_batch.kernel_phase_for_slice(ubatch_slice.request_slice)
+            )
 
         return UBatchState(
             slices=ubatch_slices,
             forward_contexts=self._make_forward_contexts(
-                ubatch_slices, attn_metadata, slot_mappings_by_layer, is_padding
+                ubatch_slices,
+                attn_metadata,
+                slot_mappings_by_layer,
+                is_padding,
+                kernel_phases,
             ),
         )
 
@@ -450,6 +461,7 @@ class UBatchRunner:
         attn_metadata: list[dict[str, Any]],
         slot_mappings_by_layer: list[dict[str, torch.Tensor]],
         is_padding: list[torch.Tensor | None],
+        kernel_phases: list[KernelPhase],
     ) -> list[ForwardContext]:
         """Build one forward context per microbatch.
 
@@ -478,6 +490,7 @@ class UBatchRunner:
                     ubatch_slices=ubatch_slices,
                     slot_mapping=slot_mappings_by_layer[i],
                     is_padding=is_padding[i],
+                    kernel_phase=kernel_phases[i],
                 )
             )
         return forward_contexts

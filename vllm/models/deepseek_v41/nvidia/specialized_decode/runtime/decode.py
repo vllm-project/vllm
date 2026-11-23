@@ -37,6 +37,7 @@ from torch import nn
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
 from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
 from vllm.models.deepseek_v41.common.engram import Engram
@@ -110,8 +111,10 @@ def step_gates(rows: int, executor: "SpecializedDecode | DraftDecode") -> Decode
     """The step of `rows` rows (0 < rows <= `FUSED_MHC_MAX_ROWS`)."""
     return DecodeStep(
         rows=rows,
-        low_batch=rows <= LOW_BATCH_MAX_ROWS,
-        overlap_inputs=rows <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD,
+        low_batch=m_in_range(rows, stop=LOW_BATCH_MAX_ROWS + 1),
+        overlap_inputs=m_in_range(
+            rows, stop=envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD + 1
+        ),
         executor=executor,
     )
 
@@ -292,7 +295,7 @@ class SpecializedDecode:
         rows = positions.shape[0]
         if (
             intermediate_tensors is not None
-            or not 0 < rows <= FUSED_MHC_MAX_ROWS
+            or not m_in_range(rows, start=1, stop=FUSED_MHC_MAX_ROWS + 1)
             or not is_forward_context_available()
         ):
             return None

@@ -11,6 +11,8 @@ from typing import Any
 
 import torch
 
+from vllm.kernel_buckets import m_in_range
+
 logger = logging.getLogger(__name__)
 
 _cutedsl_available: bool | None = None
@@ -65,7 +67,7 @@ class ShapeDynamicSkinnyGemm:
     def _config(m: int, n: int, k: int) -> SkinnyGemmConfig:
         num_rows = m
         wide_block = 224
-        if m == 1 and k >= 7168 and k % (wide_block * 8) == 0:
+        if m_in_range(m, start=1, stop=2) and k >= 7168 and k % (wide_block * 8) == 0:
             if n % 3 == 0:
                 k_unroll = 2 if n <= 2304 else 4
                 return SkinnyGemmConfig(num_rows, wide_block, 3, k_unroll)
@@ -83,7 +85,7 @@ class ShapeDynamicSkinnyGemm:
             return SkinnyGemmConfig(num_rows, 32, outputs_per_block, 2, vector_width=4)
 
         block_size = 64 if 4096 <= n < 8192 else 128
-        outputs_per_block = 1 if m == 1 and n <= 2304 else 2
+        outputs_per_block = 1 if m_in_range(m, start=1, stop=2) and n <= 2304 else 2
         if n % outputs_per_block:
             outputs_per_block = 1
         k_unroll = 2 if n <= 2304 or n >= 16384 else 1
@@ -227,7 +229,7 @@ class ShapeDynamicSkinnyGemm:
             raise ValueError("b must be contiguous")
         if a.shape[1] != b.shape[1]:
             raise ValueError("a and b must have matching K dimensions")
-        if not 1 <= a.shape[0] <= 16:
+        if not m_in_range(a.shape[0], start=1, stop=17):
             raise ValueError("shape-dynamic skinny GEMM requires 1 <= M <= 16")
         if residual is not None:
             if residual.dim() != 2 or residual.shape != (a.shape[0], b.shape[0]):

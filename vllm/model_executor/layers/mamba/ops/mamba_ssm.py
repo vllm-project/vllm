@@ -15,6 +15,7 @@ from packaging import version
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.kernel_buckets import select_nearest_m
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.platforms import current_platform
@@ -146,8 +147,7 @@ def _try_get_optimal_ssm_config_cached(
     configs = get_ssm_configs(headdim, dstate, cache_dtype)
     if configs:
         # Pick the closest effective_batch in the tuned grid (MoE strategy).
-        closest = min(configs.keys(), key=lambda x: abs(x - effective_batch))
-        cfg = configs[closest]
+        cfg = select_nearest_m(configs, effective_batch)
         return cfg["BLOCK_SIZE_M"], cfg["num_warps"]
 
     return _get_default_ssm_launch_config(dstate, is_blackwell)

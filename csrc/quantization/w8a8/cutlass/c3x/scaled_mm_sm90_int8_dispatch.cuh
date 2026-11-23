@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/kernel_buckets.h"
 #include <torch/headeronly/util/shim_utils.h>
 
 #include "scaled_mm.cuh"
@@ -118,7 +119,7 @@ inline void cutlass_gemm_sm90_int8_dispatch(torch::stable::Tensor& out,
   uint32_t const mp2 =
       std::max(static_cast<uint32_t>(32), next_pow_2(m));  // next power of 2
 
-  if (mp2 <= 32) {
+  if (vllm::kernel_buckets::m_in_range(mp2, 0, 33)) {
     // m in [1, 32]
     if (is_small_n) {
       return cutlass_gemm_caller<Cutlass3xGemmM32NSmall>(
@@ -127,11 +128,11 @@ inline void cutlass_gemm_sm90_int8_dispatch(torch::stable::Tensor& out,
       return cutlass_gemm_caller<Cutlass3xGemmM32NBig>(
           out, a, b, std::forward<EpilogueArgs>(args)...);
     }
-  } else if (mp2 <= 64) {
+  } else if (vllm::kernel_buckets::m_in_range(mp2, 0, 65)) {
     // m in (32, 64]
     return cutlass_gemm_caller<Cutlass3xGemmM64>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
-  } else if (mp2 <= 128) {
+  } else if (vllm::kernel_buckets::m_in_range(mp2, 0, 129)) {
     // m in (64, 128]
     return cutlass_gemm_caller<Cutlass3xGemmM128>(
         out, a, b, std::forward<EpilogueArgs>(args)...);

@@ -1,3 +1,4 @@
+#include "core/kernel_buckets.h"
 /*
  * Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
  *
@@ -235,7 +236,7 @@ void cutlass_fp4_gemm_dispatch(torch::stable::Tensor& D,
   }
 
   uint32_t const mp2 = std::max(static_cast<uint32_t>(16), next_pow_2(m));
-  if (mp2 <= 256) {
+  if (vllm::kernel_buckets::m_in_range(mp2, 0, 257)) {
     using Gemm =
         typename Fp4GemmSm120<sm120_fp4_config_M256, OutType, HasBias>::Gemm;
     runGemm<Gemm, HasBias>(D, A, B, A_sf, B_sf, alpha, bias, m, n, k, stream);

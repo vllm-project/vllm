@@ -1,0 +1,35 @@
+group: Operator Buckets
+depends_on:
+  - image-build
+steps:
+- label: ":nvidia: Host Operator Bucket Dispatch"
+  key: operator-bucket-dispatch
+  device: h200_18gb
+  timeout_in_minutes: 15
+  source_file_dependencies:
+  - vllm/_custom_ops.py
+  - vllm/models/common/
+  - vllm/compilation/passes/fusion/
+  - vllm/kernel_buckets.py
+  - vllm/forward_context.py
+  - vllm/model_executor/kernels/
+  - vllm/model_executor/layers/
+  - vllm/models/qwen4_exp/
+  - vllm/models/deepseek_v41/
+  - vllm/v1/worker/gpu/
+  - csrc/
+  - tools/kernel_bucket_inventory.py
+  - tests/model_executor/test_kernel_buckets.py
+  - tests/v1/worker/test_gpu_input_batch_v2.py
+  - tests/kernels/core/kernel_buckets_test.cpp
+  commands:
+  - export VLLM_TARGET_DEVICE=empty
+  - >-
+    pytest -v -s --confcutdir=model_executor
+    model_executor/test_kernel_buckets.py
+  - >-
+    pytest -v -s --confcutdir=v1/worker
+    v1/worker/test_gpu_input_batch_v2.py -k kernel_phase
+  - uv run --no-project --no-sync ../tools/kernel_bucket_inventory.py --check
+  - c++ -std=c++17 -Wall -Wextra -Werror -I ../csrc kernels/core/kernel_buckets_test.cpp -o /tmp/kernel-buckets-test
+  - /tmp/kernel-buckets-test

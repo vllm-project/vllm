@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/kernel_buckets.h"
 #include <torch/headeronly/util/shim_utils.h>
 
 #include "scaled_mm.cuh"
@@ -319,7 +320,7 @@ inline void cutlass_gemm_sm90_fp8_dispatch(
   uint32_t const n = b.size(1);
   uint32_t const k = a.size(1);
 
-  if (m <= 16) {
+  if (vllm::kernel_buckets::m_in_range(m, 0, 17)) {
     // m in [1, 16]
     if (n <= 1280) {
       return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM16_N1280>(
@@ -327,7 +328,7 @@ inline void cutlass_gemm_sm90_fp8_dispatch(
     }
     return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM16_N8192>(
         out, a, b, b_scales, a_scales, std::forward<EpilogueArgs>(args)...);
-  } else if (m <= 64) {
+  } else if (vllm::kernel_buckets::m_in_range(m, 0, 65)) {
     // m in (16, 64]
     if (n <= 1280) {
       return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM64_N1280>(
@@ -335,11 +336,11 @@ inline void cutlass_gemm_sm90_fp8_dispatch(
     }
     return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM64_N8192>(
         out, a, b, b_scales, a_scales, std::forward<EpilogueArgs>(args)...);
-  } else if (m <= 128) {
+  } else if (vllm::kernel_buckets::m_in_range(m, 0, 129)) {
     // m in (64, 128]
     return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM128>(
         out, a, b, a_scales, b_scales, std::forward<EpilogueArgs>(args)...);
-  } else if (m >= 8192 && k >= 6144) {
+  } else if (vllm::kernel_buckets::m_in_range(m, 8192) && k >= 6144) {
     return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM8192_K6144>(
         out, a, b, a_scales, b_scales, std::forward<EpilogueArgs>(args)...);
   } else {

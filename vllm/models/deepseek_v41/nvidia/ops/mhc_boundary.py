@@ -30,6 +30,7 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass.utils import SmemAllocator
 
 from vllm.cute_utils.cvt import fp32x2_to_bf16x2
+from vllm.kernel_buckets import m_in_range
 
 CLUSTER = 16
 # Two CTAs of 320 threads (96 registers each) and at most ~110 KB of shared memory share
@@ -1160,7 +1161,7 @@ def mhc_shifted_post_pre_boundary(
     on its first call, which vLLM's eager run before each graph capture makes; a
     capture that would have to compile returns None too."""
     tokens, mult, hidden = residual.shape
-    if not 0 < tokens <= MAX_TOKENS:
+    if not m_in_range(tokens, start=1, stop=MAX_TOKENS + 1):
         return None
     key = (hidden, num_sinkhorn_iters, boundary_tile(tokens))
     kernel = _KERNELS.get(key)

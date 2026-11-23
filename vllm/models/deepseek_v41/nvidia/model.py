@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import typing
 from collections.abc import Callable, Iterable
 from functools import partial
@@ -24,6 +25,7 @@ from vllm.forward_context import (
     in_piecewise_cudagraph,
     is_forward_context_available,
 )
+from vllm.kernel_buckets import m_in_range
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_post_tilelang,
@@ -615,7 +617,9 @@ class DeepseekV4DecoderLayer(nn.Module):
         mhc_stream = self.mhc_stream
         if mhc_stream is not None and (
             in_piecewise_cudagraph()
-            or not 0 < positions.shape[0] <= self.mhc_overlap_max_tokens
+            or not m_in_range(
+                positions.shape[0], start=1, stop=self.mhc_overlap_max_tokens + 1
+            )
             or not torch.cuda.is_current_stream_capturing()
         ):
             # Use overlap only in FULL graphs; eager warmup initializes Mega mHC.

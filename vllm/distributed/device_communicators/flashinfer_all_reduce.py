@@ -18,6 +18,7 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
     FI_MNNVL_ALLREDUCE_MAX_SIZE_MB,
 )
 from vllm.distributed.parallel_state import _node_count
+from vllm.kernel_buckets import m_in_range
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -539,7 +540,9 @@ class FlashInferAllReduce:
             workspace=workspace,
             pattern=flashinfer_comm.AllReduceFusionPattern.kAllReduce,
             launch_with_pdl=True,
-            trigger_completion_at_end=num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
+            trigger_completion_at_end=m_in_range(
+                num_tokens, start=PDL_ADVANCE_LAUNCH_TOKENS + 1
+            ),
         )
 
     def destroy(self):

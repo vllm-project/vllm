@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+from vllm.kernel_buckets import KernelPhase, phase_from_counts
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
@@ -130,6 +131,32 @@ class InputBatch:
     # [num_reqs] admitted draft counts in flight to the host. Set only under
     # adaptive verification with batch-sharded sampling, when the budget binds.
     num_admitted_draft_tokens: "AdmittedDraftCounts | None" = None
+
+    @property
+    def kernel_phase(self) -> KernelPhase:
+        if not self.num_reqs:
+            return KernelPhase.UNKNOWN
+        if not self.has_prefill:
+            return KernelPhase.VERIFY if self.num_draft_tokens else KernelPhase.DECODE
+        if self.is_prefilling_np[: self.num_reqs].all():
+            return KernelPhase.PREFILL
+        return KernelPhase.MIXED
+
+    def kernel_phase_for_slice(self, request_slice: slice) -> KernelPhase:
+        flags = self.is_prefilling_np[: self.num_reqs][request_slice]
+        if self.num_draft_tokens_per_req is not None:
+            has_draft_tokens = bool(
+                self.num_draft_tokens_per_req[: self.num_reqs][request_slice].any()
+            )
+        elif self.num_draft_tokens and flags.size != self.num_reqs and not flags.any():
+            return KernelPhase.UNKNOWN
+        else:
+            has_draft_tokens = self.num_draft_tokens > 0
+        return phase_from_counts(
+            prefill_tokens=int(flags.any()),
+            decode_tokens=int(not flags.all()),
+            has_draft_tokens=has_draft_tokens,
+        )
 
     @classmethod
     def make_dummy(

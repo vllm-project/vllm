@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "core/kernel_buckets.h"
 #include <cmath>
 #include <cuda_runtime.h>
 #include <type_traits>
@@ -637,7 +638,8 @@ void launchFusedQKNormRope(void* qkv, int const num_tokens,
   int const gridSize = common::divUp(totalWarps, warpsPerBlock);
   dim3 gridDim(gridSize);
   dim3 blockDim(blockSize);
-  bool const enable_pdl = num_tokens <= kPDLEnableTokens;
+  bool const enable_pdl =
+      vllm::kernel_buckets::m_in_range(num_tokens, 0, kPDLEnableTokens + 1);
   switch (head_dim) {
     case 64:
       DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
@@ -723,7 +725,8 @@ void launchFusedQKNormRopeNTokenHeads(
   int const gridSize = common::divUp(total_warps, warpsPerBlock);
   dim3 gridDim(gridSize);
   dim3 blockDim(blockSize);
-  bool const enable_pdl = num_tokens <= kPDLEnableTokens;
+  bool const enable_pdl =
+      vllm::kernel_buckets::m_in_range(num_tokens, 0, kPDLEnableTokens + 1);
   // Cache element size: float=4, bfloat16=2 (host-safe; kernel uses same
   // layout).
   size_t const cache_elem_size =

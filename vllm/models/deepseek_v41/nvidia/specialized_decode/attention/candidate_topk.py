@@ -19,6 +19,7 @@ buffer treats a row as a set.
 
 import torch
 
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import _max_with_nan
 from vllm.model_executor.layers.indexer_topk import (
     AUTO_COOPERATIVE_MAX_ROWS,
@@ -101,7 +102,7 @@ def supports_cooperative_candidates(num_rows: int, num_blocks: int, k: int) -> b
     """Whether `select_candidate_blocks_cooperative` takes `num_rows` rows of
     `num_blocks` blocks and `k` candidates."""
     return (
-        0 < num_rows <= AUTO_COOPERATIVE_MAX_ROWS
+        m_in_range(num_rows, start=1, stop=AUTO_COOPERATIVE_MAX_ROWS + 1)
         and k in (512, 1024, 2048)
         # cooperative_topk reads the scores with TMA: 16-byte aligned rows.
         and num_blocks % 4 == 0

@@ -5,6 +5,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation_masked_supported,
@@ -932,7 +933,7 @@ def batched_moe_kernel_quantize_input(
 
         for e in range(E):
             num_tokens = int(expert_num_tokens[e].item())
-            if num_tokens > 0:
+            if m_in_range(num_tokens, start=1):
                 if A_scale is not None:
                     scales = A_scale[e, : min(num_tokens, A_scale.shape[1])]
                 else:

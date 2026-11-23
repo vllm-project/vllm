@@ -47,6 +47,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 )
 from vllm.distributed.parallel_state import GroupCoordinator, in_the_same_node_as
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.kernel_buckets import m_in_range
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -1275,7 +1276,7 @@ class ParallelEngramEmbedding(nn.Module):
         sort = (
             self._uses_small_host_pages
             and sort_min_rows is not None
-            and rows >= sort_min_rows
+            and m_in_range(rows, start=sort_min_rows)
         )
         dst = indices
         if sort:
@@ -1292,7 +1293,7 @@ class ParallelEngramEmbedding(nn.Module):
         max_grid = self._num_sms // 2 if background else self._num_sms
         # Host reads are latency bound: once the rows fill the grid with
         # 128-row tiles, each program keeps 8x the reads in flight.
-        block_r = 128 if rows >= 128 * max_grid else 16
+        block_r = 128 if m_in_range(rows, start=128 * max_grid) else 16
         packed = out.dtype == torch.uint8
         # Copy packed rows 8 bytes per load where their values, scales and
         # output rows are 8-byte aligned.

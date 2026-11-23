@@ -12,6 +12,7 @@ import torch
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.kernel_buckets import m_in_range, select_nearest_m
 from vllm.logger import init_logger
 from vllm.model_executor.determinism.batch_invariant_configs import (
     get_batch_invariant_moe_config,
@@ -1513,20 +1514,20 @@ def get_default_config(
         if current_platform.is_rocm():
             block_n = block_shape[0]
             num_stages = num_stages_rocm
-        elif M <= 8 and block_shape[0] % 64 == 0:
+        elif m_in_range(M, stop=9) and block_shape[0] % 64 == 0:
             block_n = 64
             # The smallest batches are memory-latency bound, so a deeper
             # pipeline hides the weight loads; by M=8 it turns occupancy/SMEM
             # bound and the extra stages hurt.
-            num_stages = 4 if M <= 4 else 3
+            num_stages = 4 if m_in_range(M, stop=5) else 3
         else:
             block_n = block_shape[0]
             num_stages = 3
         config = {
-            "BLOCK_SIZE_M": 16 if M <= 64 else 64,
+            "BLOCK_SIZE_M": 16 if m_in_range(M, stop=65) else 64,
             "BLOCK_SIZE_N": block_n,
             "BLOCK_SIZE_K": block_shape[1],
-            "GROUP_SIZE_M": 1 if M <= 16 else 32,
+            "GROUP_SIZE_M": 1 if m_in_range(M, stop=17) else 32,
             "SPLIT_K": 1,
             "num_warps": 4,
             "num_stages": num_stages,
@@ -1543,9 +1544,9 @@ def get_default_config(
                 "GROUP_SIZE_M": 1,
                 "SPLIT_K": 1,
             }
-        elif M <= 20:
+        elif m_in_range(M, stop=21):
             config = {"BLOCK_SIZE_M": 16, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
-        elif M <= 40:
+        elif m_in_range(M, stop=41):
             config = {"BLOCK_SIZE_M": 32, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
         else:
             config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
@@ -1554,35 +1555,35 @@ def get_default_config(
         # Tile sizes scale with batch: small batches are memory-bound
         # (favor tall-K tiles), large batches are compute-bound (favor
         # large M/N tiles with more warps).
-        if M <= 32:
+        if m_in_range(M, stop=33):
             block_m = 16
-        elif M <= 96:
+        elif m_in_range(M, stop=97):
             block_m = 32
-        elif M <= 512:
+        elif m_in_range(M, stop=513):
             block_m = 64
         else:
             block_m = 128
 
-        block_n = 64 if M <= 64 else 128
+        block_n = 64 if m_in_range(M, stop=65) else 128
 
         # Small batches benefit from longer reduction (larger K tile),
         # while large batches prefer more output parallelism.
         # FP8 elements are half-width so larger K tiles are always cheap.
-        block_k = 128 if dtype == "fp8_w8a8" or M <= 64 else 64
+        block_k = 128 if dtype == "fp8_w8a8" or m_in_range(M, stop=65) else 64
 
         # Grouping adjacent M-blocks lets them share weight tiles in L2.
         # Only helps when there are enough M-blocks per expert to group;
         # with many experts each one sees few tokens so grouping is useless.
         tokens_per_expert = M // max(E, 1)
-        group_m = 16 if tokens_per_expert > 128 else 1
+        group_m = 16 if m_in_range(tokens_per_expert, start=129) else 1
 
         # Large batches have enough blocks to saturate the GPU, so we
         # use more warps per block to increase arithmetic intensity.
-        num_warps = 4 if M <= 128 else 8
+        num_warps = 4 if m_in_range(M, stop=129) else 8
 
         if current_platform.is_rocm():
             num_stages = num_stages_rocm
-        elif M <= 32:
+        elif m_in_range(M, stop=33):
             num_stages = 4
         else:
             num_stages = 3
@@ -1626,7 +1627,7 @@ def _get_configured_moe_config(
     configs = get_moe_configs(E, N, dtype, block_n, block_k)
     if configs:
         # Pick the config tuned for the closest batch size
-        return configs[min(configs.keys(), key=lambda x: abs(x - M))]
+        return select_nearest_m(configs, M)
     return None
 
 

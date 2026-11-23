@@ -5,6 +5,7 @@
 // supported (E, H) pairs listed at the bottom of this file.
 // Supports bf16 or fp32 activation; weight is always fp32.
 
+#include "core/kernel_buckets.h"
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
@@ -221,12 +222,15 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
           output, mat_a, mat_b, stream);
       return;
     }
-    if constexpr (kNumTokens > 16 && kNumTokens % 8 == 0) {
-      constexpr int block_size = kNumTokens == 24 ? 160 : 128;
+    if constexpr (vllm::kernel_buckets::m_in_range(kNumTokens, 17) &&
+                  kNumTokens % 8 == 0) {
+      constexpr int block_size =
+          vllm::kernel_buckets::m_in_range(kNumTokens, 24, 25) ? 160 : 128;
       launchFp32RouterGemm<InputT, block_size, 2, kNumTokens, kNumExperts,
                            kHiddenDim, 4>(output, mat_a, mat_b, stream);
     } else {
-      constexpr int block_size = kNumTokens == 1 ? 64 : 128;
+      constexpr int block_size =
+          vllm::kernel_buckets::m_in_range(kNumTokens, 1, 2) ? 64 : 128;
       constexpr int token_groups = kNumTokens % 2 == 0 ? 2 : 1;
       launchFp32RouterGemm<InputT, block_size, 1, kNumTokens, kNumExperts,
                            kHiddenDim, token_groups>(output, mat_a, mat_b,
@@ -246,10 +250,12 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
           output, mat_a, mat_b, stream);
       return;
     }
-    if constexpr (kNumTokens >= 12 && kNumTokens % 2 == 0) {
+    if constexpr (vllm::kernel_buckets::m_in_range(kNumTokens, 12) &&
+                  kNumTokens % 2 == 0) {
       launchFp32RouterGemm<InputT, 192, 1, kNumTokens, kNumExperts, kHiddenDim,
                            2>(output, mat_a, mat_b, stream);
-    } else if constexpr (kNumTokens >= 6 && kNumTokens % 2 == 0) {
+    } else if constexpr (vllm::kernel_buckets::m_in_range(kNumTokens, 6) &&
+                         kNumTokens % 2 == 0) {
       launchFp32RouterGemm<InputT, 384, 1, kNumTokens, kNumExperts, kHiddenDim,
                            2>(output, mat_a, mat_b, stream);
     } else {
@@ -266,12 +272,14 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
           output, mat_a, mat_b, stream);
       return;
     }
-    if constexpr (kNumTokens >= 14 && kNumTokens % 2 == 0) {
+    if constexpr (vllm::kernel_buckets::m_in_range(kNumTokens, 14) &&
+                  kNumTokens % 2 == 0) {
       // M=14 originally measured 0.91x and stayed on legacy; two fresh
       // sweeps (B300 dev1 + B200) both put 192/2/tg2 ahead by 3.5-4%%.
       launchFp32RouterGemm<InputT, 192, 2, kNumTokens, kNumExperts, kHiddenDim,
                            2>(output, mat_a, mat_b, stream);
-    } else if constexpr (kNumTokens >= 8 && kNumTokens <= 12 &&
+    } else if constexpr (vllm::kernel_buckets::m_in_range(kNumTokens, 8) &&
+                         vllm::kernel_buckets::m_in_range(kNumTokens, 0, 13) &&
                          kNumTokens % 2 == 0) {
       launchFp32RouterGemm<InputT, 192, 1, kNumTokens, kNumExperts, kHiddenDim,
                            2>(output, mat_a, mat_b, stream);
@@ -290,10 +298,11 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
           output, mat_a, mat_b, stream);
       return;
     }
-    if constexpr (kNumTokens >= 10 && kNumTokens % 2 == 0) {
+    if constexpr (vllm::kernel_buckets::m_in_range(kNumTokens, 10) &&
+                  kNumTokens % 2 == 0) {
       launchFp32RouterGemm<InputT, 256, 2, kNumTokens, kNumExperts, kHiddenDim,
                            2>(output, mat_a, mat_b, stream);
-    } else if constexpr (kNumTokens >= 13) {
+    } else if constexpr (vllm::kernel_buckets::m_in_range(kNumTokens, 13)) {
       launchFp32RouterGemm<InputT, 256, 2, kNumTokens, kNumExperts, kHiddenDim>(
           output, mat_a, mat_b, stream);
     } else {

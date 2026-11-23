@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
+from vllm.kernel_buckets import m_in_range
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
@@ -1561,7 +1562,7 @@ def scaled_fp4_quant(
             f"padded_n has to be a multiple of {block_size}, but got {padded_n}."
         )
 
-    use_8x4_sf_layout = True if "trtllm" in backend and m <= 32 else False  # noqa: SIM210
+    use_8x4_sf_layout = bool("trtllm" in backend and m_in_range(m, stop=33))
     if use_8x4_sf_layout and padded_n is not None and padded_n != n:
         # TODO: support this case
         raise ValueError("padded_n is not supported with TRTLLM 8x4 scale layout.")

@@ -11,6 +11,7 @@ from typing import Any
 
 import torch
 
+from vllm.kernel_buckets import MBucketTable, m_in_range
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
 
 from ._ll_router_common import (
@@ -57,6 +58,10 @@ _TUNED_DOTPROD_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int, int]]] =
         **{M: (256, 1, 2) for M in range(13, 33, 2)},
     },
 }
+_TUNED_DOTPROD_BUCKETS = {
+    shape: MBucketTable.from_points(points, None)
+    for shape, points in _TUNED_DOTPROD_CONFIGS.items()
+}
 _SUPPORTED_ACTIVATION_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 
 
@@ -94,13 +99,11 @@ class LLFp32WGemm(VllmJitKernel["LLFp32WGemm.CompileKey"]):
     ) -> CompileKey:
         default_config = (
             _DEFAULT_DOTPROD_GROUPED_CONFIG
-            if N <= 128 and M >= 12 and M % 2 == 0
+            if N <= 128 and m_in_range(M, start=12) and M % 2 == 0
             else _DEFAULT_DOTPROD_CONFIG
         )
-        tuned_configs = _TUNED_DOTPROD_CONFIGS.get((K, N))
-        config = (
-            tuned_configs.get(M, default_config) if tuned_configs else default_config
-        )
+        tuned_buckets = _TUNED_DOTPROD_BUCKETS.get((K, N))
+        config = (tuned_buckets.select(M) if tuned_buckets else None) or default_config
         return self.CompileKey(
             m=M,
             k=K,

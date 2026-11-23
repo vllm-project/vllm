@@ -21,6 +21,7 @@ import torch
 from packaging.version import Version
 
 import vllm.envs as envs
+from vllm.kernel_buckets import m_in_range
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -992,7 +993,7 @@ def use_trtllm_attention(
             use_trtllm = True
         else:
             # Decode auto-detection
-            use_trtllm = num_tokens <= 256 and kv_cache_dtype == "auto"
+            use_trtllm = m_in_range(num_tokens, stop=257) and kv_cache_dtype == "auto"
         if use_trtllm:
             logger.warning_once(
                 "Using TRTLLM %s attention (auto-detected).",
@@ -1327,7 +1328,7 @@ def flashinfer_scaled_fp4_mm(
         block_scale_a = block_scale_a.view(torch.uint8)
         block_scale_b = block_scale_b.view(torch.uint8)
 
-    use_8x4_sf_layout = True if backend == "trtllm" and a.shape[0] <= 32 else False  # noqa: SIM210
+    use_8x4_sf_layout = bool(backend == "trtllm" and m_in_range(a.shape[0], stop=33))  # noqa: SIM210
 
     return flashinfer_mm_fp4(
         a,

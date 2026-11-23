@@ -10,6 +10,7 @@ from typing import Any
 
 import torch
 
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.warmup.jit_warmup import WarmupIntRange, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_tilelang_helper import (
     TileLangLaunchSpec,
@@ -86,11 +87,11 @@ def mhc_fused_post_pre_split_config(
     fused kernel's block. One source of truth for the dispatch decision, the
     compile key and the launch, which must agree.
     """
-    if num_tokens > _FUSED_POST_PRE_MAX_TOKENS:
+    if m_in_range(num_tokens, start=_FUSED_POST_PRE_MAX_TOKENS + 1):
         return None
     tile_n, n_splits, n_thr = _FUSED_POST_PRE_SINGLE_PASS
     if (
-        num_tokens <= _FUSED_POST_PRE_SINGLE_PASS_MAX_TOKENS
+        m_in_range(num_tokens, stop=_FUSED_POST_PRE_SINGLE_PASS_MAX_TOKENS + 1)
         and hidden_size == n_splits * n_thr
         and (hc_mult * (hc_mult + 2)) % tile_n == 0
         and _fused_post_pre_single_pass_supported()
@@ -102,7 +103,7 @@ def mhc_fused_post_pre_split_config(
     # The projection tiles supply the parallelism a small token count cannot,
     # so the tile grows with the batch: 1.3x at one token and 1.03x at 32
     # against a split-k GEMM given the split its own estimator computes.
-    if num_tokens < 16:
+    if m_in_range(num_tokens, stop=16):
         tile_n, n_splits = 2, 8
     else:
         tile_n, n_splits = 6, 8
@@ -1170,11 +1171,11 @@ class HcPrenormGemmTileLangKernel(
         **compile_key_fields: int,
     ) -> CompileKey:
         use_default_config = n_splits == 1 and tile_n == 12 and n_thr == 512
-        use_block_m = use_default_config and num_tokens >= 1024
+        use_block_m = use_default_config and m_in_range(num_tokens, start=1024)
         use_small_tile = (
             use_default_config
             and not use_block_m
-            and num_tokens < 128
+            and m_in_range(num_tokens, stop=128)
             and hc_hidden_size % 1024 == 0
         )
         effective_n_thr = 1024 if use_small_tile else n_thr
@@ -1481,7 +1482,7 @@ class MhcPreBigFuseTileLangKernel(
             if broadcast_norm_eps is not None
             else norm_eps,
             _when=lambda *, use_fused_tilelang, num_tokens: (
-                not use_fused_tilelang or num_tokens <= 16
+                not use_fused_tilelang or m_in_range(num_tokens, stop=17)
             ),
         )
 
@@ -1727,7 +1728,9 @@ class MhcFusedTileLangKernel(
             num_tokens=WarmupIntRange(1, max_tokens + 1),
             hidden_size=hidden_size,
             hc_mult=hc_mult,
-            _when=lambda *, num_tokens: num_tokens <= _FUSED_POST_PRE_MAX_TOKENS,
+            _when=lambda *, num_tokens: m_in_range(
+                num_tokens, stop=_FUSED_POST_PRE_MAX_TOKENS + 1
+            ),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:

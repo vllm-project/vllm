@@ -20,6 +20,7 @@
  * limitations under the License.
  */
 
+#include "core/kernel_buckets.h"
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/ScalarType.h>
@@ -712,7 +713,7 @@ template <typename T, int kHdIn, int kHdOut, int kTileK = 256, int kTileM = 16>
 void invokeFusedAGemmForTokens(T* output, T const* mat_a, T const* mat_b,
                                int num_tokens, int input_row_stride,
                                cudaStream_t const stream, bool enable_pdl) {
-  if (num_tokens <= 8) {
+  if (vllm::kernel_buckets::m_in_range(num_tokens, 0, 9)) {
     invokeFusedAGemm<T, kHdIn, kHdOut, 8, kTileK, kTileM>(
         output, mat_a, mat_b, num_tokens, input_row_stride, stream, enable_pdl);
   } else {

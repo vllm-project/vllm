@@ -19,6 +19,7 @@ from typing import Any, Literal
 
 import torch
 
+from vllm.kernel_buckets import MBucketTable, m_in_range
 from vllm.platforms import current_platform
 
 logger = logging.getLogger(__name__)
@@ -27,14 +28,23 @@ logger = logging.getLogger(__name__)
 MAX_FUSED_M = 48
 
 # Split-K configs tuned on SM100f for Qwen3.8-Flash-Next (K=10240, N=324).
-_SM100F_TUNED_SPLITK: dict[int, tuple[int, int, int]] = {
-    **{m: (6, 5, 8) for m in range(5, 17)},
-    **{m: (6, 5, 16) for m in range(17, 33)},
-    **{m: (6, 4, 16) for m in range(33, MAX_FUSED_M + 1)},
-}
+_SM100F_TUNED_SPLITK = MBucketTable(
+    stops=(5, 17, 33, MAX_FUSED_M + 1),
+    values=(None, (6, 5, 8), (6, 5, 16), (6, 4, 16), None),
+)
 
 # FMA: (backend, M, K, threadblock_size); MMA: (backend, split_k, stages, tile_n).
 CompileKey = tuple[Literal["fma", "mma"], int, int, int]
+
+
+@lru_cache(maxsize=256)
+def _dispatch_hc_down_silu(m: int, k: int) -> CompileKey:
+    if m_in_range(m, stop=5) or k < 2048:
+        return ("fma", m, k, 128)
+    config = _SM100F_TUNED_SPLITK.select(m)
+    if config is None:
+        raise KeyError(m)
+    return ("mma", *config)
 
 
 class HcDownSiluGemm:
@@ -52,9 +62,7 @@ class HcDownSiluGemm:
         self._warmup_registered = False
 
     def dispatch(self, m: int) -> CompileKey:
-        if m <= 4 or self.k < 2048:
-            return ("fma", m, self.k, 128)
-        return ("mma", *_SM100F_TUNED_SPLITK[m])
+        return _dispatch_hc_down_silu(m, self.k)
 
     def compile(self, compile_key: CompileKey) -> None:
         if compile_key in self._compiled:
@@ -191,7 +199,9 @@ def hc_down_silu(
         LoRA activations [M, rank] and injection logits [M, hc].
 
     """
-    kernel = _get_kernel(rank, hc, weight.shape[1], x.shape[0] == 1)
+    kernel = _get_kernel(
+        rank, hc, weight.shape[1], m_in_range(x.shape[0], start=1, stop=2)
+    )
     output = kernel(x, weight)
     return output[:, :rank], output[:, rank : rank + hc]
 
@@ -211,7 +221,7 @@ def request_hc_down_silu_warmup(
     """
     if not current_platform.has_device_capability(90) or k % 8 != 0:
         return
-    m_set = {int(m) for m in m_values if 1 <= m <= MAX_FUSED_M}
+    m_set = {int(m) for m in m_values if m_in_range(m, start=1, stop=MAX_FUSED_M + 1)}
     # M=1 dispatches to the weight-prefetching PDL variant.
     _get_kernel(rank, hc, k, True).request_warmup(m_set & {1})
     _get_kernel(rank, hc, k).request_warmup(m_set - {1})

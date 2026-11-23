@@ -12,7 +12,6 @@ process-wide workspace through `maybe_init_gemm_rs_ar` + `GemmRsAr.apply`.
 # See https://github.com/NVIDIA/cutlass/issues/3117 for memory semantics.
 # The MXFP8 path follows the block-scaled SM100 GEMM template from
 # https://github.com/gau-nernst/gn-kernels (sm100_mm_mxfp8.py).
-
 from functools import cache
 from typing import TYPE_CHECKING
 
@@ -44,6 +43,7 @@ from vllm.distributed.device_communicators.nvlink_fabric import (
     SymmetricMemoryTopology,
     get_symmetric_memory_topology,
 )
+from vllm.kernel_buckets import m_in_range
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
@@ -996,7 +996,7 @@ class GemmRsAr:
     def should_run(self, x: torch.Tensor) -> bool:
         # Use the same threshold for RS and AR for now. Small-M shapes are
         # supported but faster on the existing LL path.
-        return x.shape[0] >= 128
+        return m_in_range(x.shape[0], start=128)
 
     def apply(
         self, x: torch.Tensor | QuantizedActivation, linear: LinearBase
@@ -1059,7 +1059,7 @@ class GemmRsAr:
 
         grid_m = (M + 127) // 128
         # Avoid padding small odd grids; 2-CTA wins consistently for M >= 1024.
-        cta_group = 2 if M >= 1024 or grid_m % 2 == 0 else 1
+        cta_group = 2 if m_in_range(M, start=1024) or grid_m % 2 == 0 else 1
         grid_m = (grid_m + cta_group - 1) // cta_group * cta_group
 
         num_tiles = grid_m * (N // 128)

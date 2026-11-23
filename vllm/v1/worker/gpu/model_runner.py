@@ -52,6 +52,7 @@ from vllm.distributed.parallel_state import (
     single_pp_stage,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.kernel_buckets import KernelPhase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
@@ -2197,6 +2198,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
+                kernel_phase=(
+                    KernelPhase.UNKNOWN if dummy_run else input_batch.kernel_phase
+                ),
             ):
                 self.kv_connector.pre_forward(
                     scheduler_output, input_batch, attn_metadata=attn_metadata

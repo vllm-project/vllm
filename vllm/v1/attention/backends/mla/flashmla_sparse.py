@@ -12,6 +12,7 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
+from vllm.kernel_buckets import m_in_range
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
@@ -1312,9 +1313,8 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             # convert to local slots. Without compaction the fp8 kernel masks
             # the scattered -1s natively. req_id is sliced to topk_indices rows
             # (the converter grids from req_id).
-            use_topk_length = (
-                self.fp8_supports_topk_length
-                and topk_indices.shape[0] >= MIN_TOKENS_FOR_DCP_TOPK_LENGTH
+            use_topk_length = self.fp8_supports_topk_length and m_in_range(
+                topk_indices.shape[0], start=MIN_TOKENS_FOR_DCP_TOPK_LENGTH
             )
             converted = triton_filter_and_convert_dcp_index(
                 req_id_per_token,

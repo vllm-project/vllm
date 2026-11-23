@@ -17,6 +17,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include "core/kernel_buckets.h"
 #include "moeTopKFuncs.cuh"
 
 #include <torch/csrc/stable/tensor.h>
@@ -1213,7 +1214,8 @@ void launch(T* scores, float* topk_values, IdxT* topk_indices,
   bool const use_block_kernel =
       UseTunedBlockPath<MaxNumExperts, MaxNumTopExperts> ||
       MaxNumExperts > 1024 || num_experts >= 1024 ||
-      (num_experts >= 256 && num_tokens <= 1024);
+      (num_experts >= 256 &&
+       vllm::kernel_buckets::m_in_range(num_tokens, 0, 1025));
   if (use_block_kernel) {
     config.gridDim = static_cast<uint32_t>(num_tokens);
     config.blockDim = BlockDim;
@@ -1462,7 +1464,8 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
       scores, {num_tokens, topk}, torch::headeronly::ScalarType::Float);
   auto topk_indices = torch::stable::new_empty(
       scores, {num_tokens, topk}, torch::headeronly::ScalarType::Int);
-  const bool pdl_flag = num_tokens <= vllm::moe::PDLEnableTokens;
+  const bool pdl_flag = vllm::kernel_buckets::m_in_range(
+      num_tokens, 0, vllm::moe::PDLEnableTokens + 1);
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       scores.get_device_index());

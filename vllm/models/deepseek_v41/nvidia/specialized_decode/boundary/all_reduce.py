@@ -7,6 +7,7 @@ import torch
 from transformers import PreTrainedConfig
 
 from vllm.distributed import get_tp_group
+from vllm.kernel_buckets import m_in_range
 from vllm.platforms import current_platform
 
 from ...ops.cute_dsl import AllReduceMHC
@@ -76,7 +77,7 @@ class BoundaryAllReduce(AllReduceMHC):
         if published is not x:
             raise RuntimeError("reducing a tensor other than the published one")
         m = x.shape[0]
-        if m >= self.bt_min_rows:
+        if m_in_range(m, start=self.bt_min_rows):
             # The producer stored into the LL mailbox (``publish_target``);
             # ``PublishingMxfp8Linear.supports`` admits only smaller calls.
             raise RuntimeError(f"a published contribution of {m} rows takes BT")

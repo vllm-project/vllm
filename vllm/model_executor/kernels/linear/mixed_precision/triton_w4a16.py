@@ -21,6 +21,7 @@ Checkpoint layout from compressed_tensors_wNa16 create_weights:
 
 import torch
 
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
 from vllm.platforms import current_platform
@@ -226,24 +227,24 @@ def _triton_w4a16_gemm_impl(
 
         if on_gfx1x():
             # Tuned for RDNA 3.5 (gfx1151, 40 CUs, 32-wide wavefronts).
-            if M <= 32:
+            if m_in_range(M, stop=33):
                 BLOCK_M, BLOCK_N, BLOCK_K = 32, 32, 64
-            elif M <= 64:
+            elif m_in_range(M, stop=65):
                 BLOCK_M, BLOCK_N, BLOCK_K = 64, 64, 32
             else:
                 BLOCK_M, BLOCK_N, BLOCK_K = 128, 32, 64
         else:
             # Tuned for MI300 (gfx942, 304 CUs, 64-wide wavefronts).
-            if M <= 32:
+            if m_in_range(M, stop=33):
                 BLOCK_M, BLOCK_N, BLOCK_K = 32, 64, 32
-            elif M <= 64:
+            elif m_in_range(M, stop=65):
                 BLOCK_M, BLOCK_N, BLOCK_K = 64, 64, 32
             else:
                 BLOCK_M, BLOCK_N, BLOCK_K = 128, 128, 32
     else:
-        if M <= 32:
+        if m_in_range(M, stop=33):
             BLOCK_M, BLOCK_N, BLOCK_K = 32, 64, 32
-        elif M <= 64:
+        elif m_in_range(M, stop=65):
             BLOCK_M, BLOCK_N, BLOCK_K = 64, 64, 32
         else:
             BLOCK_M, BLOCK_N, BLOCK_K = 128, 128, 32

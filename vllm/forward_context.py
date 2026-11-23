@@ -11,6 +11,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
+from vllm.kernel_buckets import KernelPhase
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionMetadata
@@ -191,6 +192,7 @@ class ForwardContext:
     moe_layer_index: int = 0
 
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
+    kernel_phase: KernelPhase = KernelPhase.UNKNOWN
 
     def __post_init__(self):
         assert self.cudagraph_runtime_mode.is_valid_runtime_mode(), (
@@ -208,6 +210,15 @@ def get_forward_context() -> ForwardContext:
         "Please use `set_forward_context` to set the forward context."
     )
     return _forward_context
+
+
+def get_kernel_phase() -> KernelPhase:
+    """Execution phase supplied by the runner; standalone warmup is unknown."""
+    return (
+        _forward_context.kernel_phase
+        if _forward_context is not None
+        else KernelPhase.UNKNOWN
+    )
 
 
 def is_forward_context_available() -> bool:
@@ -234,6 +245,7 @@ def create_forward_context(
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    kernel_phase: KernelPhase = KernelPhase.UNKNOWN,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
@@ -251,6 +263,7 @@ def create_forward_context(
         ubatch_slices=ubatch_slices,
         skip_compiled=skip_compiled,
         additional_kwargs=additional_kwargs or {},
+        kernel_phase=kernel_phase,
         is_padding=is_padding,
     )
 
@@ -282,6 +295,7 @@ def set_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    kernel_phase: KernelPhase = KernelPhase.UNKNOWN,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -349,6 +363,7 @@ def set_forward_context(
         additional_kwargs,
         skip_compiled,
         is_padding=is_padding,
+        kernel_phase=kernel_phase,
     )
 
     try:

@@ -36,6 +36,7 @@ import torch.nn.functional as F
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -181,7 +182,7 @@ class MoonEPBufferPool:
         self._buffers: dict[int, Any] = {}
 
     def capacity_for(self, num_tokens: int) -> int:
-        if num_tokens >= self.max_tokens_per_rank:
+        if m_in_range(num_tokens, start=self.max_tokens_per_rank):
             return self.max_tokens_per_rank
         cap = 1 << max(num_tokens - 1, 0).bit_length()
         return min(max(cap, MOONEP_MIN_DISPATCH_TOKENS), self.max_tokens_per_rank)

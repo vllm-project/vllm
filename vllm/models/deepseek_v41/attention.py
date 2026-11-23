@@ -16,6 +16,7 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -1039,7 +1040,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # it cannot go through fused_wqa_wkv directly.
         num_tokens = hidden_states.shape[0]
         # MergedColumnParallelLinear returns (output, bias); bias is None.
-        if self.shard_fused_wqa_wkv and num_tokens >= _SHARD_FUSED_WQA_WKV_MIN_TOKENS:
+        if self.shard_fused_wqa_wkv and m_in_range(
+            num_tokens, start=_SHARD_FUSED_WQA_WKV_MIN_TOKENS
+        ):
             qr_kv, _ = self.fused_wqa_wkv(sp_shard(hidden_states))
             return sp_all_gather(qr_kv)[:num_tokens]
         qr_kv, _ = self.fused_wqa_wkv(hidden_states)
@@ -1097,8 +1100,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.ln_events[0],
             self.ln_events[1:3],
             aux_streams,
-            enable=hidden_states.shape[0]
-            <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD,
+            enable=m_in_range(
+                hidden_states.shape[0],
+                stop=envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD + 1,
+            ),
         )
 
         return qr_kv, kv_score, indexer_weights
@@ -1214,7 +1219,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # Captured graphs keep the fused pad.
             copy_q = (
                 self._pads_q_by_copy
-                and q.shape[0] >= _Q_PAD_COPY_MIN_TOKENS
+                and m_in_range(q.shape[0], start=_Q_PAD_COPY_MIN_TOKENS)
                 and not torch.cuda.is_current_stream_capturing()
             )
             q_padded = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(

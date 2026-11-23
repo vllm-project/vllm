@@ -5,6 +5,7 @@ import functools
 
 import torch
 
+from vllm.kernel_buckets import m_in_range
 from vllm.utils.torch_utils import direct_register_custom_op
 
 # MXFP8 constants
@@ -197,7 +198,7 @@ def _mxfp8_e4m3_quantize_triton(
     scales = torch.empty(
         (M, K // MXFP8_BLOCK_SIZE), dtype=MXFP8_SCALE_DTYPE, device=x.device
     )
-    BLOCK_M, BLOCK_K = (1 if M == 1 else 4), 512
+    BLOCK_M, BLOCK_K = (1 if m_in_range(M, start=1, stop=2) else 4), 512
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(K, BLOCK_K))
     _MXFP8_QUANT_KERNEL[grid](
         x,

@@ -1,4 +1,5 @@
 
+#include "core/kernel_buckets.h"
 #include "../../torch_utils.h"
 
 #include "../../dispatch_utils.h"
@@ -234,7 +235,10 @@ void rms_norm_per_block_quant_dispatch(
   dim3 grid(num_tokens);
   const bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
   const int max_block_size =
-      batch_invariant_launch ? 512 : ((num_tokens <= 256) ? 512 : 256);
+      batch_invariant_launch
+          ? 512
+          : ((vllm::kernel_buckets::m_in_range(num_tokens, 0, 257)) ? 512
+                                                                    : 256);
   dim3 block(std::min(hidden_size, max_block_size));
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());

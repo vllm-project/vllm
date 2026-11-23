@@ -16,6 +16,7 @@ from cutlass.cute.runtime import make_fake_tensor
 from cutlass.utils import hopper_helpers
 
 from vllm.cute_utils import mbarrier, recast_val, simple_tma_copy
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
@@ -518,7 +519,9 @@ class CandidatePagedLogitsKernel(
             # These dimensions stay fixed during CUDA Graph replay.
             tile_tokens = (
                 128
-                if use_tma and q.shape[0] >= 24 and logits.shape[1] % 128 == 0
+                if use_tma
+                and m_in_range(q.shape[0], start=24)
+                and logits.shape[1] % 128 == 0
                 else 64
             )
         assert tile_tokens in (64, 128, 256) and logits.shape[1] % tile_tokens == 0

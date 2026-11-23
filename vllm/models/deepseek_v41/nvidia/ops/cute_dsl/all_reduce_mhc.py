@@ -72,6 +72,7 @@ from cutlass import BFloat16, Float32, Int32, Int64, Uint8, Uint32
 from cutlass.cute.runtime import make_fake_compact_tensor
 
 from vllm.distributed import get_tp_group
+from vllm.kernel_buckets import m_in_range
 from vllm.models.common.ops.moe_tail_fusion.primitives import (
     ACTIVE_STAGE,
     LAMPORT_GENERATIONS,
@@ -1559,7 +1560,7 @@ class AllReduceMHC:
         self._check(m, residual, post, comb, pre)
         if x.shape != (m, self.hidden_size):
             raise ValueError("unexpected x shape")
-        bt = m >= self.bt_min_rows
+        bt = m_in_range(m, start=self.bt_min_rows)
         consumer = self._consumer(residual, pre, norm_weight, m, mxfp8_out, bt)
         (self._bt_publish if bt else self._publish)(
             to_cute_dynamic(x.flatten(), 16, divisibility=self.hidden_size),
@@ -1616,7 +1617,7 @@ class AllReduceMHC:
             or expanded_idx_to_permuted_idx.numel() != m * top_k
         ):
             raise ValueError("expanded_idx_to_permuted_idx must be int32 [M, top_k]")
-        bt = m >= self.bt_min_finalize_rows
+        bt = m_in_range(m, start=self.bt_min_finalize_rows)
         consumer = self._consumer(residual, pre, norm_weight, m, mxfp8_out, bt)
         (self._bt_finalize_publish if bt else self._finalize_publish)(
             to_cute_dynamic(gemm2_permuted.flatten(), 16, divisibility=hidden),
@@ -1649,7 +1650,7 @@ class AllReduceMHC:
         pre: torch.Tensor | None,
     ) -> None:
         hc = self.hc_mult
-        if not 1 <= m <= self.capacity:
+        if not m_in_range(m, start=1, stop=self.capacity + 1):
             raise ValueError(f"M={m} is outside [1, {self.capacity}]")
         if residual.shape != (m, hc, self.hidden_size):
             raise ValueError("unexpected residual shape")
@@ -1738,7 +1739,7 @@ class AllReduceMHC:
         hidden, hc = self.hidden_size, self.hc_mult
         if bt:
             # The owners reduce first; the consumer then reads their sums.
-            self._owner_reduce[32 if m <= 192 else 320](
+            self._owner_reduce[32 if m_in_range(m, stop=193) else 320](
                 to_cute(self._bt_mailbox.flatten(), 16),
                 to_cute(self._bt_stage_state, 4),
                 Int64(self._bt_multicast),

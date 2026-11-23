@@ -18,6 +18,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
     has_deep_select,
     sparse_mqa_logits_paged_decode,
@@ -201,7 +202,7 @@ class SparseMQAIndexer(nn.Module):
             assert decode_rows is not None and decode_rows.block_table is not None
             assert decode_rows.row_indices is not None
             num_rows = decode_rows.row_ke.shape[0]
-            if num_rows > 0:
+            if m_in_range(num_rows, start=1):
                 decode_rows.kernel_metadata = sparse_mqa_logits_paged_decode(
                     q_values[:num_rows].unsqueeze(1),
                     q_scale[:num_rows].unsqueeze(1),

@@ -19,6 +19,7 @@ from types import FunctionType, MethodType
 
 import torch
 
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.layers.activation import (
     GELU,
     ReLUSquaredActivation,
@@ -210,7 +211,7 @@ def _act_nvfp4_quant_supported(
         and x.ndim == 2
         and x.shape[-1] > 0
         and x.shape[-1] % 16 == 0
-        and x.shape[0] <= _act_nvfp4_max_rows(x.shape[-1])
+        and m_in_range(x.shape[0], stop=_act_nvfp4_max_rows(x.shape[-1]) + 1)
         and x.is_contiguous()
         and isinstance(scale, torch.Tensor)
         and scale.dtype == torch.float32

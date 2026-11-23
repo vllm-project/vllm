@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from collections.abc import Callable
 
 import torch
@@ -7,6 +8,7 @@ import torch
 import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
@@ -76,9 +78,8 @@ def _aiter_topk_gating_supported(
     sharing a row stride and `topk_weights` wide enough for the shared
     columns. Shared expert ids stay as the caller prefilled them.
     """
-    if (
-        not gating_output.is_contiguous()
-        or gating_output.shape[0] > _AITER_TOPK_GATING_MAX_TOKENS
+    if not gating_output.is_contiguous() or m_in_range(
+        gating_output.shape[0], start=_AITER_TOPK_GATING_MAX_TOKENS + 1
     ):
         return False
     if num_shared_experts == 0:
@@ -200,7 +201,7 @@ def fused_topk(
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
     # Idle ranks still participate in dispatch, but have no local routing work.
-    if M > 0:
+    if m_in_range(M, start=1):
         topk_weights, topk_ids = topk_func(
             topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
         )

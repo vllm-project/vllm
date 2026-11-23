@@ -7,6 +7,7 @@ from collections.abc import Callable
 import torch
 from torch import nn
 
+from vllm.kernel_buckets import m_in_range
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
 )
@@ -97,7 +98,9 @@ def dsv41_o_proj(
     wo_b_proj = wo_b_proj or layer._wo_b_proj
     o = attn_out[:, : layer.n_local_heads, :]
     cos_sin_cache = layer.rotary_emb.cos_sin_cache
-    if 1 <= o.shape[0] <= _fused_wo_a_max_tokens(layer) and _can_fuse_wo_a(layer):
+    if m_in_range(
+        o.shape[0], start=1, stop=_fused_wo_a_max_tokens(layer) + 1
+    ) and _can_fuse_wo_a(layer):
         from .fused_wo_a import _FUSED_WO_A_KERNEL
 
         q, scales = _FUSED_WO_A_KERNEL(

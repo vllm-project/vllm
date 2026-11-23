@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from typing import TYPE_CHECKING, Union
@@ -10,6 +11,7 @@ import vllm.envs as envs
 from vllm.config import ParallelConfig, SchedulerConfig
 from vllm.config.kernel import MoEBackend
 from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
+from vllm.kernel_buckets import m_in_range
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
@@ -1623,8 +1625,8 @@ class FusedMoEConfig:
         max_num_tokens = self.defer_moe_finalize_max_num_tokens
         return (
             self.use_deferred_moe_finalize
-            and num_tokens > 0
-            and (max_num_tokens < 0 or num_tokens <= max_num_tokens)
+            and m_in_range(num_tokens, start=1)
+            and (max_num_tokens < 0 or m_in_range(num_tokens, stop=max_num_tokens + 1))
         )
 
     def limit_deferred_moe_finalize(self, max_num_tokens: int) -> None:

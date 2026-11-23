@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/kernel_buckets.h"
 #include <torch/headeronly/util/shim_utils.h>
 
 #include "core/utils.hpp"
@@ -237,7 +238,7 @@ void cutlass_gemm_blockwise_sm100_fp8_dispatch(torch::stable::Tensor& out,
   // TODO: better heuristics
   // swapAB only wins for small M; misaligned M >= 65 is faster on the
   // non-swapAB path with padded activation scales (measured on GB300).
-  bool swap_ab = (m <= 64);
+  bool swap_ab = (vllm::kernel_buckets::m_in_range(m, 0, 65));
   bool use_tma_epilogue = (m * n) % 4 == 0;
   if (!swap_ab) {
     constexpr int TILE_N = 128;

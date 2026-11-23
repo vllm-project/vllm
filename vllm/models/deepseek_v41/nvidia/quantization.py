@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import get_current_vllm_config
+from vllm.kernel_buckets import m_in_range
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExperts,
@@ -160,7 +161,7 @@ def bf16_mxfp8_linear_method_cls() -> type[ModelOptLinearMethod]:
                 self.gemv is not None
                 and bias is None
                 and x.dim() == 2
-                and 0 < x.shape[0] <= GEMV_MAX_ROWS
+                and m_in_range(x.shape[0], start=1, stop=GEMV_MAX_ROWS + 1)
                 and x.dtype == torch.bfloat16
                 and x.stride(1) == 1
                 and x.stride(0) % 8 == 0

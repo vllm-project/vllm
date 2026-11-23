@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.kernel_buckets import m_in_range
+
 
 @dataclass(slots=True)
 class UnfinalizedMoEOutput:
@@ -84,7 +86,7 @@ def convert_flashinfer_moe_output(
         ValueError: If FlashInfer returns an unexpected layout.
 
     """
-    if num_tokens < 0:
+    if m_in_range(num_tokens, stop=0):
         raise ValueError("num_tokens must be non-negative.")
     if top_k <= 0:
         raise ValueError("top_k must be positive.")

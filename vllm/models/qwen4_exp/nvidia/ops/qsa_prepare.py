@@ -4,7 +4,16 @@
 
 import torch
 
+from vllm.kernel_buckets import MBucketTable, PhaseBucketTable
 from vllm.triton_utils import tl, triton
+
+_QSA_PREPARE_BUCKETS_LEGACY = MBucketTable((4097,), ((2, 2), (2, 4)))
+QSA_PREPARE_BUCKETS = PhaseBucketTable(
+    operator="vllm.models.qwen4_exp.nvidia.ops.qsa_prepare.qsa_prepare",
+    fallback=_QSA_PREPARE_BUCKETS_LEGACY,
+    prefill=_QSA_PREPARE_BUCKETS_LEGACY,
+    decode=_QSA_PREPARE_BUCKETS_LEGACY,
+)
 
 
 @triton.jit
@@ -573,10 +582,7 @@ def qsa_prepare(
     assert main_qkv.stride(-1) == 1
     assert main_slot_mapping.shape == (num_tokens,)
 
-    if num_tokens <= 4096:
-        TILE_T_Q, TILE_H_Q = 2, 2
-    else:
-        TILE_T_Q, TILE_H_Q = 2, 4
+    TILE_T_Q, TILE_H_Q = QSA_PREPARE_BUCKETS.select_current(num_tokens)
     num_k_work = k_work_metadata.shape[0]
     num_q_work = triton.cdiv(num_tokens, TILE_T_Q) * triton.cdiv(num_q_heads, TILE_H_Q)
     num_main_work = num_tokens * (num_main_q_heads + num_main_kv_heads)

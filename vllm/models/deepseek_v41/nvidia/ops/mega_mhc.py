@@ -5,6 +5,7 @@ import functools
 
 import torch
 
+from vllm.kernel_buckets import m_in_range
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     _import_deep_gemm,
@@ -39,7 +40,7 @@ def can_use_mega_mhc(
         pre_mix is not None
         and norm_weight is not None
         and not capture_aux
-        and x.shape[0] <= 1 << 20
+        and m_in_range(x.shape[0], stop=(1 << 20) + 1)
         and is_mega_mhc_supported(x.shape[1], residual.shape[1])
     )
 
