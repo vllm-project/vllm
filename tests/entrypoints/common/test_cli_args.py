@@ -78,24 +78,22 @@ def test_config_arg_parsing(serve_parser, cli_config_file):
 
 
 def test_logging_config_cli_args(serve_parser):
-    with pytest.warns(UserWarning, match="--log-config-file is deprecated"):
-        args = serve_parser.parse_args(
-            [
-                "--logging-config",
-                '{"log_level":"WARNING","pylogging_config_file":"/tmp/json.json"}',
-                "--logging-config.formatter",
-                "json",
-                "--log-level",
-                "DEBUG",
-                "--log-config-file",
-                "/tmp/flat.json",
-            ]
-        )
+    args = serve_parser.parse_args(
+        [
+            "--logging-config",
+            (
+                '{"log_level":"WARNING","formatter":"json",'
+                '"pylogging_config_file":"/tmp/json.json"}'
+            ),
+            "--log-level",
+            "DEBUG",
+        ]
+    )
 
     config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
     assert config.log_level == "DEBUG"
     assert config.formatter == "json"
-    assert config.pylogging_config_file == "/tmp/flat.json"
+    assert config.pylogging_config_file == "/tmp/json.json"
 
 
 ### Tests for LoRA module parsing
@@ -273,7 +271,7 @@ def test_auto_tool_choice_with_reasoning_parser_passes(serve_parser):
     """Auto tool choice combined with a reasoning parser is supported.
 
     See docs/features/tool_calling.md, which documents using
-    ``--tool-call-parser`` together with ``--reasoning-parser``. This
+    `--tool-call-parser` together with `--reasoning-parser`. This
     combination must pass validation as long as a tool call parser is set.
     """
     args = serve_parser.parse_args(
@@ -336,10 +334,10 @@ def test_per_request_metrics_requires_log_stats(serve_parser):
 def _build_launch_render_parser():
     """Mirror `vllm launch render`.
 
-    `vllm/entrypoints/cli/main.py` parses subcommands with ``dest="subparser"``,
+    `vllm/entrypoints/cli/main.py` parses subcommands with `dest="subparser"`,
     and `LaunchSubcommandBase.add_cli_args` builds the component parser with
     `make_arg_parser`, so a launch component carries serve args under
-    ``args.subparser == "launch"``.
+    `args.subparser == "launch"`.
     """
     vllm_parser = FlexibleArgumentParser()
     subparsers = vllm_parser.add_subparsers(required=False, dest="subparser")

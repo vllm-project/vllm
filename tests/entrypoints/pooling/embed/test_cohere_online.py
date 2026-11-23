@@ -19,14 +19,10 @@ from tests.utils import RemoteOpenAIServer
 DTYPE = "bfloat16"
 
 MODELS: list[tuple[str, list[str]]] = [
-    ("intfloat/multilingual-e5-small", []),
+    ("vllm-project/multilingual-e5-small", []),
     (
         "Snowflake/snowflake-arctic-embed-m-v1.5",
-        [
-            "--trust_remote_code",
-            "--hf_overrides",
-            '{"matryoshka_dimensions":[256]}',
-        ],
+        ["--hf_overrides", '{"matryoshka_dimensions":[256]}'],
     ),
 ]
 

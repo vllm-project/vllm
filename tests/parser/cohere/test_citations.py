@@ -17,10 +17,10 @@ from .utils import make_parser, stream_parser
 
 class TestMelodySourceResolution:
     """Pin the parser-side source resolution (see
-    ``_melody_sources_to_vllm``). The parser receives melody's numeric
-    ``(tool_call_index, tool_result_indices)`` addressing and resolves
-    it against a ``position_to_source`` map handed in by
-    ``CohereServingChatV2._apply_cohere_template_kwargs`` -- the same
+    `_melody_sources_to_vllm`). The parser receives melody's numeric
+    `(tool_call_index, tool_result_indices)` addressing and resolves
+    it against a `position_to_source` map handed in by
+    `CohereServingChatV2._apply_cohere_template_kwargs` -- the same
     map that would otherwise live in the serving layer's resolver.
     """
 
@@ -83,15 +83,15 @@ class TestMelodySourceResolution:
 class TestParserStreamingEndToEnd:
     """End-to-end streaming shape: raw model output text is tokenized
     with the mock byte-level tokenizer and fed one token at a time
-    through :meth:`CohereCommand3ReasoningParser.extract_reasoning_streaming`.
-    We collect the ordered sequence of ``DeltaMessage``s the parser
+    through `CohereCommand3ReasoningParser.extract_reasoning_streaming`.
+    We collect the ordered sequence of `DeltaMessage`s the parser
     hands back -- i.e. what the client would receive on the wire --
     and pin the exact shape.
 
-    Combines the three flavors that reach ``delta``: a thinking block
-    (populates ``reasoning``), a text block (populates ``content``),
-    and a resolved citation (populates ``citations``) referencing
-    ``(start, end)`` offsets into the already-streamed content.
+    Combines the three flavors that reach `delta`: a thinking block
+    (populates `reasoning`), a text block (populates `content`),
+    and a resolved citation (populates `citations`) referencing
+    `(start, end)` offsets into the already-streamed content.
     """
 
     _MODEL_OUTPUT = (
