@@ -111,18 +111,12 @@ class PoolingIOProcessor:
                 ),
             )
 
-            mm_config = self.model_config.multimodal_config
             chat_tok_params = request.build_tok_params(
                 self.model_config, self.renderer.default_chat_tok_params
             )
             chat_params = request.build_chat_params(
                 self.chat_template, self.chat_template_content_format
-            ).with_defaults(
-                default_template_kwargs,
-                default_media_io_kwargs=(
-                    mm_config.media_io_kwargs if mm_config else None
-                ),
-            )
+            ).with_defaults(default_template_kwargs)
 
             params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
             seq_lora_requests = self._lora_request_to_seq(
@@ -136,7 +130,6 @@ class PoolingIOProcessor:
                     chat_params=chat_params,
                     tok_params=chat_tok_params,
                     prompt_extras=ctx.prompt_extras,
-                    skip_mm_cache=False,
                     params=params_seq[i],
                     lora_requests=seq_lora_requests[i],
                     priorities=seq_priority[i],
@@ -174,7 +167,6 @@ class PoolingIOProcessor:
                     prompts=parsed_prompts[i],
                     tok_params=cmpl_tok_params,
                     prompt_extras=ctx.prompt_extras,
-                    skip_mm_cache=False,
                     params=params_seq[i],
                     lora_requests=seq_lora_requests[i],
                     priorities=seq_priority[i],
@@ -221,6 +213,10 @@ class PoolingIOProcessor:
         else:
             pooling_params = ctx.pooling_params
 
+        prompt_extras = ctx.build_engine_prompt_extras(
+            pooling_params if not isinstance(pooling_params, Sequence) else None
+        )
+
         # Clone to avoid modifying the caller's pooling parameters.
         params_seq = [
             param.clone() for param in self._params_to_seq(pooling_params, num_requests)
@@ -245,8 +241,7 @@ class PoolingIOProcessor:
                 yield EncodeCMPLRenderParams(
                     prompts=parsed_prompts[i],
                     tok_params=cmpl_tok_params,
-                    prompt_extras=None,
-                    skip_mm_cache=False,
+                    prompt_extras=prompt_extras,
                     params=params_seq[i],
                     lora_requests=seq_lora_requests[i],
                     priorities=seq_priority[i],
@@ -271,20 +266,22 @@ class PoolingIOProcessor:
     ) -> PoolingEngineInput:
         if "conversations" in render_params:
             render_params = cast(EncodeChatRenderParams, render_params)
+            skip_mm_cache = render_params["prompt_extras"].pop("skip_mm_cache", False)
             (_,), engine_input = self.renderer.render_chat(
                 conversations=[render_params["conversations"]],
                 chat_params=render_params["chat_params"],
                 tok_params=render_params["tok_params"],
                 prompt_extras=render_params["prompt_extras"],
-                skip_mm_cache=render_params["skip_mm_cache"],
+                skip_mm_cache=skip_mm_cache,
             )
         elif "prompts" in render_params:
             render_params = cast(EncodeCMPLRenderParams, render_params)
+            skip_mm_cache = render_params["prompt_extras"].pop("skip_mm_cache", False)
             engine_input = self.renderer.render_cmpl(
                 prompts=[render_params["prompts"]],
                 tok_params=render_params["tok_params"],
                 prompt_extras=render_params["prompt_extras"],
-                skip_mm_cache=render_params["skip_mm_cache"],
+                skip_mm_cache=skip_mm_cache,
             )
         else:
             raise ValueError(

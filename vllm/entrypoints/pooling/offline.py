@@ -131,7 +131,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 skip_mm_cache=skip_mm_cache,
                 cache_salt=cache_salt,
                 media_io_kwargs=media_io_kwargs,
-                mm_processor_kwargs=mm_processor_kwargs
+                mm_processor_kwargs=mm_processor_kwargs,
             )
         else:
             ctx = OfflineEncodeInputsContext(
@@ -144,7 +144,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 skip_mm_cache=skip_mm_cache,
                 cache_salt=cache_salt,
                 media_io_kwargs=media_io_kwargs,
-                mm_processor_kwargs=mm_processor_kwargs
+                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         request_factory, num_requests = io_processor.get_request_factory_offline(ctx)
@@ -277,7 +277,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             skip_mm_cache=skip_mm_cache,
             cache_salt=cache_salt,
             media_io_kwargs=media_io_kwargs,
-            mm_processor_kwargs=mm_processor_kwargs
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
         if self.pooling_task == "token_embed":
@@ -339,7 +339,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             skip_mm_cache=skip_mm_cache,
             cache_salt=cache_salt,
             media_io_kwargs=media_io_kwargs,
-            mm_processor_kwargs=mm_processor_kwargs
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
@@ -468,7 +468,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             skip_mm_cache=skip_mm_cache,
             cache_salt=cache_salt,
             media_io_kwargs=media_io_kwargs,
-            mm_processor_kwargs=mm_processor_kwargs
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
         request_factory, num_requests = io_processor.get_request_factory_offline(ctx)

@@ -273,7 +273,6 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
                 prompts=parsed_prompts[i],
                 tok_params=tok_params,
                 prompt_extras=ctx.prompt_extras,
-                skip_mm_cache=False,
                 params=params_seq[i],
                 lora_requests=seq_lora_requests[i],
                 priorities=seq_priority[i],
@@ -580,7 +579,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 max_tokens_per_query=max_tokens_per_query,
                 max_tokens_per_doc=max_tokens_per_doc,
                 prompt_extras=ctx.prompt_extras,
-                skip_mm_cache=False,
                 params=ctx.pooling_params,
                 lora_requests=seq_lora_requests[i],
                 priorities=seq_priority[i],
@@ -634,7 +632,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     if isinstance(data_1[i], list)
                     else cmpl_tok_params,
                     prompt_extras=prompt_extras,
-                    skip_mm_cache=False,
                     params=ctx.pooling_params,
                     lora_requests=seq_lora_requests[i],
                     priorities=seq_priority[i],
@@ -720,7 +717,10 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             target_prompt = extract_target_prompt(self.model_config, engine_prompt)
             target_prompt.update(engine_prompt_extras)
 
-        engine_input = self.renderer.process_for_engine(engine_prompt, arrival_time)
+        skip_mm_cache = render_params["prompt_extras"].pop("skip_mm_cache", False)
+        engine_input = self.renderer.process_for_engine(
+            engine_prompt, arrival_time, skip_mm_cache=skip_mm_cache
+        )
 
         return PoolingEngineInput(
             prompts=engine_input,

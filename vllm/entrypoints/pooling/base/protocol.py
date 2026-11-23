@@ -6,10 +6,11 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, model_validator
 
 from vllm import envs
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, MultiModalConfig
 from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
+from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -82,6 +83,13 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
             "to 256 bit)."
         ),
     )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description="Additional kwargs to pass to the HF processor.",
@@ -133,6 +141,30 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
             return tok_params
 
         return tok_params.with_kwargs(padding=self.padding)
+
+    def build_engine_prompt_extras(self, mm_config: MultiModalConfig | None = None):
+        prompt_extras: dict[str, Any] = {}
+        merged = {
+            k: v
+            for k in ("skip_mm_cache", "cache_salt", "mm_processor_kwargs")
+            if (v := prompt_extras.get(k)) is not None
+        }
+
+        default_media_io_kwargs = mm_config.media_io_kwargs if mm_config else None
+        merged["media_io_kwargs"] = merge_media_io_kwargs(
+            default_media_io_kwargs, merged["media_io_kwargs"]
+        )
+
+        if self.skip_mm_cache is not None:
+            merged["skip_mm_cache"] = self.skip_mm_cache
+
+        if self.cache_salt is not None:
+            merged["cache_salt"] = self.cache_salt
+
+        if self.mm_processor_kwargs is not None:
+            merged["mm_processor_kwargs"] = self.mm_processor_kwargs
+
+        return merged
 
 
 class PoolingTokenizeParamsMixin:
@@ -292,13 +324,6 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
-    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
-        default=None,
-        description=(
-            "Additional kwargs to pass to the media IO connectors, "
-            "keyed by modality. Merged with engine-level media_io_kwargs."
-        ),
-    )
     # --8<-- [end:chat-extra-params]
 
     @model_validator(mode="before")
@@ -338,7 +363,6 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
                     continue_final_message=self.continue_final_message,
                 ),
             ),
-            media_io_kwargs=self.media_io_kwargs,
         )
 
 

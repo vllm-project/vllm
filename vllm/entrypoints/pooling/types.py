@@ -20,6 +20,8 @@ from vllm.renderers.chat_utils import (
 from vllm.renderers.inputs import DictPrompt
 from vllm.tasks import PoolingTask
 
+from ...config import MultiModalConfig
+from ...multimodal.media.connector import merge_media_io_kwargs
 from .classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -145,7 +147,7 @@ class OfflineInputsContext:
     add_special_tokens: bool | None = None
     tokenization_kwargs: dict[str, Any] | None = None
 
-    # mm_params:
+    # mm_params->engine_prompt_extras:
     skip_mm_cache: bool = False
     cache_salt: str | None = None
     media_io_kwargs: dict[str, dict[str, Any]] | None = None
@@ -164,20 +166,29 @@ class OfflineInputsContext:
             return default_tok_params
         return default_tok_params.with_kwargs(**tok_kwargs)
 
-    def build_engine_prompt_extras(self, params: PoolingParams):
-        # Priority: explicit mm_processor_kwargs / cache_salt
-        #         > params.extra_kwargs["chat_template_kwargs"]
+    def build_engine_prompt_extras(
+        self, params: PoolingParams, mm_config: MultiModalConfig | None = None
+    ):
         prompt_extras: dict[str, Any] = dict(params.extra_kwargs or {})
         merged = {
             k: v
-            for k in ("mm_processor_kwargs", "cache_salt")
+            for k in ("skip_mm_cache", "cache_salt", "mm_processor_kwargs")
             if (v := prompt_extras.get(k)) is not None
         }
-        if self.mm_processor_kwargs is not None:
-            merged["mm_processor_kwargs"] = self.mm_processor_kwargs
+
+        default_media_io_kwargs = mm_config.media_io_kwargs if mm_config else None
+        merged["media_io_kwargs"] = merge_media_io_kwargs(
+            default_media_io_kwargs, merged["media_io_kwargs"]
+        )
+
+        if self.skip_mm_cache is not None:
+            merged["skip_mm_cache"] = self.skip_mm_cache
 
         if self.cache_salt is not None:
             merged["cache_salt"] = self.cache_salt
+
+        if self.mm_processor_kwargs is not None:
+            merged["mm_processor_kwargs"] = self.mm_processor_kwargs
 
         return merged
 
@@ -221,8 +232,6 @@ class OfflineOutputsContext:
 class RenderParams(TypedDict):
     tok_params: TokenizeParams
     prompt_extras: dict[str, Any] | None
-    skip_mm_cache: bool
-
     params: PoolingParams
     lora_requests: LoRARequest | None
     priorities: int
