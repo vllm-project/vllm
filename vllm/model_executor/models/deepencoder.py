@@ -272,7 +272,17 @@ def _pack_conv2d_windows_kernel(
 class _DeepEncoderConv2d(Conv2dLayer):
     """Implement an ungrouped, undilated SAM convolution with GEMM."""
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        return self._forward_gemm(x, use_triton=False)
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        use_triton = HAS_TRITON and x.device.type in ("cuda", "xpu")
+        return self._forward_gemm(x, use_triton=use_triton)
+
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_cuda(x)
+
+    def _forward_gemm(self, x: torch.Tensor, *, use_triton: bool) -> torch.Tensor:
         pad_h, pad_w = self.padding
         kernel_h, kernel_w = self.kernel_size
         stride_h, stride_w = self.stride
@@ -282,7 +292,7 @@ class _DeepEncoderConv2d(Conv2dLayer):
 
         if self.kernel_size == self.stride == (1, 1) and self.padding == (0, 0):
             rows = x.permute(0, 2, 3, 1).reshape(-1, self.input_size).contiguous()
-        elif HAS_TRITON and x.device.type in ("cuda", "xpu"):
+        elif use_triton:
             rows = x.new_empty((batch * height * width, self.input_size))
             block_size = 512
             grid = (triton.cdiv(height * width * self.input_size, block_size), batch)
