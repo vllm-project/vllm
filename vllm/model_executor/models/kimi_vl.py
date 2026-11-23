@@ -51,6 +51,7 @@ import torch
 from torch import nn
 from transformers import BatchFeature
 from transformers.activations import GELUActivation
+from transformers.image_transforms import to_pil_image
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
@@ -234,6 +235,17 @@ class KimiVLDummyInputsBuilder(BaseDummyInputsBuilder[KimiVLProcessingInfo]):
 class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _call_hf_processor(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # The checkpoint's remote-code image processor only accepts PIL images.
+        images: Any = hf_data.get("images")
+        if images:
+            hf_data = {**hf_data, "images": [to_pil_image(image) for image in images]}
+        return super()._call_hf_processor(hf_data, hf_kwargs)
 
     def _get_mm_fields_config(
         self,
