@@ -45,13 +45,13 @@ def _prefer_narrow_kv_tile() -> bool:
     return on_gfx1x()
 
 
-def on_gfx1151() -> bool:
-    """The only part the head-dim blocking below was tuned on."""
+def _tuned_head_dim_blocking() -> bool:
+    """The parts the head-dim blocking below was tuned on: gfx1151 and RDNA4."""
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx1151 as _on_gfx1151
+    from vllm.platforms.rocm import on_gfx1151, on_rdna4
 
-    return _on_gfx1151()
+    return on_gfx1151() or on_rdna4()
 
 
 @triton.jit
@@ -367,7 +367,7 @@ def context_attention_fwd(
     BLOCK_DMODEL_TAIL = 0
     HEAD_STRIDE_ALIGNED_8 = False
 
-    if on_gfx1151() and q.dtype in (torch.bfloat16, torch.float16):
+    if _tuned_head_dim_blocking() and q.dtype in (torch.bfloat16, torch.float16):
         # Cover the head dim as a power-of-2 main block plus a power-of-2 tail
         # instead of padding up to next_power_of_2: 72 runs the dots over
         # 64 + 16 = 80 lanes rather than 128. Only taken when it narrows the
