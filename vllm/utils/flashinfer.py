@@ -158,6 +158,16 @@ def find_flashinfer_bf16_tuning_file(
     return best
 
 
+# The tuning file found for the model that could not be used (unreadable, or
+# rejected by FlashInfer), or None: a missing file is expected for many models,
+# an unusable one is a problem the user should hear about.
+_bf16_unusable_tuning_file: Path | None = None
+
+
+def flashinfer_bf16_unusable_tuning_file() -> Path | None:
+    return _bf16_unusable_tuning_file
+
+
 @functools.cache
 def load_flashinfer_bf16_tuning(model_names: tuple[str, ...], tp_size: int) -> bool:
     """Load the FlashInfer tuning file for a model, TP size and the current GPU.
@@ -165,6 +175,8 @@ def load_flashinfer_bf16_tuning(model_names: tuple[str, ...], tp_size: int) -> b
     Returns whether a file was loaded. Without one, FlashInfer has no tactics for
     this model and the BF16 GEMMs should stay on torch.
     """
+    global _bf16_unusable_tuning_file
+    _bf16_unusable_tuning_file = None
     file = find_flashinfer_bf16_tuning_file(model_names, tp_size)
     if file is None:
         logger.info(
@@ -189,9 +201,11 @@ def load_flashinfer_bf16_tuning(model_names: tuple[str, ...], tp_size: int) -> b
             loaded = bool(AutoTuner.get().load_configs(str(path)))
     except Exception as e:
         logger.warning("Cannot load FlashInfer tuning file %s: %s", file, e)
+        _bf16_unusable_tuning_file = file
         return False
     if not loaded:
         logger.warning("FlashInfer rejected the tuning file %s", file)
+        _bf16_unusable_tuning_file = file
         return False
     global _bf16_tuning_files_loaded, _bf16_tuning_file, _bf16_tuning_points
     _bf16_tuning_files_loaded = True

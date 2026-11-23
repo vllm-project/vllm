@@ -214,6 +214,7 @@ def test_load_tuning_without_a_file_loads_nothing(
     _write_tuning_files(tuning_dir, _FILES)
     _set_gpu(monkeypatch, "NVIDIA GB200", (10, 0))
     assert not fi.load_flashinfer_bf16_tuning(("Unknown/Model",), 1)
+    assert fi.flashinfer_bf16_unusable_tuning_file() is None
     assert tuner_gpus == {}
     assert not fi.is_flashinfer_bf16_tuning_loaded()
     monkeypatch.setattr(fi, "_bf16_gemm_tuning_buckets", (16, 32))
@@ -231,6 +232,8 @@ def test_load_tuning_rejected_by_flashinfer(
     _set_gpu(monkeypatch, "NVIDIA GB200", (10, 0))
     assert not fi.load_flashinfer_bf16_tuning(("Qwen/Qwen3.8-27B",), 1)
     assert list(loaded) == ["Qwen3.8-27B-tp1-blackwell.json"]
+    unusable = fi.flashinfer_bf16_unusable_tuning_file()
+    assert unusable is not None and unusable.name == "Qwen3.8-27B-tp1-blackwell.json"
     assert not fi.is_flashinfer_bf16_tuning_loaded()
     fi.load_flashinfer_bf16_tuning.cache_clear()
 
@@ -480,7 +483,7 @@ def test_flashinfer_bf16_mm_warns_when_flashinfer_misses_the_cache(monkeypatch):
     import vllm.utils.flashinfer as fi
 
     stats = types.SimpleNamespace(cache_misses=0)
-    calls = []
+    calls: list[int] = []
 
     def fake_mm(a, b, bias, pdl, backend):
         if len(calls) % 2 == 0:  # the first, third, ... call misses
@@ -526,3 +529,50 @@ def test_flashinfer_bf16_mm_is_silent_without_a_tuning_file(monkeypatch):
     monkeypatch.setattr(fi.logger, "warning", warn)
     fi.flashinfer_bf16_mm(torch.empty(4, 8), torch.empty(8, 16), None, True, "auto")
     assert warn.call_count == 0
+
+
+def test_dispatch_without_a_tuning_file_only_logs_info(
+    cuda_dispatch, monkeypatch: pytest.MonkeyPatch
+):
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(
+        cuda_dispatch, "load_flashinfer_bf16_tuning_for_current_model", lambda: False
+    )
+    monkeypatch.setattr(
+        cuda_dispatch, "flashinfer_bf16_unusable_tuning_file", lambda: None
+    )
+    warning, info = MagicMock(), MagicMock()
+    monkeypatch.setattr(cuda_dispatch.logger, "warning_once", warning)
+    monkeypatch.setattr(cuda_dispatch.logger, "info_once", info)
+    assert (
+        cuda_dispatch.dispatch_unquantized_gemm("flashinfer")
+        is cuda_dispatch.cuda_unquantized_gemm
+    )
+    assert info.call_count == 1
+    assert warning.call_count == 0
+
+
+def test_dispatch_with_an_unusable_tuning_file_warns(
+    cuda_dispatch, monkeypatch: pytest.MonkeyPatch
+):
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(
+        cuda_dispatch, "load_flashinfer_bf16_tuning_for_current_model", lambda: False
+    )
+    monkeypatch.setattr(
+        cuda_dispatch,
+        "flashinfer_bf16_unusable_tuning_file",
+        lambda: Path("Qwen3.8-27B-tp1-blackwell.json"),
+    )
+    warning, info = MagicMock(), MagicMock()
+    monkeypatch.setattr(cuda_dispatch.logger, "warning_once", warning)
+    monkeypatch.setattr(cuda_dispatch.logger, "info_once", info)
+    assert (
+        cuda_dispatch.dispatch_unquantized_gemm("flashinfer")
+        is cuda_dispatch.cuda_unquantized_gemm
+    )
+    assert warning.call_count == 1
+    assert warning.call_args.args[1] == "Qwen3.8-27B-tp1-blackwell.json"
+    assert info.call_count == 0
