@@ -6,6 +6,7 @@ from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
 from tests.utils import single_gpu_only
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_gemv_bf16_fp4_gather
 
 from ...utils import compute_acceptance_len
 
@@ -14,8 +15,9 @@ MODEL = "Qwen/Qwen3.5-0.8B-Base"
 
 @single_gpu_only
 @pytest.mark.skipif(
-    not current_platform.is_device_capability_family(120),
-    reason="Dynamic rows run on SM12x",
+    not current_platform.is_device_capability_family(120)
+    or not has_flashinfer_gemv_bf16_fp4_gather(),
+    reason="Dynamic rows need SM12x and FlashInfer's gemv_bf16_fp4_gather",
 )
 def test_mtp_draft_token_map(monkeypatch: pytest.MonkeyPatch, vllm_runner):
     """MTP with a reduced draft vocabulary keeps GSM8K above the stock-MTP
