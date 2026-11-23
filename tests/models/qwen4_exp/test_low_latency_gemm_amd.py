@@ -61,7 +61,7 @@ def test_op_uses_tgemm_only_for_tuned_rows(
     x = torch.empty(num_tokens, TUNED_SHAPE[1], dtype=torch.bfloat16, device="meta")
     weight = torch.empty(TUNED_SHAPE, dtype=torch.bfloat16, device="meta")
 
-    llg._qwen4_exp_rocm_tgemm(x, weight)
+    llg.qwen4_exp_rocm_tgemm(x, weight)
 
     if num_tokens > llg._SKINNY_MAX_TOKENS or not guard_permits:
         lookup.assert_called_once_with(
@@ -75,6 +75,51 @@ def test_op_uses_tgemm_only_for_tuned_rows(
     else:
         mm.assert_not_called()
         standard.assert_called_once_with(x, weight)
+
+
+@pytest.mark.parametrize(("down_tgemm", "up_tgemm"), [(False, True), (True, False)])
+def test_hc_fallback_uses_tgemm_for_switched_weights(monkeypatch, down_tgemm, up_tgemm):
+    from vllm.models.qwen4_exp.amd import hyperconnection as hc
+
+    hc_count, lowrank, hidden, down_rows, num_tokens = 4, 8, 16, 16, 8
+    calls = []
+
+    def gemm(name):
+        def fn(x, w):
+            calls.append((name, tuple(w.shape)))
+            return x.new_zeros((x.shape[0], w.shape[0]))
+
+        return fn
+
+    monkeypatch.setattr(hc, "qwen4_exp_rocm_tgemm", gemm("tgemm"))
+    monkeypatch.setattr(hc, "rocm_unquantized_gemm_impl", gemm("standard"))
+    monkeypatch.setattr(hc, "_hc_combine_norm", lambda r, b, i, w, eps, n: (r, r))
+    monkeypatch.setattr(hc, "_hc_silu", lambda x, n: x)
+    monkeypatch.setattr(hc, "_hc_gate_mix", lambda x, g, n: x[:, :hidden])
+    residual = torch.zeros(num_tokens, hc_count * hidden)
+    w_down = torch.zeros(down_rows, hc_count * hidden)
+    w_up = torch.zeros(hc_count * hidden, lowrank)
+
+    hc._hc_two_stage_combine_and_mix(
+        residual,
+        residual,
+        None,
+        None,
+        w_down,
+        None,
+        w_up,
+        1e-6,
+        hc_count,
+        lowrank,
+        num_tokens - 1,
+        down_tgemm,
+        up_tgemm,
+    )
+
+    assert calls == [
+        ("tgemm" if down_tgemm else "standard", tuple(w_down.shape)),
+        ("tgemm" if up_tgemm else "standard", tuple(w_up.shape)),
+    ]
 
 
 def _linears():

@@ -69,7 +69,15 @@ class Qwen4ExpTgemmEmbeddingMethod(_Qwen4ExpTgemmApply, UnquantizedEmbeddingMeth
     pass
 
 
-def _qwen4_exp_rocm_tgemm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+def uses_tgemm(layer: nn.Module) -> bool:
+    """Whether `enable_qwen4_exp_low_latency_gemm` switched this linear to
+    `tgemm`, for callers that run its GEMM on the raw weight."""
+    return isinstance(layer.quant_method, _Qwen4ExpTgemmApply) and (
+        not envs.VLLM_BATCH_INVARIANT
+    )
+
+
+def qwen4_exp_rocm_tgemm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     num_tokens = x.numel() // x.shape[-1]
     skinny = num_tokens <= _SKINNY_MAX_TOKENS and lmhead_skinny_guard_permits(
         weight, num_tokens
@@ -89,7 +97,7 @@ def _qwen4_exp_rocm_tgemm_fake(x: torch.Tensor, weight: torch.Tensor) -> torch.T
 
 direct_register_custom_op(
     op_name="qwen4_exp_rocm_tgemm",
-    op_func=_qwen4_exp_rocm_tgemm,
+    op_func=qwen4_exp_rocm_tgemm,
     fake_impl=_qwen4_exp_rocm_tgemm_fake,
 )
 

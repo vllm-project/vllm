@@ -41,6 +41,7 @@ from ..common.hyperconnection import (
     GroupedGemmaRMSNorm,
     HyperConnectionConfig,
 )
+from .low_latency_gemm import qwen4_exp_rocm_tgemm, uses_tgemm
 from .ops.hc import (
     _hc_combine_norm,
     _hc_gate_mix,
@@ -67,6 +68,8 @@ def _hc_two_stage_combine_and_mix(
     hc_count: int,
     hc_lowrank: int,
     max_tokens: int,
+    down_tgemm: bool,
+    up_tgemm: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # The graph is compiled for a symbolic token count, so the choice between
     # the skinny decode kernels and the Triton chain has to be made here.
@@ -86,9 +89,11 @@ def _hc_two_stage_combine_and_mix(
     out, xn = _hc_combine_norm(
         residual, block_output, injection, norm_weight, eps, hc_count
     )
-    down = rocm_unquantized_gemm_impl(xn, w_down_inject)
+    down_gemm = qwen4_exp_rocm_tgemm if down_tgemm else rocm_unquantized_gemm_impl
+    up_gemm = qwen4_exp_rocm_tgemm if up_tgemm else rocm_unquantized_gemm_impl
+    down = down_gemm(xn, w_down_inject)
     lowrank = _hc_silu(down[:, :hc_lowrank], hc_count)
-    gate = rocm_unquantized_gemm_impl(lowrank, w_up)
+    gate = up_gemm(lowrank, w_up)
     block_input = _hc_gate_mix(xn, gate, hc_count)
     return out, block_input, down[:, hc_lowrank : hc_lowrank + hc_count]
 
@@ -105,6 +110,8 @@ def _hc_two_stage_combine_and_mix_fake(
     hc_count: int,
     hc_lowrank: int,
     max_tokens: int,
+    down_tgemm: bool,
+    up_tgemm: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Both paths return the injection as a column slice of the down output,
     # and Inductor checks the real strides against these.
@@ -317,6 +324,8 @@ class GatedResidual(nn.Module):
                 self.hc_count,
                 self.hc_lowrank,
                 self.hc_two_stage_max_tokens,
+                uses_tgemm(self.input_mix_weight_down_block_inject),
+                uses_tgemm(self.input_mix_weight_up),
             )
 
         hidden_states, xn = hc_combine_norm(
