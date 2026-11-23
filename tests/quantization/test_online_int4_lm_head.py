@@ -255,17 +255,44 @@ def test_mp_layout_round_trip():
 # ----------------------------------------------------------------- layer
 
 
-@pytest.fixture
-def online_head_config(dist_init, monkeypatch):
+def _mp_backends():
+    if current_platform.is_cuda() and current_platform.has_device_capability(80):
+        return [
+            pytest.param(("marlin", MarlinLinearKernel), id="marlin"),
+            pytest.param(
+                ("humming", HummingLinearKernel),
+                id="humming",
+                marks=pytest.mark.skipif(
+                    not has_humming(), reason="humming is not installed"
+                ),
+            ),
+        ]
+    return [pytest.param((None, None), id="default")]
+
+
+@pytest.fixture(params=_mp_backends())
+def online_head_config(request, dist_init, monkeypatch):
+    backend: Literal["marlin", "humming"] | None
+    expected_kernel: type | None
+    backend, expected_kernel = request.param
     # Online linear methods read the model dtype from the current config.
     monkeypatch.setattr(
         online_fp8,
         "get_current_vllm_config",
         lambda: SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16)),
     )
+    vllm_config = (
+        VllmConfig(
+            kernel_config=KernelConfig(
+                linear_backend_per_quant={"mixed_precision": backend}
+            )
+        )
+        if backend is not None
+        else VllmConfig()
+    )
     config = OnlineQuantizationConfig(QuantizationConfigArgs(targets=LM_HEAD_TARGET))
-    with set_current_vllm_config(VllmConfig()), torch.device("cuda"):
-        yield config
+    with set_current_vllm_config(vllm_config), torch.device("cuda"):
+        yield config, expected_kernel
 
 
 def _reference_logits(x, weight):
@@ -276,16 +303,19 @@ def _reference_logits(x, weight):
 @requires_kernel
 @pytest.mark.parametrize("num_tokens", [1, 7, 64])
 def test_untied_head_matches_reference(online_head_config, num_tokens):
+    config, expected_kernel = online_head_config
     torch.manual_seed(0)
     head = ParallelLMHead(
         VOCAB,
         HIDDEN,
         params_dtype=torch.bfloat16,
-        quant_config=online_head_config,
+        quant_config=config,
         prefix="lm_head",
         disable_tp=True,
     )
     assert isinstance(head.quant_method, Int4PerGroup32AsymLMHeadMethod)
+    if expected_kernel is not None:
+        assert head.quant_method.kernel_cls is expected_kernel
     assert head.weight.is_meta  # materialized while loading
     loaded = (torch.randn(VOCAB, HIDDEN, device="cuda") * 0.02).to(torch.bfloat16)
     head.weight.weight_loader(head.weight, loaded)
@@ -304,6 +334,7 @@ def test_untied_head_matches_reference(online_head_config, num_tokens):
 
 @requires_kernel
 def test_tied_head_keeps_the_embedding(online_head_config):
+    config, expected_kernel = online_head_config
     torch.manual_seed(0)
     embed = VocabParallelEmbedding(
         VOCAB, HIDDEN, params_dtype=torch.bfloat16, disable_tp=True
@@ -315,10 +346,13 @@ def test_tied_head_keeps_the_embedding(online_head_config):
         VOCAB,
         HIDDEN,
         params_dtype=torch.bfloat16,
-        quant_config=online_head_config,
+        quant_config=config,
         prefix="lm_head",
         disable_tp=True,
     )
+    assert isinstance(head.quant_method, Int4PerGroup32AsymLMHeadMethod)
+    if expected_kernel is not None:
+        assert head.quant_method.kernel_cls is expected_kernel
     head.tie_weights(embed)
     # The model loader's process_weights_after_loading pass.
     head.quant_method.process_weights_after_loading(head)
@@ -333,86 +367,3 @@ def test_tied_head_keeps_the_embedding(online_head_config):
     ref = _reference_logits(x, original[:VOCAB])
     err = (out[:, :VOCAB].float() - ref).norm() / ref.norm()
     assert err < 1e-2, err
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(80),
-    reason=(
-        "Explicit Marlin/Humming bf16 mixed-precision backend check requires "
-        "CUDA SM80+."
-    ),
-)
-@pytest.mark.parametrize(
-    ("backend", "expected_kernel"),
-    [
-        ("marlin", MarlinLinearKernel),
-        ("humming", HummingLinearKernel),
-    ],
-)
-@pytest.mark.parametrize("tied", [False, True])
-def test_cuda_marlin_and_humming_backends(
-    dist_init,
-    monkeypatch,
-    backend: Literal["marlin", "humming"],
-    expected_kernel: type,
-    tied: bool,
-):
-    """Exercise both Marlin (BasevLLMParameter layout path) and Humming on CUDA,
-    independent of SM90/SM12x default kernel priority."""
-    if backend == "humming" and not has_humming():
-        pytest.skip("humming is not installed")
-
-    monkeypatch.setattr(
-        online_fp8,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16)),
-    )
-    vllm_config = VllmConfig(
-        kernel_config=KernelConfig(
-            linear_backend_per_quant={"mixed_precision": backend}
-        )
-    )
-    config = OnlineQuantizationConfig(QuantizationConfigArgs(targets=LM_HEAD_TARGET))
-
-    torch.manual_seed(0)
-    with set_current_vllm_config(vllm_config), torch.device("cuda"):
-        head = ParallelLMHead(
-            VOCAB,
-            HIDDEN,
-            params_dtype=torch.bfloat16,
-            quant_config=config,
-            prefix="lm_head",
-            disable_tp=True,
-        )
-        assert isinstance(head.quant_method, Int4PerGroup32AsymLMHeadMethod)
-        assert head.quant_method.kernel_cls is expected_kernel
-
-        if tied:
-            embed = VocabParallelEmbedding(
-                VOCAB, HIDDEN, params_dtype=torch.bfloat16, disable_tp=True
-            )
-            embed.weight.data.zero_()
-            ref_weight = (torch.randn(VOCAB, HIDDEN, device="cuda") * 0.02).to(
-                torch.bfloat16
-            )
-            embed.weight.weight_loader(embed.weight, ref_weight)
-            head.tie_weights(embed)
-            head.quant_method.process_weights_after_loading(head)
-            assert head.weight is not embed.weight
-            assert embed.weight.dtype == torch.bfloat16
-            torch.testing.assert_close(
-                embed.weight.data[:VOCAB], ref_weight, rtol=0, atol=0
-            )
-        else:
-            ref_weight = (torch.randn(VOCAB, HIDDEN, device="cuda") * 0.02).to(
-                torch.bfloat16
-            )
-            head.weight.weight_loader(head.weight, ref_weight)
-            finalize_layerwise_processing(head, model_config=None)
-
-        x = torch.randn(4, HIDDEN, device="cuda", dtype=torch.bfloat16)
-        out = head.quant_method.apply(head, x)
-        ref = _reference_logits(x, ref_weight)
-        err = (out[:, :VOCAB].float() - ref).norm() / ref.norm()
-        assert err < 1e-2, err
-        assert torch.all(out[:, VOCAB:] == 0)
