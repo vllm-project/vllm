@@ -61,13 +61,13 @@ pub(super) enum AssistantInputBlock {
     },
     Thinking {
         thinking: String,
-        #[serde(rename = "signature")]
-        _signature: Option<String>,
+        #[expect(dead_code, reason = "Thinking signatures are ignored on replay")]
+        signature: Option<String>,
     },
     // Opaque reasoning cannot be rendered, but clients replay the full response.
     RedactedThinking {
-        #[serde(rename = "data")]
-        _data: String,
+        #[expect(dead_code, reason = "Redacted thinking is ignored on replay")]
+        data: String,
     },
 }
 
@@ -77,13 +77,13 @@ pub(super) enum ThinkingConfig {
     Enabled {
         budget_tokens: i64,
         // Like Python, always return reasoning and retain it in history.
-        #[serde(rename = "display")]
-        _display: Option<ThinkingDisplay>,
+        #[expect(dead_code, reason = "Display hints do not change reasoning output")]
+        display: Option<ThinkingDisplay>,
     },
     Disabled,
     Adaptive {
-        #[serde(rename = "display")]
-        _display: Option<ThinkingDisplay>,
+        #[expect(dead_code, reason = "Display hints do not change reasoning output")]
+        display: Option<ThinkingDisplay>,
     },
     BetweenTools,
 }
@@ -202,15 +202,15 @@ pub(super) struct ErrorDetail {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "Variant names match the wire values"
+)]
 pub(super) enum ErrorType {
-    #[serde(rename = "invalid_request_error")]
-    InvalidRequest,
-    #[serde(rename = "not_found_error")]
-    NotFound,
-    #[serde(rename = "conflict_error")]
-    Conflict,
-    #[serde(rename = "overloaded_error")]
-    Overloaded,
-    #[serde(rename = "api_error")]
-    Api,
+    InvalidRequestError,
+    NotFoundError,
+    ConflictError,
+    OverloadedError,
+    ApiError,
 }

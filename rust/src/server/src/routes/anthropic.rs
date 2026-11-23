@@ -25,60 +25,64 @@ use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
 use crate::utils::resolve_request_context;
 
-fn error_body(error: ApiError) -> ErrorResponse {
-    let kind = match error {
-        ApiError::InvalidRequest { .. }
-        | ApiError::JsonParseError { .. }
-        | ApiError::InvalidQuery { .. } => ErrorType::InvalidRequest,
-        ApiError::ModelNotFound { .. } | ApiError::NotFound { .. } => ErrorType::NotFound,
-        ApiError::Conflict { .. } => ErrorType::Conflict,
-        ApiError::ServiceUnavailable { .. } => ErrorType::Overloaded,
-        ApiError::ServerError { .. } => ErrorType::Api,
-    };
-    ErrorResponse {
-        kind: ErrorResponseType::Error,
-        error: ErrorDetail {
-            kind,
-            message: error.message(),
-        },
+pub(super) struct AnthropicError(ApiError);
+
+impl From<ApiError> for AnthropicError {
+    fn from(error: ApiError) -> Self {
+        Self(error)
     }
 }
 
-fn error_response(error: ApiError) -> Response {
-    (error.status_code(), Json(error_body(error))).into_response()
+impl IntoResponse for AnthropicError {
+    fn into_response(self) -> Response {
+        let error = self.0;
+        let kind = match error {
+            ApiError::InvalidRequest { .. }
+            | ApiError::JsonParseError { .. }
+            | ApiError::InvalidQuery { .. } => ErrorType::InvalidRequestError,
+            ApiError::ModelNotFound { .. } | ApiError::NotFound { .. } => ErrorType::NotFoundError,
+            ApiError::Conflict { .. } => ErrorType::ConflictError,
+            ApiError::ServiceUnavailable { .. } => ErrorType::OverloadedError,
+            ApiError::ServerError { .. } => ErrorType::ApiError,
+        };
+        let body = ErrorResponse {
+            kind: ErrorResponseType::Error,
+            error: ErrorDetail {
+                kind,
+                message: error.message(),
+            },
+        };
+        (error.status_code(), Json(body)).into_response()
+    }
 }
 
 pub(super) async fn count_tokens(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Result<Json<MessagesRequest>, JsonRejection>,
-) -> Response {
-    let body = match body {
-        Ok(body) => body.0,
-        Err(error) => return error_response(error.into()),
-    };
+) -> Result<impl IntoResponse, AnthropicError> {
+    let Json(body) = body.map_err(ApiError::from)?;
     let model = state.resolve_model_with_loras(Some(&body.model)).await;
-    let request = match resolve_request_context(&headers, None)
-        .and_then(|ctx| prepare_messages_request(body, &model, ctx))
-    {
-        Ok(request) => request,
-        Err(error) => return error_response(error),
-    };
-    let text = match state.chat.request_processor().prepare_for_tokenization(request).await {
-        Ok(text) => text,
-        Err(error) => return error_response(chat_submit_error("count_tokens failed", error)),
-    };
-    let tokens = match state.chat.text().request_processor().tokenize(text) {
-        Ok(tokens) => tokens,
-        Err(error) => return error_response(text_submit_error("count_tokens failed", error)),
-    };
-    Json(CountTokensResponse {
+    let ctx = resolve_request_context(&headers, None)?;
+    let request = prepare_messages_request(body, &model, ctx)?;
+    let text = state
+        .chat
+        .request_processor()
+        .prepare_for_tokenization(request)
+        .await
+        .map_err(|error| chat_submit_error("count_tokens failed", error))?;
+    let tokens = state
+        .chat
+        .text()
+        .request_processor()
+        .tokenize(text)
+        .map_err(|error| text_submit_error("count_tokens failed", error))?;
+    Ok(Json(CountTokensResponse {
         input_tokens: tokens.len(),
         context_management: ContextManagement {
             original_input_tokens: tokens.len(),
         },
-    })
-    .into_response()
+    }))
 }
 
 /// Anthropic request handling over the application's shared chat inference.
@@ -86,32 +90,24 @@ pub(super) async fn messages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Result<Json<MessagesRequest>, JsonRejection>,
-) -> Response {
-    let body = match body {
-        Ok(body) => body.0,
-        Err(error) => return error_response(error.into()),
-    };
+) -> Result<impl IntoResponse, AnthropicError> {
+    let Json(body) = body.map_err(ApiError::from)?;
     let model = state.resolve_model_with_loras(Some(&body.model)).await;
     let options = state.api_server_options;
     if body.max_tokens.is_none() {
-        return error_response(invalid_request!(
+        return Err(invalid_request!(
             param = "max_tokens",
             "max_tokens is required for generation"
-        ));
+        )
+        .into());
     }
-    let request = match resolve_request_context(&headers, None)
-        .and_then(|ctx| prepare_messages_request(body, &model, ctx))
-    {
-        Ok(request) => request,
-        Err(error) => return error_response(error),
-    };
-    if let Err(error) = validate_max_output_tokens(
+    let ctx = resolve_request_context(&headers, None)?;
+    let request = prepare_messages_request(body, &model, ctx)?;
+    validate_max_output_tokens(
         "max_tokens",
         request.sampling_params.max_tokens,
         state.chat.text().llm().info().max_model_len,
-    ) {
-        return error_response(error);
-    }
+    )?;
     let request_id = request.request_id.clone();
     let span = tracing::info_span!("messages", request_id = %request_id, engine_request_id = tracing::field::Empty);
     let response = async {
@@ -157,9 +153,6 @@ pub(super) async fn messages(
         })
     }
     .instrument(span)
-    .await;
-    match response {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => error_response(error),
-    }
+    .await?;
+    Ok(Json(response))
 }
