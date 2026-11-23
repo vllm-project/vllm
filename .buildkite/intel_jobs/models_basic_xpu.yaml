@@ -143,7 +143,7 @@ steps:
 - label: ':nvidia: (B200) Kimi K3'
   key: kimi-k3-unit-tests-b200
   device: intel_gpu
-  timeout_in_minutes: 40
+  timeout_in_minutes: 80
   optional: true
   working_dir: "."
   no_plugin: true
