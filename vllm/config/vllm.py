@@ -3787,25 +3787,39 @@ class VllmConfig:
         if self.model_config is None or not self.model_config.use_mla:
             return self
         cache_dtype = self.cache_config.cache_dtype
+        spec_config = self.speculative_config
+        draft_dtype = spec_config.kv_cache_dtype if spec_config else None
+        draft_model_config = spec_config.draft_model_config if spec_config else None
+        # Draft loaders rebuild this config with the draft's kv_cache_dtype as
+        # cache_dtype but keep the target's model config, so check that dtype
+        # against the draft model.
+        cache_model_config = (
+            draft_model_config
+            if draft_model_config is not None and cache_dtype == draft_dtype
+            else self.model_config
+        )
         # The ds_mla layouts are MLA-only by construction and plain nvfp4 is
         # the dense (FlashInfer MLA) layout; the other nvfp4 layouts
         # (head_size//2 + head_size//16) do not apply to MLA.
         sparse_mla = (
-            getattr(self.model_config.hf_text_config, "index_topk", None) is not None
+            getattr(cache_model_config.hf_text_config, "index_topk", None) is not None
         )
         if (
-            cache_dtype.startswith("nvfp4")
+            cache_model_config.use_mla
+            and cache_dtype.startswith("nvfp4")
             and not cache_dtype.endswith("_ds_mla")
             and (cache_dtype != "nvfp4" or sparse_mla)
         ):
+            if cache_model_config is self.model_config:
+                model, flag = "model", "--kv-cache-dtype"
+            else:
+                model, flag = "draft model", "speculative_config.kv_cache_dtype"
             raise ValueError(
                 f"{cache_dtype} KV cache is not supported with this MLA "
-                "(Multi-head Latent Attention) model. Please use a different "
-                "--kv-cache-dtype (e.g., 'nvfp4' for dense MLA, 'fp8', 'auto', "
+                f"(Multi-head Latent Attention) {model}. Please use a different "
+                f"{flag} (e.g., 'nvfp4' for dense MLA, 'fp8', 'auto', "
                 "or 'nvfp4_ds_mla' with a sparse MLA backend)."
             )
-        spec_config = self.speculative_config
-        draft_dtype = spec_config.kv_cache_dtype if spec_config else None
         if (
             "nvfp4" in (cache_dtype, draft_dtype)
             and self.model_config.is_hybrid
@@ -3817,7 +3831,6 @@ class VllmConfig:
             )
         # MLA draft layers gather context into a workspace typed by the target's
         # KV dtype: BF16 for nvfp4, FP8 for fp8 under FP8 prefill.
-        draft_model_config = spec_config.draft_model_config if spec_config else None
         if (
             self.attention_config.use_prefill_query_quantization
             and draft_model_config is not None
