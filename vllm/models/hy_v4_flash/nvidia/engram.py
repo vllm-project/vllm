@@ -352,6 +352,19 @@ class FlashEmbedding(nn.Module):
         return rows.float()
 
 
+def _fp8_round_trip(x: torch.Tensor) -> torch.Tensor:
+    """Quantize to FP8 (E4M3) per vector and back.
+
+    Engram embeddings were trained to be read this way.
+    """
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    scale = x.detach().abs().amax(dim=-1, keepdim=True).clamp_min(1e-12) / fp8_max
+    quantized = (x / scale).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn).to(
+        x.dtype
+    ) * scale
+    return x + (quantized - x).detach()
+
+
 class FlashEngram(nn.Module):
     def __init__(self, vllm_config, layout, layer_id, prefix):
         super().__init__()
@@ -377,6 +390,7 @@ class FlashEngram(nn.Module):
             sizes, layout.head_dim, dtype, storage.cpu_offload
         )
         self.hidden_size, self.hc_mult = config.hidden_size, config.hc_mult
+        self.fp8_embedding = config.engram_fp8_embedding
         local = (
             self.multi_head_embedding.head_end - self.multi_head_embedding.head_start
         )
@@ -447,6 +461,8 @@ class FlashEngram(nn.Module):
 
     def forward(self, hidden, hashes):
         rows = self.multi_head_embedding(hashes)
+        if self.fp8_embedding and not self.multi_head_embedding.fp8:
+            rows = _fp8_round_trip(rows.to(hidden.dtype)).float()
         eps = torch.finfo(torch.float32).eps
         gamma = torch.stack(
             [norm.weight for norm in self.lookup_per_head_norms]
