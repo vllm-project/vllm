@@ -282,6 +282,8 @@ def dynamic_preprocess(
         .permute(0, 2, 4, 1, 3, 5)
         .reshape(B * hp * wp, C, image_size, image_size)
     )
+    # Drop the resized buffer if rearranging the patches made a copy.
+    del resized_img
 
     if use_thumbnail and patches.shape[0] > 1:
         thumb = _bicubic_resize_and_normalize(
@@ -844,15 +846,31 @@ class BaseNanoNemotronVLProcessor(ABC):
 
         return num_patches * self.num_image_token
 
-    def _validate_image_preprocessing_budget(self, pixels: int, limit: int) -> None:
+    def _validate_image_preprocessing_budget(
+        self,
+        images: Sequence[Image.Image],
+        pixels: int,
+        limit: int,
+        *,
+        concatenates: bool = False,
+    ) -> None:
         # Account for float32 even when normalization runs on the model device.
         dtype = self.dtype or torch.float32
         bytes_per_channel = max(torch.float32.itemsize, dtype.itemsize)
-        size_bytes = pixels * 3 * bytes_per_channel
+        output_bytes = pixels * 3 * bytes_per_channel
+        source_bytes = 0
+        if self.do_cpu_normalize:
+            source_pixels = max(
+                (image.width * image.height for image in images), default=0
+            )
+            source_bytes = source_pixels * 3 * torch.float32.itemsize
+        # Each source cast is released before its tiles are concatenated.
+        concat_bytes = output_bytes if concatenates else 0
+        size_bytes = output_bytes + max(source_bytes, concat_bytes)
         if size_bytes > limit:
             raise VLLMValidationError(
                 "Image preprocessing exceeds VLLM_MAX_MEDIA_PREPROCESSING_BYTES="
-                f"{limit} (estimated {size_bytes} bytes for patches).",
+                f"{limit} (estimated {size_bytes} bytes).",
                 parameter="image",
             )
 
@@ -874,11 +892,13 @@ class BaseNanoNemotronVLProcessor(ABC):
                 )[0]
                 for image in images
             )
-            # Concatenation keeps both the input tiles and the new tensor live.
-            if len(images) > 1 or (self.use_thumbnail and num_patches > 1):
-                num_patches *= 2
             self._validate_image_preprocessing_budget(
-                num_patches * self.image_size**2, limit
+                images,
+                num_patches * self.image_size**2,
+                limit,
+                concatenates=(
+                    len(images) > 1 or (self.use_thumbnail and num_patches > 1)
+                ),
             )
 
         return [
@@ -918,7 +938,7 @@ class BaseNanoNemotronVLProcessor(ABC):
             limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
             if limit > 0 and not is_profiling_media():
                 self._validate_image_preprocessing_budget(
-                    sum(height * width for height, width in imgs_sizes), limit
+                    images, sum(height * width for height, width in imgs_sizes), limit
                 )
             if self.device_resize:
                 pixel_values_lst = [_pil_to_nhwc_tensor(p.media)[0] for p in params]

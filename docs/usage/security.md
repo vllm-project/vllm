@@ -122,7 +122,9 @@ lookup.
   log-Mel feature extraction. The byte-derived item cap applies to waveforms.
   The configured multimodal item limit applies to waveforms and `audio_embeds`.
 - Nano Nemotron VL, DeepSeek-VL2, and Molmo2 account for image tiles and
-  temporary tensors before materializing them.
+  temporary tensors before materializing them. With CPU normalization enabled,
+  the Nano Nemotron VL estimate includes the largest full-resolution float32
+  source buffer.
 - DeepSeek-OCR and Unlimited-OCR account for all global views and local tiles
   in the document plus temporary buffers for one view. Size the limit for the
   page count and crop settings when serving long multi-page scans.
@@ -138,7 +140,8 @@ lookup.
   not change the default count.
 - Gemma 4 and EmbeddingGemma2 reserve video patch tensor bytes before each
   clip is processed and account for the concatenated output while the
-  individual tensors are live.
+  individual tensors are live. EmbeddingGemma2 counts the frames the processor
+  will keep when processor-side sampling is enabled.
 
 The Rust frontend defaults to 999 items per modality. Set an explicit video
 count of 32 in `--limit-mm-per-prompt` to match the Python default for the

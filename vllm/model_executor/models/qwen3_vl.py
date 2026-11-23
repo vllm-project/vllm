@@ -1143,6 +1143,17 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         return timestamps
 
 
+def _get_max_video_tokens_per_frame(
+    video_processor: Qwen3VLVideoProcessor, video_kwargs: Mapping[str, object]
+) -> int | None:
+    if not video_kwargs.get(
+        "cap_pixels_per_frame", getattr(video_processor, "cap_pixels_per_frame", None)
+    ):
+        return None
+    # HF resolves the enable flag at call time. The ceiling comes from the instance.
+    return getattr(video_processor, "max_video_tokens", None)
+
+
 class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -1210,14 +1221,18 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         # over enough frames that the cap is not binding for the dummy.
         # This takes precedence over a shrinking num_frames override, which
         # would otherwise reintroduce the under-profiling.
-        if video_mm_kwargs.get("cap_pixels_per_frame"):
-            max_video_tokens = video_mm_kwargs.get(
-                "max_video_tokens",
-                getattr(video_processor, "max_video_tokens", 768),
-            )
+        max_video_tokens = _get_max_video_tokens_per_frame(
+            video_processor, video_mm_kwargs
+        )
+        if max_video_tokens is not None and video_mm_kwargs.get(
+            "do_resize", video_processor.do_resize
+        ):
             patch_size = video_mm_kwargs.get("patch_size", video_processor.patch_size)
             merge_size = video_mm_kwargs.get("merge_size", video_processor.merge_size)
-            per_frame_cap = max_video_tokens * (patch_size * merge_size) ** 2
+            per_frame_cap = max(
+                max_video_tokens * (patch_size * merge_size) ** 2,
+                int(video_size["shortest_edge"] * 1.05),
+            )
             target_num_frames = max(
                 target_num_frames,
                 min(video_processor.max_frames, cdiv(video_max_pixels, per_frame_cap)),
@@ -1532,11 +1547,11 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     size = video_kwargs.get("size", video_processor.size)
                     factor = patch_size * merge_size
                     max_pixels = size["longest_edge"]
-                    if video_kwargs.get(
-                        "cap_pixels_per_frame",
-                        getattr(video_processor, "cap_pixels_per_frame", None),
-                    ):
-                        frame_cap = video_processor.max_video_tokens * factor**2
+                    max_video_tokens = _get_max_video_tokens_per_frame(
+                        video_processor, video_kwargs
+                    )
+                    if max_video_tokens is not None:
+                        frame_cap = max_video_tokens * factor**2
                         pixels_per_frame = max(
                             min(frame_cap, max_pixels // frame_count),
                             int(size["shortest_edge"] * 1.05),

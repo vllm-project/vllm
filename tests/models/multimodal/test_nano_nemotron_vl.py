@@ -307,8 +307,43 @@ def test_static_image_preprocessing_budget(
 
 
 @pytest.mark.core_model
-@pytest.mark.parametrize("static_tiling", [True, False], ids=["static", "dynamic"])
-def test_render_rejects_over_budget_image_patches(tmp_path, static_tiling):
+@pytest.mark.parametrize(
+    ("static_tiling", "target_pixels"),
+    [(True, 2 * 16**2), (False, 32**2 + 8**2)],
+    ids=["static", "dynamic"],
+)
+def test_cpu_image_preprocessing_budget_counts_largest_source(
+    static_tiling: bool,
+    target_pixels: int,
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+):
+    processor = _make_processor(static_tiling=static_tiling)
+    images = [Image.new("RGB", (64, 64)), Image.new("RGB", (8, 8))]
+    # The source float32 copies are created one at a time.
+    budget = (target_pixels + 64**2) * 3 * torch.float32.itemsize
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget - 1)
+    with pytest.raises(VLLMValidationError, match="Image preprocessing exceeds"):
+        processor(text="<image><image>", images=images, max_num_tiles=1)
+    with profiling_media():
+        profiled = processor(text="<image><image>", images=images, max_num_tiles=1)
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget)
+    output = processor(text="<image><image>", images=images, max_num_tiles=1)
+    torch.testing.assert_close(
+        output["pixel_values_flat"], profiled["pixel_values_flat"], rtol=0, atol=0
+    )
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize(
+    ("static_tiling", "normalize_on_cpu", "first_image_size", "budget"),
+    [(True, False, 8, 8000), (False, False, 8, 1000), (False, True, 64, 20_000)],
+    ids=["static", "dynamic", "dynamic-cpu-normalize"],
+)
+def test_render_rejects_over_budget_image_patches(
+    tmp_path, static_tiling, normalize_on_cpu, first_image_size, budget
+):
     vision_args = {} if static_tiling else {"min_num_patches": 4, "max_num_patches": 64}
     LlavaConfig(
         architectures=["NemotronH_Nano_VL_V2"],
@@ -331,20 +366,23 @@ def test_render_rejects_over_budget_image_patches(tmp_path, static_tiling):
     images = [
         {
             "type": "image_url",
-            "image_url": {"url": encode_image_url(Image.new("RGB", (8, 8), color))},
+            "image_url": {
+                "url": encode_image_url(Image.new("RGB", (size, size), color))
+            },
         }
-        for color in ("red", "blue")
+        for size, color in ((first_image_size, "red"), (8, "blue"))
     ]
     model = str(tmp_path)
-    # Static tiling resizes each image to 16x16. Dynamic tiling retains 8x8.
-    budget = 8000 if static_tiling else 1000
+    args = ["--host", "127.0.0.1", "--dtype", "float32", "--max-model-len", "128"]
+    if normalize_on_cpu:
+        args.append("--no-mm-device-do-normalize")
     with RemoteLaunchRenderServer(
         model,
-        ["--host", "127.0.0.1", "--dtype", "float32", "--max-model-len", "128"],
+        args,
         env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": str(budget)},
     ) as server:
         url = server.url_for("v1/chat/completions/render")
-        for content, status in ((images, 400), (images[:1], 200)):
+        for content, status in ((images, 400), (images[1:], 200)):
             response = httpx.post(
                 url,
                 json={

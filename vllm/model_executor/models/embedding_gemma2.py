@@ -16,6 +16,9 @@ from transformers.models.embedding_gemma2.configuration_embedding_gemma2 import 
 from transformers.models.embedding_gemma2.processing_embedding_gemma2 import (
     EmbeddingGemma2Processor,
 )
+from transformers.models.embedding_gemma2.video_processing_embedding_gemma2 import (
+    EmbeddingGemma2VideoProcessor,
+)
 from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import support_torch_compile
@@ -633,6 +636,41 @@ class EmbeddingGemma2MultiModalProcessor(Gemma4MultiModalProcessor):
 
     info: EmbeddingGemma2ProcessingInfo
 
+    @staticmethod
+    def _get_video_frame_count(
+        decoded_frames: int,
+        metadata: VideoMetadata,
+        processor: EmbeddingGemma2VideoProcessor,
+        video_kwargs: Mapping[str, Any],
+    ) -> int:
+        if not video_kwargs.get("do_sample_frames", processor.do_sample_frames):
+            return decoded_frames
+
+        # Match HF's FPS sampling and overflow cap without allocating indices.
+        frame_count = metadata.total_num_frames
+        fps = video_kwargs.get("fps", processor.fps)
+        if (
+            fps is not None
+            and metadata.fps is not None
+            and metadata.duration is not None
+        ):
+            try:
+                frame_count = max(1, int(metadata.duration * fps))
+            except OverflowError as exc:
+                raise ValueError("Invalid video sampling duration or FPS.") from exc
+
+        if (
+            video_kwargs.get("overflow_strategy", processor.overflow_strategy)
+            is not None
+        ):
+            max_frames = video_kwargs.get("max_frames", processor.max_frames)
+            if max_frames is None or max_frames <= 0:
+                raise ValueError(
+                    "Video overflow handling requires positive max_frames."
+                )
+            frame_count = min(frame_count, max_frames)
+        return frame_count
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
@@ -717,10 +755,14 @@ class EmbeddingGemma2MultiModalProcessor(Gemma4MultiModalProcessor):
                 video_kwargs = self.info.ctx.get_hf_processor_kwargs(
                     hf_processor, video_mm_kwargs, scope="videos_kwargs"
                 )
+                video_processor = hf_processor.video_processor
+                frame_count = self._get_video_frame_count(
+                    len(video_array), metadata_obj, video_processor, video_kwargs
+                )
                 estimated_bytes = _video_patch_bytes(
                     video_array,
-                    len(video_array),
-                    hf_processor.video_processor,
+                    frame_count,
+                    video_processor,
                     video_kwargs,
                 )
                 validate_video_preprocessing_budget(

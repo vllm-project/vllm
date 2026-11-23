@@ -7,6 +7,7 @@ import pytest
 import torch
 from PIL import Image as PILImage
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -106,8 +107,22 @@ def test_qwen3_vl_video_preflight_uses_patch_overrides(
     assert pixels.nbytes * 2 == budget
 
 
-def test_embedding_gemma2_video_budget_uses_soft_token_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("decoded_frames", "sampling_kwargs", "processed_frames"),
+    [
+        (2, {"do_sample_frames": False}, 2),
+        (6, {"do_sample_frames": True, "fps": 1, "max_frames": 4}, 3),
+        (6, {"do_sample_frames": True, "fps": 1, "max_frames": 2}, 2),
+        (2, {"do_sample_frames": True, "fps": 3, "overflow_strategy": None}, 3),
+    ],
+    ids=["unsampled", "fps", "frame-cap", "upsample"],
+)
+def test_embedding_gemma2_video_budget_uses_effective_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    decoded_frames: int,
+    sampling_kwargs: dict[str, object],
+    processed_frames: int,
 ):
     pytest.importorskip("transformers.models.embedding_gemma2")
     from transformers import (
@@ -136,8 +151,11 @@ def test_embedding_gemma2_video_budget_uses_soft_token_override(
         video_token_id=hf_processor.video_token_id,
     ).save_pretrained(tmp_path)
 
-    # Count the output and its concatenated copy. Only the 70-token setting fits.
-    monkeypatch.setenv("VLLM_MAX_MEDIA_PREPROCESSING_BYTES", str(8 * 1024**2))
+    # Only the effective frame count and soft-token limit fit the byte budget.
+    # Both the output tensor and its concatenated copy count toward the budget.
+    pixel_shape = (processed_frames, 70 * 3**2, 16**2 * 3)
+    budget = 2 * processed_frames * pixel_shape[1] * pixel_shape[2] * 4
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget)
     config = ModelConfig(
         model=str(tmp_path),
         dtype="float32",
@@ -146,13 +164,18 @@ def test_embedding_gemma2_video_budget_uses_soft_token_override(
         mm_device_do_normalize=False,
     )
     processor = MULTIMODAL_REGISTRY.create_processor(config)
-    frames = np.zeros((2, 64, 64, 3), dtype=np.uint8)
-    metadata = {"fps": 2.0, "total_num_frames": 2, "frames_indices": [0, 1]}
+    frames = np.zeros((decoded_frames, 64, 64, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": decoded_frames / 2.0,
+        "total_num_frames": decoded_frames,
+        "frames_indices": list(range(decoded_frames)),
+    }
     inputs = ProcessorInputs(
         prompt=[hf_processor.video_token_id],
         mm_data_items=processor.info.parse_mm_data({"video": [(frames, metadata)]}),
         hf_processor_mm_kwargs={
-            "videos_kwargs": {"max_soft_tokens": 70, "do_sample_frames": False}
+            "videos_kwargs": {"max_soft_tokens": 70, **sampling_kwargs}
         },
     )
 
@@ -162,7 +185,8 @@ def test_embedding_gemma2_video_budget_uses_soft_token_override(
     assert video is not None
     pixels = video.get_data()["pixel_values_videos"]
     assert isinstance(pixels, torch.Tensor)
-    assert pixels.shape == (2, 70 * 3**2, 16**2 * 3)
+    assert pixels.shape == pixel_shape
+    assert pixels.nbytes * 2 == budget
 
 
 @pytest.mark.parametrize(
