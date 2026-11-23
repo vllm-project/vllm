@@ -2,14 +2,59 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Normalized configuration consumed by native offloading backends."""
 
+from __future__ import annotations
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.layer_layout import (
         LayerObjectLayout,
     )
+
+
+class OffloadAccessMode(Enum):
+    """Direction(s) in which an offloading connector may transfer data.
+
+    Configured through the optional `access_mode` key of a connector's
+    config: `read` serves loads but never accepts stores, `write` accepts
+    stores but never serves loads, and `readwrite` (the default) does both.
+    """
+
+    READ = "read"
+    WRITE = "write"
+    READWRITE = "readwrite"
+
+    @classmethod
+    def from_config(cls, value: str | OffloadAccessMode | None) -> OffloadAccessMode:
+        """Parse a configured `access_mode` value, defaulting to `readwrite`."""
+        if value is None:
+            return cls.READWRITE
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, str):
+            raise ValueError(
+                f"access_mode must be a string, got {type(value).__name__}: {value!r}"
+            )
+        try:
+            return cls(value.strip().lower())
+        except ValueError:
+            valid = ", ".join(repr(access_mode.value) for access_mode in cls)
+            raise ValueError(
+                f"Invalid access_mode {value!r}; expected one of {valid}"
+            ) from None
+
+    @property
+    def can_read(self) -> bool:
+        """Whether the connector may serve loads (read from the tier)."""
+        return self is not OffloadAccessMode.WRITE
+
+    @property
+    def can_write(self) -> bool:
+        """Whether the connector may accept stores (write to the tier)."""
+        return self is not OffloadAccessMode.READ
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +147,7 @@ class OffloadingConfig:
     # group ID. A row holds the canonical pages of the group's layers on every
     # pipeline stage, back to back in model order, so the layout does not
     # depend on the parallel config; a stage fills the slots of its own layers.
-    canonical_row_layouts: Mapping[int, "LayerObjectLayout"] = field(
+    canonical_row_layouts: Mapping[int, LayerObjectLayout] = field(
         default_factory=dict
     )
     # Resolved KVCacheLayout name of the worker KV cache.

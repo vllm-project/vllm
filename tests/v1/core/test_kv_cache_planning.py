@@ -824,8 +824,6 @@ def test_pipeline_stages_describe_every_stage():
     assert stages[1].kv_cache_groups[0].layer_names == draft_stage_layers
     kv_cache_configs[2].kv_cache_groups[0].kv_cache_specs["shared"] = layer.spec
     assert stages[1].kv_cache_groups[0].layer_names == draft_stage_layers
-    # An engine core that plans only its own worker cannot describe the stages.
-    assert get_pipeline_stages(vllm_config, kv_cache_configs[:1]) == ()
 
 
 def _pipeline_layer_specs(partition: list[int]) -> list[list[str]]:

@@ -831,7 +831,7 @@ class KVCacheStage:
 
     bytes_per_block: int
     """Bytes one block takes in the device KV cache of each worker of the
-    stage."""
+    stage: the size the engine core plans that worker's `num_blocks` with."""
     kv_cache_groups: tuple[KVCacheGroup, ...]
     """The global KV cache groups projected onto the stage, by group ID, each
     holding the stage's layers of the group in model order. A group holding
@@ -876,9 +876,7 @@ class KVCacheConfig:
 
     pipeline_stages: tuple[KVCacheStage, ...] = ()
     """The KV cache of every pipeline stage, by PP rank, resolved by the engine
-    core so that both halves of a KV connector see every stage. Empty when the
-    engine core plans only its own worker, as under the external launcher with
-    pipeline parallelism."""
+    core so that both halves of a KV connector see every stage."""
 
     needs_kv_cache_zeroing: bool = field(init=False)
     """Whether newly allocated attention blocks must be zeroed before use.
