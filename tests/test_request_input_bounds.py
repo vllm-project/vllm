@@ -17,6 +17,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 from pydantic import ValidationError
+from transformers import Qwen3Config
 
 import vllm.envs as envs
 from vllm import SamplingParams
@@ -226,6 +227,25 @@ def test_unset_max_tokens_accepts_min_tokens_within_filled_max():
     request = _process_inputs_with_max_model_len(params)
     assert request.sampling_params.max_tokens == 2045
     assert request.sampling_params.min_tokens == 10
+
+
+@pytest.mark.parametrize("stop", ["END", ["END", "STOP"]])
+def test_stop_strings_require_tokenizer_at_engine_admission(tmp_path, stop):
+    Qwen3Config(architectures=["Qwen3ForCausalLM"]).save_pretrained(tmp_path)
+    processor = InputProcessor(
+        EngineArgs(
+            model=str(tmp_path),
+            max_model_len=32,
+            skip_tokenizer_init=True,
+            enforce_eager=True,
+        ).create_engine_config()
+    )
+    prompt = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+    with pytest.raises(VLLMValidationError, match="stop strings require") as exc:
+        processor.process_inputs(
+            "req", prompt, SamplingParams(stop=stop), ("generate",)
+        )
+    assert exc.value.parameter == "stop"
 
 
 # --- Stop strings: public requests cap the number of stop strings ---------
