@@ -788,6 +788,19 @@ def test_rejected_cache_retunes_every_rank_in_its_tuning_group(autotune_run, pp,
     assert {rank for rank, _, _ in rerun.saves} == set(range(tp))
 
 
+@pytest.mark.parametrize("tp", [1, 4])
+def test_rejected_cache_restores_the_bf16_tuning(autotune_run, tp):
+    """clear_cache() drops the BF16 tuning file loaded at model init, along with
+    everything else, so every rank that cleared its tuner loads it again."""
+    with patch.object(warmup, "reload_flashinfer_bf16_tuning") as reload:
+        autotune_run(pp=1, tp=tp).execute()
+        assert reload.call_count == 0  # no cache file yet, nothing was cleared
+        rerun = autotune_run(pp=1, tp=tp)
+        rerun.rejected_load_ranks = {tp - 1}
+        rerun.execute()
+    assert reload.call_count == tp
+
+
 def test_autotune_cache_key_normalizes_kv_init_fields():
     """mamba_block_size/kv_cache_layout only resolve at engine KV-init time;
     they must not feed the autotune cache key, or nothing can compute the key

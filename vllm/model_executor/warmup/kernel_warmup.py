@@ -52,7 +52,11 @@ from vllm.model_executor.warmup.watermark_sample_warmup import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
-from vllm.utils.flashinfer import has_flashinfer, is_flashinfer_bf16_tuning_loaded
+from vllm.utils.flashinfer import (
+    has_flashinfer,
+    is_flashinfer_bf16_tuning_loaded,
+    reload_flashinfer_bf16_tuning,
+)
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 
@@ -602,6 +606,8 @@ def _load_shared_autotune_cache(cache_path: Path, tuner, tune_group) -> bool:
         loaded = all(loaded_by_rank)
     if not loaded:
         tuner.clear_cache()
+        # clear_cache() also dropped the BF16 tuning file loaded at model init.
+        reload_flashinfer_bf16_tuning()
     return loaded
 
 

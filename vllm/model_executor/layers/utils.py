@@ -19,9 +19,10 @@ from vllm.utils.flashinfer import (
     init_flashinfer_bf16_tuning_buckets,
     is_flashinfer_auto_bf16_gemm_supported,
     is_flashinfer_bf16_gemm_supported,
-    is_flashinfer_bf16_shape_tuned,
+    is_flashinfer_bf16_gemm_tuned,
     is_flashinfer_cutedsl_bf16_gemm_supported,
     load_flashinfer_bf16_tuning_for_current_model,
+    warn_flashinfer_bf16_untuned,
 )
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op, eager_bypass_custom_op
@@ -185,11 +186,17 @@ def _can_use_flashinfer_bf16(
         current_platform.is_cuda() and current_platform.is_device_capability_family(100)
     ):
         return False
-    # Only GEMMs the loaded tuning file has tactics for: FlashInfer would run an
-    # untuned one with its default tactic, which can be slower than torch.
-    if not is_flashinfer_bf16_shape_tuned(weight.shape[0], weight.shape[1]):
+    if not _bf16_mm_tensors_supported(x, weight, bias):
         return False
-    return _bf16_mm_tensors_supported(x, weight, bias)
+    # Only GEMMs the loaded tuning file has a tactic for (by M bucket, N and K):
+    # FlashInfer would run any other with its default tactic, which can be slower
+    # than torch, so those stay on torch.
+    k = weight.shape[1]
+    m = x.numel() // k
+    if is_flashinfer_bf16_gemm_tuned(m, weight.shape[0], k):
+        return True
+    warn_flashinfer_bf16_untuned(m, weight.shape[0], k)
+    return False
 
 
 # Output width below which flashinfer beats cuBLAS (swept on GB10, K=5120);

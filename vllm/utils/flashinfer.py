@@ -13,13 +13,13 @@ import importlib.util
 import inspect
 import json
 import os
-import re
 import shutil
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NoReturn
 
+import regex as re
 import requests
 import torch
 from packaging.version import Version
@@ -47,8 +47,10 @@ _BF16_TUNING_DIR = (
     / "gemmbf16_configs"
 )
 _bf16_tuning_files_loaded = False
-# (N, K) of every GEMM the loaded tuning file has tactics for.
-_bf16_tuning_shapes: frozenset[tuple[int, int]] = frozenset()
+# The file that was loaded, to load it again if FlashInfer's tuner cache is cleared.
+_bf16_tuning_file: Path | None = None
+# (M bucket, N, K) of every GEMM the loaded tuning file has a tactic for.
+_bf16_tuning_points: frozenset[tuple[int, int, int]] = frozenset()
 
 # <model>-tp<tensor parallel size>-<architecture>.json
 _BF16_TUNING_FILE_NAME = re.compile(
@@ -63,11 +65,6 @@ _DATACENTER_BLACKWELL_GPU_NAME = re.compile(r"NVIDIA (GB200|B200|GB300|B300)\b")
 
 def is_flashinfer_bf16_tuning_loaded() -> bool:
     return _bf16_tuning_files_loaded
-
-
-def is_flashinfer_bf16_shape_tuned(n: int, k: int) -> bool:
-    """Whether the loaded tuning file has tactics for an N x K GEMM."""
-    return (n, k) in _bf16_tuning_shapes
 
 
 def _bf16_tuning_path_for_this_gpu(file: Path, workdir: Path) -> Path:
@@ -181,8 +178,8 @@ def load_flashinfer_bf16_tuning(model_names: tuple[str, ...], tp_size: int) -> b
 
     try:
         with open(file) as f:
-            shapes = frozenset(
-                (int(m.group(4)), int(m.group(2)))
+            points = frozenset(
+                (int(m.group(1)), int(m.group(4)), int(m.group(2)))
                 for key in json.load(f)
                 if (m := _BF16_TUNING_KEY_SHAPE.search(key))
                 and m.group(2) == m.group(3)
@@ -196,15 +193,45 @@ def load_flashinfer_bf16_tuning(model_names: tuple[str, ...], tp_size: int) -> b
     if not loaded:
         logger.warning("FlashInfer rejected the tuning file %s", file)
         return False
-    global _bf16_tuning_files_loaded, _bf16_tuning_shapes
+    global _bf16_tuning_files_loaded, _bf16_tuning_file, _bf16_tuning_points
     _bf16_tuning_files_loaded = True
-    _bf16_tuning_shapes = shapes
+    _bf16_tuning_file = file
+    _bf16_tuning_points = points
     logger.info(
-        "Loaded FlashInfer BF16 tuning file %s with %d GEMM shapes",
+        "Loaded FlashInfer BF16 tuning file %s with %d GEMM shapes (%d M buckets)",
         file.name,
-        len(shapes),
+        len({(n, k) for _, n, k in points}),
+        len(points),
     )
     return True
+
+
+def reload_flashinfer_bf16_tuning() -> None:
+    """Load the BF16 tuning file again after FlashInfer's tuner cache was cleared.
+
+    AutoTuner.clear_cache() drops the loaded tactics together with everything
+    else. If they cannot be restored, no BF16 GEMM may use FlashInfer: it would
+    run a default tactic, and the autotune warmup skips bf16 GEMMs as long as a
+    tuning file counts as loaded.
+    """
+    global _bf16_tuning_files_loaded, _bf16_tuning_points
+    file = _bf16_tuning_file
+    if file is None or not _bf16_tuning_files_loaded:
+        return
+    from flashinfer.autotuner import AutoTuner
+
+    try:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = _bf16_tuning_path_for_this_gpu(file, Path(workdir))
+            loaded = bool(AutoTuner.get().load_configs(str(path)))
+    except Exception as e:
+        logger.warning("Cannot load FlashInfer tuning file %s again: %s", file, e)
+        loaded = False
+    if loaded:
+        logger.info("Loaded FlashInfer BF16 tuning file %s again", file.name)
+        return
+    _bf16_tuning_files_loaded = False
+    _bf16_tuning_points = frozenset()
 
 
 def load_flashinfer_bf16_tuning_for_current_model() -> bool:
@@ -257,7 +284,36 @@ def init_flashinfer_bf16_tuning_buckets() -> None:
     _bf16_gemm_tuning_buckets = tuple(sorted(buckets))
 
 
-def flashinfer_bf16_mm(
+def _bf16_lookup_bucket(m: int) -> int | None:
+    """The M bucket FlashInfer looks up a bf16 GEMM with m rows in.
+
+    With the buckets of init_flashinfer_bf16_tuning_buckets() FlashInfer rounds m
+    up to the smallest bucket that is not below it (the largest one if m is above
+    all of them). Without them it uses its own default mapping.
+    """
+    buckets = _bf16_gemm_tuning_buckets
+    if buckets is not None:
+        return next((b for b in buckets if b >= m), buckets[-1])
+    try:
+        from flashinfer.fused_moe.utils import map_to_hybrid_bucket_uncapped
+    except ImportError:
+        return None
+    return map_to_hybrid_bucket_uncapped(m)
+
+
+def is_flashinfer_bf16_gemm_tuned(m: int, n: int, k: int) -> bool:
+    """Whether the loaded tuning file has a tactic for an m x k by k x n GEMM.
+
+    FlashInfer looks a GEMM up by its M bucket, N and K. For one that is missing
+    (a CUDA graph capture size the file was not tuned for, say) it would run a
+    default tactic, and nothing tunes it because the autotune warmup skips bf16
+    GEMMs once a tuning file is loaded. Such a GEMM should stay on torch.
+    """
+    bucket = _bf16_lookup_bucket(m)
+    return bucket is not None and (bucket, n, k) in _bf16_tuning_points
+
+
+def _flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
     bias: torch.Tensor | None,
@@ -290,6 +346,72 @@ def flashinfer_bf16_mm(
         round_up=True,
     ):
         return _mm()
+
+
+_warned_bf16_points: set[tuple[int, int, int]] = set()
+_warned_bf16_misses: set[tuple[int, int, int]] = set()
+
+
+def warn_flashinfer_bf16_untuned(m: int, n: int, k: int) -> None:
+    """Warn that a GEMM is not in the tuning file and runs on torch linear.
+
+    Reported once per (M bucket, N, K), so a server log lists each shape that
+    fell back without one line per call.
+    """
+    point = (_bf16_lookup_bucket(m) or m, n, k)
+    if point in _warned_bf16_points:
+        return
+    _warned_bf16_points.add(point)
+    logger.warning(
+        "FlashInfer BF16 tuning file has no entry for M bucket %d, N=%d, K=%d "
+        "(M=%d): this GEMM runs on torch linear. The same shape is not "
+        "reported again.",
+        *point,
+        m,
+    )
+
+
+def _flashinfer_autotuner_stats():
+    try:
+        from flashinfer.autotuner import AutoTuner
+
+        return AutoTuner.get().stats
+    except Exception:
+        return None
+
+
+def flashinfer_bf16_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None,
+    pdl: bool,
+    backend: str,
+) -> torch.Tensor:
+    """_flashinfer_bf16_mm, warning when FlashInfer finds no tuned tactic.
+
+    The tuning file covers the shape (the caller checked), yet FlashInfer may not
+    find the entry, for example when the file was made by a different FlashInfer
+    version and its op names or keys differ. FlashInfer then silently runs its
+    default tactic. A miss shows up in FlashInfer's AutoTuner statistics (they
+    are only filled by FlashInfer versions that count inference-time misses).
+    """
+    stats = _flashinfer_autotuner_stats() if _bf16_tuning_files_loaded else None
+    misses = getattr(stats, "cache_misses", None)
+    out = _flashinfer_bf16_mm(a, b, bias, pdl, backend)
+    if misses is not None and stats.cache_misses > misses:
+        k = a.shape[-1]
+        m = a.numel() // k
+        point = (_bf16_lookup_bucket(m) or m, b.shape[-1], k)
+        if point not in _warned_bf16_misses:
+            _warned_bf16_misses.add(point)
+            logger.warning(
+                "FlashInfer found no tuned tactic for a BF16 GEMM with M bucket "
+                "%d, N=%d, K=%d although a tuning file is loaded: it ran its "
+                "default tactic. The file may have been made with a different "
+                "FlashInfer version. The same shape is not reported again.",
+                *point,
+            )
+    return out
 
 
 # This is the storage path for the cubins, it can be replaced
@@ -1764,8 +1886,9 @@ __all__ = [
     "find_flashinfer_bf16_tuning_file",
     "load_flashinfer_bf16_tuning",
     "load_flashinfer_bf16_tuning_for_current_model",
+    "reload_flashinfer_bf16_tuning",
     "is_flashinfer_bf16_tuning_loaded",
-    "is_flashinfer_bf16_shape_tuned",
+    "is_flashinfer_bf16_gemm_tuned",
     "init_flashinfer_bf16_tuning_buckets",
     "has_flashinfer_moe",
     "has_flashinfer_autotune_v2",
