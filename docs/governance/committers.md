@@ -50,6 +50,7 @@ Sorted alphabetically by GitHub handle:
 - [@sfeng33](https://github.com/sfeng33): Tool use and reasoning parser
 - [@shen-shanshan](https://github.com/shen-shanshan): AMD GPU / ROCm integration, multimodality, ViT CUDA graph
 - [@simon-mo](https://github.com/simon-mo): Project lead, API entrypoints, community
+- [@taneem-ibrahim](https://github.com/taneem-ibrahim): Pooling models
 - [@tdoublep](https://github.com/tdoublep): State space models
 - [@tjtanaa](https://github.com/tjtanaa): AMD GPU integration
 - [@tlrmchlsmth](https://github.com/tlrmchlsmth): Kernels and performance, distributed, disagg
@@ -123,6 +124,8 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 
 - Model Interface: The `nn.Module` interface and implementation for various models
     - @zhuohan123, @mgoin, @simon-mo, @houseroad, @ywang96 (multimodality), @jeejeelee (lora)
+- Pooling models: Embeddings, classification, reward modeling, and scoring
+    - @noooop, @taneem-ibrahim
 - Logits Processors / Sampler: The provided sampler class and pluggable logits processors
     - @njhill, @houseroad
 - Custom Layers: Utility layers in vLLM such as rotary embedding and rms norms
