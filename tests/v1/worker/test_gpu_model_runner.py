@@ -505,9 +505,12 @@ def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
             quantization=None,
         ),
     )
-    model = Mock()
-    model.named_parameters.return_value = []
-    model.load_weights.return_value = None
+
+    class EmptyModel(torch.nn.Module):
+        def load_weights(self, weights):
+            return {name for name, _ in weights}
+
+    model = EmptyModel()
 
     reload_inplace_module.reload_weights(
         vllm_config,

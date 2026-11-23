@@ -1257,6 +1257,53 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert req_status.partial_tail_boundary is None
 
 
+def test_partial_tail_hit_still_stores_the_containing_chunk():
+    """Only a tail checkpoint of the hit chunk is in the CPU tier, so the rest
+    of that chunk must still be stored once it is computed."""
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler, num_tokens=32)
+    req_status = scheduler._req_status["req"]
+    req_status.num_locally_computed_tokens = 0
+    req_status.update_offload_keys()
+    _as_mock(scheduler.manager.lookup).return_value = LookupResult.HIT
+    _as_mock(scheduler.manager.prepare_store).side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
+    )
+    assert scheduler._lookup(req_status) == 28
+
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(41)],
+            )
+        ),
+        num_external_tokens=28,
+    )
+    meta = scheduler.build_connector_meta(SchedulerOutput.make_empty())
+    assert isinstance(meta, OffloadingConnectorMetadata)
+    [load_job_id] = meta.load_jobs
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={load_job_id: 1}
+            )
+        )
+    )
+
+    # Compute the rest of the hit chunk (tokens 28-31).
+    request.num_computed_tokens = 28
+    output = SchedulerOutput.make_empty()
+    _schedule_new_request(output, request, ([31, 32], [0, 41]), 4)
+    meta = scheduler.build_connector_meta(output)
+    assert isinstance(meta, OffloadingConnectorMetadata)
+    [(store_job_id, store_job)] = meta.store_jobs.items()
+    assert scheduler._job_statuses[store_job_id].keys == (make_offload_key(b"h7", 0),)
+    assert isinstance(store_job.src_spec, GPULoadStoreSpec)
+    assert store_job.src_spec.block_ids.tolist() == [32]
+
+
 def test_partial_tail_lookup_delays_duplicate_inflight_load():
     """A second request must wait for an in-flight partial-tail load."""
     manager = CPUOffloadingManager(num_chunks=8)
