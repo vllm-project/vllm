@@ -2115,6 +2115,32 @@ def fused_moe_wvSplitK_int4_gemm(
     )
 
 
+def fused_moe_wmma_int4_gemm(
+    a: torch.Tensor,
+    w: torch.Tensor,
+    scales: torch.Tensor,
+    c: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    n_valid_tokens: int,
+    top_k: int,
+    block_size_m: int,
+    num_blocks: int,
+) -> None:
+    torch.ops._rocm_C.fused_moe_wmma_int4_gemm(
+        a,
+        w,
+        scales,
+        c,
+        sorted_token_ids,
+        expert_ids,
+        n_valid_tokens,
+        top_k,
+        block_size_m,
+        num_blocks,
+    )
+
+
 def wvSplitKrc(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:

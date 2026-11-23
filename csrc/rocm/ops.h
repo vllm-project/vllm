@@ -104,3 +104,12 @@ void rdna35_gdn_chunked(torch::Tensor& q, torch::Tensor& k, torch::Tensor& v,
                         std::optional<torch::Tensor> initial_state,
                         torch::Tensor& cu_seqlens, torch::Tensor& out,
                         torch::Tensor& final_state, double scale);
+
+// RDNA3.5 only: W4A16 MoE prefill WMMA GEMM (GEMM1, top_k == 8).
+// Mutates `c` in place.
+void fused_moe_wmma_int4_gemm(torch::Tensor& a, torch::Tensor& w,
+                              torch::Tensor& scales, torch::Tensor& c,
+                              torch::Tensor& sorted_token_ids,
+                              torch::Tensor& expert_ids, int64_t n_valid_tokens,
+                              int64_t top_k, int64_t block_size_m,
+                              int64_t num_blocks);

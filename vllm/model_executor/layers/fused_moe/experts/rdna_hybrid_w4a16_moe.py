@@ -9,8 +9,10 @@ Both GEMMs read one copy of the weights in the skinny layout shared with
   - Symmetric (uint4b8) only
 
 Decode (M <= MAX_SKINNY_BATCH_SIZE) runs the `fused_moe_wvSplitK_int4_gemm`
-HIP kernel; prefill runs the Triton `fused_moe_kernel_gptq_awq` with
-`use_shuffle_w4a16`.
+HIP kernel. Prefill runs the Triton `fused_moe_kernel_gptq_awq` with
+`use_shuffle_w4a16`, except that GEMM1 runs the `fused_moe_wmma_int4_gemm`
+HIP kernel when it supports the shape (bf16, top_k == 8; see
+`_use_wmma_gemm1`).
 """
 
 import torch
@@ -62,7 +64,8 @@ def rdna_hybrid_w4a16_moe_kernel_available() -> bool:
 
 
 class RDNAHybridW4A16Experts(mk.FusedMoEExpertsModular):
-    """W4A16 experts: HIP skinny GEMM for decode, Triton for prefill."""
+    """W4A16 experts: HIP skinny GEMM for decode; WMMA HIP GEMM1 (when
+    supported) and Triton for prefill."""
 
     # Above this many tokens the Triton prefill kernel is used.
     MAX_SKINNY_BATCH_SIZE = 5
@@ -94,6 +97,9 @@ class RDNAHybridW4A16Experts(mk.FusedMoEExpertsModular):
         self._group_size = block_shape[1]
         assert self._group_size in SUPPORTED_GROUP_SIZES
         self._cu_count = num_compute_units()
+        self._has_wmma_gemm1 = hasattr(torch.ops, "_rocm_C") and hasattr(
+            torch.ops._rocm_C, "fused_moe_wmma_int4_gemm"
+        )
         self._cached_arange: torch.Tensor | None = None
         self._cached_inv_perm_buf: torch.Tensor | None = None
         self._cached_expert_ids_buf: torch.Tensor | None = None
@@ -200,6 +206,31 @@ class RDNAHybridW4A16Experts(mk.FusedMoEExpertsModular):
             "num_stages": 1,
         }
 
+    def _use_wmma_gemm1(
+        self,
+        N: int,
+        K: int,
+        top_k: int,
+        dtype: torch.dtype,
+        apply_router_weight_on_input: bool,
+    ) -> bool:
+        """Whether prefill GEMM1 can run the WMMA HIP kernel instead of Triton.
+
+        The kernel has one instantiation: bf16 activations, group size 128,
+        top_k 8, BLOCK_M == TRITON_BLOCK_SIZE_M (32), K % 128 == 0 and
+        N % 256 == 0. It does not apply router weights.
+        """
+        return (
+            self._has_wmma_gemm1
+            and dtype == torch.bfloat16
+            and top_k == 8
+            and self._group_size == 128
+            and self.TRITON_BLOCK_SIZE_M == 32
+            and K % 128 == 0
+            and N % 256 == 0
+            and not apply_router_weight_on_input
+        )
+
     def _arange(self, n: int, device: torch.device) -> torch.Tensor:
         if self._cached_arange is None or self._cached_arange.size(0) < n:
             self._cached_arange = torch.arange(n, dtype=torch.int32, device=device)
@@ -293,21 +324,42 @@ class RDNAHybridW4A16Experts(mk.FusedMoEExpertsModular):
 
             # GEMM1 scatters its output by slot id, so rows [0, P) are always
             # written and padding rows are never read: no zero-init needed.
-            invoke_fused_moe_kernel_hybrid_triton(
-                A=gemm1_in,
-                B=w1,
-                C=gemm1_out,
-                B_scale=self.w1_scale,
-                topk_weights=topk_weights if apply_router_weight_on_input else None,
-                sorted_token_ids=sorted_token_ids,
-                expert_ids=expert_ids,
-                num_tokens_post_padded=num_tokens_post_padded,
-                mul_routed_weight=apply_router_weight_on_input,
-                top_k=top_k,
-                config=self._triton_config(K, N, P),
-                compute_type=compute_type,
-                group_size=self._group_size,
-            )
+            # Both GEMM1 kernels write the same layout.
+            if self._use_wmma_gemm1(
+                N,
+                K,
+                top_k,
+                hidden_states.dtype,
+                apply_router_weight_on_input,
+            ):
+                ops.fused_moe_wmma_int4_gemm(
+                    gemm1_in,
+                    w1,
+                    self.w1_scale,
+                    gemm1_out,
+                    sorted_token_ids,
+                    expert_ids,
+                    P,
+                    top_k,
+                    block_size_m,
+                    expert_ids.numel(),
+                )
+            else:
+                invoke_fused_moe_kernel_hybrid_triton(
+                    A=gemm1_in,
+                    B=w1,
+                    C=gemm1_out,
+                    B_scale=self.w1_scale,
+                    topk_weights=topk_weights if apply_router_weight_on_input else None,
+                    sorted_token_ids=sorted_token_ids,
+                    expert_ids=expert_ids,
+                    num_tokens_post_padded=num_tokens_post_padded,
+                    mul_routed_weight=apply_router_weight_on_input,
+                    top_k=top_k,
+                    config=self._triton_config(K, N, P),
+                    compute_type=compute_type,
+                    group_size=self._group_size,
+                )
 
             self.activation(activation, act_out[:P], gemm1_out[:P])
 
