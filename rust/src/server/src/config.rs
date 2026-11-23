@@ -362,6 +362,8 @@ pub struct Config {
     pub listener_mode: HttpListenerMode,
     /// gRPC listener setup. When `None`, no gRPC server is started.
     pub grpc_listener_mode: Option<HttpListenerMode>,
+    /// Trusted local directory for immutable gRPC SHM inputs; disabled by default.
+    pub grpc_shm_directory: Option<std::path::PathBuf>,
     /// Tool-call parser selection.
     pub tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
@@ -463,6 +465,9 @@ impl Config {
     /// Validate frontend configuration that can be checked before engine
     /// startup.
     pub fn validate(&self) -> Result<()> {
+        if self.grpc_shm_directory.is_some() && self.grpc_listener_mode.is_none() {
+            bail!("--grpc-shm-directory requires a gRPC listener");
+        }
         if self.api_server_options.enable_per_request_metrics && self.disable_log_stats {
             bail!(
                 "--enable-per-request-metrics requires engine statistics logging; remove --disable-log-stats"

@@ -29,6 +29,7 @@ const DATA_PARALLEL_RANK_METADATA_KEY: &str = "x-data-parallel-rank";
 /// gRPC inference service backed by the shared application state.
 pub struct InferenceServiceImpl {
     state: Arc<AppState>,
+    shm: Option<Arc<super::shm::SharedMemoryDirectory>>,
 }
 
 struct PreparedGrpcRequest {
@@ -98,7 +99,18 @@ fn apply_encoder_cache_placeholders(text_request: &mut TextRequest) {
 
 impl InferenceServiceImpl {
     pub fn new(state: Arc<AppState>) -> Self {
-        Self { state }
+        Self { state, shm: None }
+    }
+
+    /// Enable immutable shared-memory inputs from a trusted local directory.
+    pub fn with_shared_memory_directory(
+        mut self,
+        directory: &std::path::Path,
+    ) -> std::io::Result<Self> {
+        self.shm = Some(Arc::new(super::shm::SharedMemoryDirectory::open(
+            directory,
+        )?));
+        Ok(self)
     }
 
     async fn prepare_request(
@@ -133,7 +145,7 @@ impl InferenceServiceImpl {
         info!(parent: &request_span, "gRPC inference request received");
 
         let result = async {
-            let media = std::mem::take(&mut proto_request.media);
+            let mut media = std::mem::take(&mut proto_request.media);
             let media_io_kwargs = proto_request.media_io_kwargs.take();
             let mut text_request =
                 convert::to_text_request(proto_request, stream, &self.state.base_model_names())?;
@@ -152,7 +164,8 @@ impl InferenceServiceImpl {
                 })?);
             }
 
-            let media = super::media::from_proto(media, media_io_kwargs.as_ref())?;
+            let shared_bytes = super::shm::import_kwargs(&mut media, self.shm.clone()).await?;
+            let media = super::media::from_proto(media, media_io_kwargs.as_ref(), shared_bytes)?;
             if !media.is_empty() {
                 let Prompt::TokenIds(mut token_ids) = text_request.prompt else {
                     return Err(Status::invalid_argument(

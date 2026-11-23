@@ -346,6 +346,11 @@ pub struct JsonStringList(pub Vec<String>);
 #[derive(Educe, Clone, Args, PartialEq, Eq, Deserialize)]
 #[educe(Debug)]
 pub struct SharedRuntimeArgs {
+    /// Enable local gRPC SHM inputs from this trusted directory. Disabled by default.
+    #[arg(long)]
+    #[serde(default)]
+    pub grpc_shm_directory: Option<PathBuf>,
+
     /// The model and the sources of its tokenizer and config files.
     #[command(flatten)]
     #[serde(flatten)]
@@ -1089,6 +1094,7 @@ impl SharedRuntimeArgs {
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             grpc_listener_mode: grpc_listen_fd.map(|fd| HttpListenerMode::InheritedFd { fd }),
+            grpc_shm_directory: self.grpc_shm_directory,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
@@ -1183,6 +1189,7 @@ impl SharedRuntimeArgs {
             served_model_name: self.served_model_name,
             listener_mode,
             grpc_listener_mode,
+            grpc_shm_directory: self.grpc_shm_directory,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,

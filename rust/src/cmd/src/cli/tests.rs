@@ -45,6 +45,37 @@ fn bench_serve_args_parse_without_managed_engine_repartition() {
     assert!(args.request_rate.is_infinite());
 }
 
+#[test]
+fn shm_directory_reaches_bootstrapped_and_managed_server_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "test-model",
+        "--grpc-port",
+        "50051",
+        "--grpc-shm-directory",
+        "/dev/shm/vllm-inputs",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve")
+    };
+    let resolved = topology(&args);
+    let config = args.to_frontend_config("ipc:///tmp/shm-test".into(), &resolved);
+    assert_eq!(
+        config.grpc_shm_directory.as_deref(),
+        Some(std::path::Path::new("/dev/shm/vllm-inputs"))
+    );
+
+    let runtime: SharedRuntimeArgs = serde_json::from_value(serde_json::json!({
+        "model_tag": "test-model", "grpc_shm_directory": "/dev/shm/vllm-inputs"
+    }))
+    .unwrap();
+    let bootstrapped = runtime.into_bootstrapped_config(3, Some(4), 5, 6, None, 0, 1, 1);
+    assert_eq!(bootstrapped.grpc_shm_directory, config.grpc_shm_directory);
+    assert!(bootstrapped.validate().is_ok());
+}
+
 /// `--dtype` takes vLLM's choices, including the `half` and `float` aliases.
 #[test]
 fn render_dtype_accepts_vllm_choices() {
@@ -256,6 +287,7 @@ fn serve_args_forward_python_flags_with_separator() {
                     uds: None,
                     grpc_port: None,
                     runtime: SharedRuntimeArgs {
+                        grpc_shm_directory: None,
                         model: ModelArgs {
                             id: "Qwen/Qwen3-0.6B",
                             revision: None,
@@ -2321,6 +2353,7 @@ fn frontend_args_accept_json() {
                     engine_count: 1,
                     data_parallel_size: None,
                     runtime: SharedRuntimeArgs {
+                        grpc_shm_directory: None,
                         model: ModelArgs {
                             id: "Qwen/Qwen3-0.6B",
                             revision: None,
@@ -3413,6 +3446,7 @@ fn serve_args_accept_handshake_aliases() {
                     uds: None,
                     grpc_port: None,
                     runtime: SharedRuntimeArgs {
+                        grpc_shm_directory: None,
                         model: ModelArgs {
                             id: "Qwen/Qwen3-0.6B",
                             revision: None,
@@ -3744,6 +3778,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 port: 8000,
             },
             grpc_listener_mode: None,
+            grpc_shm_directory: None,
             tool_call_parser: Auto,
             reasoning_parser: Auto,
             tool_strict_level: None,
@@ -3882,6 +3917,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 port: 8000,
             },
             grpc_listener_mode: None,
+            grpc_shm_directory: None,
             tool_call_parser: Auto,
             reasoning_parser: Auto,
             tool_strict_level: None,
@@ -4133,6 +4169,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 fd: 3,
             },
             grpc_listener_mode: None,
+            grpc_shm_directory: None,
             tool_call_parser: None,
             reasoning_parser: None,
             tool_strict_level: None,

@@ -195,6 +195,8 @@ def test_rust_grpc_port_accepts_frontend_launch(
             "serve",
             "--grpc-port",
             str(port),
+            "--grpc-shm-directory",
+            "/dev/shm/vllm-inputs",
             "--data-parallel-size",
             "8",
             "--data-parallel-size-local",
@@ -207,6 +209,16 @@ def test_rust_grpc_port_accepts_frontend_launch(
     )
     validate_parsed_serve_args(args)
     assert args.grpc_port == port
+    assert args.grpc_shm_directory == "/dev/shm/vllm-inputs"
+
+
+def test_rust_grpc_shm_requires_listener(vllm_parser, monkeypatch):
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    args = vllm_parser.parse_args(
+        ["serve", "--grpc-shm-directory", "/dev/shm/vllm-inputs"]
+    )
+    with pytest.raises(ValueError, match="--grpc-shm-directory requires --grpc-port"):
+        validate_parsed_serve_args(args)
 
 
 @pytest.mark.parametrize(
