@@ -16,6 +16,7 @@ from vllm.model_executor.models.qwen3_dflash2 import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
 
@@ -473,6 +474,7 @@ def _mock_draft_configs(monkeypatch, hf_config, dtype=torch.float32):
             ),
             num_speculative_tokens=4,
             enable_adaptive_verification=False,
+            prefill_context_kv_only=False,
         ),
         model_config=SimpleNamespace(
             dtype=dtype,
@@ -484,6 +486,9 @@ def _mock_draft_configs(monkeypatch, hf_config, dtype=torch.float32):
             quantization=None,
             quantization_param_path=None,
         ),
+    )
+    vllm_config.speculative_config.speculator_config = DFlash2SpeculatorConfig(
+        vllm_config.speculative_config
     )
     mock_current_vllm_config.speculative_config = vllm_config.speculative_config
     vllm_config.compilation_config = mock_current_vllm_config.compilation_config
@@ -543,6 +548,79 @@ def test_candidate_model_decoder_layer_cls(monkeypatch, variant):
         else DFlash2Qwen3DecoderLayer
     )
     assert type(model.layers[0]) is expected
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("dflash_flag", "top_level_flag", "expected_block_size"),
+    [
+        (False, None, 5),
+        (True, None, 4),
+        (None, True, 4),
+        (None, False, 5),
+        (True, True, 4),
+    ],
+)
+def test_dflash2_conv_block_matches_query_layout(
+    monkeypatch, dflash_flag, top_level_flag, expected_block_size
+):
+    """The grouped conv resets per draft block, so its block must be the number
+    of query tokens per request: `1 + K` for fill-in, `K` for anchor-first.
+    `sample_from_anchor` may be set in `dflash_config` or at the top level."""
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.models.qwen3_dflash2 import DFlash2Qwen3Model
+
+    hf_config = _dflash2_hf_config(dflash_flag, top_level_flag, expected_block_size)
+    current_config, vllm_config = _mock_draft_configs(monkeypatch, hf_config)
+    with set_current_vllm_config(current_config), torch.device("meta"):
+        model = DFlash2Qwen3Model(vllm_config=vllm_config)
+
+    assert model.layers[0].attention_conv.block_size == expected_block_size
+
+
+@pytest.mark.skip_global_cleanup
+def test_dflash2_rejects_conflicting_sample_from_anchor(monkeypatch):
+    """A checkpoint that sets `sample_from_anchor` both in `dflash_config` and at
+    the top level with different values is ambiguous, so it must not load."""
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.models.qwen3_dflash2 import DFlash2Qwen3Model
+
+    hf_config = _dflash2_hf_config(True, False, 4)
+    current_config, vllm_config = _mock_draft_configs(monkeypatch, hf_config)
+    with (
+        set_current_vllm_config(current_config),
+        torch.device("meta"),
+        pytest.raises(ValueError, match="Conflicting sample_from_anchor"),
+    ):
+        DFlash2Qwen3Model(vllm_config=vllm_config)
+
+
+def _dflash2_hf_config(dflash_flag, top_level_flag, block_size):
+    hf_config = SimpleNamespace(
+        vocab_size=1000,
+        hidden_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=8,
+        num_key_value_heads=2,
+        max_position_embeddings=2048,
+        rms_norm_eps=1e-6,
+        rope_parameters={},
+        intermediate_size=512,
+        hidden_act="silu",
+        dflash_config={
+            "selector_rank": 4,
+            "selector_top_k": 3,
+            "conv_kernel_size": 3,
+            "conv_group_size": 2,
+            "block_size": block_size,
+            "use_aux_hidden_state": False,
+        },
+    )
+    if dflash_flag is not None:
+        hf_config.dflash_config["sample_from_anchor"] = dflash_flag
+    if top_level_flag is not None:
+        hf_config.sample_from_anchor = top_level_flag
+    return hf_config
 
 
 @pytest.mark.skip_global_cleanup
@@ -698,9 +776,15 @@ def test_conv_projections_use_draft_quant_config(monkeypatch):
     quant_config = modelopt.ModelOptNvFp4Config(
         quant_method="W4A16_NVFP4", is_checkpoint_nvfp4_serialized=True
     )
+    speculative_config = SimpleNamespace(
+        num_speculative_tokens=7,
+        prefill_context_kv_only=False,
+        draft_model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+    )
+    speculative_config.speculator_config = DFlash2SpeculatorConfig(speculative_config)
     layer = DFlash2Qwen3DecoderLayer(
         SimpleNamespace(
-            speculative_config=SimpleNamespace(num_speculative_tokens=7),
+            speculative_config=speculative_config,
             model_config=SimpleNamespace(dtype=torch.bfloat16),
         ),
         config=SimpleNamespace(

@@ -400,6 +400,8 @@ class Ovis2_5Processor(ProcessorMixin):
                 images = [images]
         elif video is not None:
             is_video = True
+            if isinstance(video, torch.Tensor):
+                video = video.cpu().numpy()
             # type of video in dummy_mm_data is np.ndarray
             if isinstance(video, np.ndarray):
                 images = []
