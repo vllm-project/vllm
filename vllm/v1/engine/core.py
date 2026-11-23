@@ -61,6 +61,7 @@ from vllm.v1.core.kv_cache_planning import (
     finalize_extensible_kv_cache,
     get_global_kv_cache_groups,
     get_kv_cache_configs,
+    get_pipeline_stages,
     resolve_mamba_block_size,
 )
 from vllm.v1.core.kv_cache_utils import (
@@ -387,12 +388,14 @@ class EngineCore:
             scheduler_block_size,
             hash_block_size,
         )
+        pipeline_stages = get_pipeline_stages(vllm_config, kv_cache_configs)
         # The scheduler's config is a deep copy taken before these are resolved,
         # so set them there too: the KV connector's scheduler side reads the same
         # fields as its workers.
         for kv_cache_config in (*kv_cache_configs, scheduler_kv_cache_config):
             kv_cache_config.hash_block_size = hash_block_size
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
+            kv_cache_config.pipeline_stages = pipeline_stages
 
         self.model_executor.initialize_from_config(kv_cache_configs)
         compilation_times = []
@@ -409,24 +412,8 @@ class EngineCore:
             if max_model_len != max_model_len_after:
                 self.collective_rpc("update_max_model_len", args=(max_model_len,))
             self.model_executor.extend_kv_cache(num_blocks)
-        # Under the extensible KV cache, workers create the connector in
-        # `extend_kv_cache`, so ask for its block count only afterwards.
-        kv_transfer_config = vllm_config.kv_transfer_config
-        if (
-            kv_transfer_config is not None
-            and kv_transfer_config.has_connector("SimpleCPUOffloadConnector")
-            and vllm_config.cache_config.enable_prefix_caching
-        ):
-            aligned_num_cpu_blocks = (
-                self.model_executor.get_simple_cpu_offload_num_blocks()
-            )
-            assert aligned_num_cpu_blocks is not None, (
-                "SimpleCPUOffloadConnector workers must report their block count"
-            )
-            vllm_config.cache_config.simple_cpu_offload_num_blocks = (
-                aligned_num_cpu_blocks
-            )
 
+        kv_transfer_config = vllm_config.kv_transfer_config
         if (
             kv_transfer_config is not None
             and kv_transfer_config.is_kv_transfer_instance
