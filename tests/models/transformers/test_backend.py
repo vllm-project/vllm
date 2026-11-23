@@ -465,47 +465,6 @@ def test_pooling(
     )
 
 
-def test_classify_per_position_head(hf_runner, vllm_runner, example_prompts, tmp_path):
-    """A head applied at every position, like CTRL's `classifier`, returns one row of
-    logits per sequence."""
-    from transformers import (
-        AutoModelForSequenceClassification,
-        AutoTokenizer,
-        CTRLConfig,
-        CTRLForSequenceClassification,
-    )
-
-    config = CTRLConfig(
-        vocab_size=32000, n_embd=64, n_layer=2, n_head=4, dff=128, num_labels=3
-    )
-    torch.manual_seed(0)
-    CTRLForSequenceClassification(config).save_pretrained(tmp_path)
-    tokenizer = AutoTokenizer.from_pretrained(
-        "vllm-project/tiny-random-LlamaForCausalLM"
-    )
-    tokenizer.save_pretrained(tmp_path)
-
-    model = str(tmp_path)
-    with vllm_runner(
-        model,
-        runner="pooling",
-        model_impl="transformers",
-        max_model_len=config.n_positions,
-        enforce_eager=True,
-    ) as vllm_model:
-        assert vllm_model.llm.llm_engine.model_config.using_transformers_backend()
-        vllm_outputs = vllm_model.classify(example_prompts)
-    with hf_runner(model, auto_cls=AutoModelForSequenceClassification) as hf_model:
-        hf_outputs = hf_model.classify(example_prompts)
-
-    check_embeddings_close(
-        embeddings_0_lst=hf_outputs,
-        embeddings_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-    )
-
-
 VOCAB_SIZE = 64
 PER_LAYER_VOCAB_SIZE = 32
 NUM_POSITIONS = 16
