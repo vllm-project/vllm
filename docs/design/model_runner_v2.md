@@ -40,6 +40,20 @@ This removes the need for `CachedRequestState` and simplifies bookkeeping. Large
 
 ![Persistent Batch in MRV2](../assets/design/model_runner_v2/persistent_batch_mrv2.png)
 
+### Model-supplied PrefixLM ranges
+
+A model that changes only request attention visibility can implement
+`get_request_prefix_ranges(request: NewRequestData)`. Return inclusive
+`(start, end)` token ranges for bidirectional blocks, or `None` to keep the
+default multimodal ranges. `DefaultModelState` stores these ranges by request
+ID, translates them to the current batch order, and removes them when the
+request ends. Hybrid states inherit the same lifecycle.
+
+This hook retains platform-specific state preparation and recurrent-state
+handling. It does not replace the model state class, alter linear attention,
+or share state computation across requests. The attention backend must
+support PrefixLM ranges.
+
 ## 2. Async-First
 
 vLLM now relies heavily on asynchronous scheduling. The scheduler and worker prepare inputs for step `N+1` while the GPU executes step `N`, overlapping CPU and GPU work to maximize utilization.

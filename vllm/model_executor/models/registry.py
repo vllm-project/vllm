@@ -349,6 +349,14 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
         "shieldgemma2",
         "ShieldGemma2ForImageClassification",
     ),
+    "StartLuxDecisionForSequenceClassification": (
+        "startlux_decision",
+        "StartLuxDecisionForSequenceClassification",
+    ),
+    "StartLuxDecisionMoeForSequenceClassification": (
+        "startlux_decision",
+        "StartLuxDecisionMoeForSequenceClassification",
+    ),
 }
 
 _MULTIMODAL_MODELS = {
