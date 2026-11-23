@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""`subfolder` without `model` takes the draft that the target checkpoint ships
-in that subfolder, and fails clearly when it is missing."""
+"""Without `model`, the draft is taken from `subfolder` of the target
+checkpoint, which defaults to the method name, and a missing draft fails
+clearly."""
 
 import json
 
@@ -37,11 +38,13 @@ _DRAFT_CONFIG = {
 }
 
 
-def _make_spec(tmp_path, with_draft: bool) -> SpeculativeConfig:
+def _make_spec(
+    tmp_path, draft_dir: str | None, subfolder: str | None
+) -> SpeculativeConfig:
     (tmp_path / "config.json").write_text(json.dumps(_TARGET_CONFIG))
-    if with_draft:
-        (tmp_path / "eagle3").mkdir()
-        (tmp_path / "eagle3" / "config.json").write_text(json.dumps(_DRAFT_CONFIG))
+    if draft_dir is not None:
+        (tmp_path / draft_dir).mkdir()
+        (tmp_path / draft_dir / "config.json").write_text(json.dumps(_DRAFT_CONFIG))
     target = ModelConfig(
         model=str(tmp_path),
         tokenizer=str(tmp_path),
@@ -50,7 +53,7 @@ def _make_spec(tmp_path, with_draft: bool) -> SpeculativeConfig:
     )
     return SpeculativeConfig(
         method="eagle3",
-        subfolder="eagle3",
+        subfolder=subfolder,
         num_speculative_tokens=3,
         target_model_config=target,
         target_parallel_config=ParallelConfig(),
@@ -58,14 +61,28 @@ def _make_spec(tmp_path, with_draft: bool) -> SpeculativeConfig:
 
 
 @pytest.mark.cpu_test
-def test_draft_from_target_subfolder(tmp_path):
-    spec = _make_spec(tmp_path, with_draft=True)
+@pytest.mark.parametrize(
+    "draft_dir,subfolder",
+    [("eagle3", None), ("draft", "draft")],
+    ids=["method-default", "explicit"],
+)
+def test_draft_from_target_subfolder(tmp_path, draft_dir, subfolder):
+    spec = _make_spec(tmp_path, draft_dir, subfolder)
 
-    assert spec.model == str(tmp_path / "eagle3")
+    assert spec.model == str(tmp_path / draft_dir)
+    assert spec.subfolder == draft_dir
     assert spec.draft_model_config.hf_config.architectures == ["Eagle3LlamaForCausalLM"]
 
 
 @pytest.mark.cpu_test
-def test_missing_draft_subfolder_raises(tmp_path):
-    with pytest.raises(ValueError, match="no draft checkpoint in the 'eagle3/'"):
-        _make_spec(tmp_path, with_draft=False)
+@pytest.mark.parametrize(
+    "subfolder,match",
+    [
+        ("draft", "no draft checkpoint in the 'draft/'"),
+        (None, "without speculative model"),
+    ],
+    ids=["explicit", "method-default"],
+)
+def test_missing_draft_subfolder_raises(tmp_path, subfolder, match):
+    with pytest.raises(ValueError, match=match):
+        _make_spec(tmp_path, None, subfolder)

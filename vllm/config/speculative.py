@@ -454,7 +454,9 @@ class SpeculativeConfig:
     """The subfolder of `model` (or of the target model, if `model` is not
     given) that holds the draft checkpoint, e.g. `"eagle3"` for a target that
     ships its EAGLE-3 draft in `eagle3/`. Only this subfolder is downloaded
-    from the Hugging Face Hub."""
+    from the Hugging Face Hub. If neither `model` nor `subfolder` is given,
+    a draft method that needs a checkpoint looks for one in the target's
+    subfolder named after the method (e.g. `eagle3/`)."""
     method: SpeculativeMethod | str | None = None
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
@@ -1446,19 +1448,27 @@ class SpeculativeConfig:
             transformers_mtp_overrides=transformers_mtp_overrides,
         )
 
-    def get_subfolder_checkpoint(self, subfolder: str) -> str:
+    def find_subfolder_checkpoint(self, subfolder: str) -> str | None:
         """The local path of the draft checkpoint in `subfolder` of `model`, or
-        of the target model if `model` is not given."""
+        of the target model if `model` is not given, if there is one."""
         if self.model is not None:
             model, revision = self.model, self.revision
         elif (target := self.target_model_config) is not None:
             model, revision = target.model, target.revision
         else:
-            raise ValueError("subfolder requires model or target_model_config.")
+            return None
         load_config = self.draft_load_config
         cache_dir = load_config.download_dir if load_config else None
         path = get_subfolder_path(model, subfolder, revision, cache_dir)
         if not os.path.isfile(os.path.join(path, "config.json")):
+            return None
+        return path
+
+    def get_subfolder_checkpoint(self, subfolder: str) -> str:
+        """Like `find_subfolder_checkpoint`, but raises if there is none."""
+        if (path := self.find_subfolder_checkpoint(subfolder)) is None:
+            target = self.target_model_config
+            model = self.model or (target.model if target else None)
             raise ValueError(
                 f"Found no draft checkpoint in the '{subfolder}/' subfolder of "
                 f"{model}. Set speculative_config.model to the draft checkpoint."
