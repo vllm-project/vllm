@@ -25,6 +25,7 @@ import vllm.envs as envs
 from vllm.connections import (
     HTTPConnection,
     MediaDownloadSizeExceededError,
+    MediaFetchDeadlineExceededError,
     MediaRequestDownloadBudget,
     MediaRequestDownloadSizeExceededError,
     global_http_connection,
@@ -114,6 +115,13 @@ def _wrap_media_fetch_error(
     if isinstance(
         exc, (MediaDownloadSizeExceededError, MediaRequestDownloadSizeExceededError)
     ):
+        return VLLMUnprocessableEntityError(
+            f"Failed to fetch media from URL: {exc}",
+            parameter="image_url",
+            value=url,
+        )
+
+    if isinstance(exc, MediaFetchDeadlineExceededError):
         return VLLMUnprocessableEntityError(
             f"Failed to fetch media from URL: {exc}",
             parameter="image_url",
@@ -408,6 +416,11 @@ class MediaConnector:
                 data = connection.get_bytes(
                     url_spec.url,
                     timeout=fetch_timeout,
+                    deadline=(
+                        time.monotonic() + 2 * fetch_timeout
+                        if fetch_timeout is not None
+                        else None
+                    ),
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
                     max_bytes=max_bytes,
                     **budget_kwargs,

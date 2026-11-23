@@ -192,6 +192,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
+        self._tracker._validate_add("image")
         image = self._connector.fetch_image(image_url) if image_url else None
 
         placeholder = self._tracker.add("image", (image, uuid))
@@ -262,6 +263,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("image", placeholder)
 
     def parse_audio(self, audio_url: str | None, uuid: str | None = None) -> None:
+        self._tracker._validate_add("audio")
         audio = self._connector.fetch_audio(audio_url) if audio_url else None
 
         placeholder = self._tracker.add("audio", (audio, uuid))
@@ -284,6 +286,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
+        self._tracker._validate_add("video")
         video = (
             self._connector.fetch_video(
                 video_url=video_url,

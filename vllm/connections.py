@@ -11,6 +11,7 @@ from typing import Any, ParamSpec, TypeVar
 
 import aiohttp
 import requests
+from urllib3.exceptions import DecodeError, ProtocolError, ReadTimeoutError, SSLError
 from urllib3.util import parse_url
 
 import vllm.envs as envs
@@ -59,6 +60,10 @@ class MediaDownloadSizeExceededError(ValueError):
         if received_bytes is not None:
             message += f" (received at least {received_bytes} bytes)"
         super().__init__(message)
+
+
+class MediaFetchDeadlineExceededError(ValueError):
+    """Raised when a synchronous media download exceeds its total time limit."""
 
 
 class MediaRequestDownloadSizeExceededError(ValueError):
@@ -150,9 +155,10 @@ def _read_response_bytes(
     response: requests.Response,
     max_bytes: int | None,
     request_budget: MediaRequestDownloadBudget | None = None,
+    deadline: float | None = None,
 ) -> bytes:
     max_bytes, media_download_limit = _get_response_size_limit(max_bytes)
-    if max_bytes is None and request_budget is None:
+    if max_bytes is None and request_budget is None and deadline is None:
         return response.content
 
     _check_content_length(
@@ -162,7 +168,30 @@ def _read_response_bytes(
     )
     chunks: list[bytes] = []
     received_bytes = 0
-    for chunk in response.iter_content(_RESPONSE_READ_CHUNK_SIZE):
+    if deadline is not None and time.monotonic() >= deadline:
+        raise MediaFetchDeadlineExceededError("Media fetch exceeded its time limit")
+    if deadline is None:
+        chunks_iter = response.iter_content(_RESPONSE_READ_CHUNK_SIZE)
+    else:
+        # iter_content can wait for a full chunk while a peer trickles bytes.
+        def read1() -> bytes:
+            try:
+                return response.raw.read1(
+                    _RESPONSE_READ_CHUNK_SIZE, decode_content=True
+                )
+            except ProtocolError as e:
+                raise requests.exceptions.ChunkedEncodingError(e) from e
+            except DecodeError as e:
+                raise requests.exceptions.ContentDecodingError(e) from e
+            except ReadTimeoutError as e:
+                raise requests.exceptions.ConnectionError(e) from e
+            except SSLError as e:
+                raise requests.exceptions.SSLError(e) from e
+
+        chunks_iter = iter(read1, b"")
+    for chunk in chunks_iter:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise MediaFetchDeadlineExceededError("Media fetch exceeded its time limit")
         received_bytes = _append_chunk(
             chunks,
             chunk,
@@ -171,6 +200,8 @@ def _read_response_bytes(
             media_download_limit,
             request_budget,
         )
+    if deadline is not None and time.monotonic() >= deadline:
+        raise MediaFetchDeadlineExceededError("Media fetch exceeded its time limit")
     return b"".join(chunks)
 
 
@@ -297,6 +328,7 @@ def _sync_retry(
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> _T:
         base_timeout: float | None = kwargs.get("timeout")
+        deadline: float | None = kwargs.get("deadline")
         max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
 
         for attempt in range(max_retries):
@@ -305,10 +337,21 @@ def _sync_retry(
                 if base_timeout is not None
                 else None
             )
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise MediaFetchDeadlineExceededError(
+                        "Media fetch exceeded its time limit"
+                    )
+                attempt_timeout = min(attempt_timeout or remaining, remaining)
             kwargs["timeout"] = attempt_timeout
             try:
                 return fn(*args, **kwargs)
             except Exception as e:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise MediaFetchDeadlineExceededError(
+                        "Media fetch exceeded its time limit"
+                    ) from e
                 if not _is_retryable(e) or attempt + 1 >= max_retries:
                     raise
                 backoff = _RETRY_BACKOFF_FACTOR**attempt
@@ -322,7 +365,11 @@ def _sync_retry(
                     backoff,
                     base_timeout,
                 )
-                time.sleep(backoff)
+                time.sleep(
+                    max(0, min(backoff, deadline - time.monotonic()))
+                    if deadline is not None
+                    else backoff
+                )
 
         raise AssertionError("unreachable")
 
@@ -462,6 +509,7 @@ class HTTPConnection:
         allow_redirects: bool = True,
         max_bytes: int | None = None,
         request_budget: MediaRequestDownloadBudget | None = None,
+        deadline: float | None = None,
     ) -> bytes:
         with self.get_response(
             url,
@@ -471,7 +519,7 @@ class HTTPConnection:
         ) as r:
             r.raise_for_status()
 
-            return _read_response_bytes(r, max_bytes, request_budget)
+            return _read_response_bytes(r, max_bytes, request_budget, deadline)
 
     @_async_retry
     async def async_get_bytes(
