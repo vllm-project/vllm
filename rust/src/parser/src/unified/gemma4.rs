@@ -1,4 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use serde_json::{Map, Number, Value};
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, delimited, eof, opt, separated, seq, terminated};
 use winnow::error::{ContextError, ErrMode, ModalResult};
@@ -6,33 +10,70 @@ use winnow::prelude::*;
 use winnow::stream::{Partial, Stream};
 use winnow::token::{literal, take_till, take_until};
 
-use vllm_tokenizer::DynTokenizer;
-
-use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
+use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, token_id};
 use crate::reasoning::last_reasoning_boundary;
-use crate::tool::{Tool, ToolCallDelta};
+use crate::tool::{JsonStyle, Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
+use crate::utils::recursion::ParserRecursionGuard;
 use crate::utils::{incomplete, parse_buffered_event, partial_prefix_len, safe_text_len_mul};
 
 const REASONING_START: &str = "<|channel>thought\n";
 const CHANNEL_START: &str = "<|channel>";
 const CHANNEL_END: &str = "<channel|>";
+const FRAMED_CHANNEL_END: &str = "\n<channel|>";
 const TOOL_CALL_START: &str = "<|tool_call>";
 const TOOL_CALL_END: &str = "<tool_call|>";
 const STRING_DELIM: &str = "<|\"|>";
 const CALL_PREFIX: &str = "call:";
+/// Bare header prefix some Gemma4 checkpoints emit instead of [`CALL_PREFIX`].
+const BARE_CALL_PREFIX: &str = ":";
 
 type Gemma4Input<'i> = Partial<&'i str>;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Gemma4Event {
-    Text { len: usize },
-    Reasoning { len: usize },
+    Text,
+    Reasoning,
     ReasoningStart,
     ReasoningEnd,
     ToolCallStart,
-    ToolCallHeader { name: String },
-    ToolCall { args: Map<String, Value> },
+    ToolCallHeader {
+        name: String,
+        body: Gemma4CallBody,
+    },
+    ToolCall {
+        args: Map<String, Value>,
+    },
+    /// A name-only call (`call:name<tool_call|>`) with no argument body.
+    NameOnlyToolCall {
+        name: String,
+    },
+}
+
+/// Bracket pair around a Gemma4 call body, chosen by the opener after the name.
+///
+/// Gemma4 documents `call:name{...}`, but some checkpoints write
+/// `call:name(...)`; the body is closed by the opener's own closer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gemma4CallBody {
+    Braced,
+    Parenthesized,
+}
+
+impl Gemma4CallBody {
+    fn opener(self) -> char {
+        match self {
+            Self::Braced => '{',
+            Self::Parenthesized => '(',
+        }
+    }
+
+    fn closer(self) -> char {
+        match self {
+            Self::Braced => '}',
+            Self::Parenthesized => ')',
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -49,6 +90,7 @@ enum Gemma4Mode {
     Header,
     ToolCall {
         name: String,
+        body: Gemma4CallBody,
         args_scan: Gemma4ArgsScanState,
     },
 }
@@ -64,9 +106,12 @@ enum Gemma4Mode {
 ///
 /// `<|tool_call>call:func_name{key:<|"|>value<|"|>}<tool_call|>`
 ///
+/// Some checkpoints write the body in parentheses (`call:func_name(...)`) or
+/// omit it (`call:func_name<tool_call|>`); both are accepted.
+///
 /// Arguments are emitted only after a full Gemma4 tool call is parsed.
 pub struct Gemma4UnifiedParser {
-    buffer: String,
+    buffer: DecodedText,
     mode: Gemma4Mode,
     emitted_tool_count: usize,
     tokenizer: DynTokenizer,
@@ -77,20 +122,11 @@ pub struct Gemma4UnifiedParser {
 impl Gemma4UnifiedParser {
     /// Create a Gemma4 parser.
     pub fn new(_tools: &[Tool], tokenizer: DynTokenizer) -> Result<Self> {
-        let channel_start_token_id = tokenizer.token_to_id(CHANNEL_START).ok_or_else(|| {
-            UnifiedParserError::MissingToken {
-                token: CHANNEL_START.to_string(),
-            }
-        })?;
-        let channel_end_token_id =
-            tokenizer
-                .token_to_id(CHANNEL_END)
-                .ok_or_else(|| UnifiedParserError::MissingToken {
-                    token: CHANNEL_END.to_string(),
-                })?;
+        let channel_start_token_id = token_id(tokenizer.as_ref(), CHANNEL_START)?;
+        let channel_end_token_id = token_id(tokenizer.as_ref(), CHANNEL_END)?;
 
         Ok(Self {
-            buffer: String::new(),
+            buffer: DecodedText::default(),
             mode: Gemma4Mode::default(),
             emitted_tool_count: 0,
             channel_start_token_id,
@@ -99,20 +135,23 @@ impl Gemma4UnifiedParser {
         })
     }
 
-    fn apply_event(&mut self, event: Gemma4Event, output: &mut UnifiedParserOutput) -> Result<()> {
+    fn apply_event(
+        &mut self,
+        event: Gemma4Event,
+        piece: DecodedText,
+        output: &mut UnifiedParserOutput,
+    ) -> Result<()> {
         match event {
-            Gemma4Event::Text { len: consumed_len } => {
-                output.push_text(self.buffer[..consumed_len].to_string());
-            }
-            Gemma4Event::Reasoning { len: consumed_len } => {
-                output.push_reasoning(self.buffer[..consumed_len].to_string());
-            }
+            Gemma4Event::Text => output.push_text(piece.text),
+            Gemma4Event::Reasoning => output.push_reasoning(piece),
+            // Marker and tool-syntax spans are drained and dropped with their tokens.
             Gemma4Event::ReasoningStart => self.mode = Gemma4Mode::Reasoning,
             Gemma4Event::ReasoningEnd => self.mode = Gemma4Mode::Text,
             Gemma4Event::ToolCallStart => self.mode = Gemma4Mode::Header,
-            Gemma4Event::ToolCallHeader { name } => {
+            Gemma4Event::ToolCallHeader { name, body } => {
                 self.mode = Gemma4Mode::ToolCall {
                     name,
+                    body,
                     args_scan: Gemma4ArgsScanState::default(),
                 };
             }
@@ -123,17 +162,33 @@ impl Gemma4UnifiedParser {
                         "Gemma4 arguments without an active tool call"
                     ));
                 };
-                let arguments = serde_json::to_string(&args)
-                    .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
-
-                output.push_call(ToolCallDelta {
-                    tool_index: self.emitted_tool_count,
-                    name: Some(name),
-                    arguments,
-                });
-                self.emitted_tool_count += 1;
+                self.push_call(name, &args, output)?;
+            }
+            Gemma4Event::NameOnlyToolCall { name } => {
+                self.mode = Gemma4Mode::Text;
+                self.push_call(name, &Map::new(), output)?;
             }
         }
+        Ok(())
+    }
+
+    fn push_call(
+        &mut self,
+        name: String,
+        args: &Map<String, Value>,
+        output: &mut UnifiedParserOutput,
+    ) -> Result<()> {
+        // The template renders its own object literal, not JSON, so the no-JSON default applies.
+        let arguments = JsonStyle::Spaced
+            .to_string(args)
+            .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
+
+        output.push_call(ToolCallDelta {
+            tool_index: self.emitted_tool_count,
+            name: Some(name),
+            arguments,
+        });
+        self.emitted_tool_count += 1;
         Ok(())
     }
 
@@ -150,22 +205,18 @@ impl Gemma4UnifiedParser {
     }
 
     fn reset(&mut self) -> String {
+        let buffer = self.buffer.take().text;
         let raw = match std::mem::replace(&mut self.mode, Gemma4Mode::Text) {
-            Gemma4Mode::Text => std::mem::take(&mut self.buffer),
+            Gemma4Mode::Text => buffer,
             Gemma4Mode::Reasoning => {
-                format!("{}{}", REASONING_START, std::mem::take(&mut self.buffer))
+                format!("{REASONING_START}{buffer}")
             }
             Gemma4Mode::Header => {
-                format!("{}{}", TOOL_CALL_START, std::mem::take(&mut self.buffer))
+                format!("{TOOL_CALL_START}{buffer}")
             }
-            Gemma4Mode::ToolCall { name, .. } => {
-                format!(
-                    "{}{}{}{{{}",
-                    TOOL_CALL_START,
-                    CALL_PREFIX,
-                    name,
-                    std::mem::take(&mut self.buffer)
-                )
+            Gemma4Mode::ToolCall { name, body, .. } => {
+                let opener = body.opener();
+                format!("{TOOL_CALL_START}{CALL_PREFIX}{name}{opener}{buffer}")
             }
         };
         self.mode = Gemma4Mode::Text;
@@ -193,16 +244,16 @@ impl UnifiedParser for Gemma4UnifiedParser {
         true
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut UnifiedParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
+        self.buffer.append(delta);
 
         while let Some((event, consumed_len)) = {
-            parse_buffered_event(&self.buffer, |input| {
+            parse_buffered_event(&self.buffer.text, |input| {
                 parse_next_gemma4_event(input, &mut self.mode)
             })?
         } {
-            self.apply_event(event, output)?;
-            self.buffer.drain(..consumed_len);
+            let piece = self.buffer.drain_prefix(consumed_len);
+            self.apply_event(event, piece, output)?;
         }
 
         Ok(())
@@ -212,10 +263,10 @@ impl UnifiedParser for Gemma4UnifiedParser {
         let mut output = UnifiedParserOutput::default();
 
         match &self.mode {
-            Gemma4Mode::Text => output.push_text(std::mem::take(&mut self.buffer)),
-            Gemma4Mode::Reasoning => output.push_reasoning(std::mem::take(&mut self.buffer)),
+            Gemma4Mode::Text => output.push_text(self.buffer.take().text),
+            Gemma4Mode::Reasoning => output.push_reasoning(self.buffer.take()),
             Gemma4Mode::Header | Gemma4Mode::ToolCall { .. } => {
-                return Err(parsing_failed!("incomplete Gemma4 tool call"));
+                return Err(UnifiedParserError::IncompleteToolCall { parser: "Gemma4" });
             }
         }
 
@@ -237,7 +288,9 @@ fn parse_next_gemma4_event(
         Gemma4Mode::Text => parse_text_event(input),
         Gemma4Mode::Reasoning => parse_reasoning_event(input),
         Gemma4Mode::Header => tool_call_header_event(input),
-        Gemma4Mode::ToolCall { args_scan, .. } => tool_call_args_event(input, args_scan),
+        Gemma4Mode::ToolCall {
+            body, args_scan, ..
+        } => tool_call_args_event(input, *body, args_scan),
     }
 }
 
@@ -268,7 +321,9 @@ fn reasoning_start_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event
 
 /// Parse a Gemma4 reasoning end marker.
 fn reasoning_end_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
-    literal(CHANNEL_END).value(Gemma4Event::ReasoningEnd).parse_next(input)
+    alt((literal(FRAMED_CHANNEL_END), literal(CHANNEL_END)))
+        .value(Gemma4Event::ReasoningEnd)
+        .parse_next(input)
 }
 
 /// Parse a Gemma4 tool-call start marker.
@@ -276,24 +331,32 @@ fn tool_call_start_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event
     literal(TOOL_CALL_START).value(Gemma4Event::ToolCallStart).parse_next(input)
 }
 
-/// Parse a Gemma4 tool-call header.
+/// Parse a Gemma4 tool-call header, or a whole name-only call.
 fn tool_call_header_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
-    let (name,) = seq!(
-        _: literal(CALL_PREFIX),
+    let (name, body) = seq!(
+        _: alt((literal(CALL_PREFIX), literal(BARE_CALL_PREFIX))),
         gemma4_tool_name,
-        _: literal("{"),
+        alt((
+            literal("{").value(Some(Gemma4CallBody::Braced)),
+            literal("(").value(Some(Gemma4CallBody::Parenthesized)),
+            literal(TOOL_CALL_END).value(None),
+        )),
     )
     .parse_next(input)?;
-    Ok(Gemma4Event::ToolCallHeader { name })
+    Ok(match body {
+        Some(body) => Gemma4Event::ToolCallHeader { name, body },
+        None => Gemma4Event::NameOnlyToolCall { name },
+    })
 }
 
 /// Parse complete Gemma4 tool-call arguments.
 fn tool_call_args_event(
     input: &mut Gemma4Input<'_>,
+    body: Gemma4CallBody,
     args_scan: &mut Gemma4ArgsScanState,
 ) -> ModalResult<Gemma4Event> {
     let raw_args = gemma4_raw_args_until_tool_call_end(input, args_scan)?;
-    let Some(args_input) = raw_args.strip_suffix('}') else {
+    let Some(args_input) = raw_args.strip_suffix(body.closer()) else {
         return Err(ErrMode::Cut(ContextError::new()));
     };
     let args = parse_gemma4_args(args_input)?;
@@ -301,9 +364,9 @@ fn tool_call_args_event(
     Ok(Gemma4Event::ToolCall { args })
 }
 
-/// Parse a Gemma4 tool name.
+/// Parse a Gemma4 tool name, up to the call body opener or the end marker.
 fn gemma4_tool_name(input: &mut Gemma4Input<'_>) -> ModalResult<String> {
-    let name = take_until(1.., "{").parse_next(input)?.trim();
+    let name = take_till(1.., ['{', '(', '<']).parse_next(input)?.trim();
     if name.is_empty() {
         return Err(ErrMode::Cut(ContextError::new()));
     }
@@ -312,14 +375,13 @@ fn gemma4_tool_name(input: &mut Gemma4Input<'_>) -> ModalResult<String> {
 
 /// Parse a safe text run before the next Gemma4 marker.
 fn safe_text_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
-    safe_text_len_mul(input, &[REASONING_START, TOOL_CALL_START])
-        .map(|len| Gemma4Event::Text { len })
+    safe_text_len_mul(input, &[REASONING_START, TOOL_CALL_START]).map(|_| Gemma4Event::Text)
 }
 
 /// Parse a safe reasoning run before the next Gemma4 marker.
 fn safe_reasoning_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
-    safe_text_len_mul(input, &[CHANNEL_END, TOOL_CALL_START])
-        .map(|len| Gemma4Event::Reasoning { len })
+    safe_text_len_mul(input, &[FRAMED_CHANNEL_END, CHANNEL_END, TOOL_CALL_START])
+        .map(|_| Gemma4Event::Reasoning)
 }
 
 /// Parse raw Gemma4 arguments through the first end marker outside a Gemma string.
@@ -449,12 +511,16 @@ fn gemma4_string<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
 
 /// Parse a nested Gemma4 object.
 fn gemma4_object(input: &mut &str) -> ModalResult<Map<String, Value>> {
-    delimited(literal("{"), gemma4_args, literal("}")).parse_next(input)
+    literal("{").parse_next(input)?;
+    let _guard = ParserRecursionGuard::enter()?;
+    terminated(gemma4_args, literal("}")).parse_next(input)
 }
 
 /// Parse a Gemma4 array value.
 fn gemma4_array_value(input: &mut &str) -> ModalResult<Vec<Value>> {
-    delimited(literal("["), gemma4_array_content, literal("]")).parse_next(input)
+    literal("[").parse_next(input)?;
+    let _guard = ParserRecursionGuard::enter()?;
+    terminated(gemma4_array_content, literal("]")).parse_next(input)
 }
 
 /// Parse Gemma4 array content.
@@ -515,78 +581,29 @@ mod tests {
 
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
-    use vllm_tokenizer::Tokenizer;
+    use vllm_tokenizer::test_utils::TestTokenizer;
+    use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution};
     use winnow::combinator::{eof, terminated};
     use winnow::error::ErrMode;
     use winnow::prelude::*;
 
     use super::{
         CHANNEL_END, CHANNEL_START, Gemma4UnifiedParser, ToolCallDelta, UnifiedParser,
-        UnifiedParserError, UnifiedParserOutput, gemma4_array_content, parse_gemma4_args,
+        UnifiedParserOutput, gemma4_array_content, parse_gemma4_args,
     };
     use crate::tool::Tool;
-    use crate::unified::{UnifiedParserEvent, parsing_failed};
+    use crate::unified::{UnifiedParserError, UnifiedParserEvent, parsing_failed};
+    use crate::utils::recursion::MAX_PARSER_RECURSION_DEPTH;
 
-    struct FakeTokenizer;
+    const CHANNEL_START_ID: u32 = 256;
+    const CHANNEL_END_ID: u32 = 257;
+    const TURN_BOUNDARY_ID: u32 = 258;
 
-    impl Tokenizer for FakeTokenizer {
-        fn encode(
-            &self,
-            text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            Ok(text.chars().map(u32::from).collect())
-        }
-
-        fn decode(
-            &self,
-            token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(token_ids
-                .iter()
-                .map(|token_id| char::from_u32(*token_id).unwrap_or('\u{FFFD}'))
-                .collect())
-        }
-
-        fn token_to_id(&self, token: &str) -> Option<u32> {
-            match token {
-                CHANNEL_START => Some(100),
-                CHANNEL_END => Some(101),
-                _ => None,
-            }
-        }
-
-        fn is_special_id(&self, token_id: u32) -> bool {
-            matches!(token_id, 100..=105)
-        }
-    }
-
-    struct MissingTokenTokenizer;
-
-    impl Tokenizer for MissingTokenTokenizer {
-        fn encode(
-            &self,
-            text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            Ok(text.chars().map(u32::from).collect())
-        }
-
-        fn decode(
-            &self,
-            token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(token_ids
-                .iter()
-                .map(|token_id| char::from_u32(*token_id).unwrap_or('\u{FFFD}'))
-                .collect())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
+    fn tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
+            .with_special_token(CHANNEL_START, CHANNEL_START_ID)
+            .with_special_token(CHANNEL_END, CHANNEL_END_ID)
+            .with_special_token("<turn-boundary>", TURN_BOUNDARY_ID)
     }
 
     trait UnifiedParserTestExt {
@@ -597,7 +614,7 @@ mod tests {
     impl UnifiedParserTestExt for Gemma4UnifiedParser {
         fn parse_chunk(&mut self, chunk: &str) -> super::Result<UnifiedParserOutput> {
             let mut output = UnifiedParserOutput::default();
-            self.parse_into(chunk, &mut output)?;
+            self.parse_into(DecodedText::unattributed(chunk), &mut output)?;
             Ok(output)
         }
 
@@ -630,7 +647,7 @@ mod tests {
             self.events
                 .iter()
                 .filter_map(|event| match event {
-                    UnifiedParserEvent::Reasoning(text) => Some(text.as_str()),
+                    UnifiedParserEvent::Reasoning(text) => Some(text.text.as_str()),
                     UnifiedParserEvent::Text(_) | UnifiedParserEvent::ToolCall(_) => None,
                 })
                 .collect()
@@ -669,59 +686,67 @@ mod tests {
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "get_time".to_string(),
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "write_file".to_string(),
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "Edit".to_string(),
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "search".to_string(),
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "set".to_string(),
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "get_status".to_string(),
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "todowrite".to_string(),
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
         ]
     }
 
     fn test_parser() -> Gemma4UnifiedParser {
-        Gemma4UnifiedParser::new(&test_tools(), Arc::new(FakeTokenizer)).unwrap()
+        Gemma4UnifiedParser::new(&test_tools(), Arc::new(tokenizer())).unwrap()
     }
 
     #[test]
     fn gemma4_create_requires_channel_start_token() {
-        let error = match Gemma4UnifiedParser::new(&test_tools(), Arc::new(MissingTokenTokenizer)) {
+        let error = match Gemma4UnifiedParser::new(&test_tools(), Arc::new(TestTokenizer::new())) {
             Ok(_) => panic!("expected missing token error"),
             Err(error) => error,
         };
@@ -740,6 +765,18 @@ mod tests {
         }
         output.append(parser.finish().unwrap());
         output.coalesce()
+    }
+
+    #[test]
+    fn gemma4_reasoning_framing_preserves_extra_newlines_at_every_split() {
+        let wire = "<|channel>thought\n\n  reason\n\n<channel|>    answer\n";
+        for split in 0..=wire.len() {
+            let output = collect_stream(&[&wire[..split], &wire[split..]]);
+            assert_eq!(output.reasoning_text(), "\n  reason\n", "split {split}");
+            assert_eq!(output.normal_text(), "    answer\n", "split {split}");
+        }
+        let output = collect_stream(&["<|channel>thought\nreason\n<channel"]);
+        assert_eq!(output.reasoning_text(), "reason\n<channel");
     }
 
     fn first_call(output: &UnifiedParserOutput) -> ToolCallDelta {
@@ -779,6 +816,18 @@ mod tests {
     }
 
     #[test]
+    fn gemma4_parser_rejects_excessive_recursion_and_recovers_input() {
+        let depth = MAX_PARSER_RECURSION_DEPTH * 2;
+        let nested_value = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+        let input = format!("<|tool_call>call:set{{value:{nested_value}}}<tool_call|>");
+        let mut parser = test_parser();
+
+        let error = parser.parse_chunk(&input).unwrap_err();
+        assert!(error.to_report_string().contains("parser recursion limit exceeded"));
+        assert_eq!(parser.reset(), input);
+    }
+
+    #[test]
     fn gemma4_parse_complete_extracts_single_tool_call() {
         let mut parser = test_parser();
         let output = parser
@@ -792,6 +841,94 @@ mod tests {
             serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({ "location": "London" })
         );
+    }
+
+    #[test]
+    fn gemma4_accepts_bare_tool_call_opener_at_every_split() {
+        let wire = concat!(
+            "Hello: world",
+            "<|tool_call>:get_weather{location:<|\"|>London<|\"|>}<tool_call|>",
+            "<|tool_call>call:set{flag:true}<tool_call|>",
+        );
+        let assert_output = |output: &UnifiedParserOutput, case: &str| {
+            assert_eq!(output.normal_text(), "Hello: world", "{case}");
+            let calls = output
+                .calls()
+                .into_iter()
+                .map(|call| {
+                    let arguments = serde_json::from_str::<Value>(&call.arguments).unwrap();
+                    (call.name.clone(), arguments)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                calls,
+                [
+                    (
+                        Some("get_weather".to_string()),
+                        json!({ "location": "London" })
+                    ),
+                    (Some("set".to_string()), json!({ "flag": true })),
+                ],
+                "{case}"
+            );
+        };
+
+        let output = test_parser().parse_complete(wire).unwrap();
+        assert_output(&output, "complete");
+        for split in 0..=wire.len() {
+            let output = collect_stream(&[&wire[..split], &wire[split..]]);
+            assert_output(&output, &format!("split {split}"));
+        }
+    }
+
+    #[test]
+    fn gemma4_accepts_parenthesized_and_name_only_calls_at_every_split() {
+        let wire = concat!(
+            "<|tool_call>call:write_file(content:<|\"|>echo (hi)<|\"|>,mode:0)<tool_call|>",
+            "<|tool_call>call:get_status<tool_call|>",
+            "<|tool_call>call:set{flag:true}<tool_call|>",
+            "done",
+        );
+        let assert_output = |output: &UnifiedParserOutput, case: &str| {
+            assert_eq!(output.normal_text(), "done", "{case}");
+            let calls = output
+                .calls()
+                .into_iter()
+                .map(|call| {
+                    let arguments = serde_json::from_str::<Value>(&call.arguments).unwrap();
+                    (call.tool_index, call.name.clone(), arguments)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                calls,
+                [
+                    (
+                        0,
+                        Some("write_file".to_string()),
+                        json!({ "content": "echo (hi)", "mode": 0 })
+                    ),
+                    (1, Some("get_status".to_string()), json!({})),
+                    (2, Some("set".to_string()), json!({ "flag": true })),
+                ],
+                "{case}"
+            );
+        };
+
+        let output = test_parser().parse_complete(wire).unwrap();
+        assert_output(&output, "complete");
+        for split in 0..=wire.len() {
+            let output = collect_stream(&[&wire[..split], &wire[split..]]);
+            assert_output(&output, &format!("split {split}"));
+        }
+    }
+
+    #[test]
+    fn gemma4_parenthesized_call_requires_its_own_closer() {
+        let mut parser = test_parser();
+        let input = "<|tool_call>call:set(flag:true}<tool_call|>";
+
+        let _error = parser.parse_chunk(input).unwrap_err();
+        assert_eq!(parser.reset(), input);
     }
 
     #[test]
@@ -1046,7 +1183,7 @@ mod tests {
     #[test]
     fn gemma4_initialize_open_channel_prompt_starts_in_reasoning() {
         let mut parser = test_parser();
-        parser.initialize(&[100, 3000, 3001]).unwrap();
+        parser.initialize(&[CHANNEL_START_ID, 3000, 3001]).unwrap();
 
         let output = parser.parse_complete("reason<channel|>answer").unwrap();
 
@@ -1057,7 +1194,7 @@ mod tests {
     #[test]
     fn gemma4_initialize_turn_prompt_starts_in_text() {
         let mut parser = test_parser();
-        parser.initialize(&[104, 3000, 3001]).unwrap();
+        parser.initialize(&[TURN_BOUNDARY_ID, 3000, 3001]).unwrap();
 
         let output = parser.parse_complete("<|channel>thought\nreason<channel|>answer").unwrap();
 
@@ -1068,7 +1205,7 @@ mod tests {
     #[test]
     fn gemma4_initialize_special_token_caps_boundary_scan() {
         let mut parser = test_parser();
-        parser.initialize(&[100, 3000, 104, 3001]).unwrap();
+        parser.initialize(&[CHANNEL_START_ID, 3000, TURN_BOUNDARY_ID, 3001]).unwrap();
 
         let output = parser.parse_complete("answer").unwrap();
 
@@ -1079,7 +1216,7 @@ mod tests {
     #[test]
     fn gemma4_initialize_closed_channel_prompt_starts_in_text() {
         let mut parser = test_parser();
-        parser.initialize(&[100, 3000, 3001, 101]).unwrap();
+        parser.initialize(&[CHANNEL_START_ID, 3000, 3001, CHANNEL_END_ID]).unwrap();
 
         let output = parser.parse_complete("answer").unwrap();
 
@@ -1155,5 +1292,63 @@ mod tests {
         let raw = parser.reset();
 
         assert_eq!(raw, input);
+    }
+
+    #[test]
+    fn gemma4_reasoning_events_conserve_token_attributions() {
+        let mut parser = test_parser();
+
+        let chunk = |token_id: u32, text: &str| DecodedText {
+            text: text.to_string(),
+            attributions: [TokenAttribution {
+                token_id,
+                anchor: TokenAnchor::Visible { byte_offset: 0 },
+            }]
+            .into_iter()
+            .collect(),
+        };
+        // A zero-width token inside the reasoning channel counts as reasoning,
+        // matching Python's current-state rule.
+        let zero_width = |token_id: u32| DecodedText {
+            text: String::new(),
+            attributions: [TokenAttribution {
+                token_id,
+                anchor: TokenAnchor::ZeroWidth { byte_offset: 0 },
+            }]
+            .into_iter()
+            .collect(),
+        };
+
+        let mut output = UnifiedParserOutput::default();
+        for delta in [
+            chunk(1, "<|channel>thought\n"),
+            zero_width(2),
+            chunk(3, "reason"),
+            chunk(4, "<channel|>"),
+            chunk(5, "answer"),
+            chunk(6, "<|tool_call>"),
+            chunk(7, "call:get_weather{location:<|\"|>Paris<|\"|>}"),
+            chunk(8, "<tool_call|>"),
+        ] {
+            parser.parse_into(delta, &mut output).unwrap();
+        }
+        output.append(parser.finish().unwrap());
+
+        // The reasoning tokens keep their attributions; marker and tool-syntax
+        // tokens (1, 4, 6, 7, 8) are dropped with their spans, and text/tool
+        // pieces carry no attributions.
+        let reasoning_ids: Vec<u32> = output
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                UnifiedParserEvent::Reasoning(piece) => Some(piece),
+                _ => None,
+            })
+            .flat_map(|piece| piece.attributions.iter().map(|attr| attr.token_id))
+            .collect();
+        assert_eq!(reasoning_ids, [2, 3]);
+        assert_eq!(output.reasoning_text(), "reason");
+        assert_eq!(output.normal_text(), "answer");
+        assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
     }
 }

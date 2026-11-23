@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Integration tests for Whisper models with LoRA adapters.
+"""Integration tests for Whisper models with LoRA adapters.
 
 These tests verify that Whisper models can correctly load and use LoRA adapters
 for speech-to-text transcription tasks.
@@ -31,13 +30,17 @@ def use_spawn_for_whisper(monkeypatch):
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 
-def create_whisper_llm(
-    enable_lora: bool = True, max_loras: int = 2, attn_backend: str | None = None
+def create_whisper_runner(
+    vllm_runner,
+    enable_lora: bool = True,
+    max_loras: int = 2,
+    attn_backend: str | None = None,
 ):
-    """Create a Whisper LLM instance with optional LoRA support."""
-    return vllm.LLM(
-        model=WHISPER_MODEL,
+    """Create a Whisper runner with optional LoRA support."""
+    return vllm_runner(
+        WHISPER_MODEL,
         enable_lora=enable_lora,
+        enable_chunked_prefill=None,
         max_loras=max_loras if enable_lora else 1,
         max_lora_rank=64,
         max_model_len=448,
@@ -84,7 +87,7 @@ def run_whisper_inference(
 
 
 @create_new_process_for_each_test()
-def test_whisper_lora_inference(whisper_lora_files):
+def test_whisper_lora_inference(whisper_lora_files, vllm_runner):
     """Test basic Whisper inference with a LoRA adapter.
 
     This test verifies that:
@@ -92,43 +95,48 @@ def test_whisper_lora_inference(whisper_lora_files):
     2. A LoRA adapter can be applied during inference
     3. The model produces valid transcription output
     """
-    llm = create_whisper_llm(enable_lora=True)
+    with create_whisper_runner(vllm_runner, enable_lora=True) as runner:
+        # Run inference with LoRA
+        outputs = run_whisper_inference(
+            runner.llm, lora_path=whisper_lora_files, lora_id=1
+        )
 
-    # Run inference with LoRA
-    outputs = run_whisper_inference(llm, lora_path=whisper_lora_files, lora_id=1)
+        # Verify we got a non-empty transcription
+        assert len(outputs) == 1
+        assert len(outputs[0]) > 0, "Expected non-empty transcription output"
 
-    # Verify we got a non-empty transcription
-    assert len(outputs) == 1
-    assert len(outputs[0]) > 0, "Expected non-empty transcription output"
-
-    # The output should contain some recognizable words from the audio
-    # (Mary had a little lamb)
-    print(f"Transcription output: {outputs[0]}")
+        # The output should contain some recognizable words from the audio
+        # (Mary had a little lamb)
+        print(f"Transcription output: {outputs[0]}")
 
 
 @create_new_process_for_each_test()
-def test_whisper_multi_lora(whisper_lora_files):
+def test_whisper_multi_lora(whisper_lora_files, vllm_runner):
     """Test Whisper with multiple LoRA adapter IDs.
 
     This test verifies that the same LoRA adapter can be loaded with
     different IDs and produce consistent results.
     """
-    llm = create_whisper_llm(
+    with create_whisper_runner(
+        vllm_runner,
         enable_lora=True,
         max_loras=4,
         attn_backend="TRITON_ATTN" if current_platform.is_rocm() else None,
-    )
+    ) as runner:
+        # Test with different LoRA IDs using the same adapter
+        outputs_lora1 = run_whisper_inference(
+            runner.llm, lora_path=whisper_lora_files, lora_id=1
+        )
+        outputs_lora2 = run_whisper_inference(
+            runner.llm, lora_path=whisper_lora_files, lora_id=2
+        )
 
-    # Test with different LoRA IDs using the same adapter
-    outputs_lora1 = run_whisper_inference(llm, lora_path=whisper_lora_files, lora_id=1)
-    outputs_lora2 = run_whisper_inference(llm, lora_path=whisper_lora_files, lora_id=2)
+        # Both should produce valid outputs
+        assert len(outputs_lora1[0]) > 0
+        assert len(outputs_lora2[0]) > 0
 
-    # Both should produce valid outputs
-    assert len(outputs_lora1[0]) > 0
-    assert len(outputs_lora2[0]) > 0
-
-    # Same adapter with different IDs should produce same output
-    assert outputs_lora1 == outputs_lora2, (
-        f"Expected same outputs for same adapter with different IDs. "
-        f"Got: {outputs_lora1} vs {outputs_lora2}"
-    )
+        # Same adapter with different IDs should produce same output
+        assert outputs_lora1 == outputs_lora2, (
+            f"Expected same outputs for same adapter with different IDs. "
+            f"Got: {outputs_lora1} vs {outputs_lora2}"
+        )

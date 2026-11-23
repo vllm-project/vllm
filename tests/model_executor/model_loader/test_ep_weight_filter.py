@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from vllm.model_executor.model_loader.ep_weight_filter import (
+    compute_eplb_local_expert_ids,
     compute_local_expert_ids,
     parse_expert_id,
     should_skip_weight,
@@ -91,6 +92,7 @@ class TestComputeLocalExpertIds:
         ids_0 = compute_local_expert_ids(10, ep_size=3, ep_rank=0)
         ids_1 = compute_local_expert_ids(10, ep_size=3, ep_rank=1)
         ids_2 = compute_local_expert_ids(10, ep_size=3, ep_rank=2)
+        assert ids_0 is not None and ids_1 is not None and ids_2 is not None
 
         assert len(ids_0) == 4
         assert len(ids_1) == 3
@@ -107,9 +109,10 @@ class TestComputeLocalExpertIds:
             assert len(ids) == 48
 
         # All experts covered
-        all_ids = set()
+        all_ids: set[int] = set()
         for rank in range(8):
             ids = compute_local_expert_ids(384, ep_size=8, ep_rank=rank)
+            assert ids is not None
             all_ids |= ids
         assert all_ids == set(range(384))
 
@@ -158,6 +161,113 @@ class TestComputeLocalExpertIds:
 
 
 # ---------------------------------------------------------------------------
+# Unit tests for compute_eplb_local_expert_ids
+# ---------------------------------------------------------------------------
+
+
+class TestComputeEplbLocalExpertIds:
+    def test_ep_disabled(self):
+        assert compute_eplb_local_expert_ids(8, 2, ep_size=1, ep_rank=0) is None
+
+    def test_no_redundant_matches_plain_partition(self):
+        # With zero redundant experts EPLB placement degenerates to the
+        # plain linear EP partition.
+        for ep_size in (2, 4, 8):
+            for ep_rank in range(ep_size):
+                assert compute_eplb_local_expert_ids(
+                    8, 0, ep_size, ep_rank
+                ) == compute_local_expert_ids(8, ep_size, ep_rank, placement="linear")
+
+    def test_redundant_slots_pull_remote_logical_experts(self):
+        # 8 logical + 2 redundant = 10 physical slots, EP=2.
+        # Rank 1 owns physical slots 5-9; slots 8 and 9 map to logical 0, 1.
+        ids = compute_eplb_local_expert_ids(8, 2, ep_size=2, ep_rank=1)
+        assert ids == {0, 1, 5, 6, 7}
+
+    def test_matches_model_side_placement(self):
+        # The filter set must equal what the model requests for its local
+        # physical slots: determine_expert_map (linear, as forced under EPLB)
+        # mapped through EplbState's initial physical-to-logical map.
+        from vllm.distributed.eplb.eplb_state import EplbState
+        from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+            determine_expert_map,
+        )
+
+        for num_experts, num_redundant, ep_size in [
+            (8, 2, 2),
+            (256, 0, 16),
+            (256, 32, 16),
+            (384, 16, 8),
+        ]:
+            initial_map = EplbState.build_initial_global_physical_to_logical_map(
+                num_experts, num_redundant
+            )
+            for ep_rank in range(ep_size):
+                _, expert_map, _ = determine_expert_map(
+                    ep_size, ep_rank, num_experts + num_redundant, "linear"
+                )
+                assert expert_map is not None
+                expected = {
+                    initial_map[g] for g in torch.where(expert_map != -1)[0].tolist()
+                }
+                assert (
+                    compute_eplb_local_expert_ids(
+                        num_experts, num_redundant, ep_size, ep_rank
+                    )
+                    == expected
+                )
+
+    def test_full_coverage_no_starved_experts(self):
+        # The union over ranks must cover every logical expert, and no rank
+        # loads more logical experts than its physical slot count.
+        for num_experts, num_redundant, ep_size in [(8, 2, 2), (256, 32, 16)]:
+            max_slots = -(-(num_experts + num_redundant) // ep_size)
+            union: set[int] = set()
+            for ep_rank in range(ep_size):
+                ids = compute_eplb_local_expert_ids(
+                    num_experts, num_redundant, ep_size, ep_rank
+                )
+                assert ids is not None
+                assert len(ids) <= max_slots
+                union |= ids
+            assert union == set(range(num_experts))
+
+    def test_model_side_forces_linear_placement(self):
+        # The filter always splits physical slots linearly under EPLB, which
+        # relies on the model refusing round-robin placement there as well.
+        from vllm.model_executor.layers.fused_moe.config import (
+            FusedMoEParallelConfig,
+        )
+        from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+            determine_expert_placement_strategy,
+        )
+
+        moe_parallel_config = FusedMoEParallelConfig(
+            tp_size=1,
+            pcp_size=1,
+            dp_size=8,
+            ep_size=8,
+            tp_rank=0,
+            pcp_rank=0,
+            dp_rank=0,
+            ep_rank=0,
+            sp_size=1,
+            use_ep=True,
+            all2all_backend="allgather_reducescatter",
+            enable_eplb=True,
+        )
+        for num_redundant in (0, 32):
+            strategy = determine_expert_placement_strategy(
+                "round_robin",
+                moe_parallel_config,
+                num_expert_group=8,
+                num_redundant_experts=num_redundant,
+                enable_eplb=True,
+            )
+            assert strategy == "linear"
+
+
+# ---------------------------------------------------------------------------
 # Unit tests for should_skip_weight
 # ---------------------------------------------------------------------------
 
@@ -183,6 +293,21 @@ class TestShouldSkipWeight:
     def test_remote_expert_skipped(self):
         assert should_skip_weight(
             "model.layers.0.mlp.experts.200.gate_proj.weight", self.local_ids
+        )
+
+    def test_local_packed_expert_not_skipped(self):
+        assert not should_skip_weight(
+            "model.layers.0.mlp.experts.10.gate_proj.weight_packed", self.local_ids
+        )
+
+    def test_remote_packed_expert_skipped(self):
+        assert should_skip_weight(
+            "model.layers.0.mlp.experts.200.gate_proj.weight_packed", self.local_ids
+        )
+
+    def test_remote_expert_scale_not_skipped(self):
+        assert not should_skip_weight(
+            "model.layers.0.mlp.experts.200.gate_proj.weight_scale", self.local_ids
         )
 
     def test_boundary_expert(self):
@@ -299,6 +424,7 @@ class TestEpFilterOnSyntheticMoeWeights:
         files, expected = synthetic_moe_files
         # EP=2, rank=0 → experts 0-3
         local_ids = compute_local_expert_ids(8, ep_size=2, ep_rank=0)
+        assert local_ids is not None
         loaded = dict(
             safetensors_weights_iterator(files, False, local_expert_ids=local_ids)
         )
@@ -322,6 +448,7 @@ class TestEpFilterOnSyntheticMoeWeights:
     def test_ep2_rank1_gets_other_half(self, synthetic_moe_files):
         files, expected = synthetic_moe_files
         local_ids = compute_local_expert_ids(8, ep_size=2, ep_rank=1)
+        assert local_ids is not None
         loaded = dict(
             safetensors_weights_iterator(files, False, local_expert_ids=local_ids)
         )
@@ -359,3 +486,23 @@ class TestEpFilterOnSyntheticMoeWeights:
 
         for name, tensor in filtered.items():
             assert torch.equal(tensor, all_weights[name]), f"Tensor mismatch for {name}"
+
+    def test_eplb_redundant_slot_weights_not_skipped(self, synthetic_moe_files):
+        """Regression test for EPLB: a rank whose redundant physical slots map
+        to *remote* logical experts must still read those experts from disk."""
+        files, _ = synthetic_moe_files
+        # 8 logical + 2 redundant = 10 physical slots, EP=2.
+        # Rank 1 owns physical 5-9, i.e. logical {5,6,7} plus redundant {0,1}.
+        local_ids = compute_eplb_local_expert_ids(8, 2, ep_size=2, ep_rank=1)
+        loaded = dict(
+            safetensors_weights_iterator(files, False, local_expert_ids=local_ids)
+        )
+
+        for eid in (0, 1, 5, 6, 7):
+            for proj in ("gate_proj", "up_proj", "down_proj"):
+                name = f"model.layers.0.mlp.experts.{eid}.{proj}.weight"
+                assert name in loaded, f"Needed expert weight {name} was skipped"
+
+        # Experts 2, 3, 4 are on rank 0's plain partition and stay filtered.
+        expert_names = {n for n in loaded if parse_expert_id(n) is not None}
+        assert len(expert_names) == 5 * 3

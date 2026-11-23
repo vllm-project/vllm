@@ -1,0 +1,4 @@
+interface:
+  display_name: "Triton Kernel Writing"
+  short_description: "Write robust, practical Triton kernels for vLLM."
+  default_prompt: "Use $triton-kernel-writing to implement or review this Triton kernel."

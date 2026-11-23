@@ -4,7 +4,6 @@ import dataclasses
 import functools
 import json
 from concurrent.futures import Future
-from concurrent.futures._base import TimeoutError
 from typing import TYPE_CHECKING, Any, cast
 
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
@@ -21,12 +20,17 @@ if TYPE_CHECKING:
 @dataclasses.dataclass
 class StructuredOutputRequest:
     params: StructuredOutputsParams
-    _grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar | None = None
+    _grammar: (
+        Future[StructuredOutputGrammar] | StructuredOutputGrammar | Exception | None
+    ) = None
     reasoning_ended: bool | None = None
     reasoning_parser_kwargs: dict[str, Any] | None = None
     # Cached per request; do not share reasoning parsers across requests because
     # their behavior can depend on reasoning_parser_kwargs.
     reasoner: "ReasoningParser | None" = None
+    # Implicit reasoning-end tokens the grammar rejects as the first content
+    # token; masked while the request reasons. Computed on first use.
+    masked_reasoning_end_ids: tuple[int, ...] | None = None
 
     @staticmethod
     def from_sampling_params(
@@ -40,16 +44,13 @@ class StructuredOutputRequest:
         return StructuredOutputRequest(params=params)
 
     def _check_grammar_completion(self) -> bool:
-        # NOTE: We have to lazy import to gate circular imports
-        from vllm.v1.request import RequestStatus
-
         if isinstance(self._grammar, Future):
-            try:
-                # We will check whether the future is ready within 100 us
-                self._grammar = self._grammar.result(timeout=0.0001)
-                self.status = RequestStatus.WAITING
-            except TimeoutError:
+            if not self._grammar.done():
                 return False
+            try:
+                self._grammar = self._grammar.result()
+            except Exception as e:
+                self._grammar = e
         return True
 
     @property
@@ -57,11 +58,10 @@ class StructuredOutputRequest:
         return self._check_grammar_completion()
 
     @property
-    def grammar(self) -> StructuredOutputGrammar | None:
-        completed = self._check_grammar_completion()
-        return (
-            cast(StructuredOutputGrammar | None, self._grammar) if completed else None
-        )
+    def grammar(self) -> StructuredOutputGrammar | Exception | None:
+        if not self._check_grammar_completion():
+            return None
+        return cast(StructuredOutputGrammar | Exception | None, self._grammar)
 
     @grammar.setter
     def grammar(

@@ -6,6 +6,7 @@ from functools import partial
 import torch
 from torch import nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -31,7 +32,7 @@ def _all_reduce_variance(var: torch.Tensor) -> torch.Tensor:
 
     Variance is accumulated in fp32 for numerical stability. The FlashInfer
     fused all-reduce caches a single global workspace keyed to the model's
-    16-bit activation dtype (``use_fp32_lamport=False``); routing an fp32
+    16-bit activation dtype (`use_fp32_lamport=False`); routing an fp32
     reduction through it would read against a mismatched workspace and corrupt
     the result. FlashInfer's fast-path only triggers for 2D inputs, so reducing
     a flattened (1D) view keeps these fp32 reductions on custom all-reduce /
@@ -52,8 +53,8 @@ def _minimax_qk_var_kernel(
     """TP-pre stage: per-token mean-of-squares for the q and k segments.
 
     Accumulates in fp32 while reading the 16-bit qkv in place, so no fp32
-    copy of q/k is materialized. ``var[:, 0]`` is the q variance and
-    ``var[:, 1]`` the k variance; both are the local-shard means, ready for
+    copy of q/k is materialized. `var[:, 0]` is the q variance and
+    `var[:, 1]` the k variance; both are the local-shard means, ready for
     the all-reduce that follows.
     """
     token = tl.program_id(0)
@@ -92,13 +93,13 @@ def _minimax_rms_apply_kernel(
     eps: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """TP-post stage: ``x * rsqrt(var / tp_world + eps) * weight``.
+    """TP-post stage: `x * rsqrt(var / tp_world + eps) * weight`.
 
     A single program normalizes both the q and k segments of one token, so q
     and k share one launch instead of two. The all-reduce yields the sum of
-    per-shard means, so the ``/ tp_world`` that recovers the global
-    mean-of-squares is folded into the ``rsqrt`` here rather than run as a
-    separate elementwise pass over the ``[num_tokens, 2]`` variance tensor.
+    per-shard means, so the `/ tp_world` that recovers the global
+    mean-of-squares is folded into the `rsqrt` here rather than run as a
+    separate elementwise pass over the `[num_tokens, 2]` variance tensor.
     """
     token = tl.program_id(0)
     base = qkv_ptr + token * row_stride
@@ -164,8 +165,8 @@ def _minimax_qk_norm_tp_fallback(
     The all-reduce is a TP communication barrier and cannot live inside a
     single kernel, so the eager-torch path is split into two Triton kernels
     around it: a variance reduction before the all-reduce and a normalize
-    after. Compared to the ``torch.compile`` path this avoids materializing
-    fp32 copies of q/k and the ``cat``/``chunk`` temporaries.
+    after. Compared to the `torch.compile` path this avoids materializing
+    fp32 copies of q/k and the `cat`/`chunk` temporaries.
     """
     if not HAS_TRITON:
         return _minimax_qk_norm_tp_eager(
@@ -235,6 +236,17 @@ def _minimax_qk_norm_fusion(
             tp_world,
             eps,
         )
+    # ROCm AITER fused QK-norm + AllReduce; skips unaligned shapes.
+    if tp_world > 1 and num_tokens <= MINIMAX_QK_NORM_MAX_TOKEN_NUM:
+        pack_size = 16 // qkv.element_size()
+        warp_work_size = 32 * pack_size
+        if q_size % warp_work_size == 0 and kv_size % warp_work_size == 0:
+            aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+            if aiter_ar is not None:
+                q_out, k_out, _ = aiter_ar.aiter_ca.custom_fused_qknorm_ar(
+                    qkv, q_weight, k_weight, eps
+                )
+                return q_out, k_out
     return _minimax_qk_norm_tp_fallback(
         qkv, q_weight, k_weight, q_size, kv_size, tp_rank, tp_world, eps
     )

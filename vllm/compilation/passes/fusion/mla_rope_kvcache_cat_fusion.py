@@ -35,7 +35,10 @@ def fused_rope_unified_mla_kv_cache_update_impl(
     layer_name: LayerNameType,
 ) -> torch.Tensor:
     layer_name = _resolve_layer_name(layer_name)
-    attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
+        layer_name
+    )
+    attn_layer.prepare_kv_cache_update(attn_metadata)
     if layer_slot_mapping is not None:
         ops.concat_and_cache_mla_rope_fused(
             positions,
@@ -45,7 +48,7 @@ def fused_rope_unified_mla_kv_cache_update_impl(
             cos_sin_cache,
             is_neox,
             layer_slot_mapping,
-            kv_cache,
+            kv_cache.squeeze(1),
             kv_cache_dtype,
             kv_cache_scale,
         )
@@ -94,6 +97,9 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
         self.use_flashinfer = use_flashinfer
         self._ln = _encode_layer_name(self.layer_name)
 
+        self.rope_matcher: (
+            MatcherDeepseekScalingRotaryEmbedding | MatcherRotaryEmbedding
+        )
         if use_deepseek_scaling:
             self.rope_matcher = MatcherDeepseekScalingRotaryEmbedding(
                 is_neox=self.is_neox,
@@ -103,7 +109,7 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
                 use_flashinfer=self.use_flashinfer,
             )
         else:
-            self.rope_matcher = MatcherRotaryEmbedding(  # type: ignore
+            self.rope_matcher = MatcherRotaryEmbedding(
                 is_neox=self.is_neox,
                 head_size=self.qk_rope_head_dim,
                 num_heads=self.num_heads,

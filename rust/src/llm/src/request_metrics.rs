@@ -1,20 +1,33 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreEvent, EngineCoreEventType, EngineCoreOutput,
+};
 use vllm_engine_core_client::protocol::stats::PrefillStats;
-use vllm_engine_core_client::protocol::{EngineCoreEvent, EngineCoreEventType, EngineCoreOutput};
 use vllm_metrics::{
-    EngineLabels, FinishedReasonLabels, METRICS, PromptTokenSourceLabels, RequestMetrics,
+    EngineLabels, FinishedReasonLabels, HistogramMetric, METRICS, PromptTokenSourceLabels,
+    U64Counter, WatermarkStatusLabels,
 };
 
 use crate::FinishReason;
 
-fn metrics() -> &'static RequestMetrics {
-    &METRICS.request
-}
-
 const PROMPT_TOKEN_SOURCE_LOCAL_COMPUTE: &str = "local_compute";
 const PROMPT_TOKEN_SOURCE_LOCAL_CACHE_HIT: &str = "local_cache_hit";
 const PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER: &str = "external_kv_transfer";
+
+/// Engine lifecycle timestamps used by frontend per-request response metrics.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RequestTimestamps {
+    pub queued_ts: f64,
+    pub scheduled_ts: f64,
+    pub first_token_ts: f64,
+    pub last_token_ts: f64,
+}
 
 /// Request-scoped metrics state tracked across streamed engine-core updates.
 ///
@@ -27,13 +40,18 @@ const PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER: &str = "external_kv_transfer";
 ///
 /// Original Python update flow:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/engine/output_processor.py#L600-L677>
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct RequestMetricsTracker {
-    model_name: String,
+    /// Cached request metric handles for this request's model and engine index.
+    handles: Arc<RequestMetricHandles>,
+
     arrival_time: f64,
     prompt_len: u32,
     max_tokens_param: Option<u32>,
-    n_param: u32,
+    /// Set when this request is one child of a parallel-sampling request.
+    parallel_sampling: Option<Arc<ParallelSamplingStats>>,
+    /// Whether the request asked for watermarking (not opted out).
+    watermark_requested: bool,
     is_prefilling: bool,
     queued_ts: f64,
     scheduled_ts: f64,
@@ -41,26 +59,209 @@ pub(crate) struct RequestMetricsTracker {
     last_token_ts: f64,
     first_token_latency: f64,
     num_generation_tokens: u32,
+    num_preemptions: u64,
     latest_num_cached_tokens: u32,
-    last_seen_engine_index: u32,
+    is_corrupted: bool,
+    /// `vllm:watermark_requests` series to count at finish, resolved when the
+    /// engine reports the request's watermarking.
+    watermark_requests: Option<U64Counter>,
+}
+
+/// Request-level metric state shared by the `n` children of one
+/// parallel-sampling request.
+///
+/// Like Python's `ParentRequest`, the `n` and max-generation-tokens histograms
+/// describe the whole request: they are observed once, when the last child
+/// finishes, while every other request metric is per child.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/913fccd11847f5b4d4769e3a69c8925f955bc29e/vllm/v1/engine/parallel_sampling.py#L134-L156>
+pub(crate) struct ParallelSamplingStats {
+    n: u32,
+    unfinished_children: AtomicU32,
+    max_generation_tokens: AtomicU32,
+}
+
+impl ParallelSamplingStats {
+    pub(crate) fn new(n: u32) -> Self {
+        Self {
+            n,
+            unfinished_children: AtomicU32::new(n),
+            max_generation_tokens: AtomicU32::new(0),
+        }
+    }
+
+    /// Record one finished child, returning the request's max generation
+    /// token count once the last child has finished.
+    fn observe_finished_child(&self, num_generation_tokens: u32) -> Option<u32> {
+        self.max_generation_tokens.fetch_max(num_generation_tokens, Ordering::AcqRel);
+        (self.unfinished_children.fetch_sub(1, Ordering::AcqRel) == 1)
+            .then(|| self.max_generation_tokens.load(Ordering::Acquire))
+    }
+}
+
+/// Cached request metric handles for one model and engine index.
+///
+/// Resolved once per engine when the frontend starts, so every series exists
+/// with zero values before the first request, like the Python frontend's
+/// `PrometheusStatLogger`.
+pub(crate) struct RequestMetricHandles {
+    /// Labels of the series created on first use.
+    labels: EngineLabels,
+
+    // Request-derived counters.
+    prompt_tokens: U64Counter,
+    prompt_tokens_local_compute: U64Counter,
+    prompt_tokens_local_cache_hit: U64Counter,
+    prompt_tokens_external_kv_transfer: U64Counter,
+    prompt_tokens_cached: U64Counter,
+    generation_tokens: U64Counter,
+    corrupted_requests: U64Counter,
+    /// Created when the engine first reports a request's watermarking, which
+    /// it does only with a `watermark_config`. The frontend has no other
+    /// source for that engine config, so unlike Python the series do not
+    /// exist before the first such report.
+    watermark_requests: OnceLock<WatermarkRequestCounters>,
+
+    // Request lifecycle counters and histograms.
+    request_success: RequestSuccessCounters,
+    request_prompt_tokens: HistogramMetric,
+    request_generation_tokens: HistogramMetric,
+    request_max_num_generation_tokens: HistogramMetric,
+    request_params_max_tokens: HistogramMetric,
+    request_params_n: HistogramMetric,
+    request_prefill_kv_computed_tokens: HistogramMetric,
+    time_to_first_token_seconds: HistogramMetric,
+    inter_token_latency_seconds: HistogramMetric,
+    e2e_request_latency_seconds: HistogramMetric,
+    request_decode_time_seconds: HistogramMetric,
+    request_time_per_output_token_seconds: HistogramMetric,
+
+    /// Present only when engines record stats.
+    events: Option<EventMetricHandles>,
+}
+
+/// `vllm:request_success` counters, one per finish reason.
+pub(crate) struct RequestSuccessCounters {
+    stop: U64Counter,
+    length: U64Counter,
+    abort: U64Counter,
+    error: U64Counter,
+    repetition: U64Counter,
+}
+
+impl RequestSuccessCounters {
+    /// Create the series for every finish reason, like Python's
+    /// `for reason in FinishReason` loop.
+    pub(crate) fn resolve(model_name: &str, engine: u32) -> Self {
+        let counter = |finished_reason| {
+            METRICS.request.request_success.get_or_create_owned(&FinishedReasonLabels {
+                model_name: model_name.to_string(),
+                engine,
+                finished_reason,
+            })
+        };
+        Self {
+            stop: counter(FinishReason::Stop(None).as_str()),
+            length: counter(FinishReason::Length.as_str()),
+            abort: counter(FinishReason::Abort.as_str()),
+            error: counter(FinishReason::Error(None).as_str()),
+            repetition: counter(FinishReason::Repetition(None).as_str()),
+        }
+    }
+
+    /// Counter for a terminal finish reason.
+    fn get(&self, finish_reason: &FinishReason) -> &U64Counter {
+        match finish_reason {
+            FinishReason::Stop(_) => &self.stop,
+            FinishReason::Length => &self.length,
+            FinishReason::Abort => &self.abort,
+            FinishReason::Error(_) => &self.error,
+            FinishReason::Repetition(_) => &self.repetition,
+        }
+    }
+
+    /// Requests finished for any reason, like Python's `finished_requests`.
+    pub(crate) fn total(&self) -> u64 {
+        let Self {
+            stop,
+            length,
+            abort,
+            error,
+            repetition,
+        } = self;
+        [stop, length, abort, error, repetition].iter().map(|c| c.get()).sum()
+    }
+}
+
+/// `vllm:watermark_requests` counters, one per status.
+struct WatermarkRequestCounters {
+    watermarked: U64Counter,
+    skipped: U64Counter,
+    not_watermarked: U64Counter,
+}
+
+impl WatermarkRequestCounters {
+    /// Create the series for every status, like Python's `PrometheusStatLogger`.
+    fn resolve(labels: &EngineLabels) -> Self {
+        let counter = |status| {
+            METRICS.request.watermark_requests.get_or_create_owned(&WatermarkStatusLabels {
+                model_name: labels.model_name.clone(),
+                engine: labels.engine,
+                status,
+            })
+        };
+        Self {
+            watermarked: counter("watermarked"),
+            skipped: counter("skipped"),
+            not_watermarked: counter("not_watermarked"),
+        }
+    }
+
+    /// Counter for a request the engine watermarks (`applied`) or not, given
+    /// whether it asked for watermarking.
+    ///
+    /// A request that asked but is not watermarked, such as a greedy one, is
+    /// `skipped`; an opt-out is `not_watermarked` unless the engine enforced
+    /// watermarking on it.
+    fn get(&self, requested: bool, applied: bool) -> &U64Counter {
+        match (requested, applied) {
+            (_, true) => &self.watermarked,
+            (true, false) => &self.skipped,
+            (false, false) => &self.not_watermarked,
+        }
+    }
+}
+
+/// Cached handles for request metrics derived from engine-core lifecycle
+/// events (`QUEUED`, `SCHEDULED`, `PREEMPTED`), which engines only emit when
+/// they record stats.
+struct EventMetricHandles {
+    num_preemptions: U64Counter,
+    request_num_preemptions: HistogramMetric,
+    request_queue_time_seconds: HistogramMetric,
+    request_prefill_time_seconds: HistogramMetric,
+    request_inference_time_seconds: HistogramMetric,
 }
 
 impl RequestMetricsTracker {
     /// Create the per-request tracker from the normalized `llm`-layer request
-    /// context.
+    /// context and the cached handles of the engine serving it.
     pub(crate) fn new(
-        model_name: String,
+        handles: Arc<RequestMetricHandles>,
         arrival_time: f64,
         prompt_len: u32,
         max_tokens_param: Option<u32>,
-        n_param: u32,
+        parallel_sampling: Option<Arc<ParallelSamplingStats>>,
+        watermark_requested: bool,
     ) -> Self {
         Self {
-            model_name,
+            handles,
             arrival_time,
             prompt_len,
             max_tokens_param,
-            n_param,
+            parallel_sampling,
+            watermark_requested,
             is_prefilling: true,
             queued_ts: 0.0,
             scheduled_ts: 0.0,
@@ -68,8 +269,10 @@ impl RequestMetricsTracker {
             last_token_ts: 0.0,
             first_token_latency: 0.0,
             num_generation_tokens: 0,
+            num_preemptions: 0,
             latest_num_cached_tokens: 0,
-            last_seen_engine_index: 0,
+            is_corrupted: false,
+            watermark_requests: None,
         }
     }
 
@@ -79,23 +282,25 @@ impl RequestMetricsTracker {
     /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L331-L384>
     pub(crate) fn observe_output(
         &mut self,
-        engine_index: u32,
         batch_timestamp: f64,
         received_at: f64,
         output: &EngineCoreOutput,
     ) {
-        self.last_seen_engine_index = engine_index;
         if let Some(prefill_stats) = &output.prefill_stats {
             self.latest_num_cached_tokens = prefill_stats.num_cached_tokens;
         }
         self.num_generation_tokens += output.new_token_ids.len() as u32;
-        metrics()
-            .generation_tokens
-            .get_or_create(&engine_labels(&self.model_name, engine_index))
-            .inc_by(output.new_token_ids.len() as u64);
+        self.handles.generation_tokens.inc_by(output.new_token_ids.len() as u64);
+        self.is_corrupted |= output.num_nans_in_logits > 0;
+        // EngineCore reports what it applied, including enforced opt-outs.
+        if let Some(applied) = output.watermarking {
+            let counters = (self.handles.watermark_requests)
+                .get_or_init(|| WatermarkRequestCounters::resolve(&self.handles.labels));
+            self.watermark_requests = Some(counters.get(self.watermark_requested, applied).clone());
+        }
 
         if let Some(events) = &output.events {
-            self.observe_events(engine_index, events);
+            self.observe_events(events);
         }
 
         // Only outputs that actually carry tokens drive token-timing metrics.
@@ -105,22 +310,16 @@ impl RequestMetricsTracker {
         if !output.new_token_ids.is_empty() {
             if self.is_prefilling {
                 if let Some(prefill_stats) = &output.prefill_stats {
-                    record_prompt_tokens(&self.model_name, engine_index, prefill_stats);
+                    self.record_prompt_tokens(prefill_stats);
                 }
                 self.first_token_latency = received_at - self.arrival_time;
-                observe_time_to_first_token_seconds(
-                    &self.model_name,
-                    engine_index,
-                    self.first_token_latency,
-                );
+                self.handles.time_to_first_token_seconds.observe(self.first_token_latency);
                 self.first_token_ts = batch_timestamp;
                 self.is_prefilling = false;
             } else if self.last_token_ts > 0.0 {
-                observe_inter_token_latency_seconds(
-                    &self.model_name,
-                    engine_index,
-                    batch_timestamp - self.last_token_ts,
-                );
+                self.handles
+                    .inter_token_latency_seconds
+                    .observe(batch_timestamp - self.last_token_ts);
             }
 
             self.last_token_ts = batch_timestamp;
@@ -133,14 +332,10 @@ impl RequestMetricsTracker {
     /// Original Python finished-request stats:
     /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L222-L237>
     pub(crate) fn record_finished(&self, received_at: f64, finish_reason: FinishReason) {
-        let labels = engine_labels(&self.model_name, self.last_seen_engine_index);
         let prefill_kv_computed_tokens =
             self.prompt_len.saturating_sub(self.latest_num_cached_tokens);
         let e2e_latency_seconds = received_at - self.arrival_time;
-        let queue_time_seconds = diff_or_zero(self.scheduled_ts, self.queued_ts);
-        let prefill_time_seconds = diff_or_zero(self.first_token_ts, self.scheduled_ts);
         let decode_time_seconds = diff_or_zero(self.last_token_ts, self.first_token_ts);
-        let inference_time_seconds = diff_or_zero(self.last_token_ts, self.scheduled_ts);
         let time_per_output_token_seconds = if self.num_generation_tokens > 1 {
             diff_or_zero(self.last_token_ts, self.first_token_ts)
                 / (self.num_generation_tokens - 1) as f64
@@ -148,57 +343,82 @@ impl RequestMetricsTracker {
             0.0
         };
 
-        record_request_success(&self.model_name, self.last_seen_engine_index, finish_reason);
-        metrics()
-            .request_prompt_tokens
-            .get_or_create(&labels)
-            .observe(self.prompt_len as f64);
-        metrics()
-            .request_generation_tokens
-            .get_or_create(&labels)
-            .observe(self.num_generation_tokens as f64);
-        metrics()
-            .request_max_num_generation_tokens
-            .get_or_create(&labels)
-            .observe(self.num_generation_tokens as f64);
-        if let Some(max_tokens_param) = self.max_tokens_param {
-            metrics()
-                .request_params_max_tokens
-                .get_or_create(&labels)
-                .observe(max_tokens_param as f64);
+        self.handles.request_success.get(&finish_reason).inc();
+        if self.is_corrupted {
+            self.handles.corrupted_requests.inc();
         }
-        metrics().request_params_n.get_or_create(&labels).observe(self.n_param as f64);
-        metrics()
+        if let Some(watermark_requests) = &self.watermark_requests {
+            watermark_requests.inc();
+        }
+
+        self.handles.request_prompt_tokens.observe(self.prompt_len as f64);
+        self.handles
+            .request_generation_tokens
+            .observe(self.num_generation_tokens as f64);
+        // (max generation tokens, n), once per request.
+        let request_level = match &self.parallel_sampling {
+            None => Some((self.num_generation_tokens, 1)),
+            Some(parallel_sampling) => parallel_sampling
+                .observe_finished_child(self.num_generation_tokens)
+                .map(|max_generation_tokens| (max_generation_tokens, parallel_sampling.n)),
+        };
+        if let Some((max_generation_tokens, _)) = request_level {
+            self.handles
+                .request_max_num_generation_tokens
+                .observe(max_generation_tokens as f64);
+        }
+        if let Some(max_tokens_param) = self.max_tokens_param {
+            self.handles.request_params_max_tokens.observe(max_tokens_param as f64);
+        }
+        if let Some((_, n)) = request_level {
+            self.handles.request_params_n.observe(n as f64);
+        }
+        self.handles
             .request_prefill_kv_computed_tokens
-            .get_or_create(&labels)
             .observe(prefill_kv_computed_tokens as f64);
-        metrics()
-            .e2e_request_latency_seconds
-            .get_or_create(&labels)
-            .observe(e2e_latency_seconds);
-        metrics()
-            .request_queue_time_seconds
-            .get_or_create(&labels)
-            .observe(queue_time_seconds);
-        metrics()
-            .request_prefill_time_seconds
-            .get_or_create(&labels)
-            .observe(prefill_time_seconds);
-        metrics()
-            .request_decode_time_seconds
-            .get_or_create(&labels)
-            .observe(decode_time_seconds);
-        metrics()
-            .request_inference_time_seconds
-            .get_or_create(&labels)
-            .observe(inference_time_seconds);
-        metrics()
+        self.handles.e2e_request_latency_seconds.observe(e2e_latency_seconds);
+        self.handles.request_decode_time_seconds.observe(decode_time_seconds);
+        self.handles
             .request_time_per_output_token_seconds
-            .get_or_create(&labels)
             .observe(time_per_output_token_seconds);
+
+        if let Some(events) = &self.handles.events {
+            let queue_time_seconds = diff_or_zero(self.scheduled_ts, self.queued_ts);
+            let prefill_time_seconds = diff_or_zero(self.first_token_ts, self.scheduled_ts);
+            let inference_time_seconds = diff_or_zero(self.last_token_ts, self.scheduled_ts);
+
+            events.request_num_preemptions.observe(self.num_preemptions as f64);
+            events.request_queue_time_seconds.observe(queue_time_seconds);
+            events.request_prefill_time_seconds.observe(prefill_time_seconds);
+            events.request_inference_time_seconds.observe(inference_time_seconds);
+        }
     }
 
-    fn observe_events(&mut self, engine_index: u32, events: &[EngineCoreEvent]) {
+    /// Engine lifecycle timestamps recorded so far.
+    pub(crate) fn timestamps(&self) -> RequestTimestamps {
+        RequestTimestamps {
+            queued_ts: self.queued_ts,
+            scheduled_ts: self.scheduled_ts,
+            first_token_ts: self.first_token_ts,
+            last_token_ts: self.last_token_ts,
+        }
+    }
+
+    /// Record prompt token counters through cached metric handles.
+    fn record_prompt_tokens(&self, prefill_stats: &PrefillStats) {
+        let computed = prefill_stats.num_computed_tokens as u64;
+        let local_cache_hit = prefill_stats.num_local_cached_tokens as u64;
+        let external_kv_transfer = prefill_stats.num_external_cached_tokens as u64;
+
+        self.handles.prompt_tokens.inc_by(prefill_stats.num_prompt_tokens as u64);
+        self.handles.prompt_tokens_local_compute.inc_by(computed);
+        self.handles.prompt_tokens_local_cache_hit.inc_by(local_cache_hit);
+        self.handles.prompt_tokens_external_kv_transfer.inc_by(external_kv_transfer);
+        self.handles.prompt_tokens_cached.inc_by(prefill_stats.num_cached_tokens as u64);
+    }
+
+    /// Record request event counters through cached metric handles.
+    fn observe_events(&mut self, events: &[EngineCoreEvent]) {
         for event in events {
             match event.r#type {
                 EngineCoreEventType::Queued => {
@@ -210,46 +430,89 @@ impl RequestMetricsTracker {
                     }
                 }
                 EngineCoreEventType::Preempted => {
-                    metrics()
-                        .num_preemptions
-                        .get_or_create(&engine_labels(&self.model_name, engine_index))
-                        .inc();
+                    self.num_preemptions += 1;
+                    if let Some(events) = &self.handles.events {
+                        events.num_preemptions.inc();
+                    }
                 }
             }
         }
     }
 }
 
-fn engine_labels(model_name: &str, engine: u32) -> EngineLabels {
-    EngineLabels {
+/// Resolve fixed request metric handles for one model and engine index,
+/// creating every series they cover.
+pub(crate) fn resolve_request_metric_handles(
+    model_name: &str,
+    engine: u32,
+    engine_stats_enabled: bool,
+) -> RequestMetricHandles {
+    let metrics = &METRICS.request;
+    let labels = EngineLabels {
         model_name: model_name.to_string(),
         engine,
+    };
+
+    RequestMetricHandles {
+        prompt_tokens: metrics.prompt_tokens.get_or_create_owned(&labels),
+        prompt_tokens_local_compute: metrics.prompt_tokens_by_source.get_or_create_owned(
+            &prompt_token_source_labels(model_name, engine, PROMPT_TOKEN_SOURCE_LOCAL_COMPUTE),
+        ),
+        prompt_tokens_local_cache_hit: metrics.prompt_tokens_by_source.get_or_create_owned(
+            &prompt_token_source_labels(model_name, engine, PROMPT_TOKEN_SOURCE_LOCAL_CACHE_HIT),
+        ),
+        prompt_tokens_external_kv_transfer: metrics.prompt_tokens_by_source.get_or_create_owned(
+            &prompt_token_source_labels(
+                model_name,
+                engine,
+                PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER,
+            ),
+        ),
+        prompt_tokens_cached: metrics.prompt_tokens_cached.get_or_create_owned(&labels),
+        generation_tokens: metrics.generation_tokens.get_or_create_owned(&labels),
+        corrupted_requests: metrics.corrupted_requests.get_or_create_owned(&labels),
+        watermark_requests: OnceLock::new(),
+        request_success: RequestSuccessCounters::resolve(model_name, engine),
+        request_prompt_tokens: metrics.request_prompt_tokens.get_or_create_owned(&labels),
+        request_generation_tokens: metrics.request_generation_tokens.get_or_create_owned(&labels),
+        request_max_num_generation_tokens: metrics
+            .request_max_num_generation_tokens
+            .get_or_create_owned(&labels),
+        request_params_max_tokens: metrics.request_params_max_tokens.get_or_create_owned(&labels),
+        request_params_n: metrics.request_params_n.get_or_create_owned(&labels),
+        request_prefill_kv_computed_tokens: metrics
+            .request_prefill_kv_computed_tokens
+            .get_or_create_owned(&labels),
+        time_to_first_token_seconds: metrics
+            .time_to_first_token_seconds
+            .get_or_create_owned(&labels),
+        inter_token_latency_seconds: metrics
+            .inter_token_latency_seconds
+            .get_or_create_owned(&labels),
+        e2e_request_latency_seconds: metrics
+            .e2e_request_latency_seconds
+            .get_or_create_owned(&labels),
+        request_decode_time_seconds: metrics
+            .request_decode_time_seconds
+            .get_or_create_owned(&labels),
+        request_time_per_output_token_seconds: metrics
+            .request_time_per_output_token_seconds
+            .get_or_create_owned(&labels),
+        events: engine_stats_enabled.then(|| EventMetricHandles {
+            num_preemptions: metrics.num_preemptions.get_or_create_owned(&labels),
+            request_num_preemptions: metrics.request_num_preemptions.get_or_create_owned(&labels),
+            request_queue_time_seconds: metrics
+                .request_queue_time_seconds
+                .get_or_create_owned(&labels),
+            request_prefill_time_seconds: metrics
+                .request_prefill_time_seconds
+                .get_or_create_owned(&labels),
+            request_inference_time_seconds: metrics
+                .request_inference_time_seconds
+                .get_or_create_owned(&labels),
+        }),
+        labels,
     }
-}
-
-fn observe_time_to_first_token_seconds(model_name: &str, engine: u32, seconds: f64) {
-    metrics()
-        .time_to_first_token_seconds
-        .get_or_create(&engine_labels(model_name, engine))
-        .observe(seconds);
-}
-
-fn observe_inter_token_latency_seconds(model_name: &str, engine: u32, seconds: f64) {
-    metrics()
-        .inter_token_latency_seconds
-        .get_or_create(&engine_labels(model_name, engine))
-        .observe(seconds);
-}
-
-fn record_request_success(model_name: &str, engine: u32, finish_reason: FinishReason) {
-    metrics()
-        .request_success
-        .get_or_create(&FinishedReasonLabels {
-            model_name: model_name.to_string(),
-            engine,
-            finished_reason: finish_reason.as_str(),
-        })
-        .inc();
 }
 
 fn prompt_token_source_labels(
@@ -262,45 +525,6 @@ fn prompt_token_source_labels(
         engine,
         source,
     }
-}
-
-fn record_prompt_tokens(model_name: &str, engine: u32, prefill_stats: &PrefillStats) {
-    let computed = prefill_stats.num_computed_tokens as u64;
-    let local_cache_hit = prefill_stats.num_local_cached_tokens as u64;
-    let external_kv_transfer = prefill_stats.num_external_cached_tokens as u64;
-
-    metrics()
-        .prompt_tokens
-        .get_or_create(&engine_labels(model_name, engine))
-        .inc_by(prefill_stats.num_prompt_tokens as u64);
-    metrics()
-        .prompt_tokens_by_source
-        .get_or_create(&prompt_token_source_labels(
-            model_name,
-            engine,
-            PROMPT_TOKEN_SOURCE_LOCAL_COMPUTE,
-        ))
-        .inc_by(computed);
-    metrics()
-        .prompt_tokens_by_source
-        .get_or_create(&prompt_token_source_labels(
-            model_name,
-            engine,
-            PROMPT_TOKEN_SOURCE_LOCAL_CACHE_HIT,
-        ))
-        .inc_by(local_cache_hit);
-    metrics()
-        .prompt_tokens_by_source
-        .get_or_create(&prompt_token_source_labels(
-            model_name,
-            engine,
-            PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER,
-        ))
-        .inc_by(external_kv_transfer);
-    metrics()
-        .prompt_tokens_cached
-        .get_or_create(&engine_labels(model_name, engine))
-        .inc_by(prefill_stats.num_cached_tokens as u64);
 }
 
 fn diff_or_zero(end: f64, start: f64) -> f64 {
@@ -319,7 +543,7 @@ fn diff_or_zero(end: f64, start: f64) -> f64 {
 ///
 /// Original Python request timestamp source:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L206-L216>
-pub(crate) fn current_unix_timestamp_secs() -> f64 {
+pub fn current_unix_timestamp_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock is before unix epoch")
@@ -328,20 +552,26 @@ pub(crate) fn current_unix_timestamp_secs() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use vllm_engine_core_client::protocol::output::{EngineCoreEvent, EngineCoreEventType};
     use vllm_engine_core_client::protocol::stats::PrefillStats;
-    use vllm_engine_core_client::protocol::{EngineCoreEvent, EngineCoreEventType};
+    use vllm_metrics::METRICS;
 
-    use super::{RequestMetricsTracker, diff_or_zero};
+    use std::sync::Arc;
+
+    use super::{
+        RequestMetricsTracker, RequestTimestamps, diff_or_zero, resolve_request_metric_handles,
+    };
 
     #[test]
     fn tracker_updates_timing_state_across_prefill_decode_and_finish() {
-        let mut tracker = RequestMetricsTracker::new("model".to_string(), 100.0, 64, Some(128), 1);
+        METRICS.request.set_max_model_len(4096);
+        let handles = Arc::new(resolve_request_metric_handles("model", 2, true));
+        let mut tracker = RequestMetricsTracker::new(handles, 100.0, 64, Some(128), None, true);
 
         tracker.observe_output(
-            2,
             10.0,
             100.2,
-            &vllm_engine_core_client::protocol::EngineCoreOutput {
+            &vllm_engine_core_client::protocol::output::EngineCoreOutput {
                 request_id: "req-1".to_string(),
                 new_token_ids: vec![1],
                 finish_reason: None,
@@ -355,21 +585,21 @@ mod tests {
                         timestamp: 9.0,
                     },
                 ]),
-                prefill_stats: Some(PrefillStats {
+                prefill_stats: Some(Box::new(PrefillStats {
                     num_prompt_tokens: 64,
                     num_computed_tokens: 60,
                     num_cached_tokens: 4,
                     num_local_cached_tokens: 4,
                     num_external_cached_tokens: 0,
-                }),
+                    ..Default::default()
+                })),
                 ..Default::default()
             },
         );
         tracker.observe_output(
-            2,
             11.5,
             100.4,
-            &vllm_engine_core_client::protocol::EngineCoreOutput {
+            &vllm_engine_core_client::protocol::output::EngineCoreOutput {
                 request_id: "req-1".to_string(),
                 new_token_ids: vec![2, 3],
                 finish_reason: None,
@@ -382,12 +612,20 @@ mod tests {
         );
 
         assert!(!tracker.is_prefilling);
-        assert_eq!(tracker.last_seen_engine_index, 2);
         assert_eq!(tracker.num_generation_tokens, 3);
         assert_eq!(tracker.queued_ts, 8.0);
         assert_eq!(tracker.scheduled_ts, 9.0);
         assert_eq!(tracker.first_token_ts, 10.0);
         assert_eq!(tracker.last_token_ts, 11.5);
+        assert_eq!(
+            tracker.timestamps(),
+            RequestTimestamps {
+                queued_ts: 8.0,
+                scheduled_ts: 9.0,
+                first_token_ts: 10.0,
+                last_token_ts: 11.5,
+            }
+        );
         assert!((tracker.first_token_latency - 0.2).abs() < 1e-9);
         assert_eq!(
             diff_or_zero(tracker.last_token_ts, tracker.first_token_ts),

@@ -2,17 +2,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import io
+import itertools
+import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from typing import cast
 
-import numpy as np
-import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    RequestResponseMetadata,
+)
+from vllm.entrypoints.generate.base.serving import (
+    GenerateBaseServing,
+    build_per_request_timing_metrics,
+    build_spec_decoding_metrics,
+    clamp_prompt_logprobs,
+    completion_top_logprobs_limit,
+    format_token_id_placeholder,
+)
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
     CompletionRequest,
@@ -21,36 +32,87 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponseStreamChoice,
     CompletionStreamResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
     PromptTokenUsageInfo,
-    RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import (
-    GenerationError,
-    OpenAIServing,
-    clamp_prompt_logprobs,
-    format_token_id_placeholder,
-)
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
-from vllm.logprobs import Logprob
+from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.outputs import RequestOutput
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
+from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
 
 
-class OpenAIServingCompletion(OpenAIServing):
+def _padded_prompt_logprobs(
+    prompt_logprobs: PromptLogprobs | None, num_prompt_tokens: int
+) -> PromptLogprobs:
+    """One entry per prompt token; a request aborted mid-prefill has logprobs
+    only for the prompt tokens it processed, or none."""
+    if prompt_logprobs is not None and len(prompt_logprobs) == num_prompt_tokens:
+        return prompt_logprobs
+    logprobs = list(prompt_logprobs or [])
+    return logprobs + [None] * (num_prompt_tokens - len(logprobs))
+
+
+_PROBE_TEXT = "zZ_vllm_sse_probe_Zz"
+_PROBE_INDEX = 987654321
+_encode_delta_text = json.JSONEncoder(ensure_ascii=False).encode
+
+
+def _delta_frame_template(
+    request_id: str, created_time: int, model_name: str
+) -> tuple[str, str, str] | None:
+    """Split a probe chunk into the parts of a plain-delta SSE frame that are
+    constant for a stream, so only index and text are rendered per chunk.
+
+    Taking them from the serializer keeps frames byte-identical to
+    `model_dump_json(exclude_unset=True)` if the models gain fields.
+
+    Returns:
+        `(prefix, infix, suffix)`, or None if the sentinels are ambiguous.
+
+    """
+    probe = CompletionStreamResponse(
+        id=request_id,
+        object="text_completion",
+        created=created_time,
+        model=model_name,
+        choices=[
+            CompletionResponseStreamChoice(
+                index=_PROBE_INDEX,
+                text=_PROBE_TEXT,
+                logprobs=None,
+                finish_reason=None,
+                stop_reason=None,
+                prompt_token_ids=None,
+                token_ids=None,
+                weight_versions=None,
+            )
+        ],
+        kv_transfer_params=None,
+    )
+    frame = f"data: {probe.model_dump_json(exclude_unset=True)}\n\n"
+    index, text = str(_PROBE_INDEX), json.dumps(_PROBE_TEXT)
+    if frame.count(index) != 1 or frame.count(text) != 1:
+        return None
+    prefix, rest = frame.split(index, 1)
+    infix, suffix = rest.split(text, 1)
+    return prefix, infix, suffix
+
+
+class OpenAIServingCompletion(GenerateBaseServing):
     def __init__(
         self,
         engine_client: EngineClient,
@@ -61,6 +123,9 @@ class OpenAIServingCompletion(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        enable_log_outputs: bool = False,
+        enable_log_deltas: bool = True,
+        enable_per_request_metrics: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -72,6 +137,9 @@ class OpenAIServingCompletion(OpenAIServing):
         self.online_renderer = online_renderer
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+        self.enable_log_outputs = enable_log_outputs
+        self.enable_log_deltas = enable_log_deltas
+        self.enable_per_request_metrics = enable_per_request_metrics
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -85,24 +153,20 @@ class OpenAIServingCompletion(OpenAIServing):
         self,
         request: CompletionRequest,
     ) -> list[EngineInput] | ErrorResponse:
-        """
-        Validate the model and preprocess a completion request.
+        """Validate the model and preprocess a completion request.
 
         Delegates preprocessing logic to OnlineRenderer, adding the
         engine-aware checks (LoRA model validation, engine health).
 
         Returns:
             A list of engine_inputs on success, or an ErrorResponse on failure.
+
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
 
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight(request.n or 1)
 
         return await self.online_renderer.render_completion(request)
 
@@ -116,9 +180,7 @@ class OpenAIServingCompletion(OpenAIServing):
         See https://platform.openai.com/docs/api-reference/completions/create
         for the API specification. This API mimics the OpenAI Completion API.
 
-        NOTE: Currently we do not support the following feature:
-            - suffix (the language models we currently support do not support
-            suffix)
+        NOTE: suffix is only supported by models that implement FIM rendering.
         """
         return await self._with_kv_transfer_rejection_cleanup(
             self._create_completion(request, raw_request), request, raw_request
@@ -190,6 +252,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(request, raw_request)
 
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(
@@ -198,6 +261,9 @@ class OpenAIServingCompletion(OpenAIServing):
                     params=sampling_params,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
+                    session_id=session_id,
+                    priority=self._get_priority(request, raw_request),
+                    data_parallel_rank=data_parallel_rank,
                 )
             else:
                 generator = self.engine_client.generate(
@@ -206,8 +272,9 @@ class OpenAIServingCompletion(OpenAIServing):
                     request_id_item,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=request.priority,
+                    priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
                 )
 
             generators.append(generator)
@@ -259,6 +326,18 @@ class OpenAIServingCompletion(OpenAIServing):
                 tokenizer,
                 request_metadata,
             )
+
+            if self.enable_log_outputs and self.request_logger:
+                for final_res in final_res_batch_checked:
+                    for output in final_res.outputs:
+                        self.request_logger.log_outputs(
+                            request_id=request_id,
+                            outputs=output.text,
+                            output_token_ids=output.token_ids,
+                            finish_reason=output.finish_reason,
+                            is_streaming=False,
+                            delta=False,
+                        )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
 
@@ -288,8 +367,9 @@ class OpenAIServingCompletion(OpenAIServing):
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
-        previous_text_lens = [0] * num_choices * num_prompts
+        next_text_offsets = [0] * num_choices * num_prompts
         previous_num_tokens = [0] * num_choices * num_prompts
+        previous_texts = [""] * num_choices * num_prompts
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
         num_cached_tokens = None
@@ -300,19 +380,30 @@ class OpenAIServingCompletion(OpenAIServing):
             stream_options, self.enable_force_include_usage
         )
 
+        last_res: RequestOutput | None = None
         try:
+            # Requests that can only emit plain delta chunks render them from a
+            # per-stream template; everything else uses the model path below.
+            delta_template = None
+            if (
+                not request.echo
+                and request.logprobs is None
+                and not request.return_token_ids
+                and not request.return_weight_versions
+                and not include_continuous_usage
+            ):
+                delta_template = _delta_frame_template(
+                    request_id, created_time, model_name
+                )
+
             async for prompt_idx, res in result_generator:
+                last_res = res
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
 
                 if first_iteration:
                     num_cached_tokens = res.num_cached_tokens
                     first_iteration = False
-
-                prompt_text = res.prompt
-                if prompt_text is None:
-                    engine_input = engine_inputs[prompt_idx]
-                    prompt_text = self._extract_prompt_text(engine_input)
 
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:
@@ -323,6 +414,8 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
+                    finish_reason = output.finish_reason
+                    self._raise_if_error(finish_reason, request_id)
 
                     # Useful when request.return_token_ids is True
                     # Returning prompt token IDs shares the same logic
@@ -332,14 +425,22 @@ class OpenAIServingCompletion(OpenAIServing):
                     assert request.max_tokens is not None
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
-                        if request.return_token_ids:
-                            prompt_text = ""
-                        assert prompt_text is not None
+                        prompt_text = "" if request.return_token_ids else res.prompt
+                        if prompt_text is None:
+                            prompt_text = self._extract_prompt_text(
+                                engine_inputs[prompt_idx]
+                            )
                         if request.max_tokens == 0:
                             # only return the prompt
                             delta_text = prompt_text
                             delta_token_ids = prompt_token_ids
-                            out_logprobs = prompt_logprobs
+                            out_logprobs = (
+                                _padded_prompt_logprobs(
+                                    prompt_logprobs, len(prompt_token_ids)
+                                )
+                                if request.logprobs is not None
+                                else None
+                            )
                         else:
                             # echo the prompt and first token
                             delta_text = prompt_text + output.text
@@ -347,10 +448,16 @@ class OpenAIServingCompletion(OpenAIServing):
                                 *prompt_token_ids,
                                 *output.token_ids,
                             ]
-                            out_logprobs = [
-                                *(prompt_logprobs or []),
-                                *(output.logprobs or []),
-                            ]
+                            out_logprobs = (
+                                [
+                                    *_padded_prompt_logprobs(
+                                        prompt_logprobs, len(prompt_token_ids)
+                                    ),
+                                    *(output.logprobs or []),
+                                ]
+                                if request.logprobs is not None
+                                else None
+                            )
                         prompt_token_ids_to_return = prompt_token_ids
                         has_echoed[i] = True
                     else:
@@ -369,6 +476,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             not delta_text
                             and not delta_token_ids
                             and not previous_num_tokens[i]
+                            and finish_reason is None
                         ):
                             # Chunked prefill case, don't return empty chunks
                             continue
@@ -380,18 +488,43 @@ class OpenAIServingCompletion(OpenAIServing):
                             top_logprobs=out_logprobs,
                             num_output_top_logprobs=request.logprobs,
                             tokenizer=tokenizer,
-                            initial_text_offset=previous_text_lens[i],
+                            logprob_token_ids=request.logprob_token_ids,
+                            initial_text_offset=next_text_offsets[i],
                             return_as_token_id=request.return_tokens_as_token_ids,
                         )
+                        # Advance by the tokens just reported, not by delta_text:
+                        # text held back for stop strings lags the tokens.
+                        if logprobs.tokens:
+                            next_text_offsets[i] = logprobs.text_offset[-1] + len(
+                                logprobs.tokens[-1]
+                            )
                     else:
                         logprobs = None
 
-                    previous_text_lens[i] += len(output.text)
                     previous_num_tokens[i] += len(output.token_ids)
-                    finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
-                    self._raise_if_error(finish_reason, request_id)
+                    if self.enable_log_outputs and self.request_logger:
+                        delta_content = output.text
+                        previous_texts[i] += delta_content
+                        if delta_content and self.enable_log_deltas:
+                            self.request_logger.log_outputs(
+                                request_id=request_id,
+                                outputs=delta_content,
+                                output_token_ids=as_list(output.token_ids),
+                                finish_reason=finish_reason,
+                                is_streaming=True,
+                                delta=True,
+                            )
+
+                    if delta_template is not None and finish_reason is None:
+                        prefix, infix, suffix = delta_template
+                        yield (
+                            f"{prefix}{i}{infix}"
+                            f"{_encode_delta_text(delta_text)}"
+                            f"{suffix}"
+                        )
+                        continue
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
@@ -411,8 +544,18 @@ class OpenAIServingCompletion(OpenAIServing):
                                     if request.return_token_ids
                                     else None
                                 ),
+                                weight_versions=(
+                                    output.weight_versions
+                                    if request.return_weight_versions
+                                    else None
+                                ),
                             )
                         ],
+                        kv_transfer_params=(
+                            res.kv_transfer_params
+                            if finish_reason is not None
+                            else None
+                        ),
                     )
                     # Stamp on terminal chunk only when no trailing usage chunk
                     # will follow (that one is the true final message).
@@ -434,6 +577,17 @@ class OpenAIServingCompletion(OpenAIServing):
                     response_json = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {response_json}\n\n"
 
+            if self.enable_log_outputs and self.request_logger:
+                for full_text in previous_texts:
+                    self.request_logger.log_outputs(
+                        request_id=request_id,
+                        outputs=full_text,
+                        output_token_ids=None,
+                        finish_reason="streaming_complete",
+                        is_streaming=True,
+                        delta=False,
+                    )
+
             total_prompt_tokens = sum(num_prompt_tokens)
             total_completion_tokens = sum(previous_num_tokens)
             final_usage_info = UsageInfo(
@@ -448,6 +602,27 @@ class OpenAIServingCompletion(OpenAIServing):
                 )
 
             if include_usage:
+                # In streaming, metrics ride on this final usage chunk, which is
+                # only emitted when usage reporting is enabled (i.e.
+                # ``stream_options.include_usage=true`` or
+                # ``--enable-force-include-usage``).
+                stream_per_request_metrics: PerRequestMetrics | None = None
+                # See note in request_output_to_completion_response: suppress when
+                # not attributable to one stream (multi-prompt or n>1).
+                if num_prompts == 1 and (request.n or 1) == 1:
+                    if self.enable_per_request_metrics:
+                        last_metrics = (
+                            last_res.metrics if last_res is not None else None
+                        )
+                        stream_per_request_metrics = build_per_request_timing_metrics(
+                            last_metrics, total_completion_tokens
+                        )
+                    spec_stats = build_spec_decoding_metrics(last_res)
+                    if spec_stats is not None:
+                        if stream_per_request_metrics is None:
+                            stream_per_request_metrics = PerRequestMetrics()
+                        stream_per_request_metrics.speculative_decoding = spec_stats
+
                 final_usage_chunk = CompletionStreamResponse(
                     id=request_id,
                     created=created_time,
@@ -455,6 +630,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     choices=[],
                     usage=final_usage_info,
                     system_fingerprint=self.system_fingerprint,
+                    metrics=stream_per_request_metrics,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=False, exclude_none=True
@@ -486,6 +662,7 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompt_tokens = 0
         num_generated_tokens = 0
         kv_transfer_params = None
+        ec_transfer_params = None
         last_final_res = None
         for final_res in final_res_batch:
             last_final_res = final_res
@@ -507,7 +684,13 @@ class OpenAIServingCompletion(OpenAIServing):
                     assert prompt_text is not None
                     if request.max_tokens == 0:
                         token_ids = prompt_token_ids
-                        out_logprobs = prompt_logprobs
+                        out_logprobs = (
+                            _padded_prompt_logprobs(
+                                prompt_logprobs, len(prompt_token_ids)
+                            )
+                            if request.logprobs is not None
+                            else None
+                        )
                         output_text = prompt_text
                     else:
                         token_ids = [*prompt_token_ids, *output.token_ids]
@@ -515,10 +698,11 @@ class OpenAIServingCompletion(OpenAIServing):
                         if request.logprobs is None:
                             out_logprobs = None
                         else:
-                            assert prompt_logprobs is not None
                             assert output.logprobs is not None
                             out_logprobs = [
-                                *prompt_logprobs,
+                                *_padded_prompt_logprobs(
+                                    prompt_logprobs, len(prompt_token_ids)
+                                ),
                                 *output.logprobs,
                             ]
 
@@ -535,22 +719,17 @@ class OpenAIServingCompletion(OpenAIServing):
                         top_logprobs=out_logprobs,
                         tokenizer=tokenizer,
                         num_output_top_logprobs=request.logprobs,
+                        logprob_token_ids=request.logprob_token_ids,
                         return_as_token_id=request.return_tokens_as_token_ids,
                     )
                 else:
                     logprobs = None
 
-                # Encode routed_experts for transport. JSON can't carry raw
-                # bytes, so we write the ndarray as a ``.npy`` byte stream
-                # and base64-encode it. ``pybase64`` is ~3x faster than the
-                # stdlib ``base64`` on large payloads thanks to SIMD.
-                routed_experts_b64 = None
-                if output.routed_experts is not None:
-                    buf = io.BytesIO()
-                    np.save(buf, output.routed_experts)
-                    routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
-                        "ascii"
-                    )
+                routed_experts_b64 = (
+                    numpy2base64(output.routed_experts)
+                    if output.routed_experts is not None
+                    else None
+                )
 
                 choice_data = CompletionResponseChoice(
                     index=len(choices),
@@ -566,6 +745,11 @@ class OpenAIServingCompletion(OpenAIServing):
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                     routed_experts=routed_experts_b64,
+                    weight_versions=(
+                        output.weight_versions
+                        if request.return_weight_versions
+                        else None
+                    ),
                 )
                 choices.append(choice_data)
 
@@ -589,8 +773,30 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
         request_metadata.final_usage_info = usage
+
+        per_request_metrics: PerRequestMetrics | None = None
+        # Per-request metrics (timing + spec-decode acceptance) describe a single
+        # generation stream, so suppress them when they cannot be attributed to
+        # one: multiple prompts (timestamps span prompts) or n>1 (stats belong to
+        # one of the n sequences).
+        if len(final_res_batch) == 1 and (request.n or 1) == 1:
+            if self.enable_per_request_metrics:
+                last_metrics = (
+                    last_final_res.metrics if last_final_res is not None else None
+                )
+                per_request_metrics = build_per_request_timing_metrics(
+                    last_metrics, num_generated_tokens
+                )
+            spec_stats = build_spec_decoding_metrics(last_final_res)
+            if spec_stats is not None:
+                if per_request_metrics is None:
+                    per_request_metrics = PerRequestMetrics()
+                per_request_metrics.speculative_decoding = spec_stats
+
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
+            ec_transfer_params = final_res_batch[0].ec_transfer_params
+
         return CompletionResponse(
             id=request_id,
             created=created_time,
@@ -599,6 +805,8 @@ class OpenAIServingCompletion(OpenAIServing):
             usage=usage,
             system_fingerprint=self.system_fingerprint,
             kv_transfer_params=kv_transfer_params,
+            ec_transfer_params=ec_transfer_params,
+            metrics=per_request_metrics,
         )
 
     def _create_completion_logprobs(
@@ -607,6 +815,7 @@ class OpenAIServingCompletion(OpenAIServing):
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         num_output_top_logprobs: int,
         tokenizer: TokenizerLike | None,
+        logprob_token_ids: list[int] | None = None,
         initial_text_offset: int = 0,
         return_as_token_id: bool | None = None,
     ) -> CompletionLogProbs:
@@ -670,8 +879,12 @@ class OpenAIServingCompletion(OpenAIServing):
                             tokenizer,
                             return_as_token_id=should_return_as_token_id,
                         ): max(top_lp[1].logprob, -9999.0)
-                        for i, top_lp in enumerate(step_top_logprobs.items())
-                        if num_output_top_logprobs >= i
+                        for top_lp in itertools.islice(
+                            step_top_logprobs.items(),
+                            completion_top_logprobs_limit(
+                                num_output_top_logprobs, bool(logprob_token_ids)
+                            ),
+                        )
                     }
                 )
 
