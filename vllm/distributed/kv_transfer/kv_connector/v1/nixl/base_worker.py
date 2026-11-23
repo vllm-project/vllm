@@ -23,6 +23,7 @@ import regex as re
 import torch
 import zmq
 
+from vllm.config import get_layers_from_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
@@ -83,6 +84,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
@@ -98,6 +100,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SparseCacheRole,
 )
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -457,6 +460,33 @@ class NixlBaseConnectorWorker:
             )
             regions.add(i)
         return regions
+
+    def _compat_backend_name(self) -> str:
+        """Attention backend name folded into the compatibility hash.
+
+        Backends of indexer caches do not count: a model may build indexers on
+        some layers only, so a PP stage may start on, or hold only, layers
+        without one.
+        """
+        indexer_layers = [
+            name
+            for group in self.kv_cache_config.kv_cache_groups
+            for name, spec in group.kv_cache_specs.items()
+            if isinstance(spec, AttentionSpec)
+            and spec.cache_role is SparseCacheRole.INDEXER
+        ]
+        layer_type = cast(type[Any], AttentionLayerBase)
+        indexer_backends = {
+            layer.get_attn_backend()
+            for layer in get_layers_from_vllm_config(
+                self.vllm_config, layer_type, indexer_layers
+            ).values()
+        }
+        backends = [b for b in self.attn_backends if b not in indexer_backends]
+        if self._supports_pp_hma and self._has_packed_cache:
+            # PP can reorder the same backends across stages of a packed model.
+            return ",".join(sorted({backend.get_name() for backend in backends}))
+        return backends[0].get_name()
 
     def _set_region_layers(self, region_layers: list[list[str]]) -> None:
         self.region_members: list[list[str]] = region_layers
@@ -1649,15 +1679,9 @@ class NixlBaseConnectorWorker:
             else None,
             is_mamba=self._has_mamba,
         )
-        backend_name = self.backend_name
-        if self._supports_pp_hma and self._has_packed_cache:
-            # PP can reorder the same backends across stages of a packed model.
-            backend_name = ",".join(
-                sorted({backend.get_name() for backend in self.attn_backends})
-            )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config,
-            backend_name,
+            self._compat_backend_name(),
             transfer_mode=self._TRANSFER_MODE,
         )
 
@@ -4292,11 +4316,13 @@ class NixlBaseConnectorWorker:
         now = time.perf_counter()
         for engine_id in self._failed_remote_engines - self._invalid_remote_engines:
             if engine_id in self._disconnected_remote_engines:
-                # The metadata may still be loaded; the connection is not.
-                logger.warning(
-                    "NIXL lost the connection to remote engine %s.", engine_id
-                )
-                self._mark_remote_engine_invalid(engine_id, now)
+                # Skip an engine whose agents were already removed (no NIXL state left).
+                if engine_id in self._remote_agents:
+                    # The metadata may still be loaded; the connection is not.
+                    logger.warning(
+                        "NIXL lost the connection to remote engine %s.", engine_id
+                    )
+                    self._mark_remote_engine_invalid(engine_id, now)
                 continue
             agents = self._remote_agents.get(engine_id, {}).values()
             try:

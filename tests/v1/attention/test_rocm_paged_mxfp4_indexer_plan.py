@@ -299,6 +299,8 @@ def test_decode_row_shard_skips_steps_with_prefill(
     assert (metadata.decode_shard is not None) == sharded
     assert metadata.decode_row_lens is not None
     assert metadata.decode_row_lens.shape[0] == (rows // 4 if sharded else rows)
+    assert metadata.decode_step_row_lens is not None
+    assert torch.equal(metadata.decode_step_row_lens, decode.seq_lens.view(-1))
     ends = metadata.decode_block_ends
     expected = range(rows // 4, rows // 2) if sharded else range(rows)
     assert ends is not None and ends.tolist() == list(expected)
