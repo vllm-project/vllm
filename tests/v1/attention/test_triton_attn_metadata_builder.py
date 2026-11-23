@@ -204,7 +204,7 @@ def test_split_k_segments_follow_cu_occupancy_cdna3(
             cudagraph_mode=CUDAGraphMode.NONE, static_forward_context={}
         ),
     )
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=num_kv_heads, head_size=128, dtype=torch.bfloat16
     )
     builder = builder_cls(spec, ["layer.0"], config, "cpu")
