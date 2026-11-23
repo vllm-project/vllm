@@ -5127,6 +5127,88 @@ async fn chat_structured_outputs_use_configured_backend() {
     }
 }
 
+/// `allowed_tools` restricts the calls the grammar admits to the allowed
+/// subset, in both modes, while plain `required` admits every tool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_allowed_tools_restrict_the_call_grammar() {
+    let allowed = |mode| {
+        json!({
+            "type": "allowed_tools",
+            "allowed_tools": {
+                "mode": mode,
+                "tools": [{"type": "function", "function": {"name": "get_time"}}],
+            },
+        })
+    };
+    for (tool_choice, callable) in [
+        (json!("required"), ["get_weather", "get_time"].as_slice()),
+        (allowed("required"), ["get_time"].as_slice()),
+        (allowed("auto"), ["get_time"].as_slice()),
+    ] {
+        let case = tool_choice.to_string();
+        let chat_backend = Arc::new(FakeChatBackend::new());
+        let (app, engine_task) = test_app_with_chat_and_engine_request_check(
+            |llm| {
+                ChatLlm::new(TextLlm::new(llm, chat_backend.clone()), chat_backend)
+                    .with_tool_call_parser(ParserSelection::Explicit("qwen3_coder".to_string()))
+            },
+            {
+                let case = case.clone();
+                move |request| {
+                    let params = request.sampling_params.as_ref().expect("sampling params");
+                    let structured_outputs =
+                        params.structured_outputs.as_ref().expect("structured outputs");
+                    let tag = structured_outputs
+                        .params
+                        .constraint
+                        .as_structural_tag()
+                        .expect("structural tag");
+                    for name in ["get_weather", "get_time"] {
+                        let grammar_name = format!("<function={name}>");
+                        assert_eq!(
+                            tag.contains(&grammar_name),
+                            callable.contains(&name),
+                            "{case}: {name} in {tag}"
+                        );
+                    }
+                }
+            },
+        )
+        .await;
+
+        let tool = |name: &str| {
+            json!({
+                "type": "function",
+                "function": {"name": name, "parameters": {"type": "object"}},
+            })
+        };
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "max_tokens": 2,
+                            "tools": [tool("get_weather"), tool("get_time")],
+                            "tool_choice": tool_choice,
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{case}");
+        to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+        engine_task.await.expect("mock engine task");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn openai_return_weight_versions_reports_spans_on_final_choice() {
@@ -5666,6 +5748,44 @@ async fn generate_text_output_mode_rejects_missing_tokenizer_and_detokenize_fals
             "400 Bad Request: \"output_mode='text' requires sampling_params.detokenize to be true\"",
         ]
     "#]].assert_debug_eq(&errors);
+}
+
+/// Stop strings are matched on decoded text, so a server without a tokenizer
+/// must reject them rather than silently never apply them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_rejects_stop_strings_without_tokenizer() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-generate-rejects-stop-without-tokenizer",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::without_tokenizer()),
+    )
+    .await;
+    let mut app = build_router_with_gates(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
+
+    let (status, json) = post_json(
+        &mut app,
+        "/inference/v1/generate",
+        json!({
+            "token_ids": [11, 22],
+            "sampling_params": {"stop": ["never"]},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        json["error"]["message"].as_str().unwrap().contains("stop strings"),
+        "unexpected error: {json}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
