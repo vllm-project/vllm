@@ -122,6 +122,9 @@ class DSparkDeepseekV4Model(nn.Module):
                 for i in range(self.num_dspark_layers)
             ]
         )
+        for layer in self.layers:
+            # The draft's loader has no copy of the whole wo_b to gather for.
+            layer.attn.wo_b_full = None
 
         # Heads: final norm, and the Markov + confidence heads.
         # Loaded from the "final" MTP layer weights (mtp.*) in the target

@@ -264,6 +264,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         if self.use_sequence_parallel:
             self.attn.wo_b.reduce_results = False
+            self.attn.wo_b_full = None
         self.ffn = DeepseekV4MoE(
             vllm_config,
             prefix=f"{prefix}.ffn",
@@ -552,7 +553,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             mhc_overlap.join()
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
-        elif self.mono is not None and self.mono.ffn_only:
+        elif (
+            self.mono is not None
+            and self.mono.ffn_only
+            and not self.attn.wo_b_gathers(x.shape[0])
+        ):
             out = self.mono.ffn(self, x, residual, post_mix, res_mix, attn_pre)
             if out is not None:
                 return out
@@ -1292,6 +1297,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     )
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
+                    # The rank's copy of the whole wo_b (see wo_b_gathers).
+                    full_name = name.replace(".attn.wo_b.", ".attn.wo_b_full.")
+                    if full_name != name and full_name in params_dict:
+                        param = params_dict[full_name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, loaded_weight)
+                        loaded_params.add(full_name)
                     continue
 
         return loaded_params
