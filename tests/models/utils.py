@@ -556,6 +556,7 @@ def dummy_hf_overrides(
                 "Gemma3nForConditionalGeneration",
                 "Gemma4ForCausalLM",
                 "Gemma4ForConditionalGeneration",
+                "Gemma4ForSlotDecision",
                 "Gemma4MTPModel",
                 "Gemma4UnifiedForConditionalGeneration",
                 "DiffusionGemmaForBlockDiffusion",

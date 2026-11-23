@@ -922,6 +922,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Gemma4ForConditionalGeneration": _HfExamplesInfo(
         "google/gemma-4-E2B-it",
     ),
+    "Gemma4ForSlotDecision": _HfExamplesInfo(
+        "baselabs/bison-1",
+        max_model_len=4096,
+    ),
     "Gemma4UnifiedForConditionalGeneration": _HfExamplesInfo(
         "google/gemma-4-12B-it",
     ),

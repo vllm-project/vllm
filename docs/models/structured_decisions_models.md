@@ -8,12 +8,13 @@ used for classification and routing.
 
 ### Text-only Models
 
-| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models       |
-|---------------------------|---------------------|------------------|-------------------|-------------------------|
-| `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
-| `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it` |
-| `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
-| `Qwen3_5ForSlotDecision`  | `SlotLMStrategy`    | `generate`       | LM head (fp32)    | `baselabs/mammoth-1`    |
+| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models                            |
+|---------------------------|---------------------|------------------|-------------------|----------------------------------------------|
+| `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash`                      |
+| `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it`                      |
+| `Gemma4ForSlotDecision`   | `SlotLMStrategy`    | `generate`       | LM head (fp32)    | `baselabs/bison-1`, `baselabs/groundhog-1`   |
+| `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc.                      |
+| `Qwen3_5ForSlotDecision`  | `SlotLMStrategy`    | `generate`       | LM head (fp32)    | `baselabs/mammoth-1`                         |
 
 ### Multimodal Models
 
@@ -427,3 +428,30 @@ vllm serve baselabs/mammoth-1
 - `instructions` returns 400, as does any `chat_template_kwargs` other than
   `{"enable_thinking": false}`. `/v1/decisions` reads every question as a
   choice and returns 400 for score levels with the same label.
+
+### Bison-1 and Groundhog-1
+
+Base Labs [`baselabs/bison-1`](https://huggingface.co/baselabs/bison-1)
+(31B dense) and
+[`baselabs/groundhog-1`](https://huggingface.co/baselabs/groundhog-1) (26B
+mixture of experts, about 4B active) are Gemma 4 checkpoints whose
+`baseten_modeling_overrides` select `Gemma4ForSlotDecision`.
+
+```bash
+vllm serve baselabs/groundhog-1
+vllm serve baselabs/bison-1 --tensor-parallel-size 2
+```
+
+- `--max-model-len` defaults to the trained 131,072 tokens. At that length
+  bison-1's KV cache does not fit on one H200, so serve it on two GPUs or set a
+  lower `--max-model-len`. groundhog-1 fits on one H200.
+- The full attention layers read the prompt as for Mammoth-1, with chunked
+  prefill off, and the sliding window layers stay causal. Prefix caching works
+  with every attention backend.
+- On `/v1/systemone` and `/v1/decisions`, media inputs return 400.
+  `/v1/chat/completions` takes images as stock Gemma 4 does.
+- Only the `TRITON_ATTN` attention backend is supported for full attention,
+  and it is selected automatically. The flags Mammoth-1 refuses are refused
+  here too, as is `--disable-hybrid-kv-cache-manager`.
+- The `choice`, `instructions` and `chat_template_kwargs` limits are those of
+  Mammoth-1.
