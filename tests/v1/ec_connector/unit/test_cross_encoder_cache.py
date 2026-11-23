@@ -220,24 +220,37 @@ def test_batch_reads_reuse_registration_without_aliasing_outputs(backend, capaci
 
 
 @pytest.mark.parametrize(
-    ("read_capacity", "disk_budget", "batch_lengths"),
+    ("read_capacity", "disk_budget", "use_uring", "batch_lengths"),
     [
-        (120, None, [3]),
-        (80, 36864, [2, 1]),
-        (120, 24576, [2, 1]),
-        (120, 24575, [1, 1, 1]),
-        (120, 12287, []),
+        (120, None, None, [3]),
+        (80, 36864, None, [2, 1]),
+        (120, 24576, None, [2, 1]),
+        (120, 24575, None, [1, 1, 1]),
+        (120, 12287, None, []),
+        (120, 24576, True, [2, 1]),
+        (120, 12287, True, []),
+        (120, 120, "default", [3]),
+        (120, 120, False, [3]),
+        (120, 119, False, [2, 1]),
+        (80, 120, False, [2, 1]),
+        (120, 39, False, []),
     ],
 )
 def test_reads_obey_local_and_owner_staging_limits(
-    read_capacity, disk_budget, batch_lengths, monkeypatch
+    read_capacity, disk_budget, use_uring, batch_lengths, monkeypatch
 ):
-    """Owner alignment overhead must split batches even for tiny embeddings."""
+    """Only DirectIO owners need padding; plain reads can fill the budget."""
+    monkeypatch.setenv(
+        "MOONCAKE_OFFLOAD_USE_URING",
+        "true" if use_uring in (False, "default") else "false",
+    )
     native = MemoryStore()
+    mode_config = {} if use_uring == "default" else {"disk_use_uring": use_uring}
     client = store_client.MooncakeEmbeddingStoreClient(
         native,
         read_buffer_bytes=read_capacity,
         disk_staging_budget_bytes=disk_budget,
+        **mode_config,
     )
     tensors = {key: torch.full((2, 2), float(i)) for i, key in enumerate("abc")}
     try:
@@ -254,9 +267,13 @@ def test_reads_obey_local_and_owner_staging_limits(
             sizes = call.args[2]
             assert sum(sizes) <= read_capacity
             if disk_budget is not None:
-                assert sum(((size + 4095) // 4096 + 2) * 4096 for size in sizes) <= (
-                    disk_budget
+                usage = sum(
+                    size
+                    if use_uring in (False, "default")
+                    else ((size + 4095) // 4096 + 2) * 4096
+                    for size in sizes
                 )
+                assert usage <= disk_budget
         if not batch_lengths:
             assert client._read_buffer is None
     finally:
@@ -268,7 +285,10 @@ def test_disk_budget_includes_header_and_preserves_other_hits():
     """Skip an oversized object without losing neighboring reusable outputs."""
     native = MemoryStore()
     client = store_client.MooncakeEmbeddingStoreClient(
-        native, read_buffer_bytes=16384, disk_staging_budget_bytes=12288
+        native,
+        read_buffer_bytes=16384,
+        disk_staging_budget_bytes=12288,
+        disk_use_uring=True,
     )
     # The first object, including its header, is exactly one DirectIO page.
     tensors = {
@@ -313,8 +333,9 @@ def test_disk_staging_budget_requires_positive_integer(budget):
         (True, "embedded", 12288, "standalone-store"),
     ],
 )
+@pytest.mark.parametrize("use_uring", [None, False, True])
 def test_store_factory_connects_configured_ssd_and_preserves_ram(
-    tmp_path, monkeypatch, offload, mode, budget, error
+    tmp_path, monkeypatch, offload, mode, budget, error, use_uring
 ):
     """Production creation must reach the native Store for SSD configurations."""
     native = MemoryStore()
@@ -343,11 +364,11 @@ def test_store_factory_connects_configured_ssd_and_preserves_ram(
     if error is not None:
         with pytest.raises(ValueError, match=error):
             store_client.create_mooncake_embedding_store_client(
-                disk_staging_budget_bytes=budget
+                disk_staging_budget_bytes=budget, disk_use_uring=use_uring
             )
         return
     client = store_client.create_mooncake_embedding_store_client(
-        disk_staging_budget_bytes=budget
+        disk_staging_budget_bytes=budget, disk_use_uring=use_uring
     )
     try:
         tensor = torch.ones(2, 2)
@@ -356,6 +377,7 @@ def test_store_factory_connects_configured_ssd_and_preserves_ram(
         assert torch.equal(restored["key"], tensor)
         assert replication.preferred_segment == "owner:50053"
         assert client._disk_staging_budget_bytes == (12288 if offload else None)
+        assert client._disk_use_uring is (use_uring if offload else None)
     finally:
         client.close()
 
@@ -372,6 +394,29 @@ def test_ec_config_parses_disk_staging_allowance(budget):
     else:
         parsed = MooncakeECConfig.from_vllm_config(config)
         assert parsed.store_disk_staging_budget_bytes == budget
+
+
+@pytest.mark.parametrize(
+    "use_uring", ["default", None, False, True, "false", "true", 0, 1]
+)
+def test_disk_io_mode_requires_boolean_or_none(use_uring):
+    config = create_ec_vllm_config(ec_role="ec_producer")
+    if use_uring == "default":
+        assert MooncakeECConfig.from_vllm_config(config).store_disk_use_uring is False
+        return
+    config.ec_transfer_config.ec_connector_extra_config["store_disk_use_uring"] = (
+        use_uring
+    )
+    if use_uring is not None and not isinstance(use_uring, bool):
+        with pytest.raises(ValueError, match="store_disk_use_uring"):
+            MooncakeECConfig.from_vllm_config(config)
+        with pytest.raises(ValueError, match="disk_use_uring"):
+            store_client.MooncakeEmbeddingStoreClient(
+                MemoryStore(), disk_use_uring=use_uring
+            )
+    else:
+        parsed = MooncakeECConfig.from_vllm_config(config)
+        assert parsed.store_disk_use_uring is use_uring
 
 
 @pytest.mark.parametrize("error", [-900, -901, -1102])

@@ -74,12 +74,15 @@ _SAFE_PUT_REJECTIONS = _SAFE_IO_REJECTIONS | {_MooncakeErrorCode.TENANT_QUOTA_EX
 _MOONCAKE_TENSOR_OBJECT_MAGIC = 0x4D4F4F4E
 # Magic, dtype, token count, hidden dimension. Format versioning is in the key.
 _MOONCAKE_TENSOR_HEADER = struct.Struct("<IIQQ")
-# Mirrors FileStorage::AllocateBatch in Mooncake v0.3.12: pointer alignment
-# and unaligned file offsets each require one additional DirectIO page.
+# DirectIO reads require pointer alignment and read padding.
 _DIRECT_IO_ALIGNMENT = 4096
 
 
-def _estimate_disk_staging_bytes(object_bytes: int) -> int:
+def _estimate_disk_staging_bytes(
+    object_bytes: int, *, use_uring: bool | None = False
+) -> int:
+    if use_uring is False:
+        return max(object_bytes, 1)
     aligned_bytes = (
         (object_bytes + _DIRECT_IO_ALIGNMENT - 1)
         // _DIRECT_IO_ALIGNMENT
@@ -102,6 +105,7 @@ def create_mooncake_embedding_store_client(
     read_buffer_bytes: int = 128 * 1024**2,
     *,
     disk_staging_budget_bytes: int | None = None,
+    disk_use_uring: bool | None = False,
     preferred_segment: str | None = None,
 ) -> MooncakeEmbeddingStoreClient:
     try:
@@ -141,6 +145,7 @@ def create_mooncake_embedding_store_client(
         disk_staging_budget_bytes=(
             disk_staging_budget_bytes if config.enable_offload else None
         ),
+        disk_use_uring=disk_use_uring if config.enable_offload else None,
     )
     store = client.store
     local_ip = get_ip()
@@ -198,7 +203,10 @@ class MooncakeEmbeddingStoreClient:
         *,
         read_buffer_bytes: int = 128 * 1024**2,
         disk_staging_budget_bytes: int | None = None,
+        disk_use_uring: bool | None = False,
     ):
+        if disk_use_uring is not None and not isinstance(disk_use_uring, bool):
+            raise ValueError("disk_use_uring must be a boolean or None")
         if disk_staging_budget_bytes is not None and (
             isinstance(disk_staging_budget_bytes, bool)
             or not isinstance(disk_staging_budget_bytes, int)
@@ -213,6 +221,8 @@ class MooncakeEmbeddingStoreClient:
         self._read_buffer_bytes = read_buffer_bytes
         # A per-call allowance, not a reservation of shared owner capacity.
         self._disk_staging_budget_bytes = disk_staging_budget_bytes
+        # Keep this in sync with MOONCAKE_OFFLOAD_USE_URING on the SSD owners.
+        self._disk_use_uring = disk_use_uring
         self._read_buffer: torch.Tensor | None = None
         self._put_header: ctypes.Array[ctypes.c_char] | None = None
 
@@ -335,7 +345,9 @@ class MooncakeEmbeddingStoreClient:
                 )
                 continue
             disk_bytes = (
-                _estimate_disk_staging_bytes(size) if disk_budget is not None else 0
+                _estimate_disk_staging_bytes(size, use_uring=self._disk_use_uring)
+                if disk_budget is not None
+                else 0
             )
             if disk_budget is not None and disk_bytes > disk_budget:
                 logger.warning(

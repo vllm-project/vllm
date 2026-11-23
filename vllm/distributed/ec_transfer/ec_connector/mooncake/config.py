@@ -74,6 +74,12 @@ class MooncakeECConfig:
     store_max_pending_bytes: int = 2 * 1024**3
     store_read_buffer_bytes: int = 128 * 1024**2
     store_disk_staging_budget_bytes: int | None = None
+    store_disk_use_uring: bool | None = False
+    """Match MOONCAKE_OFFLOAD_USE_URING on the SSD owners when configuring Mooncake.
+
+    Defaults to False, like Mooncake. Update this setting whenever the owners'
+    mode changes. Use None for unknown or mixed modes to retain DirectIO padding.
+    """
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> MooncakeECConfig:
@@ -102,6 +108,9 @@ class MooncakeECConfig:
         shared_reuse = get("cross_encoder_cache", False)
         if not isinstance(shared_reuse, bool):
             raise ValueError("cross_encoder_cache must be a boolean")
+        disk_use_uring = get("store_disk_use_uring", False)
+        if disk_use_uring is not None and not isinstance(disk_use_uring, bool):
+            raise ValueError("store_disk_use_uring must be a boolean or None")
         if shared_reuse:
             if not ec_config.is_encode_only:
                 raise ValueError(
@@ -159,4 +168,5 @@ class MooncakeECConfig:
                 if get("store_disk_staging_budget_bytes", None) is not None
                 else None
             ),
+            store_disk_use_uring=disk_use_uring,
         )

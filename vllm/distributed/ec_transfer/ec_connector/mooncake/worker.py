@@ -103,6 +103,7 @@ class ECMooncakeWorker:
                 config.store_max_pending_bytes,
                 config.store_read_buffer_bytes,
                 config.store_disk_staging_budget_bytes,
+                config.store_disk_use_uring,
                 ec_config.get_from_extra_config("preferred_segment", None),
             )
             if config.cross_encoder_cache
@@ -203,13 +204,20 @@ class ECMooncakeWorker:
                 create_mooncake_embedding_store_client,
             )
 
-            namespace, max_items, max_bytes, read_bytes, disk_budget, segment = (
-                self._store_config
-            )
+            (
+                namespace,
+                max_items,
+                max_bytes,
+                read_bytes,
+                disk_budget,
+                disk_use_uring,
+                segment,
+            ) = self._store_config
             self._output_store = MooncakeEmbeddingStoreBackend(
                 create_mooncake_embedding_store_client(
                     read_buffer_bytes=read_bytes,
                     disk_staging_budget_bytes=disk_budget,
+                    disk_use_uring=disk_use_uring,
                     preferred_segment=segment,
                 ),
                 namespace,
