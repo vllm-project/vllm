@@ -520,8 +520,8 @@ class XpuVmmDriver(VmmDriver):
 
     def __init__(self) -> None:
         import torch
-        import vllm_xpu_kernels._C  # noqa: F401
-        import vllm_xpu_kernels._xpu_C
+        import vllm_xpu_kernels._C  # noqa
+        import vllm_xpu_kernels._xpu_C  # noqa
 
         self._ops = torch.ops._xpu_C
 
@@ -544,9 +544,7 @@ class XpuVmmDriver(VmmDriver):
     def free_reserved(self, ptr: int, size: int) -> None:
         self._ops.vmm_free_reserved(ptr, size)
 
-    def create(
-        self, size: int, device_index: int, export_handle_types: int = 0
-    ) -> int:
+    def create(self, size: int, device_index: int, export_handle_types: int = 0) -> int:
         if export_handle_types:
             raise RuntimeError("XPU VMM does not support exportable handle types.")
         return self._ops.vmm_create(size, device_index)
