@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Logprob drift eval: metric arithmetic on synthetic logprobs, and a
-record/compare round trip against one vLLM server.
+record/compare round trip with restart check against freshly started vLLM
+servers.
 
 Usage:
 pytest -s -v tests/evals/logprob_drift/test_logprob_drift.py \
@@ -13,6 +14,7 @@ import math
 import random
 import shlex
 import sys
+from pathlib import Path
 
 import pytest
 import yaml
@@ -22,6 +24,8 @@ from tests.utils import RemoteOpenAIServer
 from . import logprob_drift_eval
 from .logprob_drift_eval import (
     NOISY_BAR_FALSE_ALARM_ONE_IN,
+    RestartNoiseError,
+    append_recording,
     check_gates,
     check_noise_sample,
     compare,
@@ -29,7 +33,10 @@ from .logprob_drift_eval import (
     kl_estimate,
     parse_prompt_logprobs,
     record,
+    recording_distance,
     rerun_noise,
+    restart_states,
+    worst_rerun_noise,
 )
 
 VOCAB_SIZE = 50
@@ -477,51 +484,258 @@ def test_record_warns_when_compare_would_refuse(
     assert noisy_gates and f"--num-runs {needed} " in capsys.readouterr().err
 
 
-def test_logprob_drift_correctness(config_filename):
-    """Record and compare on one server: the drift must pass the gates. The
-    candidate is then one more pass of the same process, which is the case the
-    gates are built for. A server restart is not part of this test."""
+def _with_servers(reference: dict, *recordings: list[dict]) -> dict:
+    """The reference plus one more server per recording, as `record --append`
+    stores them."""
+    return reference | {
+        "other_servers": [
+            {"rerun_noise": _noise(identical=True, num_runs=2), "passages": r}
+            for r in recordings
+        ]
+    }
+
+
+def test_restart_states_group_identical_servers():
+    reference = _with_servers(
+        _reference(None), _scored(), _scored(temperature=1.5), _scored()
+    )
+    assert restart_states(reference) == [[1, 2, 4], [3]]
+    # A reference in the format of one server is one state.
+    assert restart_states(_reference(None)) == [[1]]
+
+
+def test_worst_rerun_noise_refuses_a_nan_on_any_server():
+    for server in range(3):
+        noises = [_noise(identical=True, num_runs=2) for _ in range(3)]
+        noises[server] = noises[server] | {"max_kl_estimate": math.nan}
+        reference = _reference(None, noises[0]) | {
+            "other_servers": [
+                {"rerun_noise": n, "passages": _scored()} for n in noises[1:]
+            ]
+        }
+        with pytest.raises(ValueError, match="non-finite"):
+            worst_rerun_noise(reference)
+
+
+def test_recording_distance_is_symmetric_and_zero_for_identical_recordings():
+    assert recording_distance(_scored(), _scored()) == 0.0
+    a, b = _scored(), _scored(temperature=1.5)
+    assert recording_distance(a, b) == recording_distance(b, a) > 0.0
+
+
+def test_compare_stops_on_restart_noise(fake_server):
+    noisy = _with_servers(_reference(None), _scored(temperature=1.5))
+    # It stops before scoring: the empty queue would raise if a pass were asked.
+    with pytest.raises(RestartNoiseError, match="2 states"):
+        compare("http://unused", noisy)
+    fake_server.append(_scored())
+    agreeing = _with_servers(_reference(None), _scored(), _scored())
+    result = compare("http://unused", agreeing)
+    assert result["passed"] and result["reference_servers"] == 3
+
+
+def test_worst_rerun_noise_takes_each_value_from_the_noisiest_server():
+    quiet = _noise(identical=True, num_runs=60)
+    loud = _noise(identical=False, num_runs=60, nll=0.02, kl=0.003) | {
+        "min_top1_agreement": 0.99
+    }
+    reference = _reference(None, quiet) | {
+        "other_servers": [{"rerun_noise": loud, "passages": _scored()}]
+    }
+    worst = worst_rerun_noise(reference)
+    assert worst["max_kl_estimate"] == loud["max_kl_estimate"] > 0
+    assert worst["min_top1_agreement"] == loud["min_top1_agreement"] < 1
+    assert not worst["identical"]
+
+
+def test_worst_rerun_noise_ignores_a_server_without_noise_in_any_value():
+    # Bits differ but all three values show no noise: its 2 passes do not
+    # limit the pass count of the bar the noisy server set.
+    noisy = _noise(identical=False, num_runs=60, nll=0.02)
+    neutral = _noise(identical=False, num_runs=2, nll=0.0)
+    reference = _reference(None, noisy) | {
+        "other_servers": [{"rerun_noise": neutral, "passages": _scored()}]
+    }
+    assert worst_rerun_noise(reference)["num_runs"] == 60
+
+
+def test_worst_rerun_noise_counts_only_servers_that_set_a_bar():
+    # Server B is noisy only on the KL estimate, whose tolerance is above it,
+    # so its 2 passes do not limit the NLL bar that server A set.
+    a = _noise(identical=False, num_runs=20, nll=0.02, kl=0.0)
+    b = _noise(identical=False, num_runs=2, nll=0.0, kl=0.003)
+    reference = _reference(None, a) | {
+        "other_servers": [{"rerun_noise": b, "passages": _scored()}]
+    }
+    assert worst_rerun_noise(reference, max_kl_estimate=0.01)["num_runs"] == 20
+    assert worst_rerun_noise(reference)["num_runs"] == 2
+
+
+def test_noise_sample_counts_gates_across_servers(fake_server):
+    # One server is noisy on the NLL change, another on the KL estimate:
+    # two gates take their bar from noise, so 20 passes each are not enough.
+    nll_only = _noise(identical=False, num_runs=20, nll=0.02, kl=0.0)
+    kl_only = _noise(identical=False, num_runs=20, nll=0.0, kl=0.003)
+    reference = _reference(None, nll_only) | {
+        "other_servers": [{"rerun_noise": kl_only, "passages": _scored()}]
+    }
+    with pytest.raises(ValueError, match="--num-runs 40"):
+        compare("http://unused", reference)
+
+
+def test_restart_noise_comes_before_the_noise_sample(fake_server):
+    # Too few passes and two states: the restart noise is reported (exit 3).
+    reference = _reference(None, _noise(identical=False, num_runs=2)) | {
+        "other_servers": [
+            {
+                "rerun_noise": _noise(identical=True, num_runs=2),
+                "passages": _scored(temperature=1.5),
+            }
+        ]
+    }
+    with pytest.raises(RestartNoiseError):
+        compare("http://unused", reference)
+
+
+def test_compare_checks_every_servers_rerun_noise(fake_server):
+    reference = _reference(None) | {
+        "other_servers": [
+            {
+                "rerun_noise": _noise(identical=False, num_runs=2),
+                "passages": _scored(),
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="--num-runs 20"):
+        compare("http://unused", reference)
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("model", "other"),
+        ("vllm_version", "y"),
+        ("num_passages", 4),
+        ("passages_sha256", "other"),
+        ("top_k", TOP_K + 1),
+        ("server_args", "--enforce-eager"),
+    ],
+)
+def test_append_refuses_another_build_or_setting(key, value):
+    reference = _reference(None)
+    reference["metadata"]["vllm_version"] = "x"
+    new = _reference(None)
+    new["metadata"]["vllm_version"] = "x"
+    new["metadata"][key] = value
+    with pytest.raises(ValueError, match="cannot append"):
+        append_recording(reference, new)
+
+
+def test_record_append_and_compare_exit_codes(
+    fake_server, monkeypatch, tmp_path, capsys
+):
+    ref_file = str(tmp_path / "reference.json")
+    fake_server.extend([_scored(), _scored()])
+    assert _run_main(monkeypatch, "record", "--output", ref_file) == 0
+    assert "one server; record on 2 more" in capsys.readouterr().err
+    fake_server.append(_scored())
+    assert _run_main(monkeypatch, "compare", "--reference", ref_file) == 0
+    assert "Restart noise unchecked" in capsys.readouterr().out
+    fake_server.extend([_scored(), _scored()])
+    assert _run_main(monkeypatch, "record", "--output", ref_file, "--append") == 0
+    assert len(json.loads(Path(ref_file).read_text())["other_servers"]) == 1
+    fake_server.append(_scored())
+    assert _run_main(monkeypatch, "compare", "--reference", ref_file) == 0
+    fake_server.append(_scored(temperature=1.5))
+    assert _run_main(monkeypatch, "compare", "--reference", ref_file) == 1
+    assert "compare once more" in capsys.readouterr().out
+    # A third server in another state: restart noise, exit 3, nothing scored.
+    fake_server.extend([_scored(temperature=1.5), _scored(temperature=1.5)])
+    assert _run_main(monkeypatch, "record", "--output", ref_file, "--append") == 3
+    assert _run_main(monkeypatch, "compare", "--reference", ref_file) == 3
+    assert fake_server == []
+
+
+# Freshly started servers the GPU test records the reference on.
+REFERENCE_SERVERS = 3
+
+
+def test_logprob_drift_correctness(config_filename, tmp_path):
+    """Record the reference on REFERENCE_SERVERS freshly started servers, each
+    with its own empty vLLM, Triton and FlashInfer-autotune cache directories.
+
+    If they disagree, the model has restart noise on this machine, and compare
+    must stop with RestartNoiseError. The last server is then compared against
+    its own recording alone. If they agree, the last server is compared
+    against the whole reference. Either way the comparison is one more pass of
+    a process whose recording is in the reference.
+
+    It can still fail in two ways. With zero bars, it fails if that server's
+    later passes differ although its first two did not. On a server whose
+    passes differ, it fails with the false-alarm chance of check_noise_sample,
+    at most 3 in 60."""
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
     server_args = shlex.split(eval_config.get("server_args", ""))
     server_args.append("--disable-uvicorn-access-log")
     startup_max_wait_seconds = eval_config.get(
         "startup_max_wait_seconds", DEFAULT_STARTUP_MAX_WAIT_SECONDS
     )
-    env_dict = dict(eval_config.get("env") or {})
-    env_dict["VLLM_ENGINE_READY_TIMEOUT_S"] = str(int(startup_max_wait_seconds))
+    base_env = dict(eval_config.get("env") or {})
+    base_env["VLLM_ENGINE_READY_TIMEOUT_S"] = str(int(startup_max_wait_seconds))
+    model = eval_config["model_name"]
+    args = shlex.join(server_args)
 
-    with RemoteOpenAIServer(
-        eval_config["model_name"],
-        server_args,
-        env_dict=env_dict,
-        max_wait_seconds=startup_max_wait_seconds,
-    ) as remote_server:
-
-        def record_runs(num_runs: int) -> dict:
-            return record(
-                remote_server.url_root,
-                model=eval_config["model_name"],
-                num_passages=eval_config["num_passages"],
-                top_k=eval_config["top_k"],
-                num_runs=num_runs,
-                server_args=shlex.join(server_args),
-            )
-
-        reference = record_runs(2)
-        if not reference["rerun_noise"]["identical"]:
-            # Enough passes for all three gates to take their bar from the noise.
-            reference = record_runs(3 * NOISY_BAR_FALSE_ALARM_ONE_IN)
-        result = compare(
-            remote_server.url_root,
-            reference,
-            model=eval_config["model_name"],
-            server_args=shlex.join(server_args),
+    def fresh_server(index: int) -> RemoteOpenAIServer:
+        # Empty caches: a shared cache would replay one server's start-up
+        # choices on every restart and hide the noise between starts.
+        cache = tmp_path / f"server_{index}"
+        env = base_env | {
+            "VLLM_CACHE_ROOT": str(cache / "vllm"),
+            "TRITON_CACHE_DIR": str(cache / "triton"),
+            "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": str(cache / "flashinfer"),
+        }
+        return RemoteOpenAIServer(
+            model, server_args, env_dict=env, max_wait_seconds=startup_max_wait_seconds
         )
 
+    def record_on(server: RemoteOpenAIServer, num_runs: int) -> dict:
+        return record(
+            server.url_root,
+            model=model,
+            num_passages=eval_config["num_passages"],
+            top_k=eval_config["top_k"],
+            num_runs=num_runs,
+            server_args=args,
+        )
+
+    reference = None
+    result = None
+    for i in range(REFERENCE_SERVERS):
+        with fresh_server(i) as server:
+            recorded = record_on(server, 2)
+            if not recorded["rerun_noise"]["identical"]:
+                # Enough passes for all three gates to take their bar from
+                # the noise.
+                recorded = record_on(server, 3 * NOISY_BAR_FALSE_ALARM_ONE_IN)
+            reference = (
+                recorded if reference is None else append_recording(reference, recorded)
+            )
+            if i < REFERENCE_SERVERS - 1:
+                continue
+            states = restart_states(reference)
+            print(f"Logprob drift results for {model}:")
+            print(f"  Reference servers: {REFERENCE_SERVERS}, states: {states}")
+            if len(states) > 1:
+                with pytest.raises(RestartNoiseError):
+                    compare(server.url_root, reference, model=model, server_args=args)
+                # Still run the gates: this server against its own recording.
+                reference = recorded
+            result = compare(server.url_root, reference, model=model, server_args=args)
+            if len(states) == 1:
+                assert result["reference_servers"] == REFERENCE_SERVERS
+
+    assert result is not None
     drift = result["drift"]
-    print(f"Logprob drift results for {eval_config['model_name']}:")
-    print(f"  Rerun noise: {result['rerun_noise']}")
-    print(f"  Positions: {drift['positions']}")
     print(f"  Mean NLL change: {drift['nll_rel_change']:+.4%}")
     print(f"  Top-1 agreement: {drift['top1_agreement']:.4%}")
     assert result["passed"], result["failures"]

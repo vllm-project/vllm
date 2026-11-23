@@ -13,6 +13,10 @@ Usage (from the repository root):
     vllm serve <model> --port 8000          # reference build
     python -m tests.evals.logprob_drift.logprob_drift_eval record \
         --port 8000 --output reference.json
+    # restart the reference build with empty caches, then add its recording;
+    # repeat for a third server (see "Server restarts" in the README)
+    python -m tests.evals.logprob_drift.logprob_drift_eval record \
+        --port 8000 --output reference.json --append
     # stop that server, then start the candidate build on the same GPU type
     vllm serve <model> --port 8000
     python -m tests.evals.logprob_drift.logprob_drift_eval compare \
@@ -24,6 +28,7 @@ import hashlib
 import itertools
 import json
 import math
+import os
 import shlex
 import sys
 import time
@@ -41,6 +46,12 @@ MAX_LOGPROB = 1e-4
 # `compare` may fail a build identical to the reference with chance at most 1
 # in this many, over all gates. A chosen risk, not a measured value.
 NOISY_BAR_FALSE_ALARM_ONE_IN = 20
+
+
+class RestartNoiseError(ValueError):
+    """Raised by `compare`, before scoring, when the reference's fresh servers
+    disagree: the gates cannot then tell a candidate's own change from the
+    noise between server starts."""
 
 
 def load_passages(num_passages: int) -> list[str]:
@@ -392,6 +403,133 @@ def check_gates(
     return failures
 
 
+def recording_distance(a: list[dict], b: list[dict]) -> float:
+    """The mean per-position KL estimate between two recordings, averaged over
+    both directions.
+
+    Unused here. A comparison over repeated server starts can build on it (see
+    "Server restarts" in the README). It is symmetric and zero for identical
+    recordings, but it is not a metric. The KL estimate covers only the top-k,
+    so it can be slightly negative. Two top-k lists that differ only in the
+    order of equal logprobs give zero.
+    """
+    return (
+        compare_passages(a, b)["kl_estimate"] + compare_passages(b, a)["kl_estimate"]
+    ) / 2
+
+
+def server_recordings(reference: dict) -> list[list[dict]]:
+    """The reference's recordings, one per server: the first server's, then the
+    servers `record --append` added. A reference from one server has one."""
+    return [reference["passages"]] + [
+        s["passages"] for s in reference.get("other_servers", [])
+    ]
+
+
+def worst_rerun_noise(
+    reference: dict,
+    max_nll_rel_change: float = 0.0,
+    min_top1_agreement: float = 1.0,
+    max_kl_estimate: float = 0.0,
+) -> dict:
+    """The rerun noise the gates use: per value, the worst over the
+    reference's servers (largest NLL change and KL, lowest top-1).
+
+    A server holds a bar when it has the worst value of a gate whose bar
+    comes from the noise under these tolerances (as in `check_noise_sample`).
+    `num_runs` is the fewest passes among those servers, because a bar from
+    noise is only as reliable as the server that measured it. This assumes
+    the servers of one state share a rerun-noise distribution; nothing here
+    checks that.
+
+    Raises:
+        ValueError: if any server's rerun noise has a non-finite value.
+
+    """
+    noises = [reference["rerun_noise"]] + [
+        s["rerun_noise"] for s in reference.get("other_servers", [])
+    ]
+    # max and min drop a NaN that is not the first element, so check each
+    # server before aggregating.
+    for n in noises:
+        values = (
+            n["max_abs_nll_rel_change"],
+            n["min_top1_agreement"],
+            n["max_kl_estimate"],
+        )
+        if not all(math.isfinite(v) for v in values):
+            raise ValueError("the reference's rerun noise has a non-finite value")
+    worst = {
+        "max_abs_nll_rel_change": max(n["max_abs_nll_rel_change"] for n in noises),
+        "min_top1_agreement": min(n["min_top1_agreement"] for n in noises),
+        "max_kl_estimate": max(n["max_kl_estimate"] for n in noises),
+    }
+    sets_bar = {
+        "max_abs_nll_rel_change": worst["max_abs_nll_rel_change"] > 0.0
+        and worst["max_abs_nll_rel_change"] >= max_nll_rel_change,
+        "min_top1_agreement": worst["min_top1_agreement"] < 1.0
+        and worst["min_top1_agreement"] <= min_top1_agreement,
+        "max_kl_estimate": worst["max_kl_estimate"] > 0.0
+        and worst["max_kl_estimate"] >= max_kl_estimate,
+    }
+    holders = [
+        n for n in noises if any(sets_bar[k] and n[k] == worst[k] for k in worst)
+    ] or noises
+    return {
+        "num_runs": min(n["num_runs"] for n in holders),
+        "identical": all(n["identical"] for n in noises),
+        **worst,
+    }
+
+
+def restart_states(reference: dict) -> list[list[int]]:
+    """Group the reference's servers (numbered from 1) into states: servers
+    whose recordings are bit-identical at every position share a state."""
+    states: list[tuple[list[dict], list[int]]] = []
+    for i, recording in enumerate(server_recordings(reference), start=1):
+        for first, members in states:
+            drift = compare_passages(first, recording)
+            if drift["identical_positions"] == drift["positions"]:
+                members.append(i)
+                break
+        else:
+            states.append((recording, [i]))
+    return [members for _, members in states]
+
+
+def append_recording(reference: dict, new: dict) -> dict:
+    """Add another server's recording (a `record` result) to a reference.
+
+    Raises:
+        ValueError: if the new recording is not of the same model, vLLM
+            version, server arguments, passages and top-k.
+
+    """
+    ref, add = reference["metadata"], new["metadata"]
+    for key in ("model", "vllm_version", "num_passages", "passages_sha256", "top_k"):
+        if ref.get(key) != add.get(key):
+            raise ValueError(
+                f"cannot append: {key} is {add.get(key)!r}, the reference's is "
+                f"{ref.get(key)!r}; every server of a reference runs the same build "
+                "and settings"
+            )
+    if shlex.split(ref.get("server_args") or "") != shlex.split(
+        add.get("server_args") or ""
+    ):
+        raise ValueError("cannot append: the --server-args differ from the reference's")
+    others = reference.get("other_servers", [])
+    return reference | {
+        "other_servers": others
+        + [
+            {
+                "metadata": new["metadata"],
+                "rerun_noise": new["rerun_noise"],
+                "passages": new["passages"],
+            }
+        ]
+    }
+
+
 def server_info(base_url: str, model: str | None, timeout: float) -> dict:
     """The served model (the first one when `model` is None) and vLLM version."""
     if model is None:
@@ -468,6 +606,8 @@ def compare(
             model or dataset differ from the reference's, the reference's
             rerun noise is not finite or has too few passes, or the server's
             response is not usable.
+        RestartNoiseError: if the reference's servers are not bit-identical
+            (checked before scoring).
         KeyError: if the reference lacks a field the comparison needs.
 
     """
@@ -493,7 +633,8 @@ def compare(
             f"reference's ({ref_args!r}); give the same arguments to both, or to "
             "neither"
         )
-    check_noise_sample(reference["rerun_noise"], **gates)
+    # A reference that is wrong for this run is an input error, not restart
+    # noise, so these checks come first.
     passages = load_passages(ref_meta["num_passages"])
     if passages_sha256(passages) != ref_meta["passages_sha256"]:
         raise ValueError("the dataset differs from the one the reference scored")
@@ -503,15 +644,34 @@ def compare(
             f"the candidate serves {info['model']}, the reference was recorded "
             f"on {ref_meta['model']}"
         )
+    noise = worst_rerun_noise(reference, **gates)
+    states = restart_states(reference)
+    if len(states) > 1:
+        reruns = (
+            "; some servers' own passes differ too, so rerun noise may account "
+            "for part of this"
+            if not noise["identical"]
+            else ""
+        )
+        raise RestartNoiseError(
+            f"the reference's {sum(map(len, states))} fresh servers fall into "
+            f"{len(states)} states ({'; '.join(map(str, states))}): its own "
+            "restarts differ, so a candidate would fail the gates without any "
+            "change of its own. Telling a change from this noise needs a "
+            "comparison over repeated server starts, which this eval does not "
+            f'make; see "Server restarts" in the README{reruns}'
+        )
+    check_noise_sample(noise, **gates)
     scored = score_passages(
         base_url, info["model"], passages, ref_meta["top_k"], timeout
     )
     drift = compare_passages(reference["passages"], scored)
-    failures = check_gates(drift, reference["rerun_noise"], **gates)
+    failures = check_gates(drift, noise, **gates)
     return {
         "reference": ref_meta,
         "candidate": info | {"server_args": server_args},
-        "rerun_noise": reference["rerun_noise"],
+        "rerun_noise": noise,
+        "reference_servers": len(states[0]),
         "drift": drift,
         "gates": gates,
         "failures": failures,
@@ -562,6 +722,15 @@ def main() -> int:
         ),
     )
     record_parser.add_argument("--output", type=str, required=True)
+    record_parser.add_argument(
+        "--append",
+        action="store_true",
+        help=(
+            "Add this server's recording to the reference already in --output "
+            "instead of writing a new one. Use it on freshly started servers of "
+            "the same build, with empty caches"
+        ),
+    )
     compare_parser.add_argument("--reference", type=str, required=True)
     compare_parser.add_argument(
         "--max-nll-rel-change",
@@ -597,15 +766,48 @@ def main() -> int:
                 server_args=args.server_args,
                 timeout=args.request_timeout_seconds,
             )
-            with open(args.output, "w") as f:
-                json.dump(result, f)
+            # This server's own noise, before appending to the reference.
+            server_noise = result["rerun_noise"]
+            if args.append:
+                with open(args.output) as f:
+                    result = append_recording(json.load(f), result)
+            servers = len(server_recordings(result))
+            states = restart_states(result)
+            # A partial write would lose the servers already in the reference.
+            tmp = f"{args.output}.tmp"
+            try:
+                with open(tmp, "w") as f:
+                    json.dump(result, f)
+                os.replace(tmp, args.output)
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
             print(f"Positions: {result['metadata']['positions']}")
-            print(f"Rerun noise: {json.dumps(result['rerun_noise'])}")
+            print(
+                f"Servers in the reference: {servers}, in {len(states)} state(s)"
+                + ("" if len(states) == 1 else f": {states}")
+            )
+            print(f"This server's rerun noise: {json.dumps(server_noise)}")
             print(f"Reference saved to {args.output}")
             try:
-                check_noise_sample(result["rerun_noise"])
+                check_noise_sample(worst_rerun_noise(result))
             except ValueError as e:
                 print(f"Warning: with the default tolerances, {e}", file=sys.stderr)
+            if servers == 1:
+                print(
+                    "Note: one server; record on 2 more freshly started servers "
+                    "with --append to check restart noise",
+                    file=sys.stderr,
+                )
+            if len(states) > 1:
+                # The recordings are kept for a comparison over repeated
+                # starts; compare refuses this reference (exit 3).
+                print(
+                    f"Restart noise: the reference's servers are in {len(states)} "
+                    "states; compare would stop with exit 3",
+                    file=sys.stderr,
+                )
+                return 3
             return 0
 
         with open(args.reference) as f:
@@ -629,6 +831,9 @@ def main() -> int:
         OSError,
         requests.RequestException,
     ) as e:
+        if isinstance(e, RestartNoiseError):
+            print(f"Restart noise: {e}", file=sys.stderr)
+            return 3
         print(f"Error: {e}", file=sys.stderr)
         return 2
 
@@ -648,8 +853,20 @@ def main() -> int:
         f"candidate's remaining mass, at least {MIN_PROB:g}; it adds at most "
         f"{-math.log(MIN_PROB):.1f} nats times its reference probability"
     )
+    print(f"Reference servers in agreement: {result['reference_servers']}")
+    if result["reference_servers"] == 1:
+        print(
+            "  Restart noise unchecked: the reference comes from one server "
+            "(record --append adds more)"
+        )
     for failure in result["failures"]:
         print(f"FAILED: {failure}")
+    if result["failures"]:
+        print(
+            "  One failing server can be a rare restart state: start the "
+            "candidate again with empty caches and compare once more. A second "
+            "failure makes a change likely but does not rule out restart noise"
+        )
     if args.save_results:
         try:
             with open(args.save_results, "w") as f:
