@@ -10,7 +10,7 @@ import sys
 import threading
 from collections.abc import Callable, Collection, Sequence
 from types import FunctionType
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, get_type_hints
 
 import numpy as np
 import numpy.typing as npt
@@ -1010,12 +1010,21 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
 
 def _named_tuple_params(op_func: Callable) -> dict[str, type]:
+    # Resolve string annotations: with `from __future__ import annotations`,
+    # even a NamedTuple defined next to the op reaches us as its name.
+    try:
+        hints = get_type_hints(op_func)
+    except Exception:
+        hints = {
+            p.name: p.annotation for p in inspect.signature(op_func).parameters.values()
+        }
     return {
-        p.name: p.annotation
-        for p in inspect.signature(op_func).parameters.values()
-        if isinstance(p.annotation, type)
-        and issubclass(p.annotation, tuple)
-        and hasattr(p.annotation, "_fields")
+        name: annotation
+        for name, annotation in hints.items()
+        if name != "return"
+        and isinstance(annotation, type)
+        and issubclass(annotation, tuple)
+        and hasattr(annotation, "_fields")
     }
 
 
@@ -1080,12 +1089,16 @@ def _infer_op_schema(
     for name, named_tuple in named_tuple_params.items():
         # Only `_fields` entries are constructor fields; subclass annotations
         # can carry unrelated class-level entries (e.g. ClassVar aliases), and
-        # inherited fields live on base-class annotations.
-        field_annotations: dict[str, Any] = {}
-        for klass in reversed(named_tuple.__mro__):
-            annotations_ = getattr(klass, "__annotations__", None)
-            if annotations_:
-                field_annotations.update(annotations_)
+        # inherited fields live on base-class annotations. Resolve string
+        # annotations (`from __future__ import annotations`) per class.
+        try:
+            field_annotations: dict[str, Any] = dict(get_type_hints(named_tuple))
+        except Exception:
+            field_annotations = {}
+            for klass in reversed(named_tuple.__mro__):
+                annotations_ = getattr(klass, "__annotations__", None)
+                if annotations_:
+                    field_annotations.update(annotations_)
         fields = ", ".join(
             annotation_schema_str(field_annotations[field_name])
             for field_name in named_tuple._fields

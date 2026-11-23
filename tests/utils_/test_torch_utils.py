@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 import numpy as np
 import pytest
 import torch
@@ -298,3 +300,32 @@ def test_direct_register_custom_op_named_tuple_param() -> None:
 
     compiled = torch.compile(fwd, fullgraph=True)
     assert torch.equal(compiled(x), eager)
+
+
+def test_direct_register_custom_op_string_annotation_param() -> None:
+    # With `from __future__ import annotations`, every annotation arrives as
+    # its name; NamedTuple parameters must still be detected and registered.
+    namespace: dict[str, Any] = {"torch": torch}
+    exec(
+        "from __future__ import annotations\n"
+        "from typing import NamedTuple\n"
+        "class _Shape(NamedTuple):\n"
+        "    row: int\n"
+        "    col: int\n"
+        "def op(x: torch.Tensor, shape: _Shape) -> torch.Tensor:\n"
+        "    return x * (shape.row + shape.col)\n",
+        namespace,
+    )
+
+    direct_register_custom_op(
+        "test_named_tuple_string_op",
+        namespace["op"],
+        mutates_args=[],
+        fake_impl=lambda x, shape: torch.empty_like(x),
+        dispatch_key="CPU",
+    )
+
+    out = torch.ops.vllm.test_named_tuple_string_op(
+        torch.arange(4.0), namespace["_Shape"](1, 2)
+    )
+    assert out.tolist() == [0.0, 3.0, 6.0, 9.0]
