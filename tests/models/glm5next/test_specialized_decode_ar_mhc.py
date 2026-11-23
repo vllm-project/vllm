@@ -14,7 +14,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import (
 )
 from vllm.platforms import current_platform
 
-from .tp4 import TP, run_tp4
+from .tp import TP_SIZES, run_tp
 
 HIDDEN, HC, SINKHORN, EPS, TOP_K = 4096, 4, 20, 1e-6, 8
 
@@ -22,9 +22,10 @@ HIDDEN, HC, SINKHORN, EPS, TOP_K = 4096, 4, 20, 1e-6, 8
 def _reference(peers, i):
     # The fused kernel sums the ranks in FP32 and rounds once, as one-shot
     # all-reduces do.
-    x = (
-        (peers[0].float() + peers[1].float()) + (peers[2].float() + peers[3].float())
-    ).bfloat16()
+    values = peers.float()
+    while values.shape[0] > 1:
+        values = values[::2] + values[1::2]
+    x = values[0].bfloat16()
     residual = mhc_post_torch(x, i["residual"], i["post"], i["comb"])
     post, comb, collapsed = mhc_pre_torch(
         residual, i["fn"].float(), i["scale"], i["base"],
@@ -71,7 +72,8 @@ def _boundary(rank, device):
     )  # fmt: skip
 
     def check(outputs, i):
-        peers = get_tp_group().all_gather(i["x"], dim=0).view(TP, -1, HIDDEN)
+        tp = get_tp_group().world_size
+        peers = get_tp_group().all_gather(i["x"], dim=0).view(tp, -1, HIDDEN)
         ref = _reference(peers, i)
         # BF16 outputs are one rounding apart at most; the mixes are FP32
         # and differ only in summation order.
@@ -132,9 +134,9 @@ def _boundary(rank, device):
             assert torch.equal(a, b)
 
 
-@pytest.mark.distributed(num_gpus=4)
+@pytest.mark.parametrize("tp", TP_SIZES)
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100), reason="Requires SM100"
 )
-def test_all_reduce_mhc_boundary_matches_reference():
-    run_tp4(_boundary)
+def test_all_reduce_mhc_boundary_matches_reference(tp):
+    run_tp(_boundary, tp)

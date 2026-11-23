@@ -55,7 +55,7 @@ def _route(logits, bias):
     return ids, weights / weights.sum(-1, keepdim=True) * SCALE
 
 
-def _weights(g):
+def _weights(g, INTER=INTER):
     """Routed experts ([up; gate] w31 and w2 with FP32 block scales), their
     TRTLLM-Gen copies, and the shared expert in both layouts."""
     from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -95,7 +95,8 @@ def _weights(g):
     [(False, 1), (False, 4), (True, 8), (True, 64)],
 )
 @pytest.mark.parametrize("ue8m0", [False, True])
-def test_mega_moe_matches_reference(grouped, tokens, ue8m0):
+@pytest.mark.parametrize("INTER", [512, 256], ids=["tp4", "tp8"])
+def test_mega_moe_matches_reference(grouped, tokens, ue8m0, INTER):
     """Routing, activation quant and both expert GEMMs against PyTorch."""
     from vllm.models.glm5next.nvidia.specialized_decode.grouped_moe import (
         GroupedExperts,
@@ -103,7 +104,7 @@ def test_mega_moe_matches_reference(grouped, tokens, ue8m0):
     from vllm.models.glm5next.nvidia.specialized_decode.mega_moe import MegaExperts
 
     g = torch.Generator(device="cuda").manual_seed(tokens)
-    w = _weights(g)
+    w = _weights(g, INTER)
     w31, w31_s, w2, w2_s = w["trtllm"]
     args = (w31, w31_s, w2, w2_s, TOP_K, LIMIT, SCALE, ue8m0)
     if grouped:
@@ -184,7 +185,7 @@ def _mlp(w31, w31_s, w2, w2_s, x, quant_hidden):
     """FP64 expert MLP of FP8 (UE8M0) tokens; `quant_hidden` rounds the hidden
     to FP8 per 128 like TRTLLM-Gen does."""
     x = _dequant(*_quant(x, ue8m0=True)).double()
-    up, gate = (x @ _weight(w31, w31_s).double().t()).split(INTER, dim=-1)
+    up, gate = (x @ _weight(w31, w31_s).double().t()).split(w2.shape[-1], dim=-1)
     act = F.silu(gate.clamp(max=LIMIT)) * up.clamp(-LIMIT, LIMIT)
     if quant_hidden:
         act = _dequant(*_quant(act)).double()
@@ -192,7 +193,8 @@ def _mlp(w31, w31_s, w2, w2_s, x, quant_hidden):
 
 
 @pytest.mark.parametrize("tokens", [8, 64])
-def test_grouped_moe_error_within_stock(tokens):
+@pytest.mark.parametrize("INTER", [512, 256], ids=["tp4", "tp8"])
+def test_grouped_moe_error_within_stock(tokens, INTER):
     """The grouped kernel's error against FP64 is no larger (median, p99, max)
     than the stock path's. Routed experts: TRTLLM-Gen, both finalized in FP32
     like the fused boundary, against FP64 with the FP8 tokens and hidden they
@@ -213,7 +215,7 @@ def test_grouped_moe_error_within_stock(tokens):
     )
 
     g = torch.Generator(device="cuda").manual_seed(100 + tokens)
-    w = _weights(g)
+    w = _weights(g, INTER)
     x = torch.randn(tokens, HIDDEN, generator=g, device="cuda").bfloat16()
     logits = torch.randn(tokens, EXPERTS, generator=g, device="cuda")
     bias = torch.randn(EXPERTS, generator=g, device="cuda") * 0.1

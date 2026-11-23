@@ -51,7 +51,6 @@ from .cutedsl.primitives import (
     wait_tmem,
 )
 
-CLUSTER = 16
 TILE = 128  # weight rows per MMA (UMMA M) and per K block
 COLUMNS = 16  # UMMA N: the route's token in column 0, the rest zero
 # Few enough stages (~106 KB of shared memory) that two CTAs share an SM:
@@ -117,10 +116,12 @@ class _MegaKernel:
         self.nk1 = hidden // TILE  # GEMM1 K blocks
         self.nk2 = inter // TILE  # GEMM2 K blocks (= up tiles)
         self.tiles1 = 2 * inter // TILE  # GEMM1 row tiles (W31: up, then gate)
-        assert self.tiles1 * 2 == CLUSTER and self.nk1 // 2 == COLUMNS
+        self.cluster = self.tiles1 * 2
+        assert self.cluster in (8, 16) and self.nk1 // 2 == COLUMNS
         self.blocks1 = self.nk1 // 2
-        self.rows2 = hidden // CLUSTER  # GEMM2 rows per CTA
+        self.rows2 = hidden // self.cluster  # GEMM2 rows per CTA
         self.tiles2 = self.rows2 // TILE
+        self.tmem_columns = 1 << (COLUMNS * (1 + self.tiles2) - 1).bit_length()
         self.loads = self.blocks1 + self.tiles2 * self.nk2
         self.off_b1 = STAGES * STAGE_BYTES
         self.off_b2 = self.off_b1 + self.blocks1 * B_BYTES
@@ -155,9 +156,9 @@ class _MegaKernel:
         self.kernel(
             maps, w13_scale, w2_scale, x, logits, bias, rows1, rows2, out, ids, weights
         ).launch(
-            grid=(CLUSTER * routes, 1, 1),
+            grid=(self.cluster * routes, 1, 1),
             block=(self.threads, 1, 1),
-            cluster=(CLUSTER, 1, 1),
+            cluster=(self.cluster, 1, 1),
             smem=self.smem + 1024,
             stream=stream,
             use_pdl=True,
@@ -184,7 +185,7 @@ class _MegaKernel:
         lane = cute.arch.lane_idx()
         cta, _, _ = cute.arch.block_idx()
         rank = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
-        route = cta // CLUSTER
+        route = cta // self.cluster
         tile = rank // 2
         half = rank % 2
         blocks1, nk2, tiles2 = self.blocks1, self.nk2, self.tiles2
@@ -231,7 +232,7 @@ class _MegaKernel:
             acquire_tensormap_asm(maps.iterator)
             acquire_tensormap_asm(maps.iterator + 128)
         if warp == 1:
-            cute.arch.alloc_tmem(64, tmem_base.iterator)
+            cute.arch.alloc_tmem(self.tmem_columns, tmem_base.iterator)
             cute.arch.relinquish_tmem_alloc_permit()
         # GEMM2's B tiles get remote hidden rows: zero them before the cluster
         # barrier releases any sender.
@@ -316,7 +317,7 @@ class _MegaKernel:
             )  # fmt: skip
         if warp < 2:
             cute.arch.cluster_wait()
-        release_tmem(tmem, 64, warp, 1)
+        release_tmem(tmem, self.tmem_columns, warp, 1)
 
     @cute.jit
     def top_k_pick(self, logits, offsets, route, lane):
@@ -505,7 +506,7 @@ class _MegaKernel:
         byte = pack_fp8((act / scale, Float32(0.0), Float32(0.0), Float32(0.0)))
         cute.arch.store((stage + local).llvm_ptr, Uint8(byte & Uint32(0xFF)))
         cute.arch.barrier(barrier_id=1, number_of_threads=128)
-        # Thread e sends 16-byte chunk e % 8 to CTA e // 8 (16 CTAs x 8 chunks).
+        # Thread e sends 16-byte chunk e % 8 to CTA e // 8.
         peer = e // 8
         chunk = e % 8
         words = cute.make_rmem_tensor(cute.make_layout((4,)), Uint32)
@@ -514,13 +515,16 @@ class _MegaKernel:
             words[w] = cute.arch.load((source + w).llvm_ptr, Uint32)
         offset = self.off_b2 + tile * B_BYTES + tile * TILE + (chunk ^ (tile % 8)) * 16
         dst = cute.recast_ptr(sm.iterator + cute.assume(offset, divby=16), dtype=Uint32)
-        store_async_dsmem(dst, (words[0], words[1], words[2], words[3]), hrecv, peer)
-        if chunk == 0:
-            scale_offset = self.off_hscale + tile * 4
-            scale_dst = cute.recast_ptr(
-                sm.iterator + cute.assume(scale_offset, divby=4), dtype=Uint32
+        if peer < self.cluster:
+            store_async_dsmem(
+                dst, (words[0], words[1], words[2], words[3]), hrecv, peer
             )
-            store_async_dsmem(scale_dst, Uint32(float_bits(scale)), hrecv, peer)
+            if chunk == 0:
+                scale_offset = self.off_hscale + tile * 4
+                scale_dst = cute.recast_ptr(
+                    sm.iterator + cute.assume(scale_offset, divby=4), dtype=Uint32
+                )
+                store_async_dsmem(scale_dst, Uint32(float_bits(scale)), hrecv, peer)
 
 
 def _weight_map(weight: torch.Tensor, box_rows: int) -> torch.Tensor:

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash specialized decode: a decode executor over the stock backbone for
-GB300 TP4, enabled by default; `decode_backend=stock` disables it.
+GB300 TP4/TP8, enabled by default; `decode_backend=stock` disables it.
 """
 
 from dataclasses import dataclass
@@ -119,7 +119,7 @@ def unsupported(vllm_config) -> list[str]:
         ),
         (bool(geometry), "this model geometry: " + ", ".join(geometry)),
         (not getattr(text, "mhc", False), "checkpoints without mHC"),
-        (parallel.tensor_parallel_size != 4, "TP other than 4"),
+        (parallel.tensor_parallel_size not in (4, 8), "TP other than 4 or 8"),
         (parallel.pipeline_parallel_size != 1, "pipeline parallelism"),
         (parallel.data_parallel_size != 1, "data parallelism"),
         (parallel.enable_expert_parallel, "expert parallelism"),

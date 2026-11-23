@@ -39,16 +39,18 @@ def _weight(g, n, k):
 
 
 def _packed(exponents, n):
-    """DeepGEMM's int32 [n, k / 512] column-major packing of per-row UE8M0."""
+    """DeepGEMM's int32 [n, ceil(k / 512)] column-major per-row UE8M0 packing."""
     rows = exponents.repeat_interleave(128, 0)  # [n, k / 128]
+    rows = F.pad(rows, (0, -rows.shape[1] % 4))
     shifts = torch.arange(rows.shape[1], device=rows.device) % 4 * 8
     words = (rows << shifts).view(n, -1, 4).sum(-1, dtype=torch.int64).to(torch.int32)
-    return words.T.contiguous().T
+    return words.T.clone(memory_format=torch.contiguous_format).T
 
 
 @pytest.mark.parametrize("ue8m0", [False, True])
 @pytest.mark.parametrize("tokens", [1, 2])
-def test_shared_expert_matches_reference(tokens, ue8m0):
+@pytest.mark.parametrize("INTER", [512, 256], ids=["tp4", "tp8"])
+def test_shared_expert_matches_reference(tokens, ue8m0, INTER):
     from vllm.models.glm5next.nvidia.specialized_decode.shared_expert import (
         SharedExpert,
     )

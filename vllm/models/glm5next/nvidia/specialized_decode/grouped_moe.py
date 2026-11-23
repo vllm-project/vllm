@@ -1143,7 +1143,8 @@ _compiled: dict = {}
 def _workspace(device, experts, top_k, hidden, inter, grid):
     """Scratch every layer's calls share (they run one after another): the token
     plan, hidden blocks, FC1 partials and the counters, sized for 64 tokens."""
-    if device.index not in _workspaces:
+    key = (device.index, experts, top_k, hidden, inter, grid)
+    if key not in _workspaces:
         w, nk1, nk2 = GROUP, hidden // TILE, inter // TILE
         units = unit_capacity(experts, top_k)
         sizes = {
@@ -1153,7 +1154,7 @@ def _workspace(device, experts, top_k, hidden, inter, grid):
             "hscale": units * w * nk2 * 4,
             "partial": 2 * grid * 2 * w * TILE * 4,
         }
-        _workspaces[device.index] = {
+        _workspaces[key] = {
             **{k: torch.empty(v, dtype=torch.uint8, device=device)
                for k, v in sizes.items()},
             "counters": torch.zeros(
@@ -1161,7 +1162,7 @@ def _workspace(device, experts, top_k, hidden, inter, grid):
                 device=device,
             ),
         }  # fmt: skip
-    return _workspaces[device.index]
+    return _workspaces[key]
 
 
 class GroupedExperts:

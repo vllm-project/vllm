@@ -7,7 +7,7 @@ mailbox (DSV4.1's `AllReduceMHC` protocol). One cluster of CTAs per token
 then
 
 1. polls its fragments of every rank's contribution (lane `r` of each
-   four-lane group reads rank `r`) and sums them,
+   four-lane group reads ranks `r`, then `r + 4` at TP8) and sums them,
 2. post-mixes the four residual streams (lane `j` owns stream `j`),
 3. reduces the 24-way prenorm GEMV and the sum of squares over the cluster
    through distributed shared memory,
@@ -69,6 +69,7 @@ from vllm.models.common.ops.moe_tail_fusion.primitives import (
 )
 
 from .cutedsl.finalize_publish import _QuadFinalizePublishDeviceKernel
+from .cutedsl.primitives import add_rn, fma
 
 HC = 4
 MIX = (2 + HC) * HC  # pre 4, post 4, comb 16
@@ -161,8 +162,8 @@ class _BoundaryDeviceKernel:
         pre_eps: float,
         norm_eps: float,
     ) -> None:
-        if tp != HC:
-            raise ValueError("one rank lane per hc stream: tp must be 4")
+        if tp not in (HC, 2 * HC):
+            raise ValueError("tp must be 4 or 8")
         fragments = hidden // VEC_BF16
         if fragments % cluster_size:
             raise ValueError("hidden fragments must split evenly over the cluster")
@@ -283,7 +284,7 @@ class _BoundaryDeviceKernel:
         tidx, _, _ = cute.arch.thread_idx()
         token, _, _ = cute.arch.block_idx()
         cluster_rank = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
-        lane = tidx % HC  # source rank while polling, hc stream afterwards
+        lane = tidx % HC  # source rank modulo HC, hc stream afterwards
         fragment = cluster_rank * self.groups_per_cta + tidx // HC
         column = Int64(fragment) * VEC_BF16
 
@@ -325,19 +326,33 @@ class _BoundaryDeviceKernel:
             (Int64(active_stage) * self.tp + Int64(lane)) * self.capacity_m
             + Int64(token)
         ) * hidden + column
-        packed = cute.make_rmem_tensor(cute.make_layout((4,)), Uint32)
+        ranks = self.tp // HC
+        packed = cute.make_rmem_tensor(
+            cute.make_layout((ranks, 4), stride=(4, 1)), Uint32
+        )
         dirty = True
         while dirty:
-            loaded = load_global_u32x4(_gmem_ptr(mailbox, slot, 16), volatile=True)
-            dirty = fragment_has_negative_zero(loaded)
-            packed.store(loaded)
-        reduced = cute.make_rmem_tensor(cute.make_layout((VEC_BF16,)), Float32)
-        reduced.store(packed_u32x4_to_bf16x8(packed.load()).to(Float32))
-        for offset in cutlass.range_constexpr(2):
-            for k in cutlass.range_constexpr(VEC_BF16):
-                reduced[k] = reduced[k] + cute.arch.shuffle_sync_bfly(
-                    reduced[k], offset=1 << offset, mask=-1, mask_and_clamp=31
+            dirty = False
+            for r in cutlass.range_constexpr(ranks):
+                offset = slot + Int64(r * HC * self.capacity_m * hidden)
+                loaded = load_global_u32x4(
+                    _gmem_ptr(mailbox, offset, 16), volatile=True
                 )
+                dirty = dirty | fragment_has_negative_zero(loaded)
+                packed[r, None].store(loaded)
+        cute.arch.sync_warp()
+        reduced = cute.make_rmem_tensor(cute.make_layout((VEC_BF16,)), Float32)
+        rank_sum = cute.make_rmem_tensor(cute.make_layout((VEC_BF16,)), Float32)
+        reduced.fill(0.0)
+        for r in cutlass.range_constexpr(ranks):
+            rank_sum.store(packed_u32x4_to_bf16x8(packed[r, None].load()).to(Float32))
+            for offset in cutlass.range_constexpr(2):
+                for k in cutlass.range_constexpr(VEC_BF16):
+                    rank_sum[k] = rank_sum[k] + cute.arch.shuffle_sync_bfly(
+                        rank_sum[k], offset=1 << offset, mask=-1, mask_and_clamp=31
+                    )
+            for k in cutlass.range_constexpr(VEC_BF16):
+                reduced[k] = reduced[k] + rank_sum[k]
 
         if token == 0 and cluster_rank == 0 and tidx == 0:
             store_global_u32(
@@ -345,14 +360,23 @@ class _BoundaryDeviceKernel:
                 (active_stage + Uint32(1)) % Uint32(LAMPORT_GENERATIONS),
             )
         cute.arch.griddepcontrol_launch_dependents()
-        store_lamport_sentinel_u32x4(Int64((mailbox.iterator + slot).toint()))
+        for r in cutlass.range_constexpr(ranks):
+            offset = slot + Int64(r * HC * self.capacity_m * hidden)
+            store_lamport_sentinel_u32x4(Int64((mailbox.iterator + offset).toint()))
 
         # The all-reduced sublayer output is BF16, as the collective returns it.
         x = reduced.load().to(BFloat16).to(Float32)
-        mixed = x * post_mix
+        mixed = cute.make_rmem_tensor(cute.make_layout((VEC_BF16,)), Float32)
+        mixed.fill(0.0)
         for source in cutlass.range_constexpr(HC):
-            mixed = mixed + streams[source, None].load().to(Float32) * comb_mix[source]
-        stream_bf16 = mixed.to(BFloat16)
+            stream = streams[source, None].load().to(Float32)
+            for k in cutlass.range_constexpr(VEC_BF16):
+                mixed[k] = fma(stream[k], comb_mix[source], mixed[k])
+        # Stock finishes the residual GEMM before adding the rounded post term.
+        post_term = x * post_mix
+        for k in cutlass.range_constexpr(VEC_BF16):
+            mixed[k] = add_rn(mixed[k], post_term[k])
+        stream_bf16 = mixed.load().to(BFloat16)
         output = (Int64(token) * HC + Int64(lane)) * hidden + column
         store_global_u32x4(
             Int64((residual_output.iterator + output).toint()),
@@ -609,7 +633,7 @@ class _GroupBoundaryDeviceKernel(_BoundaryDeviceKernel):
         group, _, _ = cute.arch.block_idx()
         cluster_rank = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
         warp = cute.arch.warp_idx()
-        lane = tidx % HC  # source rank while polling, hc stream afterwards
+        lane = tidx % HC  # source rank modulo HC, hc stream afterwards
         local = tidx // HC
         fragment = cluster_rank * groups + local
         column = Int64(fragment) * VEC_BF16
@@ -674,8 +698,9 @@ class _GroupBoundaryDeviceKernel(_BoundaryDeviceKernel):
         # before the reset below.
         active_stage = load_volatile_u32(stage_state.iterator + ACTIVE_STAGE)
         stage_base = Int64(active_stage) * self.tp + Int64(lane)
+        ranks = self.tp // HC
         kept = cute.make_rmem_tensor(
-            cute.make_layout((tokens, 4), stride=(4, 1)), Uint32
+            cute.make_layout((ranks * tokens, 4), stride=(4, 1)), Uint32
         )
         dirty = True
         while dirty:
@@ -683,20 +708,33 @@ class _GroupBoundaryDeviceKernel(_BoundaryDeviceKernel):
             for t in cutlass.range_constexpr(tokens):
                 token = cutlass.min(first + t, last)
                 slot = (stage_base * self.capacity_m + Int64(token)) * hidden + column
-                loaded = load_global_u32x4(_gmem_ptr(mailbox, slot, 16), volatile=True)
-                dirty = dirty | fragment_has_negative_zero(loaded)
-                kept[t, None].store(loaded)
+                for r in cutlass.range_constexpr(ranks):
+                    offset = slot + Int64(r * HC * self.capacity_m * hidden)
+                    loaded = load_global_u32x4(
+                        _gmem_ptr(mailbox, offset, 16), volatile=True
+                    )
+                    dirty = dirty | fragment_has_negative_zero(loaded)
+                    kept[r * tokens + t, None].store(loaded)
         # Lanes leave the poll at different times; without reconverging, every
         # shuffle below takes the divergent-warp path.
         cute.arch.sync_warp()
         reduced = cute.make_rmem_tensor(cute.make_layout((VEC_BF16,)), Float32)
+        rank_sum = cute.make_rmem_tensor(cute.make_layout((VEC_BF16,)), Float32)
         for t in cutlass.range_constexpr(tokens):
-            reduced.store(packed_u32x4_to_bf16x8(kept[t, None].load()).to(Float32))
-            for offset in cutlass.range_constexpr(2):
-                for k in cutlass.range_constexpr(VEC_BF16):
-                    reduced[k] = reduced[k] + cute.arch.shuffle_sync_bfly(
-                        reduced[k], offset=1 << offset, mask=-1, mask_and_clamp=31
+            reduced.fill(0.0)
+            for r in cutlass.range_constexpr(ranks):
+                rank_sum.store(
+                    packed_u32x4_to_bf16x8(kept[r * tokens + t, None].load()).to(
+                        Float32
                     )
+                )
+                for offset in cutlass.range_constexpr(2):
+                    for k in cutlass.range_constexpr(VEC_BF16):
+                        rank_sum[k] = rank_sum[k] + cute.arch.shuffle_sync_bfly(
+                            rank_sum[k], offset=1 << offset, mask=-1, mask_and_clamp=31
+                        )
+                for k in cutlass.range_constexpr(VEC_BF16):
+                    reduced[k] = reduced[k] + rank_sum[k]
             # The all-reduced sublayer output is BF16, as the collective
             # returns it.
             kept[t, None].store(bf16x8_to_packed_u32x4(reduced.load().to(BFloat16)))
@@ -710,24 +748,32 @@ class _GroupBoundaryDeviceKernel(_BoundaryDeviceKernel):
         for t in cutlass.range_constexpr(tokens):
             token = cutlass.min(first + t, last)
             slot = (stage_base * self.capacity_m + Int64(token)) * hidden + column
-            store_lamport_sentinel_u32x4(Int64((mailbox.iterator + slot).toint()))
+            for r in cutlass.range_constexpr(ranks):
+                offset = slot + Int64(r * HC * self.capacity_m * hidden)
+                store_lamport_sentinel_u32x4(Int64((mailbox.iterator + offset).toint()))
 
         for t in cutlass.range_constexpr(tokens):
             token = cutlass.min(first + t, last)
             inputs = mix_inputs + t * self.inputs
-            mixed = packed_u32x4_to_bf16x8(kept[t, None].load()).to(
-                Float32
-            ) * cute.arch.load((inputs + lane).llvm_ptr, Float32)
+            mixed = cute.make_rmem_tensor(cute.make_layout((VEC_BF16,)), Float32)
+            mixed.fill(0.0)
             for source in cutlass.range_constexpr(HC):
                 stream = packed_u32x4_to_bf16x8(
                     _load_shared_u32x4(
                         (staged + ((t * HC + source) * groups + local) * 4).toint()
                     )
                 )
-                mixed = mixed + stream.to(Float32) * cute.arch.load(
+                coefficient = cute.arch.load(
                     (inputs + HC + source * HC + lane).llvm_ptr, Float32
                 )
-            stream_bf16 = mixed.to(BFloat16)
+                for k in cutlass.range_constexpr(VEC_BF16):
+                    mixed[k] = fma(Float32(stream[k]), coefficient, mixed[k])
+            post_term = packed_u32x4_to_bf16x8(kept[t, None].load()).to(
+                Float32
+            ) * cute.arch.load((inputs + lane).llvm_ptr, Float32)
+            for k in cutlass.range_constexpr(VEC_BF16):
+                mixed[k] = add_rn(mixed[k], post_term[k])
+            stream_bf16 = mixed.load().to(BFloat16)
             words = bf16x8_to_packed_u32x4(stream_bf16)
             kept[t, None].store(words)
             output = (Int64(token) * HC + Int64(lane)) * hidden + column
