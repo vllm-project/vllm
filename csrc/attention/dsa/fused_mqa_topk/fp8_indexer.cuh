@@ -68,7 +68,7 @@ struct Fp8IndexerTensorMaps {
   // threshold samples: kv as [keys / S, S, 128] u8 (key = row * S + phase), 256
   // rows of one phase per box, one map per odd sample stride S (see
   // sample_stride)
-  CUtensorMap kv_strided[2];
+  CUtensorMap kv_strided[3];
 };
 
 struct Fp8IndexerParams;
@@ -102,11 +102,12 @@ struct Fp8IndexerParams {
                          // blocks)
   uint2* __restrict__ sample_codes;  // [grid][Impl::kCodesPerCta] a block's
                                      // sample codes between the two passes
-  uint32_t sample_limit[2];  // keys < limit[m] = (num_keys / S_m) * S_m are
+  uint32_t sample_limit[3];  // keys < limit[m] = (num_keys / S_m) * S_m are
                              // reachable through kv_strided[m]
   float* recovery_scores;
   int32_t* recovery_out;
   int64_t recovery_stride;
+  int64_t recovery_out_stride;
   uint32_t recovery_block;
   uint32_t recovery_slot, recovery_slots;
   const float* recovery_weights;
@@ -279,11 +280,11 @@ struct Fp8IndexerImpl {
   static constexpr uint32_t kNumTmemStages = 3;
   static constexpr uint32_t kNumTmemCols = 512;
   // Threshold samples are single keys on an odd stride: 65 up to 512K keys of
-  // span, 129 up to 1M (at most kMaxSampleTiles tiles of 256; the op takes at
-  // most 1M keys). Top keys sit in runs, so a block of consecutive keys lands
-  // in one or misses it and makes the threshold noisy.
+  // span, 129 up to 1M, 257 up to kMaxSampleTiles * 256 * 257 = 2,105,344 (at
+  // most kMaxSampleTiles tiles of 256). Top keys sit in runs, so a block of
+  // consecutive keys lands in one or misses it and makes the threshold noisy.
   static constexpr uint32_t sample_stride(uint32_t m) {
-    return m == 0 ? 65u : 129u;
+    return m == 0 ? 65u : m == 1 ? 129u : 257u;
   }
   // Q stage: [lin WG0 16 | Q 256 | lin WG1 16] (each warpgroup's B is kUmmaN
   // contiguous rows), 128 B swizzled rows.
@@ -476,7 +477,7 @@ struct Fp8IndexerImpl {
     if (need_t) {
       // a per-block phase in [0, S) keeps the grid off any fixed alignment of
       // the keys
-      const uint32_t m = span <= 524288u ? 0u : 1u;
+      const uint32_t m = span <= 524288u ? 0u : span <= 1048576u ? 1u : 2u;
       const uint32_t stride = sample_stride(m);
       b.stride = stride;
       b.smap = m;
@@ -1518,6 +1519,7 @@ struct Fp8IndexerImpl {
       ptx::prefetch_tensormap(&tmaps.sf_kv);
       ptx::prefetch_tensormap(&tmaps.kv_strided[0]);
       ptx::prefetch_tensormap(&tmaps.kv_strided[1]);
+      ptx::prefetch_tensormap(&tmaps.kv_strided[2]);
     } else if (warp_id == 9 && lane_id == 0) {
 #pragma unroll
       for (uint32_t i = 0; i < kNumQStages; ++i) {
@@ -1601,8 +1603,9 @@ __global__ void __launch_bounds__(Impl::kNumThreads, 1)
     if (!__syncthreads_or(nonzero)) {
       // For finite operands, zero head weights prove that every score is zero.
       for (uint32_t i = threadIdx.x; i < params.topk; i += blockDim.x) {
-        params.recovery_out[static_cast<int64_t>(row_id) * params.topk + i] =
-            i < length ? static_cast<int32_t>(i) : -1;
+        params.recovery_out[static_cast<int64_t>(row_id) *
+                                params.recovery_out_stride +
+                            i] = i < length ? static_cast<int32_t>(i) : -1;
       }
       zero_rows |= 1u << r;
     } else {
@@ -1633,7 +1636,8 @@ __global__ void __launch_bounds__(Impl::kNumThreads, 1)
               (static_cast<int64_t>(slot) * Impl::kBlockQ + r) *
                   params.recovery_stride,
           nullptr, length, params.topk,
-          params.recovery_out + static_cast<int64_t>(row_id) * params.topk,
+          params.recovery_out +
+              static_cast<int64_t>(row_id) * params.recovery_out_stride,
           *reinterpret_cast<litetopk_recovery::Scratch*>(smem_buffer));
     }
   }

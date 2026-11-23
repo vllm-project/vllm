@@ -63,16 +63,21 @@ struct TopKCandidatesFP32Params {
   const int32_t* __restrict__ indices;  // [rows, cap]
   const int32_t* __restrict__ count;
   const float* __restrict__ thr;
-  int32_t* __restrict__ out;  // [rows, kTopK]
+  int32_t* __restrict__ out;  // [rows, topk], row stride out_stride (% 4 == 0)
+  int64_t out_stride;
   // The slab width; counts beyond it leave placeholders for the GPU rescan.
   uint32_t cap;
+  // Selected elements per row (multiple of 4 in [4, 2048]); used when kTopK_==0
+  uint32_t topk;
 };
 
 // The fp32 candidate top-k of one row: one CTA of 256 threads per row, `run` is
-// the kernel body. kTopK_ Selected elements per row (512 / 1024 / 2048).
+// the kernel body. kTopK_ is 512 / 1024 / 2048 for the specialized paths, or 0
+// for any runtime multiple of 4 in [4, 2048] (e.g. top-k minus forced keys).
 template <uint32_t kTopK_>
 struct TopKCandidatesFP32Impl {
   static constexpr uint32_t kTopK = kTopK_;
+  static constexpr uint32_t kMaxTopK = kTopK_ ? kTopK_ : 2048;
   static constexpr uint32_t kBlockSize = 256;
   static constexpr uint32_t kNumWarps = kBlockSize / device::kWarpThreads;
   static constexpr uint32_t kMaxCands = 12288;
@@ -88,10 +93,10 @@ struct TopKCandidatesFP32Impl {
       kStageElems / kBlockSize;  // per stage
   static constexpr uint32_t kGroups =
       kElemsPerThread / 4;  // groups of 4 elements
-  static_assert(kTopK == 512 || kTopK == 1024 || kTopK == 2048);
+  static_assert(kTopK == 0 || (kTopK % 4 == 0 && 4 <= kTopK && kTopK <= 2048));
   static_assert(kElemsPerThread % 4 == 0 &&
                 kElemsPerThread <= 16);  // one 16-bit mask per stage
-  static_assert(kTopK % (4 * kBlockSize) == 0 || kTopK % 4 == 0);
+  static_assert(kMaxTopK % 4 == 0);
   static_assert(kMaxCands < 0x10000);  // every counter packs in 16 bits
   static_assert(kTieCap <= kBlockSize);
 
@@ -100,7 +105,7 @@ struct TopKCandidatesFP32Impl {
       alignas(8) uint32_t hist[kNumBins / 2];  // 16-bit counters, bin 2w in the
                                                // low half of word w
       struct {
-        int32_t ids[kTopK];         // selected positions in the row
+        int32_t ids[kMaxTopK];      // selected positions in the row
         uint64_t tie_key[kTieCap];  // (order key of the score) << 32 | ~id:
                                     // higher key = taken first
       } sel;
@@ -130,11 +135,20 @@ struct TopKCandidatesFP32Impl {
 
   Smem& smem;
   const uint32_t tx, warp_id, lane_id;
-  const float* row;       // scores of this row
-  uint32_t n;             // candidates, at most kMaxCands
-  float thr;              // T; the row minimum on T = -inf rows
-  uint32_t hi_x2, lo_x2;  // pass 2: fp16 codes of the pivot bin's upper and
-                          // lower edges, twice
+  const uint32_t topk_val;  // runtime top-k when kTopK_ == 0
+  const float* row;         // scores of this row
+  uint32_t n;               // candidates, at most kMaxCands
+  float thr;                // T; the row minimum on T = -inf rows
+  uint32_t hi_x2, lo_x2;    // pass 2: fp16 codes of the pivot bin's upper and
+                            // lower edges, twice
+
+  FMT_DEVICE constexpr uint32_t topk() const {
+    if constexpr (kTopK_ != 0) {
+      return kTopK_;
+    } else {
+      return topk_val;
+    }
+  }
 
   // ---- per-element helpers
   // -----------------------------------------------------------------
@@ -316,10 +330,11 @@ struct TopKCandidatesFP32Impl {
     // chunk order inside the warp: j descending, then lanes descending; bins
     // inside a chunk descend from the high half of word 3 to the low half of
     // word 0
+    const uint32_t k = topk();
 #pragma unroll
     for (int32_t j = kChunks - 1; j >= 0; --j) {
       const uint32_t a = above + excl[j];
-      if (a < kTopK && kTopK <= a + local[j]) {
+      if (a < k && k <= a + local[j]) {
         vec_t h;
         const uint32_t vec = warp_id * kVecsPerWarp + j * 32 + lane_id;
         h.load(smem.hist, vec);
@@ -327,7 +342,7 @@ struct TopKCandidatesFP32Impl {
 #pragma unroll
         for (int32_t b = 7; b >= 0; --b) {
           const auto cnt = (b & 1) ? h[b / 2] >> 16 : h[b / 2] & 0xFFFFu;
-          if (suffix < kTopK && kTopK <= suffix + cnt) {
+          if (suffix < k && k <= suffix + cnt) {
             smem.pivot_bin = 8 * vec + static_cast<uint32_t>(b);
             smem.count_above = suffix;
           }
@@ -469,13 +484,20 @@ struct TopKCandidatesFP32Impl {
     thr = params.thr[bx];
     __syncthreads();
 
+    const uint32_t k = topk();
     const auto indices_row = params.indices + int64_t(bx) * params.cap;
-    const auto out = params.out + int64_t(bx) * kTopK;
-    if (needs_rescan || n <= kTopK) {
+    const auto out = params.out + int64_t(bx) * params.out_stride;
+    if (needs_rescan || n <= k) {
       // Truncated slabs are repaired from Q/K by the following GPU launch.
-      static_loop<kTopK, kBlockSize>(tx, [&](uint32_t t) {
-        out[t] = !needs_rescan && t < n ? indices_row[t] : -1;
-      });
+      if constexpr (kTopK_ != 0) {
+        static_loop<kTopK_, kBlockSize>(tx, [&](uint32_t t) {
+          out[t] = !needs_rescan && t < n ? indices_row[t] : -1;
+        });
+      } else {
+        for (uint32_t t = tx; t < k; t += kBlockSize) {
+          out[t] = !needs_rescan && t < n ? indices_row[t] : -1;
+        }
+      }
       if (tx == 0) {
         ptx::mbar_wait_parity(&smem.full_bar[0],
                               0);  // no CTA exits with a copy in flight
@@ -546,8 +568,7 @@ struct TopKCandidatesFP32Impl {
     find_pivot();
     const uint32_t pivot = smem.pivot_bin;
     const uint32_t count_above = smem.count_above;
-    const uint32_t quota =
-        kTopK - count_above;  // taken from the pivot bin, >= 1
+    const uint32_t quota = k - count_above;  // taken from the pivot bin, >= 1
 
     // ---- pass 2: emit the bins above the pivot, collect the pivot bin into
     // the tie buffer ---- bin > pivot <=> code >= (pivot + 1) << 3; the codes
@@ -579,7 +600,7 @@ struct TopKCandidatesFP32Impl {
 
     if ((smem.emit_counter >> 16) > kTieCap) {
       device::litetopk_recovery::exact_topk<TopKCandidatesFP32Impl>(
-          row, indices_row, n, kTopK, out,
+          row, indices_row, n, k, out,
           *reinterpret_cast<device::litetopk_recovery::Scratch*>(&smem));
       return;
     }
@@ -588,7 +609,7 @@ struct TopKCandidatesFP32Impl {
     // Wider pivot bins have already taken the exact recovery path above.
     const uint32_t num_ties = min(smem.emit_counter >> 16, kTieCap);
     const uint32_t taken = min(quota, num_ties);
-    // For valid candidate rows this equals kTopK.
+    // For valid candidate rows this equals k.
     const uint32_t first_hole = count_above + taken;
     int32_t* const tie_ids = smem.sel.ids + count_above;
     for (uint32_t i = taken + tx; i < quota; i += kBlockSize) {
@@ -608,14 +629,15 @@ struct TopKCandidatesFP32Impl {
     __syncthreads();
 
     // ---- gather: quads of selected positions -> key indices -> out ----
-    constexpr uint32_t kQuads = kTopK / 4;
-    constexpr uint32_t kPerThread = device::div_ceil(kQuads, kBlockSize);
+    constexpr uint32_t kMaxQuads = kMaxTopK / 4;
+    constexpr uint32_t kPerThread = device::div_ceil(kMaxQuads, kBlockSize);
+    const uint32_t quads = k / 4;
     AlignedVector<int32_t, 4> res[kPerThread];
 #pragma unroll
     for (uint32_t r = 0; r < kPerThread;
          ++r) {  // every load in flight before the first store
       const uint32_t q4 = r * kBlockSize + tx;
-      if (q4 < kQuads) {
+      if (q4 < quads) {
         AlignedVector<int32_t, 4> ids;
         ids.load(smem.sel.ids, q4);
 #pragma unroll
@@ -630,13 +652,13 @@ struct TopKCandidatesFP32Impl {
 #pragma unroll
     for (uint32_t r = 0; r < kPerThread; ++r) {
       const uint32_t q4 = r * kBlockSize + tx;
-      if (first_hole < kTopK) {
+      if (first_hole < k) {
 #pragma unroll
         for (uint32_t i = 0; i < 4; ++i) {
           if (4 * q4 + i >= first_hole) res[r][i] = -1;
         }
       }
-      if (q4 < kQuads) res[r].store(out, q4);
+      if (q4 < quads) res[r].store(out, q4);
     }
   }
 };
@@ -652,6 +674,7 @@ __global__ __launch_bounds__(Impl::kBlockSize, Impl::kOccupancy)  //
       .tx = tx,
       .warp_id = device::warp::reduce_max(tx / device::kWarpThreads),
       .lane_id = device::warp::get_lane_id(),
+      .topk_val = Impl::kTopK ? Impl::kTopK : params.topk,
       .row = nullptr,
       .n = 0,
       .thr = 0.0f,

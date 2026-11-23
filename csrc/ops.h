@@ -957,4 +957,4 @@ void fused_mqa_topk_prefill(
     torch::stable::Tensor out, torch::stable::Tensor counter,
     torch::stable::Tensor codes, torch::stable::Tensor values,
     torch::stable::Tensor indices, torch::stable::Tensor row_state,
-    torch::stable::Tensor recovery);
+    torch::stable::Tensor recovery, int64_t num_ctas);
