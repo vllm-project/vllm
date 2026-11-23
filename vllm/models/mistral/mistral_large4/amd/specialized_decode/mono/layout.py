@@ -262,9 +262,7 @@ def sparse_keys_per_task(samples: int, heads: int = WAVES) -> int:
     """Use narrower sparse tiles when samples or attention heads fill LDS.
     gfx942's 64 KB of LDS holds 32 keys' latent and k_pe tiles (47 KB with 8
     heads' q), not 64 (85 KB)."""
-    if GFX942:
-        return 32
-    return 32 if heads > 2 * WAVES or (heads == WAVES and samples > 4) else 64
+    return 32 if GFX942 or heads > 2 * WAVES or (heads == WAVES and samples > 4) else 64
 
 
 def sample_wave_batches(samples: int) -> int:
