@@ -33,7 +33,13 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.dspark.speculator.DSparkSpeculator"
     )
-    supported_options = frozenset({"dspark_draft_topk", "draft_lm_head_quantization"})
+    supported_options = frozenset(
+        {
+            "dspark_draft_topk",
+            "dspark_markov_quantization",
+            "draft_lm_head_quantization",
+        }
+    )
     uses_separate_workspace_lane = True
     # DSpark predicts acceptance with its own confidence head.
     adaptive_verification_uses_draft_logits = False
@@ -161,6 +167,11 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
                     "Qwen3DSparkModel and Qwen3OmniDSparkModel"
                 )
             hf_config.dspark_draft_topk = dspark_draft_topk
+            if spec.dspark_markov_quantization is not None:
+                raise ValueError(
+                    "dspark_markov_quantization and dspark_draft_topk cannot "
+                    "be combined."
+                )
 
         if spec.draft_lm_head_quantization is not None:
             # Other drafters may read lm_head.weight directly (e.g. Muse Spark).
@@ -186,10 +197,12 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
         return bool(getattr(hf_config, "sample_from_anchor", True))
 
     def hash_factors(self) -> list[Any]:
-        # Adaptive verification and draft TP both change the draft graph.
+        # Adaptive verification, draft TP and the int8 Markov walk change the
+        # draft graph.
         return [
             self.spec_config.enable_adaptive_verification,
             self.spec_config.draft_tensor_parallel_size,
+            self.spec_config.dspark_markov_quantization,
         ]
 
     def pcp_unsupported_reason(self, parallel_config: "ParallelConfig") -> str | None:
