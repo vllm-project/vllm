@@ -174,6 +174,10 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     maybe_create_adaptive_verification_manager,
     resolve_adaptive_cudagraph_mode,
 )
+from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
+    AutoRegressiveSpeculator,
+)
+from vllm.v1.worker.gpu.spec_decode.draft_grammar import DraftGrammarManager
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
@@ -364,6 +368,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.batch_sharder: BatchSharder | None = None
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
+        self.draft_grammar_manager: DraftGrammarManager | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
 
         # LoRA-related workers.
@@ -579,6 +584,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
                 mask_stride=self.decode_query_len,
             )
+            if (
+                isinstance(self.speculator, AutoRegressiveSpeculator)
+                and self.pp_handler is None
+                and self.dp_size == 1
+                and self.pcp_manager is None
+                and not self.model_config.skip_tokenizer_init
+            ):
+                self.draft_grammar_manager = DraftGrammarManager(
+                    vllm_config=self.vllm_config,
+                    max_num_reqs=self.max_num_reqs,
+                    vocab_size=self.vocab_size,
+                    device=self.device,
+                    draft_vocab_target_ids=self.speculator.draft_vocab_target_ids,
+                )
+                self.speculator.draft_grammar_manager = self.draft_grammar_manager
 
         if self.is_pooling_model and self.is_last_pp_rank:
             self.pooling_runner = PoolingRunner(self.model, self.vllm_config)
@@ -1280,6 +1300,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache.remove_request(req_id)
         if self.prompt_logprobs_worker is not None:
             self.prompt_logprobs_worker.remove_request(req_id)
+        if self.draft_grammar_manager is not None:
+            self.draft_grammar_manager.remove_request(req_id)
         self.lora_state.remove_request(req_id)
         return True
 
@@ -2423,6 +2445,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
+        if (
+            self.draft_grammar_manager is not None
+            and grammar_output is not None
+            and grammar_output.draft_grammar_inits
+        ):
+            self.draft_grammar_manager.register_inits(
+                grammar_output.draft_grammar_inits
+            )
+
         if self.speculator is not None:
             assert self.sampler is not None
             if isinstance(self.speculator, DraftModelSpeculator):
@@ -2432,23 +2463,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_hidden_states = get_drafter_hidden_states(
                 self.model, draft_hidden_states
             )
-            with self.draft_context():
-                draft_tokens = self.speculator.propose(
-                    input_batch,
-                    attn_metadata,
-                    slot_mappings_by_layer,
-                    spec_hidden_states,
-                    aux_hidden_states,
-                    num_sampled,
-                    num_rejected,
-                    self.req_states.last_sampled_tokens,
-                    self.req_states.next_prefill_tokens,
-                    self.sampler.sampling_states.temperature.gpu,
-                    self.sampler.sampling_states.seeds.gpu,
-                    num_speculative_tokens=num_spec_tokens,
-                    dp_sync_state=dp_sync_state,
-                    mm_inputs=mm_inputs,
+            if self.draft_grammar_manager is not None:
+                self.draft_grammar_manager.begin_propose(
+                    input_batch.req_ids,
+                    num_spec_tokens,
+                    pending_sync=(
+                        async_output.copy_event,
+                        async_output.sampled_token_ids,
+                        async_output.num_sampled_tokens_np,
+                    ),
                 )
+            try:
+                with self.draft_context():
+                    draft_tokens = self.speculator.propose(
+                        input_batch,
+                        attn_metadata,
+                        slot_mappings_by_layer,
+                        spec_hidden_states,
+                        aux_hidden_states,
+                        num_sampled,
+                        num_rejected,
+                        self.req_states.last_sampled_tokens,
+                        self.req_states.next_prefill_tokens,
+                        self.sampler.sampling_states.temperature.gpu,
+                        self.sampler.sampling_states.seeds.gpu,
+                        num_speculative_tokens=num_spec_tokens,
+                        dp_sync_state=dp_sync_state,
+                        mm_inputs=mm_inputs,
+                    )
+            finally:
+                if self.draft_grammar_manager is not None:
+                    self.draft_grammar_manager.end_propose()
             if self.pcp_manager is not None:
                 self.pcp_manager.sync_drafts(
                     draft_tokens, input_batch.idx_mapping, self.speculator.draft_logits

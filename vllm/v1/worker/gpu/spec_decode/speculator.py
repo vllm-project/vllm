@@ -54,6 +54,7 @@ from vllm.v1.worker.utils import (
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
     from vllm.v1.worker.gpu.sample.sampler import Sampler
+    from vllm.v1.worker.gpu.spec_decode.draft_grammar import DraftGrammarManager
 
 logger = init_logger(__name__)
 
@@ -259,6 +260,8 @@ class DraftModelSpeculator(BaseSpeculator):
         # Pre-temperature logits, cached from the previous decode step.
         # Allocated in load_model. See _init_draft_logits.
         self.draft_logits: DraftLogitsCache | None = None
+        self.draft_grammar_manager: DraftGrammarManager | None = None
+        self.draft_vocab_target_ids: frozenset[int] | None = None
         self.use_draft_logits = (
             self.speculative_config.draft_sample_method == "probabilistic"
         )
@@ -306,6 +309,14 @@ class DraftModelSpeculator(BaseSpeculator):
         )
 
         self.model = self.load_draft_model(target_model, target_attn_layer_names)
+        d2t = getattr(self.model, "draft_id_to_target_id", None)
+        if d2t is not None:
+            targets = (
+                (torch.arange(d2t.shape[0], device=d2t.device, dtype=d2t.dtype) + d2t)
+                .cpu()
+                .tolist()
+            )
+            self.draft_vocab_target_ids = frozenset(int(t) for t in targets)
         self._validate_local_argmax_reduction()
         if self.use_draft_logits:
             self._init_draft_logits(target_model)
@@ -619,10 +630,21 @@ class DraftModelSpeculator(BaseSpeculator):
         spec_step_idx: int = 0,
         num_steps: int = 1,
     ) -> torch.Tensor:
-        if draft_logits is None and self.use_local_argmax_reduction:
+        has_draft_grammar = (
+            self.draft_grammar_manager is not None
+            and self.draft_grammar_manager.has_active_requests
+        )
+        if (
+            draft_logits is None
+            and self.use_local_argmax_reduction
+            and not has_draft_grammar
+        ):
             return self.get_draft_top_tokens(hidden_states, spec_step_idx)
 
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
+        if has_draft_grammar:
+            assert self.draft_grammar_manager is not None
+            self.draft_grammar_manager.apply_draft_bitmask(logits)
         if draft_logits is not None and self.draft_watermarker is not None:
             sampled = self.draft_watermarker.sample(
                 logits,
@@ -654,6 +676,9 @@ class DraftModelSpeculator(BaseSpeculator):
         else:
             sampled = greedy_argmax(logits)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
+        if has_draft_grammar:
+            assert self.draft_grammar_manager is not None
+            self.draft_grammar_manager.advance_after_draft_step(sampled)
         return sampled
 
     def _maybe_predict_acceptance(

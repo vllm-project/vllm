@@ -182,18 +182,42 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             decode_batch_sync, num_batch_tokens = self._build_uniform_batch_dp_sync(
                 dp_sync_state, num_reqs
             )
-        decode_batch_desc, decode_batch_sync = dispatch_cg_and_sync_dp(
-            self.decode_cudagraph_manager,
-            num_reqs,
-            num_batch_tokens,
-            uniform_token_count=1,
-            dp_size=self.dp_size,
-            dp_rank=self.dp_rank,
-            need_eager=is_profile,
-            dp_sync_state=decode_batch_sync,
-            parallel_config=self.vllm_config.parallel_config,
+        use_grammar_piecewise = (
+            self.draft_grammar_manager is not None
+            and self.draft_grammar_manager.has_active_requests
         )
-        if self.decode_cudagraph_manager is not None:
+        can_reuse_prefill_pw = (
+            use_grammar_piecewise
+            and self.prefill_cudagraph_manager is not None
+            and getattr(self, "pcp_manager", None) is None
+        )
+        if can_reuse_prefill_pw:
+            # Avoid FULL decode graph (which captures sample_draft), while
+            # keeping PIECEWISE CUDA graphs for the draft model forward pass.
+            decode_batch_desc, decode_batch_sync = dispatch_cg_and_sync_dp(
+                self.prefill_cudagraph_manager,
+                num_reqs,
+                num_batch_tokens,
+                uniform_token_count=None,
+                dp_size=self.dp_size,
+                dp_rank=self.dp_rank,
+                need_eager=is_profile,
+                dp_sync_state=decode_batch_sync,
+                parallel_config=self.vllm_config.parallel_config,
+            )
+        else:
+            decode_batch_desc, decode_batch_sync = dispatch_cg_and_sync_dp(
+                self.decode_cudagraph_manager,
+                num_reqs,
+                num_batch_tokens,
+                uniform_token_count=1,
+                dp_size=self.dp_size,
+                dp_rank=self.dp_rank,
+                need_eager=is_profile or use_grammar_piecewise,
+                dp_sync_state=decode_batch_sync,
+                parallel_config=self.vllm_config.parallel_config,
+            )
+        if self.decode_cudagraph_manager is not None and not use_grammar_piecewise:
             decode_batch_desc = self.decode_cudagraph_manager.specialize_spec_tokens(
                 decode_batch_desc, num_speculative_steps
             )

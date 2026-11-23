@@ -259,14 +259,30 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         cudagraph_runtime_mode: CUDAGraphMode,
         num_speculative_steps: int,
     ) -> None:
+        if cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+            # Piecewise graphs captured by prefill_cudagraph_manager bind the
+            # addresses of expanded_input_ids / expanded_positions.
+            self.expanded_input_ids[:num_tokens_padded].copy_(
+                self.input_buffers.input_ids[:num_tokens_padded]
+            )
+            self.expanded_positions[:num_tokens_padded].copy_(
+                self.input_buffers.positions[:num_tokens_padded]
+            )
+            decode_input_ids = self.expanded_input_ids[:num_tokens_padded]
+            decode_positions = self.expanded_positions[:num_tokens_padded]
+            cg_manager = self.prefill_cudagraph_manager
+        else:
+            decode_input_ids = self.input_buffers.input_ids[:num_tokens_padded]
+            decode_positions = self.input_buffers.positions[:num_tokens_padded]
+            cg_manager = self.decode_cudagraph_manager
         hidden_states = self._run_model(
-            self.input_buffers.input_ids[:num_tokens_padded],
-            self.input_buffers.positions[:num_tokens_padded],
+            decode_input_ids,
+            decode_positions,
             attn_metadata,
             slot_mappings,
             num_tokens_across_dp,
             cudagraph_runtime_mode,
-            self.decode_cudagraph_manager,
+            cg_manager,
         )
         draft_tokens = self.sample_draft(
             hidden_states[:num_reqs],
@@ -375,11 +391,18 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             )
             # Standalone AR prefill adds a correction-token slot per request,
             # so it needs a separate DP sync for the expanded batch.
+            use_grammar_piecewise = (
+                not dummy_run
+                and self.draft_grammar_manager is not None
+                and self.draft_grammar_manager.has_active_requests
+            )
             prefill_batch_desc, prefill_batch_sync = dispatch_cg_and_sync_dp(
                 self.prefill_cudagraph_manager,
                 num_reqs,
                 total_expanded,
-                uniform_token_count=uniform_token_count,
+                uniform_token_count=None
+                if use_grammar_piecewise
+                else uniform_token_count,
                 dp_size=self.dp_size,
                 dp_rank=self.dp_rank,
                 need_eager=is_profile,

@@ -193,18 +193,25 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             max_query_len,
             input_batch.decode_graph_eligible,
         )
+        use_grammar_piecewise = (
+            not dummy_run
+            and self.draft_grammar_manager is not None
+            and self.draft_grammar_manager.has_active_requests
+        )
         prefill_batch_desc, prefill_batch_sync = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,
             num_reqs,
             num_tokens_padded,
-            uniform_token_count,
+            None if use_grammar_piecewise else uniform_token_count,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             max_query_len=(
-                int(max_query_len) if input_batch.decode_graph_eligible else None
+                None
+                if use_grammar_piecewise
+                else (int(max_query_len) if input_batch.decode_graph_eligible else None)
             ),
             need_eager=is_profile,
-            dp_sync_state=dp_sync_state,
+            dp_sync_state=None if use_grammar_piecewise else dp_sync_state,
             parallel_config=self.vllm_config.parallel_config,
         )
         num_tokens_across_dp = (

@@ -13,12 +13,16 @@ from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
+from vllm.v1.core.sched.output import DraftGrammarInit
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
 )
-from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+from vllm.v1.structured_output.backend_xgrammar import (
+    XgrammarBackend,
+    XgrammarGrammar,
+)
 from vllm.v1.structured_output.utils import (
     allocate_token_bitmask,
     strip_speculative_padding,
@@ -523,7 +527,47 @@ class StructuredOutputManager:
         if grammar_start > len(new_token_ids):
             return True
         structured_req.reasoning_ended = True
-        return grammar.accept_tokens(request.request_id, new_token_ids[grammar_start:])
+        tokens_to_accept = new_token_ids[grammar_start:]
+        accepted = grammar.accept_tokens(request.request_id, tokens_to_accept)
+        if accepted and tokens_to_accept:
+            structured_req.accepted_grammar_token_ids.extend(tokens_to_accept)
+        return accepted
+
+    def get_draft_grammar_inits(
+        self,
+        requests: dict[str, "Request"],
+        structured_output_request_ids: Sequence[str],
+    ) -> list[DraftGrammarInit]:
+        """Build one-time worker draft grammar handoffs for newly-active
+        (or resumed / post-reasoning) xgrammar requests."""
+        if self.vllm_config.speculative_config is None:
+            return []
+        inits: list[DraftGrammarInit] = []
+        for req_id in structured_output_request_ids:
+            request = requests[req_id]
+            structured_req = request.structured_output_request
+            if structured_req is None or structured_req.draft_grammar_synced:
+                continue
+            grammar = structured_req.grammar
+            if not isinstance(grammar, XgrammarGrammar) or grammar.is_terminated():
+                continue
+            # Only hand off once the request is actively grammar-constrained
+            # (past any reasoning block).
+            if self._get_constraint_bounds(request, ()).constraint_start != 0:
+                continue
+            key_opt, key_spec = structured_req.structured_output_key
+            inits.append(
+                DraftGrammarInit(
+                    req_id=req_id,
+                    cache_key=f"{key_opt.value}:{key_spec}",
+                    serialized_grammar=grammar.get_serialized_grammar(),
+                    use_full_vocab=grammar.use_full_vocab,
+                    stop_token_ids=grammar.stop_token_ids,
+                    accepted_token_ids=tuple(structured_req.accepted_grammar_token_ids),
+                )
+            )
+            structured_req.draft_grammar_synced = True
+        return inits
 
     def clear_backend(self) -> None:
         # Finish tasks that can still use the backend before releasing it.

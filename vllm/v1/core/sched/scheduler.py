@@ -1854,6 +1854,8 @@ class Scheduler(SchedulerInterface):
         request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
+        if request.structured_output_request is not None:
+            request.structured_output_request.draft_grammar_synced = False
         # Async scheduling: mark all in-flight output as stale. Its tokens are
         # still delivered on return (dropping them would perturb spec-decode
         # acceptance) but must not mutate the reset counters; each step drains
@@ -2329,7 +2331,14 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids,
             scheduler_output.scheduled_spec_decode_tokens,
         )
-        return GrammarOutput(structured_output_request_ids, bitmask)
+        draft_grammar_inits = self.structured_output_manager.get_draft_grammar_inits(
+            self.requests, structured_output_request_ids
+        )
+        return GrammarOutput(
+            structured_output_request_ids,
+            bitmask,
+            draft_grammar_inits=draft_grammar_inits,
+        )
 
     def update_from_output(
         self,

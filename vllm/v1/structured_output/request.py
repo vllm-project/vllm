@@ -31,6 +31,11 @@ class StructuredOutputRequest:
     # Implicit reasoning-end tokens the grammar rejects as the first content
     # token; masked while the request reasons. Computed on first use.
     masked_reasoning_end_ids: tuple[int, ...] | None = None
+    # Tokens already accepted by the scheduler-side grammar; replayed on worker
+    # shadow matchers when a request enters/resumes grammar-aware drafting.
+    accepted_grammar_token_ids: list[int] = dataclasses.field(default_factory=list)
+    # Whether the compiled grammar has been handed off to worker draft matchers.
+    draft_grammar_synced: bool = False
 
     @staticmethod
     def from_sampling_params(

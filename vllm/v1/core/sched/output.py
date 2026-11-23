@@ -350,8 +350,22 @@ class SchedulerOutput:
 
 
 @dataclass(slots=True)
+class DraftGrammarInit:
+    """One-time handoff of a compiled xgrammar state to GPU workers."""
+
+    req_id: str
+    cache_key: str
+    serialized_grammar: str
+    use_full_vocab: bool
+    stop_token_ids: tuple[int, ...]
+    accepted_token_ids: tuple[int, ...] = ()
+
+
+@dataclass(slots=True)
 class GrammarOutput:
     # ids of structured output requests.
     structured_output_request_ids: list[str]
     # Bitmask ordered as structured_output_request_ids.
     grammar_bitmask: "npt.NDArray[np.int32]"
+    # One-time compiled grammar handoffs for worker-side draft masking.
+    draft_grammar_inits: list[DraftGrammarInit] = field(default_factory=list)

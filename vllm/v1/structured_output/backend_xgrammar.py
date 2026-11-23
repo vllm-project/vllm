@@ -45,40 +45,9 @@ class XgrammarBackend(StructuredOutputBackend):
             model_config is not None and model_config.hf_config.model_type == "plamo3"
         )
 
-        full_vocab_tokenizer_info = None
-        if is_mistral_tokenizer(self.tokenizer):
-            # NOTE: ideally, xgrammar should handle this accordingly.
-            # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
-            stop_token_ids = [self.tokenizer.eos_token_id]
-
-            # not self.tokenizer.vocab_size as self.tokenizer.vocab
-            # collapses all decoded errors into a single token.
-            tokenizer_info = xgr.TokenizerInfo(  # type: ignore
-                encoded_vocab=self.tokenizer.vocab,
-                # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43
-                vocab_type=xgr.VocabType.RAW
-                if self.tokenizer.is_tekken
-                else xgr.VocabType.BYTE_FALLBACK,
-                vocab_size=self.vocab_size,
-                stop_token_ids=stop_token_ids,
-                add_prefix_space=True,
-            )
-        elif is_plamo3 and callable(
-            init_xgrammar := getattr(self.tokenizer, "init_xgrammar", None)
-        ):
-            tokenizer_info, _ = init_xgrammar()
-        else:
-            # tokenizer for structural tags
-            # accepts some of the special tokens
-            full_vocab_tokenizer_info = xgr.TokenizerInfo.from_huggingface(
-                self.tokenizer,
-                vocab_size=self.vocab_size,
-            )
-            # tokenizer for json
-            # does NOT accept any special tokens
-            tokenizer_info = self._filter_special_tokens(
-                self.tokenizer, full_vocab_tokenizer_info
-            )
+        tokenizer_info, full_vocab_tokenizer_info = self.build_tokenizer_infos(
+            self.tokenizer, self.vocab_size, is_plamo3=is_plamo3
+        )
 
         # FIXME(arpera):
         # Here we create not one but TWO compilers
@@ -106,7 +75,7 @@ class XgrammarBackend(StructuredOutputBackend):
         # Compiler for structural tag. May accept some of the special tokens.
         self.full_vocab_compiler = (
             self.compiler
-            if full_vocab_tokenizer_info is None
+            if full_vocab_tokenizer_info is tokenizer_info
             else self._create_compiler(full_vocab_tokenizer_info)
         )
 
@@ -131,6 +100,7 @@ class XgrammarBackend(StructuredOutputBackend):
         # xgrammar must not insert spaces.
         # This is a requirement of xgrammar's API, so we must comply with it.
         separators = (",", ":") if self.disable_any_whitespace else None
+        use_full_vocab = False
         if request_type == StructuredOutputOptions.JSON:
             ctx = self.compiler.compile_json_schema(
                 grammar_spec,
@@ -146,6 +116,7 @@ class XgrammarBackend(StructuredOutputBackend):
         elif request_type == StructuredOutputOptions.GRAMMAR:
             if grammar_is_likely_lark(grammar_spec):
                 ctx = self.full_vocab_compiler.compile_lark(grammar_spec)
+                use_full_vocab = True
             else:
                 ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
@@ -160,6 +131,7 @@ class XgrammarBackend(StructuredOutputBackend):
                 choice_as_grammar(json.loads(grammar_spec))
             )
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
+            use_full_vocab = True
             s_tag = json.loads(grammar_spec)
             if "structures" in s_tag:
                 # Falling back to deprecated method of compiling structural tag
@@ -184,15 +156,73 @@ class XgrammarBackend(StructuredOutputBackend):
                 f"grammar is not of valid supported types. ({request_type!s})"
             )
 
+        resolved_stops = tuple(stop_token_ids) if stop_token_ids else ()
         return XgrammarGrammar(
             matcher=xgr.GrammarMatcher(
                 ctx,
-                override_stop_tokens=list(stop_token_ids) if stop_token_ids else None,
+                override_stop_tokens=list(resolved_stops) if resolved_stops else None,
                 max_rollback_tokens=self.num_speculative_tokens,
             ),
             vocab_size=self.vocab_size,
             ctx=ctx,
+            use_full_vocab=use_full_vocab,
+            stop_token_ids=resolved_stops,
         )
+
+    @classmethod
+    def build_tokenizer_infos(
+        cls,
+        tokenizer: "TokenizerLike",
+        vocab_size: int,
+        is_plamo3: bool = False,
+    ) -> tuple["xgr.TokenizerInfo", "xgr.TokenizerInfo"]:
+        """Build `(filtered_tokenizer_info, full_vocab_tokenizer_info)`.
+
+        The first `TokenizerInfo` filters special tokens for JSON (and other
+        default) grammars; the second retains special tokens for structural
+        tags (and Lark grammars) that may match them.
+
+        Mistral and PLaMo3 do not build a separate filtered/full-vocab pair
+        and return the same `TokenizerInfo` instance for both entries. Callers
+        such as `XgrammarBackend.__post_init__` rely on object identity
+        (`full_vocab_tokenizer_info is tokenizer_info`) to reuse a single
+        `GrammarCompiler`.
+        """
+        if is_mistral_tokenizer(tokenizer):
+            # NOTE: ideally, xgrammar should handle this accordingly.
+            # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
+            stop_token_ids = [tokenizer.eos_token_id]
+
+            tokenizer_info = xgr.TokenizerInfo(  # type: ignore
+                encoded_vocab=tokenizer.vocab,
+                # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43
+                vocab_type=xgr.VocabType.RAW
+                if tokenizer.is_tekken
+                else xgr.VocabType.BYTE_FALLBACK,
+                # not tokenizer.vocab_size as tokenizer.vocab
+                # collapses all decoded errors into a single token.
+                vocab_size=vocab_size,
+                stop_token_ids=stop_token_ids,
+                add_prefix_space=True,
+            )
+            return tokenizer_info, tokenizer_info
+        if is_plamo3 and callable(
+            init_xgrammar := getattr(tokenizer, "init_xgrammar", None)
+        ):
+            tokenizer_info, _ = init_xgrammar()
+            return tokenizer_info, tokenizer_info
+        # tokenizer for structural tags
+        # accepts some of the special tokens
+        full_vocab_tokenizer_info = xgr.TokenizerInfo.from_huggingface(
+            tokenizer,
+            vocab_size=vocab_size,
+        )
+        # tokenizer for json
+        # does NOT accept any special tokens
+        tokenizer_info = cls._filter_special_tokens(
+            tokenizer, full_vocab_tokenizer_info
+        )
+        return tokenizer_info, full_vocab_tokenizer_info
 
     def destroy(self):
         del self.compiler
@@ -242,10 +272,20 @@ class XgrammarGrammar(StructuredOutputGrammar):
     vocab_size: int
     matcher: xgr.GrammarMatcher = field(hash=False)
     ctx: xgr.CompiledGrammar = field(hash=False)
+    use_full_vocab: bool = field(default=False, repr=False, hash=False)
+    stop_token_ids: tuple[int, ...] = field(default=(), repr=False, hash=False)
     num_processed_tokens: int = field(
         default_factory=lambda: 0, repr=False, hash=False, init=False
     )
     _is_terminated: bool = field(default=False, repr=False, hash=False)
+    _serialized_json: str | None = field(
+        default=None, init=False, repr=False, hash=False
+    )
+
+    def get_serialized_grammar(self) -> str:
+        if self._serialized_json is None:
+            self._serialized_json = self.ctx.serialize_json()
+        return self._serialized_json
 
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
