@@ -380,6 +380,8 @@ def video_to_pixel_values(
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Convert video ndarray (T, H, W, C) to normalized pixel tensor (T, C, H, W)."""
+    if isinstance(video, torch.Tensor):
+        video = video.cpu().numpy()
     orig_h, orig_w = video.shape[1], video.shape[2]
     size: tuple[int, int] | None = None
 
