@@ -608,16 +608,14 @@ class KVCacheManager:
         # additional watermark of headroom for waiting/preempted admissions.
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
-        if (full_sequence_shortfall > 0 or required_blocks > available_blocks) and (
+        deficit = required_blocks - available_blocks
+        if full_sequence_shortfall > 0:
+            deficit = max(deficit, full_sequence_shortfall + reserved_blocks)
+        if deficit > 0 and (
             self.try_preallocate is None
             or not self.try_preallocate(
                 request.request_id,
-                max(
-                    required_blocks - available_blocks,
-                    full_sequence_shortfall + reserved_blocks
-                    if full_sequence_shortfall > 0
-                    else 0,
-                ),
+                deficit,
                 available_blocks - watermark_blocks,
                 bool(
                     num_new_computed_tokens

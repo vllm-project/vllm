@@ -509,11 +509,7 @@ class HiSparseCoordinator:
         """Fund this allocation only if Hot fits and reclaim covers the shortfall."""
         # Computed KV must be attached before any group grows. Empty groups
         # without new computed tokens can come from a retained streaming request.
-        if (
-            has_new_computed_kv
-            or not self.resident_managers
-            or shortfall + available > self.gpu_pool.num_gpu_blocks
-        ):
+        if has_new_computed_kv or not self.resident_managers:
             return False
         upfront = 0
         for manager in self.hot_managers:

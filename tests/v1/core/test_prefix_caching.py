@@ -895,9 +895,7 @@ def test_hisparse_keeps_resident_pages_until_hot_buffer_is_allocated(enable_cach
     assert "first" in coordinator.take_residency_updates(["first"])
 
 
-def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
-    monkeypatch,
-):
+def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk():
     """A hot region fits even when hot plus the next chunk do not fit together.
 
     Every page is written back, the two newest stay pinned as the active tail,
@@ -935,30 +933,18 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
     # Two new indexer blocks, plus two resident and two hot blocks per group.
     gross_budget = 2 + 4 * num_resident_groups
     assert 2 * num_resident_groups <= free < gross_budget
+    reclaimable = (4 - len(shared_pages)) * num_resident_groups
+    assert coordinator.get_num_reclaimable_blocks(request.request_id) == reclaimable
 
-    predicted_releases = []
-    observed_releases = []
-    get_reclaimable = coordinator.get_num_reclaimable_blocks
-    update_residency = coordinator.update_residency
-
-    def record_reclaim(request_id: str) -> int:
-        count = get_reclaimable(request_id)
-        predicted_releases.append(count)
-        return count
-
-    def record_released_blocks(request_id: str) -> None:
-        before = manager.block_pool.get_num_free_blocks()
-        update_residency(request_id)
-        observed_releases.append(manager.block_pool.get_num_free_blocks() - before)
-        assert coordinator.request_states[request_id].unpinned_pages == set(range(4))
-
-    monkeypatch.setattr(coordinator, "get_num_reclaimable_blocks", record_reclaim)
-    monkeypatch.setattr(coordinator, "update_residency", record_released_blocks)
     blocks = manager.allocate_slots(request, 2 * HISPARSE_BLOCK_SIZE)
 
-    assert predicted_releases == [(4 - len(shared_pages)) * num_resident_groups]
-    assert observed_releases == predicted_releases
     assert blocks is not None
+    assert manager.block_pool.get_num_free_blocks() == (
+        free + reclaimable - gross_budget
+    )
+    assert not coordinator.request_states[request.request_id].pinned_clean & set(
+        range(4)
+    )
     assert all(hot.has_hot(request.request_id) for hot in coordinator.hot_managers)
     assert all(
         len(blocks.blocks[hot.kv_cache_group_id]) == 2
@@ -1243,6 +1229,11 @@ def _add_hisparse_request(
 
 
 def test_hisparse_async_import_preserves_hot_transition_reservation(tmp_path):
+    """An async import must not take the blocks a parked request needs for Hot.
+
+    Without that reservation the import fills the pool, and the parked request
+    can never fund Hot to release its resident pages.
+    """
     block = HISPARSE_BLOCK_SIZE
     scheduler, manager = _make_hisparse_scheduler(
         tmp_path, 64, 2 * block, num_gpu_blocks=38, num_resident_groups=3
