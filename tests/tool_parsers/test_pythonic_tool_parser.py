@@ -209,6 +209,26 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
     assert reconstructor.tool_calls[2].function == EMPTY_LIST_FUNCTION_CALL
 
 
+def test_streaming_valid_call_before_malformed_call(default_tokenizer: TokenizerLike):
+    """The delta that completes a valid call also starts a malformed one. The
+    valid call's withheld closing characters must still be streamed."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        default_tokenizer
+    )
+    model_output_deltas = [
+        "[get_weather(city='San",
+        " Francisco', metric='celsius'), get",
+        "_weather(city=)]",
+    ]
+
+    reconstructor = run_tool_extraction_streaming(
+        tool_parser, model_output_deltas, assert_one_tool_per_delta=False
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
 @pytest.mark.parametrize("streaming", [False])
 def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLike):
     """Test regex timeout is handled gracefully."""

@@ -55,6 +55,8 @@ class PythonicToolParser(ToolParser):
         tools: list[Tool] | None = None,
     ):
         super().__init__(tokenizer, tools)
+        # Index in the text of the end of the last call already released.
+        self._released_call_end = -1
 
     # Rename for readability. This is NOT a tool id.
     @property
@@ -127,8 +129,22 @@ class PythonicToolParser(ToolParser):
         try:
             valid_and_added_text = make_valid_python(current_text)
             if valid_and_added_text is None:
-                return None
+                # The next call may never parse (e.g. it is malformed), so
+                # parse up to the end of the last complete call, once, to
+                # still release that call's withheld closing characters.
+                last_call_end = current_text.rfind("),")
+                if last_call_end <= self._released_call_end:
+                    return None
+                self._released_call_end = last_call_end
+                valid_and_added_text = make_valid_python(
+                    current_text[: last_call_end + 1]
+                )
+                if valid_and_added_text is None:
+                    return None
             valid_text, added_text = valid_and_added_text
+            if ")]" not in added_text:
+                # Every call parsed is complete and is released below.
+                self._released_call_end = len(valid_text) - len(added_text) - 1
 
             module = ast.parse(valid_text)
             parsed = getattr(module.body[0], "value", None)
