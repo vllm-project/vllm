@@ -97,7 +97,7 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
 ### Dual Batch Overlap for hybrid models
 
 CUDA expert-parallel deployments of text-only GDN and Mamba2 hybrid models can
-enable DBO with `--enable-dbo --no-async-scheduling`. Use TP=1, at least two DP
+enable DBO with `--enable-dbo`. Use TP=1, at least two DP
 ranks, and an expert parallel backend that supports DBO. See the
 [DBO limitations](../design/dbo.md#limitations) for the supported execution modes.
 

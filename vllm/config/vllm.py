@@ -3634,7 +3634,6 @@ class VllmConfig:
             and (model_config.is_hybrid or model_config.is_attention_free)
             and (
                 not current_platform.is_cuda()
-                or self.scheduler_config.async_scheduling
                 or self.speculative_config is not None
                 or self.cache_config.use_replayssm
                 or self.cache_config.use_kda_recoverssm
@@ -3649,9 +3648,8 @@ class VllmConfig:
         ):
             unsupported.append(
                 "dual batch overlap with hybrid models outside CUDA "
-                "DP+EP with TP=1, DCP=1, two microbatches, synchronous "
-                "scheduling and no speculative decoding, ReplaySSM, RecoverSSM "
-                "or KV transfer"
+                "DP+EP with TP=1, DCP=1, two microbatches and no speculative "
+                "decoding, ReplaySSM, RecoverSSM or KV transfer"
             )
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             # DBO captures FULL graphs only.

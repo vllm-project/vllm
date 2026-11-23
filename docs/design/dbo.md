@@ -50,7 +50,8 @@ multimodal models. Use Full CUDA graphs or eager execution.
 Text-only hybrid models with the standard model state and GDN or Mamba2 state
 backends support two microbatches with `--enable-dbo` and the default
 `dispatch-combine-overlap` schedule in CUDA DP+EP with TP=1 and no context
-parallelism. Use `--no-async-scheduling` and a DBO-capable expert parallel backend.
+parallelism. Both synchronous and asynchronous scheduling are supported. Use a
+DBO-capable expert parallel backend.
 Steps can run eagerly or replay a compatible Full CUDA graph for single-token
 decode. Hybrid DBO requires speculative decoding, ReplaySSM, RecoverSSM and KV
 transfer to be disabled.
