@@ -63,39 +63,119 @@ def test_mxfp8_linear_as_bf16(
     assert quantization.mxfp8_linear_as_bf16() == expected
 
 
-def test_mxfp8_linear_method_is_stock_at_sm90_tp1(monkeypatch):
+@pytest.mark.parametrize(
+    ("capability", "backend", "per_quant", "tp_size", "batch_invariant", "expected"),
+    [
+        # TP1 on SM90 keeps vLLM's kernel on the FP8 weights, with the GEMV ...
+        (90, "auto", None, 1, False, "gemv"),
+        # ... but an explicit MXFP8 backend means that kernel only, and so does
+        # batch invariance, which the GEMV's row-count-dependent results break.
+        (90, "marlin", None, 1, False, "stock"),
+        (90, "auto", {"mxfp8": "humming"}, 1, False, "stock"),
+        (90, "auto", {"nvfp4_w4a16": "humming"}, 1, False, "gemv"),
+        (90, "auto", None, 1, True, "stock"),
+        # TP2 and up, and SM80, keep BF16 GEMMs and the GEMV.
+        (90, "auto", None, 2, False, "bf16"),
+        (90, "auto", None, 2, True, "bf16"),
+        (90, "auto", None, 8, False, "bf16"),
+        (80, "auto", None, 1, False, "bf16"),
+        (80, "auto", None, 8, False, "bf16"),
+        (90, "marlin", None, 8, False, "stock"),
+        (100, "auto", None, 1, False, "stock"),
+        (100, "auto", None, 8, False, "stock"),
+    ],
+)
+def test_mxfp8_linear_method_cls(
+    monkeypatch, capability, backend, per_quant, tp_size, batch_invariant, expected
+):
     from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
 
-    monkeypatch.setattr(quantization, "current_platform", _platform(90))
-    monkeypatch.setattr(quantization, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(quantization, "current_platform", _platform(capability))
+    monkeypatch.setattr(
+        quantization, "envs", SimpleNamespace(VLLM_BATCH_INVARIANT=batch_invariant)
+    )
+    monkeypatch.setattr(
+        quantization, "get_tensor_model_parallel_world_size", lambda: tp_size
+    )
     kernel_config = SimpleNamespace(
-        linear_backend="auto", linear_backend_per_quant=None
+        linear_backend=backend, linear_backend_per_quant=per_quant
     )
     monkeypatch.setattr(
         quantization,
         "get_current_vllm_config",
         lambda: SimpleNamespace(kernel_config=kernel_config),
     )
-    assert quantization.mxfp8_linear_method_cls() is ModelOptLinearMethod
+    bf16 = quantization.gemv_mxfp8_linear_method_cls(True)
+    gemv = quantization.gemv_mxfp8_linear_method_cls(False)
+    assert issubclass(bf16, ModelOptLinearMethod)
+    assert issubclass(gemv, ModelOptLinearMethod)
+    assert bf16 is not gemv
+    want = {"bf16": bf16, "gemv": gemv, "stock": ModelOptLinearMethod}[expected]
+    assert quantization.mxfp8_linear_method_cls() is want
 
 
-def test_bf16_mxfp8_linear_method_takes_emulation(monkeypatch):
-    from vllm.model_executor.kernels.linear.mxfp8.emulation import (
-        EmulationMxfp8LinearKernel,
-    )
+def _gemv_method(monkeypatch, bf16, kernel=None):
+    """A GEMV method as vLLM builds it, `create_weights` stubbed down to the
+    selection of `kernel` as the platform's MXFP8 kernel."""
     from vllm.model_executor.layers.quantization import modelopt
 
     def create_weights(self, layer, *args, **kwargs):
-        layer.weight = SimpleNamespace(shape=(1024, 4096))
-        self.kernel = "platform kernel"
+        self.kernel = kernel or "platform kernel"
 
     monkeypatch.setattr(modelopt.ModelOptLinearMethod, "create_weights", create_weights)
-    method_cls = quantization.bf16_mxfp8_linear_method_cls()
-    assert issubclass(method_cls, modelopt.ModelOptLinearMethod)
+    method_cls = quantization.gemv_mxfp8_linear_method_cls(bf16)
     method = method_cls.__new__(method_cls)
     method.fmt = modelopt.FormatScheme()
-    method.create_weights(SimpleNamespace())  # type: ignore[call-arg]
+    return method
+
+
+def test_bf16_gemv_linear_method_takes_emulation(monkeypatch):
+    from vllm.model_executor.kernels.linear.mxfp8.emulation import (
+        EmulationMxfp8LinearKernel,
+    )
+
+    method = _gemv_method(monkeypatch, bf16=True)
+    layer = SimpleNamespace(weight=SimpleNamespace(shape=(1024, 4096)))
+    method.create_weights(layer)  # type: ignore[call-arg]
     assert isinstance(method.kernel, EmulationMxfp8LinearKernel)
+
+
+def test_stock_gemv_linear_method_keeps_the_platform_kernel(monkeypatch):
+    method = _gemv_method(monkeypatch, bf16=False)
+    method.create_weights(SimpleNamespace())  # type: ignore[call-arg]
+    assert method.kernel == "platform kernel"
+
+
+def test_gemv_linear_methods_weight_loader():
+    """The stock variant keeps `ModelOptLinearMethod`'s v2 weight loader; the
+    BF16 one keeps v1."""
+    from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
+
+    stock = quantization.gemv_mxfp8_linear_method_cls(False)
+    bf16 = quantization.gemv_mxfp8_linear_method_cls(True)
+    assert stock.__name__ in WEIGHT_LOADER_V2_SUPPORTED
+    assert bf16.__name__ not in WEIGHT_LOADER_V2_SUPPORTED
+
+
+def test_gemv_linear_method_forwards_quantized_activation(monkeypatch):
+    """A pre-quantized activation is no input of the GEMV: the kernel gets it."""
+    from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+
+    method = _gemv_method(
+        monkeypatch,
+        bf16=False,
+        kernel=SimpleNamespace(apply_weights=lambda layer, x, bias: "kernel"),
+    )
+    method.create_weights(SimpleNamespace())  # type: ignore[call-arg]
+    method.gemv = (None, None, None)  # type: ignore[assignment]
+    x = QuantizedActivation(
+        torch.zeros(2, 32),
+        torch.zeros(2),
+        torch.bfloat16,
+        torch.Size((2, 32)),
+        kMxfp8Dynamic,
+    )
+    assert method.apply(SimpleNamespace(), x) == "kernel"  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -177,42 +257,56 @@ def _mxfp8_layer(n: int, k: int, seed: int) -> torch.nn.Module:
     return layer
 
 
-def _linear_kernel(monkeypatch, layer: torch.nn.Module, bmm_batch_size=None):
-    """The kernel the BF16 MXFP8 linear method gives a layer."""
+def _linear_method(monkeypatch, layer: torch.nn.Module, bf16, bmm_batch_size=None):
+    """The GEMV method of a layer. The stock one runs the emulation kernel as
+    the platform's: BF16 GEMMs on the weights dequantized at load, as the BF16
+    one does, but with the GEMV packed before it, as for any platform kernel."""
+    from vllm.model_executor.kernels.linear.mxfp8.emulation import (
+        EmulationMxfp8LinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
+        Mxfp8LinearLayerConfig,
+    )
     from vllm.model_executor.layers.quantization import modelopt
 
-    def create_weights(self, layer, *args, **kwargs):
-        self.kernel = "platform kernel"
-
-    monkeypatch.setattr(modelopt.ModelOptLinearMethod, "create_weights", create_weights)
-    method_cls = quantization.bf16_mxfp8_linear_method_cls()
-    method = method_cls.__new__(method_cls)
-    method.fmt = modelopt.FormatScheme()
+    method = _gemv_method(
+        monkeypatch,
+        bf16,
+        EmulationMxfp8LinearKernel(
+            Mxfp8LinearLayerConfig(weight_shape=tuple(layer.weight.shape))
+        ),
+    )
+    monkeypatch.setattr(
+        modelopt.ModelOptLinearMethod,
+        "process_weights_after_loading",
+        lambda self, layer: self.kernel.process_weights_after_loading(layer),
+    )
     layer.bmm_batch_size = bmm_batch_size
     method.create_weights(layer)  # type: ignore[call-arg]
-    return method.kernel
+    return method
 
 
 @needs_sm80
 # cuBLAS reduces split-K partial sums in FP32, as the bound below assumes.
 @pytest.mark.usefixtures("fp32_cublas_reduction")
+@pytest.mark.parametrize("bf16", [True, False])
 @pytest.mark.parametrize("rows", [6, 24, 25, 64])
-def test_gemv_linear_dispatch(monkeypatch, rows):
+def test_gemv_linear_dispatch(monkeypatch, bf16, rows):
     """Decode steps of up to GEMV_MAX_ROWS rows take the GEMV on the packed
-    FP8 copy, larger ones cuBLAS on the BF16 copy; both compute the product
+    FP8 copy, larger ones the kernel on the BF16 copy; both compute the product
     of the load-time dequantized weights."""
     from vllm.models.deepseek_v41.nvidia.specialized_decode.ampere import gemv
 
     n, k = 576, 1024
     layer = _mxfp8_layer(n, k, seed=rows)
-    kernel = _linear_kernel(monkeypatch, layer)
-    kernel.process_weights_after_loading(layer)
+    method = _linear_method(monkeypatch, layer, bf16)
+    method.process_weights_after_loading(layer)
     assert layer.weight.dtype == torch.bfloat16
-    assert kernel.gemv is not None
+    assert method.gemv is not None
     x = torch.randn(rows, k, dtype=torch.bfloat16, device="cuda")
-    got = kernel.apply_weights(layer, x)
+    got = method.apply(layer, x)
     if rows <= quantization.GEMV_MAX_ROWS:
-        blocks, factors, _ = kernel.gemv
+        blocks, factors, _ = method.gemv
         assert torch.equal(got, gemv.mxfp8_gemv(x, blocks, factors))
     else:
         assert torch.equal(got, torch.nn.functional.linear(x, layer.weight))
@@ -223,21 +317,64 @@ def test_gemv_linear_dispatch(monkeypatch, rows):
 
 
 @needs_sm80
-def test_gemv_linear_unaligned_rows(monkeypatch):
-    """Rows that are not 16-byte aligned keep cuBLAS."""
+def test_gemv_linear_packs_the_same_bytes_with_any_kernel(monkeypatch):
+    """The stock method packs the FP8 weights before its kernel rewrites them
+    (as Humming does, into its own layout), and a decode step takes the GEMV,
+    not that kernel: the same packed bytes and output as the BF16 method."""
     n, k = 576, 1024
-    layer = _mxfp8_layer(n, k, seed=0)
-    kernel = _linear_kernel(monkeypatch, layer)
-    kernel.process_weights_after_loading(layer)
-    x = torch.randn(6, k + 8, dtype=torch.bfloat16, device="cuda")[:, 1 : k + 1]
-    got = kernel.apply_weights(layer, x)
-    assert torch.equal(got, torch.nn.functional.linear(x, layer.weight))
+    layers = [_mxfp8_layer(n, k, seed=3) for _ in range(2)]
+    bf16 = _linear_method(monkeypatch, layers[0], True)
+    stock = _linear_method(monkeypatch, layers[1], False)
+
+    def rewrite(layer):
+        layer.weight.data.view(torch.uint8).zero_()
+
+    stock.kernel = SimpleNamespace(
+        process_weights_after_loading=rewrite,
+        apply_weights=lambda layer, x, bias: torch.zeros(
+            x.shape[0], n, dtype=x.dtype, device=x.device
+        ),
+    )
+    for method, layer in zip((bf16, stock), layers):
+        method.process_weights_after_loading(layer)
+    assert not layers[1].weight.data.view(torch.uint8).any()
+    assert bf16.gemv is not None and stock.gemv is not None
+    assert torch.equal(bf16.gemv[0], stock.gemv[0])
+    assert torch.equal(bf16.gemv[1], stock.gemv[1])
+    x = torch.randn(6, k, dtype=torch.bfloat16, device="cuda")
+    assert torch.equal(bf16.apply(layers[0], x), stock.apply(layers[1], x))
 
 
 @needs_sm80
+@pytest.mark.parametrize("bf16", [True, False])
+def test_gemv_linear_unaligned_rows(monkeypatch, bf16):
+    """Rows that are not 16-byte aligned keep the kernel."""
+    n, k = 576, 1024
+    layer = _mxfp8_layer(n, k, seed=0)
+    method = _linear_method(monkeypatch, layer, bf16)
+    method.process_weights_after_loading(layer)
+    x = torch.randn(6, k + 8, dtype=torch.bfloat16, device="cuda")[:, 1 : k + 1]
+    got = method.apply(layer, x)
+    assert torch.equal(got, torch.nn.functional.linear(x, layer.weight))
+
+
+@pytest.mark.parametrize(("bmm_batch_size", "is_bmm"), [(2, False), (None, True)])
+def test_gemv_linear_packs_no_batched_layer(monkeypatch, bmm_batch_size, is_bmm):
+    """A batched layer (wo_a) is told by its batch size or by `is_bmm` alone; the
+    layer here has no weights to pack."""
+    layer = SimpleNamespace(weight=SimpleNamespace(shape=(576, 1024)), is_bmm=is_bmm)
+    method = _linear_method(monkeypatch, layer, False, bmm_batch_size)
+    method.kernel = SimpleNamespace(process_weights_after_loading=lambda layer: None)
+    method.process_weights_after_loading(layer)
+    assert method.gemv is None
+
+
+@needs_sm80
+@pytest.mark.parametrize("bf16", [True, False])
 @pytest.mark.parametrize("case", ["row scales differ", "scale above 2^7", "bmm"])
-def test_gemv_linear_declines(monkeypatch, case):
-    """Weights the GEMV cannot take stay on cuBLAS alone, with no packed copy."""
+def test_gemv_linear_declines(monkeypatch, bf16, case):
+    """Weights the GEMV cannot take stay on the kernel alone, with no packed
+    copy."""
     n, k = 576, 1024
     layer = _mxfp8_layer(n, k, seed=1)
     if case == "row scales differ":
@@ -249,45 +386,46 @@ def test_gemv_linear_declines(monkeypatch, case):
         assert packed is None
     # A batched layer (wo_a) never gets a packed copy; its 2-D weight here
     # only stands in for the real [B, N, K] one.
-    kernel = _linear_kernel(
-        monkeypatch, layer, bmm_batch_size=2 if case == "bmm" else None
+    method = _linear_method(
+        monkeypatch, layer, bf16, bmm_batch_size=2 if case == "bmm" else None
     )
-    kernel.process_weights_after_loading(layer)
-    assert kernel.gemv is None
+    method.process_weights_after_loading(layer)
+    assert method.gemv is None
     x = torch.randn(6, k, dtype=torch.bfloat16, device="cuda")
-    got = kernel.apply_weights(layer, x)
+    got = method.apply(layer, x)
     assert torch.equal(got, torch.nn.functional.linear(x, layer.weight))
 
 
 @needs_sm80
-def test_gemv_linear_reload(monkeypatch):
+@pytest.mark.parametrize("bf16", [True, False])
+def test_gemv_linear_reload(monkeypatch, bf16):
     """A reload of the weights (reload_weights: the FP8 parameters again,
     `process_weights_after_loading` again, the processed parameters copied
     into the first ones) writes the new packed copy into the first one, which
     a captured CUDA graph reads."""
     n, k, rows = 576, 1024, 6
     layer = _mxfp8_layer(n, k, seed=0)
-    kernel = _linear_kernel(monkeypatch, layer)
-    kernel.process_weights_after_loading(layer)
-    first = kernel.gemv
+    method = _linear_method(monkeypatch, layer, bf16)
+    method.process_weights_after_loading(layer)
+    first = method.gemv
     x = torch.randn(rows, k, dtype=torch.bfloat16, device="cuda")
     out = torch.empty(rows, n, dtype=torch.bfloat16, device="cuda")
-    out.copy_(kernel.apply_weights(layer, x))
+    out.copy_(method.apply(layer, x))
     before = out.clone()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        out.copy_(kernel.apply_weights(layer, x))
+        out.copy_(method.apply(layer, x))
 
     weight = layer.weight
     fresh = _mxfp8_layer(n, k, seed=1)
     layer.weight, layer.weight_scale = fresh.weight, fresh.weight_scale
-    kernel.process_weights_after_loading(layer)
+    method.process_weights_after_loading(layer)
     weight.data.copy_(layer.weight.data)
     layer.weight = weight
-    assert kernel.gemv is first
+    assert method.gemv is first
 
     graph.replay()
-    assert torch.equal(out, kernel.apply_weights(layer, x))
+    assert torch.equal(out, method.apply(layer, x))
     assert not torch.equal(out, before)
     want = x.double() @ layer.weight.double().t()
     magnitude = x.double().abs() @ layer.weight.double().abs().t()
@@ -299,7 +437,7 @@ def test_gemv_linear_reload(monkeypatch):
     stale.weight_scale.data[:32, 0] = 135
     layer.weight, layer.weight_scale = stale.weight, stale.weight_scale
     with pytest.raises(RuntimeError, match="no longer fit"):
-        kernel.process_weights_after_loading(layer)
+        method.process_weights_after_loading(layer)
 
 
 @pytest.mark.parametrize(

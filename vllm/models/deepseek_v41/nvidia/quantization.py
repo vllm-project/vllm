@@ -7,7 +7,9 @@ the MXFP8 linear layers and of the MXFP4 routed experts:
 
 - On A100 (SM80) and H100 (SM90, except at TP1) the MXFP8 linear layers run
   as BF16 GEMMs on weights dequantized once at load, and decode steps of a few
-  rows on an FP8 GEMV kernel that reads a packed copy of the FP8 weights.
+  rows on an FP8 GEMV kernel that reads a packed copy of the FP8 weights. At
+  TP1 on H100 they keep vLLM's MXFP8 kernel on the FP8 weights, with the same
+  GEMV for decode steps of a few rows, except under batch invariance.
 - On A100 and H100 the Marlin MXFP4 experts pad the per-rank intermediate
   size to a multiple of 64 instead of 128, and leave their top-k reduction to
   the next mHC boundary. vLLM picks the experts' backend: Marlin on A100,
@@ -23,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -52,6 +55,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _mxfp8_backend_is_auto() -> bool:
+    """Whether no MXFP8 linear backend is requested explicitly."""
+    kernel_config = get_current_vllm_config().kernel_config
+    overrides = kernel_config.linear_backend_per_quant or {}
+    return (overrides.get("mxfp8") or kernel_config.linear_backend) == "auto"
+
+
 def mxfp8_linear_as_bf16() -> bool:
     """Whether the MXFP8 linear layers run as BF16 GEMMs: on A100 (SM80) and
     H100 (SM90), whose MXFP8 kernels (Marlin, Humming) are slower than cuBLAS
@@ -59,25 +69,25 @@ def mxfp8_linear_as_bf16() -> bool:
     (its attention reads the BF16 `wo_a` weight); SM90 only when no MXFP8
     linear backend is requested explicitly and not at TP1, where every rank
     holds whole dense layers and the BF16 copy and the GEMV's packed copy cost
-    12.4 GiB per GPU for DeepSeek-V4.1-Flash, against about 1% of decode time."""
+    12.4 GiB per GPU for DeepSeek-V4.1-Flash, against about 1% of decode time.
+    TP1 keeps vLLM's kernel on the FP8 weights, with the packed copy alone: about
+    half of that."""
     if current_platform.is_device_capability(80):
         return True
     if not current_platform.is_device_capability(90):
         return False
     if get_tensor_model_parallel_world_size() == 1:
         return False
-    kernel_config = get_current_vllm_config().kernel_config
-    overrides = kernel_config.linear_backend_per_quant or {}
-    return (overrides.get("mxfp8") or kernel_config.linear_backend) == "auto"
+    return _mxfp8_backend_is_auto()
 
 
 # Decode steps of at most this many rows run the MXFP8 linear layers on the
 # FP8 GEMV kernel (``specialized_decode/ampere/gemv.py``), which reads the FP8
-# weights, half the bytes of the BF16 copy. Larger steps and prefill keep
-# cuBLAS on the BF16 copy. On H100 at TP8 a layer's dense GEMMs take 0.65x
-# cuBLAS's time at 6 rows, 0.71x at 12 and 0.77x at 24, and about the same
-# time at 48. The packed copy costs N x K bytes per layer (about 29 MB per
-# decoder layer, 1.2 GB per GPU at TP8), taken from the KV cache.
+# weights, half the bytes of the BF16 copy. Larger steps and prefill keep the
+# layer's own kernel (cuBLAS on the BF16 copy). On H100 at TP8 a layer's dense
+# GEMMs take 0.65x cuBLAS's time at 6 rows, 0.71x at 12 and 0.77x at 24, and
+# about the same time at 48. The packed copy costs N x K bytes per layer (about
+# 29 MB per decoder layer, 1.2 GB per GPU at TP8), taken from the KV cache.
 GEMV_MAX_ROWS = 24
 
 
@@ -103,15 +113,20 @@ def pack_for_gemv(
 
 
 @functools.cache
-def bf16_mxfp8_linear_method_cls() -> type[ModelOptLinearMethod]:
-    """`ModelOptLinearMethod` with the MXFP8 weights dequantized to BF16 at
-    load (the emulation kernel) instead of the platform's MXFP8 kernel, and
-    decode steps of at most `GEMV_MAX_ROWS` rows on the FP8 GEMV kernel."""
+def gemv_mxfp8_linear_method_cls(bf16: bool) -> type[ModelOptLinearMethod]:
+    """`ModelOptLinearMethod` that runs decode steps of at most `GEMV_MAX_ROWS`
+    rows on the FP8 GEMV kernel, on a packed copy of the FP8 weights, and the
+    other steps on its kernel: with `bf16`, cuBLAS on the MXFP8 weights
+    dequantized to BF16 at load (the emulation kernel in place of the
+    platform's), otherwise the platform's MXFP8 kernel on the FP8 weights."""
     from vllm.model_executor.kernels.linear.mxfp8.emulation import (
         EmulationMxfp8LinearKernel,
     )
     from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
         Mxfp8LinearLayerConfig,
+    )
+    from vllm.model_executor.layers.linear import (
+        register_weight_loader_v2_supported_method,
     )
     from vllm.model_executor.layers.quantization.modelopt import (
         ModelOptLinearMethod,
@@ -119,22 +134,46 @@ def bf16_mxfp8_linear_method_cls() -> type[ModelOptLinearMethod]:
 
     from .specialized_decode.ampere.gemv import mxfp8_gemv
 
-    class DecodeGemvMxfp8LinearKernel(EmulationMxfp8LinearKernel):
-        """BF16 cuBLAS on the weights dequantized at load, and the FP8 GEMV
-        on a packed copy of the FP8 weights for small decode steps."""
+    class GemvMxfp8LinearMethod(ModelOptLinearMethod):
+        # As declared by `ModelOptLinearMethod`, which holds any selected
+        # kernel; mypy would otherwise type it from the assignment below.
+        kernel: Any
 
         # The packed weights, their scale factors and their own ticket
         # counters (one per 16 rows; projections of one layer run on several
         # streams at once), or None when the GEMV cannot take the weight.
         gemv: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
-        def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-            weight, scales = layer.weight, layer.weight_scale
-            assert isinstance(weight, torch.Tensor)
-            assert isinstance(scales, torch.Tensor)
+        def create_weights(self, layer, *args, **kwargs) -> None:
+            super().create_weights(layer, *args, **kwargs)
+            if bf16:
+                logger.info_once(
+                    "DeepSeek-V4.1 MXFP8 linear layers: BF16 GEMMs on weights "
+                    "dequantized at load, FP8 GEMV up to %d rows, in place of %s",
+                    GEMV_MAX_ROWS,
+                    type(self.kernel).__name__,
+                )
+                self.kernel = EmulationMxfp8LinearKernel(
+                    Mxfp8LinearLayerConfig(
+                        weight_shape=self.fmt.kernel_weight_shape(layer)
+                    )
+                )
+                return
+            logger.info_once(
+                "DeepSeek-V4.1 MXFP8 linear layers: %s, FP8 GEMV up to %d rows",
+                type(self.kernel).__name__,
+                GEMV_MAX_ROWS,
+            )
+
+        def process_weights_after_loading(self, layer) -> None:
+            # Packed from the loaded FP8 weights, before the kernel rewrites
+            # them into its own layout (BF16, or its GEMM's). A batched layer
+            # (wo_a) is not a linear the GEMV can take.
             packed = None
-            if self.config.bmm_batch_size is None:
-                packed = pack_for_gemv(weight.data, scales.data)
+            if getattr(layer, "bmm_batch_size", None) is None and not getattr(
+                layer, "is_bmm", False
+            ):
+                packed = pack_for_gemv(layer.weight.data, layer.weight_scale.data)
             super().process_weights_after_loading(layer)
             if self.gemv is not None:
                 # A reload of the weights (reload_weights, a weight update in
@@ -155,14 +194,13 @@ def bf16_mxfp8_linear_method_cls() -> type[ModelOptLinearMethod]:
                 )
                 self.gemv = (blocks, factors, counters)
 
-        def apply_weights(
-            self,
-            layer: torch.nn.Module,
-            x: torch.Tensor,
-            bias: torch.Tensor | None = None,
-        ) -> torch.Tensor:
+        def apply(self, layer, x, bias=None):
+            # Before `self.fmt.apply`, which for MXFP8 only forwards to the
+            # kernel. A pre-quantized activation (a QuantizedActivation, for
+            # kernels that take one) is not a BF16 input for the GEMV.
             if (
                 self.gemv is not None
+                and isinstance(x, torch.Tensor)
                 and bias is None
                 and x.dim() == 2
                 and 0 < x.shape[0] <= GEMV_MAX_ROWS
@@ -173,37 +211,35 @@ def bf16_mxfp8_linear_method_cls() -> type[ModelOptLinearMethod]:
             ):
                 blocks, factors, counters = self.gemv
                 return mxfp8_gemv(x, blocks, factors, counters=counters)
-            return super().apply_weights(layer, x, bias)
+            return super().apply(layer, x, bias)
 
-    class BF16Mxfp8LinearMethod(ModelOptLinearMethod):
-        """The MXFP8 linear layer as a BF16 GEMM on dequantized weights."""
-
-        # As declared by `ModelOptLinearMethod`, which holds any selected
-        # kernel; mypy would otherwise type it from the assignment below.
-        kernel: Any
-
-        def create_weights(self, layer, *args, **kwargs) -> None:
-            super().create_weights(layer, *args, **kwargs)
-            logger.info_once(
-                "DeepSeek-V4.1 MXFP8 linear layers: BF16 GEMMs on weights "
-                "dequantized at load, FP8 GEMV up to %d rows, in place of %s",
-                GEMV_MAX_ROWS,
-                type(self.kernel).__name__,
-            )
-            self.kernel = DecodeGemvMxfp8LinearKernel(
-                Mxfp8LinearLayerConfig(
-                    weight_shape=self.fmt.kernel_weight_shape(layer),
-                    bmm_batch_size=getattr(layer, "bmm_batch_size", None),
-                )
-            )
-
-    return BF16Mxfp8LinearMethod
+    GemvMxfp8LinearMethod.__name__ = GemvMxfp8LinearMethod.__qualname__ = (
+        "BF16GemvMxfp8LinearMethod" if bf16 else "GemvMxfp8LinearMethod"
+    )
+    # The weight loader is picked by class name: the stock variant keeps the
+    # v2 loader of `ModelOptLinearMethod`, the BF16 one the v1 loader it has
+    # always had.
+    if not bf16:
+        register_weight_loader_v2_supported_method(GemvMxfp8LinearMethod)
+    return GemvMxfp8LinearMethod
 
 
 def mxfp8_linear_method_cls() -> type[ModelOptLinearMethod]:
-    """The method of the MXFP8 linear layers (`mxfp8_linear_as_bf16`)."""
+    """The method of the MXFP8 linear layers: BF16 GEMMs and the GEMV
+    (`mxfp8_linear_as_bf16`); at TP1 on SM90, with no backend requested
+    explicitly and no batch invariance, vLLM's kernel and the GEMV; otherwise
+    the stock method."""
     if mxfp8_linear_as_bf16():
-        return bf16_mxfp8_linear_method_cls()
+        return gemv_mxfp8_linear_method_cls(True)
+    # SM90 with the auto backend that `mxfp8_linear_as_bf16` declined is TP1.
+    # Under batch invariance TP1 keeps the stock kernel alone: with the GEMV a
+    # row's result would depend on the row count of the step.
+    if (
+        current_platform.is_device_capability(90)
+        and _mxfp8_backend_is_auto()
+        and not envs.VLLM_BATCH_INVARIANT
+    ):
+        return gemv_mxfp8_linear_method_cls(False)
     from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
 
     return ModelOptLinearMethod
