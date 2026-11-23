@@ -72,6 +72,7 @@ use crate::model_names::ServedModelNames;
 use crate::render::RenderState;
 use crate::state::AppState;
 
+mod dynamo;
 mod responses;
 
 fn request_output(
@@ -1014,7 +1015,7 @@ async fn assert_route_not_supported(app: &axum::Router, method: &str, uri: &str,
         error["error"]["message"],
         format!(
             "{method} {route} is not supported by the Rust frontend yet. \
-             Set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend."
+             Disable VLLM_USE_RUST_FRONTEND and VLLM_USE_DYNAMO_RUST_PARSER to use the Python frontend."
         ),
     );
 }

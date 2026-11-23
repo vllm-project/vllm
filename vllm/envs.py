@@ -180,6 +180,7 @@ if TYPE_CHECKING:
     VLLM_USE_RUST_FRONTEND: bool = False
     VLLM_USE_RUST_BENCH: bool = False
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
+    VLLM_USE_DYNAMO_RUST_PARSER: bool = False
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
@@ -596,12 +597,13 @@ logger = logging.getLogger(__name__)
 def _resolve_rust_cli_path() -> str | None:
     """Resolve the vllm-rs binary path.
 
-    Returns None unless VLLM_USE_RUST_FRONTEND or VLLM_USE_RUST_BENCH is enabled.
+    Returns None unless the Rust frontend or Rust benchmarking is enabled.
     When enabled, resolves VLLM_RUST_FRONTEND_PATH ("auto" by default)
     to the actual binary path.
     """
-    use_rust = bool(int(os.environ.get("VLLM_USE_RUST_FRONTEND", "0"))) or bool(
-        int(os.environ.get("VLLM_USE_RUST_BENCH", "0"))
+    use_rust = (
+        environment_variables["VLLM_USE_RUST_FRONTEND"]()
+        or environment_variables["VLLM_USE_RUST_BENCH"]()
     )
     raw = os.environ.get("VLLM_RUST_FRONTEND_PATH", "auto")
 
@@ -609,7 +611,8 @@ def _resolve_rust_cli_path() -> str | None:
         if os.environ.get("VLLM_RUST_FRONTEND_PATH") is not None:
             logger.warning(
                 "VLLM_RUST_FRONTEND_PATH is set without enabling "
-                "VLLM_USE_RUST_FRONTEND or VLLM_USE_RUST_BENCH. "
+                "VLLM_USE_RUST_FRONTEND, VLLM_USE_DYNAMO_RUST_PARSER, "
+                "or VLLM_USE_RUST_BENCH. "
                 "Set one of them to 1 to use the vllm-rs binary."
             )
         return None
@@ -1572,13 +1575,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # process(es).
     "VLLM_USE_RUST_FRONTEND": lambda: bool(
         int(os.getenv("VLLM_USE_RUST_FRONTEND", "0"))
+        or environment_variables["VLLM_USE_DYNAMO_RUST_PARSER"]()
     ),
     # If set, use the packaged Rust client for `vllm bench serve`.
     "VLLM_USE_RUST_BENCH": lambda: bool(int(os.getenv("VLLM_USE_RUST_BENCH", "0"))),
     # Path to the vllm-rs binary. Defaults to "auto" which discovers the
     # binary installed with the vllm package. Used when VLLM_USE_RUST_FRONTEND=1
-    # or VLLM_USE_RUST_BENCH=1.
+    # or when Dynamo parsing or Rust benchmarking is enabled.
     "VLLM_RUST_FRONTEND_PATH": lambda: _resolve_rust_cli_path(),
+    # Use the Rust frontend with Dynamo v2 unified parsers.
+    "VLLM_USE_DYNAMO_RUST_PARSER": lambda: bool(
+        int(os.getenv("VLLM_USE_DYNAMO_RUST_PARSER", "0"))
+    ),
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`, and default `--enable-scale-out` to on

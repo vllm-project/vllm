@@ -40,17 +40,18 @@ impl ContinuousUsage {
     }
 
     /// Add the tokens attributed to one reasoning delta to the running count.
-    pub(crate) fn add_reasoning_tokens(&mut self, token_count: usize) {
-        if let Some(reasoning_tokens) = &mut self.reasoning_tokens {
-            *reasoning_tokens = reasoning_tokens.saturating_add(token_count);
-        }
+    pub(crate) fn add_reasoning_tokens(&mut self, token_count: Option<usize>) {
+        self.reasoning_tokens = self
+            .reasoning_tokens
+            .zip(token_count)
+            .map(|(count, added)| count.saturating_add(added));
     }
 
     /// Converge the running reasoning count onto the authoritative terminal
     /// value reported at stream end.
-    pub(crate) fn set_reasoning_tokens(&mut self, reasoning_tokens: usize) {
-        if let Some(count) = &mut self.reasoning_tokens {
-            *count = reasoning_tokens;
+    pub(crate) fn set_reasoning_tokens(&mut self, reasoning_tokens: Option<usize>) {
+        if self.reasoning_tokens.is_some() {
+            self.reasoning_tokens = reasoning_tokens;
         }
     }
 

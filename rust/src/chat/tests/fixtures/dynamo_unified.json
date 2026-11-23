@@ -1,0 +1,547 @@
+{
+  "source": "https://github.com/ai-dynamo/frontend-crates/tree/ae3bd801a07075aa2de712939f77c61b8dae4b3b/conformance/fixtures-unified-v2",
+  "scenario": "content_then_reason_then_tool",
+  "cases": [
+    {
+      "family": "deepseek_v4",
+      "model": "deepseek/DeepSeek-V4",
+      "input": "Sure, one sec. <think>checking the forecast</think><｜DSML｜tool_calls><｜DSML｜invoke name=\"get_weather\"><｜DSML｜parameter name=\"city\" string=\"true\">Paris</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "<｜DSML｜tool_calls><｜DSML｜invoke name=\"get_weather\"><｜DSML｜parameter name=\"city\" string=\"true\">Paris</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"
+    },
+    {
+      "family": "deepseek_v41",
+      "model": "deepseek/DeepSeek-V4.1",
+      "input": "Sure, one sec. <think>checking the forecast</think><｜DSML｜ calls><｜DSML｜ invoke name=\"get_weather\"><｜DSML｜ parameter name=\"city\" string=\"true\">Paris</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "<｜DSML｜ calls><｜DSML｜ invoke name=\"get_weather\"><｜DSML｜ parameter name=\"city\" string=\"true\">Paris</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>"
+    },
+    {
+      "family": "gemma4",
+      "model": "google/gemma-4-27b-it",
+      "input": "Sure, one sec. <|channel>thought\nchecking the forecast<channel|><|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>"
+    },
+    {
+      "family": "glm47",
+      "model": "zai/GLM-4.7",
+      "input": "Sure, one sec. <think>checking the forecast</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>"
+    },
+    {
+      "family": "qwen3",
+      "model": "Qwen/Qwen3-Coder",
+      "input": "Sure, one sec. <think>checking the forecast</think><tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>"
+    },
+    {
+      "family": "nemotron_v3",
+      "model": "nvidia/Nemotron-3-Nano",
+      "input": "</think>Sure, one sec. <think>checking the forecast</think><tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "</think><tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>"
+    },
+    {
+      "family": "minimax_m3",
+      "model": "MiniMax/MiniMax-M3",
+      "input": "Sure, one sec. <mm:think>checking the forecast</mm:think>]<]minimax[>[<tool_call>]<]minimax[>[<invoke name=\"get_weather\">]<]minimax[>[<city>Paris]<]minimax[>[</city>]<]minimax[>[</invoke>]<]minimax[>[</tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "]<]minimax[>[<tool_call>]<]minimax[>[<invoke name=\"get_weather\">]<]minimax[>[<city>Paris]<]minimax[>[</city>]<]minimax[>[</invoke>]<]minimax[>[</tool_call>"
+    },
+    {
+      "family": "muse_glimmer",
+      "model": "meta/Muse-Glimmer",
+      "input": "<|start|>assistant to=user<|message|>Sure, one sec. <|eom|><|start|>assistant to=self<|message|>checking the forecast<|eom|><|start|>assistant to=get_weather<|message|><atem:function_calls>\n<atem:invoke name=\"get_weather\">\n<atem:parameter name=\"city\">Paris</atem:parameter>\n</atem:invoke>\n</atem:function_calls><|eom|>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "<|start|>assistant to=get_weather<|message|><atem:function_calls>\n<atem:invoke name=\"get_weather\">\n<atem:parameter name=\"city\">Paris</atem:parameter>\n</atem:invoke>\n</atem:function_calls><|eom|>"
+    },
+    {
+      "family": "muse_spark",
+      "model": "meta/Muse-Spark-open",
+      "input": "<|start|>assistant to=user<|message|>Sure, one sec. <|eom|><|start|>assistant to=self<|message|>checking the forecast<|eom|><|start|>assistant to=get_weather<|message|><atem:function_calls>\n<atem:invoke name=\"get_weather\">\n<atem:parameter name=\"city\">Paris</atem:parameter>\n</atem:invoke>\n</atem:function_calls><|eom|>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "<|start|>assistant to=get_weather<|message|><atem:function_calls>\n<atem:invoke name=\"get_weather\">\n<atem:parameter name=\"city\">Paris</atem:parameter>\n</atem:invoke>\n</atem:function_calls><|eom|>"
+    },
+    {
+      "family": "beam",
+      "model": "beam/Beam",
+      "input": "<|start|>assistant<|channel|>final<|message|>Sure, one sec. <|return|><|start|>assistant<|channel|>analysis<|message|>checking the forecast<|end|><|start|>assistant to=get_weather<|channel|>analysis <|constrain|>xml<|message|><rfl:parameter name=\"city\">\nParis\n</rfl:parameter><|call|>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "<|start|>assistant to=get_weather<|channel|>analysis <|constrain|>xml<|message|><rfl:parameter name=\"city\">\nParis\n</rfl:parameter><|call|>"
+    },
+    {
+      "family": "kimi_k2",
+      "model": "moonshot/Kimi-K2",
+      "input": "Sure, one sec. <think>checking the forecast</think><|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"city\": \"Paris\"}<|tool_call_end|><|tool_calls_section_end|>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"city\": \"Paris\"}<|tool_call_end|><|tool_calls_section_end|>"
+    },
+    {
+      "family": "kimi_k3",
+      "model": "moonshot/Kimi-K3",
+      "input": "<|open|>response<|sep|>Sure, one sec. <|close|>response<|sep|><|open|>think<|sep|>checking the forecast<|close|>think<|sep|><|open|>tools<|sep|><|open|>call tool=\"get_weather\" index=\"1\"<|sep|><|open|>argument key=\"city\" type=\"string\"<|sep|>Paris<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "<|open|>tools<|sep|><|open|>call tool=\"get_weather\" index=\"1\"<|sep|><|open|>argument key=\"city\" type=\"string\"<|sep|>Paris<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|>"
+    },
+    {
+      "family": "gpt_oss",
+      "model": "openai/gpt-oss",
+      "input": "<|channel|>final<|message|>Sure, one sec. <|return|><|channel|>analysis<|message|>checking the forecast<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\": \"Paris\"}<|call|>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\": \"Paris\"}<|call|>"
+    },
+    {
+      "family": "hermes",
+      "model": "Qwen/Qwen3-0.6B",
+      "input": "Sure, one sec. <think>checking the forecast</think><tool_call>{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}</tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "<tool_call>{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}</tool_call>"
+    },
+    {
+      "family": "mistral_4",
+      "model": "mistralai/Mistral-4",
+      "input": "Sure, one sec. [THINK]checking the forecast[/THINK][TOOL_CALLS]get_weather[ARGS]{\"city\": \"Paris\"}",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "text",
+          "text": "Sure, one sec. "
+        },
+        {
+          "kind": "reasoning",
+          "text": "checking the forecast"
+        },
+        {
+          "kind": "tool_call",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris"
+          }
+        }
+      ],
+      "call_only_input": "[TOOL_CALLS]get_weather[ARGS]{\"city\": \"Paris\"}"
+    }
+  ],
+  "additional_source": "https://github.com/ai-dynamo/frontend-crates/tree/c3eed65edd38bc1204d7e65c254e9d88f662e1a4/conformance/fixtures-unified-v2"
+}

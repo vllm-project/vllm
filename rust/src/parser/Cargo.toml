@@ -9,6 +9,8 @@ test-util = []
 
 [dependencies]
 auto_impl.workspace = true
+anyhow.workspace = true
+dynamo-parsers-v2.workspace = true
 easy-ext.workspace = true
 educe.workspace = true
 pcre2.workspace = true

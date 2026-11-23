@@ -130,20 +130,25 @@ impl [AssistantContentBlock] {
 /// Extends the engine-level [`TokenUsage`] with reasoning attribution measured
 /// by the chat output pipeline. [`TokenUsage`] itself stays engine-level and
 /// is not touched by parsing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChatTokenUsage {
     /// Engine-level token usage.
     pub engine: TokenUsage,
-    /// Number of generated tokens attributed to reasoning; 0 when the
-    /// configured parser has no reasoning channel.
-    pub reasoning_tokens: usize,
+    /// Generated reasoning tokens, or None when the parser cannot attribute them.
+    pub reasoning_tokens: Option<usize>,
+}
+
+impl Default for ChatTokenUsage {
+    fn default() -> Self {
+        TokenUsage::default().into()
+    }
 }
 
 impl From<TokenUsage> for ChatTokenUsage {
     fn from(engine: TokenUsage) -> Self {
         Self {
             engine,
-            reasoning_tokens: 0,
+            reasoning_tokens: Some(0),
         }
     }
 }

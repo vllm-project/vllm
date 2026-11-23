@@ -292,7 +292,7 @@ async fn collect_chat_completion(
     let usage = Usage::from_token_usage(
         usage.engine,
         enable_prompt_tokens_details,
-        count_reasoning_tokens.then_some(usage.reasoning_tokens),
+        count_reasoning_tokens.then_some(usage.reasoning_tokens).flatten(),
     );
 
     if enable_log_requests {
@@ -468,9 +468,7 @@ async fn chat_completion_chunk_stream(
                 // The count is per-delta and follows the decoder clock; it is
                 // fed even when the reasoning delta itself is hidden from the
                 // client (`include_reasoning=false`).
-                if matches!(kind, AssistantBlockKind::Reasoning)
-                    && let Some(token_count) = token_count
-                {
+                if matches!(kind, AssistantBlockKind::Reasoning) {
                     continuous_usage.add_reasoning_tokens(token_count);
                 }
                 let include_delta =
@@ -658,7 +656,9 @@ async fn chat_completion_chunk_stream(
                         Usage::from_token_usage(
                             final_usage.engine,
                             enable_prompt_tokens_details,
-                            count_reasoning_tokens.then_some(final_usage.reasoning_tokens),
+                            count_reasoning_tokens
+                                .then_some(final_usage.reasoning_tokens)
+                                .flatten(),
                         ),
                         metrics,
                         system_fingerprint,
@@ -1952,7 +1952,7 @@ mod tests {
                         output_token_count: 3,
                         prompt_cache_usage: Default::default(),
                     },
-                    reasoning_tokens: 2,
+                    reasoning_tokens: Some(2),
                 },
                 timestamps: Default::default(),
                 spec_decode_metrics: None,
@@ -2030,7 +2030,7 @@ mod tests {
                         output_token_count: 2,
                         prompt_cache_usage: Default::default(),
                     },
-                    reasoning_tokens: 2,
+                    reasoning_tokens: Some(2),
                 },
                 timestamps: Default::default(),
                 spec_decode_metrics: None,

@@ -947,7 +947,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
             assert_eq!(message.text(), "answer");
             assert_eq!(finish_reason, FinishReason::Length);
             // 7 tokens for "reason " plus 4 for "more"; markers are excluded.
-            assert_eq!(usage.reasoning_tokens, 11);
+            assert_eq!(usage.reasoning_tokens, Some(11));
         }
         other => panic!("unexpected final event: {other:?}"),
     }
@@ -1016,7 +1016,7 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
         token_ids("<think>inner</think>outer").len()
     );
     // 5 tokens for "inner"; markers are excluded.
-    assert_eq!(message.usage.reasoning_tokens, 5);
+    assert_eq!(message.usage.reasoning_tokens, Some(5));
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -1096,7 +1096,7 @@ async fn chat_explicitly_disables_reasoning_parser() {
     assert_eq!(message.message.reasoning(), None);
     assert_eq!(message.message.text(), "<think>reason more</think>answer");
     assert_eq!(message.finish_reason, FinishReason::Length);
-    assert_eq!(message.usage.reasoning_tokens, 0);
+    assert_eq!(message.usage.reasoning_tokens, Some(0));
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();

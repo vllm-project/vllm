@@ -3,12 +3,12 @@
 
 //! Unified parser registration and selection boundary for `vllm-chat`.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::unified::{
-    BeamUnifiedParser, Gemma4UnifiedParser, HfTemplateError, HfUnifiedParser, HyV3UnifiedParser,
-    HyV4UnifiedParser, InklingUnifiedParser, KimiK3UnifiedParser, MuseUnifiedParser,
-    ResponseTemplate, UnifiedParser,
+    BeamUnifiedParser, DynamoUnifiedParser, Gemma4UnifiedParser, HfTemplateError, HfUnifiedParser,
+    HyV3UnifiedParser, HyV4UnifiedParser, InklingUnifiedParser, KimiK3UnifiedParser,
+    MuseUnifiedParser, REGISTERED_UNIFIED_FAMILIES, ResponseTemplate, UnifiedParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -36,8 +36,15 @@ pub mod names {
 }
 
 /// Constructor signature for one registered unified parser implementation.
-type UnifiedParserCreator =
-    fn(&[ChatTool], DynTokenizer) -> vllm_parser::unified::Result<Box<dyn UnifiedParser>>;
+#[derive(Clone)]
+pub struct UnifiedParserCreator {
+    create: Arc<UnifiedParserConstructor>,
+    dynamo_family: Option<&'static str>,
+}
+
+type UnifiedParserConstructor = dyn Fn(&[ChatTool], DynTokenizer) -> vllm_parser::unified::Result<Box<dyn UnifiedParser>>
+    + Send
+    + Sync;
 
 /// Registry and model matcher for unified parsers.
 pub type UnifiedParserFactory = ParserFactory<UnifiedParserCreator>;
@@ -53,6 +60,10 @@ impl UnifiedParserFactory {
     /// Create the default registry with built-in parser names and model
     /// mappings.
     pub fn new() -> Self {
+        Self::new_with_options(use_dynamo_rust_parser())
+    }
+
+    pub(crate) fn new_with_options(use_dynamo: bool) -> Self {
         let mut factory = Self::default();
 
         factory.register_parser::<Gemma4UnifiedParser>(names::GEMMA4);
@@ -65,6 +76,40 @@ impl UnifiedParserFactory {
         // Opt-in only: no model patterns map to it.
         factory.register_parser::<HfUnifiedParser>(names::HF);
         factory.register_parser::<BeamUnifiedParser>(names::BEAM);
+
+        if use_dynamo {
+            for &family in REGISTERED_UNIFIED_FAMILIES {
+                factory.register_dynamo(family, family);
+            }
+            for (alias, family) in [
+                ("qwen3_xml", "qwen3_coder"),
+                (names::MUSE, "muse_spark"),
+                (names::MUSE_SPARK, "muse_spark"),
+            ] {
+                factory.register_dynamo(alias, family);
+            }
+            factory
+                .register_pattern("deepseek-v4.1", "deepseek_v41")
+                .register_pattern("deepseek-v4", "deepseek_v4")
+                .register_pattern("deepseek_v4", "deepseek_v4")
+                .register_pattern("qwen3-coder", "qwen3_coder")
+                .register_pattern("qwen3.5", "qwen3_coder")
+                .register_pattern("qwen3-0.6b", "hermes")
+                .register_pattern("hermes", "hermes")
+                .register_pattern("mistral-4", "mistral_4")
+                .register_pattern("nemotron-3", "nemotron_v3")
+                .register_pattern("nemotron-v3", "nemotron_v3")
+                .register_pattern("glm-5", "glm47")
+                .register_pattern("glm-4.7", "glm47")
+                .register_pattern("kimi-k2", "kimi_k2")
+                .register_pattern("minimax-m3", "minimax_m3")
+                .register_pattern("mm-m3", "minimax_m3")
+                .register_pattern("muse-glimmer", "muse_glimmer")
+                .register_pattern("muse-spark", "muse_spark")
+                .register_pattern("gpt-oss", "gpt_oss")
+                .register_pattern("gpt_oss", "gpt_oss")
+                .register_pattern("beam", "beam");
+        }
 
         factory
             .register_pattern("gemma-4", names::GEMMA4)
@@ -84,7 +129,39 @@ impl UnifiedParserFactory {
     where
         T: UnifiedParser + 'static,
     {
-        self.register_creator(name, T::create)
+        self.register_creator(
+            name,
+            UnifiedParserCreator {
+                create: Arc::new(T::create),
+                dynamo_family: None,
+            },
+        )
+    }
+
+    fn register_dynamo(&mut self, name: &str, family: &'static str) -> &mut Self {
+        self.register_creator(
+            name,
+            UnifiedParserCreator {
+                create: Arc::new(move |tools, tokenizer| {
+                    Ok(Box::new(DynamoUnifiedParser::new(
+                        family, tools, tokenizer,
+                    )?))
+                }),
+                dynamo_family: Some(family),
+            },
+        )
+    }
+
+    pub fn dynamo_family(&self, name: &str) -> Option<&'static str> {
+        self.creator(name).and_then(|creator| creator.dynamo_family)
+    }
+
+    pub fn equivalent_names(&self, left: Option<&str>, right: Option<&str>) -> bool {
+        let canonical = |name: Option<&str>| {
+            name.and_then(|name| self.dynamo_family(name))
+                .and_then(vllm_parser::unified::canonical_unified_family)
+        };
+        left == right || (canonical(left).is_some() && canonical(left) == canonical(right))
     }
 
     /// Construct a parser from an exact name.
@@ -100,12 +177,17 @@ impl UnifiedParserFactory {
             available_names: self.list(),
         })?;
 
-        creator(tools, tokenizer).map_err(|error| crate::Error::ParserInitialization {
+        (creator.create)(tools, tokenizer).map_err(|error| crate::Error::ParserInitialization {
             kind: "unified",
             name: name.to_string(),
             error: error.into(),
         })
     }
+}
+
+pub(crate) fn use_dynamo_rust_parser() -> bool {
+    std::env::var("VLLM_USE_DYNAMO_RUST_PARSER")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "True" | "TRUE"))
 }
 
 #[cfg(test)]

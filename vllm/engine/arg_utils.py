@@ -2215,7 +2215,7 @@ class EngineArgs:
         only when the resolved value is still empty, so explicit CLI flags
         take precedence.
         """
-        if self.reasoning_parser:
+        if self.reasoning_parser and not envs.VLLM_USE_DYNAMO_RUST_PARSER:
             self.structured_outputs_config.reasoning_parser = self.reasoning_parser
 
         if self.reasoning_parser_plugin:
@@ -3136,7 +3136,7 @@ class EngineArgs:
             self.enable_prefix_caching = False
 
     def _set_default_reasoning_config_args(self):
-        if not self.reasoning_parser:
+        if not self.reasoning_parser or envs.VLLM_USE_DYNAMO_RUST_PARSER:
             return
         if self.reasoning_config is None:
             self.reasoning_config = ReasoningConfig()

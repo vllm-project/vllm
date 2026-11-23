@@ -718,7 +718,8 @@ pub struct InputTokensDetails {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputTokensDetails {
     /// Reasoning tokens reported by the shared chat output processor.
-    pub reasoning_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<usize>,
     pub tool_output_tokens: usize,
     /// vLLM extension: per-turn token counts, populated only by multi-turn
     /// builtin-tool execution. Always empty in this single-turn frontend.
@@ -969,7 +970,7 @@ mod tests {
                 },
                 output_tokens: 2,
                 output_tokens_details: OutputTokensDetails {
-                    reasoning_tokens: 0,
+                    reasoning_tokens: Some(0),
                     tool_output_tokens: 0,
                     output_tokens_per_turn: vec![],
                     tool_output_tokens_per_turn: vec![],
