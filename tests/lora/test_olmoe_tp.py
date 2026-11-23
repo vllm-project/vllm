@@ -110,8 +110,8 @@ def generate_and_test(
         )
 
 
-def test_olmoe_lora_mixed(olmoe_lora_files):
-    llm = vllm.LLM(
+def test_olmoe_lora_mixed(vllm_runner, olmoe_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
@@ -119,13 +119,12 @@ def test_olmoe_lora_mixed(olmoe_lora_files):
         enforce_eager=True,
         hf_overrides={"head_dtype": "float32"},
         enable_chunked_prefill=True,
-    )
-
-    generate_and_test(llm, olmoe_lora_files, lora_id=[1, None, 3, None])
+    ) as runner:
+        generate_and_test(runner.llm, olmoe_lora_files, lora_id=[1, None, 3, None])
 
 
 def test_olmoe_lora_mixed_random(
-    olmoe_lora_files, tmp_path, maybe_enable_lora_dual_stream
+    vllm_runner, olmoe_lora_files, tmp_path, maybe_enable_lora_dual_stream
 ):
     # Create a dummy LoRA with random weights based on the real one
     random_lora_path = tmp_path / "random_lora"
@@ -136,34 +135,35 @@ def test_olmoe_lora_mixed_random(
     random_weights = {k: torch.randn_like(v) for k, v in weights.items()}
     save_file(random_weights, str(weights_path))
 
-    llm = vllm.LLM(
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
         enforce_eager=True,
         enable_chunked_prefill=True,
-    )
+    ) as runner:
+        prompts = [
+            PROMPT_TEMPLATE.format(context="How many candidates are there?"),
+            PROMPT_TEMPLATE.format(context="Count the number of candidates."),
+        ]
 
-    prompts = [
-        PROMPT_TEMPLATE.format(context="How many candidates are there?"),
-        PROMPT_TEMPLATE.format(context="Count the number of candidates."),
-    ]
+        lora_requests = [
+            LoRARequest("real", 1, olmoe_lora_files),
+            LoRARequest("random", 2, str(random_lora_path)),
+        ]
 
-    lora_requests = [
-        LoRARequest("real", 1, olmoe_lora_files),
-        LoRARequest("random", 2, str(random_lora_path)),
-    ]
-
-    sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64)
-    outputs = llm.generate(prompts, sampling_params, lora_request=lora_requests)
-    assert outputs[0].outputs[0].text.strip().startswith(EXPECTED_LORA_OUTPUT[0])
+        sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64)
+        outputs = runner.llm.generate(
+            prompts, sampling_params, lora_request=lora_requests
+        )
+        assert outputs[0].outputs[0].text.strip().startswith(EXPECTED_LORA_OUTPUT[0])
 
 
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @multi_gpu_test(num_gpus=2)
-def test_olmoe_lora_tp2(olmoe_lora_files, fully_sharded_loras):
-    llm = vllm.LLM(
+def test_olmoe_lora_tp2(vllm_runner, olmoe_lora_files, fully_sharded_loras):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
@@ -172,10 +172,9 @@ def test_olmoe_lora_tp2(olmoe_lora_files, fully_sharded_loras):
         enable_chunked_prefill=True,
         tensor_parallel_size=2,
         fully_sharded_loras=fully_sharded_loras,
-    )
-
-    generate_and_test(llm, olmoe_lora_files, lora_id=1)
-    generate_and_test(llm, olmoe_lora_files, lora_id=2)
+    ) as runner:
+        generate_and_test(runner.llm, olmoe_lora_files, lora_id=1)
+        generate_and_test(runner.llm, olmoe_lora_files, lora_id=2)
 
 
 async def _generate_on_rank(
