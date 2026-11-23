@@ -13,12 +13,14 @@ meta:
     - "Qwen/Qwen3-Next-80B-A3B-Instruct"
   default_variant:
     mi355x: mxfp4
+    mi325x: bf16
   hardware:
     h200: verified
     h100: verified
     gb200: verified
     gb300: verified
     mi355x: verified
+    mi325x: verified
     rtx_pro_6000_4x: verified
     dgx_station_gb300: verified
 
@@ -139,6 +141,12 @@ variants:
     precision: bf16
     vram_minimum_gb: 423
     description: "Official BF16 checkpoint"
+    hardware_overrides:
+      mi325x:
+        docker_image: "vllm/vllm-openai-rocm:nightly"
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
   mxfp4:
     model_id: "amd/Qwen3.8-Flash-Next-Quark-MXFP4"
     precision: mxfp4
@@ -367,6 +375,13 @@ guide: |
   | TEP8 | 0.965 | 665 / 1831 |
   | TP2 | 0.967 | 801 / 1384 |
   | TP1 | 0.967 | 751 / 1282 |
+
+  ### BF16 on MI325X
+
+  The BF16 variant sets `VLLM_ROCM_USE_AITER=1` and
+  `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`. With AITER on, Gated DeltaNet
+  prefill uses the AITER FlyDSL kernel (`requested=auto`), and the shared expert
+  runs inside the routed-expert MoE kernel.
 
   ### FP8 configuration on a 4x MI355X GPU
   ```bash

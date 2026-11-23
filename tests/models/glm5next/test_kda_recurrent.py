@@ -545,6 +545,8 @@ def test_prefill_checkpoint_resumes_suffix(
     layer.kda_safe_gate = True
     layer.kda_lower_bound = -5.0
     layer.kda_prefill_backend = backend
+    layer.kda_decode_backend = "triton"
+    layer._use_aiter_decode = False
     layer._conv_state_dim_first = dim_first
     layer.conv1d = SimpleNamespace(
         weight=torch.randn(width, 1, 4, device=device) * 0.1, bias=None
@@ -643,7 +645,7 @@ def test_prefill_checkpoint_resumes_suffix(
         out = torch.empty(
             1, qkv.shape[0], heads, D, device=device, dtype=torch.bfloat16
         )
-        layer._forward(qkv, g, b, out)
+        layer._forward(qkv, g, b, out, g[0])
         return out[:, spec_tokens:]
 
     checkpoint = MambaPrefillCheckpointMetadata(
@@ -718,6 +720,8 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, conv):
     layer.local_projection_size = heads * D
     layer.kda_safe_gate = True
     layer.kda_lower_bound = LOWER_BOUND
+    layer.kda_decode_backend = "triton"
+    layer._use_aiter_decode = False
     layer._conv_state_dim_first = False
     layer._triton_checkpoint_spec = None
     layer._checkpoint_exporter = None
@@ -811,7 +815,7 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, conv):
         out = torch.full(
             (1, num_tokens, heads, D), float("nan"), device=device, dtype=torch.bfloat16
         )
-        layer._forward(raw_qkv, gate, beta, out)
+        layer._forward(raw_qkv, gate, beta, out, gate[0])
         return out, recurrent
 
     triton_out, triton_recurrent = run("triton")
