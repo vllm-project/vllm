@@ -4,8 +4,9 @@
 
 Launches one weight cache daemon per GPU; each daemon holds the
 post-quantized, TP-sharded weights of its rank in GPU memory and serves
-CUDA IPC handles to vLLM engines over a Unix domain socket, so restarting
-engines can map the weights via zero-copy IPC instead of reloading from disk:
+GPU IPC handles to vLLM engines over a Unix domain socket, so restarting
+engines can map the weights via zero-copy IPC instead of reloading from disk.
+The VMM backend uses CUDA/HIP VMM allocations on Linux:
 
     vllm preload --model /path/to/model --tensor-parallel-size 4
 
@@ -181,7 +182,19 @@ class PreloadSubcommand(CLISubcommand):
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> None:
+        from vllm.model_executor.model_loader.weight_cache.ipc_backends import (
+            IPC_BACKENDS,
+        )
+
         EngineArgs.add_cli_args(parser)
+        parser.add_argument(
+            "--weight-cache-backend",
+            choices=IPC_BACKENDS,
+            default="torch_ipc",
+            help="Local weight-sharing backend (default: torch_ipc). "
+            "vmm_ipc uses CUDA/HIP VMM allocations and POSIX file descriptors "
+            "on Linux.",
+        )
         parser.add_argument(
             "--weight-cache-socket-dir",
             type=str,
@@ -474,6 +487,7 @@ class PreloadSubcommand(CLISubcommand):
                             if mirror_devices is not None
                             else None,
                             warmup_cache_stores,
+                            args.weight_cache_backend,
                         ),
                         name=(
                             f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
@@ -584,7 +598,7 @@ class PreloadSubcommand(CLISubcommand):
             help="Launch weight cache daemons (one per GPU) for fast engine restarts.",
             description="Launch weight cache daemons (one per GPU) that "
             "keep post-quantized weights in GPU memory and serve them to "
-            "engines over CUDA IPC.",
+            "engines over GPU IPC.",
             usage="vllm preload --model <model> [options]",
         )
         self.add_cli_args(preload_parser)

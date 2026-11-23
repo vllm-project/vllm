@@ -595,6 +595,15 @@ impl EngineCoreClient {
         (self.engines.iter()).all(|engine| engine.ready_response.supports_prompt_logprobs)
     }
 
+    /// The tightest engine-reported limit on the encoder cache tokens a
+    /// request's multimodal items may need together, if any engine has one.
+    pub fn max_mm_embeds_per_request(&self) -> Option<u64> {
+        self.engines
+            .iter()
+            .filter_map(|engine| engine.ready_response.max_mm_embeds_per_request)
+            .min()
+    }
+
     /// Return the engine-reported effective model dtype.
     pub fn model_dtype(&self) -> ModelDtype {
         self.engines
