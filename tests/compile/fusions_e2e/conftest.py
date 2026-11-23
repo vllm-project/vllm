@@ -48,7 +48,6 @@ def run_model(
     with vllm_runner(
         model,
         compilation_config=compilation_config,
-        trust_remote_code=False,
         enable_chunked_prefill=None,
         block_size=None,
         **model_kwargs,

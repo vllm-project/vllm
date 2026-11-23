@@ -104,7 +104,6 @@ def run_bagel(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         max_model_len=8192,
         max_num_seqs=2,
         limit_mm_per_prompt={modality: 1},
@@ -1402,43 +1401,6 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# OpenPangu
-def run_openpangu_vl(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "FreedomIntelligence/openPangu-VL-7B"
-
-    mm_limit = {"image": 1, "video": 1} if modality == "image+video" else {modality: 1}
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=4096,
-        max_num_seqs=4,
-        trust_remote_code=True,
-        enforce_eager=True,
-        limit_mm_per_prompt=mm_limit,
-    )
-
-    image_placeholder = "[unused19]"
-    video_placeholder = "[unused32]"
-
-    if modality == "image":
-        placeholder = image_placeholder
-    elif modality == "video":
-        placeholder = video_placeholder
-    elif modality == "image+video":
-        placeholder = image_placeholder + video_placeholder
-
-    prompts = [
-        (
-            f"<s>[unused9]系统：[unused10][unused9]用户：[unused18]{placeholder}[unused20]{question}[unused10][unused9]助手："
-        )
-        for question in questions
-    ]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # OpenVLA
 def run_openvla(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1447,7 +1409,7 @@ def run_openvla(questions: list[str], modality: str) -> ModelRequestData:
     chat_template = get_chat_template_fallback_path("openvla", model_name)
     assert chat_template is not None
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     messages = [{"role": "user", "content": "pick up the red block"}]
     prompt = tokenizer.apply_chat_template(
         messages,
@@ -1457,7 +1419,6 @@ def run_openvla(questions: list[str], modality: str) -> ModelRequestData:
     prompts = [prompt for _ in questions]
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         max_model_len=512,
         limit_mm_per_prompt={modality: 1},
     )
@@ -1479,12 +1440,11 @@ def run_ovis(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         max_model_len=4096,
         max_num_seqs=2,
-        trust_remote_code=True,
         dtype="half",
         limit_mm_per_prompt={modality: 1},
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     messages = [
         [{"role": "user", "content": f"<image>\n{question}"}] for question in questions
     ]
@@ -1544,7 +1504,6 @@ def run_paddleocr_vl(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=4096,
         max_num_seqs=2,
         limit_mm_per_prompt={modality: 1},
-        trust_remote_code=True,
     )
 
     placeholder = "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
@@ -2024,6 +1983,7 @@ def run_r_vl(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
+        trust_remote_code=True,
         max_model_len=16384,
         limit_mm_per_prompt={modality: 1},
     )
@@ -2192,7 +2152,6 @@ model_example_map = {
     "nemotron_parse_35": run_nemotron_parse_35,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
-    "openpangu_vl": run_openpangu_vl,
     "openvla": run_openvla,
     "ovis": run_ovis,
     "ovis2_5": run_ovis2_5,

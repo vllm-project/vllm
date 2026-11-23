@@ -74,7 +74,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -1084,6 +1086,9 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             params_dtype=params_dtype,
             weight_loader=weight_loader,
         )
+        self.supports_pre_processed_weights = (
+            layer.scheme.supports_pre_processed_weights
+        )
 
     def apply(
         self,
@@ -1174,8 +1179,9 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         layer.v_scale = torch.nn.Parameter(
             torch.ones(n_scales, requires_grad=False, dtype=torch.float32)
         )
+        # -1.0 marks a q_scale the checkpoint does not provide.
         layer.q_scale = torch.nn.Parameter(
-            torch.ones(n_scales, requires_grad=False, dtype=torch.float32)
+            torch.full((n_scales,), -1.0, requires_grad=False, dtype=torch.float32)
         )
 
         # Zero points are not used in vLLM as currently only symmetric quantization is
@@ -1264,11 +1270,37 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
+        if is_weights_pre_processed():
+            super().process_weights_after_loading(layer)
+            return
+
+        # k/v scales default to 1.0, so only a configured scheme means they were loaded.
+        fnuz_factor = (
+            2.0
+            if current_platform.is_fp8_fnuz()
+            and is_quantized_kv_cache(layer.kv_cache_dtype)
+            and getattr(self.quant_config, "kv_cache_scheme", None) is not None
+            else 1.0
+        )
+        q_loaded = bool((layer.q_scale > 0).all())
+
         # Buffers, not Parameters: updates don't rewrite them, so level-2 sleep
         # must keep them. ATTN_HEAD changes shape.
-        layer.register_buffer("_k_scale", layer.k_scale.detach())
-        layer.register_buffer("_v_scale", layer.v_scale.detach())
-        layer.register_buffer("_q_scale", layer.q_scale.detach())
+        def _set_scale(name: str, value: torch.Tensor) -> None:
+            buf = getattr(layer, name, None)
+            if isinstance(buf, torch.Tensor) and buf.shape == value.shape:
+                buf.copy_(value)
+            else:
+                layer.register_buffer(name, value)
+
+        _set_scale("_k_scale", layer.k_scale.detach() * fnuz_factor)
+        _set_scale("_v_scale", layer.v_scale.detach() * fnuz_factor)
+        _set_scale(
+            "_q_scale",
+            layer.q_scale.detach() * fnuz_factor
+            if q_loaded
+            else torch.ones_like(layer.q_scale),
+        )
 
         # Set the _float variants that the attention backend uses.
         def _to_scalar(tensor: torch.Tensor) -> float:
@@ -1277,9 +1309,9 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 return tensor.max().item()
             return tensor.item()
 
-        layer._k_scale_float = _to_scalar(layer.k_scale)
-        layer._v_scale_float = _to_scalar(layer.v_scale)
-        layer._q_scale_float = _to_scalar(layer.q_scale)
+        layer._k_scale_float = _to_scalar(layer._k_scale)
+        layer._v_scale_float = _to_scalar(layer._v_scale)
+        layer._q_scale_float = _to_scalar(layer._q_scale)
 
         # Sync host (cpu) scale copies read by AITER fused kernels.
         layer._k_scale_cpu.fill_(layer._k_scale_float)
