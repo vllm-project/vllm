@@ -11,6 +11,7 @@ from vllm.config import ParallelConfig
 from vllm.model_executor import parameter
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
+    find_shared_weight_storage,
     zero_weights,
 )
 from vllm.v1.worker import gpu_worker
@@ -76,6 +77,50 @@ def test_tensor_subclass_inner_tensors_are_hashed_and_reset():
     assert all(
         before[name] != digest for name, digest in compute_tensor_digests(model).items()
     )
+
+
+@pytest.mark.parametrize("alias", ["parameter", "view", "buffer"])
+def test_reset_preflight_detects_storage_shared_with_the_other_model(alias):
+    draft = nn.Linear(2, 2, bias=False)
+    target = nn.Linear(2, 2, bias=False)
+    assert find_shared_weight_storage(draft, target) is None
+    if alias == "parameter":
+        target.weight = draft.weight
+    elif alias == "view":
+        target.weight = nn.Parameter(draft.weight.view(-1)[1:])
+    else:
+        target.register_buffer("shared", draft.weight.detach())
+    assert find_shared_weight_storage(draft, target) == (
+        "weight",
+        "shared" if alias == "buffer" else "weight",
+    )
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_reset_rejects_single_model_when_storage_is_shared(shared, monkeypatch):
+    target = nn.Linear(2, 2, bias=False)
+    draft = nn.Linear(2, 2, bias=False)
+    if shared:
+        draft.weight = target.weight
+
+    worker = object.__new__(Worker)
+    worker._weight_update_active = False
+    worker._incomplete_weight_updates = set()
+    worker.parallel_config = ParallelConfig(pipeline_parallel_size=1)
+    worker.speculative_config = SimpleNamespace()
+    monkeypatch.setattr(worker, "get_model", lambda: target)
+    monkeypatch.setattr(worker, "get_draft_model", lambda: draft)
+    monkeypatch.setattr(worker, "_weight_checker_draft", lambda: draft)
+
+    if not shared:
+        assert worker._models_for_weight_reset("target") == (target,)
+        assert worker._models_for_weight_reset("draft") == (draft,)
+    else:
+        for model in ("target", "draft"):
+            error = worker._models_for_weight_reset(model)
+            assert isinstance(error, str)
+            assert "shares storage" in error
+    assert worker._models_for_weight_reset("both") == (target, draft)
 
 
 def test_dense_dp_replicas_get_distinct_key_prefixes(monkeypatch):
