@@ -19,6 +19,7 @@ from vllm.assets.audio import AudioAsset
 from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
 from vllm.multimodal.audio import AudioResampler
+from vllm.multimodal.utils import encode_audio_url
 
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode",
@@ -325,6 +326,29 @@ async def test_basic_audio(mary_had_lamb, model_name):
             expected_seconds=16,
             extra_body=extra_body,
         )
+
+
+def test_chat_rejects_audio_preprocessing_over_budget():
+    model_name = "Qwen/Qwen3-ASR-0.6B"
+    audio_url = encode_audio_url(np.zeros(16000, dtype=np.float32), 16000)
+    content = [{"type": "audio_url", "audio_url": {"url": audio_url}} for _ in range(4)]
+    with RemoteOpenAIServer(
+        model_name,
+        ["--enforce-eager", "--load-format", "dummy", *ROCM_EXTRA_ARGS],
+        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": "20000000"},
+    ) as remote_server:
+        response = httpx.post(
+            remote_server.url_for("v1/chat/completions"),
+            json={
+                "model": model_name,
+                "messages": [{"role": "user", "content": content}],
+                "max_tokens": 1,
+            },
+            timeout=60,
+        )
+
+    assert response.status_code == 400, response.text[:300]
+    assert "Qwen3-ASR audio preprocessing exceeds" in response.text
 
 
 @pytest.mark.asyncio

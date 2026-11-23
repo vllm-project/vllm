@@ -63,7 +63,7 @@ def test_chat_render_rejects_audio_preprocessing_over_budget(model, error_text):
                 },
                 timeout=60,
             )
-            assert response.status_code == expected_status, response.text
+            assert response.status_code == expected_status, response.text[:300]
             if count == 4:
                 assert error_text in response.text
 
