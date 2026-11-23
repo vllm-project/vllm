@@ -220,8 +220,8 @@ class NixlBaseConnectorWorker:
         num_ssm_regions = 0
         if self._has_mamba:
             assert self._conv_decomp is not None
-            # NIXL regions per SSM layer = conv sub-projections + 1 SSM temporal
-            # (Mamba2/GDN: 3+1=4; Mamba1: 1+1=2).
+            # NIXL regions per SSM layer = conv ranges + 1 SSM temporal; conv
+            # ranges are the sub-projections, once per row in the SD layout.
             ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
             # Count only the regions that actually hold SSM state; must match
             # the descriptors emitted by _build_mamba_local.
@@ -2607,7 +2607,8 @@ class NixlBaseConnectorWorker:
         so that the whole cache is shared by "tp_ratio" D TP workers.
 
         For Mamba hetero-TP, both tp_ratio > 0 (D_TP > P_TP) and
-        tp_ratio < 0 (P_TP > D_TP) are supported by the 3-read transfer.
+        tp_ratio < 0 (P_TP > D_TP) are supported by the per-sub-projection
+        conv reads, in the DS and SD conv layouts.
         """  # noqa: E501
         engine_id = nixl_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery

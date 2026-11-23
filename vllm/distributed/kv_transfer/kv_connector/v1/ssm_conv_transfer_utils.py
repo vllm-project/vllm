@@ -37,6 +37,7 @@ class MambaConvSplitInfo:
       Mamba1: |---- x ----|  (single sub-projection, no decomposition)
       Mamba2: |-- x --|- B -|- C -|  (B == C)
       GDN:    |- Q -|- K -|-- V --|  (dim(Q)==dim(K), V may differ)
+      Declared by the layer, e.g. GDP: |- V_1 -|..|- V_n -|- K_1 -|..|- K_n -|- Q -|
     """
 
     conv_rows: int  # conv_kernel - 1 (typically 3)
@@ -46,7 +47,7 @@ class MambaConvSplitInfo:
     conv_dtype_size: int  # bytes per element (e.g. 2 for float16)
     ssm_sizes: tuple[int, int]  # (conv_state_bytes, ssm_state_bytes)
     # DS (dim, state_len) or SD (state_len, dim) conv state layout.
-    dim_first: bool = True
+    dim_first: bool
 
     @property
     def local_conv_dim(self) -> int:
@@ -99,22 +100,20 @@ class MambaConvSplitInfo:
                        to get P-sized offsets.
 
         """
+        if tp_ratio >= 1:
+            # (offset of this D rank's slice, slice size, remote piece size)
+            pieces = [(local_rank_offset * s, s, s * tp_ratio) for s in self.proj_bytes]
+        else:
+            # NOTE (ZhanqiuHu): tp_ratio < 0 means P_TP > D_TP, so P pages
+            # are smaller than D's. Local dims are D-sized, but we need
+            # P-sized offsets. Scale down by |tp_ratio|.
+            pieces = [(0, s // -tp_ratio, s // -tp_ratio) for s in self.proj_bytes]
         offsets: list[tuple[int, int]] = []
         remote_base = 0
         for _ in range(self.num_row_groups):
-            if tp_ratio >= 1:
-                for size in self.proj_bytes:
-                    offsets.append((remote_base + local_rank_offset * size, size))
-                    remote_base += size * tp_ratio
-            else:
-                # NOTE (ZhanqiuHu): tp_ratio < 0 means P_TP > D_TP, so P pages
-                # are smaller than D's. Local dims are D-sized, but we need
-                # P-sized offsets. Scale down by |tp_ratio|.
-                abs_ratio = -tp_ratio
-                for size in self.proj_bytes:
-                    remote_size = size // abs_ratio
-                    offsets.append((remote_base, remote_size))
-                    remote_base += remote_size
+            for slice_offset, slice_size, remote_size in pieces:
+                offsets.append((remote_base + slice_offset, slice_size))
+                remote_base += remote_size
         return offsets
 
 
@@ -179,10 +178,11 @@ def derive_mamba_conv_split(
     local_proj_dims: tuple[int, ...]
     if declared_dims is not None:
         # The layer knows its own sub-projections; nothing to infer.
-        assert declared_dims and sum(declared_dims) == local_conv_dim, (
-            f"Declared conv sub-projections {declared_dims} don't add up to "
-            f"the conv dim ({local_conv_dim})."
-        )
+        if not declared_dims or sum(declared_dims) != local_conv_dim:
+            raise ValueError(
+                f"Declared conv sub-projections {declared_dims} don't add up to "
+                f"the conv dim ({local_conv_dim})."
+            )
         local_proj_dims = tuple(declared_dims)
     elif mamba_spec.mamba_type == MambaAttentionBackendEnum.MAMBA1:
         # Mamba1 conv state holds only x (no B/C), so it's a single

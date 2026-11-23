@@ -11,10 +11,19 @@ both conv state layouts.
 """
 
 from dataclasses import dataclass
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    compute_nixl_compatibility_hash,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+    NixlConnectorWorker,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     derive_mamba_conv_split,
 )
@@ -27,7 +36,11 @@ from vllm.models.nemotron_shortcut.nvidia.gdp import (
     gdp_state_shape,
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+
+from .utils import create_vllm_config
+
+pytestmark = pytest.mark.cpu_test
 
 CONV_ROWS = 3  # conv window - 1
 GDP_VALUE_HEAD, GDP_KEY_HEAD = 64, 128
@@ -201,6 +214,7 @@ def transfer(layer: Layer, p_pages: list[bytes], p_tp: int, d_tp: int, d_rank: i
 def _conv_layout(monkeypatch, request):
     monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", request.param)
     get_conv_state_layout.cache_clear()
+    assert is_conv_state_dim_first() == (request.param == "DS")
     yield
     get_conv_state_layout.cache_clear()
 
@@ -223,3 +237,137 @@ def test_gdp_sub_projections(n: int):
     # 4 heads per rank: value pieces of 4*64, key and query pieces of 4*128.
     info = derive_mamba_conv_split(gdp_layer(n).spec(2), 2, require_dim_first=False)
     assert info.local_proj_dims == (256,) * n + (512,) * (n + 1)
+
+
+NUM_BLOCKS = 3
+
+
+def _nixl_worker(spec: MambaSpec, tp: int, rank: int) -> MagicMock:
+    """The attributes NIXL's Mamba descriptor builders read, for one layer."""
+    worker = MagicMock(spec=NixlConnectorWorker)
+    worker._conv_decomp = derive_mamba_conv_split(spec, tp, require_dim_first=False)
+    worker._mamba_ssm_size = worker._conv_decomp.ssm_sizes
+    worker._logical_num_blocks = NUM_BLOCKS
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.device_id = 0
+    worker.tp_rank = rank
+    worker._has_mamba = True
+    worker.num_regions = 0
+    worker.region_num_blocks = []
+    worker._ssm_region_indices = None
+    worker.block_stride_per_layer = [spec.page_size_bytes]
+    worker.block_len_per_layer = [spec.page_size_bytes]
+    worker._ple_region_index = None
+    worker._ple_group_index = None
+    worker._group_spec_types = [AttentionSpec, MambaSpec]
+    worker._fa_desc_replicated = lambda starts, *_: np.zeros(len(starts), dtype=bool)
+    worker._pack_strided_descs = NixlConnectorWorker._pack_strided_descs
+    worker._strided_desc_starts = NixlConnectorWorker._strided_desc_starts
+    for name in (
+        "_build_mamba_local",
+        "_build_mamba_remote",
+        "_build_local_splits_from_plan",
+        "_compute_desc_ids",
+    ):
+        method = getattr(NixlConnectorWorker, name)
+        setattr(worker, name, method.__get__(worker, NixlConnectorWorker))
+    return worker
+
+
+def _expand(descs: np.ndarray) -> list[tuple[int, int]]:
+    """Strided descriptors (addr, len, device, stride, count) -> one per block."""
+    return [
+        (addr + k * stride, length)
+        for addr, length, _, stride, count in descs.tolist()
+        for k in range(count)
+    ]
+
+
+def _full_page(layer: GDPLayer, tp: int, rank: int) -> bytes:
+    """Conv state, then this rank's heads of the recurrent state."""
+    heads = layer.num_heads // tp
+    temporal = torch.arange(
+        layer.num_heads * GDP_VALUE_HEAD * GDP_KEY_HEAD, dtype=torch.float32
+    ).reshape(layer.num_heads, GDP_VALUE_HEAD, GDP_KEY_HEAD)
+    ssm = temporal[rank * heads : (rank + 1) * heads].contiguous().numpy()
+    return page(layer, full_conv_state(layer), tp, rank) + ssm.tobytes()
+
+
+@pytest.mark.parametrize("p_tp,d_tp", [(1, 1), (1, 2), (2, 1), (2, 4), (4, 2)])
+def test_nixl_descriptors_move_each_rank_its_heads(p_tp: int, d_tp: int):
+    """NIXL's own descriptor builders and descriptor-id math, driven through a
+    pull read of block 1 on every prefill rank into block 0 on each decode
+    rank, deliver the decode rank's whole page: conv and recurrent state."""
+    layer = gdp_layer(n=2, num_spec=2)
+    p_spec = layer.spec(p_tp)
+    p_mem = []
+    for rank in range(p_tp):
+        mem = bytearray(p_spec.page_size_bytes * NUM_BLOCKS)
+        mem[p_spec.page_size_bytes : 2 * p_spec.page_size_bytes] = _full_page(
+            layer, p_tp, rank
+        )
+        p_mem.append(mem)
+    for d_rank in range(d_tp):
+        d_spec = layer.spec(d_tp)
+        d_mem = bytearray(d_spec.page_size_bytes * NUM_BLOCKS)
+        worker = _nixl_worker(d_spec, d_tp, d_rank)
+        local = worker._build_mamba_local([0])
+        if d_tp >= p_tp:
+            tp_ratio = d_tp // p_tp
+            sources = [(d_rank // tp_ratio, local)]
+        else:
+            tp_ratio = -(p_tp // d_tp)
+            ranks = [d_rank * -tp_ratio + j for j in range(-tp_ratio)]
+            plan = SimpleNamespace(
+                source_ranks_per_group=[[0], ranks],
+                all_source_ranks=ranks,
+                rank_to_attention_slot={},
+            )
+            sources = list(
+                zip(ranks, worker._build_local_splits_from_plan(plan, local, 0))
+            )
+        local_ids, remote_ids = (
+            worker._compute_desc_ids(
+                block_ids=([], [block]),
+                dst_num_blocks=NUM_BLOCKS,
+                block_size_ratio=None,
+                physical_blocks_per_logical=1,
+                pairs=([0], [1]),
+                region_num_blocks=[0],
+            ).tolist()
+            for block in (0, 1)
+        )
+        for p_rank, local_descs in sources:
+            remote_descs = worker._build_mamba_remote(
+                SimpleNamespace(
+                    kv_caches_base_addr=[0],
+                    ssm_sizes=derive_mamba_conv_split(
+                        p_spec, p_tp, require_dim_first=False
+                    ).ssm_sizes,
+                    num_blocks=NUM_BLOCKS,
+                    device_id=0,
+                    block_strides=[p_spec.page_size_bytes],
+                ),
+                tp_ratio,
+                SimpleNamespace(remote_physical_blocks_per_logical=1),
+                SimpleNamespace(remote_ssm_regions=[0], remote_ple_region=None),
+            )
+            dst, src = _expand(local_descs), _expand(remote_descs)
+            for d_id, s_id in zip(local_ids, remote_ids, strict=True):
+                (d_addr, d_len), (s_addr, s_len) = dst[d_id], src[s_id]
+                assert d_len == s_len
+                d_mem[d_addr : d_addr + d_len] = p_mem[p_rank][s_addr : s_addr + s_len]
+        assert bytes(d_mem[: d_spec.page_size_bytes]) == _full_page(layer, d_tp, d_rank)
+
+
+def test_conv_layout_is_part_of_the_nixl_compatibility_hash():
+    """A DS prefill and an SD decode must fail the handshake."""
+    config = create_vllm_config()
+    layout_hash = compute_nixl_compatibility_hash(config, "FLASH_ATTN")
+    other = "SD" if is_conv_state_dim_first() else "DS"
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("VLLM_SSM_CONV_STATE_LAYOUT", other)
+        get_conv_state_layout.cache_clear()
+        other_hash = compute_nixl_compatibility_hash(config, "FLASH_ATTN")
+    get_conv_state_layout.cache_clear()
+    assert layout_hash != other_hash

@@ -945,6 +945,7 @@ def _gdn_split_info(conv_rows=3, key_dim=4, value_dim=8, dtype_size=2):
         local_proj_dims=(key_dim, key_dim, value_dim),
         conv_dtype_size=dtype_size,
         ssm_sizes=(conv_state_bytes, ssm_state_bytes),
+        dim_first=True,
     )
 
 
