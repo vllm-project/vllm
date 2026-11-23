@@ -13,7 +13,7 @@ workers to pull.
 All serve-side state lives on the server actor, so trainer processes need no
 mixin, no named actors and no special actor options.
 
-See docs/training/weight_transfer/sharded_rdt.md for the publish -> serve ->
+See docs/training/weight_updates/engines/sharded_rdt.md for the publish -> serve ->
 free_group -> release lifecycle and the ownership model.
 """
 
@@ -131,7 +131,7 @@ PRODUCE_METHOD_NAME = "rdt_produce_weights_batched"
 # measuring rather than assuming.
 
 
-@dataclass
+@dataclass(slots=True)
 class _SharedPack:
     """One generation of one slot-sharing group: the rendezvous state for a
     single chunk, identified by the consumers' issue index."""

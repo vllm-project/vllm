@@ -187,8 +187,8 @@ def get_flash_attn_version(
             fa_version = 2
 
         if not is_fa_version_supported(fa_version):
-            logger.error(
-                "Cannot use FA version %d is not supported due to %s",
+            logger.warning_once(
+                "FlashAttention %d is not supported (%s); it will not be used.",
                 fa_version,
                 fa_version_unsupported_reason(fa_version),
             )
@@ -238,7 +238,11 @@ def flash_attn_supports_kv_cache_dtype(
 
 
 def flash_attn_supports_quant_query_input() -> bool:
-    return not current_platform.is_xpu()
+    if current_platform.is_xpu():
+        from vllm.platforms.xpu import XPUPlatform
+
+        return XPUPlatform.support_fp8_query()
+    return True
 
 
 def flash_attn_supports_sinks() -> bool:

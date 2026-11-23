@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::any::Any;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +13,9 @@ use tokio::sync::watch;
 use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
+use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_metrics::METRICS;
 
 mod aux_output;
@@ -56,6 +58,8 @@ pub struct LlmInfo {
     pub model_dtype: Option<ModelDtype>,
     /// Whether the engine was started with LoRA support.
     pub supports_lora: bool,
+    /// Whether the engine accepts placeholder metadata without embedding tensors.
+    pub allow_missing_mm_embeddings: bool,
     /// vLLM version of the engine.
     pub vllm_version: String,
 }
@@ -158,6 +162,7 @@ impl EngineCoreLlm {
             max_model_len: client.max_model_len(),
             model_dtype: Some(client.model_dtype()),
             supports_lora: client.ready_response().supports_lora,
+            allow_missing_mm_embeddings: client.ready_response().allow_missing_mm_embeddings,
             vllm_version: client.vllm_version().to_string(),
         };
         Self {
@@ -212,6 +217,51 @@ impl EngineCoreLlm {
         Ok(streams.pop().expect("one output stream per sample"))
     }
 
+    /// Reject a request for prompt logprobs when an engine does not compute
+    /// them (under `--kv-sharing-fast-prefill`).
+    fn check_prompt_logprobs_supported(&self, params: &EngineCoreSamplingParams) -> Result<()> {
+        if self.client.supports_prompt_logprobs() {
+            return Ok(());
+        }
+        // Python tests `prompt_logprobs` for truthiness, which lets `0`
+        // through although those logprobs are just as incorrect.
+        let parameter = if params.prompt_logprobs.is_some() {
+            "prompt_logprobs"
+        } else if params.prompt_logprob_token_ids.is_some() {
+            "prompt_logprob_token_ids"
+        } else {
+            return Ok(());
+        };
+        Err(Error::PromptLogprobsUnsupported { parameter })
+    }
+
+    /// Reject a request whose multimodal items can't fit the engine's encoder
+    /// cache together, when the engine must encode them all in one step.
+    fn check_mm_embeds_fit(&self, mm_features: Option<&MmFeatures>) -> Result<()> {
+        let (Some(max_embeds), Some(features)) =
+            (self.client.max_mm_embeds_per_request(), mm_features)
+        else {
+            return Ok(());
+        };
+        // A repeated item is encoded once.
+        let mut num_embeds_by_id = HashMap::new();
+        for feature in features {
+            let num_embeds = feature
+                .mm_position
+                .num_embeds()
+                .map_err(|message| Error::InvalidMultimodalInput { message })?;
+            num_embeds_by_id.insert(feature.identifier.as_str(), num_embeds as u64);
+        }
+        let num_embeds = num_embeds_by_id.values().sum();
+        if num_embeds > max_embeds {
+            return Err(Error::MmEmbedsExceedEncoderCache {
+                num_embeds,
+                max_embeds,
+            });
+        }
+        Ok(())
+    }
+
     /// Submit one request as `n` parallel samples, returning one output stream
     /// per sample in index order.
     ///
@@ -228,6 +278,9 @@ impl EngineCoreLlm {
         mut req: GenerateRequest,
         n: NonZeroU32,
     ) -> Result<Vec<GenerateOutputStream>> {
+        self.check_prompt_logprobs_supported(&req.sampling_params)?;
+        self.check_mm_embeds_fit(req.mm_features.as_ref())?;
+
         // Clamp the request's stream interval to the frontend-level one, like
         // Python. Engine-core ignores it; the client batches deliveries by it.
         let stream_interval = (req.sampling_params.stream_interval)

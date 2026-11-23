@@ -3,7 +3,6 @@
 
 import functools
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -31,24 +30,13 @@ class _JobMetadataLike(Protocol):
 
 
 @dataclass(slots=True)
-class _LookupTotals:
-    queries: int = 0
-    hits: int = 0
-    sync_delay: float = 0.0
-
-
-@dataclass(slots=True)
 class _RequestMetricsState:
     observed_lookups: dict[TierLabel, dict[OffloadKey, float | None]] | None = field(
         default_factory=dict
     )
-    # Reported once, when the request is allocated or finishes.
-    lookup_totals: defaultdict[TierLabel, _LookupTotals] = field(
-        default_factory=lambda: defaultdict(_LookupTotals)
-    )
 
 
-@dataclass
+@dataclass(slots=True)
 class _TierState:
     active_promotion_count: int = 0
     active_cascade_count: int = 0
@@ -87,12 +75,9 @@ class TieringMetricsTracker:
         if state is None:
             return
         state.observed_lookups = None
-        self._flush_lookup_totals(state)
 
     def on_request_finished(self, req_context: ReqContext) -> None:
-        state = self._request_states.pop(req_context.req_id, None)
-        if state is not None:
-            self._flush_lookup_totals(state)
+        self._request_states.pop(req_context.req_id, None)
 
     def on_lookup(
         self,
@@ -116,7 +101,6 @@ class TieringMetricsTracker:
             if key not in observed or start_time is not None:
                 observed[key] = None
                 self._observe_resolved_lookup(
-                    state,
                     tier_label,
                     result,
                     lookup_duration,
@@ -266,6 +250,8 @@ class TieringMetricsTracker:
             else TieringOffloadingMetrics.WRITE_TIME
         )
         transfer_size = completed_key_count * self._primary_chunk_size
+        if completed_job.success and completed_job.transfer_bytes is not None:
+            transfer_size = completed_job.transfer_bytes
         self._stats.increase_counter(bytes_metric, transfer_size, labelvalues)
         if completed_job.transfer_time is not None:
             self._stats.increase_counter(
@@ -331,40 +317,28 @@ class TieringMetricsTracker:
 
     def _observe_resolved_lookup(
         self,
-        state: _RequestMetricsState,
         tier_label: TierLabel,
         result: LookupResult,
         lookup_duration: float,
         async_start_time: float | None,
     ) -> None:
-        totals = state.lookup_totals[tier_label]
-        totals.queries += 1
+        self._stats.increase_counter(
+            TieringOffloadingMetrics.CHUNK_QUERIES,
+            labelvalues=tier_label,
+        )
         if result is LookupResult.HIT:
-            totals.hits += 1
-        totals.sync_delay += lookup_duration
+            self._stats.increase_counter(
+                TieringOffloadingMetrics.CHUNK_HITS,
+                labelvalues=tier_label,
+            )
+        self._stats.observe_histogram(
+            TieringOffloadingMetrics.LOOKUP_SYNC_DELAY,
+            lookup_duration,
+            tier_label,
+        )
         if async_start_time is not None:
             self._stats.observe_histogram(
                 TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY,
                 time.monotonic() - async_start_time,
                 tier_label,
             )
-
-    def _flush_lookup_totals(self, state: _RequestMetricsState) -> None:
-        for tier_label, totals in state.lookup_totals.items():
-            self._stats.increase_counter(
-                TieringOffloadingMetrics.CHUNK_QUERIES,
-                totals.queries,
-                labelvalues=tier_label,
-            )
-            if totals.hits:
-                self._stats.increase_counter(
-                    TieringOffloadingMetrics.CHUNK_HITS,
-                    totals.hits,
-                    labelvalues=tier_label,
-                )
-            self._stats.observe_histogram(
-                TieringOffloadingMetrics.LOOKUP_SYNC_DELAY,
-                totals.sync_delay,
-                tier_label,
-            )
-        state.lookup_totals.clear()

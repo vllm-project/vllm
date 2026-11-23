@@ -100,6 +100,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     """
 
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    SHARED_REGION_PER_RANK = False
 
     @classmethod
     @override
@@ -110,9 +111,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.LOOKUP_SYNC_DELAY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of total blocking time a request spent in tier "
-                    "lookups that resolved as a hit or miss, labeled by tier, in "
-                    "seconds."
+                    "Histogram of blocking time spent in a per-chunk tier lookup "
+                    "that resolved as a hit or miss, labeled by tier, in seconds."
                 ),
                 labelnames=(TIER_LABEL,),
                 buckets=(
@@ -336,6 +336,12 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
+        if self.async_init:
+            logger.warning(
+                "async_init is not supported with TieringOffloadingSpec yet; "
+                "setting the CPU tier up now"
+            )
+            self.async_init = False
 
         # Parse secondary tier configurations
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])

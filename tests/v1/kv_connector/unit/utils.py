@@ -62,6 +62,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         _RegionPairs,
+        _RemoteStage,
     )
 
 EOS_TOKEN_ID = 50256
@@ -148,11 +149,7 @@ def create_vllm_config(
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype=dtype,
-        seed=42,
-        hf_overrides=hf_overrides or {},
+        model=model, dtype=dtype, seed=42, hf_overrides=hf_overrides or {}
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
@@ -196,19 +193,13 @@ def create_vllm_config(
     )
 
 
-def set_mtp_config(
-    config: VllmConfig,
-    num_lookahead: int = 1,
-    *,
-    disable_lookahead_block_hashes: bool = False,
-) -> None:
+def set_mtp_config(config: VllmConfig, num_lookahead: int = 1) -> None:
     """Configure test MTP without loading a separate draft model."""
     assert config.model_config is not None
     config.model_config.hf_config.n_predict = num_lookahead
     spec = SpeculativeConfig(
         model="ngram",
         num_speculative_tokens=num_lookahead,
-        disable_lookahead_block_hashes=disable_lookahead_block_hashes,
     )
     spec.method = "mtp"
     spec.draft_model_config = config.model_config
@@ -464,7 +455,7 @@ class TestExampleConnector(ExampleConnector):
         return attr
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MockKVConfig:
     matched_tokens: int = 0
     is_async: bool = False
@@ -561,7 +552,7 @@ def make_kv_cache_config(
     mamba_enabled: bool = False,
     sw_size: int = 128,
     num_blocks: int = 100,
-    mamba_cache_mode: Literal["align", "none"] = "none",
+    enable_prefix_caching: bool = False,
 ) -> KVCacheConfig:
     kv_cache_groups = [
         make_kv_cache_group(
@@ -598,7 +589,7 @@ def make_kv_cache_config(
                     dtypes=(torch.float16,),
                 ),
                 MambaManager,
-                MambaManager.config(mamba_cache_mode=mamba_cache_mode),
+                MambaManager.config(enable_prefix_caching=enable_prefix_caching),
             )
         )
     return KVCacheConfig(
@@ -635,6 +626,7 @@ def make_nixl_scheduler(
     sched.kv_cache_config.hash_block_size = 16
     sched.vllm_config = SimpleNamespace(
         num_prefill_lookahead_tokens=0,
+        num_reprefillable_tokens=0,
         num_hash_lookahead_tokens=0,
         cache_config=CacheConfig(block_size=16),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
@@ -645,6 +637,7 @@ def make_nixl_scheduler(
         sched._heartbeat_by_engine = {}
         sched._heartbeat_req_engine = {}
         sched._last_heartbeat_time = 0.0
+        sched._new_heartbeat_reqs = set()
         sched._kv_lease_duration = kv_lease_duration
         sched._heartbeat_interval = kv_lease_duration // 6
         # Fields touched by build_connector_meta / request_finished:
@@ -715,6 +708,7 @@ def make_nixl_push_scheduler(
     vllm_config.parallel_config.decode_context_parallel_size = 1
     vllm_config.cache_config = CacheConfig(block_size=16)
     vllm_config.num_prefill_lookahead_tokens = 0
+    vllm_config.num_reprefillable_tokens = 0
     vllm_config.num_hash_lookahead_tokens = 0
     sched.vllm_config = vllm_config
 
@@ -734,6 +728,7 @@ def make_nixl_push_scheduler(
     sched._heartbeat_by_engine = {}
     sched._heartbeat_req_engine = {}
     sched._last_heartbeat_time = 0.0
+    sched._new_heartbeat_reqs = set()
     sched.blocks_per_sw = []
 
     return sched
@@ -799,3 +794,33 @@ def region_pairs_by_index(
         partner=regions,
         groups_match=groups_match,
     )
+
+
+def remote_stage(
+    pairs: "_RegionPairs",
+    region_num_blocks: Sequence[int],
+    region_group_ids: Sequence[int] | None = None,
+    xfer_side_handles: dict[int, int] | None = None,
+) -> dict[int, "_RemoteStage"]:
+    """The stages of a PP=1 remote engine: one stage 0 pairing `pairs`.
+
+    `region_num_blocks` and `region_group_ids` describe the paired remote
+    regions; groups default to 0. `xfer_side_handles` maps remote TP rank to
+    its prepped dst handle."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        _RemoteStage,
+    )
+
+    num_regions = len(pairs.remote_regions)
+    return {
+        0: _RemoteStage(
+            pp_rank=0,
+            pairs=pairs,
+            layers=[],
+            region_num_blocks=list(region_num_blocks),
+            region_group_ids=list(region_group_ids)
+            if region_group_ids is not None
+            else [0] * num_regions,
+            xfer_side_handles=dict(xfer_side_handles or {}),
+        )
+    }
