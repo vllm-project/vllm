@@ -12,10 +12,10 @@ from torch.func import functional_call
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
+from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.platform_utils import is_uva_available
-from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
 
@@ -118,7 +118,7 @@ class UVAOffloader(BaseOffloader):
             if not self.uva_offloading:
                 p.data = cpu_data
             else:
-                p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
+                p.data = current_platform.get_accelerator_view_from_cpu_tensor(cpu_data)
                 p._vllm_is_uva_offloaded = True
 
             self.cpu_offload_bytes += p.data.numel() * p.data.element_size()

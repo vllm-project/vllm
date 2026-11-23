@@ -55,9 +55,9 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v41.common.engram import DPSharedEngramStorage
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
-from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 from .ple import PLEVocabParallelEmbedding
 
@@ -461,8 +461,10 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         )
         layer.register_parameter("weight_scale_2", weight_scale_2)
         if layer.weight_scale.is_pinned():
-            self._uva_weight_scale = get_accelerator_view_from_cpu_tensor(
-                layer.weight_scale
+            self._uva_weight_scale = (
+                current_platform.get_accelerator_view_from_cpu_tensor(
+                    layer.weight_scale
+                )
             )
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
@@ -692,7 +694,9 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             data_parallel_rank=data_parallel_rank,
             reduce_results=reduce_results,
         )
-        self._uva_weight = get_accelerator_view_from_cpu_tensor(self.weight)
+        self._uva_weight = current_platform.get_accelerator_view_from_cpu_tensor(
+            self.weight
+        )
         self._prefetch_stream: torch.cuda.Stream | None = None
         self._prefetch_buffer: torch.Tensor | None = None
         self._prefetch_alloc_lock = threading.Lock()

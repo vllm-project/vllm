@@ -9,11 +9,11 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_pin_memory_available, is_uva_available
 from vllm.utils.torch_utils import (
     TORCH_DTYPE_TO_ARRAY_TYPECODE,
-    get_accelerator_view_from_cpu_tensor,
 )
 from vllm.v1.conf_compute_utils import register_inplace_h2d_target
 
@@ -42,7 +42,7 @@ class UvaBuffer:
             raise RuntimeError("UVA is not available")
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self.np = self.cpu.numpy()
-        self._uva = get_accelerator_view_from_cpu_tensor(self.cpu)
+        self._uva = current_platform.get_accelerator_view_from_cpu_tensor(self.cpu)
 
     def uva(self, n: int | None = None) -> torch.Tensor:
         return self._uva[:n] if n is not None else self._uva

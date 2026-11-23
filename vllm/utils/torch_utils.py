@@ -901,15 +901,6 @@ def weak_ref_tensors(
     raise ValueError(f"Invalid type for tensors: {type(tensors)}")
 
 
-def get_accelerator_view_from_cpu_tensor(
-    cpu_tensor: torch.Tensor,
-) -> torch.Tensor:
-    """Get an accelerator view of a CPU tensor via UVA."""
-    from vllm.platforms import current_platform
-
-    return current_platform.get_accelerator_view_from_cpu_tensor(cpu_tensor)
-
-
 HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
 
 # Allow toggling LayerName usage via environment variable.

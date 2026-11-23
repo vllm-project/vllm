@@ -8,7 +8,6 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_uva_available
-from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 from vllm.v1.token_buffer import TokenBuffer
 from vllm.v1.worker.gpu import buffer_utils
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor
@@ -28,7 +27,7 @@ def test_cpu_write(device):
     # as the UVA view's ops never trigger lazy init.
     torch.accelerator.set_device_index(device)
     cpu_tensor = torch.zeros(10, 10, device="cpu", pin_memory=True, dtype=torch.int32)
-    gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
+    gpu_view = current_platform.get_accelerator_view_from_cpu_tensor(cpu_tensor)
     assert gpu_view.device.type == DEVICE_TYPE
 
     assert gpu_view[0, 0] == 0
@@ -54,7 +53,7 @@ def test_gpu_write(device):
     # as the UVA view's ops never trigger lazy init.
     torch.accelerator.set_device_index(device)
     cpu_tensor = torch.zeros(10, 10, device="cpu", pin_memory=True, dtype=torch.int32)
-    gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
+    gpu_view = current_platform.get_accelerator_view_from_cpu_tensor(cpu_tensor)
     assert gpu_view.device.type == DEVICE_TYPE
 
     assert gpu_view[0, 0] == 0
@@ -328,7 +327,7 @@ def test_non_pinned_cpu_tensor(device):
     torch.set_default_device(device)
     cpu_tensor = torch.arange(100, dtype=torch.int32, device="cpu").view(10, 10)
     assert not cpu_tensor.is_pinned()
-    gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
+    gpu_view = current_platform.get_accelerator_view_from_cpu_tensor(cpu_tensor)
     assert gpu_view.device.type == DEVICE_TYPE
 
     assert gpu_view[0, 0] == 0
@@ -385,7 +384,7 @@ def test_non_contiguous_strided_view(device, pinned):
     assert cpu_view.stride() == (1, 16)
     assert not cpu_view.is_contiguous()
 
-    gpu_view = get_accelerator_view_from_cpu_tensor(cpu_view)
+    gpu_view = current_platform.get_accelerator_view_from_cpu_tensor(cpu_view)
     assert gpu_view.device.type == DEVICE_TYPE
     assert gpu_view.shape == (16, 32)
     assert gpu_view.stride() == (1, 16)

@@ -63,7 +63,6 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.cpu_resource_utils import get_available_memory
 from vllm.utils.platform_utils import is_uva_available
-from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
 
@@ -923,7 +922,7 @@ class DPSharedEngramStorage:
                     "Engram shared-memory initialization failed: " + failures
                 )
             assert tensor is not None
-            return tensor, get_accelerator_view_from_cpu_tensor(tensor)
+            return tensor, current_platform.get_accelerator_view_from_cpu_tensor(tensor)
 
     @staticmethod
     def _unregister(mapping: mmap.mmap, pointer: int) -> None:
@@ -1290,8 +1289,10 @@ class ParallelEngramEmbedding(nn.Module):
         src = (self.weight.data_ptr(), self.weight_scale_inv.data_ptr())
         if self._view_src != src:
             self._views = (
-                get_accelerator_view_from_cpu_tensor(self.weight.data),
-                get_accelerator_view_from_cpu_tensor(self.weight_scale_inv.data),
+                current_platform.get_accelerator_view_from_cpu_tensor(self.weight.data),
+                current_platform.get_accelerator_view_from_cpu_tensor(
+                    self.weight_scale_inv.data
+                ),
             )
             self._view_src = src
         assert self._views is not None
