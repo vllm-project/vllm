@@ -61,10 +61,12 @@ LAST_BOUND = 0.02
 MOE_BOUND = 0.3
 EXACT_RATIO = 0.5
 # - past MOE_BOUND only a token whose 8th and 9th routing scores on vLLM's path
-#   are within TIE: the residual streams' 0.1-0.4% difference moves scores by
-#   about 1e-3, so it may pick another expert (seen: 0.33-0.43 at gaps up to
-#   1.1e-3, at most 5 of 89 tokens), and later layers are exempt for it.
-TIE = 2e-3
+#   are within its layer's TIE, so it may pick another expert (seen: 0.33-0.45,
+#   at most 10 of 105 tokens), and later layers are exempt for it. Layer 3 gets
+#   the same input in both runs and flips at gaps up to 5.8e-4; layer 4 also
+#   gets layer 3's 0.1-0.4% residual difference, which moves its scores more:
+#   flips at gaps up to 2.3e-3 in CI.
+TIE = {3: 2e-3, 4: 4e-3}
 ENV = {
     "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
     "VLLM_ROCM_USE_AITER": "1",
@@ -512,11 +514,11 @@ def _assert_layers_close(got: str, want: str, tp: int) -> None:
                     assert err < RESIDUAL_BOUND, (rank, i, k, "residual", err)
                     err = _rel(x, x_ref)
                     if err >= MOE_BOUND:
-                        assert gaps[(i, *k)] < TIE, (rank, i, k, "moe", err, gaps)
+                        assert gaps[(i, *k)] < TIE[i], (rank, i, k, "moe", err, gaps)
                         flipped.append((i, *k, round(err, 3), gaps[(i, *k)]))
                         break  # its residual stream differs from here on
                     seen["moe"] = max(seen["moe"], err)
-                    if gaps[(i, *k)] >= TIE:  # both route alike
+                    if gaps[(i, *k)] >= TIE[i]:  # both route alike
                         ref = exact[b][(i, *k)]
                         e_k, e_v = _rel(x, ref), _rel(x_ref, ref)
                         to_exact["kernel"] = max(to_exact["kernel"], e_k)
