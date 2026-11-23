@@ -164,7 +164,7 @@ class SituAndMul(CustomOp):
     """SituGLU activation used by Kimi models.
 
     Computes beta * tanh(gate / beta) * sigmoid(gate) * up.  When
-    ``linear_beta`` is set, the up projection is also softly clipped with
+    `linear_beta` is set, the up projection is also softly clipped with
     linear_beta * tanh(up / linear_beta).
     """
 
@@ -213,7 +213,7 @@ class SiluAndMulWithClamp(CustomOp):
         up   = clamp(x[..., d:], min=-swiglu_limit, max=swiglu_limit)
         out  = gate * sigmoid(alpha * gate) * (up + beta)
     where d = x.shape[-1] // 2. The defaults alpha=1.0, beta=0.0 reduce this to
-    ``silu(gate) * up``; SwiGLU-OAI style models pass alpha (sigmoid scale) and
+    `silu(gate) * up`; SwiGLU-OAI style models pass alpha (sigmoid scale) and
     beta=1.0 (up bias).
 
     Shapes:

@@ -11,16 +11,61 @@ from transformers import TokenizersBackend
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
+    INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET,
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.gc_utils import gc_untrack, untracked_list
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
 
 # Error string from https://github.com/huggingface/tokenizers/blob/909fdde2a4ffedd9295206f705eb612be2a91b12/tokenizers/src/tokenizer/mod.rs#L1042
 INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
+
+# A UTF-8 character spans at most 4 bytes and byte-level / byte-fallback tokens
+# carry at least one byte each, so a window starting inside a character reaches
+# the character's first byte within 3 more tokens.
+_MAX_UTF8_SEED_EXTENSION = 3
+# Bounds the walk over prompt tokens that decode to no text (e.g. long runs of
+# skipped special tokens); such prompts are seeded with the full prompt.
+_MAX_SEED_WINDOW = 256
+
+
+def get_decode_stream_seed(
+    tokenizer: Tokenizer,
+    prompt_token_ids: list[int] | None,
+    skip_special_tokens: bool,
+) -> list[int] | None:
+    """Return a prompt tail that primes a `DecodeStream` like the full prompt.
+
+    The seed only shapes the first delta, so a short tail avoids an O(prompt)
+    decode. The tail holds `INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET` tokens
+    that decode to text on their own (decoders like Metaspace treat the start
+    of the text specially), extended if its text ends in U+FFFD. Falls back to
+    the full prompt if the prompt's own text ends in U+FFFD.
+    """
+    if not prompt_token_ids:
+        return prompt_token_ids
+    start = len(prompt_token_ids)
+    min_start = max(0, start - _MAX_SEED_WINDOW)
+    needed = INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET
+    for _ in range(_MAX_UTF8_SEED_EXTENSION + 1):
+        while start > min_start and needed > 0:
+            start -= 1
+            if tokenizer.decode(
+                [prompt_token_ids[start]], skip_special_tokens=skip_special_tokens
+            ):
+                needed -= 1
+        if needed > 0:
+            break
+        window = prompt_token_ids[start:]
+        text = tokenizer.decode(window, skip_special_tokens=skip_special_tokens)
+        if not text.endswith("\ufffd"):
+            return window
+        needed = 1
+    return prompt_token_ids
 
 
 def uses_fast_detokenizer(tokenizer: TokenizerLike) -> bool:
@@ -30,7 +75,8 @@ def uses_fast_detokenizer(tokenizer: TokenizerLike) -> bool:
 
 class IncrementalDetokenizer:
     def __init__(self):
-        self.token_ids: list[int] = []
+        # The request's output token ids, only ever modified in place.
+        self.token_ids: list[int] = untracked_list()
 
     @property
     def output_token_ids(self) -> list[int]:
@@ -188,12 +234,14 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
         self.tokenizer: Tokenizer = tokenizer._tokenizer
 
-        # Use native prefill to prime the decode stream with prompt tokens.
+        # Use native prefill to prime the decode stream with the prompt tail.
         # Look up DecodeStream on the module so backend patches (e.g. the
         # fastokens shim that replaces ``tokenizers.decoders.DecodeStream``)
         # are honored regardless of import order.
         self.stream = tokenizers.decoders.DecodeStream(
-            ids=request.prompt_token_ids,
+            ids=get_decode_stream_seed(
+                self.tokenizer, request.prompt_token_ids, self.skip_special_tokens
+            ),
             skip_special_tokens=self.skip_special_tokens,
         )
 
@@ -285,6 +333,8 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
             self.tokens = [""] * self.prompt_len
             self.prefix_offset = 0
             self.read_offset = 0
+        # Grows by one string per output token, in place.
+        gc_untrack(self.tokens)
 
         self.token_ids.extend(request.prompt_token_ids or [0] * self.prompt_len)
 

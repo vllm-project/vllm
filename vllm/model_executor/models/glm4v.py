@@ -89,13 +89,12 @@ class EVA2CLIPPatchEmbedding(nn.Module):
         self.position_embedding = nn.Embedding(config.num_positions, config.hidden_size)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """Parameters
-        images : torch.Tensor
-            Input image tensor with shape (B, C, H, W)
+        """Embed image patches and prepend the class embedding.
 
-        Returns
-        -------
-        torch.Tensor
+        Args:
+            images: Input image tensor with shape (B, C, H, W)
+
+        Returns:
             Transformed tensor with shape (B, L, D)
 
         """
@@ -348,13 +347,12 @@ class EVA2CLIPModel(nn.Module):
         self.scaling_factor = vision_config.scaling_factor
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """Parameters
-        images : torch.Tensor
-            Input image tensor with shape (B, C, H, W)
+        """Encode images into language-model embeddings.
 
-        Returns
-        -------
-        torch.Tensor
+        Args:
+            images: Input image tensor with shape (B, C, H, W)
+
+        Returns:
             Transformed tensor with shape (B, L, D)
 
         """
@@ -427,10 +425,6 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         patch_size = vision_config["patch_size"]
         grid_length = image_size // patch_size // 2
         return grid_length * grid_length
-
-    def get_num_image_feature_tokens(self) -> int:
-        # EVA2CLIPModel has embeddings for boi and eoi tokens as well
-        return self.get_num_image_tokens() + 2
 
 
 class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
