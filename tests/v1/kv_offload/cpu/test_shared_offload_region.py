@@ -1521,6 +1521,45 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
     mock_close.assert_called_once_with(9999)
 
 
+def test_secondary_segment_ftruncate_failure_closes_fd(monkeypatch):
+    """When ftruncate fails on a secondary segment, its fd must still be closed."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    engine_id = str(uuid.uuid4())
+    mock_unlink = MagicMock()
+    mock_close = MagicMock()
+    open_calls = []
+
+    def mock_open(path, *args, **kwargs):
+        fd = 1001 if len(open_calls) == 0 else 1002
+        open_calls.append((path, fd))
+        return fd
+
+    def mock_ftruncate(fd, length):
+        if fd == 1002:
+            raise OSError("disk quota exceeded on secondary segment")
+
+    monkeypatch.setattr(region.os, "open", mock_open)
+    monkeypatch.setattr(region.os, "unlink", mock_unlink)
+    monkeypatch.setattr(region.os, "close", mock_close)
+    monkeypatch.setattr(region.os, "ftruncate", mock_ftruncate)
+    monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
+
+    with pytest.raises(OSError, match="disk quota exceeded on secondary segment"):
+        SharedOffloadRegion(
+            engine_id=engine_id,
+            num_chunks=4,
+            rank=0,
+            kv_bytes_per_chunk=region._MIN_SEGMENT_BYTES,
+            cpu_page_size=PAGE_SIZE,
+            num_segments=2,
+        )
+
+    closed_fds = [call[0][0] for call in mock_close.call_args_list]
+    assert 1002 in closed_fds, "Secondary segment fd was not closed on ftruncate failure!"
+    assert 1001 in closed_fds, "Primary segment fd was not closed on failure!"
+
+
 # ---------------------------------------------------------------------------
 # Unlink-after-barrier — leak immunity to hard kills
 # ---------------------------------------------------------------------------

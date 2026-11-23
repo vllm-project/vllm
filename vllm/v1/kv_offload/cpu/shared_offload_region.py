@@ -231,8 +231,10 @@ class SharedOffloadRegion:
                 )
                 for path, _, length in self._segments[1:]:
                     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
-                    os.ftruncate(fd, length)
-                    os.close(fd)
+                    try:
+                        os.ftruncate(fd, length)
+                    finally:
+                        os.close(fd)
                 # Joiners wait for the first file, so size it last.
                 os.ftruncate(self.fd, self._segments[0][2])
                 logger.info(
