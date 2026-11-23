@@ -565,10 +565,6 @@ class PrefillHold:
             return "no_decode"
         if self._t_dec is None or self._cost.w < 1.0:
             return "cold"
-        # Mirror scheduler.py's per-rank no-decode exemption: if any rank will
-        # run a prefill anyway, release all ranks to piggyback on the step.
-        if any(r.decodes == 0.0 and r.x > 0.0 for r in rows):
-            return "no_local_decode"
 
         avail = [r for r in rows if not (r.work > 0.0 and r.x == 0.0)]
         n_avail = len(avail)

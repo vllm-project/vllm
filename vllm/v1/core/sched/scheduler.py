@@ -795,14 +795,17 @@ class Scheduler(SchedulerInterface):
 
         self.kv_cache_manager.new_step_starts()
 
-        # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
-        # all prefill compute unless saturated.
+        # DP prefill balancing: defer prefill compute while holding (global
+        # no-decode is checked cross-DP in PrefillHold), or on a throttled
+        # (non-cadence-aligned) step when local decodes are running.
         hold = self.prefill_hold
         defer_prefills = (
             hold.hold
             if hold is not None
-            else throttle_prefills and not self.prefill_capacity_bound
-        ) and any(not r.is_prefill_chunk for r in self.running)
+            else throttle_prefills
+            and not self.prefill_capacity_bound
+            and any(not r.is_prefill_chunk for r in self.running)
+        )
 
         # `long_prefill_token_threshold` exists to stop a long prefill from
         # starving other requests of the token budget. When it is the only

@@ -227,8 +227,8 @@ def test_ttft_target_and_lag_steps_bound_the_hold():
     assert hold.update(_one_rank_queued(slack=0.09)) == "deadline"
 
 
-def test_idle_n_avail_and_no_local_decode_boundaries():
-    """Covers idle hold, n_avail == 0/1, and no_local_decode piggyback."""
+def test_idle_n_avail_and_zero_local_decode_boundaries():
+    """Covers idle hold, n_avail == 0/1, and zero-local-decode holding."""
     hold = PrefillHold(Mock(), T, 1.0, 8192)
     _warm(hold, random.Random(0))
 
@@ -246,12 +246,19 @@ def test_idle_n_avail_and_no_local_decode_boundaries():
     assert hold.update(idle) == "nothing"
     assert not hold.hold
 
-    # Any rank with decodes=0 and runnable prefill forces piggyback release.
+    # A rank with decodes=0 and runnable prefill still holds when peers decode.
     hold.ttft_weight = 1.0
     rows = [_row(period=T_DEC, decodes=0, work=1, x=2048, queued=1)] + [
         _row(period=T_DEC, decodes=16)
     ] * (RANKS - 1)
-    assert hold.update(rows) == "no_local_decode"
+    assert hold.update(rows) == "wait"
+    assert hold.hold
+
+    # Only when every rank has zero decodes does global no_decode release.
+    no_decode = [_row(period=T_DEC, decodes=0, work=1, x=2048, queued=1)] + [
+        _row(period=T_DEC, decodes=0)
+    ] * (RANKS - 1)
+    assert hold.update(no_decode) == "no_decode"
     assert not hold.hold
 
 
@@ -604,3 +611,43 @@ def test_sync_that_finds_every_rank_idle_releases():
     assert hold.hold
     scheduler.update_from_dp_rows(_one_rank_queued(), idle=True)
     assert not hold.hold
+
+
+def test_scheduler_defers_prefill_without_local_decode():
+    """With the hold active, a rank with no local decodes defers both waiting
+    prefills and in-progress prefill chunks instead of bypassing the hold."""
+    scheduler, hold = _hold_scheduler(
+        max_num_batched_tokens=50, enable_chunked_prefill=True
+    )
+    _warm(hold, random.Random(0))
+
+    # Waiting prefill with empty running queue is held while peer ranks decode.
+    (req,) = create_requests(num_requests=1, num_tokens=80, req_ids=["r0"])
+    scheduler.add_request(req)
+    peer_decoding = [_row(period=T_DEC, decodes=16)] * (RANKS - 1)
+    scheduler.update_from_dp_rows([hold.local_row(), *peer_decoding], idle=False)
+    assert hold.hold
+    out = scheduler.schedule()
+    assert out.total_num_scheduled_tokens == 0
+    assert req.status == RequestStatus.WAITING
+
+    # Global no-decode releases and admits the first chunk.
+    peer_no_decode = [_row(period=T_DEC, decodes=0)] * (RANKS - 1)
+    scheduler.update_from_dp_rows([hold.local_row(), *peer_no_decode], idle=False)
+    assert not hold.hold
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens == {"r0": 50}
+    _finish_step(scheduler, out)
+    assert req.is_prefill_chunk and len(scheduler.running) == 1
+
+    # In-progress prefill chunk with no local decodes is also held while peers decode.
+    scheduler.update_from_dp_rows([hold.local_row(), *peer_decoding], idle=False)
+    assert hold.hold
+    out = scheduler.schedule()
+    assert out.total_num_scheduled_tokens == 0
+
+    # Release lets the remaining chunk finish.
+    scheduler.update_from_dp_rows([hold.local_row(), *peer_no_decode], idle=False)
+    assert not hold.hold
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens == {"r0": 30}
