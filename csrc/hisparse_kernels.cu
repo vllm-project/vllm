@@ -511,17 +511,11 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   int32_t* s_first_invalid = s_evict_off;
   const int num_positions = (end_row - first_row) * top_k;
   // With top_k a multiple of the warp size, a warp's positions share a row,
-  // so one lane can record the lowest invalid column among the lanes that
-  // reach this together. A partial mask is still correct: max combines.
+  // so only the lowest lane among those arriving together records its
+  // column. A partial mask is still correct: max combines.
   const bool warp_in_one_row = top_k % kWarpSize == 0;
   const auto record_invalid = [&](const int r, const int col) {
-    if (warp_in_one_row) {
-      const unsigned int lanes = __activemask();
-      const int leader = __ffs(lanes) - 1;
-      if (lane_id == leader) {
-        atomicMax(&s_first_invalid[r], top_k - (col - lane_id + leader));
-      }
-    } else {
+    if (!warp_in_one_row || lane_id == __ffs(__activemask()) - 1) {
       atomicMax(&s_first_invalid[r], top_k - col);
     }
   };

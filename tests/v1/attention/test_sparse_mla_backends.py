@@ -3414,11 +3414,14 @@ def test_hisparse_swap_in_packs_valid_rows_to_front(top_k, request_of_row):
     block_table = torch.arange(
         1, num_reqs * blocks_per_req + 1, dtype=torch.int32, device=device
     ).view(num_reqs, blocks_per_req)
+    # A null block leaves holes that only page translation can detect; the
+    # last row of the multi-row case has no others.
+    block_table[1, 1] = 0
     req_ids = torch.tensor(request_of_row, dtype=torch.int32, device=device)
     cols = torch.arange(top_k, dtype=torch.int32, device=device)
     topk = torch.stack([cols + row for row in range(num_rows)])
     holes = torch.stack(
-        [cols % 3 == 0, (cols == 7) | (cols >= top_k * 9 // 10), cols % 5 == 1]
+        [cols % 3 == 0, (cols == 7) | (cols >= top_k * 9 // 10), cols < 0]
     )[:num_rows]
     topk.masked_fill_(holes, -1)
 
@@ -3435,7 +3438,11 @@ def test_hisparse_swap_in_packs_valid_rows_to_front(top_k, request_of_row):
 
     global_ref = _triton_convert_reference_impl(
         req_ids, block_table, topk, block_size, top_k
-    ).cpu()
+    )
+    null_block = (
+        block_table[req_ids.long()[:, None], topk.clamp(min=0) // block_size] == 0
+    )
+    global_ref = global_ref.masked_fill(null_block, -1).cpu()
     assert isinstance(indices, torch.Tensor)
     attention_rows = cache.runtime.hot.attention_cache.reshape(-1, row_width)
     for row in range(num_rows):
