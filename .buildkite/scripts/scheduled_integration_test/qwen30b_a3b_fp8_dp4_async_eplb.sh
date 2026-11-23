@@ -18,6 +18,10 @@ wait_for_server() {
 
 MODEL="Qwen/Qwen3-30B-A3B-FP8"
 BACK="allgather_reducescatter"
+if command -v rocm-smi &> /dev/null || [[ -d /opt/rocm ]] || [[ -n "${ROCM_PATH:-}" ]]; then
+  # Disable MOE padding for ROCm since it is causing eplb to fail.
+  export VLLM_ROCM_MOE_PADDING=0
+fi
 
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
@@ -39,7 +43,6 @@ vllm serve "$MODEL" \
 --enable-eplb \
 --all2all-backend "$BACK" \
 --eplb-config '{"window_size":20, "step_interval":100, "use_async":true}' \
---trust-remote-code \
 --max-model-len 2048 \
 --port "$PORT" &
 SERVER_PID=$!

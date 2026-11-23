@@ -9,11 +9,12 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheConfig
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
+from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.model_states.interface import (
     ModelSpecificAttnMetadata,
     ModelState,
@@ -27,9 +28,7 @@ class EncoderDecoderAttnMetadata(ModelSpecificAttnMetadata):
     encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]]
 
     def get_extra_common_attn_kwargs(
-        self,
-        kv_cache_group_id: int,
-        num_reqs: int,
+        self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
         encoder_seq_lens = self.encoder_seq_lens.get(kv_cache_group_id)
         if encoder_seq_lens is None:
@@ -43,7 +42,7 @@ class EncoderDecoderAttnMetadata(ModelSpecificAttnMetadata):
 
 class EncoderDecoderModelState(ModelState):
     """ModelState for cross-attention encoder-decoder models
-    (Whisper, CohereASR, NemotronParse, FireRedLID, ...)
+    (Whisper, CohereASR, NemotronParse, ...)
     """
 
     def __init__(
@@ -53,25 +52,12 @@ class EncoderDecoderModelState(ModelState):
         encoder_cache: EncoderCache | None,
         device: torch.device,
     ) -> None:
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.model = model
-        self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        self.max_model_len = self.model_config.max_model_len
-        self.device = device
-
         assert encoder_cache is not None
-        self.encoder_cache = encoder_cache
-        self.encoder_runner = EncoderRunner(
-            model=self.model,
-            max_num_tokens=self.max_num_tokens,
-            hidden_size=self.model_config.get_inputs_embeds_size(),
-            encoder_cache=self.encoder_cache,
-            dtype=self.model_config.dtype,
-            device=self.device,
-        )
+        if vllm_config.model_config.enable_prompt_embeds:
+            raise ValueError(
+                "--enable-prompt-embeds is not supported with encoder-decoder models."
+            )
+        super().__init__(vllm_config, model, encoder_cache, device)
 
         self.max_encoder_len = getattr(
             self.model_config.hf_config,
@@ -84,7 +70,7 @@ class EncoderDecoderModelState(ModelState):
 
         self.encoder_outputs: list[torch.Tensor] = []
 
-    def get_mm_embeddings(
+    def prepare_inputs_embeds(
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
@@ -103,7 +89,8 @@ class EncoderDecoderModelState(ModelState):
             # so execute_mm_encoder preserves request order; use its return value
             # directly. No need to store in encoder_cache: cross-attention K/V are
             # written to the KV cache on the first step; decode steps use the cache.
-            self.encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            with self.encoder_runner.timed_encoder_operation(encoder_inputs.keys()):
+                self.encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
         else:
             # Decode steps: encoder K/V are in cross-attention KV cache.
             self.encoder_outputs = []
@@ -128,7 +115,9 @@ class EncoderDecoderModelState(ModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
+        assert ubatch_idx == 0, "DBO is not supported"
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding
@@ -137,7 +126,10 @@ class EncoderDecoderModelState(ModelState):
             num_tokens = input_batch.num_tokens
         enc_dec_attn_metadata = EncoderDecoderAttnMetadata(
             self._get_encoder_seq_lens(
-                input_batch.req_ids, attn_groups, for_capture, num_reqs
+                input_batch.req_ids,
+                kv_cache_config.kv_cache_groups,
+                for_capture,
+                num_reqs,
             )
         )
 
@@ -147,7 +139,7 @@ class EncoderDecoderModelState(ModelState):
         if for_capture:
             max_seq_len = self.max_model_len
         else:
-            max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max().item())
+            max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max())
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -164,17 +156,20 @@ class EncoderDecoderModelState(ModelState):
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             model_specific_attn_metadata=enc_dec_attn_metadata,
             for_cudagraph_capture=for_capture,
+            rswa_prefix_lens=input_batch.prompt_lens,
         )
         return attn_metadata
 
     def _get_encoder_seq_lens(
         self,
         req_ids: list[str],
-        attn_groups: list[list[AttentionGroup]],
+        kv_cache_groups: list[KVCacheGroup],
         for_capture: bool,
         num_reqs: int,
     ) -> dict[int, tuple[torch.Tensor, np.ndarray]]:
-        encoder_seq_lens = torch.zeros(num_reqs, dtype=torch.int32, pin_memory=True)
+        encoder_seq_lens = torch.zeros(
+            num_reqs, dtype=torch.int32, pin_memory=PIN_MEMORY
+        )
         encoder_seq_lens_np = encoder_seq_lens.numpy()
         if not for_capture:
             # During normal execution, use actual encoder lengths.
@@ -188,17 +183,13 @@ class EncoderDecoderModelState(ModelState):
             # is captured with the correct value for cross-attention.
             encoder_seq_lens_np[:] = self.max_encoder_len
 
-        self.encoder_seq_lens_gpu[:num_reqs].copy_(encoder_seq_lens, non_blocking=True)
+        async_tensor_h2d(encoder_seq_lens, out=self.encoder_seq_lens_gpu[:num_reqs])
         self.encoder_seq_lens_gpu[num_reqs:].fill_(0)
         encoder_seq_lens_gpu = self.encoder_seq_lens_gpu[:num_reqs]
 
         seq_lens_by_group: dict[int, tuple[torch.Tensor, np.ndarray]] = {}
-        for kv_cache_group_idx, groups in enumerate(attn_groups):
-            has_cross_attn = any(
-                isinstance(attn_group.kv_cache_spec, CrossAttentionSpec)
-                for attn_group in groups
-            )
-            if has_cross_attn:
+        for kv_cache_group_idx, kv_cache_group in enumerate(kv_cache_groups):
+            if issubclass(kv_cache_group.manager_cls, CrossAttentionManager):
                 seq_lens_by_group[kv_cache_group_idx] = (
                     encoder_seq_lens_gpu,
                     encoder_seq_lens_np,

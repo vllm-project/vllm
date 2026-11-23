@@ -13,7 +13,7 @@ from .qwen3_vl import (
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
 )
-from .utils import AutoWeightsLoader
+from .utils import AutoWeightsLoader, WeightsMapper
 
 
 class InternS2PreviewProcessingInfo(Qwen3VLProcessingInfo):
@@ -30,9 +30,13 @@ class InternS2PreviewProcessingInfo(Qwen3VLProcessingInfo):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class InternS2PreviewForConditionalGeneration(Qwen3_5MoeForConditionalGeneration):
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["mtp.", "model.time_series.", "time_series."],
+    # `mtp.` is already dropped by `Qwen3_5ForConditionalGeneration`.
+    hf_to_vllm_mapper = Qwen3_5MoeForConditionalGeneration.hf_to_vllm_mapper | (
+        WeightsMapper(
+            orig_to_new_prefix={"model.time_series.": None, "time_series.": None}
         )
+    )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

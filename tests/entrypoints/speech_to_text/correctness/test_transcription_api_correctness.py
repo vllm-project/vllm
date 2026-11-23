@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Evaluate Transcription API correctness by computing Word Error Rate (WER)
+"""Evaluate Transcription API correctness by computing Word Error Rate (WER)
 on a given ASR dataset. When provided, it will also compare the WER against
 a baseline.
 This simulates real work usage of the API and makes sure that the frontend and
@@ -17,7 +16,7 @@ import pytest
 import soundfile
 import torch
 from datasets import Audio, load_dataset
-from evaluate import load
+from jiwer import wer
 from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
 from vllm.benchmarks.datasets.datasets import ASRDataset
@@ -60,7 +59,11 @@ normalizer_tokenizer = get_tokenizer(
     tokenizer_mode=normalizer_model_info.tokenizer_mode,
     trust_remote_code=normalizer_model_info.trust_remote_code,
 )
-normalizer = EnglishTextNormalizer(normalizer_tokenizer.english_spelling_normalizer)
+# english_spelling_normalizer is specific to the Whisper tokenizer and is not
+# part of the TokenizerLike protocol that get_tokenizer is annotated to return.
+normalizer = EnglishTextNormalizer(
+    normalizer_tokenizer.english_spelling_normalizer  # type: ignore[attr-defined]
+)
 
 
 async def transcribe_audio(client, tokenizer, y, sr, extra_body=None):
@@ -202,8 +205,7 @@ def run_evaluation(
     # Compute WER
     predictions = [res[2] for res in results]
     references = [res[3] for res in results]
-    wer = load("wer")
-    wer_score = 100 * wer.compute(references=references, predictions=predictions)
+    wer_score = 100 * wer(references, predictions)
     print("WER:", wer_score)
     return wer_score
 
@@ -302,8 +304,7 @@ def run_longform_evaluation(
 
     predictions = [res[2] for res in results]
     references = [res[3] for res in results]
-    wer = load("wer")
-    wer_score = 100 * wer.compute(references=references, predictions=predictions)
+    wer_score = 100 * wer(references, predictions)
     print("WER:", wer_score)
     return wer_score
 
@@ -317,6 +318,9 @@ def run_longform_evaluation(
         ("openai/whisper-large-v3", 12.744980),
         # CohereASR is used to test the variable encoder length code paths
         ("CohereLabs/cohere-transcribe-03-2026", 11.92),
+        # fp32: in bf16, batch composition can flip one stuttered utterance
+        # ("100, 100") into a repetition loop up to max_model_len (+0.6 WER).
+        ("nvidia/canary-1b-v2", 12.4564, "--dtype=float32"),
     ],
 )
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.
@@ -326,13 +330,14 @@ def run_longform_evaluation(
 def test_wer_correctness(
     model_config, dataset_repo, n_examples=-1, max_concurrent_request=None
 ):
-    model_name, expected_wer = model_config
+    model_name, expected_wer, *extra_server_args = model_config
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_name)
     server_args = [
         "--enforce-eager",
         f"--tokenizer_mode={model_info.tokenizer_mode}",
         f"--max_num_seqs={MAX_SEQS_FOR_TRANSCRIPTION_TEST}",
         f"--gpu_memory_utilization={GPU_UTIL_FOR_TRANSCRIPTION_TEST}",
+        *extra_server_args,
     ]
     if model_info.trust_remote_code:
         server_args.append("--trust-remote-code")
@@ -358,7 +363,12 @@ def test_wer_correctness(
         print(f"Expected WER: {expected_wer}, Actual WER: {wer}")
 
         if expected_wer:
-            torch.testing.assert_close(wer, expected_wer, atol=1e-1, rtol=1e-2)
+            wer_atol, wer_rtol = 1e-1, 1e-2
+            max_wer = expected_wer + wer_atol + wer_rtol * abs(expected_wer)
+            assert wer <= max_wer, (
+                f"WER {wer:.6f} exceeds maximum allowed {max_wer:.6f} "
+                f"(baseline {expected_wer:.6f})"
+            )
 
 
 # 14-22mins of 6 audio samples of total ~115 mins and just 37MB.

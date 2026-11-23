@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This example shows how to use FlexKV with vLLM for prefix caching.
+"""This example shows how to use FlexKV with vLLM for prefix caching.
 
 FlexKV is a distributed KV Store and multi-level cache management system for
 ultra-large-scale LLM inference.
