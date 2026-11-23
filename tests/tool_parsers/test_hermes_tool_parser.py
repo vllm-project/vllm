@@ -7,6 +7,7 @@ import pytest
 
 from tests.tool_parsers.utils import get_function_delta
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.hermes import HermesParser
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.granite4_tool_parser import Granite4ToolParser
@@ -421,6 +422,28 @@ def test_hermes_parser_non_streaming_tool_call_invalid_json(
 
     assert tool_call is not None
     assert not tool_call.tools_called
+
+
+def test_hermes_parser_unified_parse_rejects_invalid_json(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """`HermesParser.parse` bypasses the tool-parser adapter, so the
+    all-or-nothing JSON check must live in the engine config to cover it."""
+    valid = '<tool_call>\n{"name": "final_answer", "arguments": {"trigger": true}}'
+    invalid = '<tool_call>\n{"name": "final_answer", "arguments": {"trigger": true}'
+
+    _, _, tool_calls = HermesParser(qwen_tokenizer).parse(
+        valid, any_chat_request, enable_auto_tools=True
+    )
+    assert tool_calls is not None
+    assert tool_calls[0].name == "final_answer"
+
+    _, content, tool_calls = HermesParser(qwen_tokenizer).parse(
+        invalid, any_chat_request, enable_auto_tools=True
+    )
+    assert tool_calls is None
+    assert content == invalid
 
 
 def test_hermes_streaming_content_and_tool_call_in_single_chunk(
