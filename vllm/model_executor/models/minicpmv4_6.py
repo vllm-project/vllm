@@ -1319,6 +1319,7 @@ class MiniCPMV4_6ForConditionalGeneration(
         self,
         layers: Iterable[nn.Module],
         hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None,
         varlen: Idefics2VarlenMetadata | None,
     ) -> torch.Tensor:
         if varlen is not None:
@@ -1328,7 +1329,7 @@ class MiniCPMV4_6ForConditionalGeneration(
             hidden_states = varlen.unpack(hidden_states)
         else:
             for layer in layers:
-                hidden_states = layer(hidden_states)
+                hidden_states = layer(hidden_states, attention_mask=attention_mask)
         return hidden_states
 
     def get_vision_hidden_states(
@@ -1373,7 +1374,15 @@ class MiniCPMV4_6ForConditionalGeneration(
             tgt_sizes=tgt_sizes,
         )
 
-        varlen = self.vpm.get_varlen_metadata(patch_attn_mask)
+        varlen = None
+        attention_mask = None
+        if self.vpm.prefer_varlen_attention:
+            varlen = self.vpm.get_varlen_metadata(patch_attn_mask)
+        elif torch.any(~patch_attn_mask):
+            mask_dtype = hidden_states.dtype
+            min_val = torch.finfo(mask_dtype).min
+            attention_mask = (~patch_attn_mask).to(dtype=mask_dtype) * min_val
+            attention_mask = attention_mask[:, None, None, :]
 
         # Encoder layers with mid-encoder merger injection
         insert_layer_id = getattr(self.config, "insert_layer_id", -1)
@@ -1384,14 +1393,15 @@ class MiniCPMV4_6ForConditionalGeneration(
         hidden_states = self._run_vpm_layers(
             self.vpm.encoder.layers[: insert_layer_id + 1],
             hidden_states,
+            attention_mask,
             varlen,
         )
 
         if use_vit_merger:
-            hidden_states, tgt_sizes, _ = self.vit_merger(
+            hidden_states, tgt_sizes, attention_mask = self.vit_merger(
                 hidden_states,
                 tgt_sizes,
-                None,
+                attention_mask,
             )
             if varlen is not None:
                 merged_lens = tgt_sizes.prod(-1)
@@ -1404,6 +1414,7 @@ class MiniCPMV4_6ForConditionalGeneration(
         hidden_states = self._run_vpm_layers(
             self.vpm.encoder.layers[insert_layer_id + 1 :],
             hidden_states,
+            attention_mask,
             varlen,
         )
 

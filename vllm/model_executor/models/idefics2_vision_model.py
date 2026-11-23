@@ -46,7 +46,6 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from .utils import AutoWeightsLoader, WeightsMapper
 from .vision import (
     get_fp8_padded_hidden_size,
-    get_vit_attn_backend,
     is_vit_use_data_parallel,
     run_dp_sharded_vision_model,
 )
@@ -483,10 +482,7 @@ class Idefics2VisionTransformer(nn.Module):
             orig_to_new_prefix=orig_to_new_prefix
         )
         head_size = config.hidden_size // config.num_attention_heads
-        self.attn_backend = get_vit_attn_backend(
-            head_size,
-            dtype=torch.get_default_dtype(),
-        )
+        self.attn_backend = self.encoder.layers[0].self_attn.attn.attn_backend
         self.tp_size = (
             1 if self.use_data_parallel else get_tensor_model_parallel_world_size()
         )
@@ -538,7 +534,11 @@ class Idefics2VisionTransformer(nn.Module):
         if not self.apply_encoder_attention_mask or flat_patch_mask is None:
             attention_mask = None
         else:
-            if use_varlen and not self.use_data_parallel:
+            if (
+                self.prefer_varlen_attention
+                and use_varlen
+                and not self.use_data_parallel
+            ):
                 varlen = self.get_varlen_metadata(flat_patch_mask)
                 attention_mask = None
             else:
@@ -619,3 +619,12 @@ class Idefics2VisionTransformer(nn.Module):
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
         )
+
+    @property
+    def prefer_varlen_attention(self) -> bool:
+        """Whether to prefer varlen attention over masked SDPA.
+
+        FlashAttention backends are faster than masked SDPA when using varlen attention
+        while Triton varlen attention is slower.
+        """
+        return self.encoder.layers[0].self_attn.attn.is_flash_attn_backend
