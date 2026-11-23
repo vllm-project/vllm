@@ -247,11 +247,8 @@ class Inkling2DSparkConfig(PreTrainedConfig):
         target_layer_ids: list[int] | None = None,
         **kwargs,
     ) -> None:
-        # Not stored as ``block_size``: vLLM DSpark would take that as the
-        # number of speculative tokens, but the block holds an anchor plus
-        # block_size - 1 masks, each predicting the token at its own position.
         self.draft_block_size = block_size
-        self.dspark_block_size = block_size - 1
+        self.dspark_block_size = block_size
         self.sample_from_anchor = False
         self.is_causal = False
         self.mask_token_id = 0

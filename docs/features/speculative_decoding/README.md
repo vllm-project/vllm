@@ -68,6 +68,9 @@ request). Checkpoints whose `dflash_config` (or speculators config) sets
 `sample_from_anchor: true` use the anchor-first layout instead: the anchor
 query predicts the first draft token, so `K` drafts take `K` queries. vLLM
 reads the layout from the checkpoint; no extra flag is needed.
+DSpark drafts default to the anchor-first layout. When `num_speculative_tokens`
+is not set, DSpark drafts one full trained block: `block_size` tokens for
+anchor-first checkpoints and `block_size - 1` for fill-in checkpoints.
 Draft sampling defaults to `greedy`; set `draft_sample_method` to
 `probabilistic` for probabilistic proposals.
 Set `enable_adaptive_verification` to `true` in the speculative config to
