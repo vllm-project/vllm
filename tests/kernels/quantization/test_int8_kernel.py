@@ -144,6 +144,7 @@ def test_w8a8_fp8_fused_moe(default_vllm_config, M, N, K, E, topk, dtype, seed):
     quant_config = FusedMoEQuantConfig.make(
         torch.int8,
         per_act_token_quant=True,
+        per_out_ch_quant=True,
         block_shape=None,
         w1_scale=w1_s,
         w2_scale=w2_s,

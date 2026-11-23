@@ -17,15 +17,19 @@ from vllm.model_executor.models.mistral_eagle import EagleMistralForCausalLM
 from vllm.model_executor.models.mistral_large_3_eagle import (
     EagleMistralLarge3ForCausalLM,
 )
+from vllm.model_executor.models.nemotron_h_mtp import NemotronHMTP
 from vllm.v1.attention.backends import flash_attn as flash_attn_module
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
+    prepare_input_buffers,
+    prepare_input_hidden_states_and_embeddings,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as spec_module
@@ -105,13 +109,13 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
         slot_mappings=torch.tensor([[10, 20, -1, -1]]),
     )
     speculator.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
+    builder = SimpleNamespace(build=build, supports_update_block_table=False)
     speculator.attn_groups = [
         [
-            # Stand-in group: build_attn_metadata only reads these two members.
+            # Stand-in group: build_attn_metadata only reads these members.
             SimpleNamespace(  # type: ignore[list-item]  # stand-in group
-                get_metadata_builder=lambda _: SimpleNamespace(
-                    build=build, supports_update_block_table=False
-                ),
+                metadata_builders=[builder],
+                get_metadata_builder=lambda _: builder,
                 build_metadata=lambda cm, ubatch_idx=0, **_: build(0, cm),
                 layer_names=["draft"],
             )
@@ -181,6 +185,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         method="mtp",
         num_speculative_tokens=3,
         draft_model_config=draft_model_config,
+        draft_decode_context_parallel_size=1,
         use_local_argmax_reduction=False,
         draft_sample_method="greedy",
         enable_adaptive_verification=False,
@@ -340,6 +345,79 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
     assert speculator.cached_draft_input_embeds.shape == (2, 2, 3)
 
 
+@pytest.mark.parametrize("use_input_embeds", [False, True])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires a GPU")
+def test_multi_module_mtp_reprefill_uses_only_cached_request_history(
+    use_input_embeds,
+):
+    """Rejecting all drafts must not replay the previous slot occupant's data."""
+    device = torch.device("cuda")
+    steps, hidden_size, max_reqs, max_tokens, slot = 4, 8, 2, 5, 1
+    target_buffers = InputBuffers(max_reqs, max_tokens, device)
+    batch = InputBatch.make_dummy(1, max_tokens, target_buffers, is_padding=False)
+    batch.idx_mapping.fill_(slot)
+    batch.idx_mapping_np.fill(slot)
+    batch.input_ids.copy_(torch.tensor([5100, 1, 2, 3, 4], device=device))
+    batch.positions.copy_(torch.arange(2, 7, device=device))
+    batch.seq_lens.fill_(7)
+    buffers = InputBuffers(max_reqs, max_tokens, device)
+    buffers.query_start_loc.copy_(target_buffers.query_start_loc)
+    hidden_states = torch.zeros(max_tokens, hidden_size, device=device)
+    embeds = torch.full_like(hidden_states, 30.0) if use_input_embeds else None
+    cached_ids = torch.tensor([[0, 0, 0], [9005, 5001, 5100]], device=device)
+    cached_hidden = torch.full((max_reqs, steps - 1, hidden_size), 3.0, device=device)
+    cached_hidden[slot, 0].fill_(7.0)
+    num_cached_tokens = torch.tensor([0, 2], dtype=torch.int32, device=device)
+    rejected = torch.tensor([4], dtype=torch.int32, device=device)
+    last_indices = torch.zeros(max_reqs, dtype=torch.int64, device=device)
+    prepare_input_buffers(
+        1,
+        batch,
+        cached_ids,
+        num_cached_tokens,
+        torch.ones(1, dtype=torch.int32, device=device),
+        rejected,
+        torch.full((max_reqs,), 5200, device=device),
+        torch.zeros(steps, max_reqs, dtype=torch.int32, device=device),
+        torch.full((max_reqs, steps - 1), -1, device=device),
+        buffers,
+        last_indices,
+        max_reqs,
+        steps,
+    )
+    prepare_input_hidden_states_and_embeddings(
+        1,
+        max_tokens,
+        hidden_states,
+        torch.full_like(hidden_states, 3.0),
+        cached_hidden,
+        num_cached_tokens,
+        embeds,
+        10 * cached_hidden if use_input_embeds else None,
+        batch,
+        buffers,
+        rejected,
+        steps,
+    )
+
+    assert buffers.input_ids[:3].tolist() == [5001, 5100, 5200]
+    assert buffers.positions[:3].tolist() == [0, 1, 2]
+    assert last_indices[0].item() == 2
+    torch.testing.assert_close(
+        hidden_states[:3],
+        torch.full_like(hidden_states[:3], 3.0),
+        rtol=0,
+        atol=0,
+    )
+    if embeds is not None:
+        torch.testing.assert_close(
+            embeds[:3],
+            torch.full_like(embeds[:3], 30.0),
+            rtol=0,
+            atol=0,
+        )
+
+
 @pytest.mark.parametrize(
     ("model_cls", "expected"),
     [
@@ -347,6 +425,7 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
         (EagleMistralForCausalLM, True),
         (EagleMistralLarge3ForCausalLM, True),
         (Exaone4_5_MTP, True),
+        (NemotronHMTP, True),
         (Eagle3LlamaForCausalLM, False),
     ],
 )
@@ -376,6 +455,33 @@ def test_mm_capable_drafter_merges_multimodal_embeddings(model_cls):
     )
     assert torch.equal(merged[[0, 3]], table[[1, 2]])
     assert torch.equal(merged[[1, 2]], mm_embeds[0])
+
+
+def test_nemotron_h_mtp_merges_multimodal_embeddings():
+    """NemotronH MTP is trained on the target input stream, so image and audio
+    embeddings must replace placeholder token embeddings."""
+    table = torch.arange(8, dtype=torch.float32).repeat(3, 1).T  # [8, 3]
+
+    class _EmbeddingStub(NemotronHMTP):
+        def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+            return table[input_ids]
+
+    drafter = object.__new__(_EmbeddingStub)
+    input_ids = torch.tensor([1, 5, 6, 2])
+
+    text_only = NemotronHMTP.embed_input_ids(drafter, input_ids)
+    assert torch.equal(text_only, table[input_ids])
+
+    mm_embeds = [torch.full((2, 3), -1.0)]
+    is_multimodal = torch.tensor([False, True, True, False])
+    merged = NemotronHMTP.embed_input_ids(
+        drafter, input_ids, mm_embeds, is_multimodal=is_multimodal
+    )
+    assert torch.equal(merged[[0, 3]], table[[1, 2]])
+    assert torch.equal(merged[[1, 2]], mm_embeds[0])
+
+    with pytest.raises(ValueError, match="is_multimodal"):
+        NemotronHMTP.embed_input_ids(drafter, input_ids, mm_embeds)
 
 
 def test_run_model_unpacks_tuple_return_for_mtp(monkeypatch):
@@ -671,6 +777,7 @@ def test_decode_metadata_update_needs_draft_decode_steps(
     speculator.attn_groups = [
         [
             SimpleNamespace(  # type: ignore[list-item]  # stand-in group
+                metadata_builders=[object()],
                 supports_draft_decode_metadata_update=True,
                 backend=SimpleNamespace(get_name=lambda: "CAPABLE"),
             )
