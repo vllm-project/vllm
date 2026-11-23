@@ -309,7 +309,7 @@ You can find more information about vLLM's wheels in
 
     !!! note
         - You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
-        - The validated `$AITER_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
+        - The validated AITER release is tag `v$AITER_VERSION` in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base), which installs AMD's prebuilt wheel for that tag.
 
 4. Optionally, if you want to use MORI for EP or PD disaggregation, you can install [MORI](https://github.com/ROCm/mori) using the following steps:
 
