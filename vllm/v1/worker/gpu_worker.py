@@ -1014,18 +1014,6 @@ class Worker(WorkerBase):
         ):
             self.model_runner._init_kv_zero_meta()
 
-    def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
-        from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
-            _find_simple_cpu_offload_connector,
-        )
-
-        if not has_kv_transfer_group():
-            return None
-        connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
-        if connector is None:
-            return None
-        return connector.get_aligned_num_cpu_blocks()
-
     def extensible_kv_cache_unsupported_reason(self) -> str | None:
         # Every rank must reach the same decision: one that keeps the feature
         # would wait in the block-count all-reduces for one that dropped it.
@@ -1874,6 +1862,10 @@ class Worker(WorkerBase):
             self.model_runner.on_target_weights_replaced()
 
     def shutdown(self) -> None:
+        model_runner = getattr(self, "model_runner", None)
+        if model_runner is not None and model_runner.eplb_state is not None:
+            model_runner.eplb_state.stop_async_loop()
+
         gc.unfreeze()
 
         # has_kv_transfer_group can be None during interpreter shutdown.
