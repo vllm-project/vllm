@@ -2292,8 +2292,7 @@ def _flat_sigmoid_bias_topk_is_profitable(
     where it is a Triton launch from Python against a single C++ dispatch --
     measured at -1.8% to -3.5% end-to-end throughput with --enforce-eager.
     Stream capture is the test because it holds for every graph vLLM records,
-    FULL and PIECEWISE, under either model runner, while the forward context's
-    cudagraph_runtime_mode reads NONE during the V2 model runner's FULL capture.
+    FULL and PIECEWISE, under either model runner.
     """
     from vllm.model_executor.layers.fused_moe.router.rocm_sigmoid_bias_flat_topk import (  # noqa: E501
         can_use_sigmoid_bias_flat_topk,
