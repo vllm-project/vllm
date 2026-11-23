@@ -62,14 +62,6 @@ and compares the disaggregated outputs against it. Set `MODEL` to use another mo
 or `MOONCAKE_EC_PROTOCOL=rdma` to use RDMA on supported hardware. See the script for
 additional configuration options.
 
-### HY4 image and video inputs
-
-With HY4 and HY4 Flash, the Python EPD proxy can forward images and videos as
-metadata-only references. The Encoder reports the processed vision grid and,
-for video, the timestamps of the merged frames. The Prefill+Decode instance
-uses these fields to reconstruct the visual placeholders and M-RoPE positions.
-The EC connector supplies the visual embeddings.
-
 ### Audio inputs
 
 The Python EPD proxy also rewrites audio in `/v1/chat/completions` into
