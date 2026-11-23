@@ -45,7 +45,7 @@ class EngramConfig:
 
     cpu_offload: bool = True
     """Store embedding weights in host memory. NVLink peer groups use local
-    Grace EGM when enabled and HBM when disabled."""
+    Grace host memory when enabled and HBM when disabled."""
 
     disk_offload: bool = False
     """Keep Qwen4Exp PLE tables in the checkpoint files and read each step's
@@ -80,7 +80,7 @@ class EngramConfig:
     CUDA, TP=1 and PP=1."""
 
     peer_group_transport: Literal["nvlink", "rdma"] = "nvlink"
-    """How a peer group reads rows: `nvlink` loads them from peers' HBM or EGM
+    """How a peer group reads rows: `nvlink` loads them from peer device or host memory
     through CUDA FABRIC handles and an IMEX channel.
     With `rdma`, the owners' NICs gather them from HBM, or from host memory
     with `cpu_offload`."""

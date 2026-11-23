@@ -153,7 +153,7 @@ class PoolEngramEmbedding(ParallelEngramEmbedding):
         self.weight = nn.Parameter(weight, requires_grad=False)
         self.weight_scale_inv = nn.Parameter(scales, requires_grad=False)
         weight_loader = self._weight_loader
-        if pool.egm:
+        if pool.host_shards and weight.is_cuda:
             weight_loader = partial(
                 _engram_head_shard_weight_loader, max_copy_bytes=64 << 20
             )

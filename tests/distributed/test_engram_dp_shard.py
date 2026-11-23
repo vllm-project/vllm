@@ -13,6 +13,7 @@ prefetch only their own tokens without DP gathers.
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from itertools import product
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -304,11 +305,11 @@ def _check_pool_tables(store_dir: str):
         modes.append(("nvlink", False, 4))
         # Every rank must take the same collective path in a mixed GPU group.
         attrs = cu.CUdevice_attribute
-        egm_attr = (
+        host_vmm = (
             attrs.CU_DEVICE_ATTRIBUTE_HOST_NUMA_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED
         )
         if all(
-            cu.cuDeviceGetAttribute(egm_attr, device) == (cu.CUresult.CUDA_SUCCESS, 1)
+            cu.cuDeviceGetAttribute(host_vmm, device) == (cu.CUresult.CUDA_SUCCESS, 1)
             for device in range(WORLD_SIZE)
         ):
             modes.append(("nvlink", True, 4))
@@ -326,7 +327,16 @@ def _check_pool_tables(store_dir: str):
         machine = str(group.rank_in_group) if node == 1 else rdma.node_id()
         with patch.object(rdma, "node_id", lambda machine=machine: machine):
             pool = EngramPool(group, transport, host, max_items, 72)
-        with torch.device("cuda"):
+        # Independent engines can own one GPU at a nonzero CUDA ordinal.
+        device = torch.accelerator.current_device_index()
+        assigned = [current_platform.visible_device_id_to_physical_device_id(device)]
+        with (
+            torch.device("cuda"),
+            patch(
+                "vllm.platforms.interface._assigned_physical_gpu_ids",
+                assigned if transport == "nvlink" else None,
+            ),
+        ):
             table = PoolEngramEmbedding(
                 sum(HEAD_SIZES), DIM, HEAD_SIZES, False, pool, "table"
             )
@@ -346,6 +356,7 @@ def _check_pool_tables(store_dir: str):
                 )
             finally:
                 cu.cuMemRelease(handle)
+            _check_nvlink_startup_rollback(pool)
         table.weight.weight_loader(table.weight, weight)
         table.weight_scale_inv.weight_loader(table.weight_scale_inv, scale)
         table.process_weights_after_loading()
@@ -375,6 +386,64 @@ def _check_pool_tables(store_dir: str):
         del graph
         group.barrier()
         pool.close()
+
+
+def _check_nvlink_startup_rollback(pool: EngramPool):
+    """A failed rank must leave no allocation handles or address reservations."""
+    from cuda.bindings import driver as cu
+
+    for failure in (
+        "cuDeviceGetAttribute",
+        "cuMemCreate",
+        "cuMemExportToShareableHandle",
+        "cuMemImportFromShareableHandle",
+        "cuMemMap",
+        "cuMemSetAccess",
+    ):
+        with ExitStack() as stack:
+            calls = {
+                name: stack.enter_context(
+                    patch.object(cu, name, wraps=getattr(cu, name))
+                )
+                for name in (
+                    "cuMemCreate",
+                    "cuMemImportFromShareableHandle",
+                    "cuMemRelease",
+                    "cuMemAddressReserve",
+                    "cuMemAddressFree",
+                )
+            }
+            if pool.group.rank_in_group == 0:
+                stack.enter_context(
+                    patch.object(cu, failure, side_effect=MemoryError(failure))
+                )
+            with pytest.raises(RuntimeError, match=f"rank 0: MemoryError: {failure}"):
+                pool.table(32, 8, "rollback")
+
+        assert (
+            calls["cuMemAddressFree"].call_count
+            == calls["cuMemAddressReserve"].call_count
+        )
+        assert calls["cuMemRelease"].call_count == (
+            calls["cuMemCreate"].call_count
+            + calls["cuMemImportFromShareableHandle"].call_count
+        )
+
+
+def test_engram_peer_group_propagates_startup_failure(tmp_path):
+    path = str(tmp_path / "peers")
+    groups = [PeerGroup(2, path) for _ in range(2)]
+
+    def run(group):
+        with (
+            pytest.raises(RuntimeError, match="rank 1: IndexError: device"),
+            group.startup_stage("Allocating table"),
+        ):
+            if group.rank_in_group == 1:
+                raise IndexError("device")
+
+    with ThreadPoolExecutor(2) as executor:
+        list(executor.map(run, groups))
 
 
 def test_engram_peer_group_assigns_ranks_and_gathers(tmp_path):
@@ -1229,96 +1298,3 @@ def test_engram_hash_padding_ignores_other_nodes(tp_size, uniform, monkeypatch):
         torch.testing.assert_close(
             gathered, expected.repeat(group_size, 1, 1), msg=f"DP rank {dp_rank}"
         )
-
-
-@pytest.mark.parametrize(
-    "failure", ["numa", "nvml", "allocate", "export", "import", "map", "timeout"]
-)
-def test_egm_startup_failure_propagates(monkeypatch, failure: str) -> None:
-    """A rank-local EGM failure reaches both ranks and frees local allocations."""
-    import threading
-
-    from vllm.distributed.engram_pool import nvlink
-
-    local = threading.local()
-    barrier = threading.Barrier(2, timeout=5)
-    values = [b"", b""]
-    allocated = []
-
-    class Group:
-        def __init__(self, rank):
-            self.rank_in_group = rank
-
-        def all_gather(self, value):
-            if failure == "timeout" and value == b"":
-                raise TimeoutError("injected mapping status timeout")
-            values[self.rank_in_group] = value
-            barrier.wait()
-            result = values.copy()
-            barrier.wait()
-            return result
-
-    class Memory:
-        def __init__(self, *args, **kwargs):
-            if failure == "allocate" and local.rank == 0:
-                raise RuntimeError("injected allocation failure")
-            self.rank = local.rank
-            self.handle = f"allocation-{self.rank}"
-            self.mapped = []
-            self.released = []
-            allocated.append(self)
-
-        def export_fabric(self):
-            if failure == "export" and self.rank == 0:
-                raise RuntimeError("injected export failure")
-            return str(self.rank).encode()
-
-        def import_fabric(self, handle):
-            if failure == "import" and self.rank == 0:
-                raise RuntimeError("injected import failure")
-            return handle
-
-        def map(self, handle=None, **kwargs):
-            if failure == "map" and self.rank == 0 and handle is not None:
-                raise RuntimeError("injected map failure")
-            address = (self.rank, handle)
-            self.mapped.append(address)
-            return address
-
-        def unmap(self, address):
-            self.mapped.remove(address)
-
-        def release(self, handle):
-            self.released.append(handle)
-
-    def numa(device):
-        if failure == "nvml" and local.rank == 0:
-            from vllm.third_party.pynvml import NVML_ERROR_NO_PERMISSION, NVMLError
-
-            raise NVMLError(NVML_ERROR_NO_PERMISSION)
-        return None if failure == "numa" and local.rank == 0 else 0
-
-    monkeypatch.setattr(nvlink, "CuMem", Memory)
-    monkeypatch.setattr(nvlink.current_platform, "get_device_numa_node", numa)
-    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
-    monkeypatch.setattr(
-        nvlink.torch,
-        "tensor",
-        lambda *args, **kwargs: SimpleNamespace(data_ptr=lambda: 0),
-    )
-    monkeypatch.setattr(nvlink, "device_view", lambda *args: None)
-
-    def run(rank):
-        local.rank = rank
-        error = (
-            pytest.raises(TimeoutError, match="mapping status timeout")
-            if failure == "timeout"
-            else pytest.raises(RuntimeError, match="rank 0")
-        )
-        with error:
-            nvlink.NvlinkTransport(Group(rank), True).shard(8, "test")
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        list(executor.map(run, range(2)))
-    assert all(not memory.mapped for memory in allocated)
-    assert all(memory.handle in memory.released for memory in allocated)
