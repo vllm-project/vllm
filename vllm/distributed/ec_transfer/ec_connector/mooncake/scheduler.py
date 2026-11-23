@@ -372,9 +372,7 @@ class ECMooncakeScheduler:
                     > num_computed_tokens
                 ):
                     self._prepare_push_spec(request, index)
-        if not self._is_consumer or not getattr(request, "ec_transfer_params", None):
-            # Without EC params no encoder pushes for this request; the media
-            # it carries is encoded locally.
+        if not self._is_consumer:
             return True
 
         self._drain_push_notifications()
@@ -410,7 +408,9 @@ class ECMooncakeScheduler:
             if record is not None:
                 self._scheduler_pending_work = True
                 all_ready = False
-            else:
+            elif getattr(request, "ec_transfer_params", None):
+                # Without EC params no encoder pushes; the media is encoded
+                # locally.
                 waiting_id = transfer_id or f"{request.request_id}:{index}"
                 self._note_awaiting_push(mm_hash, waiting_id, request.request_id, now)
                 all_ready = False
