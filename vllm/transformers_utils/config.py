@@ -178,6 +178,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     **{"deepseek_v41": "DeepseekV41Config"},
     flint="FlintConfig",
     inkling2="Inkling2MMConfig",
+    inkling2_loop="Inkling2LoopMMConfig",
     inkling2_model="Inkling2ModelConfig",
 )
 
@@ -424,8 +425,8 @@ class HFConfigParser(ConfigParserBase):
                 from transformers import Qwen3ASRConfig
 
                 # Original checkpoints nest their fields in `thinker_config`
-                audio_config = thinker_config["audio_config"]
-                audio_config["model_type"] = "qwen3_asr_encoder"
+                thinker_config["audio_config"]["model_type"] = "qwen3_asr_encoder"
+                thinker_config["text_config"]["model_type"] = "qwen3"
                 config_dict = {**thinker_config, **config_dict}
                 if thinker_config["model_type"] == "qwen3_forced_aligner":
                     config_dict["architectures"] = [
