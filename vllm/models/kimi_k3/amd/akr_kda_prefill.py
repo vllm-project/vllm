@@ -17,9 +17,6 @@ Constraints (any failure falls back to the stock path before anything is written
 - A mixed step (length-1 decodes first, then prefills) needs at least
   `MIXED_MIN_PREFILL_TOKENS` prefill tokens; below that it takes the stock path (see
   the constant).
-- The hand-over flags of the one-launch path are one persistent buffer per device: two
-  KDA prefill layers must never run concurrently on two streams (KDA layers run on the
-  main stream only).
 Numerics: prefill rounds conv+SiLU and o to bf16 like stock; decode keeps fp32 (about 1
 bf16 ulp apart). Mixed steps (decode-first batch): the length-1 decodes take the stock
 `causal_conv1d_update` + packed decode recurrence (+ gated norm); the prefill sequences
