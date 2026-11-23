@@ -40,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
     TritonExperts,
     TritonWNA16Experts,
 )
+from vllm.model_executor.layers.fused_moe.oracle import fp8 as fp8_oracle
 from vllm.model_executor.layers.fused_moe.oracle import int_wna16 as int_wna16_oracle
 from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
@@ -108,6 +109,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 
 # oracle -> (select call, backend mapper, explicit runner backend, name used in
 # the "moe_backend=... is not supported for <name> MoE" error).
@@ -485,6 +487,38 @@ def test_fp8_aiter_env_selection(
             select()
         return
     assert select()[0] is expected
+
+
+@pytest.mark.parametrize(
+    ("capability", "ep_size", "triton_first"),
+    [
+        pytest.param((12, 1), 1, True, id="sm121-tp"),
+        pytest.param((12, 0), 1, True, id="sm120-tp"),
+        pytest.param((12, 1), 2, False, id="sm121-ep"),
+        pytest.param((10, 0), 1, False, id="sm100-tp"),
+    ],
+)
+def test_fp8_block_moe_prefers_triton_on_sm12x(
+    capability, ep_size, triton_first, monkeypatch
+):
+    """Block FP8 MoE puts Triton first on SM12x for TP, as on Hopper; EP and
+    other families keep their order."""
+    platform = fp8_oracle.current_platform
+    monkeypatch.setattr(platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(platform, "is_cpu", lambda: False)
+    # The capability checks go through the class, so patch it there.
+    monkeypatch.setattr(
+        type(platform),
+        "get_device_capability",
+        classmethod(lambda cls, device_id=0: DeviceCapability(*capability)),
+    )
+    config = make_dummy_moe_config()
+    monkeypatch.setattr(config.moe_parallel_config, "ep_size", ep_size)
+    backends = fp8_oracle._get_priority_backends(
+        config, kFp8Static128BlockSym, kFp8Dynamic128Sym
+    )
+    assert (backends[0] is Fp8MoeBackend.TRITON) is triton_first
 
 
 _FORMAT = mk.FusedMoEActivationFormat
