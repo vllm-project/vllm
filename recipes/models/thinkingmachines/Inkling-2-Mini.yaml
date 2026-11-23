@@ -26,11 +26,7 @@ model:
   # Inkling2LoopForConditionalGeneration is not in v0.34.0; the next release at the earliest.
   min_vllm_version: "0.35.0"
   nightly_required: true
-  docker_image: "vllm/vllm-openai:inkling-2-mini"
-  install:
-    docker:
-      note: "Use the `vllm/vllm-openai:inkling-2-mini` image for the listed configurations."
-    pip: false
+  docker_image: "vllm/vllm-openai:nightly"
   architecture: moe
   parameter_count: "26B"
   active_parameters: "3.5B"
@@ -128,7 +124,8 @@ guide: |
 
   ## Runtime
 
-  Use the `vllm/vllm-openai:inkling-2-mini` image until Inkling 2 Mini support is in a vLLM release.
+  Inkling 2 Mini is supported in vLLM main. Use the `vllm/vllm-openai:nightly` image or a
+  nightly wheel until it is in a vLLM release.
 
   ## Configurations
 
