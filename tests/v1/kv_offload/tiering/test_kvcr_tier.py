@@ -582,6 +582,40 @@ def test_kvcr_telemetry_is_opt_in_and_namespaced_at_vllm_boundary(monkeypatch):
     assert returned.reduce() == {"vllm:kvcr_transfer_blocks:('remote_deliver',)": 2}
 
 
+def test_kvcr_unserved_blocks_metric_is_defined(monkeypatch):
+    """Every metric KVCR reports needs a definition at the vLLM boundary.
+
+    KVCR counts blocks a remote operation could not serve as
+    kvcr_unserved_blocks{scope, reason}. Without a definition, the Prometheus
+    logger's observe() fails on the first undelivered block.
+    """
+    definitions = KVCRSecondaryTierManager.build_metric_definitions(
+        {"enable_telemetry": True}
+    )
+    unserved = definitions["vllm:kvcr_unserved_blocks"]
+    assert unserved.labelnames == ("scope", "reason")
+
+    kvcr = RecordingKVCR()
+    tier = _make_tier(monkeypatch, kvcr, enable_telemetry=True)
+    bindings = kvcr.constructor_bindings
+    assert bindings is not None
+    assert bindings.stats_factory is not None
+    stats = bindings.stats_factory()
+    stats.increase_counter(
+        "kvcr_unserved_blocks",
+        128,
+        ("remote_deliver", "not_resident"),
+    )
+    kvcr.stats = stats
+
+    reported = tier.get_stats()
+
+    assert reported is stats
+    assert reported.reduce() == {
+        "vllm:kvcr_unserved_blocks:('remote_deliver', 'not_resident')": 128
+    }
+
+
 @pytest.mark.parametrize(
     ("policy", "expected_type"),
     [
