@@ -571,7 +571,12 @@ class CompletionRequest(OpenAIBaseModel):
         # it here so the client gets a clean 400 instead.
         for field_name in ("prompt_logprobs", "logprobs"):
             field_value = data.get(field_name)
-            if field_value is not None and not isinstance(field_value, (int, float)):
+            if field_value is not None and (
+                isinstance(field_value, bool)
+                or not isinstance(field_value, (int, float))
+                or isinstance(field_value, float)
+                and not field_value.is_integer()
+            ):
                 raise VLLMValidationError(
                     f"`{field_name}` must be an integer.",
                     parameter=field_name,
