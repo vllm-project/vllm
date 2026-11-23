@@ -62,9 +62,51 @@ _BF16_TUNING_KEY_SHAPE = re.compile(r"\(\((\d+), (\d+)\), \((\d+), (\d+)\)")
 _DATACENTER_BLACKWELL_CAPABILITIES = ((10, 0), (10, 3))
 _DATACENTER_BLACKWELL_GPU_NAME = re.compile(r"NVIDIA (GB200|B200|GB300|B300)\b")
 
+# Some FlashInfer runners put the compute capability of the GPU they were tuned on
+# into the cache key: TGV as ((major, minor),), the CuTe-DSL runners as
+# major * 10 + minor at the end of the key. A key made on a GB200 (10.0) is never
+# found on a GB300 (10.3), and FlashInfer then runs its default tactic.
+_TGV_KEY_CAPABILITY = re.compile(r"\(\((\d+), (\d+)\),\)\)$")
+_CUTE_DSL_KEY_CAPABILITY = re.compile(r"(, True, )(\d+)\)\)$")
+
 
 def is_flashinfer_bf16_tuning_loaded() -> bool:
     return _bf16_tuning_files_loaded
+
+
+def _retarget_capability(configs: dict, capability: tuple[int, int]) -> int:
+    """Rewrite the compute capability in the keys of a tuning file.
+
+    Only the capabilities of datacenter Blackwell GPUs are replaced, in the keys of
+    the runners that record it (see _TGV_KEY_CAPABILITY). Returns the number of
+    keys changed.
+    """
+    known = {major * 10 + minor for major, minor in _DATACENTER_BLACKWELL_CAPABILITIES}
+
+    def tgv(match: re.Match) -> str:
+        if int(match[1]) * 10 + int(match[2]) not in known:
+            return match[0]
+        return f"(({capability[0]}, {capability[1]}),))"
+
+    def cute_dsl(match: re.Match) -> str:
+        if int(match[2]) not in known:
+            return match[0]
+        return f"{match[1]}{capability[0] * 10 + capability[1]}))"
+
+    changed = 0
+    for key in list(configs):
+        if key.startswith("_"):
+            continue
+        if "'TGVRunner'" in key:
+            new_key = _TGV_KEY_CAPABILITY.sub(tgv, key)
+        elif "'CuteDSL" in key:
+            new_key = _CUTE_DSL_KEY_CAPABILITY.sub(cute_dsl, key)
+        else:
+            continue
+        if new_key != key:
+            configs[new_key] = configs.pop(key)
+            changed += 1
+    return changed
 
 
 def _bf16_tuning_path_for_this_gpu(file: Path, workdir: Path) -> Path:
@@ -77,8 +119,11 @@ def _bf16_tuning_path_for_this_gpu(file: Path, workdir: Path) -> Path:
     FlashInfer ignores a tuning file whose recorded GPU name differs from the
     current device. A file tuned on any datacenter Blackwell GPU (GB200, B200,
     GB300, B300) is meant for all of them, so on such a GPU the copy records the
-    current name. Consumer Blackwell and other architectures keep the recorded
-    name and are rejected by FlashInfer as before.
+    current name, and the compute capability that some runners record in their
+    keys (10.0 on GB200 and B200, 10.3 on GB300 and B300) is changed to the current
+    one, as FlashInfer would not find those entries otherwise. Consumer Blackwell
+    and other architectures keep the recorded name and are rejected by FlashInfer
+    as before.
     """
     with open(file) as f:
         configs = json.load(f)
@@ -96,6 +141,16 @@ def _bf16_tuning_path_for_this_gpu(file: Path, workdir: Path) -> Path:
         in _DATACENTER_BLACKWELL_CAPABILITIES
     ):
         metadata["gpu"] = torch.cuda.get_device_name()
+        retargeted = _retarget_capability(
+            configs, tuple(torch.cuda.get_device_capability())
+        )
+        if retargeted:
+            logger.info(
+                "Changed the compute capability in %d keys of %s to %s",
+                retargeted,
+                file.name,
+                tuple(torch.cuda.get_device_capability()),
+            )
     path = workdir / file.name
     with open(path, "w") as f:
         json.dump(configs, f)
@@ -427,7 +482,7 @@ def flashinfer_bf16_mm(
     stats = _flashinfer_autotuner_stats() if _bf16_tuning_files_loaded else None
     misses = getattr(stats, "cache_misses", None)
     out = _flashinfer_bf16_mm(a, b, bias, pdl, backend)
-    if misses is not None and stats.cache_misses > misses:
+    if stats is not None and misses is not None and stats.cache_misses > misses:
         k = a.shape[-1]
         m = a.numel() // k
         bucket = _bf16_lookup_bucket(m) or m

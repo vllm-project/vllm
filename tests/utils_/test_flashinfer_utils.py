@@ -590,3 +590,70 @@ def test_dispatch_with_an_unusable_tuning_file_warns(
     assert warning.call_count == 1
     assert warning.call_args.args[1] == "Qwen3.8-27B-tp1-blackwell.json"
     assert info.call_count == 0
+
+
+_SHAPES = "((8, 128), (128, 64), (0,), (0,), (-1, 64), (-1,))"
+_TGV_KEY = f"('bf16_gemm_pdl', 'TGVRunner', {_SHAPES}, (({{}}, {{}}),))"
+_CUTE_KEY = (
+    f"('bf16_gemm_pdl', 'CuteDSLDirectBf16Runner', {_SHAPES}, "
+    "('torch.bfloat16', 'torch.bfloat16', False, True, {}))"
+)
+_CUDNN_KEY = (
+    f"('bf16_gemm_pdl', 'CudnnBf16GemmRunner', {_SHAPES}, "
+    "(torch.bfloat16, False, True, True))"
+)
+
+
+def _capability_configs(major: int, minor: int) -> dict:
+    return {
+        "_metadata": {"gpu": "NVIDIA GB200"},
+        _TGV_KEY.format(major, minor): [1],
+        _CUTE_KEY.format(major * 10 + minor): [2],
+        _CUDNN_KEY: [3],
+    }
+
+
+def test_retarget_capability_changes_tgv_and_cute_dsl_keys():
+    configs = _capability_configs(10, 0)
+    assert fi._retarget_capability(configs, (10, 3)) == 2
+    assert configs == _capability_configs(10, 3)
+
+
+def test_retarget_capability_same_capability_changes_nothing():
+    configs = _capability_configs(10, 0)
+    assert fi._retarget_capability(configs, (10, 0)) == 0
+    assert configs == _capability_configs(10, 0)
+
+
+def test_retarget_capability_leaves_other_architectures_alone():
+    configs = _capability_configs(9, 0)
+    assert fi._retarget_capability(configs, (10, 3)) == 0
+    assert configs == _capability_configs(9, 0)
+
+
+@pytest.mark.parametrize(
+    "current, capability, expected",
+    [
+        ("NVIDIA GB300", (10, 3), _capability_configs(10, 3)),
+        ("NVIDIA GB200", (10, 0), _capability_configs(10, 0)),
+        # not datacenter Blackwell: the keys stay as they are
+        ("NVIDIA H100", (9, 0), _capability_configs(10, 0)),
+    ],
+)
+def test_tuning_file_copy_gets_the_capability_of_this_gpu(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    current: str,
+    capability: tuple[int, int],
+    expected: dict,
+):
+    source = tmp_path / "model.json"
+    source.write_text(json.dumps(_capability_configs(10, 0)))
+    _set_gpu(monkeypatch, current, capability)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    loaded = json.loads(fi._bf16_tuning_path_for_this_gpu(source, workdir).read_text())
+    loaded.pop("_metadata")
+    expected = {k: v for k, v in expected.items() if k != "_metadata"}
+    assert loaded == expected
+    assert json.loads(source.read_text()) == _capability_configs(10, 0)
