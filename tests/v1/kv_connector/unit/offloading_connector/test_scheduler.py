@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+    _make_kv_cache_config,
     _make_mamba_hybrid_kv_cache_config,
     _make_vllm_config,
 )
@@ -120,6 +121,7 @@ from vllm.v1.kv_offload.base import (
     get_offload_group_idx,
     make_offload_key,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
@@ -253,6 +255,7 @@ def test_swa_offload_window_covers_unaligned_hit(
         offload_prompt_only=True,
         async_init=False,
         extra_config={},
+        access_mode=OffloadAccessMode.READWRITE,
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=False, self_describing_kv_events=False
         ),
@@ -1252,6 +1255,53 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert dst_spec.group_sizes == [2, 1]
     assert dst_spec.block_indices == [0, 1]
     assert req_status.partial_tail_boundary is None
+
+
+def test_partial_tail_hit_still_stores_the_containing_chunk():
+    """Only a tail checkpoint of the hit chunk is in the CPU tier, so the rest
+    of that chunk must still be stored once it is computed."""
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler, num_tokens=32)
+    req_status = scheduler._req_status["req"]
+    req_status.num_locally_computed_tokens = 0
+    req_status.update_offload_keys()
+    _as_mock(scheduler.manager.lookup).return_value = LookupResult.HIT
+    _as_mock(scheduler.manager.prepare_store).side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
+    )
+    assert scheduler._lookup(req_status) == 28
+
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(41)],
+            )
+        ),
+        num_external_tokens=28,
+    )
+    meta = scheduler.build_connector_meta(SchedulerOutput.make_empty())
+    assert isinstance(meta, OffloadingConnectorMetadata)
+    [load_job_id] = meta.load_jobs
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={load_job_id: 1}
+            )
+        )
+    )
+
+    # Compute the rest of the hit chunk (tokens 28-31).
+    request.num_computed_tokens = 28
+    output = SchedulerOutput.make_empty()
+    _schedule_new_request(output, request, ([31, 32], [0, 41]), 4)
+    meta = scheduler.build_connector_meta(output)
+    assert isinstance(meta, OffloadingConnectorMetadata)
+    [(store_job_id, store_job)] = meta.store_jobs.items()
+    assert scheduler._job_statuses[store_job_id].keys == (make_offload_key(b"h7", 0),)
+    assert isinstance(store_job.src_spec, GPULoadStoreSpec)
+    assert store_job.src_spec.block_ids.tolist() == [32]
 
 
 def test_partial_tail_lookup_delays_duplicate_inflight_load():
@@ -5430,6 +5480,83 @@ def test_offload_prompt_only(request_runner, async_scheduling: bool):
         for key in call.args[0]
     }
     assert len(offered_keys) == num_prompt_blocks
+
+
+def _make_access_mode_scheduler(
+    access_mode: str,
+) -> tuple[OffloadingConnectorScheduler, MockOffloadingSpec]:
+    vllm_config = _make_vllm_config(extra_config={"access_mode": access_mode})
+    kv_cache_config = _make_kv_cache_config()
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    return (
+        OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config),
+        spec,
+    )
+
+
+def _empty_scheduler_output() -> SchedulerOutput:
+    return SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData(
+            req_ids=[],
+            new_token_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            num_output_tokens=[],
+        ),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+
+@pytest.mark.parametrize(
+    "access_mode, reads",
+    [("readwrite", True), ("read", True), ("write", False)],
+)
+def test_read_access_mode_gates_lookups(access_mode: str, reads: bool):
+    """A connector that cannot read (write mode) never queries the tiers, so it
+    serves no external hit; read and readwrite still look up."""
+    scheduler, spec = _make_access_mode_scheduler(access_mode)
+    request = create_request(num_tokens=49, block_size=16)
+    scheduler.on_new_request(request)
+
+    num_hit_tokens, _ = scheduler.get_num_new_matched_tokens(request, 0)
+
+    if reads:
+        spec.manager.lookup.assert_called()
+    else:
+        spec.manager.lookup.assert_not_called()
+        assert num_hit_tokens == 0
+
+
+@pytest.mark.parametrize(
+    "access_mode, writes",
+    [("readwrite", True), ("write", True), ("read", False)],
+)
+def test_write_access_mode_gates_store_handlers(
+    access_mode: str, writes: bool, monkeypatch
+):
+    """A connector that cannot write (read mode) runs no store handler, so the
+    manager receives no store and no GPU block is fenced."""
+    scheduler, spec = _make_access_mode_scheduler(access_mode)
+    calls: list[StoreTrigger] = []
+    for handler in scheduler._store_handlers.values():
+        monkeypatch.setattr(
+            handler, "build_store_jobs", lambda *a, **kw: calls.append(True)
+        )
+
+    meta = scheduler.build_connector_meta(_empty_scheduler_output())
+
+    if writes:
+        assert calls
+    else:
+        assert calls == []
+        assert meta.store_jobs == {}
+        spec.manager.prepare_store.assert_not_called()
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
