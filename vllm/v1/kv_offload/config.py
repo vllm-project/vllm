@@ -147,8 +147,6 @@ class OffloadingConfig:
     # group ID. A row holds the canonical pages of the group's layers on every
     # pipeline stage, back to back in model order, so the layout does not
     # depend on the parallel config; a stage fills the slots of its own layers.
-    canonical_row_layouts: Mapping[int, LayerObjectLayout] = field(
-        default_factory=dict
-    )
+    canonical_row_layouts: Mapping[int, LayerObjectLayout] = field(default_factory=dict)
     # Resolved KVCacheLayout name of the worker KV cache.
     kv_cache_layout: str | None = None
