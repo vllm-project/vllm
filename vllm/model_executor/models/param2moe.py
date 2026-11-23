@@ -34,7 +34,6 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
-    MoERunner,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -161,11 +160,8 @@ class Param2MoEAttention(nn.Module):
             "rope_type": "default",
             "base": config.rope_theta,
         }
-        if config.rope_scaling is not None:
-            rope_parameters.update(config.rope_scaling)
-            # Normalise key: some checkpoints use "type", vLLM wants "rope_type"
-            if "type" in rope_parameters and "rope_type" not in rope_parameters:
-                rope_parameters["rope_type"] = rope_parameters.pop("type")
+        if config.rope_parameters is not None:
+            rope_parameters.update(config.rope_parameters)
 
         self.rotary_emb = get_rope(
             rope_dim,
@@ -344,9 +340,6 @@ class Param2MoEMoEBlock(nn.Module):
             use_grouped_topk=self.use_grouped_topk,
             routed_scaling_factor=self.routed_scaling_factor,
         )
-
-    def maybe_get_fused_moe(self) -> MoERunner:
-        return self.experts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape

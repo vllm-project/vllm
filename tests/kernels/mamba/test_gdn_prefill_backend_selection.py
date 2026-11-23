@@ -16,12 +16,14 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
 from vllm.platforms.interface import DeviceCapability
 
 
-def _config(requested: str | None, head_k_dim: int = 128):
+def _config(requested: str | None, head_k_dim: int = 128, head_v_dim: int = 128):
     additional_config = {} if requested is None else {"gdn_prefill_backend": requested}
     return SimpleNamespace(
         additional_config=additional_config,
         model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(linear_key_head_dim=head_k_dim)
+            hf_text_config=SimpleNamespace(
+                linear_key_head_dim=head_k_dim, linear_value_head_dim=head_v_dim
+            )
         ),
     )
 
@@ -60,9 +62,10 @@ def test_sm8x_is_runnable_but_not_the_default(sm80) -> None:
     assert _resolve_gdn_prefill_backend(_config("flashinfer"))[1] == "flashinfer"
 
 
-def test_sm8x_needs_the_head_dim_the_kernel_builds(sm80) -> None:
-    with pytest.raises(ValueError, match="head_k_dim=64"):
-        _resolve_gdn_prefill_backend(_config("flashinfer", head_k_dim=64))
+@pytest.mark.parametrize("head_dim", ["head_k_dim", "head_v_dim"])
+def test_sm8x_needs_the_head_dims_the_kernel_builds(head_dim: str, sm80) -> None:
+    with pytest.raises(ValueError, match=f"{head_dim}=64"):
+        _resolve_gdn_prefill_backend(_config("flashinfer", **{head_dim: 64}))
 
 
 @pytest.mark.parametrize("requested", ["flashinfer", "cutedsl"])
