@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import math
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import replace
-from typing import Any
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
@@ -52,6 +53,7 @@ from vllm.v1.core.sched.output import (
     IterationDetails,
     KVConnectorBlockState,
     NewRequestData,
+    RepairWork,
     SchedulerOutput,
 )
 from vllm.v1.core.sched.request_queue import (
@@ -82,7 +84,14 @@ from vllm.v1.metrics.stats import (
     RequestSpecDecodeMetrics,
     SchedulerStats,
 )
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    KVConnectorOutput,
+    KVLoadAttestation,
+    KVLoadFailureReport,
+    ModelRunnerOutput,
+    RepairResultReport,
+)
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -93,7 +102,84 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
+@dataclass
+class RecoveryPlan:
+    """Scheduler-owned admission state for one damaged request (the
+    hole-recovery `repair` policy). The RequestStatus is never modified
+    by the plan; the plan only adds a budget charge at the repair
+    admission (see Scheduler._recovery_plan_budget).
+    """
+
+    request_id: str
+    # [rollback_boundary, corrupt_end): the physical repair span, in token
+    # positions. This is what num_scheduled_tokens carries for the repair
+    # step -- the worker's execution geometry stays physical.
+    repair_span: tuple[int, int]
+    # The budget-equivalent compute charge, in prefill-equivalent tokens
+    # (E = ceil(T_repair / m(ctx))). NOT a physical token count: the
+    # repair's replay is deeper per position than an ordinary prefill, and
+    # the charge makes the step budgets pay for that difference.
+    est_equivalent_tokens: int
+    # Exclusive layer limit: the repair executes layers [0, layer_end) only
+    # (the necessary range: below-CL hidden-state replay + the CL KV write).
+    layer_end: int = 0
+    # The pre-failure external computed count C: num_computed_tokens is
+    # restored to this at the repair commit -- ONLY while the report
+    # certified the above-span external ranges landed byte-exact
+    # (healthy_above_span); otherwise the commit restores to the repair
+    # span's end and the resume recomputes the untrusted above-span
+    # extent.
+    restored_extent: int = 0
+    # The report's certification that the above-span external ranges
+    # landed byte-exact. When False the commit's extent restoration is
+    # CAPPED at the repair span's end (the largest commit-checked
+    # boundary): the untrusted [span_end, C) content is never consumed
+    # as cached; the ordinary resume recompute rewrites it.
+    healthy_above_span: bool = True
+    # The report's failed block ids (the abort path's eviction targets).
+    failed_block_ids: list[int] = field(default_factory=list)
+    # The plan identity: echoed by the repair result; a mismatched echo is
+    # a stale/duplicate result and is rejected.
+    plan_id: int = -1
+    # The evidence identity of the report that built this plan
+    # (Scheduler._report_evidence_key): the duplicate-absorption key for
+    # same-step re-deliveries of the same fault across TP ranks.
+    report_evidence: tuple | None = None
+    # The identity of the transfer attempt whose failure built this
+    # plan (the generation the admitting report echoed). Reports
+    # arriving for a pending plan must match BOTH the evidence key and
+    # this generation: a stale-generation report against a pending
+    # plan is a late duplicate of the attempt the plan already
+    # consumed (absorbed), never fresh divergence evidence.
+    transfer_generation: int | None = None
+    # The execution epoch: the scheduler step at which the plan was
+    # admitted. A result echoing a different epoch is stale (the
+    # overlapping-step rejection).
+    admitted_step: int | None = None
+    state: str = "DETECTED"
+    num_deferrals: int = 0
+
+    @property
+    def n_eff(self) -> int:
+        return self.repair_span[1] - self.repair_span[0]
+
+
 class Scheduler(SchedulerInterface):
+    # Inert defaults for partially-constructed instances: unit
+    # tests build Scheduler via object.__new__ (no __init__) and
+    # assign only the attributes they exercise, so attributes read
+    # on the ordinary schedule()/update_from_output path must also
+    # exist at the class level. __init__ assigns the real per-
+    # instance state; on a bare instance every access below is an
+    # empty or False read and the transfer-evidence machinery stays
+    # inert until a report, attestation, or verdict exists.
+    repair_kv_load_failures = False
+    _evidence_state_initialized = False
+    # Read by the ordinary schedule() path (plan-first exclusivity
+    # scan); bare instances never write it -- every mutation is
+    # gated on _evidence_state_initialized.
+    recovery_plans: dict[str, RecoveryPlan] = {}
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -174,6 +260,99 @@ class Scheduler(SchedulerInterface):
         self.connector = None
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
+        self.repair_kv_load_failures = False
+        # Delayed publication: request ids whose sync external-claim blocks
+        # were left unpublished at admission under the repair policy;
+        # published at the step's update once the delivery verdict is known.
+        self._delayed_sync_claim_pubs: set[str] = set()
+        # Positive transfer evidence (the hole-repair policy's
+        # completeness gate): the number of TP ranks whose terminal
+        # attestation a recovery authorization requires. A silent rank
+        # -- one whose GET 'succeeded' against corrupt or stale content,
+        # or one that failed before reporting -- supplies no report at
+        # all, so reports alone cannot distinguish 'all ranks verified
+        # their portion' from 'one rank verified and the rest said
+        # nothing'. With PP>1 the repair policy is TP-scoped:
+        # attestations are required from the TP group's ranks only.
+        self._evidence_tp_size = vllm_config.parallel_config.tensor_parallel_size
+        # Transfer identity (the report/attestation generation): a
+        # globally monotonic counter assigned at the moment an external
+        # load attempt is SCHEDULED -- early enough to accompany the
+        # actual transfer and all its resulting evidence. Never reused,
+        # including across request-ID reuse, so a late report cannot
+        # alias onto a later attempt. request_id -> the generation of
+        # its latest scheduled attempt.
+        self._next_transfer_generation = 0
+        self._req_transfer_generation: dict[str, int] = {}
+        # request_id -> the EXTERNAL token
+        # count of its latest scheduled attempt (the claim the evidence
+        # vouches for). The report battery bounds restored_extent and
+        # the failed span by it, and the completeness gate ties the
+        # attestations' expected-object coverage to it: a misreporting
+        # connector can no longer push the commit's restoration (and
+        # with it publication) beyond the content the attempt actually
+        # claimed. Recorded alongside the generation; dies with the
+        # request (_free_request).
+        self._req_transfer_claim: dict[str, int] = {}
+        # The attempt's ABSOLUTE prefix extent (local hit + external
+        # delta): the producer's failure-report geometry (token_span,
+        # rollback_boundary, restored_extent) is request-absolute, while
+        # the claim above is the external DELTA only. Mixed local+external
+        # hits need both bounds: the span/restoration checks
+        # below are bounded by the absolute extent; the attestation
+        # coverage tie is bounded by the delta (the store objects the
+        # producer actually GETs cover only the delta).
+        self._req_transfer_claim_extent: dict[str, int] = {}
+        # request_id -> the accumulated terminal attestations of the
+        # request's LATEST scheduled attempt (validated, current-generation
+        # only, identical duplicates absorbed). The publication gates read
+        # this state at the delivery's decision points -- the sync claim's
+        # publication step and the async request's promotion -- which may
+        # be a LATER step than any single rank's attestation arrival (the
+        # timing contract only bounds the LAST arrival), so evidence folds
+        # here step by step instead of being judged per arrival. The list
+        # is bounded by the TP group size: a divergent re-attestation from
+        # one rank fails the request closed before it can accumulate, and
+        # the state dies with the attempt (a new generation resets it),
+        # with the request (_free_request), and with every fail-closed
+        # rejection or consumed authorization.
+        self._req_transfer_attestations: dict[str, list[KVLoadAttestation]] = {}
+        # request_id -> failure reports of async attempts that are
+        # still IN FLIGHT (no finished_recving yet). Judging their
+        # completeness at arrival would reject deliveries whose evidence
+        # is merely split across passes (rank A reports its failure before
+        # rank B's healthy attestation arrives); the reports are re-examined
+        # at the attempt's terminal pass instead (update_from_output
+        # re-injects them once finished_recving arrives).
+        self._req_pending_async_reports: dict[str, list[KVLoadFailureReport]] = {}
+        # Update steps each deferred async report has remained
+        # deferred (liveness bound; reset on each fresh deferral).
+        self._req_async_report_deferrals: dict[str, int] = {}
+        # Requests whose external transfer evidence failed closed at
+        # least once: the connector is not re-consulted
+        # for them -- the retry is a local recompute, never an unbounded
+        # external re-attempt loop.
+        self._untrusted_external_reqs: set[str] = set()
+        # request_id -> the (transfer_generation, evidence key) pairs
+        # of every recovery authorization that reached a terminal
+        # disposition (committed, aborted, dissolved): a late
+        # re-delivery of the SAME attempt's SAME evidence is a
+        # duplicate whose outcome is already known and is absorbed --
+        # while a genuine repeated failure carries a NEW generation (a
+        # new scheduled attempt) and is honored.
+        self._consumed_report_evidence: dict[str, list[tuple[int | None, tuple]]] = {}
+        # Transactional publication: request ids whose repair-step
+        # admissions were left unpublished at allocate_slots; they publish
+        # ONLY on the step's accepted verdict, never on abort/missing/stale.
+        self._delayed_repair_txn_pubs: set[str] = set()
+        # Marks the transfer-evidence state above as initialized;
+        # bare instances (class-level defaults above) stay inert.
+        self._evidence_state_initialized = True
+        # Requests whose num_computed_tokens moved other than by the
+        # ordinary step advance and whose GPU-side count the worker must
+        # restage at their next scheduling; drained into
+        # SchedulerOutput.rewound_req_ids.
+        self._pending_rewound_req_ids: set[str] = set()
         self.defer_block_free = False
         self.defer_async_loads = False
         # Whether a preempted request's in-flight output must be dropped; see
@@ -193,6 +372,84 @@ class Scheduler(SchedulerInterface):
                 self.connector_prefix_cache_stats = PrefixCacheStats()
             kv_load_failure_policy = kv_transfer_config.kv_load_failure_policy
             self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
+            self.repair_kv_load_failures = kv_load_failure_policy == "repair"
+            if self.repair_kv_load_failures and (
+                vllm_config.parallel_config.pipeline_parallel_size > 1
+            ):
+                # The v1 evidence contract is TP-scoped: the
+                # completeness gate demands terminal attestations from
+                # exactly the TP group's rank indices, but the output
+                # aggregator stamps source_rank over every gathered
+                # worker (tp*pp under PP>1) -- a count-satisfying set of
+                # the WRONG stage's workers would pass a weaker check
+                # while the shard-holding stage stays silent. Fail fast at
+                # init instead of shipping a false-commit path; PP support
+                # needs the request's actual TP-group rank set derived in
+                # the executor.
+                raise RuntimeError(
+                    "kv_load_failure_policy='repair' requires "
+                    "pipeline_parallel_size=1 in v1 (the transfer-evidence "
+                    "completeness gate is TP-scoped)"
+                )
+            if self.repair_kv_load_failures and (
+                vllm_config.parallel_config.data_parallel_size > 1
+            ):
+                # The repair TP consensus gathers over
+                # the WORLD process group (the worker-side all_gather has
+                # no TP-group handle in v1). Under DP>1 each DP rank
+                # schedules independently: a repair on one DP rank would
+                # gather foreign ranks' (different-work) summaries --
+                # guaranteed divergence -- or peers never enter the
+                # collective, deadlocking the engine. Reject at init,
+                # exactly like PP>1, until the collective is scoped to
+                # the TP group.
+                raise RuntimeError(
+                    "kv_load_failure_policy='repair' requires "
+                    "data_parallel_size=1 in v1 (the repair verdict "
+                    "consensus is TP-group-scoped)"
+                )
+            if self.repair_kv_load_failures and (
+                len(self.kv_cache_config.kv_cache_groups) > 1
+            ):
+                # The report consumer, the write-set
+                # derivation, and the block-table geometry are all
+                # single-group-shaped (the per-group block-id unpack in
+                # _repair_write_set_block_ids would raise ValueError --
+                # an engine crash, not a refusal). Reject at init so the
+                # documented single-group scope is loud, not latent.
+                raise RuntimeError(
+                    "kv_load_failure_policy='repair' requires a single "
+                    "KV cache group in v1 (the repair write-set and report "
+                    "geometry are single-group-shaped)"
+                )
+            if self.repair_kv_load_failures and (
+                vllm_config.parallel_config.prefill_context_parallel_size > 1
+                or vllm_config.parallel_config.decode_context_parallel_size > 1
+            ):
+                # Under context parallelism the positions tensor carries
+                # CP-local (not absolute) token positions, so the executor's
+                # span validation cannot hold. Reject at init until the
+                # repair path learns CP-local geometry.
+                raise RuntimeError(
+                    "kv_load_failure_policy='repair' is not supported with "
+                    "context parallelism in v1 (repair spans are expressed "
+                    "in absolute positions)"
+                )
+            if self.repair_kv_load_failures and (
+                self.scheduler_config.async_scheduling
+            ):
+                # Repair-only steps return their verdicts from execute_model
+                # without setting execute_model_state, but the batch-queue
+                # step calls sample_tokens unconditionally; sample_tokens
+                # then returns None, the engine discards the repair verdicts
+                # riding the execution future, and raises at the batch-queue
+                # None check. Fail fast at init instead (the async-aware
+                # repair step shape is v2 work).
+                raise RuntimeError(
+                    "kv_load_failure_policy='repair' is not supported with "
+                    "async scheduling in v1 (the batch-queue step would "
+                    "discard the repair verdicts)"
+                )
 
             # With overlapping batches (async scheduling or PP), a step may
             # still be writing a freed request's KV blocks. A consumer KV
@@ -271,6 +528,11 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+
+        # Hole recovery: pending repair plans, keyed by request id. A plan
+        # adds an equivalent-token budget charge at the repair admission.
+        self.recovery_plans: dict[str, RecoveryPlan] = {}
+        self._next_repair_plan_id = 0
 
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
@@ -699,6 +961,128 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def _recovery_plan_budget(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        input_budget: int,
+        draft_slots: int,
+    ) -> tuple[int, int] | None:
+        """Hole-repair budget admission for a pending recovery plan.
+
+        The plan's physical repair span (n_eff) is scheduled as ordinary
+        tokens; its equivalent-token compute charge is debited from the
+        step's input budget as an additional surcharge beside
+        num_new_tokens -- the draft_slots precedent (a per-request debit
+        that is NOT part of num_scheduled_tokens, so the worker's
+        execution geometry stays physical).
+
+        Returns (num_new_tokens, surcharge), or None when the request must
+        be deferred this step (the plan stays pending). A plan no step
+        could ever fund is rejected: it dissolves and the ordinary
+        rollback-recompute reschedule owns the request (the configured
+        failure-policy floor).
+        """
+        plan = self.recovery_plans.get(request.request_id)
+        if plan is None:
+            return num_new_tokens, 0
+        if plan.state != "DETECTED":
+            # ADMITTED: the repair step is scheduled and its verdict is
+            # pending. Defer the request until the verdict is consumed:
+            # with the batch queue (async scheduling) the next schedule()
+            # runs before the verdict, and rows scheduled beside the
+            # pending plan would race the commit's num_computed_tokens
+            # restoration (double execution, out-of-order samples).
+            # The verdict always arrives -- the repair step's output is
+            # queued ahead of any later step, and a missing result is
+            # synthesized as a failed verdict at that step's update.
+            return None
+        # Static never-admissible gate. The running arm reserves the
+        # plan's full equivalent-token charge before the span cap (the
+        # v1 constraint: budget - E >= n_eff, i.e. E + n_eff must fit
+        # the input budget beside the draft slots); the waiting arm has
+        # no reserve, so only the larger of the two charges must fit.
+        # A plan no step could ever fund (spec-decode draft slots
+        # reserving head-room, a scheduled-tokens cap below the span)
+        # dissolves immediately instead of deferring forever while the
+        # pending-plan drain freezes the whole engine.
+        if request.status == RequestStatus.RUNNING:
+            never_fits = (
+                plan.est_equivalent_tokens + plan.n_eff + draft_slots > input_budget
+            )
+        else:
+            never_fits = (
+                max(plan.est_equivalent_tokens, plan.n_eff) + draft_slots > input_budget
+            )
+        if (
+            never_fits
+            or plan.est_equivalent_tokens > self.scheduler_config.max_num_batched_tokens
+            or plan.n_eff > self.max_num_scheduled_tokens
+        ):
+            self._dissolve_recovery_plan(plan, "cannot fit any step budget")
+            # Skip this step for the owner rather than scheduling an
+            # ordinarily-capped chunk: the long-prefill threshold was
+            # EXEMPTED for this request while the plan existed, so
+            # returning the uncapped catch-up here would let one
+            # dissolution step bypass the threshold.
+            # The next step schedules ordinarily, threshold applied.
+            return 0, 0
+        # The repair step schedules exactly the repair span.
+        num_new_tokens = min(num_new_tokens, plan.n_eff)
+        surcharge = max(0, plan.est_equivalent_tokens - plan.n_eff)
+        num_new_tokens = min(num_new_tokens, input_budget - draft_slots - surcharge)
+        if num_new_tokens < plan.n_eff:
+            # Defer the request this step (the plan stays pending). The
+            # deferral COUNT is ticked once per schedule() step for
+            # every DETECTED plan that was not admitted (see
+            # _tick_recovery_plan_deferrals), NOT here: owners skipped
+            # before this call -- blocked remote-KV waits, paused
+            # sessions, DP-balancing and PP-cadence skips -- must be
+            # bounded identically, and they never reach this branch.
+            return None
+        return num_new_tokens, surcharge
+
+    def _tick_recovery_plan_deferrals(
+        self, num_scheduled_tokens: dict[str, int]
+    ) -> None:
+        """The step-level deferral tick: every DETECTED plan that was not
+        admitted THIS step -- whatever the reason: a budget deferral, an
+        owner skipped before its budget call, a blocked remote-KV wait,
+        a paused streaming session -- moves one step closer to the
+        bound. This is the uniform liveness guard: no plan, and
+        therefore no engine-wide drain-first freeze, can outlive
+        REPAIR_MAX_ADMISSION_DEFERRALS steps without either admitting
+        or dissolving to the recompute fallback (which chunks, and
+        therefore always makes progress)."""
+        for req_id in list(self.recovery_plans):
+            plan = self.recovery_plans[req_id]
+            if plan.state != "DETECTED" or req_id in num_scheduled_tokens:
+                continue
+            plan.num_deferrals += 1
+            if plan.num_deferrals >= self.REPAIR_MAX_ADMISSION_DEFERRALS:
+                self._dissolve_recovery_plan(plan, "admission deferral bound")
+
+    def _dissolve_recovery_plan(self, plan: RecoveryPlan, reason: str) -> None:
+        """Drop a DETECTED plan and hand the request to the ordinary
+        rollback-recompute path (num_computed_tokens already sits at the
+        rollback boundary). The request keeps running; only the repair
+        attempt is abandoned. The dissolved plan's evidence is recorded
+        as consumed: a late re-delivery of it is
+        absorbed, never re-authorized on top of the fallback."""
+        self.recovery_plans.pop(plan.request_id, None)
+        self._remember_consumed_evidence(plan)
+        logger.warning(
+            "Repair plan dissolved: req=%s plan_id=%d span=%s E=%d "
+            "deferrals=%d (%s) -> the ordinary recompute path owns the "
+            "request",
+            plan.request_id,
+            plan.plan_id,
+            plan.repair_span,
+            plan.est_equivalent_tokens,
+            plan.num_deferrals,
+            reason,
+        )
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -725,6 +1109,14 @@ class Scheduler(SchedulerInterface):
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
+        repair_charges: dict[str, int] = {}
+        repair_admitted = False
+        # Hole repair: pending plans are the first and only admission of
+        # their step (the layer-limited repair execution cannot share a
+        # forward with ordinary work).
+        repair_pending = any(
+            plan.state == "DETECTED" for plan in self.recovery_plans.values()
+        )
         token_budget = self.max_num_scheduled_tokens
         spec = self.vllm_config.speculative_config
         draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
@@ -781,6 +1173,20 @@ class Scheduler(SchedulerInterface):
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
+            if repair_admitted:
+                # A repair step is exclusive: the layer-limited repair
+                # execution cannot share a forward with ordinary work.
+                num_new_tokens = 0
+                req_index += 1
+                continue
+            if repair_pending and request.request_id not in self.recovery_plans:
+                # The pending plan drains first; ordinary running work
+                # waits one step. The damaged request itself must fall
+                # through to the budget call below: freezing it here
+                # would skip its own admission (deadlock).
+                num_new_tokens = 0
+                req_index += 1
+                continue
 
             if (
                 request.num_output_placeholders > 0
@@ -826,10 +1232,29 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
-            if 0 < long_prefill_token_threshold < num_new_tokens:
+            _pending_plan = self.recovery_plans.get(request.request_id)
+            if (
+                0 < long_prefill_token_threshold < num_new_tokens
+                # A pending repair plan is exempt from the long-prefill
+                # cap: its step is exclusive (ordinary work is frozen
+                # while the plan drains first), so the cap's starvation
+                # protection has no one to protect, and the repair span
+                # cannot be chunked -- capping it below n_eff would
+                # defer the plan (and freeze the engine) forever.
+                and _pending_plan is None
+            ):
                 num_new_tokens = long_prefill_token_threshold
+            # Reserve the pending plan's equivalent-token charge before the
+            # cap, or the later surcharge debit would not fit the budget.
+            _repair_reserve = (
+                _pending_plan.est_equivalent_tokens
+                if (_pending_plan is not None and _pending_plan.state == "DETECTED")
+                else 0
+            )
             num_new_tokens = min(
-                num_new_tokens, token_budget, input_budget - draft_slots
+                num_new_tokens,
+                token_budget,
+                input_budget - draft_slots - _repair_reserve,
             )
 
             # Make sure the input position does not exceed the max model len.
@@ -873,6 +1298,20 @@ class Scheduler(SchedulerInterface):
                 request, request.num_computed_tokens, num_new_tokens
             )
 
+            # Charge the plan's equivalent-token surcharge, or defer the
+            # request this step (falling into the skip below).
+            recovery_surcharge = 0
+            recovery = self._recovery_plan_budget(
+                request, num_new_tokens, input_budget, draft_slots
+            )
+            if recovery is None:
+                num_new_tokens = 0
+            else:
+                num_new_tokens, recovery_surcharge = recovery
+            if repair_pending and not self.recovery_plans:
+                # The plan was dissolved at the gate: the constraint lifts.
+                repair_pending = False
+
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
                 # reasons:
@@ -895,15 +1334,27 @@ class Scheduler(SchedulerInterface):
 
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
+                # A repair transaction's admission must not publish its
+                # blocks before the verdict: nothing whose validity depends
+                # on an unresolved transaction may be matchable.
+                repair_plan = self.recovery_plans.get(request.request_id)
+                delay_repair_txn = (
+                    self.repair_kv_load_failures
+                    and repair_plan is not None
+                    and repair_plan.state in ("DETECTED", "ADMITTED")
+                )
                 while True:
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
+                        delay_cache_blocks=delay_repair_txn,
                     )
 
                     if new_blocks is not None:
                         # The request can be scheduled.
+                        if delay_repair_txn:
+                            self._delayed_repair_txn_pubs.add(request.request_id)
                         break
 
                     if (
@@ -936,8 +1387,9 @@ class Scheduler(SchedulerInterface):
                             preempted_req_id = preempted_req.request_id
                             scheduled_running_reqs.remove(preempted_req)
                             restored = num_scheduled_tokens.pop(preempted_req_id)
+                            restored_charge = repair_charges.pop(preempted_req_id, 0)
                             token_budget += restored
-                            input_budget += restored + draft_slots
+                            input_budget += restored + draft_slots + restored_charge
                             req_to_new_blocks.pop(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
                             preempted_encoder_inputs = scheduled_encoder_inputs.pop(
@@ -989,7 +1441,14 @@ class Scheduler(SchedulerInterface):
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
-            input_budget -= num_new_tokens + draft_slots
+            input_budget -= num_new_tokens + draft_slots + recovery_surcharge
+            if recovery_surcharge:
+                repair_charges[request_id] = recovery_surcharge
+            recovery_plan = self.recovery_plans.get(request_id)
+            if recovery_plan is not None and recovery_plan.state == "DETECTED":
+                recovery_plan.state = "ADMITTED"
+                recovery_plan.admitted_step = self.current_step
+                repair_admitted = True
             req_index += 1
             drafts_needed = drafts_needed or not self._drafts_unused(
                 request, request.num_computed_tokens, num_new_tokens
@@ -1098,6 +1557,15 @@ class Scheduler(SchedulerInterface):
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
+                if repair_admitted:
+                    # One repair per step.
+                    skip_request(request_queue)
+                    continue
+                if repair_pending and request.request_id not in self.recovery_plans:
+                    # The pending plan drains first.
+                    skip_request(request_queue)
+                    continue
+
                 ready_to_schedule = self._handle_blocked_waiting_request(request)
                 if not ready_to_schedule:
                     skip_request(request_queue)
@@ -1163,6 +1631,15 @@ class Scheduler(SchedulerInterface):
                             )
                         )
                         if request.skip_reading_external_kv:
+                            ext_tokens, load_kv_async = 0, False
+                        if request.request_id in self._untrusted_external_reqs:
+                            # The request's transfer evidence already
+                            # failed closed once: a
+                            # connector that re-offers the same hit
+                            # would start an unbounded external
+                            # re-attempt loop. The external source is
+                            # untrusted for this request's lifetime:
+                            # the retry is a local recompute.
                             ext_tokens, load_kv_async = 0, False
 
                         if ext_tokens is None:
@@ -1371,7 +1848,15 @@ class Scheduler(SchedulerInterface):
                             num_new_tokens = padded_num_tokens
                             pad_spec_decode = True
 
-                    if 0 < long_prefill_token_threshold < num_new_tokens:
+                    if (
+                        0 < long_prefill_token_threshold < num_new_tokens
+                        # Pending repair plans are exempt from the
+                        # long-prefill cap in the waiting arm for the
+                        # same reason as the running arm: the repair
+                        # step is exclusive and cannot be chunked below
+                        # its span.
+                        and self.recovery_plans.get(request.request_id) is None
+                    ):
                         num_new_tokens = long_prefill_token_threshold
 
                     # chunked prefill has to be enabled explicitly to allow
@@ -1433,6 +1918,20 @@ class Scheduler(SchedulerInterface):
                         request, num_computed_tokens, num_new_tokens
                     )
 
+                    # Hole repair: charge the plan's equivalent-token
+                    # surcharge, or defer the request this step.
+                    recovery = self._recovery_plan_budget(
+                        request, num_new_tokens, input_budget, draft_slots
+                    )
+                    if recovery is None:
+                        skip_request(request_queue)
+                        continue
+                    num_new_tokens, recovery_surcharge = recovery
+                    if repair_pending and not self.recovery_plans:
+                        # The plan was dissolved at the gate: the
+                        # constraint lifts.
+                        repair_pending = False
+
                     if (
                         request.has_encoder_inputs
                         and not self.scheduler_config.enable_chunked_prefill
@@ -1486,6 +1985,18 @@ class Scheduler(SchedulerInterface):
                 # Replayed tokens are already counted in the adopted hit; a
                 # chunk that ends inside the replayed range needs no new slots.
                 num_tokens_past_hit = max(num_new_tokens - num_replay_tokens, 0)
+                # Delayed publication: under the repair policy a sync
+                # external claim is not content-verified until the step's
+                # delivery verdict, while the admission-time publication is
+                # content-blind (a hash of token ids). Publishing here would
+                # let a same-pass request match and consume unverified KV.
+                # Delay like the P/D async precedent; publish at the step's
+                # update.
+                delay_sync_claim_pub = (
+                    self.repair_kv_load_failures
+                    and num_external_computed_tokens > 0
+                    and not load_kv_async
+                )
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_tokens_past_hit,
@@ -1493,7 +2004,7 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
                     num_external_computed_tokens=num_external_computed_tokens,
-                    delay_cache_blocks=load_kv_async,
+                    delay_cache_blocks=load_kv_async or delay_sync_claim_pub,
                     skip_zeroing_group_ids=(
                         self.connector.get_loaded_kv_cache_group_ids(request)
                         if load_kv_async and self.connector is not None
@@ -1519,6 +2030,39 @@ class Scheduler(SchedulerInterface):
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
+                    if num_external_computed_tokens > 0:
+                        # A new external load attempt is admitted:
+                        # assign its identity HERE, at admission, so every
+                        # report and attestation the attempt produces
+                        # echoes an identity the scheduler can attribute
+                        # to this attempt (and a late report of a
+                        # consumed attempt is distinguishable from a new
+                        # attempt's failure). When async loads are
+                        # deferred (defer_async_loads), the connector
+                        # starts the transfer at the fence step; the
+                        # identity was still fixed at this admission,
+                        # and note_transfer_attempt has already
+                        # delivered it to the chosen connector.
+                        self._next_transfer_generation += 1
+                        self._req_transfer_generation[request_id] = (
+                            self._next_transfer_generation
+                        )
+                        self._req_transfer_claim[request_id] = (
+                            num_external_computed_tokens
+                        )
+                        self._req_transfer_claim_extent[request_id] = (
+                            num_new_local_computed_tokens + num_external_computed_tokens
+                        )
+                        # A new attempt supersedes everything accumulated
+                        # for the previous one: its attestations and any
+                        # still-deferred failure reports belong to an attempt
+                        # whose outcome no longer matters (the partition
+                        # would drop their late arrivals as stale anyway).
+                        self._req_transfer_attestations.pop(request_id, None)
+                        self._req_pending_async_reports.pop(request_id, None)
+                        self.connector.note_transfer_attempt(
+                            request, self._next_transfer_generation
+                        )
                     defer_load = (
                         load_kv_async
                         and self.defer_async_loads
@@ -1599,6 +2143,8 @@ class Scheduler(SchedulerInterface):
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
+                    if delay_sync_claim_pub:
+                        self._delayed_sync_claim_pubs.add(request.request_id)
                 if self.log_stats:
                     request.record_event(
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
@@ -1619,7 +2165,14 @@ class Scheduler(SchedulerInterface):
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
-                input_budget -= num_new_tokens + draft_slots
+                input_budget -= num_new_tokens + draft_slots + recovery_surcharge
+                if recovery_surcharge:
+                    repair_charges[request_id] = recovery_surcharge
+                recovery_plan = self.recovery_plans.get(request_id)
+                if recovery_plan is not None and recovery_plan.state == "DETECTED":
+                    recovery_plan.state = "ADMITTED"
+                    recovery_plan.admitted_step = self.current_step
+                    repair_admitted = True
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 self._set_kv_fetch_stage(request, None)
@@ -1755,6 +2308,10 @@ class Scheduler(SchedulerInterface):
                 len(num_scheduled_tokens)
             ]
 
+        # Bounded admission: tick the deferral count of
+        # every DETECTED plan this step did not admit, so owners skipped
+        # before their budget call are bounded exactly like deferred ones.
+        self._tick_recovery_plan_deferrals(num_scheduled_tokens)
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1780,6 +2337,59 @@ class Scheduler(SchedulerInterface):
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             skip_drafts=not drafts_needed,
         )
+
+        if repair_admitted:
+            # The worker-side descriptors for this step's repair-only
+            # executions: an exclusive repair step carries every scheduled
+            # request.
+            scheduler_output.repair_works = {
+                req_id: RepairWork(
+                    request_id=req_id,
+                    repair_span=plan.repair_span,
+                    layer_end=plan.layer_end,
+                    restored_extent=plan.restored_extent,
+                    plan_id=plan.plan_id,
+                    epoch=plan.admitted_step if plan.admitted_step is not None else -1,
+                    # The ownership authorization: the
+                    # scheduler-authoritative physical blocks covering the
+                    # repair's write set, snapshotted from KVCacheManager
+                    # at this admission (after the step's allocation) --
+                    # the worker validates its geometry against THESE,
+                    # never against its own metadata.
+                    # _repair_write_set_block_ids asserts the single
+                    # KV cache group scope.
+                    expected_write_block_ids=tuple(
+                        self._repair_write_set_block_ids(
+                            self.requests[req_id],
+                            plan.repair_span[0],
+                            plan.repair_span[1],
+                        )
+                    ),
+                )
+                for req_id, plan in self.recovery_plans.items()
+                if plan.state == "ADMITTED" and req_id in num_scheduled_tokens
+            }
+            # A repair-only step never carries speculative drafts: the
+            # replay's span is exact and no drafter runs. The spec
+            # arithmetic already yields none for a rewound request
+            # (num_scheduled_spec_tokens goes non-positive); pin it so a
+            # future accounting change fails here instead of silently
+            # drafting inside a repair.
+            assert not (
+                set(scheduler_output.repair_works) & set(scheduled_spec_decode_tokens)
+            ), "hole repair: a repair-only step must not schedule drafts"
+
+        if self._pending_rewound_req_ids:
+            # Drain the flags of every request scheduled in THIS step:
+            # the worker stages the echoed (moved) count for exactly
+            # these rows. Flags of requests no longer tracked are
+            # dropped -- a preempted or finished request's worker state
+            # is rebuilt by add_request, which stages its own init.
+            scheduler_output.rewound_req_ids = (
+                self._pending_rewound_req_ids & num_scheduled_tokens.keys()
+            )
+            self._pending_rewound_req_ids -= num_scheduled_tokens.keys()
+            self._pending_rewound_req_ids &= self.requests.keys()
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1868,6 +2478,33 @@ class Scheduler(SchedulerInterface):
         request.num_output_placeholders = 0
         request.num_output_placeholder_steps = 0
         request.num_preemptions += 1
+        if self._evidence_state_initialized:
+            # The whole prompt is recomputed on re-admission: any pending
+            # hole-repair plan is void (its evidence recorded as
+            # consumed -- a late re-delivery of the
+            # voided plan's evidence is absorbed, never re-authorized).
+            preempted_plan = self.recovery_plans.pop(request.request_id, None)
+            if preempted_plan is not None:
+                self._remember_consumed_evidence(preempted_plan)
+            # The preempted request's blocks are freed, so its pending
+            # delayed publication must not survive to a later update (the
+            # hash entries would map onto freed blocks); and its transfer
+            # evidence belongs to an attempt whose claim is gone (a later
+            # re-admission with an external hit gets a NEW generation).
+            # The attempt identity dies with the claim too: without this,
+            # a re-admission that loads nothing external keeps the OLD
+            # generation current, and a late report of the freed attempt
+            # would still pass the identity partition and authorize a plan
+            # against the recycled block table. Dropping
+            # the identity makes such a report unattributable -- dropped
+            # loudly, fail closed.
+            self._delayed_sync_claim_pubs.discard(request.request_id)
+            self._req_transfer_generation.pop(request.request_id, None)
+            self._req_transfer_claim.pop(request.request_id, None)
+            self._req_transfer_claim_extent.pop(request.request_id, None)
+            self._req_transfer_attestations.pop(request.request_id, None)
+            self._req_pending_async_reports.pop(request.request_id, None)
+            self._req_async_report_deferrals.pop(request.request_id, None)
         if self.log_stats:
             self._num_preempted_reqs += 1
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
@@ -2368,6 +3005,157 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats: SpecDecodingStats | None = None
 
         failed_kv_load_req_ids: set[str] = set()
+        repair_dispositions: dict[str, str] = {}
+        # Re-inject the failure reports of async attempts that were
+        # deferred while in flight and have now become terminal: their
+        # completeness can be judged (and their recovery authorized or
+        # refused) exactly now.
+        step_reports = (
+            kv_connector_output.load_failure_reports if kv_connector_output else None
+        )
+        # The set of async requests whose transfer attempt is provably
+        # TERMINAL this step -- their finished_recving arrived now or in an
+        # earlier update. Only then may missing attestations be judged as a
+        # contract violation rather than as ranks still in flight. Computed
+        # only while the evidence machinery is live (bare instances stay
+        # off it entirely; see the class-level defaults).
+        terminal_async_req_ids = set()
+        if self._evidence_state_initialized and (
+            self._req_pending_async_reports
+            or step_reports
+            or (
+                kv_connector_output is not None
+                and kv_connector_output.load_attestations
+            )
+        ):
+            terminal_async_req_ids = self.finished_recving_kv_req_ids | (
+                kv_connector_output.finished_recving
+                if kv_connector_output is not None
+                and kv_connector_output.finished_recving
+                else set()
+            )
+        if self._evidence_state_initialized and self._req_pending_async_reports:
+            retrigger = [
+                req_id
+                for req_id in self._req_pending_async_reports
+                if req_id in terminal_async_req_ids
+            ]
+            if retrigger:
+                step_reports = list(step_reports or [])
+                for req_id in retrigger:
+                    self._req_async_report_deferrals.pop(req_id, None)
+                    step_reports.extend(self._req_pending_async_reports.pop(req_id))
+            # Liveness: age every still-deferred attempt one update
+            # step; past the bound the request is failed closed (the
+            # recompute fallback, the claim released) instead of
+            # stranding in WAITING_FOR_REMOTE_KVS holding blocks with
+            # its failure evidence never judged.
+            expired: list[str] = []
+            for req_id in list(self._req_pending_async_reports):
+                if req_id in terminal_async_req_ids:
+                    continue
+                deferrals = self._req_async_report_deferrals.get(req_id, 0) + 1
+                self._req_async_report_deferrals[req_id] = deferrals
+                if deferrals > self.ASYNC_REPORT_MAX_DEFERRAL_STEPS:
+                    expired.append(req_id)
+            for req_id in expired:
+                request = self.requests.get(req_id)
+                deferred_reports = self._req_pending_async_reports.pop(req_id, [])
+                self._req_async_report_deferrals.pop(req_id, None)
+                if request is None or request.is_finished():
+                    continue
+                logger.warning(
+                    "Async transfer evidence for req=%s remained deferred "
+                    "beyond %d steps; failing the request closed to the "
+                    "recompute fallback",
+                    req_id,
+                    self.ASYNC_REPORT_MAX_DEFERRAL_STEPS,
+                )
+                self._reject_uninterpretable_reports(
+                    request,
+                    deferred_reports,
+                    "async transfer evidence remained deferred beyond the "
+                    "liveness bound (the transfer attempt never reached "
+                    "terminality)",
+                    set(),
+                    trusted_rollback=0,
+                    mark_external_untrusted=True,
+                )
+                self._req_transfer_attestations.pop(req_id, None)
+                self._release_failed_async_claim(request)
+                # The attempt can never deliver finished_recving (that is
+                # the shape the bound exists for), so the request cannot
+                # leave WAITING_FOR_REMOTE_KS through the promotion path:
+                # transition it here exactly as the promotion would, or
+                # the local recompute could never own it -- and clear the
+                # fetch-stage accounting so the inflight-KV-load slot is
+                # released instead of leaking.
+                request.status = (
+                    RequestStatus.PREEMPTED
+                    if request.num_preemptions
+                    else RequestStatus.WAITING
+                )
+                self._set_kv_fetch_stage(request, None)
+                self._reserve_parked(request)
+                failed_kv_load_req_ids.add(req_id)
+        if kv_connector_output and (
+            step_reports or kv_connector_output.load_attestations
+        ):
+            failed_kv_load_req_ids.update(
+                self._handle_repair_evidence(
+                    step_reports,
+                    kv_connector_output.load_attestations,
+                    terminal_async_req_ids,
+                )
+            )
+        if kv_connector_output and kv_connector_output.repair_results:
+            # The repair step's verdicts, one per admitted work item. TP
+            # aggregation may repeat a request's verdict across ranks;
+            # duplicates are rejected as stale by the identity machinery.
+            # The disposition keeps the first verdict that CONSUMED the
+            # plan (committed/aborted); a stale echo never overrides a
+            # consuming outcome, and a consuming outcome replaces an
+            # earlier stale one (the stale verdict consumed nothing).
+            for result in kv_connector_output.repair_results:
+                disposition = self._consume_repair_result(result)
+                if result.request_id not in repair_dispositions or (
+                    repair_dispositions[result.request_id] == "stale"
+                    and disposition != "stale"
+                ):
+                    repair_dispositions[result.request_id] = disposition
+        if scheduler_output.repair_works:
+            # Every work admitted this step must produce its verdict at
+            # THIS update: a missing OR ENTIRELY STALE result set would
+            # leave the plan ADMITTED indefinitely (the request stuck
+            # above the rollback floor, the span's blocks held) -- a
+            # stale echo does not consume the plan, so it counts as no
+            # verdict. Fail
+            # safe: synthesize the missing verdict as a failed result --
+            # the abort fallback, never a silent retry loop.
+            for req_id, work in scheduler_output.repair_works.items():
+                if repair_dispositions.get(req_id) not in (None, "stale"):
+                    continue
+                plan = self.recovery_plans.get(req_id)
+                if plan is None or plan.state != "ADMITTED":
+                    continue
+                logger.warning(
+                    "Repair step admitted req=%s plan_id=%d span=%s but no "
+                    "verdict arrived with it; applying the recompute "
+                    "fallback",
+                    req_id,
+                    work.plan_id,
+                    work.repair_span,
+                )
+                missing = RepairResultReport(
+                    request_id=req_id,
+                    plan_id=work.plan_id,
+                    epoch=work.epoch,
+                    structural_check=False,
+                    executed_layers=0,
+                    span=work.repair_span,
+                    aborted=True,
+                )
+                repair_dispositions[req_id] = self._consume_repair_result(missing)
         if kv_connector_output and kv_connector_output.failed_recving:
             failed_kv_load_req_ids.update(
                 self._handle_failed_recving(kv_connector_output.failed_recving)
@@ -2382,6 +3170,39 @@ class Scheduler(SchedulerInterface):
                     num_scheduled_tokens,
                 )
             )
+        # The sync-claim publication gate. It runs at EVERY update
+        # under the repair policy -- whether or not any evidence arrived in
+        # the step -- because a pending delayed publication is due exactly
+        # now, and the absence of evidence is a contract violation, never
+        # success. (Previously the gate ran only when some report or
+        # attestation arrived, so a fully silent step -- a worker returning
+        # no connector output, or one whose evidence lists were empty --
+        # published the claim unverified.)
+        if self.repair_kv_load_failures:
+            failed_kv_load_req_ids.update(
+                self._check_delivery_completeness(failed_kv_load_req_ids)
+            )
+        if self._evidence_state_initialized:
+            # Delayed publication: the delivery verdict for this step's
+            # external claims is now known (the failure channels above
+            # consumed their reports); publish the verified ones.
+            self._publish_delayed_sync_claims(failed_kv_load_req_ids)
+            # Transactional publication: every repair-step admission
+            # recorded in _delayed_repair_txn_pubs has its verdict in this
+            # update (the missing-result fail-safe guarantees a
+            # disposition for every admitted work). Publish ONLY on the
+            # accepted verdict -- the committed extent is fully written
+            # and verified at this point. Every other disposition stays
+            # unpublished: the abort path evicts the span, and the
+            # fallback recompute republishes through the ordinary path.
+            for req_id in list(self._delayed_repair_txn_pubs):
+                self._delayed_repair_txn_pubs.discard(req_id)
+                if repair_dispositions.get(req_id) != "committed":
+                    continue
+                request = self.requests.get(req_id)
+                if request is None or request.is_finished():
+                    continue
+                self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
         if kv_connector_output and kv_connector_output.mrope_position_deltas:
             # Record before the loop below can finish (and free) a request.
             for req_id, delta in kv_connector_output.mrope_position_deltas.items():
@@ -2411,6 +3232,33 @@ class Scheduler(SchedulerInterface):
                     assert request.num_stale_output_tokens >= 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
+                continue
+            if (
+                request is not None
+                and self._evidence_state_initialized
+                and req_id in self.recovery_plans
+            ):
+                # The request has a pending recovery plan: any output this
+                # step produced for it was computed over untrusted state.
+                # With async scheduling the batch queue can deliver a
+                # schedule-ahead step's output after the failure is known;
+                # suppress it until the repair verdict restores the request.
+                continue
+            if scheduler_output.repair_works is not None and (
+                req_id in scheduler_output.repair_works
+            ):
+                # A repair-only step produces no tokens by contract. Any
+                # output arriving for its requests came from a runner
+                # that ignored repair_works (possible only for an
+                # out-of-tree platform runner); suppress it loudly -- the
+                # request's real output continues on the next ordinary
+                # step, after the verdict settled the plan.
+                logger.error_once(
+                    "Suppressing output delivered for req=%s on its "
+                    "repair-only step: a repair step produces no tokens "
+                    "(a runner ignored repair_works)",
+                    req_id,
+                )
                 continue
             if request is None or request.is_finished():
                 # The request is already finished. This can happen if the
@@ -2667,7 +3515,11 @@ class Scheduler(SchedulerInterface):
         error_req_ids = set(request_errors)
         error_req_ids.update(self.encoder_cache_mismatch_reqs)
         self.encoder_cache_mismatch_reqs.clear()
-        if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
+        if (
+            failed_kv_load_req_ids
+            and not self.recompute_kv_load_failures
+            and not self.repair_kv_load_failures
+        ):
             error_req_ids.update(failed_kv_load_req_ids)
         if self.ec_connector is not None:
             # An encoder input the connector can no longer obtain. Failing is
@@ -3241,6 +4093,20 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         self._pending_encoder_input_ids.pop(request.request_id, None)
         request_id = request.request_id
+        if self._evidence_state_initialized:
+            self.recovery_plans.pop(request_id, None)
+            # The transfer-identity bookkeeping dies with the request:
+            # a later request reusing the ID cannot inherit (or
+            # collide with) its generations -- the global counter
+            # never reuses one.
+            self._req_transfer_generation.pop(request_id, None)
+            self._req_transfer_claim.pop(request_id, None)
+            self._req_transfer_claim_extent.pop(request_id, None)
+            self._req_transfer_attestations.pop(request_id, None)
+            self._req_pending_async_reports.pop(request_id, None)
+            self._req_async_report_deferrals.pop(request_id, None)
+            self._consumed_report_evidence.pop(request_id, None)
+            self._untrusted_external_reqs.discard(request_id)
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
@@ -3672,6 +4538,49 @@ class Scheduler(SchedulerInterface):
         request.replay_start = num_hit_tokens - num_replay_tokens
         return num_replay_tokens
 
+    def _publish_delayed_sync_claims(self, failed_req_ids: set[str]) -> None:
+        """Publish the sync external-claim blocks whose delivery this
+        step verified.
+
+        Requests named by any failure channel (the structured report arm,
+        the flat invalid-blocks walk, async recv failures) keep their
+        blocks unpublished: their truncation/eviction arms own them, and
+        unmatchable is the safe state for unverified content. Aborted or
+        finished requests keep theirs unpublished too: their blocks are
+        freed, and a hash entry would map to freed blocks.
+        """
+        if not self._delayed_sync_claim_pubs:
+            return
+        pending, self._delayed_sync_claim_pubs = (
+            self._delayed_sync_claim_pubs,
+            set(),
+        )
+        for req_id in pending:
+            if req_id in failed_req_ids:
+                continue
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                continue
+            # num_computed_tokens already covers the verified claim plus
+            # the chunk the completed forward wrote (the schedule-time
+            # advance), so this mirrors the async recv precedent's
+            # success arm.
+            self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
+            # The attempt's evidence has now
+            # served its purpose -- the delivery is published. A late
+            # same-generation artifact must not read the stale state as
+            # if the attempt were still verifiable.
+            self._req_transfer_attestations.pop(req_id, None)
+            self._req_pending_async_reports.pop(req_id, None)
+
+    def _release_failed_async_claim(self, request: Request) -> None:
+        """Release an async request whose external claim was failed closed:
+        nothing of the claim is trusted, nothing was published, and the
+        local recompute reschedule owns the request from zero."""
+        self.kv_cache_manager.free(request)
+        self.finished_recving_kv_req_ids.discard(request.request_id)
+        self.failed_recving_kv_req_ids.discard(request.request_id)
+
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """KV Connector: update request state after async recv is finished.
 
@@ -3680,6 +4589,42 @@ class Scheduler(SchedulerInterface):
         WAITING_FOR_REMOTE_KV.
         """
         assert self.connector is not None
+
+        if (
+            self.repair_kv_load_failures
+            and request.request_id in self._req_transfer_generation
+            # A pending recovery plan IS the delivery verdict: the plan's
+            # repair step and commit/abort transaction own the request and
+            # its publication from here (its admission already consumed the
+            # complete evidence).
+            and request.request_id not in self.recovery_plans
+        ):
+            # The async delivery's publication gate. The
+            # request's latest transfer attempt must be covered by
+            # terminal attestations from every TP rank, each proving
+            # content identity for its loaded objects, before ANY of the
+            # claim is trusted -- published or computed over. This runs at
+            # promotion, the first point the request can leave
+            # WAITING_FOR_REMOTE_KVS, so every arrival up to and including
+            # the finished-recving pass is already folded in. A request
+            # already failed closed at its delivery update (a report or
+            # attestation violation) takes the same path.
+            already_failed = request.request_id in self._untrusted_external_reqs
+            gate = None if already_failed else self._delivery_evidence_gate(request)
+            if already_failed or gate is not None:
+                if gate is not None:
+                    self._reject_uninterpretable_reports(
+                        request,
+                        [],
+                        "unverified delivery: " + gate,
+                        set(),
+                        trusted_rollback=0,
+                        mark_external_untrusted=True,
+                    )
+                    self._req_transfer_attestations.pop(request.request_id, None)
+                    self._req_pending_async_reports.pop(request.request_id, None)
+                self._release_failed_async_claim(request)
+                return
 
         load_failed = request.request_id in self.failed_recving_kv_req_ids
         if load_failed:
@@ -3892,11 +4837,1641 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens = req_num_computed_tokens
 
                 affected_req_ids.add(request.request_id)
+                # The flat channel vs a pending plan:
+                # this truncation may cut BELOW the plan's rollback and
+                # evict blocks inside the repair's write set, while the
+                # plan survives and its repair step would execute over
+                # the partially-evicted span. The flat channel's
+                # evidence and the structured evidence conflict:
+                # dissolve the plan to the recompute fallback (the
+                # flat truncation already owns the request).
+                flat_conflicted_plan = (
+                    self.recovery_plans.pop(request.request_id, None)
+                    if self._evidence_state_initialized
+                    else None
+                )
+                if flat_conflicted_plan is not None:
+                    self._remember_consumed_evidence(flat_conflicted_plan)
+                    logger.warning(
+                        "Repair plan dissolved: req=%s conflicted with the "
+                        "flat invalid-blocks channel -> the flat recompute "
+                        "path owns the request",
+                        request.request_id,
+                    )
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
 
+    # Per-layer fixed cost of a repair layer.forward in equivalent
+    # prefill tokens: at small spans the launch-bound floor dominates, so
+    # each replayed layer charges this floor beside the layer-fraction
+    # term (a conservative placeholder).
+    REPAIR_LAYER_EQ_TOKENS = 32
+
+    # The admission-deferral bound for a DETECTED recovery plan. A pending
+    # plan is the drain-first admission of its steps: every OTHER request
+    # is frozen while the plan waits for a budget it can fit, so an
+    # unbounded deferral is an engine-wide stall rather than a
+    # per-request one. At the bound the plan dissolves and the ordinary
+    # rollback-recompute path (which chunks, and therefore always makes
+    # progress) owns the request. 32 steps bounds the extra recovery
+    # latency to roughly 0.3-3 s at typical engine cadences (10-100 ms
+    # per step) while riding out transient pressure -- preemption
+    # cascades, connector drains, bursty prefills -- that resolves
+    # within a few scheduling rounds. Not a public knob: the fallback it
+    # arms (full recompute) is always correct, only more expensive.
+    REPAIR_MAX_ADMISSION_DEFERRALS = 32
+    # Liveness bound: async transfer evidence may stay deferred (the
+    # attempt not yet terminal) for at most this many update steps before
+    # the request is failed closed to the recompute fallback -- a
+    # connector whose receive thread never returns the request must not
+    # strand it in WAITING_FOR_REMOTE_KVS holding blocks indefinitely.
+    ASYNC_REPORT_MAX_DEFERRAL_STEPS = 32
+
+    def _repair_estimate(self, n_eff: int, layer_end: int) -> int:
+        n_layers = self.vllm_config.model_config.hf_config.num_hidden_layers
+        return math.ceil(
+            n_eff * layer_end / n_layers + layer_end * self.REPAIR_LAYER_EQ_TOKENS
+        )
+
+    @staticmethod
+    def _report_evidence_key(report: KVLoadFailureReport) -> tuple:
+        """The report's evidence identity: every failure-describing field
+        except the diagnostic source_rank tag. Two reports with equal keys
+        are the SAME evidence -- the identical duplicate every TP rank
+        produces for one fault -- while different keys for one request
+        are divergent evidence that no single recovery can represent."""
+        return (
+            report.request_id,
+            tuple(report.failed_block_ids),
+            report.token_span,
+            report.rollback_boundary,
+            tuple(report.observed_failed_layers),
+            report.healthy_above_span,
+            report.restored_extent,
+        )
+
+    def _handle_repair_evidence(
+        self,
+        reports: list[KVLoadFailureReport] | None,
+        attestations: list[KVLoadAttestation] | None,
+        terminal_async_req_ids: set[str] | None = None,
+    ) -> set[str]:
+        """Consume the step's structured transfer evidence under the
+        repair policy: the negative half (failure reports) plus the
+        positive half (per-rank transfer attestations).
+
+        The attestation pass runs first and INDEPENDENTLY of the
+        reports: violations of the positive contract -- malformed
+        accounting, divergent attestations from one rank, or a rank
+        that attests failed or certification-failed objects without
+        the matching report -- fail the request closed to the
+        recompute fallback even when the reports look clean. A rank's
+        silence about its own corruption is exactly what the
+        attestation exists to catch (the silent-rank gap).
+
+        The report pass then requires, for every request it would
+        authorize, terminal attestations from EVERY rank of the TP
+        group: incomplete evidence never authorizes a recovery.
+
+        Attestations are FOLDED into the per-request accumulated
+        state before any gate reads them, so evidence split across
+        passes (an async rank attesting before its peers) is judged at
+        the delivery's decision points rather than per arrival. The
+        reports of async attempts that are still in flight are deferred
+        (stored) until the attempt is provably terminal: judging their
+        completeness at arrival would reject a delivery whose evidence
+        is merely split across passes.
+        """
+        reports = reports or []
+        attestations = attestations or []
+        terminal_async_req_ids = terminal_async_req_ids or set()
+        if not self.repair_kv_load_failures:
+            # A non-repair policy cannot interpret structured
+            # transfer evidence. The in-tree producers never emit it
+            # under these policies (evidence production is
+            # repair-gated), so this is a nonconforming connector --
+            # fail the AFFECTED REQUESTS closed, never the engine. A
+            # reported failure degrades the request to the recompute
+            # floor (the flat channels' conservative treatment for a
+            # connector-reported failure); attestations alone assert
+            # that nothing failed and are dropped loudly with no state
+            # change. Under kv_load_failure_policy='fail' the affected
+            # requests are errored by the caller's existing union.
+            kv_transfer_config = self.vllm_config.kv_transfer_config
+            policy = (
+                kv_transfer_config.kv_load_failure_policy
+                if kv_transfer_config is not None
+                else None
+            )
+            what = "load_failure_reports" if reports else "load_attestations"
+            reports_by_req: dict[str, list[KVLoadFailureReport]] = {}
+            for report in reports:
+                reports_by_req.setdefault(report.request_id, []).append(report)
+            attest_only_reqs = {a.request_id for a in attestations} - set(
+                reports_by_req
+            )
+            failed: set[str] = set()
+            for req_id in sorted(set(reports_by_req) | attest_only_reqs):
+                request = self.requests.get(req_id)
+                if request is None or request.is_finished():
+                    continue
+                logger.error(
+                    "KV connector reported %s for req=%s while "
+                    "kv_load_failure_policy=%r; the repair policy is "
+                    "required to consume transfer evidence.",
+                    what,
+                    req_id,
+                    policy,
+                )
+                if req_id in reports_by_req:
+                    self._reject_uninterpretable_reports(
+                        request,
+                        reports_by_req[req_id],
+                        "structured transfer evidence under a non-repair "
+                        "policy: the repair policy is required to consume "
+                        "transfer evidence",
+                        set(),
+                        trusted_rollback=0,
+                        mark_external_untrusted=True,
+                    )
+                    # An async attempt whose evidence failed closed must
+                    # leave WAITING_FOR_REMOTE_KVS through the promotion's
+                    # FAILURE arm (the flat channels' treatment): that arm
+                    # frees the claim's blocks and applies the failed-load
+                    # zeroing bookkeeping.
+                    if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                        self.failed_recving_kv_req_ids.add(req_id)
+                    failed.add(req_id)
+            return failed
+        # The identity pass: partition the step's evidence by transfer
+        # generation. Only evidence of the request's LATEST scheduled
+        # attempt is current; anything else is a late artifact of an
+        # older attempt (dropped -- it can neither authorize nor
+        # dissolve anything) or a contract violation (no identity, or
+        # an identity the scheduler never issued) that fails the
+        # request closed.
+        (
+            reports_by_request,
+            attest_by_request,
+            violations,
+        ) = self._partition_transfer_evidence(reports, attestations)
+        skip_req_ids: set[str] = set()
+        for req_id, reason, request_reports in violations:
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                continue
+            self._reject_uninterpretable_reports(
+                request,
+                request_reports,
+                reason,
+                skip_req_ids,
+                trusted_rollback=0,
+                mark_external_untrusted=True,
+            )
+        # Defer the reports of async attempts still in flight.
+        # Their completeness cannot be judged yet (the attempt's other
+        # ranks may not have attested), and deferring BEFORE the
+        # attestation reconciliation keeps the deferred reports counted
+        # as present for the ranks that already reported.
+        for req_id in list(reports_by_request):
+            request = self.requests.get(req_id)
+            if (
+                request is not None
+                and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+                and req_id not in terminal_async_req_ids
+            ):
+                if req_id not in self._req_pending_async_reports:
+                    # A fresh deferral epoch: a stale counter of an
+                    # earlier (judged) deferral must not age this one.
+                    self._req_async_report_deferrals[req_id] = 0
+                self._req_pending_async_reports.setdefault(req_id, []).extend(
+                    reports_by_request.pop(req_id)
+                )
+        # Fold this step's validated current-generation attestations
+        # into the per-request accumulated state every gate below (and
+        # every publication point) reads.
+        self._fold_transfer_attestations(attest_by_request, skip_req_ids)
+        skip_req_ids |= self._check_transfer_attestations(reports_by_request)
+        skip_req_ids |= self._handle_repair_reports(
+            [
+                report
+                for request_reports in reports_by_request.values()
+                for report in request_reports
+            ],
+            evidence_failed=skip_req_ids,
+        )
+        return skip_req_ids
+
+    @staticmethod
+    def _attestation_evidence_key(attestation: KVLoadAttestation) -> tuple:
+        """The attestation's evidence identity: every evidence-describing
+        field including the aggregator-stamped rank. Two attestations
+        with equal keys are the SAME statement -- the identical duplicate
+        a connector may re-deliver -- while different keys for one rank
+        and attempt are divergent evidence."""
+        return (
+            attestation.request_id,
+            attestation.source_rank,
+            attestation.transfer_generation,
+            attestation.expected_objects,
+            attestation.loaded_objects,
+            attestation.failed_objects,
+            attestation.certification,
+            attestation.certified_objects,
+            attestation.certification_failures,
+            attestation.terminal,
+        )
+
+    def _fold_transfer_attestations(
+        self,
+        attest_by_request: dict[str, list[KVLoadAttestation]],
+        skip_req_ids: set[str],
+    ) -> None:
+        """Fold the step's current-generation attestations into the
+        per-request accumulated evidence state.
+
+        Only live requests whose evidence was not already failed closed
+        this step accumulate; identical duplicates are absorbed, so the
+        per-request list stays bounded by the TP group size (a divergent
+        re-attestation from one rank fails the request closed in
+        _check_transfer_attestations before it can accumulate). The
+        accumulated state is reset when a new attempt is scheduled and
+        cleared when the request finishes, is preempted, or fails
+        closed."""
+        for req_id, request_attestations in attest_by_request.items():
+            if req_id in skip_req_ids or req_id in self._untrusted_external_reqs:
+                continue
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                continue
+            accumulated = self._req_transfer_attestations.setdefault(req_id, [])
+            for attestation in request_attestations:
+                key = self._attestation_evidence_key(attestation)
+                if any(
+                    self._attestation_evidence_key(existing) == key
+                    for existing in accumulated
+                ):
+                    continue
+                accumulated.append(attestation)
+
+    def _partition_transfer_evidence(
+        self,
+        reports: list[KVLoadFailureReport],
+        attestations: list[KVLoadAttestation],
+    ) -> tuple[
+        dict[str, list[KVLoadFailureReport]],
+        dict[str, list[KVLoadAttestation]],
+        list[tuple[str, str, list[KVLoadFailureReport]]],
+    ]:
+        """Attribute the step's evidence to transfer attempts by
+        generation.
+
+        Returns (current reports by request, current attestations by
+        request, per-request identity violations). Current means: the
+        evidence's echoed generation equals the request's latest
+        SCHEDULED attempt generation. A report whose generation is
+        older is a late duplicate of a consumed attempt -- dropped,
+        never able to authorize or dissolve anything, so a genuine new
+        attempt's failure is not discarded as a duplicate either (its
+        report carries the new attempt's generation). A report with
+        no identity, or one naming a generation the scheduler never
+        issued, is a contract violation collected for the caller to
+        fail closed. Attestations are informational: non-current ones
+        simply do not count toward the completeness gate.
+        """
+        reports_by_request: dict[str, list[KVLoadFailureReport]] = {}
+        attest_by_request: dict[str, list[KVLoadAttestation]] = {}
+        violations: list[tuple[str, str, list[KVLoadFailureReport]]] = []
+        for report in reports:
+            req_id = report.request_id
+            current = self._req_transfer_generation.get(req_id)
+            if current is None:
+                # No scheduled external load attempt for this request:
+                # the report is unattributable (a very late artifact
+                # of a finished request, or a bogus connector). The
+                # request holds no external data to distrust; drop.
+                logger.error(
+                    "KV repair evidence dropped: report for req=%s names "
+                    "no scheduled external load attempt (generation=%r)",
+                    req_id,
+                    report.transfer_generation,
+                )
+                continue
+            if report.transfer_generation is None:
+                violations.append(
+                    (
+                        req_id,
+                        (
+                            "report without a transfer identity (the connector "
+                            "must implement the transfer-identity contract)"
+                        ),
+                        [report],
+                    )
+                )
+                continue
+            if report.transfer_generation > current:
+                violations.append(
+                    (
+                        req_id,
+                        (
+                            "report names transfer generation "
+                            f"{report.transfer_generation} but the latest "
+                            f"scheduled attempt is {current} (an identity the "
+                            "scheduler never issued)"
+                        ),
+                        [report],
+                    )
+                )
+                continue
+            if report.transfer_generation < current:
+                logger.info(
+                    "KV repair evidence dropped: late report of the "
+                    "consumed attempt %d for req=%s (latest attempt is %d)",
+                    report.transfer_generation,
+                    req_id,
+                    current,
+                )
+                continue
+            reports_by_request.setdefault(req_id, []).append(report)
+        for attestation in attestations:
+            req_id = attestation.request_id
+            current = self._req_transfer_generation.get(req_id)
+            if current is None:
+                # No scheduled attempt for this request: unattributable
+                # (a very late artifact, or a bogus connector). Dropped
+                # loudly, symmetric with the reports rule.
+                logger.error(
+                    "KV repair evidence dropped: attestation for req=%s "
+                    "names no scheduled external load attempt "
+                    "(generation=%r)",
+                    req_id,
+                    attestation.transfer_generation,
+                )
+                continue
+            if attestation.transfer_generation is None:
+                # The identity contract is mandatory under the repair
+                # policy: an attestation without it cannot be pinned to
+                # any attempt. Loud, symmetric with the reports rule
+                # .
+                violations.append(
+                    (
+                        req_id,
+                        (
+                            "attestation without a transfer identity (the "
+                            "connector must implement the transfer-identity "
+                            "contract)"
+                        ),
+                        [],
+                    )
+                )
+                continue
+            if attestation.transfer_generation != current:
+                if attestation.transfer_generation > current:
+                    # An identity the scheduler never issued for
+                    # this request -- symmetric with the reports rule. A
+                    # connector must never be able to introduce a transfer
+                    # identity (the generations are scheduler-authoritative
+                    # and globally monotonic); naming one that was never
+                    # scheduled is a contract violation that fails the
+                    # request closed, not an ignorable artifact.
+                    violations.append(
+                        (
+                            req_id,
+                            (
+                                "attestation names transfer generation "
+                                f"{attestation.transfer_generation} but the "
+                                f"latest scheduled attempt is {current} (an "
+                                "identity the scheduler never issued)"
+                            ),
+                            [],
+                        )
+                    )
+                    continue
+                # OLDER than the latest attempt: a late artifact of a
+                # consumed attempt -- dropped, never able to authorize
+                # or dissolve anything (a genuine new failure carries
+                # the new attempt's generation).
+                logger.info(
+                    "KV repair evidence dropped: late attestation of the "
+                    "consumed attempt %d for req=%s (latest attempt is %d)",
+                    attestation.transfer_generation,
+                    req_id,
+                    current,
+                )
+                continue
+            attest_by_request.setdefault(req_id, []).append(attestation)
+        return reports_by_request, attest_by_request, violations
+
+    def _delivery_evidence_gate(self, request: Request) -> str | None:
+        """Whether the request's latest transfer attempt carries the
+        complete, content-certified positive evidence that publication
+        requires. Returns a human-readable rejection reason, or None
+        when the delivery is verified.
+
+        Two separable requirements: transfer COMPLETENESS -- a
+        terminal, well-formed attestation from every rank of the TP
+        group, over the attempt's full lifetime (the accumulated
+        state, not just one step's arrivals) -- and CONTENT
+        CERTIFICATION -- every rank's attestation must independently
+        prove content identity for the objects it loaded
+        (KVLoadAttestation.certifies_content: a real certification
+        level, per-object digest ("sha256") or content-addressed
+        immutable keys under the documented store-trust assumption
+        ("content"), covering every loaded object with zero
+        failures). A successful GET proves only that bytes arrived;
+        "size"/"none" are the connector explicitly reporting that it
+        could NOT verify content, and under the repair policy such a
+        delivery fails closed to the recompute fallback -- symmetric
+        with the recovery path, where an uncertified above-span extent
+        is recomputed rather than restored."""
+        request_attestations = self._req_transfer_attestations.get(
+            request.request_id, []
+        )
+        gate = self._transfer_evidence_complete(request_attestations)
+        if gate is not None:
+            return gate
+        if not all(
+            attestation.certifies_content()
+            for attestation in request_attestations
+            if attestation.terminal
+        ):
+            return (
+                "delivery not content-certified: every TP rank must attest "
+                'a real certification level ("sha256" or "content") covering '
+                'its loaded objects; "size"/"none" attest that content was '
+                "NOT verified"
+            )
+        return None
+
+    def _check_delivery_completeness(self, skip_req_ids: set[str]) -> set[str]:
+        """The publication gate for deliveries with NO failure reports
+        : the report path checks
+         completeness before authorizing a recovery, but an all-healthy
+         delivery publishes and consumes the claim through paths that
+         never consult the report gate -- a silent rank's unverified
+         shard would be published, shared, and consumed as trusted.
+
+         The gate runs at EVERY update_from_output under the
+         repair policy -- whether or not any evidence arrived in the
+         step -- because a pending sync-claim publication is due
+         exactly now, and the absence of evidence is a contract
+         violation, never success. (An earlier gate ran only when some
+         report or attestation arrived in the step, so a fully silent
+         step -- a worker returning no connector output at all, or one
+         whose evidence lists were empty -- published the claim
+         unverified.) Async attempts are NOT judged here: their
+         publication point is the promotion in
+         _update_waiting_for_remote_kv, after the finished-recving pass
+         has folded the last arrivals.
+
+         Publication additionally requires content
+         certification (see _delivery_evidence_gate): transfer
+         completion alone authorizes nothing."""
+        if not self._delayed_sync_claim_pubs:
+            return set()
+        newly_failed: set[str] = set()
+        for req_id in list(self._delayed_sync_claim_pubs):
+            if req_id in skip_req_ids:
+                continue
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                continue
+            gate = self._delivery_evidence_gate(request)
+            if gate is not None:
+                self._reject_uninterpretable_reports(
+                    request,
+                    [],
+                    "unverified delivery: " + gate,
+                    newly_failed,
+                    trusted_rollback=0,
+                    mark_external_untrusted=True,
+                )
+                self._req_transfer_attestations.pop(req_id, None)
+                self._req_pending_async_reports.pop(req_id, None)
+        return newly_failed
+
+    def _check_transfer_attestations(
+        self,
+        reports_by_request: dict[str, list[KVLoadFailureReport]],
+    ) -> set[str]:
+        """Validate the POSITIVE transfer evidence of every request with
+        live accumulated attestations or this-step reports.
+
+        Validation runs over the accumulated per-request state (the
+        fold has already merged this step's arrivals), and the report
+        reconciliation counts both this step's reports and the deferred
+        reports of async attempts still in flight -- a rank whose failure
+        report was deferred is not "report-less" for reconciliation
+        purposes.
+
+        Returns the request ids whose evidence failed closed; each such
+        request truncates to rollback 0 (no attestation vouches for any
+        span of the external claim) and the ordinary
+        rollback-recompute path owns it. These are connector contract
+        violations, not ordinary load failures: loud, monitored, and
+        engine-survivable.
+        """
+        skip_req_ids: set[str] = set()
+        candidates = set(reports_by_request) | set(self._req_transfer_attestations)
+        for req_id in candidates:
+            if req_id in self.recovery_plans:
+                # A pending recovery plan owns the request: its admission
+                # already consumed and reconciled the attempt's complete
+                # evidence (this pass ran before the admission). A LATE
+                # re-delivery of the same attempt's attestation -- e.g. a
+                # connector re-emitting it after the plan was admitted --
+                # carries no report this step and must not be read as a
+                # 'failed objects without a report' violation that would
+                # dissolve the legitimately admitted plan (a
+                # false-positive rejection; the recompute fallback is
+                # safe but wasteful). The plan's own verdict machinery
+                # owns the request from admission.
+                continue
+            request_attestations = self._req_transfer_attestations.get(req_id, [])
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                continue
+            request_reports = reports_by_request.get(req_id, [])
+            # The reconciliation counts the deferred reports of an async
+            # attempt still in flight as present: the rank DID report.
+            request_reports = request_reports + self._req_pending_async_reports.get(
+                req_id, []
+            )
+            reason = self._attestation_violation(
+                request, request_attestations, request_reports
+            )
+            if reason is not None:
+                self._reject_uninterpretable_reports(
+                    request,
+                    request_reports,
+                    reason,
+                    skip_req_ids,
+                    trusted_rollback=0,
+                    mark_external_untrusted=True,
+                )
+                self._req_transfer_attestations.pop(req_id, None)
+                self._req_pending_async_reports.pop(req_id, None)
+        return skip_req_ids
+
+    def _attestation_violation(
+        self,
+        request: Request,
+        request_attestations: list[KVLoadAttestation],
+        request_reports: list[KVLoadFailureReport],
+    ) -> str | None:
+        """Whether the request's attestations violate the positive
+        evidence contract. Returns a human-readable rejection reason,
+        or None when the attestations are well-formed, per-rank
+        consistent, and (where terminal) reconciled with the failure
+        reports. The caller owns the failure mode."""
+        # The structural battery: terminal accounting must cover the
+        # complete expected object set (loaded + failed == expected), a
+        # rank cannot certify more than it loaded, and a certification
+        # failure requires a certification capable of detecting it.
+        for attestation in request_attestations:
+            if not attestation.well_formed():
+                return (
+                    "malformed attestation accounting from rank "
+                    f"{attestation.source_rank} (expected="
+                    f"{attestation.expected_objects} loaded="
+                    f"{attestation.loaded_objects} failed="
+                    f"{attestation.failed_objects} terminal="
+                    f"{attestation.terminal})"
+                )
+        # Per-rank identity: one rank, one attestation per attempt.
+        # Identical duplicates are absorbed; divergent content from one
+        # rank is unattributable evidence and fails closed.
+        by_rank: dict[int | None, list[KVLoadAttestation]] = {}
+        for attestation in request_attestations:
+            by_rank.setdefault(attestation.source_rank, []).append(attestation)
+        for rank, rank_attestations in by_rank.items():
+            first = rank_attestations[0]
+            for other in rank_attestations[1:]:
+                diverged = (
+                    other.transfer_generation,
+                    other.expected_objects,
+                    other.loaded_objects,
+                    other.failed_objects,
+                    other.certification,
+                    other.certified_objects,
+                    other.certification_failures,
+                    other.terminal,
+                ) != (
+                    first.transfer_generation,
+                    first.expected_objects,
+                    first.loaded_objects,
+                    first.failed_objects,
+                    first.certification,
+                    first.certified_objects,
+                    first.certification_failures,
+                    first.terminal,
+                )
+                if diverged:
+                    return (
+                        f"divergent attestations from rank {rank} for one "
+                        "request and attempt"
+                    )
+        # A terminal attestation that observed failures or
+        # certification failures must be accompanied by THAT RANK'S
+        # structured failure evidence in the same step: reports are
+        # per-rank statements (the aggregator stamps each with its
+        # originating worker), and a peer's report does not cover a
+        # rank's own corrupt cells. A rank whose connector detected
+        # corrupt or missing content and reported nothing -- while a
+        # peer's clean-looking report arrives -- is exactly the
+        # silent-corruption shape this contract exists to catch.
+        reported_ranks = {r.source_rank for r in request_reports}
+        reports_by_rank: dict[int | None, list[KVLoadFailureReport]] = {}
+        for report in request_reports:
+            reports_by_rank.setdefault(report.source_rank, []).append(report)
+        for attestation in request_attestations:
+            if not attestation.terminal:
+                continue
+            rank_reports = reports_by_rank.get(attestation.source_rank, [])
+            if attestation.source_rank not in reported_ranks:
+                if attestation.failed_objects > 0:
+                    return (
+                        f"rank {attestation.source_rank} attests "
+                        f"{attestation.failed_objects} failed objects "
+                        "without its own failure report"
+                    )
+                if attestation.certification_failures > 0:
+                    return (
+                        f"rank {attestation.source_rank} attests "
+                        f"{attestation.certification_failures} certification "
+                        "failures without its own failure report"
+                    )
+                continue
+            # The count reconciliation: a rank's attestation must
+            # account for exactly the failed objects its own reports
+            # describe. The documented object unit is one cell per
+            # (rank, layer, block) -- the v1 full-attention pool has a
+            # single part per layer -- so the relation is failed
+            # blocks x failed layers per report (a
+            # raw object-vs-block equality would fail-close every
+            # conforming connector whose failed block spans more than
+            # one layer). An attestation counting more leaves failures
+            # outside the reported span -- un-repaired holes the plan
+            # would never cover; counting fewer contradicts its own
+            # report.
+            reported_failed = sum(
+                len(r.failed_block_ids) * len(r.observed_failed_layers)
+                for r in rank_reports
+            )
+            if attestation.failed_objects != reported_failed:
+                return (
+                    f"rank {attestation.source_rank} attests "
+                    f"{attestation.failed_objects} failed objects but its "
+                    f"reports describe {reported_failed} object(s) "
+                    "(failed blocks x failed layers)"
+                )
+        return None
+
+    def _remember_consumed_evidence(self, plan: RecoveryPlan) -> None:
+        """Record that this plan's report evidence reached a terminal
+        disposition (committed, aborted, or dissolved -- EVERY pop of
+        the plan without a verdict included). A LATE
+        re-delivery of the same evidence -- same transfer generation
+        and same evidence key -- is a duplicate of an attempt whose
+        outcome is already known: absorbed silently, never
+        re-authorized. A genuine repeated failure carries a NEW
+        generation (a new scheduled attempt) and is never absorbed by
+        this record. Entries of OLDER generations are pruned on
+        insert: the partition drops older-generation reports before
+        they can reach the absorption check, so only the latest
+        generation's pairs are ever matchable (no
+        fixed-count cap that a burst of same-generation entries can
+        evict)."""
+        if plan.report_evidence is None:
+            return
+        consumed = [
+            (gen, key)
+            for gen, key in self._consumed_report_evidence.get(plan.request_id, [])
+            if gen == plan.transfer_generation
+        ]
+        entry = (plan.transfer_generation, plan.report_evidence)
+        if entry not in consumed:
+            consumed.append(entry)
+        self._consumed_report_evidence[plan.request_id] = consumed
+
+    def _transfer_evidence_complete(
+        self, request_attestations: list[KVLoadAttestation]
+    ) -> str | None:
+        """The completeness gate: whether every rank of the TP group
+         supplied a terminal, well-formed attestation for this request.
+         Returns a rejection reason naming the shortfall, or None when
+         complete. Reports are negative evidence -- a rank whose GET
+         'succeeded' against corrupt or stale content reports nothing at
+         all -- so only the positive attestations can prove that every
+         participating rank completed and verified its portion.
+
+         The count is an EXACT SET over the TP group's rank indices
+        : the aggregator stamps source_rank over the
+         gathered worker outputs, which under PP>1 covers the whole
+         world -- a count-based check is satisfiable by the wrong PP
+         stage's workers while the shard-holding stage stays silent.
+         Exact equality against set(range(tp_size)) makes that shape
+         fail closed; the repair policy is additionally rejected at
+         init when PP>1 (the v1 evidence contract is TP-scoped).
+         Vacuous attestations (expected_objects == 0) never count
+        : a rank with a real external claim holds at
+         least one object."""
+        terminal_ranks: set[int] = set()
+        for attestation in request_attestations:
+            if (
+                attestation.terminal
+                and attestation.well_formed()
+                and attestation.source_rank is not None
+                # A vacuous attestation never counts: a rank holding a
+                # real external claim has at least one expected object.
+                and attestation.expected_objects >= 1
+            ):
+                terminal_ranks.add(attestation.source_rank)
+        expected = set(range(self._evidence_tp_size))
+        if terminal_ranks != expected:
+            return (
+                f"incomplete transfer evidence: {len(terminal_ranks)} of "
+                f"{self._evidence_tp_size} TP ranks supplied a terminal "
+                f"attestation for the request (ranks={sorted(terminal_ranks)})"
+            )
+        return None
+
+    def _handle_repair_reports(
+        self,
+        reports: list[KVLoadFailureReport],
+        evidence_failed: set[str] | None = None,
+    ) -> set[str]:
+        """Consume structured load-failure reports under the repair policy.
+
+        Two passes per request. The consensus pass groups the step's
+        reports by request and folds identical duplicates (every TP rank
+        reports the same fault; the aggregator concatenates the per-rank
+        lists, so one fault arrives N times): a request keeps at most one
+        piece of evidence. Divergent evidence -- reports naming different
+        regions, or the same region with different metadata -- is never
+        merged and never authorizes a recovery: the request falls back to
+        the ordinary rollback-recompute path (see
+        _reject_uninterpretable_reports) and the engine stays alive.
+        Before any plan is admitted, the completeness gate requires
+        terminal attestations from every TP rank (the positive half of
+        the evidence contract, checked in _transfer_evidence_complete):
+        failure reports alone cannot prove that a silent rank holds
+        healthy KV. The gate reads the accumulated per-request
+        attestation state (the fold has merged this step's arrivals), so
+        evidence split across passes still completes. The install pass is
+        otherwise unchanged: truncate to the rollback boundary, install
+        the RecoveryPlan, and return the ids whose (garbage) outputs from
+        the detection step must be skipped.
+        """
+        evidence_failed = evidence_failed or set()
+        skip_req_ids: set[str] = set()
+        by_request: dict[str, list[KVLoadFailureReport]] = {}
+        for report in reports:
+            by_request.setdefault(report.request_id, []).append(report)
+        for req_id, req_reports in by_request.items():
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                continue
+            if req_id in evidence_failed:
+                # The attestation pass already failed this request
+                # closed this step: its positive evidence violated the
+                # contract. A report arriving in the same step must not
+                # resurrect an authorization on top of evidence that
+                # was just rejected.
+                skip_req_ids.add(req_id)
+                continue
+            if req_id in self.recovery_plans:
+                # A plan already owns this request. Reports matching the
+                # plan's evidence AND its transfer generation are
+                # same-step duplicates (absorbed); a report of a NEWER
+                # attempt (the only non-matching generation that can
+                # reach here -- the partition drops older ones) means a
+                # NEW scheduled attempt failed while this plan was
+                # pending: the plan is stale, it is DISSOLVED and the
+                # fresh evidence falls through to admission (the old
+                # behavior absorbed the newer attempt's report and let
+                # the plan commit over its corruption); anything else of
+                # the plan's own generation diverges from the evidence
+                # the plan was built on and dissolves it.
+                plan = self.recovery_plans[req_id]
+                same_attempt = [
+                    r
+                    for r in req_reports
+                    if r.transfer_generation == plan.transfer_generation
+                ]
+                if len(same_attempt) < len(req_reports):
+                    # After the identity partition every report here
+                    # carries the LATEST generation, so a report that
+                    # does not match the plan's generation is NEWER: a
+                    # new scheduled attempt failed while this plan was
+                    # pending. The plan is stale -- dissolve it and
+                    # fall through to the fresh-admission path with the
+                    # newer evidence (it owns the request now).
+                    logger.warning(
+                        "Repair plan dissolved: req=%s plan_id=%d was built "
+                        "on attempt %r but a NEWER attempt's failure "
+                        "evidence arrived -> the fresh evidence owns the "
+                        "request",
+                        req_id,
+                        plan.plan_id,
+                        plan.transfer_generation,
+                    )
+                    self._dissolve_recovery_plan(
+                        plan, "newer attempt evidence superseded it"
+                    )
+                    # Fall through: req_reports (the newer evidence) is
+                    # admitted fresh below.
+                else:
+                    divergent = [
+                        r
+                        for r in same_attempt
+                        if self._report_evidence_key(r) != plan.report_evidence
+                    ]
+                    if divergent:
+                        self._reject_uninterpretable_reports(
+                            request,
+                            divergent,
+                            "divergent against the pending plan",
+                            skip_req_ids,
+                            trusted_rollback=plan.repair_span[0],
+                        )
+                    continue
+            rejection = next(
+                (
+                    reason
+                    for r in req_reports
+                    if (reason := self._validate_load_failure_report(r)) is not None
+                ),
+                None,
+            )
+            if rejection is not None:
+                # Malformed evidence: even the rollback boundary is
+                # untrustworthy. Fail closed to a full recompute.
+                self._reject_uninterpretable_reports(
+                    request, req_reports, "malformed (" + rejection + ")", skip_req_ids
+                )
+                continue
+            unique: list[KVLoadFailureReport] = []
+            for report in req_reports:
+                key = self._report_evidence_key(report)
+                if all(self._report_evidence_key(u) != key for u in unique):
+                    unique.append(report)
+            if len(unique) > 1:
+                self._reject_uninterpretable_reports(
+                    request, unique, "divergent", skip_req_ids
+                )
+                continue
+            report = unique[0]
+            request = self.requests[report.request_id]
+            # The consumed-evidence absorption: this exact (attempt,
+            # evidence) pair already reached a terminal disposition
+            # (committed, aborted, or dissolved) -- a late
+            # re-delivery is a duplicate of an outcome already known,
+            # absorbed without re-authorization and without touching
+            # the request (its outputs of THIS step are ordinary: the
+            # fault was detected in an earlier step).
+            if (
+                report.transfer_generation,
+                self._report_evidence_key(report),
+            ) in self._consumed_report_evidence.get(req_id, []):
+                logger.info(
+                    "KV repair evidence absorbed: late duplicate of the "
+                    "consumed attempt %d for req=%s",
+                    report.transfer_generation,
+                    req_id,
+                )
+                continue
+            # The completeness gate: failure reports are negative
+            # evidence -- a rank whose GET 'succeeded' against corrupt
+            # or stale content, or one that failed before reporting,
+            # supplies no report at all. A recovery may be authorized
+            # only when EVERY rank of the TP group supplied a terminal,
+            # well-formed attestation for this request. Incomplete
+            # evidence fails closed to the recompute fallback (the
+            # engine stays alive); it never blocks on waiting for
+            # stragglers. The rollback floor is ZERO, not the report's
+            # boundary: TP attention reads every rank's shard, so a
+            # prefix boundary certified by one rank's report is not
+            # certified on a silent rank's shard -- the external claim
+            # as a whole demotes to a full recompute.
+            request_attestations = self._req_transfer_attestations.get(req_id, [])
+            gate = self._transfer_evidence_complete(request_attestations)
+            if gate is not None:
+                self._reject_uninterpretable_reports(
+                    request,
+                    req_reports,
+                    gate,
+                    skip_req_ids,
+                    trusted_rollback=0,
+                    mark_external_untrusted=True,
+                )
+                continue
+            # Multimodal requests cannot take the repair path: the repair
+            # replay embeds the raw placeholder token ids, which is not the
+            # embedding the original prefill used (the merged vision
+            # features), so the replayed KV would be silently wrong while
+            # the geometry-only commit battery passes. Fail closed to the
+            # recompute fallback until a correct re-embedding mechanism
+            # exists.
+            if request.mm_features:
+                self._reject_uninterpretable_reports(
+                    request,
+                    req_reports,
+                    "multimodal request (the repair replay cannot re-embed "
+                    "vision features; a re-embedding mechanism does not "
+                    "exist in v1)",
+                    skip_req_ids,
+                    trusted_rollback=0,
+                )
+                continue
+            rollback, corrupt_end = (
+                report.rollback_boundary,
+                report.token_span[1],
+            )
+            # the rollback prefix is
+            # external content too. Its publication -- at the async
+            # promotion and at the repair commit -- is authorized by the
+            # SAME content certification the all-healthy delivery path
+            # requires: without every rank's certifies_content(), the
+            # prefix below the failed region is unverified (same-size
+            # stale content passes a "size" check), so the repair has
+            # nothing safe to offer -- its only value was sparing the
+            # prefix -- and the whole claim demotes to the full-recompute
+            # fallback, exactly like an uncertified all-healthy delivery.
+            # (Truncating the plan's rollback to 0 instead would re-open
+            # the connector admission path at num_computed_tokens == 0
+            # and start a NEW external attempt under a pending plan.)
+            evidence_certifies = all(
+                attestation.certifies_content()
+                for attestation in request_attestations
+                if attestation.terminal
+            )
+            if not evidence_certifies:
+                self._reject_uninterpretable_reports(
+                    request,
+                    req_reports,
+                    "delivery not content-certified (repair path): the "
+                    "rollback prefix is external content and requires every "
+                    'rank to attest a real certification level ("sha256" or '
+                    '"content") covering its loaded objects; "size"/"none" '
+                    "attest that content was NOT verified",
+                    skip_req_ids,
+                    trusted_rollback=0,
+                    mark_external_untrusted=True,
+                )
+                continue
+            # The completeness gate proves every rank
+            # attested, but nothing yet ties the attested expected set
+            # to the claimed extent. Require every terminal rank's
+            # expected-object count to COVER the claim's cells (v1's
+            # cell unit: (block, layer) of the single full-attention
+            # group -- every rank holds every layer): an under-reporting
+            # producer can no longer pass a tiny attestation beside a
+            # full-claim report and have the commit certify the whole
+            # claim as verified.
+            claim = self._req_transfer_claim.get(req_id)
+            if claim is not None:
+                # Unit-agnostic lower bound: the claim's every block
+                # must be represented in each terminal rank's expected
+                # set (>= one object per claimed block). The attestation
+                # contract leaves the object unit to the connector
+                # (per block, or per (block, layer) cell as the shipped
+                # producers use), so no upper arithmetic is imposed --
+                # but no honest producer can cover a 192-block claim
+                # with a 2-object expected set.
+                min_expected_objects = -(-claim // self.block_size)
+                under_covering = [
+                    attestation.source_rank
+                    for attestation in request_attestations
+                    if attestation.terminal
+                    and attestation.expected_objects < min_expected_objects
+                ]
+                if under_covering:
+                    self._reject_uninterpretable_reports(
+                        request,
+                        req_reports,
+                        "incomplete extent coverage: the attested "
+                        "expected-object sets (min "
+                        + str(
+                            min(
+                                attestation.expected_objects
+                                for attestation in request_attestations
+                                if attestation.terminal
+                            )
+                        )
+                        + " objects) do not cover the attempt's external "
+                        "claim ("
+                        + str(min_expected_objects)
+                        + " objects for "
+                        + str(claim)
+                        + " tokens); ranks "
+                        + str(under_covering)
+                        + " attest fewer objects than the claim contains",
+                        skip_req_ids,
+                        trusted_rollback=0,
+                        mark_external_untrusted=True,
+                    )
+                    continue
+            write_set = self._repair_write_set_block_ids(request, rollback, corrupt_end)
+            violating_block = self._write_set_shared_block(write_set)
+            if violating_block is not None:
+                # Write-set fence: the repair execution writes the span's
+                # blocks at every executed layer, so any shared or
+                # published block in the write set cannot be repaired
+                # without breaking sharer/reader safety. Fail closed: no
+                # plan, the ordinary recompute floor owns the request, and
+                # the write set and everything downstream are evicted so
+                # no future request matches it.
+                self._reject_shared_block_repair(request, report, write_set)
+                skip_req_ids.add(report.request_id)
+                continue
+            request.num_computed_tokens = rollback
+            self._mark_num_computed_tokens_rewound(request)
+            # The async schedule-ahead may have left placeholder accounting
+            # for in-flight steps whose outputs are now suppressed.
+            request.num_output_placeholders = 0
+            layer_end = max(report.observed_failed_layers) + 1
+            # The global above-span trust gate: the report's
+            # healthy_above_span is ONE RANK's certification of ITS OWN
+            # above-span cells, but the commit decision consumes it for
+            # every rank's extent. The claim is honored only when every
+            # rank's terminal attestation independently proves content
+            # identity for its full expected object set
+            # (KVLoadAttestation.certifies_content: a real certification
+            # level -- per-object digest ("sha256") or content-addressed
+            # immutable keys under the store-trust assumption
+            # ("content") -- with every object certified and zero
+            # failures). Otherwise the plan carries False and the
+            # commit caps the restoration at the repair span's end:
+            # the untrusted above-span extent is recomputed, never
+            # consumed as verified cache.
+            healthy_above_span = report.healthy_above_span and evidence_certifies
+            self._next_repair_plan_id += 1
+            plan = RecoveryPlan(
+                request_id=report.request_id,
+                repair_span=(rollback, corrupt_end),
+                est_equivalent_tokens=self._repair_estimate(
+                    corrupt_end - rollback, layer_end
+                ),
+                layer_end=layer_end,
+                restored_extent=report.restored_extent,
+                healthy_above_span=healthy_above_span,
+                failed_block_ids=list(report.failed_block_ids),
+                plan_id=self._next_repair_plan_id,
+                report_evidence=self._report_evidence_key(report),
+                transfer_generation=report.transfer_generation,
+            )
+            self.recovery_plans[report.request_id] = plan
+            skip_req_ids.add(report.request_id)
+            # The attempt's positive evidence is consumed into the plan:
+            # its accumulated attestations have served their purpose (the
+            # healthy_above_span verdict was derived from them above), and
+            # leaving them would let a later re-validation step reconcile
+            # them against reports that no longer arrive.
+            self._req_transfer_attestations.pop(report.request_id, None)
+            logger.info(
+                "Repair plan admitted: req=%s plan_id=%d span=[%d,%d) "
+                "layer_end=%d E=%d restored_extent=%d "
+                "healthy_above_span=%s",
+                report.request_id,
+                plan.plan_id,
+                rollback,
+                corrupt_end,
+                layer_end,
+                plan.est_equivalent_tokens,
+                report.restored_extent,
+                healthy_above_span,
+            )
+        return skip_req_ids
+
+    def _mark_num_computed_tokens_rewound(self, request: Request) -> None:
+        """Flag a request whose num_computed_tokens just moved other than
+        by the ordinary step advance, so the next SchedulerOutput that
+        schedules it tells the worker to stage the value over its
+        GPU-side count."""
+        self._pending_rewound_req_ids.add(request.request_id)
+
+    def _repair_write_set_block_ids(
+        self, request: Request, rollback: int, corrupt_end: int
+    ) -> list[int]:
+        """The COMPLETE physical write set of the repair execution: every
+        block covering [rollback, corrupt_end). The repair stream advances
+        through the layers below the extent writing each layer's KV
+        natively, so the span's blocks are written at EVERY executed layer
+        -- the block set is layer-invariant in v1's single kv-cache-group
+        geometry, but the fence must cover the whole span: the stream's
+        writes go beyond the failed blocks whenever the rollback boundary
+        sits below the failed region."""
+        (req_block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
+        first = rollback // self.block_size
+        last = -(-corrupt_end // self.block_size)
+        return req_block_ids[first:last]
+
+    def _write_set_shared_block(self, write_set: list[int]) -> int | None:
+        """The first write-set block that is shared (ref_cnt > 1: another
+        request's table references it) or published (block_hash set: any
+        future request with the same prefix would match it), or None when
+        the whole write set is private and unpublished."""
+        block_pool = self.kv_cache_manager.block_pool
+        for block_id in write_set:
+            block = block_pool.blocks[block_id]
+            if block.ref_cnt > 1 or block.block_hash is not None:
+                return block_id
+        return None
+
+    def _reject_shared_block_repair(
+        self,
+        request: Request,
+        report: KVLoadFailureReport,
+        write_set: list[int],
+    ) -> None:
+        # Fail closed for the shared-block shape: the write set and
+        # everything downstream are evicted so no future request matches
+        # the untrusted content, and the request truncates to its rollback
+        # boundary for the ordinary recompute fallback.
+        logger.warning(
+            "KV repair refused: the write set spans a shared or published "
+            "block; failing closed to the recompute fallback (req=%s, "
+            "rollback=%d)",
+            request.request_id,
+            report.rollback_boundary,
+        )
+        (req_block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
+        start_idx = req_block_ids.index(write_set[0])
+        blocks_to_evict = set(req_block_ids[start_idx:])
+        self.kv_cache_manager.evict_blocks(blocks_to_evict)
+        request.num_computed_tokens = report.rollback_boundary
+        self._mark_num_computed_tokens_rewound(request)
+        # The shared/published write set may already be attached to
+        # other requests (ref_cnt > 1 blocks the eviction above only
+        # clears hash entries for); rewind every consumer below the
+        # failed blocks.
+        self._invalidate_failed_blocks_for_consumers(set(report.failed_block_ids))
+
+    def _validate_load_failure_report(self, report: KVLoadFailureReport) -> str | None:
+        """The report's geometry battery. Returns None when the report is
+        a well-formed single-region failure description for a live
+        request, and a human-readable rejection reason otherwise. The
+        caller owns the failure mode: a malformed report is a connector
+        contract violation, logged at ERROR and answered with the
+        request-scoped recompute fallback -- loud enough to monitor,
+        never an engine-wide crash."""
+        request = self.requests.get(report.request_id)
+        if request is None or request.is_finished():
+            return "request is unknown or finished"
+        if len(report.failed_block_ids) != 1:
+            return (
+                "names "
+                + str(len(report.failed_block_ids))
+                + " blocks; v1 repair supports exactly one failed region"
+            )
+        if not (
+            0 <= report.rollback_boundary <= report.token_span[0]
+            and report.token_span[1] <= report.restored_extent
+            and report.token_span[0] < report.token_span[1]
+        ):
+            return (
+                "malformed geometry: span="
+                + str(report.token_span)
+                + " rollback="
+                + str(report.rollback_boundary)
+                + " restored_extent="
+                + str(report.restored_extent)
+            )
+        req_block_ids_groups = self.kv_cache_manager.get_block_ids(report.request_id)
+        if len(req_block_ids_groups) != 1:
+            # Hybrid/multi-group layouts are outside the single-group
+            # v1 evidence contract; refuse loudly per request (mirroring
+            # the flat per-block channel's guard) instead of crashing on
+            # the unpack.
+            return (
+                "multi-group KV cache layouts are not supported by the "
+                "structured reporting channel (report via failed_recving)"
+            )
+        (req_block_ids,) = req_block_ids_groups
+        for block_id in report.failed_block_ids:
+            if block_id not in req_block_ids:
+                return (
+                    "names block "
+                    + str(block_id)
+                    + " which is not in the reporting request's block table"
+                )
+        bs = self.block_size
+        if (
+            report.rollback_boundary % bs
+            or report.token_span[0] % bs
+            or report.token_span[1] % bs
+        ):
+            return (
+                "not block-aligned (block_size="
+                + str(bs)
+                + "): span="
+                + str(report.token_span)
+                + " rollback="
+                + str(report.rollback_boundary)
+            )
+        # The failed region and the restoration
+        # target are properties OF THE ATTEMPT'S EXTERNAL CLAIM -- a
+        # failure beyond the claimed extent, or a restoration above it,
+        # is a misreporting connector trying to push the commit's
+        # frontier (and with it publication) onto content the evidence
+        # never vouches for. Both are honest-producer-impossible (the
+        # failed object lies inside the claim; the restoration target is
+        # the claim's own pre-failure computed count).
+        # The report's geometry is request-absolute, so the bound
+        # is the attempt's absolute prefix extent (local hit + external
+        # delta), not the delta claim alone: a mixed local+external hit
+        # legitimately reports spans inside the store prefix that lie
+        # beyond the delta. Falls back to the delta claim for attempts
+        # recorded before the extent existed (never on this code path).
+        extent = self._req_transfer_claim_extent.get(report.request_id) or (
+            self._req_transfer_claim.get(report.request_id)
+        )
+        if extent is not None and report.token_span[1] > extent:
+            return (
+                "the failed span "
+                + str(report.token_span)
+                + " lies beyond the attempt's transfer extent ("
+                + str(extent)
+                + " tokens)"
+            )
+        if extent is not None and report.restored_extent > extent:
+            return (
+                "restored_extent="
+                + str(report.restored_extent)
+                + " exceeds the attempt's transfer extent ("
+                + str(extent)
+                + " tokens)"
+            )
+        n_layers = self.vllm_config.model_config.hf_config.num_hidden_layers
+        if not report.observed_failed_layers or any(
+            not (0 <= layer < n_layers) for layer in report.observed_failed_layers
+        ):
+            return (
+                "invalid failed-layer information "
+                + repr(report.observed_failed_layers)
+                + " (model has "
+                + str(n_layers)
+                + " layers)"
+            )
+        span_first = report.token_span[0] // bs
+        span_last = -(-report.token_span[1] // bs)
+        if list(req_block_ids[span_first:span_last]) != list(report.failed_block_ids):
+            return (
+                "the span "
+                + str(report.token_span)
+                + " maps to blocks "
+                + str(list(req_block_ids[span_first:span_last]))
+                + " but the report claims "
+                + str(report.failed_block_ids)
+            )
+        return None
+
+    def _invalidate_failed_blocks_for_consumers(
+        self, failed_block_ids: set[int]
+    ) -> None:
+        """Rewind every OTHER request that attached a failed external
+        block. When a claim was already published (or its blocks shared)
+        before the attempt's failure report was judged, the refusal's
+        hash eviction cannot touch blocks other requests still reference
+        (ref_cnt > 1): a consumer that matched the published prefix would
+        keep attending over the corrupt region. This runs the flat
+        channel's consumer-invalidation walk over the same population it
+        scans (async waiting + running requests), rewinding each affected
+        consumer below the first failed block and evicting the failed
+        and downstream blocks so no future request matches them.
+        Unpublished-unshared shapes find no consumers -- a no-op."""
+        if not failed_block_ids:
+            return
+        async_load_reqs = [
+            req
+            for req in self.kv_holding_waiting
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        ]
+        _, _, async_evict = self._update_requests_with_invalid_blocks(
+            async_load_reqs,
+            failed_block_ids,
+            {},
+            evict_blocks=False,
+        )
+        # All running requests are scanned (the walk is idempotent for
+        # the reporting request: its computed tokens were already
+        # rewound to the rollback boundary above, and re-walking the
+        # same failed block lands on the same boundary).
+        sync_reqs = list(self.running)
+        sync_failed, _, sync_evict = self._update_requests_with_invalid_blocks(
+            sync_reqs,
+            failed_block_ids,
+            {},
+            evict_blocks=True,
+        )
+        if sync_evict:
+            self.kv_cache_manager.evict_blocks(sync_evict)
+        if sync_failed:
+            logger.warning(
+                "Rewound %d consumer request(s) over failed external "
+                "blocks %s (late failure evidence after publication)",
+                len(sync_failed),
+                sorted(failed_block_ids),
+            )
+
+    def _reject_uninterpretable_reports(
+        self,
+        request: Request,
+        reports: list[KVLoadFailureReport],
+        reason: str,
+        skip_req_ids: set[str],
+        trusted_rollback: int | None = None,
+        mark_external_untrusted: bool = False,
+    ) -> None:
+        """Request-scoped fail-closed fallback for uninterpretable report
+        evidence (malformed, or divergent across ranks).
+
+        Recovery is REFUSED -- conflicting or malformed evidence is never
+        merged into an authorization. The request truncates to the
+        largest boundary every well-formed report independently certifies
+        as healthy (the minimum rollback boundary; zero when the evidence
+        is malformed), everything from that boundary to the request's
+        last block is evicted so no future request matches untrusted
+        content, and the ordinary rollback-recompute path owns the
+        request from here. The engine stays alive: broken evidence
+        invalidates the recovery attempt, not the request.
+        """
+        dissolved = self.recovery_plans.pop(request.request_id, None)
+        if dissolved is not None:
+            # The plan's evidence was superseded by this rejection: a
+            # late re-delivery of it is absorbed, not re-authorized.
+            self._remember_consumed_evidence(dissolved)
+        # The attempt's accumulated positive evidence dies with the
+        # rejection -- it failed closed, and no later gate may read the
+        # stale state as if the attempt were still verifiable.
+        attempt_attestations = self._req_transfer_attestations.pop(
+            request.request_id, None
+        )
+        self._req_pending_async_reports.pop(request.request_id, None)
+        well_formed = [
+            r for r in reports if self._validate_load_failure_report(r) is None
+        ]
+        # The reports' rollback boundaries are claims about
+        # content the POSITIVE evidence must back. The single-report path
+        # Keep any of the claim only when EVERY TP
+        # rank's terminal attestation certifies content -- and the
+        # divergent path must not be more permissive. The rollback prefix
+        # collapses to the full-recompute floor (0) unless the attempt's
+        # terminal attestations are complete (every rank of the TP group
+        # supplied one) and each certifies content: an uncertified or
+        # silent rank leaves its shard unverified for the kept prefix.
+        terminal_atts = (
+            [a for a in attempt_attestations if a.terminal]
+            if attempt_attestations is not None
+            else []
+        )
+        # EXACT-set completeness, the same rule the primary gate
+        # (_transfer_evidence_complete) enforces -- a count-based check
+        # would let a forged rank set (a fabricated healthy attestation
+        # from a rank outside the TP group) stand in for a silent rank.
+        complete = {a.source_rank for a in terminal_atts} == set(
+            range(self._evidence_tp_size)
+        )
+        uncertified_delivery = not (
+            complete and all(a.certifies_content() for a in terminal_atts)
+        )
+        # The truncation boundary: every well-formed report independently
+        # certifies [0, its rollback) healthy on its rank, so the minimum
+        # rollback is healthy on ALL reporting ranks. A rollback already
+        # certified by an installed plan (the divergent-against-plan
+        # shape) joins the minimum as trusted evidence -- but only when
+        # at least one of the new reports is itself well-formed: with
+        # exclusively malformed evidence even the plan's boundary is
+        # untrustworthy, and the full-recompute floor (rollback 0)
+        # applies.
+        certified = [r.rollback_boundary for r in well_formed]
+        if trusted_rollback is not None and well_formed:
+            certified.append(trusted_rollback)
+        rollback = min(certified) if certified else 0
+        if uncertified_delivery:
+            rollback = 0
+        # Flatten across KV cache groups: hybrid layouts reach this
+        # refusal too (the battery refuses them per request), and the
+        # refusal itself must not crash on the single-group unpack.
+        req_block_ids_groups = self.kv_cache_manager.get_block_ids(request.request_id)
+        req_block_ids = [
+            block_id for group in req_block_ids_groups for block_id in group
+        ]
+        evict_from = rollback // self.block_size if well_formed else 0
+        blocks_to_evict = set(req_block_ids[evict_from:])
+        self.kv_cache_manager.evict_blocks(blocks_to_evict)
+        request.num_computed_tokens = rollback
+        self._mark_num_computed_tokens_rewound(request)
+        # The failed blocks may already be attached to OTHER requests
+        # (the claim was published, or the blocks shared, before this
+        # evidence was judged). evict_blocks only clears hash entries; a
+        # consumer's reference keeps the corrupt region matchable and
+        # attended-over. Rewind every consumer below the failed blocks
+        # and evict them -- including the blocks a MALFORMED report
+        # names (bounded to the reporting request's own table, so a
+        # fabricated id cannot rewind an unrelated request). The walk
+        # rides the single-group upstream helper, so hybrid layouts skip
+        # it (the flat channel refuses them outright); their hash entries
+        # were already cleared by the direct eviction above.
+        if len(req_block_ids_groups) != 1:
+            logger.warning(
+                "Consumer rewind skipped for req=%s: hybrid (multi-group) KV "
+                "layouts are outside the reporting channel's single-group "
+                "consumer walk (the flat per-block channel refuses them "
+                "outright); the hash entries were cleared by the eviction "
+                "above, but already-matched consumers are not rewound.",
+                request.request_id,
+            )
+        else:
+            table = set(req_block_ids)
+            failed_block_ids = {
+                block_id
+                for report in reports
+                for block_id in report.failed_block_ids
+                if block_id in table
+            }
+            self._invalidate_failed_blocks_for_consumers(failed_block_ids)
+        # The async schedule-ahead may have left placeholder accounting
+        # for in-flight steps whose outputs are now suppressed.
+        request.num_output_placeholders = 0
+        skip_req_ids.add(request.request_id)
+        if mark_external_untrusted:
+            # The transfer-evidence contract itself failed: the external
+            # source is untrusted for this request's remaining lifetime
+            # (a re-offered hit would loop the re-attempt cycle --
+            # source).
+            self._untrusted_external_reqs.add(request.request_id)
+        logger.error(
+            "KV repair refused: %s report evidence for req=%s -- failing "
+            "closed to the recompute fallback (rollback=%d, evicted=%d). "
+            "Conflicting evidence: %s",
+            reason,
+            request.request_id,
+            rollback,
+            len(blocks_to_evict),
+            [
+                {
+                    "source_rank": r.source_rank,
+                    "token_span": r.token_span,
+                    "rollback_boundary": r.rollback_boundary,
+                    "failed_block_ids": r.failed_block_ids,
+                    "restored_extent": r.restored_extent,
+                    "healthy_above_span": r.healthy_above_span,
+                    "observed_failed_layers": r.observed_failed_layers,
+                }
+                for r in reports
+            ],
+        )
+
+    def _consume_repair_result(
+        self, result: RepairResultReport
+    ) -> Literal["committed", "aborted", "stale"]:
+        """Consume the repair step's commit verdict: restore the logical
+        cached extent on pass, fall back to the ordinary
+        rollback-recompute on failure. A result that does not echo the
+        pending plan's identity (plan_id, epoch, span) is a stale or
+        duplicate report and is rejected without touching the plan.
+
+        Returns the disposition: "committed" (the extent restored),
+        "aborted" (the rollback-recompute fallback applied), or "stale"
+        (rejected; the plan untouched).
+        """
+        plan = self.recovery_plans.get(result.request_id)
+        if plan is None or plan.state != "ADMITTED":
+            return "stale"
+        if (
+            result.plan_id != plan.plan_id
+            or result.epoch != plan.admitted_step
+            or result.span != plan.repair_span
+        ):
+            return "stale"
+        plan.state = "REPAIRING"
+        request = self.requests.get(result.request_id)
+        self.recovery_plans.pop(result.request_id, None)
+        # The attempt's evidence reached its terminal disposition: a
+        # late re-delivery of the same (generation, evidence) is a
+        # duplicate of an outcome already known -- absorbed, never
+        # re-authorized. A genuine repeated failure is a NEW scheduled
+        # attempt with a NEW generation and is unaffected.
+        self._remember_consumed_evidence(plan)
+        # Re-examine the folded attestations at the verdict. The
+        # admission-time healthy_above_span is one point-in-time
+        # certification, and the validation pass skips plan-holders (to
+        # absorb late identical duplicates), so a divergent
+        # re-attestation folded while the plan was pending may
+        # contradict it. Any terminal folded attestation that does not
+        # certify content caps the restoration at the repair span's
+        # end -- the certification-failed above-span extent is never
+        # consumed as verified.
+        healthy_above_span = plan.healthy_above_span
+        if healthy_above_span:
+            for folded in self._req_transfer_attestations.get(result.request_id, []):
+                if folded.terminal and not folded.certifies_content():
+                    healthy_above_span = False
+                    logger.warning(
+                        "Repair commit for req=%s plan_id=%d: a folded "
+                        "attestation of the attempt does not certify "
+                        "content; capping restoration at the repair span "
+                        "end %d",
+                        result.request_id,
+                        plan.plan_id,
+                        plan.repair_span[1],
+                    )
+                    break
+        # The attempt's accumulated positive evidence dies with the
+        # plan's disposition (nothing may read it as a live attempt's
+        # verification anymore).
+        self._req_transfer_attestations.pop(result.request_id, None)
+        self._req_pending_async_reports.pop(result.request_id, None)
+        if request is None:
+            # The request object is already gone (it finished before the
+            # verdict arrived) -- nothing to restore or truncate.
+            return "committed" if result.structural_check else "aborted"
+        if result.structural_check:
+            # The conditional restoration: the pre-failure extent C is
+            # restored ONLY when the report certified the above-span
+            # external ranges landed byte-exact. Without the
+            # certification the restoration is capped at the repair
+            # span's end -- the largest boundary the commit check covers
+            # -- and the resume recomputes the untrusted [span_end, C)
+            # extent through the ordinary path.
+            restored = (
+                plan.restored_extent if healthy_above_span else plan.repair_span[1]
+            )
+            # The result is untrusted input: an aborted verdict reaching
+            # the commit arm, or an executed count that does not EXACTLY
+            # equal the plan's layer range, must never advance the
+            # frontier -- reject loudly with the fail-safe recompute
+            # fallback (the worker's structural_check implies layer
+            # coverage; this keeps the arm safe against forged
+            # summaries too).
+            malformed = result.aborted or result.executed_layers != plan.layer_end
+            if malformed:
+                logger.warning(
+                    "Malformed repair result for req=%s plan_id=%d: "
+                    "aborted=%s executed_layers=%d -> recompute fallback",
+                    result.request_id,
+                    plan.plan_id,
+                    result.aborted,
+                    result.executed_layers,
+                )
+                self._abort_repair_plan(plan, request, result)
+                return "aborted"
+            request.num_computed_tokens = restored
+            self._mark_num_computed_tokens_rewound(request)
+            logger.info(
+                "Repair committed: req=%s plan_id=%d restored=%d",
+                result.request_id,
+                plan.plan_id,
+                restored,
+            )
+            return "committed"
+        self._abort_repair_plan(plan, request, result)
+        return "aborted"
+
+    def _abort_repair_plan(
+        self, plan: RecoveryPlan, request: Request, result: RepairResultReport
+    ) -> None:
+        """Abort terminal state: the worker's re-zero of partial writes is
+        best-effort (a clean full-depth replay that then fails the verdict
+        collective leaves its rows un-zeroed); the authoritative
+        invalidation happens here -- the failed span is evicted (so no
+        future request matches untrustworthy content), the request
+        truncates to the rollback boundary, and the ordinary recompute
+        fallback owns it. The plan is already purged."""
+        if plan.failed_block_ids:
+            (req_block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
+            try:
+                failed_idx = req_block_ids.index(plan.failed_block_ids[0])
+                blocks_to_evict = set(req_block_ids[failed_idx:])
+            except ValueError:
+                blocks_to_evict = set(plan.failed_block_ids)
+            self.kv_cache_manager.evict_blocks(blocks_to_evict)
+        else:
+            blocks_to_evict = set()
+        request.num_computed_tokens = plan.repair_span[0]
+        self._mark_num_computed_tokens_rewound(request)
+        logger.warning(
+            "Repair aborted: req=%s plan_id=%d span=%s "
+            "executed_layers=%d evicted=%d -> recompute fallback",
+            result.request_id,
+            plan.plan_id,
+            plan.repair_span,
+            result.executed_layers,
+            len(blocks_to_evict),
+        )
+
     def _handle_failed_recving(self, failed_req_ids: set[str]) -> set[str]:
-        """Fail closed for layouts whose block IDs are not globally unique."""
+        """Fail closed for layouts whose block IDs are not globally unique.
+
+        Under the repair policy the flat request-level failure channel
+        gets the same conservative treatment as under recompute -- an
+        earlier revision skipped both the truncation and the arming, so
+        the promotion's success arm published the failed claim at its
+        full placeholder extent. Truncate to zero and arm the
+        promotion's failure arm. A recovery requires structured
+        evidence; the flat channel never authorizes one."""
         affected_req_ids: set[str] = set()
         for req_id in failed_req_ids:
             request = self.requests.get(req_id)
@@ -3905,10 +6480,34 @@ class Scheduler(SchedulerInterface):
                 and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
             ):
                 affected_req_ids.add(req_id)
-                if self.recompute_kv_load_failures:
+                if self.recompute_kv_load_failures or self.repair_kv_load_failures:
+                    if self._evidence_state_initialized:
+                        # The flat request-level channel and the structured
+                        # evidence can name the same request in one update
+                        # (the aggregator releases failed_recving at the
+                        # same terminal pass the reports ride). A recovery
+                        # plan the structured arm just admitted is now
+                        # detached from the truncation below: void it (its
+                        # evidence counts as consumed) and let the flat
+                        # recompute path own the request -- the same
+                        # conflict rule the per-block channel applies.
+                        conflicted_plan = self.recovery_plans.pop(req_id, None)
+                        if conflicted_plan is not None:
+                            self._remember_consumed_evidence(conflicted_plan)
+                            logger.warning(
+                                "Repair plan dissolved: req=%s conflicted "
+                                "with the flat failed_recving channel -> "
+                                "the flat recompute path owns the request",
+                                req_id,
+                            )
                     request.num_computed_tokens = 0
+                    self._mark_num_computed_tokens_rewound(request)
                     self.failed_recving_kv_req_ids.add(req_id)
-        return set() if self.recompute_kv_load_failures else affected_req_ids
+        return (
+            set()
+            if (self.recompute_kv_load_failures or self.repair_kv_load_failures)
+            else affected_req_ids
+        )
 
     def _handle_invalid_blocks(
         self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]
@@ -3929,8 +6528,34 @@ class Scheduler(SchedulerInterface):
                 "Connectors must report failed requests via "
                 "KVConnectorTransferResults.failed_recving instead."
             )
+        if self._evidence_state_initialized and self.recovery_plans:
+            # The truncation walk below only sees blocks within the
+            # request's already-truncated computed count, so a flat
+            # invalid block at or above a plan's rollback boundary (the
+            # structured arm runs earlier in this same update and
+            # rewinds the frontier to it) is invisible to the walk and
+            # its conflict rule. Void any pending plan whose own block
+            # table intersects the flat invalid set, independent of the
+            # walk's visibility window -- the same conflict rule the
+            # failed_recving channel applies.
+            for req_id in list(self.recovery_plans):
+                (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+                if invalid_block_ids.intersection(req_block_ids):
+                    plan = self.recovery_plans.pop(req_id)
+                    self._remember_consumed_evidence(plan)
+                    logger.warning(
+                        "Repair plan dissolved: req=%s conflicted with "
+                        "the flat invalid-blocks channel (the flat "
+                        "recompute path owns the request)",
+                        req_id,
+                    )
 
-        should_fail = not self.recompute_kv_load_failures
+        # The repair policy keeps the flat channel's semantics at the
+        # recompute floor: a block-level failure without a structured
+        # report reschedules, never fails the request.
+        should_fail = not (
+            self.recompute_kv_load_failures or self.repair_kv_load_failures
+        )
 
         # handle async KV loads (not cached yet, evict_blocks=False)
         async_load_reqs = (
@@ -3986,6 +6611,39 @@ class Scheduler(SchedulerInterface):
             total_failed_requests,
             total_failed_tokens,
         )
+
+        if self.repair_kv_load_failures:
+            # Under the repair policy the flat block-level channel
+            # cannot vouch for any of the claim. The 'valid prefix' the
+            # flat truncation leaves behind is UNVERIFIED external content,
+            # and the ordinary path publishes it at the next allocation
+            # (every block of the claim becomes prefix-matchable one
+            # schedule later). The structured evidence contract is the only
+            # authorization to keep any of an external claim: fail the
+            # whole claim closed -- full recompute, nothing published, the
+            # source marked untrusted -- for every affected request that
+            # carries a transfer identity. (Async requests take the same
+            # path here; their promotion then only releases the blocks.)
+            flat_failed: set[str] = set()
+            for req_id in async_failed_req_ids | sync_failed_req_ids:
+                request = self.requests.get(req_id)
+                if (
+                    request is None
+                    or request.is_finished()
+                    or req_id not in self._req_transfer_generation
+                ):
+                    continue
+                self._reject_uninterpretable_reports(
+                    request,
+                    [],
+                    "flat invalid-block failure under the repair policy: the "
+                    "structured evidence contract is required to keep any of "
+                    "the external claim",
+                    flat_failed,
+                    trusted_rollback=0,
+                    mark_external_untrusted=True,
+                )
+            sync_failed_req_ids |= flat_failed
 
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids

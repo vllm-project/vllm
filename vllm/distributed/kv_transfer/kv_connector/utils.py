@@ -5,7 +5,6 @@
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from itertools import chain
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
@@ -23,7 +22,13 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
-from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    KVConnectorOutput,
+    KVLoadAttestation,
+    KVLoadFailureReport,
+    ModelRunnerOutput,
+    RepairResultReport,
+)
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
@@ -172,6 +177,21 @@ class KVOutputAggregator:
         aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
+        # Carry-through: the per-rank connector outputs carry three more
+        # fields the aggregate must not drop -- the structured load-failure
+        # reports, the positive transfer attestations, and the repair
+        # verdicts. Every TP rank reports the same fault and executes the
+        # same repair; the scheduler consumes the per-rank reports and
+        # keeps the first verdict disposition, so concatenating the
+        # per-rank lists is the correct merge.
+        load_failure_reports: list[KVLoadFailureReport] = []
+        repair_results: list[RepairResultReport] = []
+        # Positive transfer attestations (the completeness half of the
+        # transfer-evidence contract): unlike reports, one per rank per
+        # attempt even on success. Concatenation is the merge here as
+        # well: the scheduler's evidence gate groups by request and
+        # requires one terminal attestation per TP rank.
+        load_attestations: list[KVLoadAttestation] = []
         mrope_position_deltas: dict[str, int] = {}
 
         salvaged, self._salvaged_outputs = self._salvaged_outputs, []
@@ -181,11 +201,14 @@ class KVOutputAggregator:
             assert o is not None
             kv_outputs.append(o.kv_connector_output)
 
-        # Salvaged outputs from failed workers join this round so their
-        # transfer progress isn't lost.
-        for kv_output in chain(salvaged, kv_outputs):
-            if not kv_output:
-                continue
+        def absorb_kv_output(kv_output: KVConnectorOutput, rank: int | None) -> None:
+            # Absorb one per-rank (or salvaged, rank-less) connector
+            # output into the aggregate, stamping its transfer evidence
+            # with the authoritative source rank.
+            nonlocal aggregated_kv_connector_stats
+            nonlocal aggregated_kv_connector_worker_meta
+            nonlocal combined_kv_cache_events
+            nonlocal invalid_block_ids
             # Allow the worker to dynamically update the expected number of
             # finished sending/recving for new requests.
             if (
@@ -200,10 +223,14 @@ class KVOutputAggregator:
                 self._expected_finished_count = kv_output.expected_finished_count
 
             update_finished_set(
-                kv_output.finished_sending, self._send_remaining_count, finished_sending
+                kv_output.finished_sending,
+                self._send_remaining_count,
+                finished_sending,
             )
             update_finished_set(
-                kv_output.finished_recving, self._recv_remaining_count, finished_recving
+                kv_output.finished_recving,
+                self._recv_remaining_count,
+                finished_recving,
             )
 
             # Aggregate kv_connector_stats from all workers.
@@ -220,7 +247,8 @@ class KVOutputAggregator:
 
             # Aggregate kv_connector_worker_meta from all workers.
             if aggregated_kv_connector_worker_meta is None:
-                # Use the first worker's kv_connector_worker_meta as accumulator.
+                # Use the first worker's kv_connector_worker_meta as
+                # accumulator.
                 aggregated_kv_connector_worker_meta = kv_output.kv_connector_worker_meta
             elif kv_connector_worker_meta := kv_output.kv_connector_worker_meta:
                 aggregated_kv_connector_worker_meta = (
@@ -244,9 +272,48 @@ class KVOutputAggregator:
 
             invalid_block_ids |= kv_output.invalid_block_ids
             self._failed_recving_pending |= kv_output.failed_recving
+            for report in kv_output.load_failure_reports or []:
+                # Rank attribution for the scheduler's cross-rank report
+                # consensus: identical duplicates of one fault arrive from
+                # every rank and are absorbed; the tag lets a divergent
+                # pair name the conflicting workers in its diagnostics.
+                # The stamp is AUTHORITATIVE: the aggregator is the only
+                # component that knows which output came from which
+                # rank, so a connector-supplied value is always
+                # overwritten -- a connector must not be able to
+                # impersonate another rank in the divergence
+                # diagnostics.
+                report.source_rank = rank
+            load_failure_reports.extend(kv_output.load_failure_reports or [])
+            repair_results.extend(kv_output.repair_results or [])
+            for attestation in kv_output.load_attestations or []:
+                # Rank attribution, AUTHORITATIVE for the same reason as
+                # the reports' stamp: the
+                # aggregator is the only component that knows which
+                # output came from which rank, so a connector-supplied
+                # source_rank is always overwritten -- an attesting
+                # connector must not be able to impersonate another
+                # rank in the completeness gate or the divergence
+                # diagnostics.
+                attestation.source_rank = rank
+            load_attestations.extend(kv_output.load_attestations or [])
+
             # Every rank computes the same deltas for the requests it adds.
             if kv_output.mrope_position_deltas:
                 mrope_position_deltas.update(kv_output.mrope_position_deltas)
+
+        # Salvaged outputs from failed workers join this round so their
+        # transfer progress isn't lost. Their transfer evidence carries no
+        # authoritative rank (the originating worker of a salvaged output is
+        # not tracked across the replay), so it is stamped None: the
+        # scheduler's evidence gates treat a rank-less attestation as absent
+        # and fail closed rather than trust an unattributable statement.
+        for salvaged_output in salvaged:
+            if salvaged_output:
+                absorb_kv_output(salvaged_output, None)
+        for rank, live_output in enumerate(kv_outputs):
+            if live_output:
+                absorb_kv_output(live_output, rank)
 
         failed_recving = self._failed_recving_pending & finished_recving
         self._failed_recving_pending -= failed_recving
@@ -265,6 +332,9 @@ class KVOutputAggregator:
             failed_recving=failed_recving,
             mrope_position_deltas=mrope_position_deltas or None,
             expected_finished_count=self._expected_finished_count,
+            load_failure_reports=load_failure_reports or None,
+            load_attestations=load_attestations or None,
+            repair_results=repair_results or None,
         )
 
         return output
