@@ -302,7 +302,9 @@ class FlashFfnOp:
                     if old != new:
                         self.tab[i].fill_(new)
             else:
-                self.tab.copy_(torch.tensor(host, dtype=torch.int64))
+                # pinned + non_blocking: no host stall (VLLM_GPU_SYNC_CHECK)
+                staged = torch.tensor(host, dtype=torch.int64, pin_memory=True)
+                self.tab.copy_(staged, non_blocking=True)
             self._tab_host = host
         return self.tab
 
