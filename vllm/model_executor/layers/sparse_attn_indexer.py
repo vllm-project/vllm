@@ -33,13 +33,16 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
-from vllm.model_executor.kernels.attention.dsa.flashtopk import FLASHTOPK_WARMUP
+from vllm.model_executor.kernels.attention.dsa.flashtopk import (
+    FLASHTOPK_WARMUP,
+    flashtopk_workspace_specs,
+    reserve_flashtopk,
+)
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     fused_mqa_topk_chunk,
     fused_mqa_topk_key_scales,
     fused_mqa_topk_prefill,
-    fused_mqa_topk_workspace_specs,
-    reserve_fused_mqa_topk_workspaces,
+    get_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
 from vllm.model_executor.layers.indexer_topk import (
@@ -669,14 +672,15 @@ def sparse_attn_indexer(
             )
             profile_specs.extend(gather_spec * 2)
         if fused_mqa_topk:
-            profile_specs += fused_mqa_topk_workspace_specs(
+            profile_specs += flashtopk_workspace_specs(
                 q_quant.device, q_quant.shape[0], total_seq_lens, topk_tokens
             )
         current_workspace_manager().get_simultaneous(*profile_specs)
         if fused_mqa_topk:
-            # Allocate the largest native fused_mqa_topk workspaces so they are
+            # Allocate the largest fused_mqa_topk workspaces so they are
             # accounted for (freed again, they overlap the dense logits below).
-            reserve_fused_mqa_topk_workspaces(
+            get_fused_mqa_topk_workspaces(q_quant.device, q_quant.shape[0])
+            reserve_flashtopk(
                 q_quant.device, q_quant.shape[0], total_seq_lens, topk_tokens
             )
 
@@ -845,7 +849,7 @@ def sparse_attn_indexer(
                 )
         # FlashTopK's scratch, beside the gathered K its calls read.
         fused_specs = (
-            fused_mqa_topk_workspace_specs(
+            flashtopk_workspace_specs(
                 q_quant.device,
                 max(c.token_end - c.token_start for c in prefill_metadata.chunks),
                 total_seq_lens,

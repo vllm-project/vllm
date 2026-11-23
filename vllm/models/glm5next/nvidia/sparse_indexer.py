@@ -13,13 +13,16 @@ from vllm.distributed import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.kernels.attention.dsa.flashtopk import FLASHTOPK_WARMUP
+from vllm.model_executor.kernels.attention.dsa.flashtopk import (
+    FLASHTOPK_WARMUP,
+    flashtopk_workspace_specs,
+    reserve_flashtopk,
+)
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     fused_mqa_topk_chunk,
     fused_mqa_topk_key_scales,
     fused_mqa_topk_prefill,
-    fused_mqa_topk_workspace_specs,
-    reserve_fused_mqa_topk_workspaces,
+    get_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
 from vllm.model_executor.layers.indexer_topk import get_indexer_topk
@@ -175,7 +178,7 @@ def sparse_attn_indexer_kpool(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
         fused_specs = (
-            fused_mqa_topk_workspace_specs(
+            flashtopk_workspace_specs(
                 q_quant.device, q_quant.shape[0], total_seq_lens, fused_topk
             )
             if fused_mqa_topk
@@ -187,10 +190,11 @@ def sparse_attn_indexer_kpool(
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
             *fused_specs,
         )
-        # Allocate the largest native fused_mqa_topk workspaces so they are
-        # accounted for (freed again, they overlap the dense logits below).
+        # Allocate the largest fused_mqa_topk workspaces so they are accounted
+        # for (freed again, they overlap the dense logits below).
         if fused_mqa_topk:
-            reserve_fused_mqa_topk_workspaces(
+            get_fused_mqa_topk_workspaces(q_quant.device, q_quant.shape[0])
+            reserve_flashtopk(
                 q_quant.device, q_quant.shape[0], total_seq_lens, fused_topk
             )
 
@@ -384,7 +388,7 @@ def sparse_attn_indexer_kpool(
         )
         # FlashTopK's scratch, beside the gathered K its calls read.
         fused_specs = (
-            fused_mqa_topk_workspace_specs(
+            flashtopk_workspace_specs(
                 q_quant.device,
                 max(c.token_end - c.token_start for c in prefill_metadata.chunks),
                 total_seq_lens,

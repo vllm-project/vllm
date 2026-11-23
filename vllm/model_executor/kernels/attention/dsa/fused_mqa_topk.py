@@ -1,17 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-launch fused FP8 MQA-logits + top-k prefill selection.
-
-Backends (VLLM_FUSED_MQA_TOPK_BACKEND): "native", vLLM's fused_mqa_topk op
-(SM100 family), or "flashtopk" (flashtopk.py), which takes the calls of at
-least FLASHTOPK_MIN_KEYS keys and leaves the shorter ones to the native op
-(all of them on SM90, which has no native op). Both share the eligibility rule
-(use_fused_mqa_topk), the chunk planner and the per-chunk gate
-(fused_mqa_topk_chunk).
-
-The profiling run reserves the workspaces (fused_mqa_topk_workspace_specs,
-reserve_fused_mqa_topk_workspaces), FlashTopK's in the workspace manager.
-"""
+"""Single-launch fused FP8 MQA-logits + top-k prefill selection: the native op
+(SM100 family) or, with VLLM_FUSED_MQA_TOPK_BACKEND=flashtopk, FlashTopK
+(flashtopk/) for the calls it takes."""
 
 import functools
 
@@ -20,12 +11,9 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.attention.dsa.flashtopk import (
-    FLASHTOPK_MIN_KEYS,
+    flashtopk_available,
     flashtopk_mqa_topk_prefill,
-    flashtopk_scratch_bytes,
-    flashtopk_supported,
-    import_flashtopk,
-    reserve_flashtopk,
+    flashtopk_takes,
 )
 from vllm.platforms import current_platform
 
@@ -63,47 +51,13 @@ def _sm_count(index: int) -> int:
     return torch.cuda.get_device_properties(index).multi_processor_count
 
 
-def _device_index(device: torch.device) -> int:
-    return (
-        device.index
-        if device.index is not None
-        else torch.accelerator.current_device_index()
-    )
-
-
-def fused_mqa_topk_backend() -> str:
-    """The fused_mqa_topk backend: "native" or "flashtopk"."""
-    return envs.VLLM_FUSED_MQA_TOPK_BACKEND
-
-
 @functools.cache
-def _native_available() -> bool:
+def fused_mqa_topk_available() -> bool:
     """True when the fused_mqa_topk op is compiled in and the GPU is SM100-family."""
     return (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
         and hasattr(torch.ops._C, "fused_mqa_topk_prefill")
-    )
-
-
-@functools.cache
-def fused_mqa_topk_available() -> bool:
-    """True when the selected backend runs on this GPU: the native op, or
-    FlashTopK on an SM90 or SM100-family GPU."""
-    if fused_mqa_topk_backend() == "native":
-        return _native_available()
-    if not (current_platform.is_cuda() and flashtopk_supported()):
-        return False
-    import_flashtopk()
-    return True
-
-
-def _flashtopk_takes(keys: int) -> bool:
-    """Whether a fused_mqa_topk_prefill call over `keys` keys runs on FlashTopK:
-    from FLASHTOPK_MIN_KEYS keys, where its key pruning makes it faster than
-    the native op, or always without the native op."""
-    return fused_mqa_topk_backend() == "flashtopk" and (
-        keys >= FLASHTOPK_MIN_KEYS or not _native_available()
     )
 
 
@@ -136,7 +90,7 @@ def use_fused_mqa_topk(
         and not candidate_selection
         and tuple(query_shape) == (FUSED_MQA_TOPK_HEADS, FUSED_MQA_TOPK_HEAD_DIM)
         and topk in FUSED_MQA_TOPK_TOPKS
-        and fused_mqa_topk_available()
+        and (fused_mqa_topk_available() or flashtopk_available())
     )
 
 
@@ -201,27 +155,6 @@ def fused_mqa_topk_key_scales(scales: torch.Tensor) -> torch.Tensor:
     return (exponents << 23).view(torch.float32)
 
 
-def fused_mqa_topk_workspace_specs(
-    device: torch.device, rows: int, keys: int, topk: int
-) -> list[tuple[tuple[int, ...], torch.dtype]]:
-    """The workspace-manager scratch of fused_mqa_topk_prefill calls of up to
-    `rows` rows and `keys` keys: FlashTopK's when it takes such calls, none
-    when only the native op does (it allocates its own workspaces).
-
-    Request it in the same `get_simultaneous` call as the buffers that hold the
-    calls' operands (the gathered K), so they do not overlap.
-    """
-    keys = min(keys, FUSED_MQA_TOPK_MAX_KEYS)
-    if not _flashtopk_takes(keys):
-        return []
-    return [
-        (
-            (flashtopk_scratch_bytes(_device_index(device), rows, keys, topk),),
-            torch.uint8,
-        )
-    ]
-
-
 def fused_mqa_topk_prefill(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -245,10 +178,10 @@ def fused_mqa_topk_prefill(
     relative to the row's `start` (i.e. `key - start`), unordered, `-1`
     padded when fewer than k keys are visible.
 
-    workspace: the scratch of fused_mqa_topk_workspace_specs for at least this
-    call's rows and keys, or None to allocate it.
+    workspace: FlashTopK's scratch (flashtopk_workspace_specs) when it takes the
+    call, or None to allocate it.
     """
-    if _flashtopk_takes(k.shape[0]):
+    if flashtopk_takes(k.shape[0]):
         logger.info_once(
             "Using the FlashTopK fused MQA+top-k prefill backend (top-k %d).",
             output.shape[1],
@@ -272,17 +205,3 @@ def fused_mqa_topk_prefill(
         output,
         *get_fused_mqa_topk_workspaces(q.device, q.shape[0]),
     )
-
-
-def reserve_fused_mqa_topk_workspaces(
-    device: torch.device, rows: int, keys: int, topk: int
-) -> None:
-    """Profiling run: allocates the native op's largest workspaces when it can
-    take calls of up to `rows` rows and `keys` keys, so they are accounted for
-    (freed again, they overlap the dense logits), and records the FlashTopK
-    calls for its warmup (its scratch: fused_mqa_topk_workspace_specs)."""
-    keys = min(keys, FUSED_MQA_TOPK_MAX_KEYS)
-    if _native_available():
-        get_fused_mqa_topk_workspaces(device, rows)
-    if _flashtopk_takes(keys):
-        reserve_flashtopk(_device_index(device), rows, keys, topk)

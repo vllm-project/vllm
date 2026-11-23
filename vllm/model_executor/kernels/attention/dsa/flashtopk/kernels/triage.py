@@ -1,17 +1,25 @@
-# Copyright (c) 2026 the FlashTopK authors. Licensed under the Apache License, Version 2.0.
-"""Recovery triage: from the selection's health, which rows recovery rescores, decided and laid out on the device.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-A call is healthy, or it has a few bad rows (at most RECOVERY_ROWS, recorded by the selection), or many. One launch:
+# Copyright (c) 2026 the FlashTopK authors.
+# Licensed under the Apache License, Version 2.0.
+"""Recovery triage: from the selection's health, which rows recovery rescores, decided
+and laid out on the device.
 
-  * CTA s < RECOVERY_ROWS is slot s of per-row recovery. With a few bad rows, slot s takes the s-th smallest bad row
-    (sorted, so the recovery's work does not depend on the order the rows went bad): its output row in row_map, its
-    window, its q rows and weights gathered (q in the SM90 kernels' operand layout on SM90). Otherwise its map entry
-    is -1 and its window empty.
-  * The other CTAs cover the call's rows for whole-call recovery: with many bad rows every row maps to itself and
-    keeps its window; otherwise the map is -1 and the windows are empty.
+A call is healthy, or it has a few bad rows (at most RECOVERY_ROWS, recorded by the
+selection), or many. One launch:
 
-Empty windows make the dense scans that follow nearly free, and a -1 map entry makes the selection skip the slot, so
-a healthy call pays a few short launches and no host read.
+  * CTA s < RECOVERY_ROWS is slot s of per-row recovery. With a few bad rows, slot s
+    takes the s-th smallest bad row (sorted, so the recovery's work does not depend on
+    the order the rows went bad): its output row in row_map, its window, its q rows and
+    weights gathered (q in the SM90 kernels' operand layout on SM90). Otherwise its map
+    entry is -1 and its window empty.
+  * The other CTAs cover the call's rows for whole-call recovery: with many bad rows
+    every row maps to itself and keeps its window; otherwise the map is -1 and the
+    windows are empty.
+
+Empty windows make the dense scans that follow nearly free, and a -1 map entry makes the
+selection skip the slot, so a healthy call pays a few short launches and no host read.
 """
 
 from __future__ import annotations
@@ -53,21 +61,56 @@ class Triage:
         stream: cuda.CUstream,
     ):
         grid = RECOVERY_ROWS + (num_q + THREADS - 1) // THREADS
-        self.kernel(health, bad_rows, ks, ke, q_words, weights, row_map, slot_ks, slot_ke, q_gather, w_gather,
-                    whole_map, whole_ks, whole_ke, num_q).launch(grid=(grid, 1, 1), block=[THREADS, 1, 1],
-                                                                 stream=stream)
+        self.kernel(
+            health,
+            bad_rows,
+            ks,
+            ke,
+            q_words,
+            weights,
+            row_map,
+            slot_ks,
+            slot_ke,
+            q_gather,
+            w_gather,
+            whole_map,
+            whole_ks,
+            whole_ke,
+            num_q,
+        ).launch(grid=(grid, 1, 1), block=[THREADS, 1, 1], stream=stream)
 
     @cute.kernel
-    def kernel(self, mHealth, mBad, mKs, mKe, mQ, mW, mMap, mSks, mSke, mQg, mWg, mWhole, mWks, mWke, num_q: Int32):
+    def kernel(
+        self,
+        mHealth,
+        mBad,
+        mKs,
+        mKe,
+        mQ,
+        mW,
+        mMap,
+        mSks,
+        mSke,
+        mQg,
+        mWg,
+        mWhole,
+        mWks,
+        mWke,
+        num_q: Int32,
+    ):
         wph = self.words_per_head
         tid, _, _ = cute.arch.thread_idx()
         bid, _, _ = cute.arch.block_idx()
         smem = utils.SmemAllocator()
         sRow = smem.allocate_tensor(Int32, cute.make_layout((1,)), 16)
 
-        failed = (mHealth[H_OVERFLOW] != cutlass.Int64(0)) | (mHealth[H_UNDERFILL] != cutlass.Int64(0))
+        failed = (mHealth[H_OVERFLOW] != cutlass.Int64(0)) | (
+            mHealth[H_UNDERFILL] != cutlass.Int64(0)
+        )
         bad = mHealth[H_BAD]
-        by_row = failed & (bad > cutlass.Int64(0)) & (bad <= cutlass.Int64(RECOVERY_ROWS))
+        by_row = (
+            failed & (bad > cutlass.Int64(0)) & (bad <= cutlass.Int64(RECOVERY_ROWS))
+        )
         if bid < RECOVERY_ROWS:
             slot = bid
             nbad = Int32(min(bad, cutlass.Int64(RECOVERY_ROWS)))
@@ -97,12 +140,17 @@ class Triage:
                 for i in cutlass.range(tid, NUM_HEADS * wph, THREADS, unroll=4):
                     dst = slot * (NUM_HEADS * wph) + i
                     if cutlass.const_expr(self.sm90):
-                        # scan_sm90.q_n_of: row 2b + a, head 2c + e of an 8-row tile is operand row
-                        # 128a + 8c + 2b + e.
+                        # scan_sm90.q_n_of: row 2b + a, head 2c + e of an 8-row tile is
+                        # operand row 128a + 8c + 2b + e.
                         head = i // wph
                         r = slot % NEXT_N
-                        op_row = (slot // NEXT_N) * (NEXT_N * NUM_HEADS) + 128 * (r % 2) + 8 * (head // 2) \
-                            + 2 * (r // 2) + head % 2
+                        op_row = (
+                            (slot // NEXT_N) * (NEXT_N * NUM_HEADS)
+                            + 128 * (r % 2)
+                            + 8 * (head // 2)
+                            + 2 * (r // 2)
+                            + head % 2
+                        )
                         dst = op_row * wph + (i - head * wph)
                     mQg[dst] = mQ[(row, i)]
                 if tid < NUM_HEADS:
@@ -110,7 +158,9 @@ class Triage:
         else:
             r = (bid - RECOVERY_ROWS) * THREADS + tid
             if r < num_q:
-                whole = failed & ((bad <= cutlass.Int64(0)) | (bad > cutlass.Int64(RECOVERY_ROWS)))
+                whole = failed & (
+                    (bad <= cutlass.Int64(0)) | (bad > cutlass.Int64(RECOVERY_ROWS))
+                )
                 mWhole[r] = select_i32(whole, r, Int32(-1))
                 mWks[r] = select_i32(whole, mKs[r], Int32(0))
                 mWke[r] = select_i32(whole, mKe[r], Int32(0))

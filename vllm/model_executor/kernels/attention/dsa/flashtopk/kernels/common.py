@@ -1,6 +1,11 @@
-# Copyright (c) 2026 the FlashTopK authors. Licensed under the Apache License, Version 2.0.
-"""What the kernels of every architecture share: the indexer's shape, the tiling the host side plans with, and PTX
-helpers. Every float operation names its rounding, so no compiler choice (contraction, fast math) can change a bit."""
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Copyright (c) 2026 the FlashTopK authors.
+# Licensed under the Apache License, Version 2.0.
+"""What the kernels of every architecture share: the indexer's shape, the tiling the
+host side plans with, and PTX helpers. Every float operation names its rounding, so no
+compiler choice (contraction, fast math) can change a bit."""
 
 from __future__ import annotations
 
@@ -13,7 +18,9 @@ from cutlass.cutlass_dsl import dsl_user_op
 NUM_HEADS = 32
 HEAD_DIM = 128
 NEXT_N = 8  # query rows of a scan tile
-BLOCK_KV = 128  # keys of a KV block: KV splits and the pruning mask are counted in these
+BLOCK_KV = (
+    128  # keys of a KV block: KV splits and the pruning mask are counted in these
+)
 PRUNE_BLOCK_Q = 16  # query rows of a pruning tile
 PRUNE_COLS = 16  # columns of the pruning operand
 REFINE_BLOCK_Q = 8  # query rows of a refine tile
@@ -23,7 +30,10 @@ REFINE_BLOCK_Q = 8  # query rows of a refine tile
 def store_global_b32(address, value, *, loc=None, ip=None) -> None:
     llvm.inline_asm(
         None,
-        [cutlass.Int64(address).ir_value(loc=loc, ip=ip), Int32(value).ir_value(loc=loc, ip=ip)],
+        [
+            cutlass.Int64(address).ir_value(loc=loc, ip=ip),
+            Int32(value).ir_value(loc=loc, ip=ip),
+        ],
         "st.global.b32 [$0], $1;",
         "l,r",
         has_side_effects=True,
@@ -39,7 +49,10 @@ def atomic_add_global_i32(address, value, *, loc=None, ip=None) -> Int32:
     return Int32(
         llvm.inline_asm(
             Int32.mlir_type,
-            [cutlass.Int64(address).ir_value(loc=loc, ip=ip), Int32(value).ir_value(loc=loc, ip=ip)],
+            [
+                cutlass.Int64(address).ir_value(loc=loc, ip=ip),
+                Int32(value).ir_value(loc=loc, ip=ip),
+            ],
             "atom.global.add.u32 $0, [$1], $2;",
             "=r,l,r",
             has_side_effects=True,
@@ -66,7 +79,11 @@ def select_i32(predicate, true_value, false_value, *, loc=None, ip=None):
 
 @dsl_user_op
 def fp32_to_i32_bits(value, *, loc=None, ip=None) -> Int32:
-    return Int32(llvm.bitcast(Int32.mlir_type, Float32(value).ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
+    return Int32(
+        llvm.bitcast(
+            Int32.mlir_type, Float32(value).ir_value(loc=loc, ip=ip), loc=loc, ip=ip
+        )
+    )
 
 
 @dsl_user_op
@@ -159,14 +176,20 @@ def select_f32(predicate, true_value, false_value, *, loc=None, ip=None):
 
 @cute.jit
 def loose_raw_gate(inv, origin, th_bucket) -> Float32:
-    """A raw score below which no key passes the bucket gate
-    fma(-inv, raw, c0) < th + 1 (c0 = -origin * inv), a little below the exact edge so rounding
-    never excludes one; -inf where the bucket map is degenerate, at most FLT_MAX."""
+    """A raw score below which no key passes the bucket gate fma(-inv, raw, c0) < th + 1
+    (c0 = -origin * inv), a little below the exact edge so rounding never excludes one;
+    -inf where the bucket map is degenerate, at most FLT_MAX."""
     c0 = mul_rn(-origin, inv)
     o = i32_to_f32_rn(th_bucket + 1)
-    valid = (inv > Float32(0.0)) & (inv <= Float32(3.4e38)) & (abs_f32(c0) <= Float32(3.4e38))
+    valid = (
+        (inv > Float32(0.0))
+        & (inv <= Float32(3.4e38))
+        & (abs_f32(c0) <= Float32(3.4e38))
+    )
     slack = mul_rn(Float32(2.0**-16), fmax(fmax(abs_f32(c0), abs_f32(o)), Float32(1.0)))
-    gate = fmin(div_rn(sub_rn(sub_rn(c0, o), slack), inv), Float32(3.4028234663852886e38))
+    gate = fmin(
+        div_rn(sub_rn(sub_rn(c0, o), slack), inv), Float32(3.4028234663852886e38)
+    )
     return select_f32(valid, gate, Float32(float("-inf")))
 
 
@@ -192,7 +215,10 @@ def find_nth_set(word, n, *, loc=None, ip=None) -> Int32:
 def cp_async_16(smem_addr, gmem_addr, *, loc=None, ip=None) -> None:
     llvm.inline_asm(
         None,
-        [Int32(smem_addr).ir_value(loc=loc, ip=ip), cutlass.Int64(gmem_addr).ir_value(loc=loc, ip=ip)],
+        [
+            Int32(smem_addr).ir_value(loc=loc, ip=ip),
+            cutlass.Int64(gmem_addr).ir_value(loc=loc, ip=ip),
+        ],
         "cp.async.cg.shared.global [$0], [$1], 16;",
         "r,l",
         has_side_effects=True,
@@ -207,7 +233,10 @@ def cp_async_16(smem_addr, gmem_addr, *, loc=None, ip=None) -> None:
 def cp_async_4(smem_addr, gmem_addr, *, loc=None, ip=None) -> None:
     llvm.inline_asm(
         None,
-        [Int32(smem_addr).ir_value(loc=loc, ip=ip), cutlass.Int64(gmem_addr).ir_value(loc=loc, ip=ip)],
+        [
+            Int32(smem_addr).ir_value(loc=loc, ip=ip),
+            cutlass.Int64(gmem_addr).ir_value(loc=loc, ip=ip),
+        ],
         "cp.async.ca.shared.global [$0], [$1], 4;",
         "r,l",
         has_side_effects=True,
@@ -232,4 +261,7 @@ def load_global_v4_b32(gmem_addr, *, loc=None, ip=None):
         loc=loc,
         ip=ip,
     )
-    return tuple(Int32(llvm.extractvalue(Int32.mlir_type, result, [i], loc=loc, ip=ip)) for i in range(4))
+    return tuple(
+        Int32(llvm.extractvalue(Int32.mlir_type, result, [i], loc=loc, ip=ip))
+        for i in range(4)
+    )

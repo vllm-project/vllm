@@ -911,8 +911,7 @@ steps:
   - tests/kernels/test_top_k_per_row.py
   - csrc/attention/dsa/fused_mqa_topk/
   - vllm/model_executor/kernels/attention/dsa/fused_mqa_topk.py
-  - vllm/model_executor/kernels/attention/dsa/flashtopk.py
-  - vllm/third_party/flashtopk/
+  - vllm/model_executor/kernels/attention/dsa/flashtopk/
   - tests/kernels/attention/test_fused_mqa_topk.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
   - tests/kernels/quantization/test_block_fp8.py

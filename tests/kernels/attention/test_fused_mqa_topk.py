@@ -20,15 +20,15 @@ from vllm.model_executor.kernels.attention.dsa.flashtopk import (
     FLASHTOPK_MIN_KEYS,
     FLASHTOPK_WARMUP,
     FlashTopkWarmup,
+    flashtopk_available,
+    flashtopk_workspace_specs,
+    reserve_flashtopk,
 )
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     fused_mqa_topk_available,
-    fused_mqa_topk_backend,
     fused_mqa_topk_min_keys,
     fused_mqa_topk_prefill,
-    fused_mqa_topk_workspace_specs,
     get_fused_mqa_topk_workspaces,
-    reserve_fused_mqa_topk_workspaces,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import as_fp32_logits
 from vllm.utils.deep_gemm import (
@@ -43,16 +43,17 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 
 requires_fused_mqa_topk = pytest.mark.skipif(
-    not torch.cuda.is_available() or not fused_mqa_topk_available(),
+    not torch.cuda.is_available()
+    or not (fused_mqa_topk_available() or flashtopk_available()),
     reason="Requires the fused MQA+top-k backend (native: SM100 extension; "
     "flashtopk: FlashTopK on SM90/SM100)",
 )
 requires_native = pytest.mark.skipif(
-    fused_mqa_topk_backend() != "native",
+    envs.VLLM_FUSED_MQA_TOPK_BACKEND != "native",
     reason="Tests the native fused_mqa_topk op's internals",
 )
 requires_flashtopk = pytest.mark.skipif(
-    fused_mqa_topk_backend() != "flashtopk",
+    envs.VLLM_FUSED_MQA_TOPK_BACKEND != "flashtopk",
     reason="Tests the flashtopk backend's adapter",
 )
 
@@ -388,11 +389,11 @@ def test_flashtopk_takes_long_calls(monkeypatch):
     for n in (keys - 1, keys):
         ends = torch.full((rows,), n, device="cuda", dtype=torch.int32)
         fused_mqa_topk_prefill(q, k[:n], scales[:n], weights, starts, ends, out)
-    native = fused_module._native_available()
+    native = fused_mqa_topk_available()
     assert taken == ([keys] if native else [keys - 1, keys])
-    short = fused_mqa_topk_workspace_specs(q.device, rows, keys - 1, 512)
+    short = flashtopk_workspace_specs(q.device, rows, keys - 1, 512)
     assert (short == []) == native
-    assert fused_mqa_topk_workspace_specs(q.device, rows, keys, 512)
+    assert flashtopk_workspace_specs(q.device, rows, keys, 512)
 
 
 @requires_fused_mqa_topk
@@ -401,7 +402,7 @@ def test_flashtopk_warmup_compiles_reserved_calls():
     """The profiling run's reservation of FlashTopK calls becomes a JIT warmup
     key; warming it leaves the backend correct on a pruning-eligible call."""
     device = torch.device("cuda", torch.accelerator.current_device_index())
-    reserve_fused_mqa_topk_workspaces(device, 256, 1 << 20, 512)
+    reserve_flashtopk(device, 256, 1 << 20, 512)
     key = FlashTopkWarmup.CompileKey(device.index, 512)
     assert key in FLASHTOPK_WARMUP.get_warmup_keys()
     FLASHTOPK_WARMUP.warmup()

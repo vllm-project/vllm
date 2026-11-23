@@ -57,6 +57,8 @@ include = ["vllm*"]
 # `vllm` is the only installed package; everything else is standalone scripts
 "!vllm/**" = ["INP"]
 "vllm/third_party/**" = ["ALL"]
+# CuTe DSL / Triton kernels: nested ifs separate compile-time from runtime branches
+"vllm/model_executor/kernels/attention/dsa/flashtopk/**" = ["SIM102"]
 "vllm/version.py" = ["F401"]
 # packages re-export their submodules
 "vllm/**/__init__.py" = ["F403"]
