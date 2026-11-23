@@ -77,6 +77,7 @@ def test_build_shardq_split_after_indexer_decodes(monkeypatch, num_spec):
         ),
         attention_config=attention_config,
         model_config=SimpleNamespace(hf_text_config=hf_config),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
     )
     split = build_shardq_split(metadata, vllm_config)
     assert split is not None
@@ -96,6 +97,32 @@ def test_build_shardq_split_after_indexer_decodes(monkeypatch, num_spec):
         device=torch.device("cpu"),
     )
     assert build_shardq_split(short, vllm_config) is None
+
+
+def test_build_shardq_split_matches_pcp_short_extends(monkeypatch):
+    """Under PCP the sparse-MLA metadata builders treat a short extend as a
+    prefill, so the split must draw the same decode boundary; otherwise it
+    hands a 1-token prefill to forward_mqa as a decode and the separate FP8
+    prefill/decode path asserts."""
+    monkeypatch.setattr(
+        shardq, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=1)
+    )
+    metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[301, 6300], query_lens=[1, 6000]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    metadata.is_prefilling = torch.tensor([True, True], dtype=torch.bool)
+    vllm_config = SimpleNamespace(
+        speculative_config=None,
+        attention_config=SimpleNamespace(sparse_mla_shard_q_min_tokens=1024),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=512)),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=2),
+    )
+    split = build_shardq_split(metadata, vllm_config)
+    assert split is not None
+    assert split.num_decode_tokens == 0
+    assert split.num_tokens_per_rank.sum() == 6001
 
 
 def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
