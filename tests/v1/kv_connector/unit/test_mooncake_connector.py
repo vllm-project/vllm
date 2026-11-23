@@ -3027,6 +3027,29 @@ def test_pp_mismatch_rejects_opaque_row_in_both_directions():
     )
 
 
+def test_prepare_transfer_regions_rejects_engines_holding_different_layers():
+    """Each producer stage aligns only the layers it holds, so a consumer
+    layer that no producer stage holds must fail the transfer instead of
+    keeping stale KV."""
+    worker, _, regions, _ = _register_sliced_packed_mla([0, 1])
+    layers = [_layer_name(0), _layer_name(1)]
+    meta = _xfer_meta(
+        regions,
+        {},
+        remote_hostname="peer",
+        remote_port=1,
+        remote_tp_size=worker.tp_size,
+        remote_pp_size=worker.pp_size,
+    )
+    meta.pipeline_stage_layers = [layers]
+    assert worker._prepare_transfer_regions(meta)[2] is None
+
+    meta.remote_port = 2
+    meta.pipeline_stage_layers = [[*layers, _layer_name(2)]]
+    err = worker._prepare_transfer_regions(meta)[2]
+    assert err is not None and "only the remote engine holds" in err
+
+
 def test_prepare_transfer_regions_reuses_success_and_error():
     """A peer layout is built once. Re-registering drops the cache."""
     worker, _, _, _ = _register_sliced_packed_mla([0, 1])
