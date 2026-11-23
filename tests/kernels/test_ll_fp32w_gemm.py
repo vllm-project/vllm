@@ -158,8 +158,8 @@ def test_arbitrary_N(N):
 @pytest.mark.parametrize("M", [9, 17, 24, 31, 32])
 @pytest.mark.parametrize("N,K", [(192, 3072), (172, 3072), (191, 5120), (96, 6144)])
 def test_pruned_expert_counts(M, N, K):
-    """Pruned and odd expert counts reach the two-experts-per-block default,
-    including a ragged final pair."""
+    """Pruned expert counts take the large-M defaults: two experts per block
+    for even N > 128, one for odd N."""
     torch.manual_seed(42)
     a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(N, K, dtype=torch.float32, device="cuda")

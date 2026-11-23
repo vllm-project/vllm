@@ -49,7 +49,9 @@ def _default_config(M: int, N: int) -> tuple[int, int, int]:
     wide_grid = N > 128
     if M <= 8:
         return 256, 2 if even and not wide_grid else 1, 1
-    return (128, 2, 2 if wide_grid else 1) if even else (256, 1, 2 if wide_grid else 1)
+    # The kernel loads both experts of a pair unguarded, so pairs need even N.
+    epb = 2 if wide_grid and N % 2 == 0 else 1
+    return (128, 2, epb) if even else (256, 1, epb)
 
 
 _TUNED_DOTPROD_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int, int]]] = {
