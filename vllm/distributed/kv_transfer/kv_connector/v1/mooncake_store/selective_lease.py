@@ -73,25 +73,21 @@ class SelectiveLookupLease:
 
     @staticmethod
     def _check_supported(store: Any) -> None:
-        if not callable(getattr(store, "batch_probe_key", None)):
+        if not callable(getattr(store, "batch_probe_key_hashed", None)):
             raise RuntimeError(
                 "VLLM_MOONCAKE_STORE_SELECTIVE_LEASE requires "
-                "MooncakeDistributedStore.batch_probe_key, which the installed "
-                "Mooncake version does not provide."
+                "MooncakeDistributedStore.batch_probe_key_hashed, which the "
+                "installed Mooncake version does not provide."
             )
 
-    def probe(self, keys: list[str]) -> list[int]:
-        """Existence of `keys`, without granting a lease."""
-        return self.store.batch_probe_key(keys)
-
-    def probe_hashed(
+    def probe(
         self,
         hashes: memoryview,
         hash_len: int,
-        prefixes: list[list[str]],
+        prefixes: list[tuple[str, ...]],
         indices: list[Any],
     ) -> bytes:
-        """`probe` with the keys built by Mooncake (`batch_probe_key_hashed`)."""
+        """`batch_is_exist_hashed` without granting a lease."""
         return self.store.batch_probe_key_hashed(hashes, hash_len, prefixes, indices)
 
     def lease_hit(

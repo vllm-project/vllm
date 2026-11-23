@@ -68,7 +68,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     AttentionStoreLayout,
     KeyMetadata,
     MambaStoreLayout,
-    PoolKey,
     RankLocalStoreLayout,
     StoreLayout,
     StoreShardId,
@@ -1533,16 +1532,11 @@ def _reused_transfer_engine() -> SharedMooncakeTransferEngine:
     return shared
 
 
-# Returned by the lookup probes when no candidate key needed probing.
-_NO_CANDIDATES: AbstractSet[tuple[int, bytes]] = frozenset()
-
-
 class MooncakeStoreWorker:
     """Worker-side component for MooncakeStoreConnector."""
 
-    # Bare workers built with __new__ in tests read these defaults.
+    # Bare workers built with __new__ in tests read this default.
     _reuse_pd_transfer_engine: bool = False
-    _native_lookup: bool = False
 
     @staticmethod
     def _create_mem_pool(
@@ -1667,6 +1661,11 @@ class MooncakeStoreWorker:
             local_hostname = rdma_utils.get_requester_local_hostname(get_ip())
 
         self.store = MooncakeDistributedStore()
+        if not hasattr(self.store, "batch_is_exist_hashed"):
+            raise ImportError(
+                "MooncakeStoreConnector needs a Mooncake version whose "
+                "MooncakeDistributedStore has batch_is_exist_hashed."
+            )
         self.store_service = MooncakeStoreService(self.store)
         setup_mooncake_store(
             self.store, store_config, local_hostname, engine=shared_engine
@@ -1790,10 +1789,6 @@ class MooncakeStoreWorker:
         )
         self.token_dbs = self._build_token_databases(metadata, store_group_plans)
         self._init_lookup_key_prefixes()
-        # Checked on the type so that mocked stores keep the Python path.
-        self._native_lookup = envs.VLLM_MOONCAKE_STORE_NATIVE_LOOKUP and hasattr(
-            type(self.store), "batch_is_exist_hashed"
-        )
         if envs.VLLM_MOONCAKE_STORE_SELECTIVE_LEASE:
             self._selective_lease = SelectiveLookupLease(
                 self.store,
@@ -2538,7 +2533,8 @@ class MooncakeStoreWorker:
 
         Checks across all rank-specific key namespaces that may be loaded. A
         hit covering all `num_tokens` is re-derived below the request end so
-        the last token is recomputed for sampling.
+        the last token is recomputed for sampling. Returns None when the probe
+        fails.
         """
         if self._capacity_only:
             return MooncakeLookupResult(0)
@@ -2546,19 +2542,15 @@ class MooncakeStoreWorker:
         token_len = self.coord.align_lookup_length(num_tokens)
         if not block_hashes or token_len <= 0:
             return MooncakeLookupResult(0)
-
-        exists_set: AbstractSet[tuple[int, bytes]] | None = (
-            self._lookup_exists_native(token_len, block_hashes)
-            if self._native_lookup
-            else self._lookup_exists_python(token_len, block_hashes)
-        )
-        if exists_set is None:
-            return None
-        if exists_set is _NO_CANDIDATES:
+        candidates = self._lookup_candidates(token_len, len(block_hashes))
+        if not candidates:
             return MooncakeLookupResult(0)
+        loadable = self._probe_loadable(candidates, block_hashes)
+        if loadable is None:
+            return None
 
         hit, load_masks = self._longest_hit(
-            num_tokens, token_len, block_hashes, exists_set
+            num_tokens, token_len, block_hashes, loadable
         )
         if self._selective_lease is None:
             return hit
@@ -2566,189 +2558,84 @@ class MooncakeStoreWorker:
             block_hashes,
             hit,
             load_masks,
-            exists_set,
+            loadable,
             functools.partial(self._longest_hit, num_tokens, token_len, block_hashes),
         )
 
-    def _lookup_exists_python(
-        self, token_len: int, block_hashes: Sequence[BlockHash]
-    ) -> AbstractSet[tuple[int, bytes]] | None:
-        """Loadable `(group, hash)` pairs; None when the probe failed, and
-        `_NO_CANDIDATES` when there was nothing to probe."""
-        # Build per-(group, hash) candidate keys expanded across rank namespaces.
-        # candidate_meta stores (group, hash_bytes, end_token) for each key slice.
-        candidate_keys: list[str] = []
-        candidate_meta: list[tuple[int, bytes, int]] = []
+    def _lookup_candidates(
+        self, token_len: int, num_hashes: int
+    ) -> list[tuple[int, np.ndarray]]:
+        """Per prefix-cacheable group, the end tokens of the units to probe."""
         fine_grained = self.coord.enable_partial_hash_hits
         lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
-        for g_idx, db in enumerate(self.token_dbs):
-            if not self._kv_cache_groups[g_idx].prefix_cacheable:
-                continue
-            spec_block_size = self._kv_cache_groups[g_idx].block_size
-            key_prefixes = self._lookup_key_prefixes[g_idx]
-            lookup_mask = None if lookup_masks is None else lookup_masks[g_idx]
-            unit_size = self.hash_block_size if fine_grained else db.chunk_size
-            max_units = (
-                min(token_len, len(block_hashes) * self.hash_block_size) // unit_size
-            )
-            for unit_id in range(max_units):
-                block_id = unit_id * unit_size // spec_block_size
-                if lookup_mask is not None and (
-                    block_id >= len(lookup_mask) or not lookup_mask[block_id]
-                ):
-                    continue
-                end_token = (unit_id + 1) * unit_size
-                h = block_hashes[end_token // self.hash_block_size - 1]
-                hash_hex = h.hex()
-                for key_prefix in key_prefixes:
-                    candidate_keys.append(
-                        PoolKey.build_key_string(key_prefix, hash_hex)
-                    )
-                candidate_meta.append((g_idx, bytes(h), end_token))
-
-        if not candidate_keys:
-            return _NO_CANDIDATES
-
-        exists_fn = (
-            self.store.batch_is_exist
-            if self._selective_lease is None
-            else self._selective_lease.probe
-        )
-        lookup_start = time.perf_counter()
-        try:
-            res = self.store_service.lookup_exists(candidate_keys, exists_fn)
-        except Exception as e:
-            self._record_kv_connector_operation(
-                "lookup_exists",
-                time.perf_counter() - lookup_start,
-                len(candidate_keys),
-                status="error",
-                num_failed_keys=len(candidate_keys),
-            )
-            logger.error("Remote connection failed in lookup: %s", e)
-            return None
-
-        failed_keys = sum(value < 0 for value in res)
-        status = "ok"
-        if failed_keys:
-            status = (
-                "error" if failed_keys == len(candidate_keys) else "partial_failure"
-            )
-        self._record_kv_connector_operation(
-            "lookup_exists",
-            time.perf_counter() - lookup_start,
-            len(candidate_keys),
-            status=status,
-            num_failed_keys=failed_keys,
-        )
-        if failed_keys:
-            return None
-
-        # A (group, hash) is "present" only when every namespace that will be
-        # loaded has it (per-group count: sharded groups need every rank's
-        # shard, replicated groups one namespace per unique KV head).
-        exists_set = set()
-        pos = 0
-        previous_page = None
-        preceding_chunks_present = True
-        for g_idx, hash_bytes, end_token in candidate_meta:
-            spec_block_size = self._kv_cache_groups[g_idx].block_size
-            page = (g_idx, (end_token - 1) // spec_block_size)
-            if page != previous_page:
-                preceding_chunks_present = True
-                previous_page = page
-            count = len(self._lookup_key_prefixes[g_idx])
-            present = all(res[pos + j] == 1 for j in range(count))
-            # A page-prefix hit covers every Store chunk before its final chunk.
-            if preceding_chunks_present and present:
-                exists_set.add((g_idx, hash_bytes))
-            if end_token % self.token_dbs[g_idx].chunk_size == 0:
-                preceding_chunks_present &= present
-            pos += count
-        return exists_set
-
-    def _lookup_exists_native(
-        self, token_len: int, block_hashes: Sequence[BlockHash]
-    ) -> AbstractSet[tuple[int, bytes]] | None:
-        """Same as `_lookup_exists_python`, but Mooncake builds and probes the
-        keys from the raw hash buffer without the GIL; the per-candidate rules
-        run on numpy arrays.
-        """
-        if isinstance(block_hashes, BlobBlockHashes):
-            blob, hash_len = block_hashes.blob, block_hashes.hash_len
-        else:
-            hash_list = [bytes(h) for h in block_hashes]
-            hash_len = len(hash_list[0])
-            assert all(len(h) == hash_len for h in hash_list), (
-                "Native Mooncake lookup needs equal-length block hashes"
-            )
-            blob = memoryview(b"".join(hash_list))
-
-        fine_grained = self.coord.enable_partial_hash_hits
-        lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
-        group_ids: list[int] = []
-        group_end_tokens: list[np.ndarray] = []
-        group_prefixes: list[list[str]] = []
-        group_hash_ids: list[np.ndarray] = []
-        num_keys = 0
+        candidates = []
         for g_idx, db in enumerate(self.token_dbs):
             group = self._kv_cache_groups[g_idx]
             if not group.prefix_cacheable:
                 continue
             unit_size = self.hash_block_size if fine_grained else db.chunk_size
-            max_units = (
-                min(token_len, len(block_hashes) * self.hash_block_size) // unit_size
-            )
+            max_units = min(token_len, num_hashes * self.hash_block_size) // unit_size
             units = np.arange(max_units, dtype=np.int64)
-            lookup_mask = None if lookup_masks is None else lookup_masks[g_idx]
-            if lookup_mask is not None:
+            if lookup_masks is not None and lookup_masks[g_idx] is not None:
+                mask = np.asarray(lookup_masks[g_idx], dtype=bool)
                 block_ids = units * unit_size // group.block_size
-                mask = np.asarray(lookup_mask, dtype=bool)
-                in_range = block_ids < len(mask)
-                keep = np.zeros(max_units, dtype=bool)
-                keep[in_range] = mask[block_ids[in_range]]
-                units = units[keep]
-            end_tokens = (units + 1) * unit_size
-            group_ids.append(g_idx)
-            group_end_tokens.append(end_tokens)
-            group_prefixes.append(list(self._lookup_key_prefixes[g_idx]))
-            group_hash_ids.append(end_tokens // self.hash_block_size - 1)
-            num_keys += len(units) * len(group_prefixes[-1])
+                units = units[block_ids < len(mask)]
+                units = units[mask[block_ids[: len(units)]]]
+            if len(units):
+                candidates.append((g_idx, (units + 1) * unit_size))
+        return candidates
 
-        if num_keys == 0:
-            return _NO_CANDIDATES
+    def _probe_loadable(
+        self,
+        candidates: list[tuple[int, np.ndarray]],
+        block_hashes: Sequence[BlockHash],
+    ) -> LoadablePairs | None:
+        """Probe every candidate under each rank namespace in one Mooncake call,
+        which builds the keys from the raw hashes with the GIL released.
 
+        A unit is loadable when every namespace has it and, for a store chunk
+        inside a larger page, no chunk end before it on the same page is
+        missing (a page-prefix hit covers every chunk before its last one).
+        """
+        if isinstance(block_hashes, BlobBlockHashes):
+            blob, hash_len = block_hashes.blob, block_hashes.hash_len
+        else:
+            hash_len = len(block_hashes[0])
+            blob = memoryview(b"".join(block_hashes))
+            assert len(blob) == hash_len * len(block_hashes), (
+                "Mooncake lookups need equal-length block hashes"
+            )
+        prefixes = [self._lookup_key_prefixes[g] for g, _ in candidates]
+        hash_ids = [ends // self.hash_block_size - 1 for _, ends in candidates]
+        num_keys = sum(len(i) * len(p) for i, p in zip(hash_ids, prefixes))
         probe = (
             self.store.batch_is_exist_hashed
             if self._selective_lease is None
-            else self._selective_lease.probe_hashed
+            else self._selective_lease.probe
         )
-        lookup_start = time.perf_counter()
+        start = time.perf_counter()
         try:
-            raw = probe(blob, hash_len, group_prefixes, group_hash_ids)
+            res = np.frombuffer(
+                probe(blob, hash_len, prefixes, hash_ids), dtype=np.int8
+            )
         except Exception as e:
             self._record_kv_connector_operation(
                 "lookup_exists",
-                time.perf_counter() - lookup_start,
+                time.perf_counter() - start,
                 num_keys,
                 status="error",
                 num_failed_keys=num_keys,
             )
             logger.error("Remote connection failed in lookup: %s", e)
             return None
-        res = np.frombuffer(raw, dtype=np.int8)
-        if len(res) != num_keys:
-            logger.warning(
-                "Mooncake returned %d results for %d keys", len(res), num_keys
-            )
-            res = np.full(num_keys, -1, dtype=np.int8)
-        failed_keys = int((res < 0).sum())
+        assert len(res) == num_keys, f"Got {len(res)} results for {num_keys} keys"
+        failed_keys = int(np.count_nonzero(res < 0))
         status = "ok"
         if failed_keys:
             status = "error" if failed_keys == num_keys else "partial_failure"
         self._record_kv_connector_operation(
             "lookup_exists",
-            time.perf_counter() - lookup_start,
+            time.perf_counter() - start,
             num_keys,
             status=status,
             num_failed_keys=failed_keys,
@@ -2756,29 +2643,22 @@ class MooncakeStoreWorker:
         if failed_keys:
             return None
 
-        loadable_by_group: dict[int, np.ndarray] = {}
+        loadable: dict[int, np.ndarray] = {}
         pos = 0
-        for g_idx, end_tokens, prefixes, hash_ids in zip(
-            group_ids, group_end_tokens, group_prefixes, group_hash_ids
-        ):
-            n, count = len(end_tokens), len(prefixes)
-            # Present only when every namespace that will be loaded has it.
-            present = (res[pos : pos + n * count].reshape(n, count) == 1).all(axis=1)
-            pos += n * count
-            # A page-prefix hit covers every Store chunk before its final
-            # chunk: a candidate counts only if no chunk end before it on the
-            # same page is missing.
-            pages = (end_tokens - 1) // self._kv_cache_groups[g_idx].block_size
-            missing_end = (end_tokens % self.token_dbs[g_idx].chunk_size == 0) & (
-                ~present
-            )
+        for (g_idx, ends), ids, group_prefixes in zip(candidates, hash_ids, prefixes):
+            n = len(ends) * len(group_prefixes)
+            present = (res[pos : pos + n] == 1).reshape(len(ends), -1).all(axis=1)
+            pos += n
+            missing_end = ~present & (ends % self.token_dbs[g_idx].chunk_size == 0)
             missing_before = np.cumsum(missing_end) - missing_end
-            page_start = np.searchsorted(pages, pages, side="left")
-            loadable = present & (missing_before == missing_before[page_start])
-            group_loadable = np.zeros(len(blob) // hash_len, dtype=bool)
-            group_loadable[hash_ids[loadable]] = True
-            loadable_by_group[g_idx] = group_loadable
-        return LoadablePairs(blob, hash_len, loadable_by_group)
+            pages = (ends - 1) // self._kv_cache_groups[g_idx].block_size
+            page_start = np.searchsorted(pages, pages)
+            group_loadable = np.zeros(len(block_hashes), dtype=bool)
+            group_loadable[
+                ids[present & (missing_before == missing_before[page_start])]
+            ] = True
+            loadable[g_idx] = group_loadable
+        return LoadablePairs(blob, hash_len, loadable)
 
     def _longest_hit(
         self,

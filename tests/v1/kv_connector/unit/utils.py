@@ -824,3 +824,36 @@ def remote_stage(
             xfer_side_handles=dict(xfer_side_handles or {}),
         )
     }
+
+
+def hashed_mooncake_keys(
+    hashes: bytes | memoryview,
+    hash_len: int,
+    prefixes: Sequence[Sequence[str]],
+    indices: Sequence[np.ndarray],
+    separator: str = "@",
+) -> list[str]:
+    """The keys a Mooncake `batch_*_hashed` call probes, in its result order."""
+    blob = bytes(hashes)
+    return [
+        f"{prefix}{separator}{blob[i * hash_len : (i + 1) * hash_len].hex()}"
+        for group_prefixes, group_indices in zip(prefixes, indices)
+        for i in group_indices.tolist()
+        for prefix in group_prefixes
+    ]
+
+
+def serve_hashed_lookups(store: Any) -> Any:
+    """Answer a fake Mooncake store's hashed lookups with its per-key
+    `batch_is_exist` / `batch_probe_key`, so tests can keep asserting on keys."""
+
+    def via(per_key: Callable[[list[str]], list[int]]) -> Callable[..., bytes]:
+        def call(*args: Any) -> bytes:
+            results = per_key(hashed_mooncake_keys(*args))
+            return bytes(0xFF if r < 0 else r for r in results)
+
+        return call
+
+    store.batch_is_exist_hashed = via(lambda keys: store.batch_is_exist(keys))
+    store.batch_probe_key_hashed = via(lambda keys: store.batch_probe_key(keys))
+    return store

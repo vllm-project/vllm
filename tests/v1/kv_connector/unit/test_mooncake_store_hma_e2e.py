@@ -22,6 +22,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     mamba_layer,
     sliding_window_layer,
 )
+from tests.v1.kv_connector.unit.utils import hashed_mooncake_keys
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     worker as mooncake_store_worker,
 )
@@ -77,6 +78,9 @@ class _DictStore:
 
     def batch_is_exist(self, keys):
         return [1 if k in self._data else 0 for k in keys]
+
+    def batch_is_exist_hashed(self, *args):
+        return bytes(self.batch_is_exist(hashed_mooncake_keys(*args)))
 
     def batch_put_from_multi_buffers(self, keys, addrs, sizes, *_args, **_kwargs):
         for k in keys:
@@ -1249,6 +1253,9 @@ class _LeaseTrackingStore(_DictStore):
         self.probed.extend(keys)
         return [1 if k in self._data else 0 for k in keys]
 
+    def batch_probe_key_hashed(self, *args):
+        return bytes(self.batch_probe_key(hashed_mooncake_keys(*args)))
+
     def batch_is_exist(self, keys):
         if self.evictions:
             for key in self.evictions.pop(0):
@@ -1505,28 +1512,6 @@ def test_selective_lease_requires_probe_support(monkeypatch):
         _full_plus_mamba_worker(_DictStore())
 
 
-class _HashedDictStore(_LeaseTrackingStore):
-    """Adds Mooncake's hashed batch calls, building keys the way Mooncake does."""
-
-    @staticmethod
-    def _keys(hashes, hash_len, prefixes, indices, separator):
-        blob = bytes(hashes)
-        return [
-            f"{prefix}{separator}{blob[i * hash_len : (i + 1) * hash_len].hex()}"
-            for group_prefixes, group_indices in zip(prefixes, indices)
-            for i in group_indices.tolist()
-            for prefix in group_prefixes
-        ]
-
-    def batch_is_exist_hashed(self, hashes, hash_len, prefixes, indices, sep="@"):
-        keys = self._keys(hashes, hash_len, prefixes, indices, sep)
-        return bytes(r & 0xFF for r in self.batch_is_exist(keys))
-
-    def batch_probe_key_hashed(self, hashes, hash_len, prefixes, indices, sep="@"):
-        keys = self._keys(hashes, hash_len, prefixes, indices, sep)
-        return bytes(r & 0xFF for r in self.batch_probe_key(keys))
-
-
 def _swa_plus_full_worker(store):
     full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     swa = sliding_window_layer(
@@ -1584,8 +1569,40 @@ def _chunked_full_worker(store, *, partial_hash_hits=False):
     return worker
 
 
+def _reference_loadable(worker, store, token_len, block_hashes):
+    """Per-key reference for the lookup's loadable `(group, hash)` pairs."""
+    loadable = set()
+    fine_grained = worker.coord.enable_partial_hash_hits
+    masks = None if fine_grained else worker.coord.lookup_mask(token_len)
+    for g_idx, db in enumerate(worker.token_dbs):
+        group = worker._kv_cache_groups[g_idx]
+        if not group.prefix_cacheable:
+            continue
+        unit = worker.hash_block_size if fine_grained else db.chunk_size
+        page, preceding_present = None, True
+        for u in range(
+            min(token_len, len(block_hashes) * worker.hash_block_size) // unit
+        ):
+            mask = None if masks is None else masks[g_idx]
+            block_id = u * unit // group.block_size
+            if mask is not None and (block_id >= len(mask) or not mask[block_id]):
+                continue
+            end = (u + 1) * unit
+            h = bytes(block_hashes[end // worker.hash_block_size - 1])
+            present = all(
+                PoolKey.build_key_string(prefix, h.hex()) in store._data
+                for prefix in worker._lookup_key_prefixes[g_idx]
+            )
+            if (end - 1) // group.block_size != page:
+                page, preceding_present = (end - 1) // group.block_size, True
+            if preceding_present and present:
+                loadable.add((g_idx, h))
+            if end % db.chunk_size == 0:
+                preceding_present &= present
+    return loadable
+
+
 @pytest.mark.parametrize("seed", range(10))
-@pytest.mark.parametrize("selective_lease", [False, True])
 @pytest.mark.parametrize(
     "make_worker",
     [
@@ -1603,50 +1620,47 @@ def _chunked_full_worker(store, *, partial_hash_hits=False):
         "chunked-full-partial-hits",
     ],
 )
-def test_native_lookup_matches_python_lookup(
-    monkeypatch, make_worker, selective_lease, seed
-):
-    """The native lookup (keys built by Mooncake from the hash buffer) finds the
-    same hits as the Python one, for random stored subsets and prompt lengths."""
-    if selective_lease:
-        monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
+def test_lookup_matches_per_key_reference(make_worker, seed):
+    """For random stored subsets and prompt lengths, the lookup finds the same
+    loadable pairs and hit as a per-key check of every candidate."""
     rng = random.Random(seed)
-    store = _HashedDictStore()
+    store = _DictStore()
     worker = make_worker(store)
-    assert worker._native_lookup
-    num_blocks = rng.randint(1, 12)
-    hs = [BlockHash(rng.randbytes(32)) for _ in range(num_blocks * 4)]
+    hs = [BlockHash(rng.randbytes(32)) for _ in range(rng.randint(1, 12) * 4)]
     keep = rng.random()
     for g_idx in range(len(worker.token_dbs)):
         for h in hs:
             if rng.random() < keep:
                 for key in _store_keys(worker, g_idx, h):
                     store._data[key] = b"x"
-    blob = BlobBlockHashes(memoryview(b"".join(hs)), 32)
-    hash_tokens = len(hs) * worker.hash_block_size
-    for num_tokens in sorted({rng.randint(1, hash_tokens + 1) for _ in range(8)}):
+    for num_tokens in sorted({rng.randint(1, len(hs) * 16 + 1) for _ in range(8)}):
         num_hashes = min(len(hs), num_tokens // worker.hash_block_size)
-        for block_hashes in (hs[:num_hashes], blob[:num_hashes]):
-            worker._native_lookup = False
-            expected = worker.lookup(num_tokens, block_hashes)
-            worker._native_lookup = True
-            assert worker.lookup(num_tokens, block_hashes) == expected
-        worker._native_lookup = True
-        assert (
-            worker.lookup(
-                num_tokens, BlobBlockHashes(memoryview(b"".join(hs[:num_hashes])), 32)
+        token_len = worker.coord.align_lookup_length(num_tokens)
+        if num_hashes == 0 or token_len <= 0:
+            continue
+        expected = _reference_loadable(worker, store, token_len, hs[:num_hashes])
+        candidates = worker._lookup_candidates(token_len, num_hashes)
+        for block_hashes in (
+            hs[:num_hashes],
+            BlobBlockHashes(memoryview(b"".join(hs[:num_hashes])), 32),
+        ):
+            loadable = worker._probe_loadable(candidates, block_hashes)
+            assert set(loadable) == expected
+            assert (
+                worker.lookup(num_tokens, block_hashes)
+                == (
+                    worker._longest_hit(
+                        num_tokens, token_len, hs[:num_hashes], expected
+                    )[0]
+                )
             )
-            == expected
-        )
 
 
-@pytest.mark.parametrize("native", [False, True])
-def test_native_lookup_reports_failed_probe_like_python(native):
-    """A probe with failed keys is a failed lookup (None) on both paths, and a
-    lookup with nothing to probe is a zero hit."""
-    store = _HashedDictStore()
+def test_lookup_reports_failed_probe():
+    """A probe with failed keys is a failed lookup (None); a lookup with nothing
+    to probe is a zero hit."""
+    store = _DictStore()
     worker = _swa_plus_full_worker(store)
-    worker._native_lookup = native
     hs = [BlockHash(bytes([i + 1]) * 32) for i in range(4)]
     for g_idx in range(2):
         for h in hs:
@@ -1654,9 +1668,6 @@ def test_native_lookup_reports_failed_probe_like_python(native):
                 store._data[key] = b"x"
     assert worker.lookup(65, hs).hit_length == 64
 
-    def failing(keys):
-        return [-1] + [1] * (len(keys) - 1)
-
-    store.batch_is_exist = failing
+    store.batch_is_exist = lambda keys: [-1] + [1] * (len(keys) - 1)
     assert worker.lookup(65, hs) is None
     assert worker.lookup(65, []) == MooncakeLookupResult(0)

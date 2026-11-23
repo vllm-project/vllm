@@ -34,11 +34,8 @@ if TYPE_CHECKING:
 
 
 class LoadablePairs(AbstractSet[tuple[int, bytes]]):
-    """The `(group, hash)` pairs a native lookup found loadable.
-
-    Kept as one boolean array per group over the request's hash indices, so
-    the lookup does not build a set entry per stored candidate. Membership maps
-    a hash to its index through a dict over the hashes loadable in any group.
+    """`(group, hash)` pairs a lookup found loadable, as one boolean array per
+    group over the request's hashes instead of one set entry per stored key.
     """
 
     def __init__(
@@ -50,52 +47,43 @@ class LoadablePairs(AbstractSet[tuple[int, bytes]]):
         self._index: dict[bytes, int] | None = None
         self._all_of: dict[tuple[int, ...], np.ndarray] = {}
 
-    def _hash_index(self) -> dict[bytes, int]:
-        if self._index is None:
-            any_group = np.zeros(len(self._blob) // self._hash_len, dtype=bool)
-            for group_loadable in self._loadable.values():
-                any_group |= group_loadable
-            hl = self._hash_len
-            self._index = {
-                bytes(self._blob[i * hl : (i + 1) * hl]): i
-                for i in np.flatnonzero(any_group).tolist()
-            }
-        return self._index
-
-    def __contains__(self, pair: object) -> bool:
-        group_id, block_hash = pair  # type: ignore[misc]
-        group_loadable = self._loadable.get(group_id)
-        if group_loadable is None:
-            return False
-        idx = self._hash_index().get(block_hash)
-        return idx is not None and bool(group_loadable[idx])
+    def _hash(self, i: int) -> bytes:
+        return bytes(self._blob[i * self._hash_len : (i + 1) * self._hash_len])
 
     def contains_all(self, group_ids: Sequence[int], block_hash: bytes) -> bool:
-        """Whether every group in `group_ids` has `block_hash` loadable."""
+        """Whether every group in `group_ids` can load `block_hash`."""
+        if self._index is None:
+            # Only hashes loadable in some group can be hits.
+            any_group = np.logical_or.reduce(list(self._loadable.values()))
+            self._index = {self._hash(i): i for i in np.flatnonzero(any_group).tolist()}
+        idx = self._index.get(block_hash)
+        if idx is None:
+            return False
         key = tuple(group_ids)
         all_of = self._all_of.get(key)
         if all_of is None:
-            arrays = [self._loadable.get(g) for g in key]
-            all_of = self._all_of[key] = (
-                np.logical_and.reduce(arrays)
-                if all(a is not None for a in arrays)
-                else np.zeros(len(self._blob) // self._hash_len, dtype=bool)
+            if not all(g in self._loadable for g in key):
+                return False
+            all_of = self._all_of[key] = np.logical_and.reduce(
+                [self._loadable[g] for g in key]
             )
-        idx = self._hash_index().get(block_hash)
-        return idx is not None and bool(all_of[idx])
+        return bool(all_of[idx])
+
+    def __contains__(self, pair: object) -> bool:
+        group_id, block_hash = pair  # type: ignore[misc]
+        return self.contains_all((group_id,), block_hash)
 
     def __iter__(self) -> Iterator[tuple[int, bytes]]:
-        hl = self._hash_len
         for group_id, group_loadable in self._loadable.items():
             for i in np.flatnonzero(group_loadable).tolist():
-                yield group_id, bytes(self._blob[i * hl : (i + 1) * hl])
+                yield group_id, self._hash(i)
 
     def __len__(self) -> int:
-        return sum(int(g.sum()) for g in self._loadable.values())
+        return sum(int(np.count_nonzero(g)) for g in self._loadable.values())
 
     @classmethod
     def _from_iterable(cls, it):
-        # Set operations (e.g. the selective lease's difference) give a set.
+        # Set operations (the selective lease's eviction) give a plain set.
         return set(it)
 
 
