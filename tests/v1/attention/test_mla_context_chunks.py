@@ -239,11 +239,11 @@ def test_continuation_merge_matches_an_out_of_place_merge():
             metadata, first_out, first_lse, num_tokens=num_tokens
         )
         accumulate_mla_context_chunk(first, first_out, first_lse, output, output_lse)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         with torch.cuda.stream(side_stream):
             busy @ busy
         accumulate_mla_context_chunk(second, second_out, second_lse, output, output_lse)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         torch.testing.assert_close(output, expected)
         torch.testing.assert_close(output_lse, expected_lse)
 
