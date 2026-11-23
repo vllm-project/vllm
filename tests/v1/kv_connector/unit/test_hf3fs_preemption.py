@@ -39,9 +39,11 @@ NUM_GPU_BLOCKS = 48
 # The startup check needs one request of this length to fit in the pool.
 MAX_MODEL_LEN = 736
 DECODE_TOKENS = 480
-# The fixed connector blocks the step until the held save has gathered.
-# The hold then ends on this timeout instead of on the other request finishing.
-HOLD_TIMEOUT_S = 30.0
+# A watchdog only: the test releases the hold itself, and fails if this expires.
+HOLD_TIMEOUT_S = 120.0
+# After release, the held save waits this long for the fixed wait to return first.
+# A wait that returns before the gather is then caught, since nothing has gathered.
+GATHER_DELAY_S = 2.0
 
 
 class InProcessMetadataService:
@@ -96,6 +98,10 @@ class SaveHold:
         self.held_block_ids: set[int] = set()
         self.release = threading.Event()
         self.timed_out = False
+        # True while the held save is waiting, before it reads the blocks.
+        self.holding = False
+        self.entered = threading.Event()
+        self.wait_returned = threading.Event()
         # Read right after the held save, before a later save can rewrite the pages.
         self.after_held = None
         self.snapshot = None
@@ -114,7 +120,11 @@ class SaveHold:
                 if hold.armed and hold.target_hashes & set(block_hashes):
                     hold.armed = False
                     hold.held_block_ids = set(block_ids)
+                    hold.holding = True
+                    hold.entered.set()
                     hold.timed_out = not hold.release.wait(HOLD_TIMEOUT_S)
+                    hold.holding = False
+                    hold.wait_returned.wait(GATHER_DELAY_S)
                     result = handle_save_task(manager, task)
                     hold.snapshot = hold.after_held()
                     return result
@@ -230,7 +240,12 @@ class TestHF3FSPreemptionEndToEnd:
         hold.after_held = functools.partial(
             _read_pages, worker, metadata, target_hashes
         )
-        seen = {"preempted": False, "reused": set()}
+        seen = {
+            "preempted": False,
+            "target_id": None,
+            "reused": set(),
+            "gathered_when_wait_returned": None,
+        }
         # Every save goes through the hold, which only holds once it is armed.
         save_patch = patch.object(
             AsyncOperationManager,
@@ -254,27 +269,51 @@ class TestHF3FSPreemptionEndToEnd:
             update = scheduler.update_from_output
 
             def record_preempt(request, *args, **kwargs):
+                # Only a preemption while the save is held exercises the race.
                 if list(request.prompt_token_ids) == target_ids:
-                    seen["preempted"] = True
+                    # Preempt only once the save is held, so the race is set up.
+                    hold.entered.wait(HOLD_TIMEOUT_S)
+                    if hold.holding:
+                        seen["preempted"] = True
+                        seen["target_id"] = request.request_id
                 return preempt(request, *args, **kwargs)
 
-            def release_when_other_is_done(*args, **kwargs):
+            def release_after_reuse(*args, **kwargs):
                 result = update(*args, **kwargs)
-                running = {r.request_id: r for r in scheduler.running if r is not None}
-                for request in running.values():
-                    if list(request.prompt_token_ids) == target_ids:
+                for request in scheduler.running:
+                    if request is None or request.request_id == seen["target_id"]:
                         continue
                     ids = scheduler.kv_cache_manager.get_block_ids(request.request_id)
-                    seen["reused"] |= set(ids[0]) & hold.held_block_ids
-                others_running = any(
-                    list(r.prompt_token_ids) != target_ids for r in running.values()
-                )
-                if seen["preempted"] and not others_running:
+                    if seen["preempted"]:
+                        seen["reused"] |= set(ids[0]) & hold.held_block_ids
+                # Without the fix, another request's forward has now written
+                # into the held blocks, so let the save gather them.
+                if seen["reused"]:
                     hold.release.set()
                 return result
 
             scheduler._preempt_request = record_preempt
-            scheduler.update_from_output = release_when_other_is_done
+            scheduler.update_from_output = release_after_reuse
+            wait_for_gathers = getattr(manager, "wait_for_gathers", None)
+            save_gathers = getattr(manager, "_save_gathers", None)
+            if wait_for_gathers is not None:
+
+                def release_on_wait(request_ids):
+                    # With the fix, the preempting step waits here for the gather.
+                    if seen["target_id"] not in request_ids:
+                        return wait_for_gathers(request_ids)
+                    hold.release.set()
+                    wait_for_gathers(request_ids)
+                    # The held save waits for this flag before it gathers.
+                    # So only a wait that covers the gather sees it done here.
+                    seen["gathered_when_wait_returned"] = all(
+                        gather.enqueued.is_set()
+                        and (gather.cuda_event is None or gather.cuda_event.query())
+                        for gather in save_gathers[seen["target_id"]]
+                    )
+                    hold.wait_returned.set()
+
+                manager.wait_for_gathers = release_on_wait
             hold.armed = True
             # The target arrives second, so it is the one preempted.
             llm.generate(
@@ -297,8 +336,11 @@ class TestHF3FSPreemptionEndToEnd:
         # The scenario happened: the target was preempted with a save held,
         # and the other request was given blocks that save still had to read.
         assert hold.held_block_ids, "no save of the target was held"
-        assert seen["preempted"], "the target was not preempted"
-        assert seen["reused"], "no held block was reused by the other request"
+        assert seen["preempted"], "the target was not preempted while its save was held"
+        assert seen["reused"], "no held block was reused after the preemption"
+        assert not hold.timed_out, "the hold was not released by the scenario"
+        if wait_for_gathers is not None:
+            assert seen["gathered_when_wait_returned"], "the wait ended too early"
         print(
             f"held={sorted(hold.held_block_ids)} reused={sorted(seen['reused'])} "
             f"hold_timed_out={hold.timed_out}"
@@ -327,12 +369,22 @@ class TestHF3FSPreemptionEndToEnd:
         manager = worker._async_manager
         connectors = [scheduler.connector, worker]
         gather_or_scatter = worker._gather_or_scatter_kv_caches
+        stream_synchronize = torch.cuda.Stream.synchronize
+        save_stream = manager._save_stream
+        injected = threading.Event()
+        save_stream_synced = threading.Event()
 
         def gather_one_block_then_fail(block_ids, buffers, direction):
             if direction != "gather":
                 return gather_or_scatter(block_ids, buffers, direction)
             gather_or_scatter(block_ids[:1], buffers[:1], direction)
+            injected.set()
             raise RuntimeError("injected gather failure")
+
+        def record_save_stream_sync(stream):
+            stream_synchronize(stream)
+            if stream is save_stream:
+                save_stream_synced.set()
 
         def sync_fails(stream):
             raise RuntimeError("injected sync failure")
@@ -341,27 +393,38 @@ class TestHF3FSPreemptionEndToEnd:
             worker, "_gather_or_scatter_kv_caches", gather_one_block_then_fail
         )
         try:
-            with fail_gather:
+            watch_sync = patch.object(
+                torch.cuda.Stream, "synchronize", record_save_stream_sync
+            )
+            with fail_gather, watch_sync:
                 failed = manager.submit_save_operation("failed", [0, 1], ["a", "b"])
                 manager.wait_for_gathers({"failed"})
-            # The wait synchronized an event recorded after the partial gather.
-            [gather] = manager._save_gathers["failed"]
-            assert gather.cuda_event is not None and gather.cuda_event.query()
+                assert injected.is_set(), "the gather failure was not injected"
+                # The partial gather was fenced before the wait returned.
+                assert save_stream_synced.is_set(), "the wait returned before the fence"
             assert failed.result(timeout=60) is False
             # The save thread survives the failure and serves the next save.
             assert manager.submit_save_operation("next", [2], ["c"]).result(timeout=60)
 
             # Without a working sync, the reads can't be fenced, so reuse must stop.
+            injected.clear()
             fail_sync = patch.object(torch.cuda.Stream, "synchronize", sync_fails)
             with fail_gather, fail_sync:
                 unfenced = manager.submit_save_operation("unfenced", [3, 4], ["d", "e"])
                 assert unfenced.result(timeout=60) is False
+                assert injected.is_set(), "the gather failure was not injected"
                 with pytest.raises(RuntimeError, match="could not fence"):
                     manager.wait_for_gathers({"unfenced"})
             with pytest.raises(RuntimeError, match="could not fence"):
                 manager.get_finished_operations({"unfenced"})
-            # Its buffers stay alive and out of the pool.
+            # Its buffers stay out of the pool.
+            pool = manager._save_buffer_allocator._free_buffers
             assert len(manager._unfenced_buffers) == 2
+            assert not any(
+                buffer is retained
+                for buffer in pool
+                for retained in manager._unfenced_buffers
+            )
         finally:
             _shutdown(llm, connectors)
             del llm, connectors, worker, manager

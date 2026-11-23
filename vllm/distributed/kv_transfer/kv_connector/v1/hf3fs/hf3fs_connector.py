@@ -103,7 +103,8 @@ class _SaveGather:
     def __init__(self) -> None:
         # Set once the gather is enqueued, or when the task ends without one.
         self.enqueued = threading.Event()
-        # Recorded on the save stream after the gather, or when the task fails.
+        # Recorded on the save stream after the gather.
+        # None if the task failed, after any gather it began was synchronized.
         self.cuda_event: torch.cuda.Event | None = None
 
 
@@ -265,6 +266,7 @@ class AsyncOperationManager:
         The write to 3FS and the metadata confirm read only the device buffers.
         So they don't need to finish before the blocks are reused.
         """
+        self._raise_if_unfenced()
         for request_id in request_ids:
             for gather in self._save_gathers.get(request_id, ()):
                 gather.enqueued.wait()
@@ -292,22 +294,8 @@ class AsyncOperationManager:
             except Exception as e:
                 logger.error("Save worker error: %s", e)
             finally:
-                self._release_gather_waiters(task[-1])
-
-    def _release_gather_waiters(self, gather: _SaveGather) -> None:
-        """Let waiters go once the task can no longer enqueue a gather."""
-        try:
-            if gather.cuda_event is None:
-                # The task may have failed after enqueuing part of a gather.
-                # Fence the save stream so waiters still wait for that work.
-                event = torch.cuda.Event()
-                event.record(self._save_stream)
-                gather.cuda_event = event
-        except Exception as e:
-            logger.error("Failed to fence a save gather: %s", e)
-            self._fence_error = e
-        finally:
-            gather.enqueued.set()
+                # A failed task has already synchronized any gather it began.
+                task[-1].enqueued.set()
 
     def _load_worker(self) -> None:
         """Background worker for handling load operations."""
@@ -405,7 +393,8 @@ class AsyncOperationManager:
         except Exception as e:
             if buffers is not None:
                 try:
-                    # Gathers enqueued before the error may still write into them.
+                    # Gathers enqueued before the error may still read the blocks.
+                    # They also still write into the buffers.
                     self._save_stream.synchronize()
                 except Exception as sync_error:
                     # Keep the buffers alive and out of the pool.
