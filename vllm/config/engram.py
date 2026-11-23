@@ -45,8 +45,8 @@ class EngramConfig:
 
     cpu_offload: bool = True
     """Store embedding weights in host memory. NVLink peer groups use local
-    Grace host memory when enabled and HBM when disabled. In `per_token` mode the table stays
-    on the GPU."""
+    Grace host memory when enabled and HBM when disabled. In `per_token` mode
+    the table stays on the GPU."""
 
     disk_offload: bool = False
     """Keep Qwen4Exp PLE tables in the checkpoint files and read each step's

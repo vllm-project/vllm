@@ -292,8 +292,8 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 )
                 prev_block_output = prev_injection = None
 
-            if input_ids is None or query_start_loc is None or ngram_context is None:
-                raise RuntimeError("PLE inputs were not prepared")
+            if input_ids is None:
+                raise RuntimeError("PLE requires input_ids")
             hidden_states = self.ple(
                 hidden_states,
                 input_ids,

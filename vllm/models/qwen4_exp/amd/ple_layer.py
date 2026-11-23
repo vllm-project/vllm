@@ -326,10 +326,14 @@ class Qwen4ExpNGramEmbedding(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        query_start_loc: torch.Tensor,
-        ngram_context: torch.Tensor,
+        query_start_loc: torch.Tensor | None,
+        ngram_context: torch.Tensor | None,
     ) -> torch.Tensor:
         """Return full embeddings or a token shard after combining vocabulary owners."""
+        if query_start_loc is None or ngram_context is None:
+            raise RuntimeError(
+                "N-gram PLE requires request boundaries and token history"
+            )
         input_ids = input_ids.reshape(-1)
         ngram_ids = input_ids.new_empty(
             (input_ids.shape[0], self.ngram_heads), dtype=torch.int64
@@ -528,7 +532,7 @@ class Qwen4ExpPerTokenEmbedding(nn.Module):
             raise ValueError(
                 "ple_embedding_mode='per_token' but "
                 "'...ple_embedding.per_token_table.weight' was never loaded "
-                "(still NaN) or contains NaN: the checkpoint has no such tensor "
+                "(still NaN) or contains NaN "
                 f"(expected shape {(self.vocab_size, self.embedding_dim)}, "
                 f"dtype {self.params_dtype}). Export a per-token checkpoint or "
                 "use ple_embedding_mode='ngram'."
@@ -966,8 +970,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self,
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor,
-        query_start_loc: torch.Tensor,
-        ngram_context: torch.Tensor,
+        query_start_loc: torch.Tensor | None,
+        ngram_context: torch.Tensor | None,
     ) -> torch.Tensor:
         input_ids = input_ids.reshape(-1)
         if (

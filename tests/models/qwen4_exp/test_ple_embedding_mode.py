@@ -25,6 +25,7 @@ from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPerTokenEmbedding
 from vllm.models.qwen4_exp.common.ple_mode import (
     validate_ple_embedding_config,
 )
+from vllm.platforms import current_platform
 
 from .test_ple import _build_amd_ngram_embedding
 
@@ -117,6 +118,26 @@ def test_per_token_forward_matches_manual_indexing() -> None:
     )
     assert torch.equal(out2, out)
     assert module.dequantize(out, torch.float16) is out
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="per-token PLE requires ROCm"
+)
+def test_per_token_runner_omits_ngram_capture_inputs(tmp_path) -> None:
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.models.qwen4_exp.amd.model_state import Qwen4ExpModelState
+
+    _config(
+        architectures=["Qwen4ExpForCausalLM"], ple_embedding_mode="per_token"
+    ).save_pretrained(tmp_path)
+    config = EngineArgs(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        max_model_len=128,
+    ).create_engine_config()
+    state = Qwen4ExpModelState(config, nn.Module(), None, torch.device("cpu"))
+    inputs = state.prepare_dummy_inputs(num_reqs=2, num_tokens=4)
+    assert {"query_start_loc", "ngram_context"}.isdisjoint(inputs)
 
 
 def test_per_token_out_of_range_ids_are_clamped() -> None:
@@ -215,7 +236,6 @@ def test_ngram_mode_skips_per_token_checkpoint_tensor(monkeypatch) -> None:
 )
 def test_model_config_rejects_unsupported_ple_mode(monkeypatch, mode, error, message):
     from vllm.model_executor.models.config import Qwen4ExpForConditionalGenerationConfig
-    from vllm.platforms import current_platform
 
     config = SimpleNamespace(
         cache_config=CacheConfig(),

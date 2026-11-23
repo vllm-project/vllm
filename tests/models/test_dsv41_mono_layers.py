@@ -534,12 +534,11 @@ def _merged_matches_two_launches(vllm_runner, monkeypatch) -> None:
 @pytest.mark.parametrize(
     ("tp", "rows", "engram_mode"),
     [
-        (2, 8, "ngram"),
-        (4, 8, "ngram"),
-        (4, 42, "ngram"),
-        (8, 8, "ngram"),
-        (8, 28, "ngram"),
-        (8, 42, "ngram"),
+        # The TP8 Buildkite step selects the original tp-rows node IDs.
+        *[
+            pytest.param(tp, rows, "ngram", id=f"{tp}-{rows}")
+            for tp, rows in sorted(set(CASES["cdna4"] + CASES["gfx942"]))
+        ],
         (2, 8, "per_token"),
         (4, 8, "per_token"),
     ],

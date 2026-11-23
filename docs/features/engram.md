@@ -293,8 +293,8 @@ The per-token table of each Engram layer is a regular bf16 checkpoint tensor,
 `[engram_compressed_vocab_size, n_hash_cols, head_dim]` (for example
 `[99092, 24, 256]`). Loading fails with an error naming the tensor when the
 checkpoint lacks it or it holds NaN values, and when it has another dtype or
-shape. The n-gram tables of the checkpoint are not read: a checkpoint without
-them can be served, and they are skipped if present. Likewise, `ngram` mode
+shape. A per-token checkpoint can omit the n-gram tables. If present, the model
+loader skips them during weight assignment. Likewise, `ngram` mode
 skips the per-token tables, so a checkpoint that carries both can be served in
 either mode.
 
@@ -308,10 +308,10 @@ Engram data-parallel group is formed. The mode is experimental, ROCm only.
 
 ## PLE embedding mode (Qwen4Exp, ROCm)
 
-On ROCm, `Qwen4ExpForCausalLM` selects the same kind of lookup with a
-`ple_embedding_mode` field in the text config, not with `--engram-config`. It
-can be set through `--hf-overrides`, nested under `text_config` (a top-level
-override is ignored and silently leaves the default `ngram`):
+On ROCm, Qwen4Exp reads `ple_embedding_mode` from the text config. For a
+multimodal checkpoint such as `Qwen4ExpForConditionalGeneration`, nest the
+override under `text_config`. For a standalone text config, set
+`ple_embedding_mode` at the top level.
 
 ```bash
 vllm serve <model> --hf-overrides '{"text_config": {"ple_embedding_mode": "per_token"}}'
