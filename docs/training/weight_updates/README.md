@@ -6,6 +6,7 @@ vLLM provides a pluggable weight update system for synchronizing model weights f
 
 | Topic | Document | Key Flags / Concepts |
 | --- | --- | --- |
+| **Trainer without importing vLLM (HTTP-only)** | [Trainer Without Importing vLLM](#trainer-without-importing-vllm-http-only) | `VLLM_SERVER_DEV_MODE=1`, [NCCL](engines/nccl.md#trainer-without-vllm-over-http) & [IPC](engines/ipc.md#trainer-without-vllm-over-http) wire contracts |
 | **In-place reload (default)** | [Direct Weight Reload](direct_reload.md) | `VLLM_RELOAD_MODE=auto`, Refused Configurations, online quantization |
 | **Layerwise reload & QeRL** | [Layerwise (Re)loading](layerwise.md) | `VLLM_RELOAD_MODE=layerwise`, online quantization, CUDA graph preservation |
 | **Correctness verification** | [Weight Checker](weight_checker.md) | SHA-256 parameter digest verification across ranks |
@@ -70,10 +71,10 @@ llm = LLM(
 )
 ```
 
-Or, for online serving:
+Or, for online serving (set `VLLM_SERVER_DEV_MODE=1` to expose the HTTP weight-transfer endpoints):
 
 ```bash
-vllm serve my-model \
+VLLM_SERVER_DEV_MODE=1 vllm serve my-model \
     --weight-transfer-config '{"backend": "nccl"}'
 ```
 
@@ -115,6 +116,23 @@ trainer's broadcast, since both rendezvous inside the same NCCL calls).
 
 There is no `backend=` argument on the trainer side: each `TrainerInitInfo`
 subclass declares its own `backend`, and the factory dispatches on it.
+
+### Trainer Without Importing vLLM (HTTP-Only)
+
+If your trainer runs in a separate environment (different PyTorch/vLLM version,
+or a non-PyTorch framework such as JAX), it does **not** need to install or
+import `vllm`. Start the server with `VLLM_SERVER_DEV_MODE=1` (and
+`VLLM_ALLOW_INSECURE_SERIALIZATION=1` for IPC) and speak the four-phase
+[HTTP endpoints](#api-endpoints) directly alongside the data-plane wire contract:
+
+- **NCCL (separate GPUs)**: [NCCL wire contract](engines/nccl.md#trainer-without-vllm-over-http) · example [`rlhf_http_nccl_no_vllm.py`](../../../examples/rl/rlhf_http_nccl_no_vllm.py)
+- **IPC (colocated GPUs)**: [IPC wire contract](engines/ipc.md#trainer-without-vllm-over-http) · example [`rlhf_http_ipc_no_vllm.py`](../../../examples/rl/rlhf_http_ipc_no_vllm.py)
+
+Key invariants when driving the HTTP protocol directly:
+
+- **NCCL concurrency**: send `/init_weight_transfer_engine` and `/update_weights` in the background while the trainer joins/broadcasts on NCCL, otherwise both sides deadlock.
+- **NCCL warm-up**: immediately after init, issue a matching `all_reduce` (sum) of `torch.zeros(1)` (`float32`) before any weight broadcast.
+- **Failure recovery**: if `/update_weights` fails, `/health` remains 200 while `/finish_weight_update` is rejected; resend a full `/start_weight_update` → `/update_weights` → `/finish_weight_update` cycle before generating again.
 
 ## Where Each Setting Lives
 
