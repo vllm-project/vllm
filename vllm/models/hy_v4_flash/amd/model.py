@@ -88,7 +88,7 @@ class HYV4FlashModel(HYV4Model):
         self.loaded_parts: dict[str, set[Any]] = {}
         self.engram_hash = None
         if self.config.engram_layer_ids:
-            from ..nvidia.engram import FlashEngram, FlashNgramHashState
+            from .engram import FlashEngram, FlashNgramHashState
 
             self.engram_hash = FlashNgramHashState(
                 self.config, dummy=vllm_config.load_config.load_format == "dummy"

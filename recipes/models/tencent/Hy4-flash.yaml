@@ -5,7 +5,7 @@ meta:
   provider: "Hunyuan (Tencent)"
   description: "Tencent HY4 Flash multimodal MoE for everyday productivity and agent workflows — 220B total / 12B active, 1M context, DFly speculative decoding"
   date_added: 2026-11-17
-  date_updated: 2026-11-22
+  date_updated: 2026-11-23
   tasks:
     - text
     - multimodal
@@ -96,6 +96,13 @@ hardware_overrides:
       # past 4 GiB of cache. Remove once vLLM's AITER includes ROCm/aiter#6277.
       VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: "1"
 
+notes:
+  - title: "TEP is not validated on AMD"
+    when: { hardware: [amd], strategies: [single_node_tep] }
+    body: |
+      Only TP8 has been run on MI355X. Expert parallelism
+      (`--enable-expert-parallel`) has not been validated on ROCm yet.
+
 guide: |
   ## Overview
 
@@ -137,9 +144,10 @@ guide: |
 
   ## AMD (8x MI355X)
 
-  Both checkpoints are verified on 8x MI355X with TP8 and DFly. MI350X is the
-  same gfx950 architecture and is supported, but has not been run. The ROCm
-  path needs gfx950, so MI300X and MI325X are not supported.
+  Both checkpoints are verified on 8x MI355X with TP8 and DFly; TEP has not
+  been run on AMD. MI350X is the same gfx950 architecture and is supported,
+  but has not been run. The ROCm path needs gfx950, so MI300X and MI325X are
+  not supported.
 
   ```bash
   docker run --device=/dev/kfd --device=/dev/dri --group-add video \

@@ -14,7 +14,7 @@ from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_fp8_paged_mqa_logits
 
 from ..nvidia.indexpool_cache import POOL_PAGE_SIZE, IndexPoolCache, IndexPoolMetadata
-from ..nvidia.indexpool_ops import (
+from .indexpool_ops import (
     expand_groups,
     fwht_quantize,
     gated_pool,
@@ -22,7 +22,7 @@ from ..nvidia.indexpool_ops import (
     select_groups,
     write_pool,
 )
-from ..nvidia.indexpool_prepare import prepare_groups, write_tails
+from .indexpool_prepare import prepare_groups, write_tails
 
 
 class FlashCompressedIndexer(nn.Module):

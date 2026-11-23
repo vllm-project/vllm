@@ -14,7 +14,7 @@ if not current_platform.is_rocm():
     pytest.skip("HYV4 Flash ROCm sparse indices", allow_module_level=True)
 
 from vllm.models.hy_v4_flash.amd import swa
-from vllm.models.hy_v4_flash.nvidia.indexpool_ops import expand_groups, select_groups
+from vllm.models.hy_v4_flash.amd.indexpool_ops import expand_groups, select_groups
 
 DEVICE = "cuda"
 # (seq_len, query_len) per request: decode, short and long extend, an empty

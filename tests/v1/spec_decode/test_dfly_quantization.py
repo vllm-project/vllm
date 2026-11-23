@@ -3,6 +3,7 @@
 """DFly accepts any compressed-tensors target scheme, while draft layers stay
 BF16 or blockwise FP8, the formats their weight loader reads."""
 
+import importlib
 import json
 
 import pytest
@@ -13,7 +14,11 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="HY4 DFly requires CUDA"
+    not current_platform.is_cuda_alike(), reason="HY4 DFly requires CUDA or ROCm"
+)
+# The engine-level checks use NVFP4 targets.
+requires_cuda = pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="NVFP4 targets require CUDA"
 )
 
 EXPERTS = r"re:.*mlp\.experts\.\d+\.(gate_proj|up_proj|down_proj)$"
@@ -82,12 +87,14 @@ def _create_engine_config(path, quantization_config):
     ).create_engine_config()
 
 
+@requires_cuda
 @pytest.mark.parametrize("scheme", [NVFP4, INT4], ids=["nvfp4", "int4"])
 def test_target_scheme_is_unrestricted(tmp_path, scheme):
     config = _create_engine_config(tmp_path, _quantization_config(scheme, EXPERTS))
     assert config.speculative_config.method == "dfly"
 
 
+@requires_cuda
 def test_target_kv_cache_scheme_is_rejected(tmp_path):
     kv_scheme = {**FLOAT_ARGS, "num_bits": 8, "strategy": "tensor"}
     quant = _quantization_config(NVFP4, EXPERTS, kv_cache_scheme=kv_scheme)
@@ -104,7 +111,10 @@ def test_draft_scheme_is_restricted(scheme, supported):
     from vllm.model_executor.layers.quantization.compressed_tensors import (
         compressed_tensors,
     )
-    from vllm.models.hy_v4.nvidia.dfly import HYV4DFlyQuantizationConfig
+
+    vendor = "amd" if current_platform.is_rocm() else "nvidia"
+    dfly = importlib.import_module(f"vllm.models.hy_v4.{vendor}.dfly")
+    HYV4DFlyQuantizationConfig = dfly.HYV4DFlyQuantizationConfig
 
     target = r"re:model\.dfly_layers\.\d+\.mlp\.down_proj$"
     source = compressed_tensors.CompressedTensorsConfig.from_config(

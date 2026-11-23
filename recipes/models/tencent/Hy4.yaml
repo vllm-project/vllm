@@ -5,7 +5,7 @@ meta:
   provider: "Hunyuan (Tencent)"
   description: "Tencent HY4 flagship multimodal MoE — 774B total / 49B active, 1M context, hy_v4 tool and reasoning parsers, DFly2 speculative decoding"
   date_added: 2026-11-20
-  date_updated: 2026-11-22
+  date_updated: 2026-11-23
   tasks:
     - text
     - multimodal
@@ -19,7 +19,7 @@ meta:
     mi300x: unsupported
     mi325x: unsupported
     mi350x: supported
-    mi355x: verified
+    mi355x: supported
 
 model:
   model_id: "tencent/Hy4"
@@ -165,9 +165,10 @@ guide: |
 
   ## AMD (8x MI355X)
 
-  The FP8 checkpoint is verified on 8x MI355X with TP8 and DFly2. MI350X is
-  the same gfx950 architecture and is supported, but has not been run. The
-  ROCm path needs gfx950, so MI300X and MI325X are not supported.
+  The FP8 checkpoint has been run on 8x MI355X with TP8 and DFly2, but not
+  yet with the command the builder renders for AMD (Rust frontend), so MI355X
+  is not marked verified. MI350X is the same gfx950 architecture. The ROCm
+  path needs gfx950, so MI300X and MI325X are not supported.
 
   ```bash
   docker run --device=/dev/kfd --device=/dev/dri --group-add video \

@@ -22,8 +22,7 @@ vllm serve tencent/Hy4-flash-FP8 \
 
 ## Supported configurations
 
-- NVIDIA GPUs, or AMD MI355X (gfx950) GPUs for HY4 Flash targets, and the
-  GPU Model Runner V2.
+- NVIDIA GPUs or AMD MI355X (gfx950) GPUs, and the GPU Model Runner V2.
 - HY4 and HY4 Flash checkpoints with compatible DFly configuration and draft
   weights.
 - BF16 computation with unquantized weights, online MoE-only block FP8
@@ -50,7 +49,8 @@ heterogeneous vocabularies, adaptive verification, and a separate draft
 attention backend.
 
 On ROCm, DFly is validated with HY4 Flash BF16 (`tencent/Hy4-flash`) and FP8
-on eight MI355X GPUs:
+on eight MI355X GPUs. HY4 targets and other target quantization schemes, such
+as NVFP4 experts or MXFP4, are accepted on ROCm but have not been validated:
 
 ```bash
 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1 \
