@@ -335,6 +335,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // BF16/FP32 x FP32 -> FP32 router GEMM for H=3072, E=256, M<=32 (SM90+).
   // conditionally compiled so impl registration is in source file
   ops.def("fp32_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
+
+  // HY V4 iHC boundary: optional post step, pre and RMSNorm (SM90+).
+  // conditionally compiled so impl registration is in source file
+  ops.def(
+      "hy_v4_ihc_boundary(Tensor residual, Tensor? x, Tensor? post, "
+      "Tensor weight, Tensor hc_scale, Tensor hc_base, Tensor? norm_weight, "
+      "float magnitude, float hc_eps, float rms_eps, float variance_eps, "
+      "bool round_before_norm, bool fp8_out=False) -> "
+      "(Tensor, Tensor, Tensor, Tensor, Tensor)");
 #endif
 
   // Merge attn states
@@ -626,7 +635,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor positions, Tensor seq_idx, Tensor slots, Tensor block_table, "
       "Tensor query_start, int stream_offset, int stream_width, "
       "float conv_scale, Tensor? residual, Tensor? addend, Tensor! conv_out, "
-      "Tensor stack, Tensor? last, Tensor queries, Tensor norm_weight, "
+      "Tensor stack, Tensor? last, Tensor queries, Tensor? norm_weight, "
       "float eps, float norm_eps, Tensor! out) -> ()");
   // Its short conv and AttnRes mix on an already reduced input.
   ops.def(
@@ -634,7 +643,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor positions, Tensor seq_idx, Tensor slots, Tensor block_table, "
       "Tensor query_start, int stream_offset, int stream_width, "
       "float conv_scale, Tensor? residual, Tensor? addend, Tensor! conv_out, "
-      "Tensor stack, Tensor? last, Tensor queries, Tensor norm_weight, "
+      "Tensor stack, Tensor? last, Tensor queries, Tensor? norm_weight, "
       "float eps, float norm_eps, Tensor! out) -> ()");
   // Its sequence-parallel collectives: the reduce-scatter of the partial
   // sums, and the conv + mix of a token shard that all-gathers the mixes.
