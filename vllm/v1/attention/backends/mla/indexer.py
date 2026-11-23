@@ -1035,11 +1035,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
         self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
         # Plan prefill chunks for the fused MQA+top-k kernel (not bounded by
-        # the logits budget). PCP + DCP has its own planner. v4.1 candidate
-        # selection is not excluded: its pre-candidate indexers take
-        # fused_mqa_topk and the others row-split their dense logits. Indexers
-        # that pad their heads to 32 run fused_mqa_topk on budget-planned
-        # chunks.
+        # the logits budget). v4.1 candidate selection is not excluded: its
+        # pre-candidate indexers take fused_mqa_topk and the others row-split
+        # their dense logits. Indexers that pad their heads to 32 run
+        # fused_mqa_topk on budget-planned chunks.
         model_config = self.vllm_config.model_config
         cfg = model_config.hf_text_config if model_config is not None else None
         self.fused_mqa_topk_eligible = cfg is not None and use_fused_mqa_topk(
@@ -1050,7 +1049,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             topk=getattr(cfg, "index_topk", 0)
             // (getattr(cfg, "index_kpool", None) or 1),
             fp4_cache=self.indexer_uses_fp4,
-            full_context=self.dcp_world_size == 1,
+            full_context=self.use_pcp or self.dcp_world_size == 1,
         )
 
         next_n = self.num_speculative_tokens + 1
@@ -1395,6 +1394,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             torch.from_numpy(query_lens.astype(np.int32)),
             self.max_prefill_buffer_size,
             max_logits_bytes,
+            fused_mqa_topk_eligible=self.fused_mqa_topk_eligible,
         )
         return [
             (

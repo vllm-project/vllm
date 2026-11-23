@@ -11,6 +11,7 @@ from types import MethodType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 
@@ -38,6 +39,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
 )
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+    fused_mqa_topk_available,
+)
 from vllm.model_executor.layers.attention import mla_attention
 from vllm.model_executor.layers.attention import (
     sparse_mla_attention as sparse_mla_module,
@@ -137,6 +141,7 @@ from vllm.v1.hisparse.runtime import (
     hisparse_prefill_staging_remap,
 )
 from vllm.v1.hisparse.types import SparseKVRowMirror
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 if current_platform.is_rocm():
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
@@ -2391,6 +2396,79 @@ def test_split_indexer_prefill_chunks_single_request_overflow():
     # req1: M=5, N=50 -> 250 elems fits budget
     expected.append((slice(1, 2), slice(0, 5)))
     assert out == expected
+
+
+@pytest.mark.parametrize(
+    "fused_mqa_topk_eligible,context,rows,expected_rows",
+    [
+        # One rank of PCP4 x DCP4 at C=16384 over 1M keys, 512 MiB budget.
+        (False, 1024000, 4096, [131] * 31 + [35]),
+        (True, 1024000, 4096, [4096]),
+        # Rows per fused_mqa_topk chunk stay capped.
+        (True, 1024000, 20000, [16384, 3616]),
+        # Past the kernel's key limit, the logits budget bounds the rows.
+        (True, 2**20 + 4, 4096, [127] * 32 + [32]),
+    ],
+)
+def test_split_pcp_dcp_prefill_chunks_plans_for_fused_mqa_topk(
+    fused_mqa_topk_eligible, context, rows, expected_rows
+):
+    """PCP + DCP all-gathers each chunk's context, so chunks whose indexer
+    may run fused_mqa_topk are not bounded by the dense logits budget."""
+    builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
+    builder.dcp_world_size = 4
+    builder.fused_mqa_topk_eligible = fused_mqa_topk_eligible
+    builder.max_prefill_buffer_size = 40 * 2**20
+    chunks = builder._split_pcp_dcp_prefill_chunks(
+        np.zeros(1, dtype=np.int64),
+        np.array([-(-context // 4)]),
+        torch.tensor([rows]),
+        512 * 2**20,
+        request_offset=0,
+    )
+    assert all(request_rows == slice(0, 1) for request_rows, _ in chunks)
+    assert [q.stop - q.start for _, q in chunks] == expected_rows
+
+
+@pytest.mark.skipif(
+    not fused_mqa_topk_available(), reason="Requires the fused MQA+top-k kernel"
+)
+@pytest.mark.parametrize(
+    "pcp,dcp,eligible", [(1, 1, True), (4, 1, True), (1, 4, False), (4, 4, True)]
+)
+def test_indexer_builder_plans_fused_mqa_topk_like_the_layer(
+    tmp_path, dist_init, pcp, dcp, eligible
+):
+    """The indexer layer runs fused_mqa_topk when every rank ranks its rows
+    over the whole context: without DCP, or under PCP + DCP after the KV
+    all-gather. The builder plans its chunks by the same rule."""
+    from transformers import LlamaConfig
+
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=4096,
+        index_n_heads=32,
+        index_head_dim=128,
+        index_topk=2048,
+    ).save_pretrained(tmp_path)
+    vllm_config = create_vllm_config(model_name=str(tmp_path), max_model_len=4096)
+    vllm_config.parallel_config.prefill_context_parallel_size = pcp
+    vllm_config.parallel_config.decode_context_parallel_size = dcp
+    builder = DeepseekV32IndexerMetadataBuilder(
+        kv_cache_spec=MLAAttentionSpec(
+            block_size=64, num_kv_heads=1, head_size=128, dtype=torch.uint8
+        ),
+        layer_names=["layer"],
+        vllm_config=vllm_config,
+        device=torch.device("cuda:0"),
+        block_table_width=64,
+    )
+    assert builder.fused_mqa_topk_eligible is eligible
 
 
 # Power-of-two, GLM's padded tile, and atomic fallback, with reused buffers.

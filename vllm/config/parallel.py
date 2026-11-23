@@ -580,6 +580,51 @@ class ParallelConfig:
     in the group.
     """
 
+    pcp_dcp_kv_prefetch: bool = False
+    """Under PCP + DCP prefill with the FlashMLA sparse backend and the fp8_ds_mla KV
+    cache, gather each layer's KV context from the other DCP ranks with the copy
+    engines while the previous layer runs its attention, instead of all-gathering it
+    right before this layer's attention. Rows travel as raw FP8 cache rows and are
+    upconverted by the receiver. The rows of the current chunk, which every rank
+    holds after the PCP all-gather, are staged locally. A layer that reuses the
+    top-k of the layer before it (a later layer of an index group) receives only the
+    rows that top-k selects: their number is predicted from the previous step and
+    completed on the device, so the host never waits for it. The copies go out in
+    chunks of at most 16 MiB: the MoE all-to-all shares the links, and one copy per
+    peer would slow it down more. The first layer of a step keeps the serial
+    all-gather. Acts in eager mode and under a breakable CUDA graph, whose attention
+    runs eagerly between the captured segments.
+
+    Needs symmetric memory across the DCP group. It adds per-rank buffers that are
+    not shared with other scratch: a BF16 KV shard and a gathered region of the
+    prefill workspace size, which must hold two layers' context for a step to be
+    prefetched, FP8 buffers for one layer's context and, for models with index
+    groups, a copy of the top-k buffer and a few bytes per gathered row for the
+    selected rows. Steps it cannot serve,
+    such as batches with several requests or with decode tokens, use the serial
+    all-gather. Requires `prefill_context_parallel_size > 1` and
+    `decode_context_parallel_size > 1`."""
+
+    pcp_dcp_gather_overlap: bool = False
+    """Under PCP + DCP prefill of DeepSeek V3.2-style sparse attention models, take
+    the gathers of the indexer off the main stream. Each layer's new KV and indexer
+    K rows are gathered over symmetric memory on an auxiliary stream, from the moment
+    they are computed until they are written to the caches: with the copy engines in
+    eager mode, and under a breakable CUDA graph by one copy kernel recorded into
+    the graph beside the projections that follow the rows.
+    Every rank keeps a whole-context replica of each indexer layer's K, appended
+    from those rows, so the top-k reads its K locally; a layer without a replica
+    gathers its K serially. A request whose earlier rows are not in the replica (a
+    prefix cache hit, a resumed request) rebuilds it once from the sharded cache.
+
+    The replica costs `(max_model_len + 4096) * (index_head_dim + 4)` bytes per
+    indexer layer on every rank, taken from the KV cache capacity, and is not kept
+    with a KV connector. Applies to prefill steps without decode tokens, eager or
+    under a breakable CUDA graph, the indexer K only to single-request steps, when
+    the PCP and DCP groups both span every rank in order and symmetric memory is
+    available; other steps use the serial gathers. Requires
+    `prefill_context_parallel_size > 1` and `decode_context_parallel_size > 1`."""
+
     cp_kv_cache_interleave_size: int = 1
     """Interleave size of kv_cache storage while using DCP.
     Store interleave_size tokens on dcp_rank i, then store next
@@ -766,6 +811,16 @@ class ParallelConfig:
                 "axis, or span the full TP x PCP axis. "
                 f"Got TP={tp}, PCP={pcp}, DCP={dcp}; valid DCP sizes are "
                 f"{sorted({1, pcp, tp * pcp})}."
+            )
+        if self.pcp_dcp_kv_prefetch and (pcp == 1 or dcp == 1):
+            raise ValueError(
+                "pcp_dcp_kv_prefetch requires prefill_context_parallel_size > 1 "
+                f"and decode_context_parallel_size > 1, got PCP={pcp}, DCP={dcp}."
+            )
+        if self.pcp_dcp_gather_overlap and (pcp == 1 or dcp == 1):
+            raise ValueError(
+                "pcp_dcp_gather_overlap requires prefill_context_parallel_size > 1 "
+                f"and decode_context_parallel_size > 1, got PCP={pcp}, DCP={dcp}."
             )
 
         return self

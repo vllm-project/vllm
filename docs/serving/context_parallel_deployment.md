@@ -34,6 +34,50 @@ This configuration requires PP=DP=DCP=1 and does not support microbatching,
 speculative decoding, KV transfer, prefix caching, MegaMoE, or the ROCm
 monokernel. TP and PCP multiply, so TP=2 with PCP=2 requires four GPUs.
 
+### Overlapping the KV all-gather under PCP + DCP
+
+When PCP and DCP are combined (for example `-pcp 4 -dcp 4`), each rank stores one
+DCP shard of the KV cache, so every sparse MLA prefill layer all-gathers the whole
+context before its attention. For long contexts this all-gather is a large part of
+the prefill step. With the FlashMLA sparse backend and the `fp8_ds_mla` KV cache,
+`--pcp-dcp-kv-prefetch` gathers the next layer's context through the copy engines
+while the current layer attends: the rows that existed before the step travel as raw
+FP8 cache rows over symmetric memory and are upconverted by the receiver, and the
+rows of the current chunk, which every rank already holds after the PCP all-gather,
+are staged locally. In models whose later layers reuse the top-k of an indexer
+layer (index groups), such a layer receives only the rows that top-k selects. The
+host predicts how many rows to copy from the previous step and a small kernel
+copies any rows the prediction missed, so the host never waits for the device.
+The first layer of each step keeps the serial all-gather, since no earlier layer
+can prefetch it. The copies go out in chunks of at most 16 MiB: the MoE all-to-all
+shares the links, and one copy per peer would slow it down more. It needs
+symmetric memory across the DCP group and dedicated buffers of about the prefill
+workspace size plus one layer's context in FP8 (plus a copy of the top-k buffer
+for index groups), and falls back to the serial all-gather for batches it cannot
+serve, such as several requests or decode tokens in one step.
+
+For DeepSeek V3.2-style models, `--pcp-dcp-gather-overlap` additionally takes the
+indexer's gathers off the main stream: each layer's new KV and indexer K rows are
+gathered on an auxiliary stream (with the copy engines in eager mode, and by one
+copy kernel recorded into the CUDA graph beside the projections otherwise), and
+every rank keeps a whole-context replica of each indexer layer's K, appended from
+those rows, so the top-k reads its K locally. The replica costs
+`(max_model_len + 4096) * (index_head_dim + 4)` bytes per indexer layer on every
+rank, taken from the KV cache capacity. A request whose earlier rows are not in
+the replica (a prefix cache hit, a resumed request) rebuilds it once from the
+sharded cache with the serial gather. It applies when the PCP and DCP groups span
+the same ranks in the same order (for example `-tp 1 -pcp 4 -dcp 4`) and falls
+back to the serial gathers otherwise.
+
+Both options act in eager mode (`--enforce-eager`) and under the default breakable
+CUDA graph, where the indexer and the attention run eagerly between the captured
+segments. The two options are independent and can be combined:
+
+```bash
+vllm serve <model> -tp 1 -pcp 4 -dcp 4 --enable-expert-parallel \
+    --pcp-dcp-kv-prefetch --pcp-dcp-gather-overlap
+```
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.
