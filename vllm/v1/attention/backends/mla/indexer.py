@@ -567,12 +567,17 @@ class BuildPrefillChunkMetadataKernel(
         dcp_interleave = parallel_config.cp_kv_cache_interleave_size
         dcp_rank = get_dcp_group().rank_in_group if dcp_world > 1 else 0
         dcp_cases = [dict(DCP_RANK=dcp_rank, DCP_WORLD=dcp_world)]
-        if parallel_config.prefill_context_parallel_size > 1 and dcp_world > 1:
+        if dcp_world > 1 and (
+            parallel_config.prefill_context_parallel_size > 1
+            or vllm_config.attention_config.sparse_mla_shard_q
+        ):
             # PCP+DCP prefill constructs a global PCP chunk plan and therefore
-            # dispatches this kernel with already-localized row starts. The
-            # runtime key is normalized to rank 0/world 1 in that path; warm it
-            # explicitly so one PCP rank cannot enter a collective while
-            # another rank is still compiling the first real inference batch.
+            # dispatches this kernel with already-localized row starts, and a
+            # DCP ShardQ step plans its chunks over a gathered, non-DCP
+            # context. The runtime key is normalized to rank 0/world 1 in those
+            # paths; warm it explicitly so one rank cannot enter a collective
+            # while another rank is still compiling the first real inference
+            # batch.
             dcp_cases.append(dict(DCP_RANK=0, DCP_WORLD=1))
         compress_ratios = tuple(
             dict.fromkeys(
@@ -1000,8 +1005,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.pcp_rank = get_pcp_group().rank_in_group if self.use_pcp else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         # Whether a main MLA layer reads these indexers' top-k token-sharded.
+        # Under DCP the MLA layer's gathered context plans them instead
+        # (vllm.v1.attention.ops.dcp_shardq).
         layers = self.vllm_config.compilation_config.static_forward_context
-        self.use_shardq = any(
+        self.use_shardq = self.dcp_world_size == 1 and any(
             getattr(layers.get(name), "use_shardq", False) for name in self.layer_names
         )
         if self.use_shardq:
@@ -2018,14 +2025,29 @@ def build_prefill_chunk_metadata(
         this_rank_counts = local_seq_lens[:, dcp_rank].to(torch.int32)
         local_cu_seq_lens = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
         torch.cumsum(this_rank_counts, dim=0, out=local_cu_seq_lens[1:])
-        local_total_seq_lens = int(local_cu_seq_lens[-1].item())
-        max_local_total_seq_lens = int(local_seq_lens.sum(dim=0).max().item())
+        # The host extents come from the CPU copy of the same lengths. Reading
+        # them off the device tensors would sync the metadata build with the
+        # GPU, which under async scheduling drains the previous step first.
+        local_seq_lens_cpu = get_dcp_local_seq_lens(
+            compressed_seq_lens_cpu[start_idx:end_idx],
+            dcp_world_size,
+            None,
+            cp_kv_cache_interleave_size,
+        )
+        local_total_seq_lens = int(local_seq_lens_cpu[:, dcp_rank].sum())
+        max_local_total_seq_lens = int(local_seq_lens_cpu.sum(dim=0).max())
 
     query_start_loc = (
         query_start_loc[start_idx : end_idx + 1] - query_start_loc[start_idx]
     )
     if positions is not None:
-        positions = positions[query_start_loc_cpu[start_idx] :]
+        positions = positions[
+            query_start_loc_cpu[start_idx] : query_start_loc_cpu[end_idx]
+        ]
+        if positions.data_ptr() % 16:
+            # The kernel is warmed up for a 16-byte aligned pointer; leading
+            # decode tokens shift a chunk's slice off it.
+            positions = positions.clone()
 
     total_query_len = int(
         (query_start_loc_cpu[end_idx] - query_start_loc_cpu[start_idx]).item()
