@@ -1504,7 +1504,7 @@ def test_cpu_swa_builder_decode_step_reads_every_layer_type():
         DeepseekV4CPUSparseSWAMetadataBuilder,
     )
     from vllm.v1.attention.backend import CommonAttentionMetadata
-    from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     device = torch.device("cpu")
     window = 8
@@ -1514,12 +1514,11 @@ def test_cpu_swa_builder_decode_step_reads_every_layer_type():
         max_num_seqs=8,
         hf_config_override={"sliding_window": window},
     )
-    spec = SlidingWindowMLASpec(
+    spec = MLAAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=1,
         head_size=512,
         dtype=torch.bfloat16,
-        sliding_window=window,
         cache_dtype_str="auto",
         model_version="deepseek_v4",
     )
