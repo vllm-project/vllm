@@ -4,7 +4,7 @@
 import json
 import time
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import TYPE_CHECKING, ClassVar, Literal, TypeAlias
 
 from fastapi import HTTPException, UploadFile
 from pydantic import (
@@ -184,7 +184,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     # --8<-- [end:transcription-sampling-params]
 
     # Default sampling parameters for transcription requests.
-    _DEFAULT_SAMPLING_PARAMS: dict = {
+    _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
         "repetition_penalty": 1.0,
         "temperature": 1.0,
         "top_p": 1.0,
@@ -208,6 +208,7 @@ class TranscriptionRequest(OpenAIBaseModel):
             request_prompt=self.prompt,
             to_language=self.to_language,
             hotwords=self.hotwords,
+            extra_args=self.vllm_xargs,
         )
 
     def to_beam_search_params(
@@ -423,6 +424,29 @@ class TranscriptionResponseDiarized(OpenAIBaseModel):
     text: str
     segments: list[TranscriptionDiarizedSegment]
     usage: TranscriptionUsageAudio
+
+
+class TranscriptionUsageTokens(OpenAIBaseModel):
+    type: Literal["tokens"] = "tokens"
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+
+
+class TranscriptionTextDeltaEvent(OpenAIBaseModel):
+    """Text added to a streamed diarized transcription."""
+
+    type: Literal["transcript.text.delta"] = "transcript.text.delta"
+    delta: str
+    segment_id: str
+
+
+class TranscriptionTextDoneEvent(OpenAIBaseModel):
+    """Last event of a streamed `diarized_json` transcription."""
+
+    type: Literal["transcript.text.done"] = "transcript.text.done"
+    text: str
+    usage: TranscriptionUsageTokens
 
 
 TranscriptionResponseVariant: TypeAlias = (

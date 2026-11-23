@@ -441,7 +441,7 @@ class M2NWeightTransferEngine(
         )
 
     def start_weight_update(self) -> None:
-        """Set up layerwise reloading, but only if some parameter needs it.
+        """Begin reloading, but only if some parameter needs it.
 
         Directly-resharded parameters are written in place and never go through
         `load_weights`, so a plan with no fallback entries has nothing to
@@ -449,19 +449,17 @@ class M2NWeightTransferEngine(
         """
         if not self._uses_load_weights:
             return
-        from vllm.model_executor.model_loader.reload import (
-            initialize_layerwise_reload,
-        )
+        from vllm.model_executor.model_loader.reload import start_reload
 
-        initialize_layerwise_reload(self.model)
+        start_reload(self.model)
 
     def finish_weight_update(self) -> None:
-        """Finalize layerwise reloading when the plan uses fallback entries."""
+        """Finish reloading when the plan uses fallback entries."""
         if not self._uses_load_weights:
             return
-        from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
+        from vllm.model_executor.model_loader.reload import finish_reload
 
-        finalize_layerwise_reload(self.model, self.model_config)
+        finish_reload(self.model, self.model_config, self.device)
 
     def receive_weights(self, update_info: M2NWeightTransferUpdateInfo) -> None:
         """Receive each requested parameter using its initialization-time plan."""
@@ -485,9 +483,7 @@ class M2NWeightTransferEngine(
                 )
             requested.append((name, index))
 
-        from vllm.model_executor.model_loader.mtp_validation import (
-            disable_mtp_completeness_check,
-        )
+        from vllm.model_executor.model_loader.reload.direct import mark_loaded
 
         stream = torch.cuda.current_stream()
 
@@ -517,21 +513,22 @@ class M2NWeightTransferEngine(
                     # has to have landed before it runs.
                     stream.synchronize()
                     yield name, buffer
+                else:
+                    mark_loaded(self.model, name)  # for the completeness check
 
         has_fallback = any(
             self._parameter_destinations[index].tensor is None for _, index in requested
         )
-        with disable_mtp_completeness_check():
-            received_weights = reshard_requested_weights()
-            if has_fallback:
-                # Some model loaders keep invocation-local state to combine
-                # related checkpoint tensors, so preserve one iterable scope.
-                self.model.load_weights(received_weights)
-            else:
-                # The iterator performs the reshards. With nothing to yield to
-                # `load_weights`, exhaust it here to execute direct transfers.
-                for _ in received_weights:
-                    pass
+        received_weights = reshard_requested_weights()
+        if has_fallback:
+            # Some model loaders keep invocation-local state to combine
+            # related checkpoint tensors, so preserve one iterable scope.
+            self.model.load_weights(received_weights)
+        else:
+            # The iterator performs the reshards. With nothing to yield to
+            # `load_weights`, exhaust it here to execute direct transfers.
+            for _ in received_weights:
+                pass
 
     def _reshard(
         self,

@@ -8,12 +8,6 @@ A "custom" logits processor is written by a user of vLLM and is loaded into vLLM
 
 This document shows how to write, load and use a custom logits processor.
 
-!!! note
-    This document covers the Model Runner V2 (MRV2) interface. The legacy V1
-    model runner (`VLLM_USE_V2_MODEL_RUNNER=0`) uses a different interface,
-    `vllm.v1.sample.logits_processor.LogitsProcessor`, which is not covered
-    here.
-
 ## Logits Processors Background
 
 A logits processor adjusts the next-token probability distribution, usually with the intention of steering the model towards a desired type of behavior.
@@ -33,7 +27,7 @@ Custom logits processors must subclass `vllm.v1.worker.gpu.sample.logits_process
     * Return whether this processor modifies logits for the request. The sampler skips the logits-processing pipeline for batches in which no request needs it
 
 * `apply_staged_writes(self) -> None` (optional):
-    * Flush host-side writes staged by `add_request()` to the device; called once per step before the forward pass
+    * Flush host-side writes staged by `add_request()` to the device; called before the forward pass of every step that admits new requests, so only state set in `add_request()` is flushed. Read data that changes every step from `ctx` in `apply()`
 
 * `validate_params(cls, sampling_params) -> None` (optional classmethod):
     * Raise `ValueError` for invalid per-request arguments (especially custom arguments); runs at request admission, so invalid arguments fail the request instead of reaching the sampler
@@ -70,7 +64,7 @@ The contrived example below implements a custom logits processor which masks out
 
         def __init__(self, vllm_config: "VllmConfig", req_states: LogitsProcRequestState):
             # Per-slot target; -1 means disabled. Staged on the host and
-            # flushed to the device once per step in apply_staged_writes().
+            # flushed to the device in apply_staged_writes().
             self.target_token = torch.full(
                 (req_states.max_num_reqs,), -1, dtype=torch.int64
             )
@@ -113,7 +107,7 @@ This section details different ways of making your logits processor visible to v
 This method is supported in both offline and online vLLM usage scenarios. The custom logits processor's FQCN (in the form of `dotted.path.to.module:ClassName`) can be passed as an argument to the `LLM` and `AsyncLLM` Python constructors, or as a CLI argument to `vllm serve` with the following syntax
 
 ``` bash
-vllm serve ... --logits_processors <logits processor 1> <logits processor 2> ...
+vllm serve ... --logits-processors <logits processor 1> <logits processor 2> ...
 ```
 
 The only requirements on the FQCN are
@@ -148,7 +142,7 @@ See examples below:
 ??? code "Passing custom logits processor FQCN to vLLM server via CLI"
 
     ```bash
-    vllm serve facebook/opt-125m --logits_processors your.module.path:TargetTokenLogitsProcessor
+    vllm serve facebook/opt-125m --logits-processors your.module.path:TargetTokenLogitsProcessor
     ```
 
 ### Method 2: Automatically Detect Custom Logits Processors Installed in Your Python Environment As Entry Points
@@ -264,6 +258,6 @@ The examples below show how a user would pass a custom argument (`target_token`)
 
     2. **The conditions under which the logits processor is or is not enabled on a per-request basis.** Unless your intention is for the custom logits processor to act on all requests all the time, you should write your logits processor in such a way that it is possible to disable the logits processor for a given request, i.e. by defaulting an argument to `None` or by passing in a specific do-nothing argument value i.e. `0.0`. Return `False` from `add_request()` for such requests so that the sampler can skip the logits-processing pipeline for batches in which no request needs it
 
-* Stage host-side writes in `add_request()` and flush them once per step in `apply_staged_writes()`, instead of writing device tensors directly; this is the discipline every built-in sampler state follows
+* Stage host-side writes in `add_request()` and flush them in `apply_staged_writes()`, instead of writing device tensors directly; this is the discipline every built-in sampler state follows
 
 * Since there is no removal hook, `add_request()` must fully (re)initialize the slot's state; do not rely on state left behind by the slot's previous occupant

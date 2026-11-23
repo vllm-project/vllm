@@ -67,6 +67,7 @@ variants:
     label: "FP8 (RedHat)"
     vram_minimum_gb: 131
     description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    supported_hardware: [h100, b200, gb200]
     extra_args:
       - "--kv-cache-dtype"
       - "fp8"
@@ -77,6 +78,7 @@ variants:
     label: "NVFP4 (RedHat)"
     vram_minimum_gb: 65
     description: "RedHatAI compressed-tensors NVFP4 quantization for Blackwell GPUs"
+    supported_hardware: [b200, gb200]
     extra_args:
       - "--kv-cache-dtype"
       - "fp8"
@@ -89,6 +91,7 @@ variants:
     label: "FP8 Block (RedHat)"
     vram_minimum_gb: 131
     description: "RedHatAI FP8 block quantization"
+    supported_hardware: [h100, b200, gb200]
     extra_args:
       - "--kv-cache-dtype"
       - "fp8"

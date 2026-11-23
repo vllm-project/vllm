@@ -15,15 +15,24 @@ pytestmark = pytest.mark.skip_global_cleanup
 
 
 def make_model() -> MiniCPMV2_6:
-    return object.__new__(MiniCPMV2_6)
+    return object.__new__(MiniCPMV2_6)  # type: ignore[type-abstract]  # protocol attrs unset
 
 
-def make_model_4_6() -> MiniCPMV4_6ForConditionalGeneration:
-    model = object.__new__(MiniCPMV4_6ForConditionalGeneration)
-    model._process_vision_input = lambda vision_input, use_vit_merger=None: [
-        vision_input["image_embeds"]
-    ]
-    return model
+def new_model_4_6() -> MiniCPMV4_6ForConditionalGeneration:
+    return object.__new__(
+        MiniCPMV4_6ForConditionalGeneration  # type: ignore[type-abstract]  # protocol attrs unset
+    )
+
+
+def make_model_4_6(
+    monkeypatch: pytest.MonkeyPatch,
+) -> MiniCPMV4_6ForConditionalGeneration:
+    monkeypatch.setattr(
+        MiniCPMV4_6ForConditionalGeneration,
+        "_process_vision_input",
+        lambda self, vision_input, use_vit_merger=None: [vision_input["image_embeds"]],
+    )
+    return new_model_4_6()
 
 
 def test_video_embeds_reach_the_vision_parser():
@@ -37,10 +46,10 @@ def test_video_embeds_reach_the_vision_parser():
     assert torch.equal(video_input["image_embeds"], embeds)
 
 
-def test_video_embeds_are_embedded_by_4_6():
+def test_video_embeds_are_embedded_by_4_6(monkeypatch):
     embeds = torch.arange(32, dtype=torch.float32).reshape(1, 4, 8)
 
-    embeddings = make_model_4_6().embed_multimodal(video_embeds=embeds)
+    embeddings = make_model_4_6(monkeypatch).embed_multimodal(video_embeds=embeds)
 
     assert len(embeddings) == 1
     assert torch.equal(embeddings[0], embeds)
@@ -55,8 +64,12 @@ def test_image_and_video_embeds_stay_in_their_own_modality():
         video_embeds=video_embeds,
     )
 
-    assert torch.equal(modalities["images"]["image_embeds"], image_embeds)
-    assert torch.equal(modalities["videos"]["image_embeds"], video_embeds)
+    image_input = modalities["images"]
+    video_input = modalities["videos"]
+    assert image_input is not None
+    assert video_input is not None
+    assert torch.equal(image_input["image_embeds"], image_embeds)
+    assert torch.equal(video_input["image_embeds"], video_embeds)
 
 
 class TestPerItemMergerFlags:
@@ -115,16 +128,20 @@ class TestPerItemMergerFlags:
         assert bool(selected["pixel_values"][0][0, 0, 0] == 2.0)
         assert bool(selected["pixel_values"][1][0, 0, 0] == 0.0)
 
-    def test_process_vision_input_applies_flags_per_item(self):
+    def test_process_vision_input_applies_flags_per_item(self, monkeypatch):
         calls: list[str | None] = []
 
-        def fake_get_vision_hidden_states(data, downsample_mode=None):
+        def fake_get_vision_hidden_states(self, data, downsample_mode=None):
             calls.append(downsample_mode)
             tag = 1.0 if downsample_mode == "16x" else 0.0
             return [torch.full((1,), tag) for _ in data["pixel_values"]]
 
-        model = object.__new__(MiniCPMV4_6ForConditionalGeneration)
-        model.get_vision_hidden_states = fake_get_vision_hidden_states
+        monkeypatch.setattr(
+            MiniCPMV4_6ForConditionalGeneration,
+            "get_vision_hidden_states",
+            fake_get_vision_hidden_states,
+        )
+        model = new_model_4_6()
 
         image_input = {
             "type": "pixel_values",
@@ -147,15 +164,19 @@ class TestPerItemMergerFlags:
         # Mixed flags are encoded as separate groups, not one collapsed batch.
         assert calls == ["16x", "4x"]
 
-    def test_process_vision_input_uses_one_group_for_uniform_flags(self):
+    def test_process_vision_input_uses_one_group_for_uniform_flags(self, monkeypatch):
         calls: list[str | None] = []
 
-        def fake_get_vision_hidden_states(data, downsample_mode=None):
+        def fake_get_vision_hidden_states(self, data, downsample_mode=None):
             calls.append(downsample_mode)
             return [torch.zeros(1) for _ in data["pixel_values"]]
 
-        model = object.__new__(MiniCPMV4_6ForConditionalGeneration)
-        model.get_vision_hidden_states = fake_get_vision_hidden_states
+        monkeypatch.setattr(
+            MiniCPMV4_6ForConditionalGeneration,
+            "get_vision_hidden_states",
+            fake_get_vision_hidden_states,
+        )
+        model = new_model_4_6()
 
         image_input = {
             "type": "pixel_values",
