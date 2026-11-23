@@ -75,21 +75,21 @@ class _BaseModelOutput(BaseModelOutputWithPast):
 
 
 class _OpaqueBaseModel(nn.Module):
-    """Stands in for `module`, the base model, and for its submodules (e.g. OPT's
+    """Stands in for `base_model` and for its submodules (e.g. OPT's
     `model.decoder`), returning `inputs_embeds` as its output."""
 
-    def __init__(self, module: nn.Module):
+    def __init__(self, base_model: nn.Module):
         super().__init__()
         # Not registered, so the head doesn't own the base model's parameters
-        self.__dict__["module"] = module
+        self.__dict__["_base_model"] = base_model
 
     def forward(self, *args, inputs_embeds: torch.Tensor, **kwargs):
         return _BaseModelOutput(last_hidden_state=inputs_embeds)
 
     def __getattr__(self, name: str):
-        module = self.__dict__.get("module")
-        if module is not None and name in module._modules:
-            return _OpaqueBaseModel(module._modules[name])
+        base_model = self.__dict__.get("_base_model")
+        if base_model is not None and name in base_model._modules:
+            return _OpaqueBaseModel(base_model._modules[name])
         return super().__getattr__(name)
 
 
@@ -131,12 +131,12 @@ class _OutputEmbeddings:
 class OutputHead:
     """What a `ForCausalLM` applies after its base model."""
 
-    module: PreTrainedModel | None
+    model: PreTrainedModel | None
     """The `ForCausalLM` with its base model stubbed out, or `None` if it applies
     nothing but its output embeddings, `scale` and `soft_cap`, which `lm_head` and
     `LogitsProcessor` compute on their own."""
     output_embeddings: _OutputEmbeddings
-    """Stands in for the output embeddings in `module`."""
+    """Stands in for the output embeddings in `model`."""
     in_features: int
     """The input size of the output embeddings."""
     renames: dict[str, str]
@@ -207,7 +207,7 @@ def to_output_head(
             renames.setdefault(name.rpartition(".")[0], new_name.rpartition(".")[0])
     parameters = forward_parameters(type(model))
     return OutputHead(
-        module=model,
+        model=model,
         output_embeddings=output_embeddings,
         in_features=embeddings.in_features,
         renames=renames,
@@ -221,7 +221,7 @@ def probe_output_head(
     """The `scale` and `soft_cap` of `LogitsProcessor` which `output_head` applies
     after its output embeddings, which must still be the identity, or `None` if it
     applies anything else."""
-    assert (model := output_head.module) is not None
+    assert (model := output_head.model) is not None
     # Heads with parameters apply more than a scale or a soft cap
     if next(model.parameters(), None) is not None:
         return None
@@ -276,7 +276,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         if output_head is not None:
             self._use_output_head(output_head)
         # Batch-sharded sampling checks for this, and kept heads need the full vocab
-        if output_head is None or output_head.module is None:
+        if output_head is None or output_head.model is None:
             self.compute_logits_local = lambda hidden_states: self.logits_processor(
                 self.lm_head, hidden_states, self.lm_head.bias, skip_gather=True
             )
@@ -325,21 +325,21 @@ class CausalMixin(VllmModelForTextGeneration, Base):
             return None
         if logit_transform := probe_output_head(output_head, hidden_size):
             output_head.scale, output_head.soft_cap = logit_transform
-            output_head.module = None
+            output_head.model = None
         return output_head
 
     def _use_output_head(self, output_head: OutputHead):
         """Run the head on the logits of `lm_head`, unless it is only the output
         embeddings."""
-        if (module := output_head.module) is None:
+        if (model := output_head.model) is None:
             return
         # The head runs after the projection, so every rank needs all logits
         self.logits_processor.use_all_gather = True
         output_head.output_embeddings.project = self._project
-        self.replace_modules(module, prefix=OUTPUT_HEAD_ATTR)
-        self.init_parameters(module)
+        self.replace_modules(model, prefix=OUTPUT_HEAD_ATTR)
+        self.init_parameters(model)
         self.output_head_kwargs = output_head.forward_kwargs
-        setattr(self, OUTPUT_HEAD_ATTR, module)
+        setattr(self, OUTPUT_HEAD_ATTR, model)
 
     def _project(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """The output embeddings, which give the logits on every TP rank."""
