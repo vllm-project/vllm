@@ -100,6 +100,7 @@ serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde-json-fmt = "0.1.0"
 serde_default = "0.2.0"
 serde_json = { version = "1.0.145", features = ["preserve_order"] }
+serde_jcs = "0.2.0"
 serde_path_to_error = "0.1.20"
 serde_repr = "0.1.20"
 serde_tuple = "1.1.3"

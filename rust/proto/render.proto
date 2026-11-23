@@ -107,9 +107,9 @@ message RenderChatResponse {
   // RESOURCE_EXHAUSTED. Such responses exceed the 4 MiB default receive limit
   // of many gRPC clients.
   repeated MediaItem media = 4;
-  // Versioned digest of the renderer inputs used to produce this response.
-  // A service accepting these token IDs should compare it with its own render
-  // fingerprint before running generation.
+  // `rf1:<inputs-sha256>:<renderer-tag>` for the renderer that produced this
+  // response. A service accepting these token IDs should compare it with its
+  // own render fingerprint before running generation.
   string render_fingerprint = 5;
 }
 

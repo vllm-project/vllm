@@ -240,6 +240,11 @@ pub(super) async fn load_model_backends(
     })
     .await?;
     files.apply_overrides(&options.hf_overrides)?;
+    let renderer = options.renderer.resolve(
+        load_model_config(files.config_path.as_deref())?
+            .model_type()
+            .unwrap_or_default(),
+    );
     let text_backend = HfTextBackend::from_resolved_model_files(
         files.clone(),
         model_id.to_string(),
@@ -264,6 +269,7 @@ pub(super) async fn load_model_backends(
     Ok(LoadedModelBackends {
         text_backend,
         chat_backend,
+        renderer,
         resolved_model_files,
     })
 }

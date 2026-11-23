@@ -252,8 +252,13 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
                 .collect(),
         )
         .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
-    let render_fingerprint =
-        render_fingerprint::for_render_server(config, model_dtype, &loaded.resolved_model_files)?;
+    let render_fingerprint = render_fingerprint::for_render_server(
+        config,
+        loaded.renderer,
+        model_dtype,
+        &loaded.resolved_model_files,
+    )
+    .await?;
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,

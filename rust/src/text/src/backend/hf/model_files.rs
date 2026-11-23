@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -92,6 +92,7 @@ pub struct ResolvedModelFiles {
     pub config_path: Option<PathBuf>,
     /// Keep a patched config alive across clones and backend ownership.
     config_temp_path: Option<Arc<tempfile::TempPath>>,
+    sources: ModelFileSources,
 }
 
 impl ResolvedModelFiles {
@@ -194,8 +195,84 @@ impl ResolvedModelFiles {
             chat_template_path,
             config_path,
             config_temp_path: None,
+            sources: sources.clone(),
         })
     }
+
+    /// Resolve the fixed inventory of files used by renderer fingerprints.
+    ///
+    /// The normal model loader only materializes files it needs. A fingerprint
+    /// must instead include every file in the shared inventory that the source
+    /// provides, so that independent frontends compare the same inputs.
+    pub async fn fingerprint_files(&self) -> Result<BTreeMap<String, Option<PathBuf>>> {
+        const TOKENIZER_FILES: &[&str] = &[
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "added_tokens.json",
+            "vocab.json",
+            "merges.txt",
+            "vocab.txt",
+            "tokenizer.model",
+            "spiece.model",
+            "sentencepiece.bpe.model",
+            "spm.model",
+            "tekken.json",
+            "tiktoken.model",
+            "chat_template.jinja",
+            "chat_template.json",
+        ];
+        const CONFIG_FILES: &[&str] = &["config.json", "params.json"];
+        const PROCESSOR_FILES: &[&str] = &[
+            "preprocessor_config.json",
+            "video_preprocessor_config.json",
+            "processor_config.json",
+        ];
+
+        let ModelFileSources {
+            model,
+            tokenizer,
+            hf_config,
+            hf_token,
+            ..
+        } = &self.sources;
+        let hf_token = hf_token.as_ref();
+        let model_files = SourceFiles::open_for_fingerprint(model, hf_token).await?;
+        let tokenizer_files = match tokenizer {
+            Some(source) => Some(SourceFiles::open_for_fingerprint(source, hf_token).await?),
+            None => None,
+        };
+        let tokenizer_files = tokenizer_files.as_ref().unwrap_or(&model_files);
+        let config_files = match hf_config {
+            Some(source) => Some(SourceFiles::open_for_fingerprint(source, hf_token).await?),
+            None => None,
+        };
+        let config_files = config_files.as_ref().unwrap_or(&model_files);
+
+        let mut files = BTreeMap::new();
+        add_fingerprint_files(&mut files, &tokenizer_files, TOKENIZER_FILES).await?;
+        add_fingerprint_files(&mut files, &config_files, CONFIG_FILES).await?;
+        add_fingerprint_files(&mut files, &model_files, PROCESSOR_FILES).await?;
+        let extra_files = tokenizer_files.fingerprint_extra_files()?;
+        add_fingerprint_files(
+            &mut files,
+            &tokenizer_files,
+            &extra_files.iter().map(String::as_str).collect::<Vec<_>>(),
+        )
+        .await?;
+        Ok(files)
+    }
+}
+
+async fn add_fingerprint_files(
+    files: &mut BTreeMap<String, Option<PathBuf>>,
+    source: &SourceFiles,
+    names: &[&str],
+) -> Result<()> {
+    for name in names {
+        files.insert((*name).to_string(), source.get(name).await?);
+    }
+    Ok(())
 }
 
 fn materialize_config(
@@ -298,6 +375,56 @@ impl SourceFiles {
         })
     }
 
+    /// Open a source for manifest collection.
+    ///
+    /// An online Hub source stays remote even when it has a cached snapshot so
+    /// the fixed manifest can materialize every listed sibling. Offline mode
+    /// instead hashes precisely the snapshot already on disk.
+    async fn open_for_fingerprint(
+        source: &ModelSource,
+        hf_token: Option<&HfToken>,
+    ) -> Result<Self> {
+        if Path::new(&source.id).is_dir() {
+            return Ok(Self::Dir(PathBuf::from(&source.id)));
+        }
+        let repo = Repo::with_revision(
+            source.id.clone(),
+            RepoType::Model,
+            source.revision.as_deref().unwrap_or("main").to_string(),
+        );
+        let cache = std::env::var_os("HF_HUB_CACHE")
+            .map(|path| Cache::new(path.into()))
+            .unwrap_or_else(Cache::from_env);
+        if is_hf_hub_offline() {
+            return cached_snapshot_dir(&cache, &repo).map(Self::Dir).ok_or_else(|| {
+                Error::Tokenizer(format!(
+                    "model '{}' at revision '{}' has no cached snapshot in '{}' and HF_HUB_OFFLINE is enabled",
+                    source.id,
+                    repo.revision(),
+                    cache.path().display(),
+                ))
+            });
+        }
+
+        let api = build_api(&cache, hf_token)
+            .map_err(|error| Error::Tokenizer(error.to_report_string()))?;
+        let repo = api.repo(repo);
+        let info = repo.info().await.map_err(|error| {
+            Error::Tokenizer(format!(
+                "failed to fetch model '{}' at revision '{}': {}",
+                source.id,
+                source.revision.as_deref().unwrap_or("main"),
+                error.as_report()
+            ))
+        })?;
+        let siblings = info.siblings.into_iter().map(|sibling| sibling.rfilename).collect();
+        Ok(Self::Remote {
+            model_id: source.id.clone(),
+            repo,
+            siblings,
+        })
+    }
+
     /// Return the path of `filename`, downloading it if the source lists it.
     async fn get(&self, filename: &str) -> Result<Option<PathBuf>> {
         match self {
@@ -385,6 +512,81 @@ impl SourceFiles {
                 Some(filename) => download_known_file(repo, model_id, filename).await.map(Some),
                 None => Ok(None),
             },
+        }
+    }
+
+    fn fingerprint_extra_files(&self) -> Result<BTreeSet<String>> {
+        let is_extra_file = |name: &str| {
+            let root_file = !name.contains('/');
+            (root_file
+                && (name.strip_prefix("tokenizer.model.v").is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                }) || name.ends_with(".tiktoken")
+                    || (name.ends_with(".jinja") && name != "chat_template.jinja")))
+                || (name.starts_with("additional_chat_templates/") && name.ends_with(".jinja"))
+        };
+
+        match self {
+            Self::Dir(dir) => {
+                let mut names = BTreeSet::new();
+                for entry in std::fs::read_dir(dir).map_err(|error| {
+                    Error::Tokenizer(format!("failed to list {}: {error}", dir.display()))
+                })? {
+                    let entry = entry.map_err(|error| {
+                        Error::Tokenizer(format!("failed to read {}: {error}", dir.display()))
+                    })?;
+                    if entry
+                        .file_type()
+                        .map_err(|error| {
+                            Error::Tokenizer(format!(
+                                "failed to inspect {}: {error}",
+                                entry.path().display()
+                            ))
+                        })?
+                        .is_file()
+                        && let Some(name) = entry.file_name().to_str()
+                        && is_extra_file(name)
+                    {
+                        names.insert(name.to_string());
+                    }
+                }
+                let additional_templates = dir.join("additional_chat_templates");
+                if additional_templates.is_dir() {
+                    for entry in std::fs::read_dir(&additional_templates).map_err(|error| {
+                        Error::Tokenizer(format!(
+                            "failed to list {}: {error}",
+                            additional_templates.display()
+                        ))
+                    })? {
+                        let entry = entry.map_err(|error| {
+                            Error::Tokenizer(format!(
+                                "failed to read {}: {error}",
+                                additional_templates.display()
+                            ))
+                        })?;
+                        if entry
+                            .file_type()
+                            .map_err(|error| {
+                                Error::Tokenizer(format!(
+                                    "failed to inspect {}: {error}",
+                                    entry.path().display()
+                                ))
+                            })?
+                            .is_file()
+                            && let Some(name) = entry.file_name().to_str()
+                        {
+                            let name = format!("additional_chat_templates/{name}");
+                            if is_extra_file(&name) {
+                                names.insert(name);
+                            }
+                        }
+                    }
+                }
+                Ok(names)
+            }
+            Self::Remote { siblings, .. } => {
+                Ok(siblings.iter().filter(|name| is_extra_file(name)).cloned().collect())
+            }
         }
     }
 }
@@ -661,6 +863,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fingerprint_files_cover_fixed_and_discovered_inputs() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("tokenizer.json"), "tokenizer").unwrap();
+        fs::write(dir.path().join("tokenizer_config.json"), "{}").unwrap();
+        fs::write(dir.path().join("config.json"), "{}").unwrap();
+        fs::write(dir.path().join("template.jinja"), "{{ messages }}").unwrap();
+        fs::write(dir.path().join("tokenizer.model.v3"), "tokenizer v3").unwrap();
+        fs::create_dir(dir.path().join("additional_chat_templates")).unwrap();
+        fs::write(
+            dir.path().join("additional_chat_templates/tool_use.jinja"),
+            "tool template",
+        )
+        .unwrap();
+
+        let files = ResolvedModelFiles::new(dir.path().to_str().unwrap(), None)
+            .await
+            .unwrap()
+            .fingerprint_files()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            files["tokenizer.json"],
+            Some(dir.path().join("tokenizer.json"))
+        );
+        assert_eq!(files["merges.txt"], None);
+        assert_eq!(files["params.json"], None);
+        assert_eq!(
+            files["template.jinja"],
+            Some(dir.path().join("template.jinja"))
+        );
+        assert_eq!(
+            files["tokenizer.model.v3"],
+            Some(dir.path().join("tokenizer.model.v3"))
+        );
+        assert_eq!(
+            files["additional_chat_templates/tool_use.jinja"],
+            Some(dir.path().join("additional_chat_templates/tool_use.jinja"))
+        );
+    }
+
+    #[tokio::test]
     async fn resolved_model_files_read_each_group_from_its_source() {
         let dirs = ["model", "tokenizer", "config"].map(|_| tempdir().unwrap());
         for dir in &dirs {
@@ -725,6 +969,24 @@ mod tests {
             processor_config: model
         "#]]
         .assert_eq(&origins);
+
+        let fingerprint_files = files.fingerprint_files().await.unwrap();
+        assert_eq!(
+            fingerprint_files["tokenizer.json"],
+            Some(tokenizer.path().join("tokenizer.json"))
+        );
+        assert_eq!(
+            fingerprint_files["chat_template.jinja"],
+            Some(tokenizer.path().join("chat_template.jinja"))
+        );
+        assert_eq!(
+            fingerprint_files["config.json"],
+            Some(config.path().join("config.json"))
+        );
+        assert_eq!(
+            fingerprint_files["preprocessor_config.json"],
+            Some(model.path().join("preprocessor_config.json"))
+        );
     }
 
     #[tokio::test]

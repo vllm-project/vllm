@@ -172,6 +172,19 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
         }
         LlmSource::Provided(llm) => (llm, None),
     };
+    let model_dtype = chat_backend
+        .multimodal_model_info()
+        .is_some()
+        .then_some(llm.info().model_dtype)
+        .flatten();
+    let render_fingerprint = render_fingerprint::for_server(
+        config,
+        loaded.renderer,
+        u64::from(llm.info().max_model_len),
+        model_dtype,
+        &loaded.resolved_model_files,
+    )
+    .await?;
     let system_fingerprint = config.fingerprint_mode.fingerprint(&llm.info().fingerprint);
     let text = TextLlm::from_boxed(llm, text_backend)
         .with_served_model_name(metrics_model_name)
@@ -202,8 +215,13 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
         .with_api_keys(config.api_keys.clone())
         .with_cors(config.cors.clone())
         .with_access_log(config.access_log.clone())
+<<<<<<< HEAD
         .with_system_fingerprint(system_fingerprint)
         .with_decisions(decisions);
+=======
+        .with_render_fingerprint(render_fingerprint)
+        .with_system_fingerprint(system_fingerprint);
+>>>>>>> abe4d02b1f ([Rust] Make render fingerprints cross-language compatible)
     if let Some((engine_core, server_info)) = &engine_core {
         state = (state.with_engine_core_client())
             .with_server_info(server_info.clone())
