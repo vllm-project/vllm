@@ -289,6 +289,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         # Having too many of these delayed layers can lead to excess memory usage
         # see Limitations(4)
         elif info.defer_processing or info.load_numel < info.load_numel_total:  # type: ignore[operator]
+            _check_requantization_source_fully_loaded(layer, info)
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)
 
@@ -300,6 +301,31 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         info.reset()
 
     LOADING_LAYERS.clear()
+
+
+def _check_requantization_source_fully_loaded(
+    layer: torch.nn.Module, info: LayerReloadingInfo
+) -> None:
+    """Raise if a requantization source layer was only partially loaded.
+
+    Serialized weights are created at their exact size, so unlike padded
+    full-precision weights every element must be loaded. A missing checkpoint
+    tensor would otherwise be materialized as zeros and silently requantized.
+    """
+    for attr in ("quant_method", "_quant_method"):
+        method = getattr(layer, attr, None)
+        if getattr(method, "requantization_source", None) is not None:
+            break
+    else:
+        return
+    assert info.load_numel_total is not None
+    if info.load_numel <= 0 or info.load_numel >= info.load_numel_total:
+        return
+    raise ValueError(
+        f"{getattr(layer, 'prefix', layer.__class__.__name__)}: the checkpoint is "
+        f"missing weights to requantize ({info.load_numel} of "
+        f"{info.load_numel_total} elements loaded)."
+    )
 
 
 def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig):
