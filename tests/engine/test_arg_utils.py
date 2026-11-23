@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import os
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
@@ -1201,3 +1202,26 @@ def test_get_batch_defaults_gb10_stays_on_small_tier(
     tokens, seqs = EngineArgs.get_batch_defaults(1)
     assert tokens[UsageContext.OPENAI_API_SERVER] == expected_api_tokens
     assert seqs[UsageContext.OPENAI_API_SERVER] == expected_api_seqs
+
+
+def test_replayssm_presets_flashinfer_gdn_env_before_model_config(monkeypatch):
+    """Creating the model config imports FlashInfer, which reads its GDN
+    state dtype once, so it must be set before that."""
+    monkeypatch.setenv("GDN_UCACHE_STATE_DTYPE", "")
+    monkeypatch.delenv("GDN_UCACHE_STATE_DTYPE")
+
+    def create_model_config(self):
+        raise RuntimeError(str(os.environ.get("GDN_UCACHE_STATE_DTYPE")))
+
+    monkeypatch.setattr(EngineArgs, "create_model_config", create_model_config)
+    monkeypatch.setattr(
+        "vllm.engine.arg_utils.maybe_override_with_speculators",
+        lambda model, tokenizer, vllm_speculative_config, **kwargs: (
+            model,
+            tokenizer,
+            vllm_speculative_config,
+        ),
+    )
+    args = EngineArgs(model="m", use_replayssm=True, mamba_ssm_cache_dtype="float16")
+    with pytest.raises(RuntimeError, match="^fp16$"):
+        args.create_engine_config()

@@ -50,6 +50,18 @@ def gdn_replayssm_executed_width(num_speculative_tokens: int) -> int:
     return num_speculative_tokens + 1
 
 
+def preset_flashinfer_gdn_env(mamba_ssm_cache_dtype: str) -> None:
+    """Set FlashInfer's GDN state dtype before vLLM first imports FlashInfer.
+
+    Creating the model config imports FlashInfer, which reads
+    `GDN_UCACHE_STATE_DTYPE` only then, and a forked engine process keeps that
+    import. This sets only a default, which affects only FlashInfer's GDN
+    kernels; `configure_flashinfer_gdn_env` checks it for GDN models.
+    """
+    if mamba_ssm_cache_dtype == "float16":
+        os.environ.setdefault("GDN_UCACHE_STATE_DTYPE", "fp16")
+
+
 def configure_flashinfer_gdn_env() -> None:
     """Select FP16 state in FlashInfer's GDN prefix materializer.
 

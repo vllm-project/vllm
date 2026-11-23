@@ -91,7 +91,7 @@ For `Qwen/Qwen3.8-Flash-Next-FP8`, add `--tensor-parallel-size 4 --block-size 19
 
 `--gdn-prefill-backend` selects the prefill kernel independently. Triton prefill can run with FlashInfer ReplaySSM decode.
 
-With prefix caching, vLLM sets `GDN_UCACHE_STATE_DTYPE=fp16` before starting its workers, because FlashInfer reads it when first imported. If your own code imports FlashInfer before creating the engine, set this variable before that import.
+With prefix caching, the FlashInfer materializer needs `GDN_UCACHE_STATE_DTYPE=fp16`, which FlashInfer reads only when it is first imported. vLLM imports FlashInfer while it creates the model config, so it sets this variable before that step. If your own code imports FlashInfer before it creates the engine, set this variable before that import.
 
 ## Example workloads
 
