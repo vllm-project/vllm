@@ -9,6 +9,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar, get_type_hints, overload
 
 import torch
+from huggingface_hub.errors import StrictDataclassError
 from PIL import Image as PILImage
 from typing_extensions import TypeVar
 
@@ -470,6 +471,19 @@ class InputProcessingContext:
             supported_mm_processor_kwargs=supported_mm_processor_kwargs,
         )
 
+    def get_hf_video_processor_kwargs(
+        self, hf_processor: ProcessorMixin, kwargs: Mapping[str, object]
+    ) -> dict[str, Any]:
+        """Resolve the video kwargs the Hugging Face processor will receive."""
+        try:
+            return hf_processor._merge_kwargs(
+                hf_processor.valid_processor_kwargs,
+                tokenizer_init_kwargs=hf_processor.tokenizer.init_kwargs,
+                **self.get_merged_mm_kwargs(kwargs),
+            )["videos_kwargs"]
+        except (AttributeError, TypeError, StrictDataclassError) as exc:
+            raise ValueError("Invalid multimodal processor kwargs.") from exc
+
     def call_hf_processor(
         self,
         hf_processor: Callable[..., BatchFeature] | ProcessorMixin,
@@ -524,6 +538,7 @@ class BaseProcessingInfo:
     """Base class to provide the information necessary for data processing."""
 
     default_mm_limits: ClassVar[Mapping[str, int]] = {}
+    """Per-modality item caps applied when the operator sets no explicit count."""
 
     def __init__(self, ctx: InputProcessingContext) -> None:
         super().__init__()

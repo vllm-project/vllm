@@ -1503,22 +1503,39 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 ):
                     video_scoped_kwargs["fps"] = None
 
-                video_processor = self.info.get_video_processor(**video_mm_kwargs)
+                hf_processor = self.info.get_hf_processor(**video_mm_kwargs)
+                video_processor = hf_processor.video_processor
+                video_kwargs = self.info.ctx.get_hf_video_processor_kwargs(
+                    hf_processor, video_mm_kwargs
+                )
+                patch_size = video_kwargs.get("patch_size", video_processor.patch_size)
+                merge_size = video_kwargs.get("merge_size", video_processor.merge_size)
+                temporal_patch_size = video_kwargs.get(
+                    "temporal_patch_size", video_processor.temporal_patch_size
+                )
+                if min(patch_size, merge_size, temporal_patch_size) <= 0:
+                    raise ValueError("Video patch and merge sizes must be positive.")
+
                 frame_count = len(video_array)
-                if video_scoped_kwargs["do_sample_frames"]:
+                if video_kwargs["do_sample_frames"]:
                     frame_count = len(
                         video_processor.sample_frames(
                             metadata,
-                            num_frames=video_scoped_kwargs.get("num_frames"),
-                            fps=video_scoped_kwargs.get("fps"),
+                            num_frames=video_kwargs.get(
+                                "num_frames", video_processor.num_frames
+                            ),
+                            fps=video_kwargs.get("fps", video_processor.fps),
                         )
                     )
                 height, width, channels = get_video_frame_dimensions(video_array)
-                if video_scoped_kwargs.get("do_resize", video_processor.do_resize):
-                    size = video_scoped_kwargs.get("size", video_processor.size)
-                    factor = video_processor.patch_size * video_processor.merge_size
+                if video_kwargs.get("do_resize", video_processor.do_resize):
+                    size = video_kwargs.get("size", video_processor.size)
+                    factor = patch_size * merge_size
                     max_pixels = size["longest_edge"]
-                    if video_scoped_kwargs.get("cap_pixels_per_frame", False):
+                    if video_kwargs.get(
+                        "cap_pixels_per_frame",
+                        getattr(video_processor, "cap_pixels_per_frame", None),
+                    ):
                         frame_cap = video_processor.max_video_tokens * factor**2
                         pixels_per_frame = max(
                             min(frame_cap, max_pixels // frame_count),
@@ -1530,21 +1547,18 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                         height=height,
                         width=width,
                         factor=factor,
-                        temporal_factor=video_processor.temporal_patch_size,
+                        temporal_factor=temporal_patch_size,
                         min_pixels=size["shortest_edge"],
                         max_pixels=max_pixels,
                     )
-                temporal_patch = video_processor.temporal_patch_size
-                padded_frames = (
-                    (frame_count + temporal_patch - 1) // temporal_patch
-                ) * temporal_patch
+                padded_frames = round_up(frame_count, temporal_patch_size)
                 estimated_bytes = (
                     padded_frames
                     * height
                     * width
                     * channels
                     * estimate_video_pixel_element_size(
-                        video_array, video_processor, video_mm_kwargs
+                        video_array, video_processor, video_kwargs
                     )
                 )
                 validate_video_preprocessing_budget(
@@ -1552,7 +1566,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 )
 
                 video_outputs = self.info.ctx.call_hf_processor(
-                    self.info.get_hf_processor(**video_mm_kwargs),
+                    hf_processor,
                     dict(text=self._get_hf_mm_text({"video": 1}), **video_mm_data),
                     video_mm_kwargs,
                 )

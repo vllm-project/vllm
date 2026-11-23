@@ -89,6 +89,53 @@ def test_chat_render_rejects_over_budget_video_tensors(
             assert response.status_code == 200, response.text[:1000]
 
 
+def test_chat_render_llava_video_budget_uses_resize_overrides():
+    model = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+    video_url = encode_video_url(np.zeros((2, 32, 48, 3), dtype=np.uint8))
+    request = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "video_url", "video_url": {"url": video_url}}],
+            }
+        ],
+    }
+    # Two float32 frames fit without resizing, but exceed the budget at 384x384.
+    with RemoteLaunchRenderServer(
+        model,
+        [
+            "--host",
+            "127.0.0.1",
+            "--dtype",
+            "float32",
+            "--mm-processor-cache-gb",
+            "0",
+            "--trust-request-mm-kwargs",
+        ],
+        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": str(64 * 1024)},
+    ) as server:
+        url = server.url_for("v1/chat/completions/render")
+        for videos_kwargs, status in (
+            ({"do_resize": False}, 200),
+            ({"size": {"shortest_edge": 24}}, 200),
+            ({}, 400),
+            ({"size": {"height": "invalid", "width": 24}}, 400),
+        ):
+            response = httpx.post(
+                url,
+                json={
+                    **request,
+                    "mm_processor_kwargs": {"videos_kwargs": videos_kwargs},
+                },
+                timeout=30,
+            )
+            assert response.status_code == status, response.text[:1000]
+            if not videos_kwargs:
+                error = response.json()["error"]["message"]
+                assert "VLLM_MAX_MEDIA_PREPROCESSING_BYTES" in error
+
+
 def test_chat_render_video_options_keep_default_count_limit():
     model = "Qwen/Qwen3-VL-Reranker-2B"
     video_url = encode_video_url(np.zeros((4, 16, 16, 3), dtype=np.uint8))

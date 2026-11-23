@@ -8,6 +8,9 @@ from typing import Annotated, Literal, Protocol, TypeAlias, TypedDict
 import torch
 import torch.nn as nn
 from transformers import BatchFeature, LlavaOnevisionConfig, LlavaOnevisionProcessor
+from transformers.image_processing_utils import get_size_dict
+from transformers.image_transforms import get_size_with_aspect_ratio
+from transformers.image_utils import get_image_size_for_max_height_width
 from transformers.models.llava_onevision.modeling_llava_onevision import (
     get_anyres_image_grid_shape,
     unpad_image,
@@ -324,6 +327,22 @@ class LlavaOnevisionMultiModalProcessor(
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
+    @staticmethod
+    def _get_video_resize_shape(
+        height: int, width: int, size: Mapping[str, int]
+    ) -> tuple[int, int]:
+        if shortest_edge := size.get("shortest_edge"):
+            return get_size_with_aspect_ratio(
+                (height, width), shortest_edge, size.get("longest_edge")
+            )
+        if size.get("max_height") and size.get("max_width"):
+            return get_image_size_for_max_height_width(
+                (height, width), size["max_height"], size["max_width"]
+            )
+        if size.get("height") and size.get("width"):
+            return size["height"], size["width"]
+        raise ValueError(f"Invalid video resize size: {size}")
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
@@ -378,15 +397,33 @@ class LlavaOnevisionMultiModalProcessor(
 
         pixel_values_videos = []
         video_tensor_bytes = 0
-        video_processor = self.info.get_hf_processor(**hf_kwargs).video_processor
-        merged_hf_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
+        processor = self.info.get_hf_processor(**hf_kwargs)
+        video_processor = processor.video_processor
+        video_kwargs = self.info.ctx.get_hf_video_processor_kwargs(processor, hf_kwargs)
+        size = None
+        if video_kwargs.get("do_resize", video_processor.do_resize):
+            size = get_size_dict(
+                size=video_kwargs.get("size", video_processor.size),
+                default_to_square=video_kwargs.get(
+                    "default_to_square", video_processor.default_to_square
+                ),
+            )
+        crop_size = None
+        if video_kwargs.get("do_center_crop", video_processor.do_center_crop):
+            crop_size = get_size_dict(
+                video_kwargs.get("crop_size", video_processor.crop_size),
+                param_name="crop_size",
+            )
+            if "height" not in crop_size or "width" not in crop_size:
+                raise ValueError(f"Invalid video crop size: {crop_size}")
+
         for video in videos:
-            frame_height, frame_width, channels = get_video_frame_dimensions(video)
-            if video_processor.do_resize:
-                height = video_processor.size["height"]
-                width = video_processor.size["width"]
-            else:
-                height, width = frame_height, frame_width
+            height, width, channels = get_video_frame_dimensions(video)
+            if size is not None:
+                height, width = self._get_video_resize_shape(height, width, size)
+            if crop_size is not None:
+                height = max(height, crop_size["height"])
+                width = max(width, crop_size["width"])
             estimated_bytes = (
                 len(video)
                 * height
@@ -395,12 +432,12 @@ class LlavaOnevisionMultiModalProcessor(
                 * estimate_video_pixel_element_size(
                     video,
                     video_processor,
-                    merged_hf_kwargs,
+                    video_kwargs,
                 )
             )
             validate_video_preprocessing_budget(video_tensor_bytes + estimated_bytes)
             item_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**hf_kwargs),
+                processor,
                 dict(text=video_token, **{"videos": video}),
                 hf_kwargs,
             )

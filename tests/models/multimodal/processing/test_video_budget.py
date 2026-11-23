@@ -51,6 +51,60 @@ def test_video_item_limit_defaults_to_32_and_honors_explicit_limit(model_id: str
 
 
 @pytest.mark.parametrize(
+    ("num_frames", "side", "video_kwargs", "grid", "budget"),
+    [
+        (2, 84, {"patch_size": 4, "merge_size": 4}, [1, 20, 20], 307_200),
+        (1, 64, {"do_resize": False, "temporal_patch_size": 1}, [1, 4, 4], 98_304),
+    ],
+)
+def test_qwen3_vl_video_preflight_uses_patch_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    num_frames: int,
+    side: int,
+    video_kwargs: dict[str, int | bool],
+    grid: list[int],
+    budget: int,
+):
+    """Only the resized and padded tensor with the overrides fits the budget."""
+    monkeypatch.setenv("VLLM_MAX_MEDIA_PREPROCESSING_BYTES", str(budget))
+    config = ModelConfig(
+        model="Qwen/Qwen3-VL-Reranker-2B",
+        dtype="float32",
+        mm_device_do_normalize=False,
+        mm_processor_cache_gb=0,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(config)
+    frames = np.zeros((num_frames, side, side, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": num_frames / 2,
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    inputs = ProcessorInputs(
+        prompt=processor.info.get_tokenizer().encode(
+            "<|vision_start|><|video_pad|><|vision_end|>"
+        ),
+        mm_data_items=processor.info.parse_mm_data({"video": [(frames, metadata)]}),
+        hf_processor_mm_kwargs={"videos_kwargs": video_kwargs},
+    )
+
+    outputs = processor.apply(inputs, TimingContext(enabled=False))
+    (video,) = outputs["mm_kwargs"]["video"]
+    assert video is not None
+    tensors = video.get_data()
+    actual_grid = tensors["video_grid_thw"]
+    pixels = tensors["pixel_values_videos"]
+    assert isinstance(actual_grid, torch.Tensor)
+    assert isinstance(pixels, torch.Tensor)
+    assert actual_grid.tolist() == grid
+    assert pixels.nbytes * 2 == budget
+
+
+@pytest.mark.parametrize(
     ("model_id", "max_model_len"),
     [
         ("zai-org/GLM-4.1V-9B-Thinking", 16384),
