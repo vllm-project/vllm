@@ -1555,6 +1555,28 @@ class VllmConfig:
         self.engram_config.verify_model_config(model_config)
         self.engram_config.resolve_dp_shared_memory(self.parallel_config, model_config)
         self.engram_config.verify_parallel_config(self.parallel_config)
+        if (
+            self.engram_config.peer_group_size
+            and model_config is not None
+            and model_config.architecture
+            in (
+                "Qwen4ExpForCausalLM",
+                "Qwen4ExpForConditionalGeneration",
+            )
+        ):
+            if self.parallel_config.use_ubatching:
+                raise ValueError(
+                    "Qwen4Exp Engram pool does not support DBO or microbatching"
+                )
+            if self.load_config.load_format in ("ipc_cache", "sharded_state"):
+                raise ValueError(
+                    "Qwen4Exp Engram pool does not support "
+                    f"{self.load_config.load_format} loading. Use a full checkpoint."
+                )
+            if self.weight_transfer_config:
+                raise ValueError(
+                    "Qwen4Exp Engram pool does not support weight transfer"
+                )
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
     def _reject_mismatched_float_kv_cache(self) -> None:
@@ -1715,16 +1737,31 @@ class VllmConfig:
             and hasattr(self.quant_config, "use_deep_gemm")
             and self.quant_config.use_deep_gemm is None
         ):
-            from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
+            from vllm.utils.deep_gemm import (
+                is_deep_gemm_fp8_linear_requested,
+                should_auto_disable_deep_gemm,
+            )
 
             model_type = getattr(self.model_config.hf_text_config, "model_type", None)
             if should_auto_disable_deep_gemm(model_type):
-                self.quant_config.use_deep_gemm = False
-                logger.warning_once(
-                    "Auto-disabled DeepGemm for model_type=%s on Blackwell. "
-                    "To disable DeepGemm globally, set VLLM_USE_DEEP_GEMM=0.",
-                    model_type,
-                )
+                if is_deep_gemm_fp8_linear_requested(self.kernel_config):
+                    logger.warning_once(
+                        "DeepGemm is auto-disabled for model_type=%s on this "
+                        "GPU, but --linear-backend deep_gemm requests it. "
+                        "Using DeepGemm for the FP8 linear layers. The "
+                        "weights are requantized to E8M0 scales, which is "
+                        "lossy.",
+                        model_type,
+                    )
+                else:
+                    self.quant_config.use_deep_gemm = False
+                    logger.warning_once(
+                        "Auto-disabled DeepGemm for model_type=%s on Blackwell. "
+                        "To use it anyway, pass --linear-backend deep_gemm for "
+                        "the FP8 linear layers. To disable DeepGemm globally, "
+                        "set VLLM_USE_DEEP_GEMM=0.",
+                        model_type,
+                    )
 
         from vllm.v1.executor.abstract import Executor
 
