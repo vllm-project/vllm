@@ -32,6 +32,10 @@ METRIC_SOURCE_FILES = [
         "key": "metrics-simple-kv-offload",
     },
     {"path": "vllm/v1/metrics/perf.py", "key": "metrics-mfu"},
+    {
+        "path": "vllm/entrypoints/serve/instrumentator/metrics.py",
+        "key": "metrics-ttft-forecast",
+    },
 ]
 
 
@@ -65,6 +69,8 @@ class MetricExtractor(ast.NodeVisitor):
             "_gauge_cls": "gauge",
             "_counter_cls": "counter",
             "_histogram_cls": "histogram",
+            # Gauges created on `prometheus_client` directly.
+            "Gauge": "gauge",
         }
         if isinstance(node.func, ast.Attribute):
             return metric_type_map.get(node.func.attr)

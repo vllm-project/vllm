@@ -1257,6 +1257,13 @@ class AsyncLLM(EngineClient):
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
 
+    async def forecast_ttft(
+        self,
+        cached_tokens: list[int] | None = None,
+        queries: list[list[int]] | None = None,
+    ) -> dict[str, Any]:
+        return await self.engine_core.forecast_ttft_async(cached_tokens, queries)
+
     async def compute_weight_checksums(self) -> list[dict[str, str]]:
         return await self.engine_core.compute_weight_checksums_async()
 

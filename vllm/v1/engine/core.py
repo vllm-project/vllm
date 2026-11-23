@@ -233,6 +233,9 @@ class EngineCore:
         self.batch_queue: (
             deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
         ) = None
+        forecaster = getattr(self.scheduler, "forecaster", None)
+        if forecaster is not None:
+            forecaster.queue_size = max(self.batch_queue_size, 1)
         if self.batch_queue_size > 1:
             logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
@@ -595,6 +598,43 @@ class EngineCore:
             # Immediately abort so the connector's request_finished hook runs
             # to free any pre-admission KV-transfer resources.
             self.abort_requests([request.request_id])
+
+    def forecast_ttft(
+        self,
+        cached_tokens: list[int] | None = None,
+        queries: list[list[int]] | None = None,
+    ) -> dict[str, Any]:
+        """Forecast time to first token for a request arriving now.
+
+        `cached_tokens` asks for one curve per cached-prefix length;
+        `queries` asks for single values as (new tokens, cached tokens).
+        Reads one scheduler snapshot, so it is safe off the engine loop.
+        """
+        forecaster = getattr(self.scheduler, "forecaster", None)
+        if forecaster is None:
+            return {"enabled": False}
+        out = forecaster.describe()
+        out["enabled"] = True
+        # A call with only `queries` skips the curves.
+        knots = cached_tokens if cached_tokens else ([] if queries else [0])
+        out["curves"] = {str(c): forecaster.curve(c) for c in knots}
+        out["curves_expected"] = {str(c): forecaster.curve(c, True) for c in knots}
+        out["floor"] = {str(c): forecaster.floor(c) for c in knots}
+        out["decode_step"] = {str(c): forecaster.decode_step(c) for c in knots}
+        if queries:
+            # A prompt cannot be longer than the model length; without the
+            # bound a caller could ask for replays of any length.
+            limit = forecaster.max_model_len
+            queries = [[min(n, limit), min(c, limit)] for n, c in queries]
+            out["ttft"] = [forecaster.ttft(n, c) for n, c in queries]
+            out["ttft_expected"] = [forecaster.ttft(n, c, True) for n, c in queries]
+        return out
+
+    def _notify_forecaster(self, hook: str, *args: Any) -> None:
+        """Run a forecaster hook of a scheduler that has one."""
+        notify = getattr(self.scheduler, "notify_forecaster", None)
+        if notify is not None:
+            notify(hook, *args)
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -2255,6 +2295,7 @@ class EngineCoreProc(EngineCore):
                         req: EngineCoreRequest = add_request_decoder.decode(data_frames)
                         try:
                             request = self.preprocess_add_request(req)
+                            self._notify_forecaster("note_arrival", request[0])
                         except MultiModalCacheMissError as e:
                             # P0/P1 shadow drift -- return a retryable signal (P0
                             # drops the stale entry, client resends with data).
@@ -2271,6 +2312,24 @@ class EngineCoreProc(EngineCore):
                     elif request_type == EngineCoreRequestType.UTILITY:
                         request = generic_decoder.decode(data_frames)
                         client_idx, call_id, method, args = request
+                        if method == "forecast_ttft":
+                            # Answered here so a busy engine loop does not
+                            # delay it until the end of its step.
+                            forecast_out = UtilityOutput(call_id)
+                            try:
+                                forecast_out.result = UtilityResult(
+                                    self.forecast_ttft(*args)
+                                )
+                            except Exception as e:
+                                logger.exception("forecast_ttft failed")
+                                forecast_out.failure_message = str(e)
+                            self.output_queue.put_nowait(
+                                (
+                                    client_idx,
+                                    EngineCoreOutputs(utility_output=forecast_out),
+                                )
+                            )
+                            continue
                         if method == FT_UTILITY_METHOD:
                             self.ft_sentinel.handle_command(
                                 client_idx, call_id, args[0]
@@ -2804,7 +2863,9 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Execute a dummy pass when no ready requests ran, unless the
                 # engine is sleeping.
                 elif not self.model_executor.is_sleeping:
+                    self._notify_forecaster("on_idle_step_start")
                     self.execute_dummy_batch()
+                    self._notify_forecaster("on_idle_step_end")
                     iteration_details = self._untimed_iteration_details(None)
                     if iteration_details is not None and not self.has_coordinator:
                         stats = self._make_iteration_details_stats(iteration_details)
