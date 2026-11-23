@@ -13,7 +13,7 @@ from vllm.models.mistral.common.layer_spec import get_layer_specs
 from vllm.models.mistral.mistral_large4.amd.specialized_decode.runtime import spec
 from vllm.models.mistral.mistral_large4.amd.specialized_decode.runtime.spec import (
     DECODE_CONFIG,
-    on_gfx942,
+    on_cdna3,
     specialized_decode_config,
 )
 
@@ -88,7 +88,7 @@ def set_requant(monkeypatch, requant: str | None, act: str = "a4w4"):
 def expert_format(monkeypatch):
     """The routed experts the platform's kernels read: block FP8 in place on
     gfx942, vLLM's MXFP4 a4w4 re-quantization on gfx950."""
-    set_requant(monkeypatch, None if on_gfx942() else "mxfp4")
+    set_requant(monkeypatch, None if on_cdna3() else "mxfp4")
 
 
 def test_off_by_default():
@@ -130,7 +130,7 @@ def test_refusal_lists_every_reason(monkeypatch):
 def test_routed_expert_format(monkeypatch, gfx942, requant):
     """gfx942 reads the block-FP8 experts in place and refuses re-quantized
     ones; gfx950 requires vLLM's MXFP4 a4w4 re-quantization."""
-    monkeypatch.setattr(spec, "on_gfx942", lambda: gfx942)
+    monkeypatch.setattr(spec, "on_cdna3", lambda: gfx942)
     set_requant(monkeypatch, requant)
     reasons = DECODE_CONFIG.refusal_reasons(vllm_config())
     refused = any("VLLM_FP8_MOE_REQUANT" in r for r in reasons)
@@ -141,7 +141,7 @@ def test_routed_expert_format(monkeypatch, gfx942, requant):
 def test_speculative_decoding(monkeypatch, gfx942):
     """DSpark verify blocks run the kernels on gfx950; gfx942 refuses any
     speculative decoding."""
-    monkeypatch.setattr(spec, "on_gfx942", lambda: gfx942)
+    monkeypatch.setattr(spec, "on_cdna3", lambda: gfx942)
     set_requant(monkeypatch, None if gfx942 else "mxfp4")
     dspark = SimpleNamespace(
         method="dspark",

@@ -8,7 +8,7 @@ import torch
 
 from vllm.platforms import current_platform
 
-from .spec import DecodeConfig, on_gfx942
+from .spec import DecodeConfig
 
 LATENT = 576  # MLA latent row (bf16 or E4M3 values): kv_lora 512 + rope 64
 INDEX_ROW = 132  # DSA indexer key row: 128 E4M3 bytes + one fp32 scale
@@ -56,7 +56,7 @@ def model_refusals(model, config: DecodeConfig) -> list[str]:
         reasons.append("requires CDNA3 / gfx942 or CDNA4 / gfx950")
     # the kernels compile for FlyDSL's target, while the TP size and the expert
     # format follow vLLM's view of the device
-    arch, device = target_arch(), "gfx942" if on_gfx942() else "gfx950"
+    arch, device = target_arch(), "gfx942" if cdna == 3 else "gfx950"
     if not arch.startswith(device):
         reasons.append(f"FlyDSL compiles for {arch}, the device is {device}")
     index = torch.accelerator.current_device_index()

@@ -18,16 +18,17 @@ MAX_ROWS = 12
 SPEC_METHODS = ("dspark",)
 
 
-def on_gfx942() -> bool:
-    """MI300X / MI325X: TP8 kernels, FP8 (FNUZ) routed experts read in place.
-    Otherwise gfx950 (MI355X): TP4 kernels on MXFP4 a4w4 routed experts."""
+def on_cdna3() -> bool:
+    """CDNA3, MI300X / MI325X (gfx942): TP8 kernels, FP8 (FNUZ) routed experts
+    read in place. Otherwise CDNA4, MI355X (gfx950): TP4 kernels on MXFP4 a4w4
+    routed experts."""
     from vllm.platforms import current_platform
 
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx942 as rocm_on_gfx942
+    from vllm.platforms.rocm import get_cdna_version
 
-    return rocm_on_gfx942()
+    return get_cdna_version() == 3
 
 
 @dataclass(frozen=True)
@@ -81,7 +82,7 @@ class DecodeConfig:
             reasons.append("does not support a KV connector")
         spec = config.speculative_config
         if spec is not None:
-            if on_gfx942():
+            if on_cdna3():
                 # the TP8 verify launch (q > 1 rows a request) is not validated
                 reasons.append("does not support speculative decoding on gfx942")
             if getattr(spec, "method", None) not in SPEC_METHODS:
@@ -107,7 +108,7 @@ class DecodeConfig:
             reasons.append("does not support routed-expert capture")
         quant = config.model_config.quantization
         requant = envs.VLLM_FP8_MOE_REQUANT.lower()
-        if on_gfx942():
+        if on_cdna3():
             if requant != "none":
                 reasons.append(
                     "reads the block-FP8 routed experts in place on gfx942 "
@@ -123,7 +124,7 @@ class DecodeConfig:
         return reasons
 
 
-DECODE_CONFIG = DecodeConfig(tp_size=8) if on_gfx942() else DecodeConfig(tp_size=4)
+DECODE_CONFIG = DecodeConfig(tp_size=8) if on_cdna3() else DecodeConfig(tp_size=4)
 
 
 def decode_backend(config: VllmConfig) -> str:

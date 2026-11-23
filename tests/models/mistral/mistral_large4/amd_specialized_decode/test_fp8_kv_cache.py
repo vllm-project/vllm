@@ -27,9 +27,9 @@ def _kernel_arch() -> str | None:
     """The architecture the ML4 mono kernels build for here, if any."""
     if not current_platform.is_rocm():
         return None
-    from vllm.platforms.rocm import on_gfx942, on_gfx950
+    from vllm.platforms.rocm import get_cdna_version
 
-    return "gfx950" if on_gfx950() else "gfx942" if on_gfx942() else None
+    return {3: "gfx942", 4: "gfx950"}.get(get_cdna_version())
 
 
 ARCH = _kernel_arch()

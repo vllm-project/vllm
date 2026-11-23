@@ -38,14 +38,14 @@ from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.weigh
     pack_fp8,
 )
 from vllm.models.mistral.mistral_large4.amd.specialized_decode.runtime.spec import (
-    on_gfx942,
+    on_cdna3,
 )
 from vllm.models.mistral.mistral_large4.amd.specialized_decode.runtime.variants import (
     KernelVariant,
 )
 from vllm.platforms import current_platform
 
-GFX942 = on_gfx942()
+GFX942 = on_cdna3()
 # vLLM's FP8 weights after load: FNUZ on gfx942 (largest finite 240)
 FP8 = current_platform.fp8_dtype()
 FP8_MAX = torch.finfo(FP8).max
