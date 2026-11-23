@@ -28,14 +28,17 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
+    CompressedTensorsKVCacheMethod,
     CompressedTensorsLinearMethod,
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
+    CompressedTensorsW6A8Mxfp6,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -55,10 +58,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     ScaleDesc,
     kFp8Dynamic128Sym,
+    kMxfp8Dynamic,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.import_utils import has_humming
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
 # AITER only supports per-channel-per-channel INT8 gemm
@@ -100,7 +105,7 @@ def _compressed_tensors_actorder_config(actorder):
     "actorder", [ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC, True]
 )
 def test_compressed_tensors_rejects_runtime_activation_order(actorder):
-    with pytest.raises(ValueError, match="group/dynamic activation ordering"):
+    with pytest.raises(ValueError, match="has been removed"):
         CompressedTensorsConfig.from_config(
             _compressed_tensors_actorder_config(actorder)
         )
@@ -403,6 +408,55 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
     with vllm_runner(model_path, attention_config={"backend": "FLASH_ATTN"}) as llm:
         output = llm.generate_greedy("Hello world!", max_tokens=4)
         assert output
+
+
+@pytest.mark.parametrize(
+    ("is_fnuz", "has_scheme", "has_q_scale", "kv_expected", "q_expected"),
+    [
+        pytest.param(True, True, True, 0.6, 0.6, id="fnuz_with_q"),
+        pytest.param(True, True, False, 0.6, 1.0, id="fnuz_no_q"),
+        pytest.param(False, True, True, 0.3, 0.3, id="not_fnuz"),
+        pytest.param(True, False, True, 0.3, 0.3, id="fnuz_no_scheme"),
+    ],
+)
+def test_compressed_tensors_kv_scales_fnuz_doubling(
+    monkeypatch, is_fnuz, has_scheme, has_q_scale, kv_expected, q_expected
+):
+    """Loaded KV scales double on fnuz; a missing q_scale stays 1.0."""
+    monkeypatch.setattr(current_platform, "is_fp8_fnuz", lambda: is_fnuz)
+    scheme = {"type": "float", "num_bits": 8, "strategy": "tensor", "symmetric": True}
+    method = CompressedTensorsKVCacheMethod(
+        CompressedTensorsConfig(
+            target_scheme_map={},
+            ignore=[],
+            quant_format="float-quantized",
+            kv_cache_scheme=scheme if has_scheme else None,
+        )
+    )
+
+    layer = torch.nn.Module()
+    set_default_quant_scales(layer, register_buffer=True)
+    layer.kv_cache_dtype = "fp8"
+    layer.num_kv_heads = 1
+    method.create_weights(layer)
+    for name in ("k_scale", "v_scale"):
+        getattr(layer, name).data.fill_(0.3)
+    if has_q_scale:
+        layer.q_scale.data.fill_(0.3)
+
+    method.process_weights_after_loading(layer)
+    assert layer._k_scale.item() == pytest.approx(kv_expected)
+    assert layer._k_scale_float == pytest.approx(kv_expected)
+    assert layer._v_scale_float == pytest.approx(kv_expected)
+    assert layer._q_scale_float == pytest.approx(q_expected)
+    assert layer._k_scale_cpu.item() == pytest.approx(kv_expected)
+
+    # A second call must not compound the factor.
+    ptrs = [layer._k_scale.data_ptr(), layer._q_scale.data_ptr()]
+    method.process_weights_after_loading(layer)
+    assert [layer._k_scale.data_ptr(), layer._q_scale.data_ptr()] == ptrs
+    assert layer._k_scale_float == pytest.approx(kv_expected)
+    assert layer._q_scale_float == pytest.approx(q_expected)
 
 
 @pytest.mark.parametrize(
@@ -976,6 +1030,22 @@ def test_quant_key_str_supports_scalar_type_dtypes():
     assert str(quant_key) == (
         "QuantKey(uint2b2,scale(f16,static,GroupShape(row=1, col=128)),symmetric)"
     )
+
+
+@pytest.mark.skipif(not has_humming(), reason="MXFP6 requires humming")
+def test_compressed_tensors_mxfp6(vllm_runner):
+    model_path = "nm-testing/Qwen3-0.6B-MXFP6A8"
+    with vllm_runner(model_path, enforce_eager=True) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+            for proj in (layer.self_attn.qkv_proj, layer.mlp.down_proj):
+                assert isinstance(proj.scheme, CompressedTensorsW6A8Mxfp6)
+                assert proj.scheme.kernel.config.activation_quant_key == kMxfp8Dynamic
+
+        llm.apply_model(check_model)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
 
 
 @pytest.mark.skipif(

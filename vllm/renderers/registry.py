@@ -28,6 +28,7 @@ _VLLM_RENDERERS = {
     "glm5_next": ("hf", "HfRenderer"),
     "hf": ("hf", "HfRenderer"),
     "inkling": ("inkling", "InklingRenderer"),
+    "hy_v4": ("hy_v4", "HYV4Renderer"),
     "kimi_audio": ("hf", "HfRenderer"),
     "kimi_k3": ("kimi_k3", "KimiK3Renderer"),
     "mistral": ("mistral", "MistralRenderer"),
@@ -36,7 +37,7 @@ _VLLM_RENDERERS = {
 }
 
 
-@dataclass
+@dataclass(slots=True)
 class RendererRegistry:
     # Renderer mode ->  (renderer module, renderer class)
     renderers: dict[str, tuple[str, str]] = field(default_factory=dict)

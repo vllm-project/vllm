@@ -39,9 +39,10 @@ if TYPE_CHECKING:
         SparseMLACommonMetadata,
     )
     from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.attention.ops.dcp_shardq.context import DcpShardQContext
 
 
-@dataclass
+@dataclass(slots=True)
 class ShardQMetadata:
     """This step's ShardQ: which TP rank attends which of the tokens after
     `num_decode_tokens` head-sharded decode tokens (ids relative to the first
@@ -55,6 +56,9 @@ class ShardQMetadata:
     rank_offsets: torch.Tensor
     # forward_mqa metadata of this rank's tokens, which run with all heads.
     attn_metadata: "SparseMLACommonMetadata" = field(init=False)
+    # Under DCP, the gathered context this rank's tokens attend instead of the
+    # DCP-local caches (vllm.v1.attention.ops.dcp_shardq).
+    gathered_context: "DcpShardQContext | None" = None
 
     @property
     def local_token_ids(self) -> torch.Tensor:

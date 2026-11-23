@@ -30,6 +30,27 @@ In most cases, this should lead to higher quality responses, because the model c
 
 You can check if this is happening by trying the old defaults with `--generation-config vllm` for online and `generation_config="vllm"` for offline. If, after trying this, your generation quality improves we would recommend continuing to use the vLLM defaults and petition the model creator on <https://huggingface.co> to update their default `generation_config.json` so that it produces better quality generations.
 
+## Check which backends a model runs on
+
+After loading a model, vLLM logs a table of the attention backend and the linear and MoE kernels its layers selected, with the layers that run each. It is on by default and logged once per model:
+
+```text
+Backends selected for Qwen3MoeForCausalLM (Qwen/Qwen3-30B-A3B-FP8):
+  layer     | count | backend                                                       | modules
+  attention |    48 | FLASHINFER                                                    | model.layers.[0-47].self_attn.attn
+  linear    |    50 | unquantized [w=bfloat16]                                      | model.embed_tokens, model.layers.[0-47].mlp.gate, lm_head
+  linear    |    96 | DeepGemmFp8BlockScaledMMKernel                                | model.layers.[0-47].self_attn.{qkv_proj,o_proj}
+  moe       |    48 | TrtLlmFp8ExpertsMonolithic [w=float8_e4m3fn, a=float8_e4m3fn] | model.layers.[0-47].mlp.experts.routed_experts
+```
+
+Each row is one backend: the kind of layer, how many layers run it, the kernel or attention backend selected, and the layer names with index ranges collapsed. Unquantized linear layers show their weight dtype instead of a kernel. MoE rows also show the weight and activation precision the kernel runs, so `a=none` means activations are not quantized. Shared experts that are not fused into the routed experts are linear layers and appear in the `linear` rows.
+
+The table replaces the individual `Using <backend> ...` and `Selected <kernel> for ...` lines, which are now logged at DEBUG where each selection is made, along with the candidates that were considered: set `VLLM_LOGGING_LEVEL=DEBUG` to see them. Selections that explain a fallback or an override are still logged at INFO or WARNING.
+
+If loading the weights fails, the table is logged before the error with the selections made up to that point (its first line ends in `before loading failed`); MoE rows then show the experts class without the precision.
+
+For the full module tree instead, set `VLLM_LOG_MODEL_INSPECTION=1` or call `LLM.get_model_inspection()`.
+
 ## Enable more logging
 
 If other strategies don't solve the problem, it's likely that the vLLM instance is stuck somewhere. You can use the following environment variables to help debug the issue:
@@ -41,6 +62,37 @@ If other strategies don't solve the problem, it's likely that the vLLM instance 
 - `export VLLM_TRACE_FUNCTION=1` to record all function calls for inspection in the log files to tell which function crashes or hangs. (WARNING: This flag will slow down the token generation by **over 100x**. Do not use unless absolutely needed.)
 
 The DP coordinator's `Received stats for out-of-order step` diagnostic is logged at DEBUG level. Statistics from different engines can arrive in a different step order; this message alone does not indicate a failed request. Set `VLLM_LOGGING_LEVEL=DEBUG` to inspect these reports.
+
+## GPU-CPU synchronization errors
+
+Set `VLLM_GPU_SYNC_CHECK=error` before starting vLLM to check for unexpected
+GPU-CPU synchronizations during inference. The check starts after model warmup
+and reports an error such as:
+
+```text
+RuntimeError: GPU<->CPU sync detected - avoid it or wrap with gpu_sync_allowed()
+```
+
+For dots.ocr, you can check image inference at TP=1 or TP=2. For example, start
+a two-GPU server with:
+
+```bash
+VLLM_GPU_SYNC_CHECK=error vllm serve rednote-hilab/dots.ocr \
+    --trust-remote-code \
+    --tensor-parallel-size 2 \
+    --max-model-len 4096 \
+    --limit-mm-per-prompt '{"image": 1}'
+```
+
+Send an image request after the server is ready so that the check exercises
+the vision encoder. A text-only request does not run this part of the model.
+See [online serving](../features/multimodal_inputs.md#online-serving) for image request examples.
+Set the request's `model` to `rednote-hilab/dots.ocr` when using this server.
+Use `--tensor-parallel-size 1` to check a single-GPU setup.
+
+If a request fails with this error, include the full traceback, model revision,
+GPU type, and encoder attention backend in the bug report. The backend is
+shown in the startup log as `Using ... for MMEncoderAttention`.
 
 ## Breakpoints
 
