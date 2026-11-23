@@ -189,6 +189,7 @@ if TYPE_CHECKING:
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
+    VLLM_DP_BODY_SESSION_AFFINITY: bool = False
     VLLM_USE_STANDALONE_COMPILE: bool = True
     VLLM_ENABLE_PREGRAD_PASSES: bool = True
     VLLM_USE_BREAKABLE_CUDAGRAPH: bool = False
@@ -1617,6 +1618,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # World size of the data parallel setting
     "VLLM_DP_SIZE": lambda: int(os.getenv("VLLM_DP_SIZE", "1")),
+    # Route a chat request without an X-data-parallel-rank header to the DP
+    # engine given by a hash of its first user message, so the turns of a
+    # conversation reuse one engine's prefix cache behind a router that
+    # forwards no session header.
+    "VLLM_DP_BODY_SESSION_AFFINITY": lambda: (
+        os.getenv("VLLM_DP_BODY_SESSION_AFFINITY", "0") == "1"
+    ),
     # IP address of the master node in the data parallel setting
     "VLLM_DP_MASTER_IP": lambda: os.getenv("VLLM_DP_MASTER_IP", "127.0.0.1"),
     # Port of the master node in the data parallel setting
