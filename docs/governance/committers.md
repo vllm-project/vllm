@@ -27,6 +27,7 @@ Sorted alphabetically by GitHub handle:
 - [@gty111](https://github.com/gty111): Multimodal EPD, encoder cache transfer
 - [@Harry-Chen](https://github.com/Harry-Chen): Build, CI, CUDA architecture
 - [@heheda12345](https://github.com/heheda12345): Hybrid memory allocator
+- [@hickeyma](https://github.com/hickeyma): API server
 - [@hmellor](https://github.com/hmellor): Hugging Face integration, documentation
 - [@hongxiayang](https://github.com/hongxiayang): AMD GPU / ROCm integration
 - [@houseroad](https://github.com/houseroad): Engine core and Llama models
