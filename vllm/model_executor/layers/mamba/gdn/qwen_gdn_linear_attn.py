@@ -135,7 +135,9 @@ MAX_FUSED_GDN_MTP_TOKENS = 9  # kMaxMtpTokens in fused_gdn_decode_kernel.cu
 # stream. On GB300, across Qwen3.5/3.8 shapes, quant formats and TP 1-8, the first
 # regression was at 272 tokens (27B BF16 TP8).
 _BA_PROJ_OVERLAP_MAX_TOKENS = 256
-FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
+FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16, torch.float16)
+# AITER's fused_gdn_decode_qkvz rejects FP16 state.
+AITER_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
 def supports_fused_mtp_decode() -> bool:
@@ -868,11 +870,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 persistent=False,
             )
         self.vllm_config = vllm_config
-        # The FlashInfer and Triton/FLA prefills emit mid-prefill states, so an
-        # align-mode checkpoint needs no split prefill. AITER FlyDSL cannot, so
+        # The FlashInfer and Triton/FLA prefills emit mid-prefill states, so a
+        # prefix-cache checkpoint needs no split prefill. AITER FlyDSL cannot, so
         # its steps that carry a checkpoint run the Triton/FLA prefill instead.
         self._checkpoint_alignment: int | None = None
-        if vllm_config.cache_config.mamba_cache_mode == "align":
+        if vllm_config.cache_config.enable_prefix_caching:
             if self.gdn_prefill_backend == "flashinfer":
                 self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
             elif (
@@ -938,7 +940,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             or self.norm.activation != "silu"
             or vllm_config.model_config.dtype != torch.bfloat16
             or conv_state_dtype != torch.bfloat16
-            or recurrent_state_dtype not in FUSED_GDN_STATE_DTYPES
+            or recurrent_state_dtype not in AITER_GDN_STATE_DTYPES
             # The kernel emits the normed output, so out_proj cannot quantize it.
             or not isinstance(self.out_proj.quant_method, UnquantizedLinearMethod)
             or self.speculative_config is not None
@@ -1015,7 +1017,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return (
                 "the fused CUDA kernel requires a BF16 GDN model with "
                 "K=V=128, SiLU or sigmoid gating, non-interleaved GQA "
-                "layout, BF16 convolution cache, BF16 or FP32 recurrent "
+                "layout, BF16 convolution cache, FP16, BF16 or FP32 recurrent "
                 "state, and a GPU with compute capability 8.0+"
             )
         if not supports_fused_mtp_decode():

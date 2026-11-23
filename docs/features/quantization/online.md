@@ -77,7 +77,7 @@ is quantized as it is loaded;
 `fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel` and `mxfp8` are supported
 on linear and MoE layers, and `mxfp4` (`--quantization-config.moe mxfp4`)
 and `nvfp4_per_token` on MoE layers. See
-[Direct Weight Reload](../../training/direct_reload.md#online-quantization)
+[Direct Weight Reload](../../training/weight_updates/direct_reload.md#online-quantization)
 for the refused schemes and the NVFP4 delivery rule.
 
 ## Advanced Configuration
@@ -120,8 +120,9 @@ vllm serve <model> --quantization-config.moe.activation mxfp8
 
 `quantization_config` lets you select an activation format independently of
 the weight format. For online quantization, it can be used to override the
-default activation quantization of MXFP4 layers; other online weight formats
-reject an activation override.
+default activation quantization of MXFP4 layers. Online MXFP8 MoE layers accept
+only `"activation": "mxfp8"`, their default; other online weight formats reject
+an activation override.
 
 For example, to enable MXFP4 MoE weights along MXFP8 activations:
 
