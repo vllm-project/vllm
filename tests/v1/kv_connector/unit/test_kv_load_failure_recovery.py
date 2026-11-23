@@ -144,6 +144,7 @@ def test_async_load_failure(
             assert request.num_computed_tokens == num_external_computed_tokens
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert scheduler.failed_recving_kv_req_ids == {request2.request_id}
+    scheduler.connector.on_load_failure.assert_called_once_with({request2.request_id})
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 3
 
 
@@ -219,6 +220,7 @@ def test_sync_load_failure(
     assert scheduler.running[0].num_computed_tokens == (
         min(invalid_block_idxs) * scheduler.block_size
     )
+    scheduler.connector.on_load_failure.assert_called_once_with({request2.request_id})
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 3
     assert scheduler.connector.request_finished.call_count == 2
 
@@ -394,3 +396,193 @@ def test_block_level_load_failure_fails_closed_with_multiple_groups():
 
     with pytest.raises(RuntimeError, match="failed_recving"):
         scheduler._handle_invalid_blocks({1}, {})
+
+
+@pytest.fixture
+def persistent_store(request, monkeypatch, tmp_path):
+    """Keep the storage lookup positive after a reported data-plane failure."""
+    from transformers import OPTConfig
+
+    from tests.v1.kv_connector.umbp_test_utils import MemoryRuntime
+    from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.factory import (
+        UMBPRuntimeFactory,
+    )
+
+    class Lookup:
+        def __init__(self):
+            self.calls = []
+            self.enabled = True
+
+        def lookup(self, *args, **kwargs):
+            self.calls.append(args)
+            return [self.enabled] * len(args[0])
+
+        def close(self):
+            pass
+
+    lookup = Lookup()
+
+    class Runtime(MemoryRuntime):
+        def create_scheduler_handle(self, namespace, topology, layout):
+            return lookup
+
+    monkeypatch.setitem(UMBPRuntimeFactory._builders, "embedded", lambda _: Runtime())
+    OPTConfig().save_pretrained(tmp_path)
+    return request.param, lookup, str(tmp_path)
+
+
+@pytest.mark.parametrize("hybrid", [False, True])
+@pytest.mark.parametrize("policy", ["fail", "recompute"])
+@pytest.mark.parametrize("persistent_store", ["UMBPStoreConnector"], indirect=True)
+def test_store_failure_recovery_survives_preemption(persistent_store, hybrid, policy):
+    """Real connectors must not reload a failed request after GPU-only preemption."""
+    connector_name, lookup, model = persistent_store
+    config = create_vllm_config(
+        model=model,
+        kv_connector=connector_name,
+        kv_role="kv_consumer",
+        max_num_batched_tokens=16,
+        kv_load_failure_policy=policy,
+        kv_connector_extra_config={"key_namespace": "recovery-test"},
+    )
+    cache = make_kv_cache_config(16, mamba_enabled=hybrid, enable_prefix_caching=True)
+    scheduler = create_scheduler(config, kv_cache_config=cache)
+    victim = create_request(request_id=9123, num_tokens=49, max_tokens=2)
+    scheduler.add_request(victim)
+    scheduled = scheduler.schedule()
+    assert victim.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert len(lookup.calls) == 1
+    scheduler.update_from_output(
+        scheduled,
+        create_model_runner_output(
+            [],
+            finished_recving={victim.request_id},
+            failed_recving={victim.request_id} if hybrid else None,
+            invalid_block_ids=(
+                None
+                if hybrid
+                else {scheduler.kv_cache_manager.get_block_ids(victim.request_id)[0][0]}
+            ),
+        ),
+    )
+    if policy == "fail":
+        assert victim.status == RequestStatus.FINISHED_ERROR
+    else:
+        first = scheduler.schedule()
+        assert first.num_scheduled_tokens[victim.request_id] == 16
+        output = create_model_runner_output([victim])
+        output.sampled_token_ids = [[]]
+        scheduler.update_from_output(first, output)
+        # This public operation invokes the real preemption path. The external
+        # store is not reset; its stale-positive metadata remains unchanged.
+        assert scheduler.reset_prefix_cache(reset_running_requests=True)
+        assert victim.status == RequestStatus.PREEMPTED
+        assert victim.num_preemptions == 1
+        computed = 0
+        for _ in range(8):
+            resumed = scheduler.schedule()
+            count = resumed.num_scheduled_tokens.get(victim.request_id, 0)
+            assert count > 0
+            computed += count
+            output = create_model_runner_output([victim])
+            if victim.num_computed_tokens < victim.num_tokens:
+                output.sampled_token_ids = [[]]
+            scheduler.update_from_output(resumed, output)
+            if victim.is_finished():
+                break
+        assert victim.is_finished()
+        assert computed == 50
+        assert len(lookup.calls) == 1
+
+    scheduler.schedule()  # Deliver terminal IDs to the connector.
+    assert scheduler.reset_prefix_cache()
+    # Reusing a terminated ID must not inherit a previous request's bypass.
+    replacement = create_request(request_id=9123, num_tokens=65)
+    scheduler.add_request(replacement)
+    scheduler.schedule()
+    assert replacement.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert len(lookup.calls) == 2
+    scheduler.shutdown()
+
+
+@pytest.mark.parametrize("persistent_store", ["UMBPStoreConnector"], indirect=True)
+def test_failed_store_load_stays_local_after_capacity_preemption(persistent_store):
+    """Growing the first request must not send the evicted second one back to IO."""
+    connector_name, lookup, model = persistent_store
+    config = create_vllm_config(
+        model=model,
+        kv_connector=connector_name,
+        kv_role="kv_consumer",
+        max_num_batched_tokens=100,
+        kv_load_failure_policy="recompute",
+        kv_connector_extra_config={"key_namespace": "recovery-test"},
+    )
+    # Ten usable blocks fit two five-block prompts, but not the next decode page.
+    scheduler = create_scheduler(config, num_blocks=11)
+    first = create_request(num_tokens=80, max_tokens=2)
+    victim = create_request(num_tokens=80, max_tokens=2)
+    lookup.enabled = False
+    scheduler.add_request(first)
+    first_step = scheduler.schedule()
+    assert first_step.num_scheduled_tokens[first.request_id] == 80
+    lookup.enabled = True
+    scheduler.add_request(victim)
+    load_step = scheduler.schedule()
+    assert victim.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.update_from_output(
+        load_step,
+        create_model_runner_output(
+            [],
+            finished_recving={victim.request_id},
+            invalid_block_ids={
+                scheduler.kv_cache_manager.get_block_ids(victim.request_id)[0][0]
+            },
+        ),
+    )
+    local_step = scheduler.schedule()
+    assert local_step.num_scheduled_tokens[victim.request_id] == 80
+    scheduler.update_from_output(first_step, create_model_runner_output([first]))
+    scheduler.update_from_output(local_step, create_model_runner_output([victim]))
+    pressure_step = scheduler.schedule()
+    assert victim.status == RequestStatus.PREEMPTED
+    assert victim.num_preemptions == 1
+    assert pressure_step.num_scheduled_tokens == {first.request_id: 1}
+    scheduler.update_from_output(pressure_step, create_model_runner_output([first]))
+    resumed = scheduler.schedule()
+    assert len(lookup.calls) == 2
+    # Four valid local prefix blocks survive preemption and remain reusable.
+    assert resumed.num_scheduled_tokens[victim.request_id] == 17
+    scheduler.update_from_output(resumed, create_model_runner_output([victim]))
+    assert first.is_finished() and victim.is_finished()
+    scheduler.shutdown()
+
+
+@pytest.mark.parametrize("persistent_store", ["UMBPStoreConnector"], indirect=True)
+def test_failed_umbp_load_recomputed_pages_are_stored(persistent_store):
+    """A failed load is not evidence that the recomputed prefix is resident."""
+    connector_name, lookup, model = persistent_store
+    config = create_vllm_config(
+        model=model,
+        kv_connector=connector_name,
+        kv_role="kv_both",
+        max_num_batched_tokens=16,
+        kv_load_failure_policy="recompute",
+        kv_connector_extra_config={"key_namespace": "recovery-test"},
+    )
+    scheduler = create_scheduler(config)
+    victim = create_request(num_tokens=49)
+    scheduler.add_request(victim)
+    loading = scheduler.schedule()
+    assert victim.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.update_from_output(
+        loading,
+        create_model_runner_output(
+            [], finished_recving={victim.request_id}, failed_recving={victim.request_id}
+        ),
+    )
+    local_step = scheduler.schedule()
+    assert local_step.num_scheduled_tokens[victim.request_id] == 16
+    stores = local_step.kv_connector_metadata.store_requests
+    assert len(stores[victim.request_id].keys) == 1
+    assert len(lookup.calls) == 1
+    scheduler.shutdown()
