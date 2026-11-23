@@ -8,6 +8,10 @@ from PIL import Image
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import AttentionConfig, KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+    ExampleConnector,
+    ReqMeta,
+)
 from vllm.inputs import TextPrompt
 from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
@@ -247,3 +251,32 @@ def test_shared_storage_connector_hashes(tmp_path, attn_backend):
         run_test(tmp_path, processor, llm, text, img, expected_len, info)
 
     print("All tests passed successfully!")
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("num_stored_tokens", [40, 48])
+@pytest.mark.parametrize("lookahead", [0, 1, 2])
+def test_hit_key_covers_lookahead_tokens(tmp_path, num_stored_tokens, lookahead):
+    """A hit also needs the L tokens after the cached prefix to match, which the
+    draft KV of that prefix depends on; a load reads the stored key."""
+    block_size = 16
+    connector = object.__new__(ExampleConnector)
+    connector._block_size = block_size
+    connector._num_hash_lookahead_tokens = lookahead
+    connector._storage_path = str(tmp_path)
+
+    stored = list(range(num_stored_tokens))
+    store = ReqMeta.make_meta(stored, [0, 1, 2], block_size, True, [], lookahead)
+    connector._generate_foldername_debug(store.token_ids, [], create_folder=True)
+
+    # The cached prompt plus one generated token loads under the stored key.
+    extension = stored + [-1]
+    assert connector._found_match_for_prompt(extension, [])
+    load = ReqMeta.make_meta(extension, [0, 1, 2], block_size, False, [], lookahead)
+    assert load.token_ids.tolist() == store.token_ids.tolist()
+    assert len(load.slot_mapping) == len(store.slot_mapping)
+
+    # A prompt diverging right after the cached prefix hits only without lookahead.
+    num_cached = len(store.slot_mapping)
+    diverged = [*stored[:num_cached], -2, *stored[num_cached + 1 :], -1]
+    assert connector._found_match_for_prompt(diverged, []) == (lookahead == 0)

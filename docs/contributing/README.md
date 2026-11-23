@@ -54,7 +54,7 @@ To rebuild only the Rust frontend binary:
 If you are developing vLLM's Python and CUDA/C++ code, install PyTorch first:
 
 ```bash
-uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
+uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu132
 ```
 
 Then install the necessary build dependencies from `requirements/build/cuda.txt`, skipping `torch` as it was installed in the previous step:
@@ -288,6 +288,13 @@ To check, ask a fresh agent a user question (e.g. "What does `VLLM_FOO` do?")
 three times, limited in turn to web search, GitHub, and a local checkout (before
 merge: the docs preview and the PR branch). If it cannot find and quote the
 docs, fix the docs.
+
+Some reference tables are generated from source at docs build time, e.g.
+attention backends (`docs/mkdocs/gen_files/generate_attention_backends.py`) and
+quantization methods, schemes, and linear kernels
+(`docs/mkdocs/gen_files/generate_quantization_tables.py`). Do not copy their
+contents into prose; write around the `--8<-- "gen:..."` marker in the tracked
+page instead.
 
 ### Adding or Changing Kernels
 

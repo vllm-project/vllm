@@ -32,7 +32,7 @@ logger = init_logger(__name__)
 _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
 
-MAX_LOGPROB_TOKEN_IDS = 128
+MAX_LOGPROB_TOKEN_IDS = 256
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
@@ -358,7 +358,7 @@ class SamplingParams(
     [num_rows, num_ids] or nested lists; -1 entries (padding) score -inf.
     Row i scores its IDs as predictions of prompt token
     prompt_logprob_start + i + 1, so the last prompt row is excluded.
-    See docs/training/prompt_token_id_logprobs.md."""
+    See docs/training/rollout_artifacts/prompt_token_id_logprobs.md."""
     prompt_logprob_start: int | None = None
     """First causal prompt row to score with prompt_logprobs and
     prompt_logprob_token_ids; defaults to the first row. Earlier prompt
@@ -406,6 +406,7 @@ class SamplingParams(
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
     _watermarking_skipped: bool = False
+    _stop_token_ids_set: frozenset[int] = msgspec.field(default_factory=frozenset)
 
     # Fields used to construct logits processors
     structured_outputs: StructuredOutputsParams | None = None
@@ -426,6 +427,9 @@ class SamplingParams(
     last token of a corresponding token sequence is not allowed when the next
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
+    # Set False by the generate endpoint in tokens mode: sample logprobs keep
+    # no decoded token strings.
+    _detokenize_logprobs: bool = True
 
     skip_reading_prefix_cache: bool | None = None
     thinking_token_budget: int | None = None
@@ -582,16 +586,42 @@ class SamplingParams(
             self.stop = []
         elif isinstance(self.stop, str):
             self.stop = [self.stop]
+        else:
+            self.stop = list(dict.fromkeys(self.stop))
+        max_stop_strings = envs.VLLM_MAX_STOP_STRINGS
+        if len(self.stop) > max_stop_strings:
+            raise VLLMValidationError(
+                f"Too many stop strings: {len(self.stop)}. "
+                f"The max number is {max_stop_strings}.",
+                parameter="stop",
+                value=self.stop,
+            )
 
         if self.stop_token_ids is None:
             self.stop_token_ids = []
         else:
             self.stop_token_ids = list(dict.fromkeys(self.stop_token_ids))
+        max_stop_token_ids = envs.VLLM_MAX_STOP_TOKEN_IDS
+        if len(self.stop_token_ids) > max_stop_token_ids:
+            raise VLLMValidationError(
+                f"Too many stop_token_ids: {len(self.stop_token_ids)}. "
+                f"The max number is {max_stop_token_ids}.",
+                parameter="stop_token_ids",
+                value=self.stop_token_ids,
+            )
 
         if self.bad_words is None:
             self.bad_words = []
         else:
             self.bad_words = list(dict.fromkeys(self.bad_words))
+        max_num_bad_words = envs.VLLM_MAX_NUM_BAD_WORDS
+        if len(self.bad_words) > max_num_bad_words:
+            raise VLLMValidationError(
+                f"Too many bad_words: {len(self.bad_words)}. "
+                f"The max number is {max_num_bad_words}.",
+                parameter="bad_words",
+                value=self.bad_words,
+            )
 
         if self.logprobs is True:
             self.logprobs = 1
@@ -625,6 +655,7 @@ class SamplingParams(
 
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
+        self._stop_token_ids_set = frozenset(self.stop_token_ids)
 
         if self.skip_reading_prefix_cache is None:
             # If prefix caching is enabled,
@@ -850,6 +881,16 @@ class SamplingParams(
                             value=self.bad_words,
                         )
 
+        total_tokens = sum(len(ids) for ids in self._bad_words_token_ids)
+        max_total_tokens = envs.VLLM_MAX_BAD_WORDS_TOTAL_TOKENS
+        if total_tokens > max_total_tokens:
+            raise VLLMValidationError(
+                f"Too many total bad word tokens: {total_tokens}. "
+                f"The max is {max_total_tokens}.",
+                parameter="bad_words",
+                value=self.bad_words,
+            )
+
         invalid_token_ids = [
             token_id
             for bad_words_token_ids in self._bad_words_token_ids
@@ -882,6 +923,10 @@ class SamplingParams(
     @property
     def all_stop_token_ids(self) -> set[int]:
         return self._all_stop_token_ids
+
+    @property
+    def stop_token_ids_set(self) -> frozenset[int]:
+        return self._stop_token_ids_set
 
     @property
     def bad_words_token_ids(self) -> list[list[int]] | None:
@@ -917,7 +962,6 @@ class SamplingParams(
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
         self._validate_allowed_token_ids(model_config)
-        self._validate_diffusion(model_config)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
         )
@@ -1182,28 +1226,6 @@ class SamplingParams(
                 "allowed_token_ids contains out-of-vocab token id!",
                 parameter="allowed_token_ids",
                 value=invalid_token_ids,
-            )
-
-    def _validate_diffusion(self, model_config: ModelConfig) -> None:
-        if not model_config.is_diffusion:
-            return
-
-        # Diffusion models denoise a whole canvas per step with a fixed
-        # temperature schedule, so per-request sampling parameters are not
-        # supported. Penalties are ignored by the sampler with a warning.
-        if (
-            self.temperature != 1.0
-            or self.min_p > _SAMPLING_EPS
-            or self.seed is not None
-            or self.min_tokens > 0
-            or self.logit_bias
-            or self.bad_words
-            or self.allowed_token_ids
-        ):
-            raise VLLMValidationError(
-                "The temperature, min_p, seed, min_tokens, logit_bias, "
-                "bad_words, and allowed_token_ids sampling parameters "
-                "are not yet supported with diffusion models."
             )
 
     def _validate_structured_outputs(
@@ -1505,6 +1527,12 @@ class BeamSearchParams(
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")
+        if not math.isfinite(self.length_penalty):
+            raise VLLMValidationError(
+                f"length_penalty must be finite, got {self.length_penalty}.",
+                parameter="length_penalty",
+                value=self.length_penalty,
+            )
 
     def configure_logprobs(
         self, sampling_params: SamplingParams, config: "VllmConfig"
@@ -1515,7 +1543,7 @@ class BeamSearchParams(
         if not ids:
             raise ValueError("Beam search allowed_token_ids must not be empty")
         if self.structured_outputs is not None:
-            # Grammar candidates can exceed the exact-ID limit of 128 tokens.
+            # Grammar candidates can exceed the MAX_LOGPROB_TOKEN_IDS exact-ID limit.
             raise ValueError(
                 "Beam allowlists with structured outputs are not supported"
             )

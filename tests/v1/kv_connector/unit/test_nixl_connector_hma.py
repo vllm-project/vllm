@@ -62,11 +62,13 @@ def region_pull_worker():
     worker.enable_permute_local_kv = False
     worker.enable_heterogeneous_attn_post_process = False
     worker._engine_last_active = {}
+    worker._engine_clock_offset = {}
     worker._handshake_lock = threading.RLock()
     worker._handshake_futures = {}
     worker._bidirectional_kv_xfer_enabled = False
     worker._recving_transfers = {}
     worker._failed_remote_engines = set()
+    worker._disconnected_remote_engines = set()
     worker._invalid_remote_engines = set()
     worker._remote_registration_generations = {}
     worker.use_mla, worker._has_mamba = True, False
@@ -804,6 +806,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker._remote_registration_generations = {}
     worker._remote_agents = {"remote-engine": {}}
     worker._engine_last_active = {}
+    worker._engine_clock_offset = {}
     worker._recving_transfers = defaultdict(list)
     worker._bidirectional_kv_xfer_enabled = False
     worker.dcp_size = 1
