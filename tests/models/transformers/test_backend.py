@@ -16,7 +16,6 @@ import torch
 import torch.nn as nn
 from safetensors.torch import load_file, save_file
 from transformers import (
-    CONFIG_MAPPING,
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
@@ -1009,8 +1008,8 @@ def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch)
 def test_mtp_draft_for_multimodal_model(tmp_path, tp_init):
     """A multimodal model, which is not an `AutoModelForCausalLM`, gets an MTP draft
     from the MTP layers in its checkpoint (loading fails if any are missing)."""
-    if "granite_docling" not in CONFIG_MAPPING:
-        pytest.skip("Transformers has no granite_docling")
+    model_info = HF_EXAMPLE_MODELS.get_hf_info("GraniteDoclingForConditionalGeneration")
+    model_info.check_transformers_version(on_fail="skip")
     from transformers.modeling_layers import MtpModel
 
     num_mtp_layers = 2
