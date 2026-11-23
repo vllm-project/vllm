@@ -70,7 +70,6 @@ def test_draft_from_target_subfolder(tmp_path, draft_dir, subfolder):
     spec = _make_spec(tmp_path, draft_dir, subfolder)
 
     assert spec.model == str(tmp_path / draft_dir)
-    assert spec.subfolder == draft_dir
     assert spec.draft_model_config.hf_config.architectures == ["Eagle3LlamaForCausalLM"]
 
 
@@ -86,3 +85,11 @@ def test_draft_from_target_subfolder(tmp_path, draft_dir, subfolder):
 def test_missing_draft_subfolder_raises(tmp_path, subfolder, match):
     with pytest.raises(ValueError, match=match):
         _make_spec(tmp_path, None, subfolder)
+
+
+@pytest.mark.cpu_test
+def test_subfolder_with_model_raises():
+    """`subfolder` is relative to the target, so a resolved config rebuilt from
+    its fields fails instead of looking in a nested subfolder."""
+    with pytest.raises(ValueError, match="cannot be combined with model"):
+        SpeculativeConfig(method="eagle3", model="draft", subfolder="eagle3")

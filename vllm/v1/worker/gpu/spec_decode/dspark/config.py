@@ -91,8 +91,7 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             raise ValueError("target_model_config must be present for dspark")
         if target.hf_config.model_type in _MINIMAX_M3_MODEL_TYPES:
             # MiniMax-M3 ships the draft as a standalone checkpoint
-            spec.subfolder = "dspark"
-            return spec.get_subfolder_checkpoint(spec.subfolder)
+            return spec.get_subfolder_checkpoint("dspark")
         # DeepSeek DSpark can ship the weights inside the target checkpoint.
         # Mistral Large 4 DSpark drafts ship in BF16.
         if (

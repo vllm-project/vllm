@@ -73,8 +73,8 @@ llm = LLM(
 )
 ```
 
-`subfolder` defaults to the method name, so it can be omitted here. With
-`model` set, `subfolder` is a subfolder of that checkpoint instead.
+`subfolder` defaults to the method name, so it can be omitted here. It cannot
+be combined with `model`.
 
 ## Pipeline Parallelism
 
