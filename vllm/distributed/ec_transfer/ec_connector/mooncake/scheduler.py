@@ -372,7 +372,9 @@ class ECMooncakeScheduler:
                     > num_computed_tokens
                 ):
                     self._prepare_push_spec(request, index)
-        if not self._is_consumer:
+        if not self._is_consumer or not getattr(request, "ec_transfer_params", None):
+            # Without EC params no encoder pushes for this request; the media
+            # it carries is encoded locally.
             return True
 
         self._drain_push_notifications()
@@ -468,7 +470,7 @@ class ECMooncakeScheduler:
                 )
 
     def update_state_after_free(self, request: Any, index: int) -> None:
-        if not self._is_consumer:
+        if not self._is_consumer or not getattr(request, "ec_transfer_params", None):
             return
         transfer_id = self._request_transfer_id(request, index)
         if transfer_id is None:
@@ -525,7 +527,7 @@ class ECMooncakeScheduler:
         return self._scheduler_pending_work
 
     def request_finished(self, request: Any) -> tuple[bool, dict[str, Any] | None]:
-        if self._is_consumer:
+        if self._is_consumer and getattr(request, "ec_transfer_params", None):
             for index in range(len(request.mm_features)):
                 transfer_id = self._request_transfer_id(request, index)
                 if transfer_id is None:
