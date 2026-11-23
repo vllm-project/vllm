@@ -112,21 +112,24 @@ def test_sp_padding_mask_marks_added_rows(
 
 
 @pytest.mark.parametrize(
-    ("data_parallel_size", "expected"),
+    ("data_parallel_size", "prefill_context_parallel_size", "expected"),
     [
-        (1, False),
-        (2, True),
+        (1, 1, False),
+        (2, 1, True),
+        (1, 2, True),
     ],
 )
-def test_moe_sequence_parallel_requires_data_parallel(
+def test_moe_sequence_parallel_requires_dp_or_pcp(
     monkeypatch,
     data_parallel_size: int,
+    prefill_context_parallel_size: int,
     expected: bool,
 ):
-    monkeypatch.setattr(current_platform, "device_count", lambda: 2)
+    monkeypatch.setattr(current_platform, "device_count", lambda: 4)
     parallel_config = ParallelConfig(
         tensor_parallel_size=2,
         data_parallel_size=data_parallel_size,
+        prefill_context_parallel_size=prefill_context_parallel_size,
         enable_expert_parallel=True,
         all2all_backend="allgather_reducescatter",
     )
