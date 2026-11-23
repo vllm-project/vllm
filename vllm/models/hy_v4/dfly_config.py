@@ -200,7 +200,6 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
     @classmethod
     def verify_target_parallel_config(cls, spec: "SpeculativeConfig") -> None:
         for field in (
-            "data_parallel_size",
             "pipeline_parallel_size",
             "prefill_context_parallel_size",
             "decode_context_parallel_size",
