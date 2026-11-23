@@ -34,7 +34,6 @@ def fake_speculative_config(
             method=fields["method"],
             custom_method=None,
             draft_model_config=SimpleNamespace(architectures=[]),
-            use_gemma4_mtp=lambda: False,
             use_multi_module_mtp=lambda: False,
         )
         speculator_config_cls = get_speculator_config_class(probe)  # type: ignore[arg-type]

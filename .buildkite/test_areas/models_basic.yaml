@@ -192,12 +192,17 @@ steps:
   device: b200-k8s
   source_file_dependencies:
   - vllm/models/inkling/
+  - vllm/models/inkling2/
   - vllm/cute_utils/
   - cmake/external_projects/tml_fa4.cmake
   - tests/models/inkling/
+  - tests/models/inkling2/
   commands:
     # FA4 kernel tests require SM100; the suite skips them elsewhere.
-    - pytest -v -s models/inkling
+    - >-
+      pytest -v -s
+      models/inkling
+      models/inkling2
   mirror:
     amd:
       automatic_shard: true
@@ -217,6 +222,27 @@ steps:
       commands:
       - pytest -v -s models/inkling/rocm
       - pytest -v -s models/inkling/test_mm_towers.py models/inkling/test_moe_weight_layout.py models/inkling/test_qkvr_prep.py
+
+- label: ":nvidia: (DGX Spark) Inkling 2 SM12"
+  key: inkling2-sm12-tests
+  automatic_shard: true
+  timeout_in_minutes: 20
+  device: dgx-spark
+  optional: true
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  source_file_dependencies:
+  - vllm/models/inkling2/
+  - vllm/utils/humming.py
+  - tests/models/inkling2/
+  commands:
+    - >-
+      pytest -v -s
+      models/inkling2/test_core_ops.py
+      models/inkling2/test_moe.py
+      models/inkling2/test_model.py
+      -k 'humming or sm12x or loop_norm or conv_mix'
 
 # Disabled until the gguf installation is locked.
 # - label: ":nvidia: (B200) Flint"
@@ -461,6 +487,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - vllm/models/qwen4_exp/amd/hyperconnection.py
       - vllm/models/qwen4_exp/amd/ops/hc.py
@@ -478,6 +505,7 @@ steps:
   depends_on:
   - image-build-amd
   source_file_dependencies:
+  - vllm/_aiter_ops.py
   - vllm/models/qwen4_exp/
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
@@ -487,6 +515,7 @@ steps:
   - pytest -v -s models/qwen4_exp/test_qsa_amd.py models/qwen4_exp/test_qsa_prepare_amd.py
   # PLE and QSA import conflicting HC registrations in a shared process.
   - pytest -v -s models/qwen4_exp/test_ple.py
+  - pytest -v -s models/qwen4_exp/test_hc_ops_amd.py
 
 - label: ":computer: (CPU) Qwen4 Exp"
   key: qwen4-exp-unit-tests-cpu
@@ -546,6 +575,19 @@ steps:
       - tests/kernels/mamba/test_gdn_output_projection.py
       commands:
       - pytest -v -s models/qwen3_5/ kernels/mamba/test_gdn_output_projection.py
+
+- label: ":nvidia: (B200) Nemotron Shortcut"
+  key: nemotron-shortcut-unit-tests-b200
+  automatic_shard: true
+  timeout_in_minutes: 60
+  device: b200-k8s
+  # test_sdsa_engine.py runs TP2.
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/models/nemotron_shortcut/
+  - tests/models/nemotron_shortcut/
+  commands:
+  - pytest -v -s models/nemotron_shortcut/
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
