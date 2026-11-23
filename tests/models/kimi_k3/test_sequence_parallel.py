@@ -192,11 +192,9 @@ def test_kimi_sequence_parallel_selection(
     assert kimi_model.use_kimi_k3_sequence_parallel(vllm_config) is expected
 
 
-@pytest.mark.parametrize("buffer_num_tokens", [2, 8])
-def test_kimi_pipeline_stage_keeps_received_sequence_shard(
-    monkeypatch,
-    buffer_num_tokens: int,
-):
+def test_kimi_pipeline_stage_keeps_received_sequence_shard(monkeypatch):
+    """A later stage reads its TP rank's rows from the front of the full-size
+    input buffers instead of sharding them again."""
     model = object.__new__(kimi_model.KimiLinearModel)
     nn.Module.__init__(model)
     model.use_sequence_parallel = True
@@ -222,10 +220,8 @@ def test_kimi_pipeline_stage_keeps_received_sequence_shard(
 
     intermediate_tensors = kimi_model.IntermediateTensors(
         {
-            "hidden_states": torch.arange(
-                buffer_num_tokens * 2, dtype=torch.float32
-            ).view(buffer_num_tokens, 2),
-            "residual": torch.ones(buffer_num_tokens, 2),
+            "hidden_states": torch.arange(6, dtype=torch.float32).view(3, 2),
+            "residual": torch.ones(3, 2),
         }
     )
     output = model(
@@ -239,41 +235,44 @@ def test_kimi_pipeline_stage_keeps_received_sequence_shard(
     assert output["hidden_states"].shape == output["residual"].shape == (2, 2)
 
 
-def test_kimi_last_pipeline_stage_gathers_received_aux_shards(monkeypatch):
+def test_kimi_pipeline_stage_sends_aux_hidden_states_unsharded(monkeypatch):
+    """The runner hands earlier stages' aux hidden states to the speculator as
+    received, so a stage gathers its own before sending them on, while hidden
+    states and residuals stay sequence-sharded."""
     model = object.__new__(kimi_model.KimiLinearModel)
     nn.Module.__init__(model)
     model.use_sequence_parallel = True
     model.use_attn_res = False
-    model.start_layer = 1
-    model.end_layer = 2
-    model.aux_hidden_state_layers = ()
-    model._aux_upstream_total_cached = 1
-    model.layers = nn.ModuleList([nn.Identity(), _RecordingDecoderLayer()])
+    model.start_layer = 0
+    model.end_layer = 1
+    model.aux_hidden_state_layers = (1,)
+    model.layers = nn.ModuleList([_RecordingDecoderLayer()])
     monkeypatch.setattr(
         kimi_model,
         "get_pp_group",
-        lambda: SimpleNamespace(is_first_rank=False, is_last_rank=True),
+        lambda: SimpleNamespace(is_first_rank=False, is_last_rank=False),
     )
     monkeypatch.setattr(kimi_model, "get_tensor_model_parallel_world_size", lambda: 2)
     monkeypatch.setattr(kimi_model.envs, "VLLM_MOE_SKIP_PADDING", False)
     gather = Mock(side_effect=lambda x: torch.cat([x, x + 100], dim=0))
     monkeypatch.setattr(kimi_model, "sp_all_gather", gather)
-    hidden = torch.arange(4, dtype=torch.float32).view(2, 2)
-    aux = hidden + 10
-    output, aux_outputs = model(
+    hidden = torch.arange(6, dtype=torch.float32).view(3, 2)
+
+    output = model(
         input_ids=None,
         positions=torch.arange(3),
         intermediate_tensors=kimi_model.IntermediateTensors(
-            {
-                "hidden_states": hidden,
-                "residual": torch.ones_like(hidden),
-                "aux_hidden_states_0": aux,
-            }
+            {"hidden_states": hidden, "residual": torch.ones(3, 2)}
         ),
     )
+
+    local_aux = hidden[:2] + 1
     gather.assert_called_once()
-    torch.testing.assert_close(output, torch.cat([hidden + 1, hidden + 101])[:3])
-    torch.testing.assert_close(aux_outputs[0], torch.cat([aux, aux + 100])[:3])
+    torch.testing.assert_close(output["hidden_states"], hidden[:2])
+    torch.testing.assert_close(output["residual"], torch.ones(2, 2))
+    torch.testing.assert_close(
+        output["aux_hidden_states_0"], torch.cat([local_aux, local_aux + 100])[:3]
+    )
 
 
 def test_kimi_decoder_layer_keeps_moe_states_sequence_sharded(monkeypatch):
@@ -284,9 +283,10 @@ def test_kimi_decoder_layer_keeps_moe_states_sequence_sharded(monkeypatch):
     layer.input_layernorm = _IdentityNorm()
     layer.post_attention_layernorm = _IdentityNorm()
     layer.mlp = _RecordingMoE()
-    layer._run_self_attn = MethodType(
-        lambda self, positions, hidden_states: hidden_states,
+    monkeypatch.setattr(
         layer,
+        "_run_self_attn",
+        MethodType(lambda self, positions, hidden_states: hidden_states, layer),
     )
 
     _mock_sequence_parallel_collectives(monkeypatch)
@@ -330,9 +330,10 @@ def test_kimi_attn_residual_states_stay_sequence_sharded(monkeypatch):
     layer.self_attention_res_proj = _Projection()
     layer.mlp_res_proj = _Projection()
     layer.mlp = _RecordingMoE()
-    layer._run_self_attn = MethodType(
-        lambda self, positions, hidden_states: hidden_states,
+    monkeypatch.setattr(
         layer,
+        "_run_self_attn",
+        MethodType(lambda self, positions, hidden_states: hidden_states, layer),
     )
 
     _mock_sequence_parallel_collectives(monkeypatch)

@@ -41,8 +41,16 @@ class KVConnector:
     def finish_forward(self) -> None:
         pass
 
-    def post_forward(self, finished_req_ids: set[str]) -> KVConnectorOutput | None:
+    def post_forward(
+        self, finished_req_ids: set[str], defer_finalize: bool = False
+    ) -> KVConnectorOutput | None:
         return None
+
+    def finalize_step(self) -> None:
+        pass
+
+    def record_mrope_position_delta(self, req_id: str, delta: int) -> None:
+        pass
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -66,6 +74,14 @@ class ActiveKVConnector(KVConnector):
 
         self._pending_load_kwargs: dict[str, Any] | None = None
         self._disabled = False
+
+        # A KV producer reports each new request's M-RoPE position delta so the
+        # scheduler can pass it on to the decode instance.
+        kv_transfer_config = vllm_config.kv_transfer_config
+        self._reports_mrope_position_deltas = (
+            kv_transfer_config is not None and kv_transfer_config.is_kv_producer
+        )
+        self._mrope_position_deltas: dict[str, int] = {}
 
     def pre_forward(
         self,
@@ -128,7 +144,9 @@ class ActiveKVConnector(KVConnector):
     def reset_capture_state(self) -> None:
         self.kv_connector.reset_capture_state()
 
-    def post_forward(self, finished_req_ids: set[str]) -> KVConnectorOutput | None:
+    def post_forward(
+        self, finished_req_ids: set[str], defer_finalize: bool = False
+    ) -> KVConnectorOutput | None:
         if self._disabled:
             return None
 
@@ -136,7 +154,8 @@ class ActiveKVConnector(KVConnector):
             self._start_load_kv()
 
         output = KVConnectorOutput()
-        self.kv_connector.wait_for_save()
+        if not defer_finalize:
+            self.kv_connector.wait_for_save()
         transfer_results = self.kv_connector.get_transfer_results(finished_req_ids)
         output.finished_sending = transfer_results.finished_sending or None
         output.finished_recving = transfer_results.finished_recving or None
@@ -147,8 +166,22 @@ class ActiveKVConnector(KVConnector):
         output.kv_connector_worker_meta = (
             self.kv_connector.build_connector_worker_meta()
         )
-        self.kv_connector.clear_connector_metadata()
+        if self._mrope_position_deltas:
+            output.mrope_position_deltas = self._mrope_position_deltas
+            self._mrope_position_deltas = {}
+        if not defer_finalize:
+            self.kv_connector.clear_connector_metadata()
         return output
+
+    def record_mrope_position_delta(self, req_id: str, delta: int) -> None:
+        if self._reports_mrope_position_deltas and not self._disabled:
+            self._mrope_position_deltas[req_id] = delta
+
+    def finalize_step(self) -> None:
+        if self._disabled:
+            return
+        self.kv_connector.wait_for_save()
+        self.kv_connector.clear_connector_metadata()
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         if self._disabled:

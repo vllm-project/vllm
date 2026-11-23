@@ -5,8 +5,10 @@ from typing import Any
 
 import torch
 from torch._higher_order_ops import auto_functionalized
+from torch._inductor.pattern_matcher import Match
 from torch._ops import OpOverload
 
+from vllm import ir
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -28,6 +30,7 @@ from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
     DeepseekScalingRotaryEmbedding,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import next_power_of_2
 
 ROTARY_OP = torch.ops._C.rotary_embedding.default
 FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
@@ -84,7 +87,23 @@ class MatcherCustomOp(ABC):
         raise NotImplementedError
 
 
+def aiter_fused_rope_supported(match: Match, head_size: int) -> bool:
+    """Whether AITER's fused_qk_rope_reshape_and_cache supports the match: it
+    needs full rotary and a power-of-2 head size."""
+    cache = match.kwargs["cos_sin_cache"].meta["val"]
+    return cache.shape[-1] == head_size and next_power_of_2(head_size) == head_size
+
+
+def rope_custom_op_is_c_kernel() -> bool:
+    """XPU's RotaryEmbedding.forward_xpu calls the in-place `_C` kernel directly
+    instead of the vLLM IR op, so its graphs contain `_C.rotary_embedding`."""
+    return current_platform.is_xpu() and RotaryEmbedding.enabled()
+
+
 class MatcherRotaryEmbedding(MatcherCustomOp):
+    """Matches base RoPE as RotaryEmbedding emits it: the flashinfer custom op,
+    the in-place `_C` op on XPU with the custom op enabled, else the IR node."""
+
     def __init__(
         self,
         is_neox: bool,
@@ -92,34 +111,21 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         num_heads: int,
         num_kv_heads: int,
         use_flashinfer: bool = False,
-        match_rocm_aiter: bool | None = None,
-        enabled: bool | None = None,
     ) -> None:
-        if enabled is None:
-            enabled = RotaryEmbedding.enabled()
-        if match_rocm_aiter is None:
-            match_rocm_aiter = rocm_aiter_ops.is_triton_rotary_embed_enabled()
-
-        super().__init__(enabled)
+        super().__init__(enabled=use_flashinfer or rope_custom_op_is_c_kernel())
+        self.rotary_op = FLASHINFER_ROTARY_OP if use_flashinfer else ROTARY_OP
         self.is_neox = is_neox
         self.head_size = head_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.q_size = self.num_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
-        self.rotary_dim = head_size
-        if use_flashinfer:
-            self.rotary_op = FLASHINFER_ROTARY_OP
-        elif match_rocm_aiter:
-            self.rotary_op = rocm_aiter_ops.get_triton_rotary_embedding_op()
-        else:
-            self.rotary_op = ROTARY_OP
 
     def inputs(self) -> list[torch.Tensor]:
         positions = self.empty_int64(5)
         query = self.empty(5, self.q_size)
         key = self.empty(5, self.kv_size)
-        cos_sin_cache = self.empty(4096, self.rotary_dim)
+        cos_sin_cache = self.empty(4096, self.head_size)
         return [positions, query, key, cos_sin_cache]
 
     def forward_custom(
@@ -146,21 +152,12 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor | None,
+        key: torch.Tensor,
         cos_sin_cache: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        result: tuple[torch.Tensor, torch.Tensor | None] = (
-            RotaryEmbedding.forward_static(
-                positions,
-                query,
-                key,
-                self.head_size,
-                self.rotary_dim,
-                cos_sin_cache,
-                self.is_neox,
-            )
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return ir.ops.rotary_embedding(
+            positions, query, key, self.head_size, cos_sin_cache, self.is_neox
         )
-        return result
 
 
 class MatcherMRotaryEmbedding(MatcherCustomOp):
@@ -240,6 +237,7 @@ class MatcherRMSNormGated(MatcherCustomOp):
         enabled: bool | None = None,
         norm_before_gate: bool = True,
         group_size: int | None = None,
+        activation: str = "swish",
     ) -> None:
         if enabled is None:
             enabled = RMSNormGated.enabled()
@@ -248,6 +246,7 @@ class MatcherRMSNormGated(MatcherCustomOp):
         self.epsilon = epsilon
         self.norm_before_gate = norm_before_gate
         self.group_size = group_size
+        self.activation = activation
 
     def inputs(self) -> list[torch.Tensor]:
         x = self.empty(5, 16)
@@ -261,18 +260,14 @@ class MatcherRMSNormGated(MatcherCustomOp):
         z: torch.Tensor,
         weight: torch.Tensor,
     ) -> torch.Tensor:
-        from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
-            rmsnorm_fn,
-        )
-
-        return rmsnorm_fn(
+        return torch.ops.vllm.fla_rms_norm_gated(
             x,
+            z,
             weight,
-            bias=None,
-            z=z,
-            eps=self.epsilon,
-            group_size=self.group_size,
-            norm_before_gate=self.norm_before_gate,
+            self.epsilon,
+            self.group_size,
+            self.norm_before_gate,
+            self.activation,
         )
 
     def forward_native(
@@ -394,10 +389,13 @@ class MatcherQuantFP8(MatcherCustomOp):
         self.is_tma_aligned = is_tma_aligned
 
         if match_rocm_aiter:
-            assert not quant_key.scale.group_shape.is_per_tensor(), (
-                "ROCm aiter fusion pass does not support per tensor quantization"
-            )
-            if quant_key.scale.group_shape.is_per_token():
+            if quant_key.scale.group_shape.is_per_tensor():
+                assert quant_key.scale.static, (
+                    "ROCm aiter fusion pass only supports static per-tensor "
+                    "quantization"
+                )
+                self.QUANT_OP = rocm_aiter_ops.get_per_tensor_quant_op()
+            elif quant_key.scale.group_shape.is_per_token():
                 self.QUANT_OP = rocm_aiter_ops.get_per_token_quant_op()
             else:
                 assert quant_key.scale.group_shape.col == 128, (
@@ -432,14 +430,24 @@ class MatcherQuantFP8(MatcherCustomOp):
         scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         quant_key_group_shape = self.quant_key.scale.group_shape
+        if quant_key_group_shape == GroupShape.PER_TENSOR:
+            # rocm_aiter_per_tensor_quant mutates `out` and `scale` and returns
+            # None, so it has to be matched through auto_functionalized.
+            assert scale is not None
+            out = torch.empty_like(input, dtype=self.quant_key.dtype)
+            result = auto_functionalized(
+                self.QUANT_OP, out=out, x=input, scale=scale, is_dynamic=False
+            )
+            # `scale` is mutable, so its functionalized output is a distinct
+            # value; return it to keep the quant node inside the match.
+            return result[1], result[2]
         if quant_key_group_shape == GroupShape.PER_TOKEN:
             return self.QUANT_OP(  # type: ignore[no-any-return]
                 x=input,
                 quant_dtype=self.quant_key.dtype,
                 scale=scale,
             )
-        else:
-            return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
+        return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
 
     def forward_custom(
         self,

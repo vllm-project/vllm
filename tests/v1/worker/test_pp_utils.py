@@ -5,7 +5,10 @@
 from unittest.mock import Mock
 
 import numpy as np
+import pytest
+import torch
 
+from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.gpu import pp_utils
 
 
@@ -166,3 +169,36 @@ def test_finishing_prefill_row_does_not_drop_a_sibling_row():
 
     assert mask is not None
     assert mask.tolist() == [False, True]
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "sender_padded", "receiver_padded", "lines_up"),
+    [
+        (5, 8, 8, True),
+        # TP rank 0 holds every token on both stages.
+        (2, 8, 16, True),
+        (5, 8, 16, False),
+        (9, 12, 16, False),
+        (3, 16, 8, False),
+    ],
+)
+def test_sequence_shard_check_compares_both_stages_tp_split(
+    monkeypatch, num_tokens, sender_padded, receiver_padded, lines_up
+):
+    """A sequence-sharded stage reads the previous stage's TP rows as its own,
+    which is right only if both stages split the batch over TP alike."""
+    tp_size = 4
+    monkeypatch.setattr(
+        pp_utils, "get_tensor_model_parallel_world_size", lambda: tp_size
+    )
+    handler = object.__new__(pp_utils.PPHandler)
+    handler.sequence_sharded = True
+    # What the previous stage sends: its rows, cut to the real tokens.
+    sent_rows = min(-(-sender_padded // tp_size), num_tokens)
+    received = IntermediateTensors({"hidden_states": torch.empty(sent_rows, 2)})
+
+    if lines_up:
+        handler.check_sequence_shard(received, num_tokens, receiver_padded)
+    else:
+        with pytest.raises(RuntimeError, match="pad every batch alike"):
+            handler.check_sequence_shard(received, num_tokens, receiver_padded)

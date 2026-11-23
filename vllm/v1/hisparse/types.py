@@ -8,18 +8,17 @@ from dataclasses import dataclass
 ACTIVE_TAIL_PAGES = 2
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SparseKVPageTransfer:
     """Copy one logical KV page between cache-manager and worker-owned tiers."""
 
     transfer_id: int
     host_block_id: int
     resident_block_ids: tuple[int, ...]
-    after_forward: bool
     restore: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SparseKVRowMirror:
     """Mirror one contiguous resident-row span into the host cache."""
 
@@ -28,7 +27,7 @@ class SparseKVRowMirror:
     num_rows: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SparseKVResidencyUpdate:
     """GPU block ids of some of a request's resident pages, per resident group.
     A null block id means the page is read from the host."""
@@ -37,7 +36,7 @@ class SparseKVResidencyUpdate:
     block_ids: tuple[list[int], ...]
 
 
-@dataclass
+@dataclass(slots=True)
 class SparseKVOffloadCommand:
     """Opaque scheduler-to-worker command for one model step."""
 

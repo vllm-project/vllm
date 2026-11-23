@@ -4,6 +4,7 @@
 
 #include "core/utils.hpp"
 #include "core/cuda_compat.h"
+#include "cuda_vec_utils.cuh"
 #include "dispatch_utils.h"
 #include "quantization/w8a8/fp8/common.cuh"
 
@@ -43,7 +44,7 @@ template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
 __global__ void act_and_mul_quant_kernel(
     fp8_type* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
-    const float* scale, const int d) {
+    const float* scale, const int d, const bool vectorize) {
   const int32_t blocks_per_token = gridDim.y;
 
   const int32_t elems_per_128bit_load = (128 / 8) / sizeof(scalar_t);
@@ -64,9 +65,12 @@ __global__ void act_and_mul_quant_kernel(
   const scalar_t* __restrict__ y_ptr = input + token_idx * 2 * d + d;
   fp8_type* __restrict__ out_ptr = out + token_idx * d;
 
-  // 128-bit vectorized code
-  const int32_t vec_loop_end =
-      round_to_previous_multiple_of(elems_per_128bit_load, block_end);
+  // 128-bit vectorized code, when d and the data pointers allow 16-byte
+  // loads and 8-byte stores on every row; otherwise the cleanup loop below
+  // handles the whole block.
+  const int32_t vec_loop_end = vectorize ? round_to_previous_multiple_of(
+                                               block_end, elems_per_128bit_load)
+                                         : block_start;
   const int32_t vec_end_idx = vec_loop_end / elems_per_128bit_load;
   const int32_t vec_start_idx = block_start / elems_per_128bit_load;
 
@@ -272,7 +276,7 @@ __device__ __forceinline__ void token_bounds(int32_t n_tokens,
 
 template <int BLOCK_COUNT, int SMEM_SIZE_BYTES_Y, typename fp8_type,
           typename scale_t, int THREADS, typename Idx_t, bool CEIL_UE8M0,
-          int GROUP_SIZE = 128, int NUM_STAGES = 3>
+          bool USE_CLAMP, int GROUP_SIZE = 128, int NUM_STAGES = 3>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const __nv_bfloat16* __restrict__ _input, fp8_type* __restrict__ _y_q,
     scale_t* __restrict__ _y_s, const int32_t* __restrict__ tokens_per_expert,
@@ -281,7 +285,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     // strides (in elements)
     Idx_t stride_i_e, Idx_t stride_i_t, Idx_t stride_i_h, Idx_t stride_yq_e,
     Idx_t stride_yq_t, Idx_t stride_yq_h, Idx_t stride_ys_e, Idx_t stride_ys_t,
-    Idx_t stride_ys_g, Idx_t stride_ys_p, Idx_t stride_counts_e) {
+    Idx_t stride_ys_g, Idx_t stride_ys_p, Idx_t stride_counts_e,
+    float clamp_limit) {
 #ifndef USE_ROCM
   static constexpr int NUM_WARPS = THREADS / WARP_SIZE;
 
@@ -504,8 +509,16 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   #pragma unroll
       for (int32_t k = 0; k < 2; ++k) {
-        __nv_bfloat162 gate = silu2_v2(__bfloat1622float2(s_gate_comp[k]));
-        res[k] = __hmul2(gate, s_up_comp[k]);
+        auto gate_input = s_gate_comp[k];
+        auto up_input = s_up_comp[k];
+        if constexpr (USE_CLAMP) {
+          const auto upper = __float2bfloat162_rn(clamp_limit);
+          const auto lower = __float2bfloat162_rn(-clamp_limit);
+          gate_input = __hmin2(gate_input, upper);
+          up_input = __hmax2(__hmin2(up_input, upper), lower);
+        }
+        __nv_bfloat162 gate = silu2_v2(__bfloat1622float2(gate_input));
+        res[k] = __hmul2(gate, up_input);
       }
 
       auto _y_max2 = __hmax2(__habs2(res[0]), __habs2(res[1]));
@@ -559,26 +572,30 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 }  // namespace vllm
 
 // Launch activation, gating, and quantize kernel.
-#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                             \
-  int d = input.size(-1) / 2;                                             \
-  int64_t num_tokens = input.numel() / input.size(-1);                    \
-  dim3 grid(num_tokens, num_tokens > 16 ? num_tokens > 32 ? 1 : 2 : 4);   \
-  dim3 block(std::min(d, 512));                                           \
-  const torch::stable::accelerator::DeviceGuard device_guard(             \
-      input.get_device_index());                                          \
-  const cudaStream_t stream =                                             \
-      get_current_cuda_stream(input.get_device_index());                  \
-  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                    \
-      input.scalar_type(), "act_and_mul_kernel", [&] {                    \
-        VLLM_STABLE_DISPATCH_FP8_TYPES(                                   \
-            out.scalar_type(), "act_and_mul_quant_kernel_fp8_type", [&] { \
-              vllm::act_and_mul_quant_kernel<scalar_t, KERNEL<scalar_t>,  \
-                                             fp8_t>                       \
-                  <<<grid, block, 0, stream>>>(                           \
-                      out.mutable_data_ptr<fp8_t>(),                      \
-                      input.const_data_ptr<scalar_t>(),                   \
-                      scale.const_data_ptr<float>(), d);                  \
-            });                                                           \
+#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                                 \
+  int d = input.size(-1) / 2;                                                 \
+  int64_t num_tokens = input.numel() / input.size(-1);                        \
+  dim3 grid(num_tokens, num_tokens > 16 ? num_tokens > 32 ? 1 : 2 : 4);       \
+  dim3 block(std::min(d, 512));                                               \
+  const torch::stable::accelerator::DeviceGuard device_guard(                 \
+      input.get_device_index());                                              \
+  const cudaStream_t stream =                                                 \
+      get_current_cuda_stream(input.get_device_index());                      \
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                        \
+      input.scalar_type(), "act_and_mul_kernel", [&] {                        \
+        VLLM_STABLE_DISPATCH_FP8_TYPES(                                       \
+            out.scalar_type(), "act_and_mul_quant_kernel_fp8_type", [&] {     \
+              const scalar_t* in_ptr = input.const_data_ptr<scalar_t>();      \
+              fp8_t* out_ptr = out.mutable_data_ptr<fp8_t>();                 \
+              const bool vectorize = d % (16 / sizeof(scalar_t)) == 0 &&      \
+                                     vllm::is_16byte_aligned(in_ptr) &&       \
+                                     vllm::is_16byte_aligned(out_ptr);        \
+              vllm::act_and_mul_quant_kernel<scalar_t, KERNEL<scalar_t>,      \
+                                             fp8_t>                           \
+                  <<<grid, block, 0, stream>>>(out_ptr, in_ptr,               \
+                                               scale.const_data_ptr<float>(), \
+                                               d, vectorize);                 \
+            });                                                               \
       });
 
 void silu_and_mul_quant(torch::stable::Tensor& out,    // [..., d]
@@ -600,7 +617,7 @@ void persistent_masked_m_silu_mul_quant(
     const torch::stable::Tensor& tokens_per_expert,  // (E)
     torch::stable::Tensor& y_q,                      // (E, T, H) [OUT]
     torch::stable::Tensor& y_s,  // (E, T, H//group_size) [OUT]
-    bool cast_scale_ue8m0) {
+    bool cast_scale_ue8m0, std::optional<double> clamp_limit) {
 #ifndef USE_ROCM
 
   // This kernel currently only supports H % 128 == 0 and assumes a
@@ -641,31 +658,35 @@ void persistent_masked_m_silu_mul_quant(
   // TODO: Get this from cuda_arch ?
   static constexpr int SILU_V2_BLOCK_COUNT = 132 * 32;
 
-  #define KERNEL(BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G,  \
-                 STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, STAGES)                \
-    static constexpr int NUM_WARPS = THREAD_COUNT / WARP_SIZE;                 \
-    int sms = SILU_V2_BLOCK_COUNT;                                             \
-    static constexpr int max_shared_mem_bytes =                                \
-        GROUP_SIZE * 2 * STAGES * NUM_WARPS * 2;                               \
-    dim3 grid(sms), block(THREAD_COUNT);                                       \
-    const torch::stable::accelerator::DeviceGuard device_guard(                \
-        input.get_device_index());                                             \
-    VLLM_STABLE_DISPATCH_FP8_TYPES(                                            \
-        y_q.scalar_type(), "silu_mul_fp8_quant_deep_gemm_kernel", [&] {        \
-          vllm::silu_mul_fp8_quant_deep_gemm_kernel<                           \
-              BLOCK_COUNT, max_shared_mem_bytes, fp8_t, scale_t, THREAD_COUNT, \
-              Idx_t, CEIL_UE8M0, GROUP_SIZE, STAGES>                           \
-              <<<grid, block, max_shared_mem_bytes + (E + 1) * 16, stream>>>(  \
-                  reinterpret_cast<const __nv_bfloat16*>(                      \
-                      input.const_data_ptr()),                                 \
-                  y_q.mutable_data_ptr<fp8_t>(),                               \
-                  reinterpret_cast<scale_t*>(y_s.mutable_data_ptr()),          \
-                  reinterpret_cast<const int32_t*>(                            \
-                      tokens_per_expert.const_data_ptr()),                     \
-                  E, T, H, stride_i_e, stride_i_t, stride_i_h, stride_yq_e,    \
-                  stride_yq_t, stride_yq_h, STRIDE_YS_E, STRIDE_YS_T,          \
-                  STRIDE_YS_G, STRIDE_YS_P, stride_counts_e);                  \
-        });
+  #define KERNEL(BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G, \
+                 STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, STAGES)               \
+    static constexpr int NUM_WARPS = THREAD_COUNT / WARP_SIZE;                \
+    int sms = SILU_V2_BLOCK_COUNT;                                            \
+    static constexpr int max_shared_mem_bytes =                               \
+        GROUP_SIZE * 2 * STAGES * NUM_WARPS * 2;                              \
+    dim3 grid(sms), block(THREAD_COUNT);                                      \
+    const torch::stable::accelerator::DeviceGuard device_guard(               \
+        input.get_device_index());                                            \
+    VLLM_STABLE_DISPATCH_BOOL(clamp_limit.has_value(), USE_CLAMP, [&] {       \
+      VLLM_STABLE_DISPATCH_FP8_TYPES(                                         \
+          y_q.scalar_type(), "silu_mul_fp8_quant_deep_gemm_kernel", [&] {     \
+            vllm::silu_mul_fp8_quant_deep_gemm_kernel<                        \
+                BLOCK_COUNT, max_shared_mem_bytes, fp8_t, scale_t,            \
+                THREAD_COUNT, Idx_t, CEIL_UE8M0, USE_CLAMP, GROUP_SIZE,       \
+                STAGES><<<grid, block, max_shared_mem_bytes + (E + 1) * 16,   \
+                          stream>>>(                                          \
+                reinterpret_cast<const __nv_bfloat16*>(                       \
+                    input.const_data_ptr()),                                  \
+                y_q.mutable_data_ptr<fp8_t>(),                                \
+                reinterpret_cast<scale_t*>(y_s.mutable_data_ptr()),           \
+                reinterpret_cast<const int32_t*>(                             \
+                    tokens_per_expert.const_data_ptr()),                      \
+                E, T, H, stride_i_e, stride_i_t, stride_i_h, stride_yq_e,     \
+                stride_yq_t, stride_yq_h, STRIDE_YS_E, STRIDE_YS_T,           \
+                STRIDE_YS_G, STRIDE_YS_P, stride_counts_e,                    \
+                static_cast<float>(clamp_limit.value_or(0.0)));               \
+          });                                                                 \
+    });
 
   #define LAUNCH_ON_H(scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G,         \
                       STRIDE_YS_P, CEIL_UE8M0)                                \

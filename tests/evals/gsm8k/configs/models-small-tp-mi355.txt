@@ -1,2 +1,0 @@
-# Dense MLA PCP accuracy on MI355.
-DeepSeek-V2-Lite-Instruct-FP8-TP1-PCP2-ROCm.yaml

@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Unit tests for ``vllm.v1.worker.xpu_model_runner`` (XPU worker / CUDA shims)."""
+"""Unit tests for `vllm.v1.worker.xpu_model_runner` (XPU worker / CUDA shims)."""
 
 import pytest
 import torch
 from torch._dynamo.variables.torch import TorchInGraphFunctionVariable
 
+from tests.utils import fork_new_process_for_each_test
 from vllm.v1.worker.xpu_model_runner import _torch_cuda_wrapper
 
 # XPU-only: needs distinct torch.cuda vs torch.xpu current_stream symbols.
@@ -17,23 +18,23 @@ pytestmark = pytest.mark.skipif(
 
 
 # Child process: patched torch.cuda must not leak to other tests in the session.
-@pytest.mark.forked
+@fork_new_process_for_each_test
 def test_torch_cuda_wrapper_allows_dynamo_handler_registration() -> None:
     """Guard against XPU CUDA shim breaking Torch Dynamo during AOT compile.
 
-    Before the fix, ``_torch_cuda_wrapper`` assigned
-    ``torch.cuda.current_stream = torch.xpu.current_stream`` (same function object).
+    Before the fix, `_torch_cuda_wrapper` assigned
+    `torch.cuda.current_stream = torch.xpu.current_stream` (same function object).
     On the first AOT/profile run, Dynamo builds its in-graph handler table and
-    registers ``torch.cuda.current_stream`` and ``torch.xpu.current_stream``
+    registers `torch.cuda.current_stream` and `torch.xpu.current_stream`
     separately; duplicate identity triggers::
 
         AssertionError: Handler already registered for <function current_stream ...>
 
-    That surfaced as EngineCore failing in ``profile_run`` / ``_get_handlers()``.
+    That surfaced as EngineCore failing in `profile_run` / `_get_handlers()`.
     The fix uses distinct shim callables so both can be registered.
 
     This test replays the post-init state (wrapper applied, patches left on
-    ``torch.cuda``) and checks that Dynamo's real ``_get_handlers()`` succeeds.
+    `torch.cuda`) and checks that Dynamo's real `_get_handlers()` succeeds.
     """
     # Same entry point as XPUModelRunner.__init__ (patches persist after exit).
     with _torch_cuda_wrapper():

@@ -11,7 +11,7 @@ from __future__ import annotations
 import ctypes
 import struct
 import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from enum import IntEnum
 from typing import Any
@@ -98,7 +98,7 @@ def create_mooncake_embedding_store_client(
             "Install mooncake with Store support to enable cross_encoder_cache."
         ) from e
 
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import rdma_utils
 
     config = MooncakeStoreConfig.load_from_config()
     if config.enable_offload:
@@ -180,7 +180,7 @@ class MooncakeEmbeddingStoreClient:
     def _registered_io(
         self,
         buffers: list[tuple[Any, int, int]],
-    ) -> Iterator[Callable[[int], None]]:
+    ) -> Generator[Callable[[int], None]]:
         self._check_healthy()
         registered = []
         submitted = False
@@ -197,7 +197,7 @@ class MooncakeEmbeddingStoreClient:
             confirmed = True
 
         try:
-            for owner, addr, size in buffers:
+            for _, addr, size in buffers:
                 ret = self.store.register_buffer(addr, size)
                 if ret != 0:
                     raise EmbeddingStoreOperationError(

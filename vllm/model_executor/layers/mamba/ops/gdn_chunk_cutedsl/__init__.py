@@ -157,21 +157,21 @@ def chunk_gated_delta_rule_cutedsl(
     """Run the GDN chunk CuteDSL prefill kernels.
 
     Args:
-        q: Query tensor with shape ``[1, T, H, K]``.
-        k: Key tensor with shape ``[1, T, H, K]``.
-        v: Value tensor with shape ``[1, T, Hv, V]``.
-        g: Log-space decay tensor with shape ``[1, T, Hv]``.
-        beta: Delta-rule beta tensor with shape ``[1, T, Hv]``.
-        initial_state: Recurrent state with shape ``[N, Hv, V, K]``.
-        cu_seqlens: Cumulative sequence lengths with shape ``[N + 1]``.
-        chunk_indices: Chunk index metadata with shape ``[NT, 2]``.
-        chunk_offsets: Cumulative chunk offsets with shape ``[N + 1]``.
-        core_attn_out: Optional output buffer with shape ``[T, Hv, V]``.
+        q: Query tensor with shape `[1, T, H, K]`.
+        k: Key tensor with shape `[1, T, H, K]`.
+        v: Value tensor with shape `[1, T, Hv, V]`.
+        g: Log-space decay tensor with shape `[1, T, Hv]`.
+        beta: Delta-rule beta tensor with shape `[1, T, Hv]`.
+        initial_state: Recurrent state with shape `[N, Hv, V, K]`.
+        cu_seqlens: Cumulative sequence lengths with shape `[N + 1]`.
+        chunk_indices: Chunk index metadata with shape `[NT, 2]`.
+        chunk_offsets: Cumulative chunk offsets with shape `[N + 1]`.
+        core_attn_out: Optional output buffer with shape `[T, Hv, V]`.
 
     Returns:
-        A tuple ``(output, final_state)`` where ``output`` has shape
-        ``[1, T, Hv, V]`` and ``final_state`` has shape ``[N, Hv, V, K]``.
-        When ``core_attn_out`` is provided, ``output`` is an unsqueezed view of
+        A tuple `(output, final_state)` where `output` has shape
+        `[1, T, Hv, V]` and `final_state` has shape `[N, Hv, V, K]`.
+        When `core_attn_out` is provided, `output` is an unsqueezed view of
         that buffer.
 
     """

@@ -4,11 +4,11 @@
 
 Two levels of coverage are provided:
 
-* :func:`test_kv_cache_cpu_write` checks that the kv-cache write logic
+* `test_kv_cache_cpu_write` checks that the kv-cache write logic
   inlined in the CPU MLA backend writes the latent KV cache in the same
   layout the CPU decode kernel expects. This runs without downloading
   any model weights and is safe for CI.
-* :func:`test_cpu_mla_backend_smoke` exercises the full end-to-end path
+* `test_cpu_mla_backend_smoke` exercises the full end-to-end path
   (LLM engine, model construction, prefill + decode) against a shrunk
   DeepSeek-V2-Lite with `hf_overrides`. It uses `dummy` weights so the
   outputs are not meaningful, only shape / plumbing correctness is
@@ -119,7 +119,6 @@ def test_cpu_mla_backend_smoke(tmp_path) -> None:
     llm = LLM(
         model="deepseek-ai/DeepSeek-V2-Lite",
         skip_tokenizer_init=True,
-        trust_remote_code=True,
         load_format="dummy",
         enforce_eager=True,
         max_model_len=128,
@@ -188,6 +187,7 @@ def test_cpu_mla_prefill_new_tokens() -> None:
     k = torch.randn(6, 4, 16, dtype=torch.bfloat16)
     v = torch.randn(6, 4, 16, dtype=torch.bfloat16)
     out = backend.run_prefill_new_tokens(q, k, v, return_softmax_lse=False)
+    assert not isinstance(out, tuple)
     ref, _ = _reference_ragged_attention(
         q,
         k,
@@ -286,6 +286,7 @@ def test_zen_cpu_mla_prefill_new_tokens() -> None:
     v = torch.randn(6, 4, v_head_dim, dtype=torch.bfloat16)
 
     out = backend.run_prefill_new_tokens(q, k, v, return_softmax_lse=False)
+    assert not isinstance(out, tuple)
     ref, _ = _reference_ragged_attention(
         q,
         k,
