@@ -98,4 +98,5 @@ def resolve_device_pointers(
         group_block_counts=tuple(group_sizes),
         group_data_ref_counts=tuple(len(refs) for refs in group_data_refs),
         block_indices=tuple(block_indices),
+        block_ids=block_ids,
     )

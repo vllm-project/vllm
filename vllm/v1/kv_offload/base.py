@@ -700,6 +700,10 @@ class DevicePointers:
             for each data_ref in group:
                 for each block in group:
                     ptrs[i], sizes[i]
+
+    `block_ids` contains the logical GPU block IDs in group order. Each
+    block ID appears once, unlike `ptrs` and `sizes`, which contain one
+    entry per data-ref/block copy operation.
     """
 
     ptrs: np.ndarray  # uint64, device memory addresses
@@ -707,6 +711,7 @@ class DevicePointers:
     group_block_counts: tuple[int, ...]  # device blocks per group
     group_data_ref_counts: tuple[int, ...]  # data_refs per group
     block_indices: tuple[int, ...]  # logical block offset per group
+    block_ids: np.ndarray  # logical GPU block IDs, one per block
 
 
 class DevicePointerGroupInfo(NamedTuple):
