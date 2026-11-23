@@ -7,12 +7,20 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
     DeepGemmFp8BlockScaledMMKernel,
+)
+from vllm.model_executor.layers.fused_moe.config import (
+    fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_MXFP4,
     MEGA_MOE_NVFP4,
+)
+from vllm.model_executor.layers.fused_moe.experts import batched_deep_gemm_moe
+from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
+    BatchedDeepGemmExperts,
 )
 from vllm.model_executor.warmup import deep_gemm_warmup
 
@@ -93,6 +101,122 @@ def test_kernel_registers_itself_as_warmup_provider(is_bmm) -> None:
 
     provider = getattr(layer, "deep_gemm_warmup_provider", None)
     assert provider is (None if is_bmm else kernel)
+
+
+def test_batched_experts_register_masked_gemm_warmup(monkeypatch) -> None:
+    """The DeepEP low-latency experts must expose their exact buffer geometry
+    to startup warmup; otherwise their first request JIT-compiles masked GEMMs."""
+    monkeypatch.setattr(
+        batched_deep_gemm_moe,
+        "get_mk_alignment_for_contiguous_layout",
+        lambda: [128, 128],
+    )
+    w1_scale = torch.empty((4, 2, 1), dtype=torch.float32)
+    w2_scale = torch.empty((4, 1, 1), dtype=torch.float32)
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        per_act_token_quant=False,
+        block_shape=[128, 128],
+    )
+    experts = BatchedDeepGemmExperts(
+        moe_config=make_dummy_moe_config(
+            num_experts=4,
+            num_local_experts=4,
+            hidden_dim=128,
+            intermediate_size=128,
+        ),
+        quant_config=quant_config,
+        max_num_tokens=64,
+        num_dispatchers=2,
+    )
+    layer = torch.nn.Module()
+    layer.w13_weight = torch.nn.Parameter(
+        torch.empty((4, 256, 128), dtype=torch.float8_e4m3fn),
+        requires_grad=False,
+    )
+    layer.w2_weight = torch.nn.Parameter(
+        torch.empty((4, 128, 128), dtype=torch.float8_e4m3fn),
+        requires_grad=False,
+    )
+
+    experts.process_weights_after_loading(layer)
+
+    data = deep_gemm_warmup._batched_masked_gemm_data(layer)
+    assert data == (
+        experts,
+        layer.w13_weight,
+        layer.w2_weight,
+        w1_scale,
+        w2_scale,
+    )
+    calls = []
+    monkeypatch.setattr(
+        deep_gemm_warmup,
+        "_deepgemm_grouped_fp8_gemm_nt_masked_warmup",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    deep_gemm_warmup.deepgemm_grouped_fp8_gemm_nt_masked_warmup(
+        torch.nn.Sequential(layer)
+    )
+
+    assert calls == [(data, {"pbar": None})]
+
+
+def test_ep_scatter_gather_warmup_uses_runtime_signature(monkeypatch) -> None:
+    """The explicit warmup must compile the EP variants used by a wide-EP
+    rank, including expert-map specialization and the model's actual top-k."""
+    calls: dict[str, dict] = {}
+
+    def fake_permute(**kwargs):
+        calls["permute"] = kwargs
+        return (
+            torch.empty((128, 128), dtype=torch.float8_e4m3fn),
+            torch.empty((128, 1), dtype=torch.float32),
+            torch.empty((128,), dtype=torch.int32),
+            torch.empty((1, 2), dtype=torch.int32),
+            128,
+        )
+
+    def fake_unpermute(**kwargs):
+        calls["unpermute"] = kwargs
+
+    monkeypatch.setattr(deep_gemm_warmup, "deepgemm_moe_permute", fake_permute)
+    monkeypatch.setattr(
+        deep_gemm_warmup,
+        "deepgemm_unpermute_and_reduce",
+        fake_unpermute,
+    )
+
+    deep_gemm_warmup._deepgemm_ep_scatter_gather_warmup(
+        hidden_size=128,
+        local_num_experts=4,
+        global_num_experts=8,
+        topk=2,
+        device=torch.device("cpu"),
+        output_dtype=torch.bfloat16,
+        block_size=128,
+        pack_ue8m0=False,
+        use_psum_layout=False,
+        has_expert_map=True,
+    )
+
+    permute = calls["permute"]
+    assert permute["aq"].shape == (1, 128)
+    assert permute["aq_scale"].shape == (1, 1)
+    assert permute["topk_ids"].shape == (1, 2)
+    assert permute["expert_map"].shape == (8,)
+    assert permute["local_num_experts"] == 4
+    assert calls["unpermute"]["output"].dtype == torch.bfloat16
+
+
+def test_masked_gemm_full_warmup_covers_every_runtime_bucket(monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "full")
+
+    assert deep_gemm_warmup._get_grouped_masked_expected_m_values(
+        64, 256, torch.device("cpu")
+    ) == [16, 32, 48, 64]
 
 
 def test_mega_moe_predicate_matches_only_native_mega_moe_layers(monkeypatch) -> None:
