@@ -5,7 +5,6 @@ import functools
 import json
 import time
 from concurrent.futures import Future
-from concurrent.futures._base import TimeoutError
 from typing import TYPE_CHECKING, Any, cast
 
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
@@ -22,14 +21,18 @@ if TYPE_CHECKING:
 @dataclasses.dataclass
 class StructuredOutputRequest:
     params: StructuredOutputsParams
-    _grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar | None = None
-    compilation_start_time: float = 0.0
-    compile_error: BaseException | None = None
+    _grammar: (
+        Future[StructuredOutputGrammar] | StructuredOutputGrammar | Exception | None
+    ) = None
     reasoning_ended: bool | None = None
     reasoning_parser_kwargs: dict[str, Any] | None = None
     # Cached per request; do not share reasoning parsers across requests because
     # their behavior can depend on reasoning_parser_kwargs.
     reasoner: "ReasoningParser | None" = None
+    # Implicit reasoning-end tokens the grammar rejects as the first content
+    # token; masked while the request reasons. Computed on first use.
+    masked_reasoning_end_ids: tuple[int, ...] | None = None
+    compilation_start_time: float | None = None
 
     @staticmethod
     def from_sampling_params(
@@ -42,31 +45,42 @@ class StructuredOutputRequest:
             return None
         return StructuredOutputRequest(params=params)
 
+    def _check_grammar_completion(self) -> bool:
+        if isinstance(self._grammar, Future):
+            if not self._grammar.done():
+                return False
+            try:
+                self._grammar = self._grammar.result()
+            except Exception as e:
+                self._grammar = e
+        return True
+
     def start_compilation(self) -> None:
         self.compilation_start_time = time.monotonic()
 
-    def _check_grammar_completion(self) -> bool:
-        if isinstance(self._grammar, Future):
-            try:
-                self._grammar = self._grammar.result(timeout=0.0001)
-            except TimeoutError:
-                return False
-            except Exception as exc:
-                self._grammar = None
-                self.compile_error = exc
-                return True
-        return True
+    def cancel_grammar_if_expired(self, timeout: int) -> bool:
+        """Stop waiting for an overdue compilation and cancel queued work."""
+        future = self._grammar
+        started = self.compilation_start_time
+        if (
+            timeout <= 0
+            or started is None
+            or not isinstance(future, Future)
+            or time.monotonic() - started < timeout
+            or future.done()
+        ):
+            return False
+        return future.cancel() or not future.done()
 
     @property
     def is_grammar_ready(self) -> bool:
         return self._check_grammar_completion()
 
     @property
-    def grammar(self) -> StructuredOutputGrammar | None:
-        completed = self._check_grammar_completion()
-        return (
-            cast(StructuredOutputGrammar | None, self._grammar) if completed else None
-        )
+    def grammar(self) -> StructuredOutputGrammar | Exception | None:
+        if not self._check_grammar_completion():
+            return None
+        return cast(StructuredOutputGrammar | Exception | None, self._grammar)
 
     @grammar.setter
     def grammar(

@@ -3,18 +3,19 @@
 """Inference-only Deepseek-OCR model compatible with HuggingFace weights."""
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal
+from collections.abc import Hashable, Iterable, Mapping, Sequence
+from typing import Annotated, Any, Literal
 
 import torch
 import torch.nn as nn
 from transformers import BatchFeature, CLIPVisionConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -45,38 +46,40 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.sampling_params import SamplingParams
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
+    IMAGE_SIZE,
     DeepseekOCRProcessor,
     count_tiles,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.v1.sample.logits_processor import (
-    AdapterLogitsProcessor,
-    RequestLogitsProcessor,
+from vllm.v1.worker.encoder_cudagraph_defs import (
+    EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig,
+    EncoderCudaGraphPathConfig,
+    EncoderCudaGraphReplayBuffers,
+    EncoderItemSpec,
 )
 
 from .deepencoder import DeepCLIPVisionTransformer, build_sam_vit_b
 from .deepseek_vl2 import MlpProjector
 
 # The image token id may be various
-IMAGE_SIZE = 640
 _IMAGE_TOKEN = "<image>"
 
 
 class DeepseekOCRImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - n: Number of images
-        - p: Number of patches
-        - base_size: Base size of the processor
-        - image_size: Image size of the processor
+    """Dimensions:
+    - b: Batch size
+    - n: Number of images
+    - p: Number of patches
+    - base_size: Base size of the processor
+    - image_size: Image size of the processor
     """
 
     type: Literal["pixel_values"]
@@ -89,100 +92,6 @@ class DeepseekOCRImagePixelInputs(TensorSchema):
         TensorShape("bnp", 3, "image_size", "image_size", dynamic_dims={"bnp"}),
     ]
     images_spatial_crop: Annotated[torch.Tensor, TensorShape("bn", 2)]
-
-
-class NoRepeatNGramLogitsProcessor:
-    def __init__(
-        self,
-        ngram_size: int,
-        window_size: int,
-        whitelist_token_ids: set[int] | None = None,
-    ):
-        self.ngram_size = ngram_size
-        self.window_size = window_size
-        self.whitelist_token_ids = whitelist_token_ids or set()
-
-    def __call__(
-        self,
-        output_ids: list[int],
-        logits: torch.Tensor,
-    ) -> torch.Tensor:
-        if len(output_ids) < self.ngram_size:
-            return logits
-
-        current_prefix = tuple(output_ids[-(self.ngram_size - 1) :])
-
-        search_start = max(0, len(output_ids) - self.window_size)
-        search_end = len(output_ids) - self.ngram_size + 1
-
-        banned_tokens = set()
-        for i in range(search_start, search_end):
-            ngram = tuple(output_ids[i : i + self.ngram_size])
-            if ngram[:-1] == current_prefix:
-                banned_tokens.add(ngram[-1])
-
-        banned_tokens = banned_tokens - self.whitelist_token_ids
-
-        if banned_tokens:
-            logits[list(banned_tokens)] = -float("inf")
-
-        return logits
-
-
-class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
-    """Example of overriding the wrapper class `__init__()` in order to utilize
-    info about the device type"""
-
-    @classmethod
-    def validate_params(cls, params: SamplingParams):
-        ngram_size = params.extra_args and params.extra_args.get("ngram_size")
-        window_size = params.extra_args and params.extra_args.get("window_size", 100)
-        whitelist_token_ids = params.extra_args and params.extra_args.get(
-            "whitelist_token_ids", None
-        )
-        # if ngram_size is not provided, skip validation because the processor
-        # will not be used.
-        if ngram_size is None:
-            return None
-
-        if not isinstance(ngram_size, int) or ngram_size <= 0:
-            raise ValueError(
-                f"`ngram_size` has to be a strictly positive integer, got {ngram_size}."
-            )
-        if not isinstance(window_size, int) or window_size <= 0:
-            raise ValueError(
-                "`window_size` has to be a strictly positive integer, "
-                f"got {window_size}."
-            )
-        if whitelist_token_ids is not None and not isinstance(
-            whitelist_token_ids, Iterable
-        ):
-            raise ValueError(
-                "`whitelist_token_ids` has to be a sequence of integers, "
-                f"got {whitelist_token_ids}."
-            )
-
-    def is_argmax_invariant(self) -> bool:
-        return False
-
-    def new_req_logits_processor(
-        self,
-        params: SamplingParams,
-    ) -> RequestLogitsProcessor | None:
-        ngram_size = params.extra_args and params.extra_args.get("ngram_size")
-        window_size = params.extra_args and params.extra_args.get("window_size", 100)
-        whitelist_token_ids = params.extra_args and params.extra_args.get(
-            "whitelist_token_ids", None
-        )
-        if ngram_size is None:
-            return None
-
-        whitelist_token_ids = set(whitelist_token_ids) if whitelist_token_ids else None
-        return NoRepeatNGramLogitsProcessor(
-            ngram_size=ngram_size,
-            window_size=window_size,
-            whitelist_token_ids=whitelist_token_ids,
-        )
 
 
 class DeepseekOCRProcessingInfo(BaseProcessingInfo):
@@ -213,8 +122,10 @@ class DeepseekOCRProcessingInfo(BaseProcessingInfo):
         patch_size = 16
         downsample_ratio = 4
 
-        if CROP_MODE:
-            if image_width <= 640 and image_height <= 640:
+        # Use the caller-supplied `cropping` flag so that callers that disable
+        # crop mode for multi-image requests get a consistent token count.
+        if cropping:
+            if image_width <= IMAGE_SIZE and image_height <= IMAGE_SIZE:
                 crop_ratio = [1, 1]
             else:
                 # find the closest aspect ratio to the target
@@ -257,17 +168,15 @@ class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         max_image_size = self.info.get_image_size_with_most_features()
 
         return {
             "image": self._get_dummy_images(
                 width=max_image_size.width,
                 height=max_image_size.height,
-                num_images=num_images,
+                num_images=mm_counts.get("image", 0),
             )
         }
 
@@ -275,27 +184,19 @@ class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessing
 class DeepseekOCRMultiModalProcessor(
     BaseMultiModalProcessor[DeepseekOCRProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if mm_data:
-            processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
-                dict(prompt=prompt, **mm_data),
-                mm_kwargs,
-            )
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        if "text" in hf_inputs.hf_data:
+            hf_inputs.hf_data["prompt"] = hf_inputs.hf_data.pop("text")
 
-        else:
-            tokenizer = self.info.get_tokenizer()
-            processed_outputs = tokenizer(
-                prompt, add_special_tokens=True, return_tensors="pt"
-            )
-
-        return processed_outputs
+        return hf_inputs
 
     def _get_mm_fields_config(
         self,
@@ -307,7 +208,10 @@ class DeepseekOCRMultiModalProcessor(
         patches_per_image = torch.where(is_tiled, images_spatial_crop.prod(dim=-1), 0)
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            images_spatial_crop=MultiModalFieldConfig.batched("image"),
+            num_image_tokens=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            images_spatial_crop=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
             images_crop=MultiModalFieldConfig.flat_from_sizes(
                 "image", patches_per_image
             ),
@@ -332,13 +236,9 @@ class DeepseekOCRMultiModalProcessor(
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
-                size = images.get_image_size(item_idx)
-
-                num_image_tokens = self.info.get_num_image_tokens(
-                    image_width=size.width,
-                    image_height=size.height,
-                    cropping=CROP_MODE,
-                )
+                token_count = out_mm_kwargs["image"][item_idx]["num_image_tokens"].data
+                assert isinstance(token_count, torch.Tensor)
+                num_image_tokens = int(token_count.item())
             return [image_token_id] * num_image_tokens
 
         return [
@@ -355,7 +255,9 @@ class DeepseekOCRMultiModalProcessor(
     info=DeepseekOCRProcessingInfo,
     dummy_inputs=DeepseekOCRDummyInputsBuilder,
 )
-class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+class DeepseekOCRForCausalLM(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsEncoderCudaGraph
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # map prefix for language backbone
@@ -383,6 +285,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
 
         self.vision_config = config.vision_config
@@ -446,8 +349,10 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
         images_spatial_crop = kwargs.pop("images_spatial_crop", None)
         images_crop = kwargs.pop("images_crop", None)
 
-        if pixel_values is None or torch.sum(pixel_values).item() == 0:
+        if pixel_values is None:
             return None
+        assert isinstance(pixel_values, torch.Tensor)
+        assert images_crop is None or isinstance(images_crop, torch.Tensor)
 
         # Use actual tensor spatial dim instead of hardcoded
         # vision_config.image_size (1024). The vision encoders (SAM & CLIP)
@@ -490,7 +395,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
     def _encode_local_features(
         self, patches: torch.Tensor, crop_shape: torch.Tensor
     ) -> torch.Tensor | None:
-        if torch.sum(patches).item() == 0:
+        if patches.numel() == 0:
             return None
 
         local_features_1 = self.sam_model(patches)
@@ -504,9 +409,14 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
         )
         features = self.projector(features)
 
+        return self._assemble_patch_grid(features, crop_shape)
+
+    def _assemble_patch_grid(
+        self, features: torch.Tensor, crop_shape: torch.Tensor
+    ) -> torch.Tensor:
+        """Assemble projected patches into a 2-D tile grid with newline columns."""
         _, hw, dim = features.shape
         patch_side = int(hw**0.5)
-
         width_tiles = int(crop_shape[0].item())
         height_tiles = int(crop_shape[1].item())
 
@@ -519,7 +429,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
             height_tiles * patch_side, 1, dim
         )
         features = torch.cat([features, newline], dim=1)
-
         return features.view(-1, dim)
 
     def _pixel_values_to_embedding(
@@ -535,7 +444,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
         images_crop = images_crop.split(patches_per_image.tolist())
         for jdx in range(images_spatial_crop.size(0)):
             patches = images_crop[jdx]
-            image_ori = pixel_values[[jdx]]
+            image_ori = pixel_values[jdx : jdx + 1]
             crop_shape = images_spatial_crop[jdx]
 
             global_features = self._encode_global_features(image_ori)
@@ -606,11 +515,373 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
         return autoloaded_weights
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="projector",
             tower_model=["sam_model", "vision_model"],
         )
+
+    # -- Fixed spatial constants (computed from BASE_SIZE / IMAGE_SIZE) --
+
+    @property
+    def image_side(self) -> int:
+        """Number of output grid cells per spatial dim for a global image."""
+        return math.ceil((BASE_SIZE // 16) / 4)  # 16
+
+    @property
+    def global_image_output_token(self) -> int:
+        """Tokens per global image (grid + one newline per row)."""
+        return self.image_side * (self.image_side + 1)  # 272
+
+    @property
+    def patch_side(self) -> int:
+        """Number of output grid cells per spatial dim for a local patch."""
+        return math.ceil((IMAGE_SIZE // 16) / 4)  # 10
+
+    @property
+    def single_patch_output_token(self) -> int:
+        """Tokens per local patch (square grid, no newlines)."""
+        return self.patch_side * self.patch_side  # 100
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+
+    def _get_num_input_output_tokens(
+        self,
+        image_spatial_crop: torch.Tensor | None = None,
+    ) -> tuple[int, int, int, int]:
+        """Return (num_input_tokens, num_output_tokens, global_output_token,
+        local_output_token) for a single image described by
+        `image_spatial_crop`.
+        """
+        is_tiled = False
+        if image_spatial_crop is not None:
+            is_tiled = image_spatial_crop[0] > 1 or image_spatial_crop[1] > 1
+
+        # Compute input size:
+        global_input_side = BASE_SIZE // 16  # 64
+        local_input_side = IMAGE_SIZE // 16  # 40
+        num_input_tokens = global_input_side**2
+
+        if is_tiled:
+            assert image_spatial_crop is not None
+            num_patches = int(image_spatial_crop.prod().item())
+            num_input_tokens += num_patches * (local_input_side**2)
+
+        global_output_token = self.global_image_output_token
+        num_output_tokens = global_output_token
+
+        local_output_token = 0
+        if is_tiled:
+            local_output_token = num_patches * self.single_patch_output_token
+            num_output_tokens += local_output_token
+
+        return (
+            num_input_tokens,
+            num_output_tokens,
+            global_output_token,
+            local_output_token,
+        )
+
+    def get_encoder_cudagraph_config(self):
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values"],
+            out_hidden_size=self.projector_config.n_embed,
+            paths={
+                "global": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.global_image_output_token
+                ),
+                "local": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.single_patch_output_token,
+                    allow_zero_tokens=True,
+                ),
+            },
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config,
+    ) -> tuple[int, int]:
+        # Min budget: at least one global image with newline tokens (without patches).
+        min_budget = self.global_image_output_token
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[EncoderItemSpec]:
+        item_specs = []
+        for image_spatial_crop in mm_kwargs["images_spatial_crop"]:
+            (
+                num_input_tokens,
+                num_output_tokens,
+                global_output_token,
+                local_output_token,
+            ) = self._get_num_input_output_tokens(image_spatial_crop)
+            item_specs.append(
+                EncoderItemSpec(
+                    input_size=num_input_tokens,
+                    output_tokens=num_output_tokens,
+                    path_output_tokens={
+                        "global": global_output_token,
+                        "local": local_output_token,
+                    },
+                )
+            )
+        return item_specs
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        pixel_values = mm_kwargs["pixel_values"]
+        images_crop = mm_kwargs["images_crop"]
+        images_spatial_crop = mm_kwargs["images_spatial_crop"]
+
+        if len(indices) == 0:
+            return {
+                "pixel_values": pixel_values[:0],
+                "images_crop": images_crop[:0],
+                "images_spatial_crop": images_spatial_crop[:0],
+            }
+
+        is_tiled = (images_spatial_crop[:, 0] > 1) | (images_spatial_crop[:, 1] > 1)
+        patches_per_image = torch.where(is_tiled, images_spatial_crop.prod(dim=-1), 0)
+        cum_patches = [0]
+        for num_patches in patches_per_image:
+            cum_patches.append(cum_patches[-1] + int(num_patches))
+
+        selected_pv = pixel_values[indices]
+        selected_ic = torch.cat(
+            [images_crop[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        selected_sp = images_spatial_crop[indices]
+
+        return {
+            "pixel_values": selected_pv,
+            "images_crop": selected_ic,
+            "images_spatial_crop": selected_sp,
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ):
+        assert path in ("global", "local")
+
+        if path == "global":
+            max_num_images = token_budget // self.global_image_output_token
+            max_batch_size = min(max_batch_size, max_num_images)
+            dummy_pixel_values = torch.randn(
+                max_batch_size,
+                3,
+                BASE_SIZE,
+                BASE_SIZE,
+                device=device,
+                dtype=dtype,
+            )
+            values = {"pixel_values": dummy_pixel_values}
+        else:
+            max_num_patches = token_budget // self.single_patch_output_token
+            dummy_images_crop = torch.randn(
+                max_num_patches,
+                3,
+                IMAGE_SIZE,
+                IMAGE_SIZE,
+                device=device,
+                dtype=dtype,
+            )
+            values = {"images_crop": dummy_images_crop}
+
+        return EncoderCudaGraphCaptureInputs(values=values)
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        assert path in ("global", "local")
+
+        if path == "global":
+            values = {"pixel_values": mm_kwargs["pixel_values"]}
+        else:
+            values = {"images_crop": mm_kwargs["images_crop"]}
+
+        return EncoderCudaGraphReplayBuffers(values=values)
+
+    def _batched_encoder_forward_global_path(
+        self,
+        pixel_values: torch.Tensor,
+    ) -> torch.Tensor:
+        """Encode batched global images with newline tokens inserted.
+        Output shape: `[B * 272, n_embed]`.
+        """
+        bsz = pixel_values.shape[0]
+        global_features_1 = self.sam_model(pixel_values)
+        global_features_2 = self.vision_model(pixel_values, global_features_1)
+        features = torch.cat(
+            (
+                global_features_2[:, 1:],
+                global_features_1.flatten(2).permute(0, 2, 1),
+            ),
+            dim=-1,
+        )
+        features = self.projector(features)
+        side = self.image_side
+        dim = features.shape[-1]
+        features = features.view(bsz, side, side, dim)
+        newline = self.image_newline.view(1, 1, 1, dim).expand(bsz, side, 1, dim)
+        features = torch.cat([features, newline], dim=2)
+        return features.view(-1, dim)
+
+    def _batched_encoder_forward_local_path(
+        self,
+        images_crop: torch.Tensor,
+    ) -> torch.Tensor:
+        """Encode local patches without newline insertion (newlines are added later
+        in `postprocess_encoder_output` via `_assemble_patch_grid`).
+        Output shape: `[P * 100, n_embed]`.
+        """
+        features_1 = self.sam_model(images_crop)
+        features_2 = self.vision_model(images_crop, features_1)
+        features = torch.cat(
+            (
+                features_2[:, 1:],
+                features_1.flatten(2).permute(0, 2, 1),
+            ),
+            dim=-1,
+        )
+        features = self.projector(features)
+        return features.view(-1, features.shape[-1])
+
+    def encoder_cudagraph_forward(
+        self,
+        values: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        assert path in ("global", "local")
+
+        if path == "global":
+            pixel_values = values["pixel_values"]
+            return self._batched_encoder_forward_global_path(pixel_values)
+        else:
+            images_crop = values["images_crop"]
+            return self._batched_encoder_forward_local_path(images_crop)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        """Eager encoder forward with optional per-path execution.
+
+        `path="default"`: full forward (global + local + assembly).
+        `path="global"`: global-only batched forward with newlines.
+        `path="local"`: local-only batched forward without newlines.
+        """
+        if path == "default":
+            # Original eager implementation: process each image one by one
+            # (with both global and local paths) and concatenate results.
+            image_input = DeepseekOCRImagePixelInputs(
+                type="pixel_values",
+                data=mm_kwargs["pixel_values"],
+                images_crop=mm_kwargs["images_crop"],
+                images_spatial_crop=mm_kwargs["images_spatial_crop"],
+            )
+            vision_embeddings = self._process_image_input(image_input)
+            return torch.cat(vision_embeddings, dim=0)
+
+        assert path in ("global", "local")
+        if path == "global":
+            pixel_values = mm_kwargs["pixel_values"]
+            return self._batched_encoder_forward_global_path(pixel_values)
+        else:
+            images_crop = mm_kwargs["images_crop"]
+            return self._batched_encoder_forward_local_path(images_crop)
+
+    def postprocess_encoder_output(
+        self,
+        outputs: dict[str, torch.Tensor],
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        """Assemble per-image embeddings from global and local encoder outputs.
+
+        `output['global']` contains global-image features with newlines already
+        inserted (from CUDA graph replay or eager fallback):
+        `[B * 272, n_embed]`.
+
+        `output['local']` contains local-patch features without
+        newlines (from CUDA graph replay or eager fallback):
+        `[P * 100, n_embed]`. May be `None` if no patches in batch.
+
+        This method:
+        1. Splits `output['global']` into per-image global portions.
+        2. Splits `output['local']` into per-image patch groups.
+        3. For each image: assembles patch grid with newlines via
+           `_assemble_patch_grid`, then concatenates
+           `[local_tiled, global, view_seperator]`.
+        """
+        output = outputs["global"]
+        local_output = outputs.get("local")
+        assert batch_mm_kwargs is not None
+        bsz = len(indices)
+        n_embed = output.shape[-1]
+
+        images_spatial_crop = batch_mm_kwargs["images_spatial_crop"]
+        is_tiled = (images_spatial_crop[:, 0] > 1) | (images_spatial_crop[:, 1] > 1)
+        num_patches = [
+            int(np) for np in torch.where(is_tiled, images_spatial_crop.prod(dim=-1), 0)
+        ]
+        total_patches = sum(num_patches)
+
+        global_part = output[: bsz * self.global_image_output_token].reshape(
+            bsz, self.global_image_output_token, n_embed
+        )
+
+        # Split local output into per-patch groups.
+        local_flat = None
+        if total_patches > 0 and local_output is not None:
+            local_flat = local_output[: total_patches * self.single_patch_output_token]
+            local_flat = local_flat.reshape(
+                total_patches, self.single_patch_output_token, n_embed
+            )
+
+        cur_patch = 0
+        for i, idx in enumerate(indices):
+            num_patch = num_patches[i]
+            single_image_output: list[torch.Tensor] = []
+
+            # 1. Process local patches: assemble tile grid, add 1 newline per row.
+            if num_patch > 0 and local_flat is not None:
+                patches = local_flat[cur_patch : cur_patch + num_patch]
+                cur_patch += num_patch
+                single_image_output.append(
+                    self._assemble_patch_grid(patches, images_spatial_crop[i])
+                )
+
+            # 2. Global image: newlines already inserted.
+            single_image_output.append(global_part[i])
+
+            # 3. Add view separator for each image.
+            single_image_output.append(self.view_seperator[None, :])
+
+            # 4. Save final outputs for each image.
+            dest[idx] = torch.cat(single_image_output, dim=0)

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Integration tests that exercise the OpenAI-compatible HTTP API through a
 //! real TCP connection using the `async-openai` client library, backed by a
 //! mock engine.
@@ -12,20 +15,23 @@ use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
     ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
 };
+use async_openai::types::responses::{CreateResponseArgs, ResponseStreamEvent, Status};
 use futures::StreamExt as _;
 use serial_test::serial;
 use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
     DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, RenderedPrompt,
 };
-use vllm_engine_core_client::protocol::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
 };
+use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
-use vllm_llm::Llm;
-use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
+use vllm_llm::EngineCoreLlm;
+use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend};
+use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
@@ -91,17 +97,8 @@ fn request_output(
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
-        new_logprobs: None,
-        new_prompt_logprobs_tensors: None,
-        pooling_output: None,
         finish_reason,
-        stop_reason: None,
-        events: None,
-        kv_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -109,19 +106,14 @@ fn engine_outputs_for_request(
     request_id: &str,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> EngineCoreOutputs {
-    EngineCoreOutputs {
-        engine_index: 0,
+    RequestBatchOutputs {
         outputs: output_specs
             .into_iter()
             .map(|(token_ids, finish_reason)| request_output(request_id, token_ids, finish_reason))
             .collect(),
-        scheduler_stats: None,
-        timestamp: 0.0,
-        utility_output: None,
-        finished_requests: None,
-        wave_complete: None,
-        start_wave: None,
+        ..Default::default()
     }
+    .into()
 }
 
 fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
@@ -144,44 +136,16 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
     dealer.recv().await.expect("recv engine message").into_vec()
 }
 
-fn test_llm(client: EngineCoreClient) -> Llm {
-    Llm::new(client).with_request_id_randomization(false)
+fn test_llm(client: EngineCoreClient) -> EngineCoreLlm {
+    EngineCoreLlm::new(client).with_request_id_randomization(false)
 }
 
 #[derive(Clone, Debug)]
 struct FakeChatBackend;
 
-#[derive(Debug)]
-struct FakeChatTokenizer;
-
-impl Tokenizer for FakeChatTokenizer {
-    fn encode(
-        &self,
-        text: &str,
-        _add_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-        Ok(text.bytes().map(u32::from).collect())
-    }
-
-    fn decode(
-        &self,
-        token_ids: &[u32],
-        _skip_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<String> {
-        Ok(
-            String::from_utf8_lossy(&token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>())
-                .into_owned(),
-        )
-    }
-
-    fn token_to_id(&self, token: &str) -> Option<u32> {
-        token.bytes().next().map(u32::from)
-    }
-}
-
 impl TextBackend for FakeChatBackend {
     fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(FakeChatTokenizer)
+        Arc::new(TestTokenizer::new())
     }
 
     fn model_id(&self) -> &str {
@@ -205,6 +169,7 @@ impl ChatBackend for FakeChatBackend {
             self.tokenizer(),
             options.tool_call_parser,
             options.reasoning_parser,
+            options.tool_strict_level,
         )?))
     }
 }
@@ -223,6 +188,8 @@ impl ChatRenderer for FakeChatBackend {
         }
         Ok(RenderedPrompt {
             prompt: Prompt::Text(prompt),
+            media_order: None,
+            effective_template_kwargs: Default::default(),
         })
     }
 }
@@ -389,4 +356,85 @@ async fn streaming_chat_via_http_client() {
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_streaming_responses_via_http_client() {
+    let (client, server_task, engine_task) =
+        http_test_server(b"engine-http-responses", default_stream_output_specs()).await;
+
+    let request = CreateResponseArgs::default()
+        .model("test-model")
+        .input("hello")
+        .max_output_tokens(10u32)
+        .build()
+        .expect("build request");
+
+    let response = client.responses().create(request).await.expect("create response");
+
+    assert_eq!(response.model, "test-model");
+    assert_eq!(response.status, Status::Completed);
+    assert_eq!(response.output_text().as_deref(), Some("hi"));
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn streaming_responses_via_http_client() {
+    let (client, server_task, engine_task) = http_test_server(
+        b"engine-http-responses-stream",
+        default_stream_output_specs(),
+    )
+    .await;
+
+    let request = CreateResponseArgs::default()
+        .model("test-model")
+        .input("hello")
+        .max_output_tokens(10u32)
+        .stream(true)
+        .build()
+        .expect("build request");
+
+    let mut stream = client.responses().create_stream(request).await.expect("stream response");
+
+    // Every event must decode into the typed SDK event union.
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("stream event"));
+    }
+
+    assert!(matches!(
+        events.first(),
+        Some(ResponseStreamEvent::ResponseCreated(_))
+    ));
+    let text = events
+        .iter()
+        .filter_map(|event| match event {
+            ResponseStreamEvent::ResponseOutputTextDelta(delta) => Some(delta.delta.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert_eq!(text, "hi");
+    let Some(ResponseStreamEvent::ResponseCompleted(completed)) = events.last() else {
+        panic!("expected a terminal response.completed event: {events:?}");
+    };
+    assert_eq!(completed.response.output_text().as_deref(), Some("hi"));
+    let sequence_numbers = events.iter().map(sequence_number).collect::<Vec<_>>();
+    assert_eq!(
+        sequence_numbers,
+        (0..events.len() as u64).collect::<Vec<_>>()
+    );
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+/// Return the `sequence_number` of one typed Responses stream event.
+fn sequence_number(event: &ResponseStreamEvent) -> u64 {
+    serde_json::to_value(event).expect("serialize event")["sequence_number"]
+        .as_u64()
+        .expect("sequence_number")
 }

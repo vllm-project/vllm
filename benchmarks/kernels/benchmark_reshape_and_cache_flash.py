@@ -22,10 +22,45 @@ logger = init_logger(__name__)
 
 
 @torch.inference_mode()
+def _make_packed_kv_caches(
+    num_blocks: int,
+    block_size: int,
+    num_heads: int,
+    head_size: int,
+    v_head_size: int,
+    kv_cache_dtype: str,
+    dtype: torch.dtype,
+    kv_cache_layout: str,
+    device: str,
+):
+    """K and V as views of one [.., head_size + v_head_size] buffer.
+
+    The asymmetric kernel needs both sides to share a head stride, which is what
+    a packed K|V buffer gives (and what backends such as ROCm AITER unified
+    attention produce).
+    """
+    if kv_cache_dtype not in ("auto", "bfloat16", "float16", "fp8"):
+        raise ValueError(f"asymmetric benchmark does not support {kv_cache_dtype}.")
+    content = head_size + v_head_size
+    if kv_cache_layout == "NHD":
+        physical = (num_blocks, block_size, num_heads, content)
+        permute = None
+    else:
+        physical = (num_blocks, num_heads, block_size, content)
+        permute = (0, 2, 1, 3)
+
+    cache_dtype = torch.uint8 if kv_cache_dtype == "fp8" else dtype
+    packed = torch.zeros(physical, dtype=cache_dtype, device=device)
+    view = packed if permute is None else packed.permute(permute)
+    key_cache, value_cache = view.split([head_size, v_head_size], dim=-1)
+    return key_cache, value_cache
+
+
 def run_benchmark(
     num_tokens: int,
     num_heads: int,
     head_size: int,
+    v_head_size: int | None,
     block_size: int,
     num_blocks: int,
     dtype: torch.dtype,
@@ -37,9 +72,14 @@ def run_benchmark(
     device: str = "cuda",
 ) -> float:
     """Return latency (seconds) for given num_tokens."""
+    if v_head_size is None:
+        v_head_size = head_size
+    asymmetric = v_head_size != head_size
 
-    if kv_cache_dtype == "fp8" and head_size % 16:
-        raise ValueError("fp8 kv-cache requires head_size to be a multiple of 16.")
+    if kv_cache_dtype == "fp8" and (head_size % 16 or v_head_size % 16):
+        raise ValueError(
+            "fp8 kv-cache requires head_size and v_head_size to be multiples of 16."
+        )
 
     if implementation not in ("cuda", "triton"):
         raise ValueError(
@@ -48,13 +88,23 @@ def run_benchmark(
         )
     if implementation == "triton" and kv_cache_layout == "HND":
         return float("nan")  # Triton does not support HND layout yet.
+    if asymmetric and implementation != "cuda":
+        raise ValueError(
+            "asymmetric head sizes (v_head_size != head_size) are only supported "
+            "by the 'cuda' implementation."
+        )
 
     set_random_seed(42)
     torch.set_default_device(device)
 
     # create random key / value tensors [T, H, D].
     key = torch.randn(num_tokens, num_heads, head_size, dtype=dtype, device=device)
-    value = torch.randn_like(key)
+    if asymmetric:
+        value = torch.randn(
+            num_tokens, num_heads, v_head_size, dtype=dtype, device=device
+        )
+    else:
+        value = torch.randn_like(key)
 
     # prepare the slot mapping.
     # each token is assigned a unique slot in the KV-cache.
@@ -64,20 +114,36 @@ def run_benchmark(
     slot_mapping_lst = random.sample(range(num_slots), num_tokens)
     slot_mapping = torch.tensor(slot_mapping_lst, dtype=torch.long, device=device)
 
-    key_caches, value_caches = create_kv_caches_with_random_flash(
-        num_blocks,
-        block_size,
-        1,  # num_layers
-        num_heads,
-        head_size,
-        kv_cache_dtype,
-        dtype,
-        device=device,
-        cache_layout=kv_cache_layout,
-    )
-    key_cache, value_cache = key_caches[0], value_caches[0]
-    # to free unused memory
-    del key_caches, value_caches
+    if asymmetric:
+        # K and V are views of one buffer, so both sides share the head stride;
+        # that is the only layout the asymmetric path accepts (see
+        # reshape_and_cache_flash).
+        key_cache, value_cache = _make_packed_kv_caches(
+            num_blocks,
+            block_size,
+            num_heads,
+            head_size,
+            v_head_size,
+            kv_cache_dtype,
+            dtype,
+            kv_cache_layout,
+            device,
+        )
+    else:
+        key_caches, value_caches = create_kv_caches_with_random_flash(
+            num_blocks,
+            block_size,
+            1,  # num_layers
+            num_heads,
+            head_size,
+            kv_cache_dtype,
+            dtype,
+            device=device,
+            cache_layout=kv_cache_layout,
+        )
+        key_cache, value_cache = key_caches[0], value_caches[0]
+        # to free unused memory
+        del key_caches, value_caches
 
     # compute per-kernel scaling factors for fp8 conversion (if used).
     k_scale = (key.amax() / 64.0).to(torch.float32)
@@ -143,6 +209,7 @@ def main(args):
                 num_tokens=n_tok,
                 num_heads=args.num_heads,
                 head_size=args.head_size,
+                v_head_size=args.v_head_size,
                 block_size=args.block_size,
                 num_blocks=args.num_blocks,
                 dtype=STR_DTYPE_TO_TORCH_DTYPE[args.dtype],
@@ -155,9 +222,14 @@ def main(args):
             )
             rows.append([n_tok, layout, f"{lat * 1e6:.3f}"])
 
+    v_note = (
+        ""
+        if args.v_head_size is None
+        else f", head_size={args.head_size} v_head_size={args.v_head_size}"
+    )
     print(
         f"Benchmark results for implementation {args.implementation}"
-        f" (measuring with {args.mode}):"
+        f" (measuring with {args.mode}{v_note}):"
     )
     print(tabulate(rows, headers=["num_tokens", "layout", "latency (µs)"]))
 
@@ -171,6 +243,13 @@ if __name__ == "__main__":
         type=int,
         choices=[64, 80, 96, 112, 120, 128, 192, 256],
         default=128,
+    )
+    parser.add_argument(
+        "--v-head-size",
+        type=int,
+        default=None,
+        help="V head dim; defaults to --head-size. Setting it differently "
+        "benchmarks the asymmetric K/V path (cuda implementation only).",
     )
     parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
     parser.add_argument("--num-blocks", type=int, default=128 * 512)

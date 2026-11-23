@@ -1,32 +1,38 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
-use crate::routes::openai::utils::token_ids::{validate_allowed_token_ids, validate_logit_bias};
-use crate::routes::openai::utils::types::{ChatMessage, Tool, ToolChoice, ToolChoiceValue};
+use crate::model_names::ServedModelNames;
+use crate::routes::openai::utils::types::{ChatMessage, Tool};
+use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
     request: &ChatCompletionRequest,
-    served_model_names: &[String],
+    served_model_names: &ServedModelNames,
 ) -> Result<(), ApiError> {
-    if !served_model_names.iter().any(|n| n == &request.model) {
-        return Err(ApiError::model_not_found(request.model.clone()));
-    }
+    served_model_names.check(request.model.as_deref())?;
 
-    if request.stream_options.is_some() && !request.stream {
+    if request.stream_options.as_ref().is_some_and(|options| !options.is_empty()) && !request.stream
+    {
         bail_invalid_request!(
             param = "stream_options",
             "stream_options are only supported when stream=true."
         );
     }
 
-    if request.n.unwrap_or(1) > 1 {
-        bail_invalid_request!(param = "n", "Only n=1 is supported.");
-    }
-
-    if request.top_logprobs.is_some() && !request.logprobs {
+    if request.top_logprobs.is_some_and(|n| n != 0) && !request.logprobs {
         bail_invalid_request!(
             param = "top_logprobs",
             "top_logprobs can only be used when logprobs=true."
+        );
+    }
+
+    if request.logprob_token_ids.as_ref().is_some_and(|ids| !ids.is_empty()) && !request.logprobs {
+        bail_invalid_request!(
+            param = "logprob_token_ids",
+            "when using `logprob_token_ids`, `logprobs` must be set to true."
         );
     }
 
@@ -59,30 +65,6 @@ pub(super) fn validate_request_compat(
         }
     }
 
-    if let Some(tool_choice) = &request.tool_choice {
-        match tool_choice {
-            ToolChoice::Value(ToolChoiceValue::Auto | ToolChoiceValue::None) => {}
-            ToolChoice::Value(ToolChoiceValue::Required) => {
-                bail_invalid_request!(
-                    param = "tool_choice",
-                    "tool_choice=required is not supported yet."
-                );
-            }
-            ToolChoice::Function { .. } => {
-                bail_invalid_request!(
-                    param = "tool_choice",
-                    "Named function tool_choice is not supported yet."
-                );
-            }
-            ToolChoice::AllowedTools { .. } => {
-                bail_invalid_request!(
-                    param = "tool_choice",
-                    "allowed_tools tool_choice is not supported yet."
-                );
-            }
-        }
-    }
-
     if request.use_beam_search {
         bail_invalid_request!(
             param = "use_beam_search",
@@ -93,34 +75,13 @@ pub(super) fn validate_request_compat(
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
-    if request.parallel_tool_calls.is_some() {
-        bail_invalid_request!(
-            param = "parallel_tool_calls",
-            "parallel_tool_calls is not supported."
-        );
-    }
-
+    // Python's default is 1.0, which SDKs may send explicitly.
     reject_non_default(
-        request.length_penalty.as_ref(),
+        request.length_penalty.filter(|penalty| *penalty != 1.0).as_ref(),
         "length_penalty",
         "length_penalty is not supported.",
     )?;
-    if !request.spaces_between_special_tokens {
-        bail_invalid_request!(
-            param = "spaces_between_special_tokens",
-            "spaces_between_special_tokens is not supported."
-        );
-    }
-    reject_non_default(
-        request.truncate_prompt_tokens.as_ref(),
-        "truncate_prompt_tokens",
-        "truncate_prompt_tokens is not supported.",
-    )?;
-    reject_non_default(
-        request.thinking_token_budget.as_ref(),
-        "thinking_token_budget",
-        "thinking_token_budget is not supported.",
-    )?;
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens)?;
     reject_non_default(
         request.media_io_kwargs.as_ref(),
         "media_io_kwargs",
@@ -130,11 +91,6 @@ pub(super) fn validate_request_compat(
         request.mm_processor_kwargs.as_ref(),
         "mm_processor_kwargs",
         "mm_processor_kwargs is not supported.",
-    )?;
-    reject_non_default(
-        request.repetition_detection.as_ref(),
-        "repetition_detection",
-        "repetition_detection is not supported.",
     )?;
 
     Ok(())
@@ -161,75 +117,70 @@ fn validate_function_tools(tools: &[Tool], param: &'static str) -> Result<(), Ap
     Ok(())
 }
 
-/// Reject out-of-vocab token ids, mirroring the Python input processor:
-/// `allowed_token_ids` against the tokenizer vocab, `logit_bias` keys against the
-/// model vocab (skipped when the model size is unknown).
-pub(super) fn validate_token_id_ranges(
-    request: &ChatCompletionRequest,
-    tokenizer_vocab_size: usize,
-    model_vocab_size: Option<usize>,
-) -> Result<(), ApiError> {
-    validate_allowed_token_ids(request.allowed_token_ids.as_deref(), tokenizer_vocab_size)?;
-    validate_logit_bias(
-        request.logit_bias.as_ref(),
-        model_vocab_size.unwrap_or(usize::MAX),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
+    use crate::routes::openai::utils::types::ReasoningEffort;
     use serde_json::json;
-    use vllm_chat::ReasoningEffort;
+    use validator::Validate as _;
 
-    use super::{validate_request_compat, validate_token_id_ranges};
+    use super::validate_request_compat;
+    use crate::model_names::ServedModelNames;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
     use crate::routes::openai::utils::structured_outputs::ResponseFormat;
     use crate::routes::openai::utils::types::{
-        ChatMessage, Function, FunctionChoice, MessageContent, StringOrArray, Tool, ToolChoice,
-        ToolChoiceValue, ToolReference,
+        ChatMessage, Function, MessageContent, Normalizable as _, StringOrArray, Tool, ToolChoice,
+        ToolChoiceValue,
     };
 
-    fn served(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| s.to_string()).collect()
+    fn served(names: &[&str]) -> ServedModelNames {
+        ServedModelNames::new(names.iter().map(|s| s.to_string()).collect())
     }
 
-    #[test]
-    fn validate_token_id_ranges_rejects_oob_and_accepts_in_vocab() {
-        // allowed_token_ids are bounded by the tokenizer vocab
-        let mut request = base_request();
-        request.allowed_token_ids = Some(vec![5, 1_000_000]);
-        assert!(validate_token_id_ranges(&request, 100, Some(200)).is_err());
-        // logit_bias is bounded by the larger model vocab: an id between the two
-        // vocabs is valid and must not be rejected (the parity regression we fix)
-        let mut request = base_request();
-        request.logit_bias = Some(HashMap::from([("150".to_string(), 1.0)]));
-        assert!(validate_token_id_ranges(&request, 100, Some(200)).is_ok());
-        // logit_bias beyond the model vocab -> reject
-        let mut request = base_request();
-        request.logit_bias = Some(HashMap::from([("1000000".to_string(), 1.0)]));
-        assert!(validate_token_id_ranges(&request, 100, Some(200)).is_err());
-        // all in-vocab -> accept
-        let mut request = base_request();
-        request.allowed_token_ids = Some(vec![5, 50]);
-        request.logit_bias = Some(HashMap::from([("50".to_string(), 1.0)]));
-        assert!(validate_token_id_ranges(&request, 100, Some(200)).is_ok());
-        // unknown sizes -> skip
-        let mut request = base_request();
-        request.allowed_token_ids = Some(vec![1_000_000]);
-        assert!(validate_token_id_ranges(&request, usize::MAX, None).is_ok());
+    fn non_streaming_request(stream_options: serde_json::Value) -> ChatCompletionRequest {
+        serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": false,
+            "stream_options": stream_options,
+        }))
+        .expect("parse request")
     }
 
     fn base_request() -> ChatCompletionRequest {
         ChatCompletionRequest {
-            model: "Qwen/Qwen1.5-0.5B-Chat".to_string(),
+            model: Some("Qwen/Qwen1.5-0.5B-Chat".to_string()),
             messages: vec![ChatMessage::User {
                 content: MessageContent::Text("hello".to_string()),
                 name: None,
             }],
             stream: true,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_empty_stream_options_without_streaming() {
+        let request = non_streaming_request(json!({}));
+        request.validate().expect("schema validation accepts empty stream_options");
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("empty stream_options sets nothing");
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_stream_options_without_streaming() {
+        let cases = [
+            json!({"include_usage": false}),
+            json!({"continuous_usage_stats": true}),
+        ];
+        for stream_options in cases {
+            let request = non_streaming_request(stream_options.clone());
+            assert!(request.validate().is_err(), "{stream_options}");
+            assert!(
+                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err(),
+                "{stream_options}"
+            );
         }
     }
 
@@ -242,6 +193,18 @@ mod tests {
 
         validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("stop strings should be accepted");
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_default_model_inputs() {
+        for model in [None, Some(String::new())] {
+            let request = ChatCompletionRequest {
+                model,
+                ..base_request()
+            };
+            validate_request_compat(&request, &served(&["served-model"]))
+                .expect("default model input should select the primary served model");
+        }
     }
 
     #[test]
@@ -265,7 +228,9 @@ mod tests {
                     description: None,
                     parameters: json!({}),
                     strict: None,
+                    defer_loading: None,
                 },
+                defer_loading: None,
             }]),
             ..base_request()
         };
@@ -282,7 +247,9 @@ mod tests {
                         description: None,
                         parameters: json!({}),
                         strict: None,
+                        defer_loading: None,
                     },
+                    defer_loading: None,
                 }]),
                 name: None,
             }],
@@ -304,13 +271,31 @@ mod tests {
                         description: None,
                         parameters: json!({}),
                         strict: None,
+                        defer_loading: None,
                     },
+                    defer_loading: None,
                 }]),
                 name: None,
             }],
             ..base_request()
         };
 
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_only_non_default_length_penalty() {
+        let request = ChatCompletionRequest {
+            length_penalty: Some(1.0),
+            ..base_request()
+        };
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("the default length_penalty should be accepted");
+
+        let request = ChatCompletionRequest {
+            length_penalty: Some(2.0),
+            ..base_request()
+        };
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 
@@ -340,6 +325,17 @@ mod tests {
     }
 
     #[test]
+    fn validate_request_compat_accepts_spaces_between_special_tokens_false() {
+        let request = ChatCompletionRequest {
+            spaces_between_special_tokens: false,
+            ..base_request()
+        };
+
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("spaces_between_special_tokens=false should be accepted");
+    }
+
+    #[test]
     fn validate_request_compat_accepts_include_reasoning_false() {
         let request = ChatCompletionRequest {
             include_reasoning: false,
@@ -352,11 +348,28 @@ mod tests {
 
     #[test]
     fn validate_request_compat_rejects_top_logprobs_without_logprobs() {
+        for top_logprobs in [-1, 1] {
+            let request = ChatCompletionRequest {
+                top_logprobs: Some(top_logprobs),
+                ..base_request()
+            };
+            assert!(request.validate().is_err(), "{top_logprobs}");
+            assert!(
+                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err(),
+                "{top_logprobs}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_zero_top_logprobs_without_logprobs() {
         let request = ChatCompletionRequest {
             top_logprobs: Some(0),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+        request.validate().expect("schema validation accepts top_logprobs=0");
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("top_logprobs=0 does not request alternatives");
     }
 
     #[test]
@@ -413,36 +426,31 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_compat_rejects_required_and_named_tool_choices() {
-        let required = ChatCompletionRequest {
-            tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
-            ..base_request()
-        };
-        assert!(validate_request_compat(&required, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
-
-        let named = ChatCompletionRequest {
-            tool_choice: Some(ToolChoice::Function {
-                tool_type: "function".to_string(),
-                function: FunctionChoice {
-                    name: "tool".to_string(),
-                },
-            }),
-            ..base_request()
-        };
-        assert!(validate_request_compat(&named, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
-
-        let allowed_tools = ChatCompletionRequest {
-            tool_choice: Some(ToolChoice::AllowedTools {
-                tool_type: "allowed_tools".to_string(),
-                mode: "auto".to_string(),
-                tools: vec![ToolReference::Function {
-                    name: "tool".to_string(),
-                }],
-            }),
-            ..base_request()
-        };
-        assert!(
-            validate_request_compat(&allowed_tools, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
-        );
+    #[expect(deprecated, reason = "Local type still mirrors legacy upstream field")]
+    fn validate_checks_min_tokens_against_the_effective_max_tokens() {
+        let cases = [
+            (Some(2), Some(1), Some(8), true),
+            (Some(2), None, Some(8), true),
+            (Some(2), Some(8), None, true),
+            (Some(2), Some(1), None, false),
+            (Some(2), None, Some(1), false),
+            (Some(2), Some(8), Some(1), false),
+        ];
+        for (min_tokens, max_tokens, max_completion_tokens, valid) in cases {
+            let mut request = ChatCompletionRequest {
+                min_tokens,
+                max_tokens,
+                max_completion_tokens,
+                ..base_request()
+            };
+            // `ValidatedJson` normalizes before validating.
+            request.normalize();
+            assert_eq!(
+                request.validate().is_ok(),
+                valid,
+                "min_tokens={min_tokens:?} max_tokens={max_tokens:?} \
+                 max_completion_tokens={max_completion_tokens:?}"
+            );
+        }
     }
 }

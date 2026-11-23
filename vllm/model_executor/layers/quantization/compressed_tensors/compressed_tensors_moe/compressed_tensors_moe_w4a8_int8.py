@@ -5,7 +5,6 @@
 import torch
 from compressed_tensors.quantization import (
     QuantizationArgs,
-    QuantizationStrategy,
 )
 
 from vllm.logger import init_logger
@@ -31,15 +30,18 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     ScaleDesc,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.model_executor.utils import (
+    move_parameter,
+    replace_parameter,
+    retire_parameter,
+    set_weight_attrs,
+)
 
 logger = init_logger(__name__)
 
 
 class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
-    """
-    CPU-only MoE method using dynamic 4-bit matmul kernels on Arm Platform
+    """CPU-only MoE method using dynamic 4-bit matmul kernels on Arm Platform
     - Weights: int4 (stored as int8 values in [-8,7], packed to uint8 nibbles)
     - Scales: Fp32 for Channelwise , bf16 for groupwise quantization
     - Bias: Same data type as original weights
@@ -64,31 +66,16 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
             weight_quant.group_size if (weight_quant.group_size is not None) else -1
         )
 
-        # Validate scheme: weights=W4 (channel or group),
-        # activations=dynamic TOKEN (A8)
-
-        # Must be dynamic per-token activations
-        if (
-            input_quant.strategy != QuantizationStrategy.TOKEN
-            or not input_quant.dynamic
+        # make sure group size is valid
+        if self.group_size != -1 and (
+            moe.hidden_dim % self.group_size != 0
+            or moe.intermediate_size_per_partition % self.group_size != 0
         ):
             raise ValueError(
-                "W4A8-int MoE needs dynamic per-token activation quantization."
+                f"Group size ({self.group_size}) must evenly divide both "
+                f"hidden size ({moe.hidden_dim}) and intermediate size per "
+                f"partition ({moe.intermediate_size_per_partition})."
             )
-
-        if weight_quant.num_bits != 4:
-            raise ValueError("This method only supports 4-bit weights (num_bits=4).")
-
-        # Arm: check _dyn ops availability
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-            try:
-                _ = torch.ops.aten._dyn_quant_matmul_4bit
-                _ = torch.ops.aten._dyn_quant_pack_4bit_weight
-            except AttributeError as err:
-                raise RuntimeError(
-                    f"""PyTorch {torch.__version__} lacks _dyn_quant_* 4bit ops;
-                    install a newer build."""
-                ) from err
 
         # Construct QuantKey for weights from QuantizationArgs
         # W4A8 INT4: 4-bit weights (stored as int8), static quantization
@@ -221,47 +208,17 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
             )
         )
 
-        # Register packed weights as parameters
-        replace_parameter(
-            layer,
-            "w13_weight_packed",
-            torch.nn.Parameter(w13_packed, requires_grad=False),
-        )
-        replace_parameter(
-            layer,
-            "w2_weight_packed",
-            torch.nn.Parameter(w2_packed, requires_grad=False),
-        )
-
-        replace_parameter(
-            layer, "w13_weight", torch.nn.Parameter(torch.empty(0), requires_grad=False)
-        )
-        replace_parameter(
-            layer, "w2_weight", torch.nn.Parameter(torch.empty(0), requires_grad=False)
-        )
-        replace_parameter(
-            layer,
-            "w13_weight_scale",
-            torch.nn.Parameter(w13_weight_scale, requires_grad=False),
-        )
-        replace_parameter(
-            layer,
-            "w2_weight_scale",
-            torch.nn.Parameter(w2_weight_scale, requires_grad=False),
-        )
-
+        # The packed weights (with scales and biases folded in) go into the loaded
+        # weight storage, one param under both names; the rest keep their data.
+        for name, packed in (("w13", w13_packed), ("w2", w2_packed)):
+            replace_parameter(layer, f"{name}_weight", packed)
+            del layer._parameters[f"{name}_weight_packed"]  # never-loaded placeholder
+            move_parameter(layer, f"{name}_weight", f"{name}_weight_packed")
+        for name in ("w13_weight_scale", "w2_weight_scale"):
+            retire_parameter(layer, name)
         if self.has_bias:
-            replace_parameter(
-                layer,
-                "w13_bias",
-                torch.nn.Parameter(w13_bias, requires_grad=False),
-            )
-        if self.has_bias:
-            replace_parameter(
-                layer,
-                "w2_bias",
-                torch.nn.Parameter(w2_bias, requires_grad=False),
-            )
+            retire_parameter(layer, "w13_bias")
+            retire_parameter(layer, "w2_bias")
 
         quant_config = self.get_fused_moe_quant_config(layer)
         assert quant_config is not None
@@ -305,6 +262,7 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
     def apply(

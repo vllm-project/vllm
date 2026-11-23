@@ -1,9 +1,33 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeMap;
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use super::tensor::WireTensor;
+
+/// Modalities represented by engine-ready multimodal features.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MmModality {
+    Image,
+    Audio,
+    Video,
+}
+
+impl MmModality {
+    /// The wire name, matching Python's modality strings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+}
 
 /// Multimodal feature payload accepted from higher-level frontend code.
 ///
@@ -28,7 +52,7 @@ pub struct MmFeatureSpec {
     pub data: Option<MmKwargsItem>,
 
     /// The input modality, e.g., `"image"`, `"audio"`, `"video"`.
-    pub modality: String,
+    pub modality: MmModality,
 
     /// The hash for caching encoder outputs (with LoRA prefix if applicable).
     pub identifier: String,
@@ -59,6 +83,21 @@ pub struct PlaceholderRange {
     /// `None` means all positions.
     #[serde(default)]
     pub is_embed: Option<WireTensor>,
+}
+
+impl PlaceholderRange {
+    /// The number of positions that take embeddings, like Python's
+    /// `get_num_embeds()`. The `is_embed` mask must be stored inline.
+    pub fn num_embeds(&self) -> Result<usize, String> {
+        let Some(mask) = &self.is_embed else {
+            return Ok(self.length);
+        };
+        let mask = mask
+            .data
+            .as_raw_view()
+            .ok_or_else(|| "is_embed mask must be stored inline".to_string())?;
+        Ok(mask.iter().filter(|&&b| b != 0).count())
+    }
 }
 
 /// A dictionary of processed keyword arguments to pass to the model,
@@ -100,6 +139,69 @@ pub enum MmKwargValue {
     Int(i64),
     Float(f64),
     List(Vec<MmKwargValue>),
+}
+
+impl MmFeatureSpec {
+    /// Extract large tensor buffers from this feature in serialized field order.
+    pub(crate) fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
+        if let Some(data) = &mut self.data {
+            for elem in data.values_mut() {
+                elem.extract_aux_frames(aux_frames, threshold);
+            }
+        }
+        if let Some(is_embed) = &mut self.mm_position.is_embed {
+            is_embed.extract_aux_frame(aux_frames, threshold);
+        }
+    }
+
+    /// Resolve tensor buffers sent in auxiliary frames, the inverse of
+    /// [`Self::extract_aux_frames`].
+    pub(crate) fn resolve_aux_frames(&mut self, frames: &[Bytes]) -> Result<(), String> {
+        if let Some(data) = &mut self.data {
+            for elem in data.values_mut() {
+                if let Some(value) = &mut elem.data {
+                    value.resolve_aux_frames(frames)?;
+                }
+            }
+        }
+        if let Some(is_embed) = &mut self.mm_position.is_embed {
+            is_embed.resolve_aux_frame(frames)?;
+        }
+        Ok(())
+    }
+}
+
+impl MmFieldElem {
+    /// Extract large tensor buffers from this field element.
+    fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
+        if let Some(data) = &mut self.data {
+            data.extract_aux_frames(aux_frames, threshold);
+        }
+    }
+}
+
+impl MmKwargValue {
+    /// Recursively resolve tensor buffers sent in auxiliary frames.
+    fn resolve_aux_frames(&mut self, frames: &[Bytes]) -> Result<(), String> {
+        match self {
+            Self::Tensor(tensor) => tensor.resolve_aux_frame(frames),
+            Self::List(values) => values.iter_mut().try_for_each(|v| v.resolve_aux_frames(frames)),
+            Self::Int(_) | Self::Float(_) => Ok(()),
+        }
+    }
+
+    /// Recursively extract large tensor buffers from this nested value.
+    fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
+        match self {
+            Self::Tensor(tensor) => tensor.extract_aux_frame(aux_frames, threshold),
+            Self::List(values) => {
+                for value in values {
+                    value.extract_aux_frames(aux_frames, threshold);
+                }
+            }
+            Self::Int(_) | Self::Float(_) => {}
+        }
+    }
 }
 
 /// Defines how to interpret tensor data belonging to a keyword argument for
@@ -239,10 +341,26 @@ mod tests {
     use rmpv::Value;
 
     use super::*;
+    use crate::protocol::tensor::WireArrayData;
 
     fn encode_value<T: Serialize>(value: &T) -> Value {
         let bytes = rmp_serde::to_vec_named(value).expect("encode value");
         rmpv::decode::read_value(&mut Cursor::new(bytes)).expect("decode value")
+    }
+
+    #[test]
+    fn num_embeds_counts_embed_positions() {
+        let mut range = PlaceholderRange {
+            offset: 3,
+            length: 4,
+            is_embed: None,
+        };
+        assert_eq!(range.num_embeds(), Ok(4));
+        range.is_embed =
+            Some(WireTensor::from_bool(vec![4], vec![true, false, true, false]).unwrap());
+        assert_eq!(range.num_embeds(), Ok(2));
+        range.is_embed.as_mut().unwrap().data = WireArrayData::AuxIndex(1);
+        assert!(range.num_embeds().is_err());
     }
 
     #[test]

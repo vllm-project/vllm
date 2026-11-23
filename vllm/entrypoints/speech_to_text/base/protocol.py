@@ -8,4 +8,5 @@ import torch
 
 ## Protocols for Audio
 AudioResponseFormat: TypeAlias = Literal["json", "text", "srt", "verbose_json", "vtt"]
+TranscriptionResponseFormat: TypeAlias = AudioResponseFormat | Literal["diarized_json"]
 _LONG_INFO = torch.iinfo(torch.long)

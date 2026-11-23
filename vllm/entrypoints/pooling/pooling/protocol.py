@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Generic, TypeAlias, TypeVar
+from typing import Annotated, Generic, TypeAlias, TypeVar
 
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
 from vllm import PoolingParams
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
@@ -20,6 +20,7 @@ from ..base.protocol import (
     EncodingRequestMixin,
     FixedMaxLenTokenizeParamsMixin,
     PoolingBasicRequestMixin,
+    reject_removed_pooling_parameters,
 )
 
 
@@ -64,9 +65,12 @@ class IOProcessorRequest(PoolingBasicRequestMixin, EncodingRequestMixin, Generic
     data: T
     task: PoolingTask = "plugin"
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+    def build_tok_params(
+        self, model_config: ModelConfig, default_tok_params: TokenizeParams
+    ) -> TokenizeParams:
         return self._build_pooling_tok_params(
             model_config,
+            default_tok_params,
             add_special_tokens=not model_config.is_encoder_decoder,
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
@@ -92,9 +96,10 @@ class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
     """
 
 
-PoolingRequest: TypeAlias = (
-    PoolingCompletionRequest | PoolingChatRequest | IOProcessorRequest
-)
+PoolingRequest: TypeAlias = Annotated[
+    PoolingCompletionRequest | PoolingChatRequest | IOProcessorRequest,
+    BeforeValidator(reject_removed_pooling_parameters),
+]
 
 
 class PoolingResponseData(OpenAIBaseModel):

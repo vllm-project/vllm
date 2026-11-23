@@ -5,9 +5,11 @@
 import json
 
 import pytest
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 def test_function_call_dict_converted_to_object():
@@ -57,7 +59,6 @@ def test_direct_function_call_object_preservation():
 
 def test_mixed_input_types_with_function_calls():
     """Test parsing with mixed input types including function calls."""
-
     request_data = {
         "model": "gpt-oss",
         "input": [
@@ -87,6 +88,7 @@ def test_mixed_input_types_with_function_calls():
     request = ResponsesRequest(**request_data)
 
     # Verify mixed types are handled correctly
+    assert isinstance(request.input, list)
     assert len(request.input) == 3
     # First item should be validated as Message
     assert request.input[0]["type"] == "message"
@@ -177,7 +179,6 @@ def test_empty_list_input():
 
 def test_function_call_output_not_affected():
     """Test that FunctionCallOutput is not affected by the function_call parsing."""
-
     # Test with FunctionCallOutput as dict (should not be parsed)
     request_data = {
         "model": "gpt-oss",
@@ -265,7 +266,6 @@ def test_function_call_validation_failure_logs_debug(caplog):
 
 def test_validator_handles_iterator_input():
     """Test that validator can handle ValidatorIterator input (Pydantic internal)."""
-
     # This test simulates when Pydantic passes a ValidatorIterator instead of a list
     # This happened with complex nested structures containing reasoning + function_call
 
@@ -328,3 +328,129 @@ def test_validator_handles_empty_iterator():
 
     request = ResponsesRequest(**mock_data)
     assert request.input == []
+
+
+def test_assistant_string_content_stays_easyinput():
+    """EasyInput assistant message with plain string content is not
+    coerced into a ResponseOutputMessage."""
+    request_data = {
+        "model": "test-model",
+        "input": [
+            {"type": "message", "role": "assistant", "content": "hello"},
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+
+    item = request.input[0]
+    assert isinstance(item, dict), (
+        "String-content assistant message should remain a dict (EasyInput), "
+        f"got {type(item)}"
+    )
+    assert item.get("content") == "hello"
+    assert "id" not in item
+    assert "status" not in item
+
+
+def test_assistant_output_style_content_coerced():
+    """Assistant message whose content is output-message-shaped (list of
+    output_text items) should be coerced to ResponseOutputMessage."""
+    request_data = {
+        "model": "test-model",
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "world"}],
+            },
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+
+    item = request.input[0]
+    assert isinstance(item, ResponseOutputMessage), (
+        "Output-style assistant message should be coerced to "
+        f"ResponseOutputMessage, got {type(item)}"
+    )
+    assert item.content[0].text == "world"
+    assert item.content[0].annotations == []
+    assert item.status == "completed"
+    assert item.id.startswith("msg_")
+
+
+def _item_attr(item, key):
+    if isinstance(item, dict):
+        return item.get(key)
+    return getattr(item, key)
+
+
+def _as_list(value):
+    return value if isinstance(value, list) else list(value)
+
+
+def test_assistant_and_reasoning_items_without_id_status_are_accepted():
+    """Assistant/reasoning history should accept missing id/status fields."""
+    request_data = {
+        "model": "gpt-oss",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}],
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi"}],
+            },
+            {
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": None,
+            },
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+
+    assert len(request.input) == 3
+    assistant_item = request.input[1]
+    reasoning_item = request.input[2]
+
+    assert _item_attr(assistant_item, "id")
+    assert _item_attr(assistant_item, "status") == "completed"
+    assert _item_attr(reasoning_item, "id")
+    assert _item_attr(reasoning_item, "status") == "completed"
+    assert _as_list(_item_attr(reasoning_item, "summary")) == []
+
+
+def test_assistant_and_reasoning_keep_existing_id_status():
+    """Existing id/status should not be overwritten by normalization."""
+    request_data = {
+        "model": "gpt-oss",
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "msg_existing",
+                "status": "in_progress",
+                "content": [{"type": "output_text", "text": "partial"}],
+            },
+            {
+                "type": "reasoning",
+                "id": "rs_existing",
+                "status": "incomplete",
+                "summary": [{"type": "summary_text", "text": "thinking"}],
+            },
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+
+    assistant_item = request.input[0]
+    reasoning_item = request.input[1]
+    assert _item_attr(assistant_item, "id") == "msg_existing"
+    assert _item_attr(assistant_item, "status") == "in_progress"
+    assert _item_attr(reasoning_item, "id") == "rs_existing"
+    assert _item_attr(reasoning_item, "status") == "incomplete"

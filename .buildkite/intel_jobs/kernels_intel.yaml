@@ -2,9 +2,14 @@ group: Kernels Intel
 depends_on: 
   - image-build-xpu
 steps:
-- label: vLLM IR Tests
+- label: ":intel: (BMG) vLLM IR Tests"
+  key: vllm-ir-tests
   timeout_in_minutes: 30
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -18,4 +23,141 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
+      pytest -v -s ir &&
       pytest -v -s kernels/ir'
+
+- label: ":intel: (B70) Qwen3.5 Shared Expert Decode (B1)"
+  key: qwen35-shared-expert-decode
+  timeout_in_minutes: 20
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/vllm-workspace/"
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/models/qwen3_5/__init__.py
+    - vllm/models/qwen3_5/xpu/
+    - vllm/model_executor/layers/fused_moe/
+    - vllm/model_executor/layers/quantization/fp8.py
+    - vllm/model_executor/layers/quantization/online/fp8.py
+    - vllm/model_executor/models/qwen3_next.py
+    - tests/kernels/moe/test_moe.py
+    - requirements/xpu.txt
+  commands:
+    - cd tests
+    - >-
+      pytest -v -s
+      kernels/moe/test_moe.py
+      -k xpu_qwen3_5
+
+- label: ":intel: (BMG) UVA Kernel Tests"
+  key: uva-kernel-tests
+  timeout_in_minutes: 20
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - tests/kernels/core/test_uva.py
+    - vllm/utils/torch_utils.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s kernels/core/test_uva.py'
+
+- label: ":intel: (BMG) XPU Sparse MLA Tests"
+  key: xpu-sparse-mla-tests
+  timeout_in_minutes: 20
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/v1/attention/backends/mla/xpu_mla_sparse.py
+    - tests/kernels/attention/test_xpu_mla_sparse.py
+    - tests/v1/attention/test_xpu_mla_sparse_backend.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s
+      kernels/attention/test_xpu_mla_sparse.py
+      v1/attention/test_xpu_mla_sparse_backend.py'
+
+- label: ":intel: (BMG) Mamba SSD Tensor-Descriptor Tests"
+  key: mamba-ssd-tensor-descriptor-tests
+  timeout_in_minutes: 30
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - requirements/xpu.txt
+    - vllm/model_executor/layers/mamba/ops/mamba_ssm.py
+    - vllm/model_executor/layers/mamba/ops/ssd_bmm.py
+    - vllm/model_executor/layers/mamba/ops/ssd_chunk_scan.py
+    - vllm/model_executor/layers/mamba/ops/ssd_chunk_state.py
+    - vllm/model_executor/layers/mamba/ops/ssd_combined.py
+    - vllm/model_executor/layers/mamba/ops/ssd_state_passing.py
+    - vllm/model_executor/layers/mamba/ops/triton_helpers.py
+    - vllm/triton_utils/__init__.py
+    - vllm/triton_utils/allocation.py
+    - vllm/triton_utils/tensor_descriptor.py
+    - vllm/v1/attention/backends/mamba2_attn.py
+    - tests/kernels/mamba/test_mamba_ssm_ssd.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s kernels/mamba/test_mamba_ssm_ssd.py -k ssd_td'
+
+- label: ":intel: (BMG) Mamba SSU Dispatch Tests"
+  key: mamba-ssu-dispatch-tests
+  timeout_in_minutes: 20
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/config/mamba.py
+    - vllm/model_executor/layers/mamba/ops/ssu_dispatch.py
+    - vllm/model_executor/layers/mamba/ops/mamba_ssm.py
+    - vllm/v1/worker/replayssm_utils.py
+    - tests/kernels/mamba/test_ssu_dispatch.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s kernels/mamba/test_ssu_dispatch.py'

@@ -30,18 +30,21 @@ BLOCK_SIZE = [128, 128]
 @pytest.mark.parametrize("K", [128, 256])  # hidden dim
 @pytest.mark.parametrize("N", [512, 1024])  # intermediate dim per expert
 @pytest.mark.parametrize("topk", [2, 4])
+@pytest.mark.parametrize("clamp_source", [None, "quant", "model"])
 def test_batched_deepgemm_vs_triton(
-    E: int, T: int, K: int, N: int, topk: int, monkeypatch, workspace_init
+    E: int, T: int, K: int, N: int, topk: int, clamp_source, monkeypatch, workspace_init
 ):
     """Compare BatchedDeepGemmExperts to BatchedTritonExperts."""
-
     monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
+    torch.manual_seed(0)
 
     device = "cuda"
     w1, w2, w1_s, w2_s = make_block_quant_fp8_weights(E, N, K, BLOCK_SIZE)
 
     M = E * T  # total tokens
     a = torch.randn(M, K, device=device, dtype=torch.bfloat16) / 10.0
+    if clamp_source is not None:
+        a *= 1000
     fp8_info = torch.finfo(torch.float8_e4m3fn)
     a.clamp_(fp8_info.min, fp8_info.max)
 
@@ -68,14 +71,17 @@ def test_batched_deepgemm_vs_triton(
         w2_scale=w2_s,
         per_act_token_quant=False,
         block_shape=BLOCK_SIZE,
+        gemm1_clamp_limit=10.0 if clamp_source == "quant" else None,
     )
+    moe_config = make_dummy_moe_config()
+    moe_config.swiglu_limit = 10.0 if clamp_source == "model" else None
 
     # triton (reference)
     triton_experts = BatchedTritonExperts(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
         quant_config=quant_config,
-        moe_config=make_dummy_moe_config(),
+        moe_config=moe_config,
     )
     mk_triton = FusedMoEKernel(
         prep_finalize,
@@ -99,7 +105,7 @@ def test_batched_deepgemm_vs_triton(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
         quant_config=quant_config,
-        moe_config=make_dummy_moe_config(),
+        moe_config=moe_config,
     )
     mk_deepgemm = FusedMoEKernel(
         prep_finalize,
