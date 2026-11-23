@@ -24,6 +24,7 @@ Sorted alphabetically by GitHub handle:
 - [@esmeetu](https://github.com/esmeetu): developer marketing, community
 - [@gau-nernst](https://github.com/gau-nernst): Kernels and performance
 - [@gshtras](https://github.com/gshtras): ROCm / AMD GPU integration
+- [@gty111](https://github.com/gty111): Multimodal EPD, encoder cache transfer
 - [@Harry-Chen](https://github.com/Harry-Chen): Build, CI, CUDA architecture
 - [@heheda12345](https://github.com/heheda12345): Hybrid memory allocator
 - [@hmellor](https://github.com/hmellor): Hugging Face integration, documentation
@@ -114,6 +115,8 @@ If you have PRs touching the area, please feel free to ping the area owner for r
     - @tlrmchlsmth, @youkaichao
 - Multimodality engine and memory management: core scheduling and memory management concerning vision, audio, and video inputs.
     - @ywang96, @DarkLight1337
+- EC Connector: Transfers multimodal encoder outputs between encoder and prefill workers.
+    - @gty111
 
 ### Model Implementations
 
