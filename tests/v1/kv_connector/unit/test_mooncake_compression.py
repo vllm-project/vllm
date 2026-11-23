@@ -140,9 +140,7 @@ def test_plan_rejects_mixed_cache_before_backend_allocation(planned_adapter):
             config,
             {
                 "model.layers.3.self_attn": FullAttentionManager.layer_config(spec),
-                "model.layers.2": MambaManager.layer_config(
-                    state, mamba_cache_mode="none"
-                ),
+                "model.layers.2": MambaManager.layer_config(state),
             },
         )
     assert not calls
