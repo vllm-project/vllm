@@ -4703,6 +4703,19 @@ class Scheduler(SchedulerInterface):
                 marked_invalid_block = True
                 # Truncate the computed tokens at the first failed block
                 request.num_computed_tokens = idx * self.block_size
+                # The truncation moves the count other than by the ordinary
+                # step advance: flag it so the next SchedulerOutput that
+                # schedules this request (the recompute fallback) tells the
+                # worker to stage the value over its GPU-side count. The
+                # worker builds positions and seq_lens from that GPU-side
+                # tensor, so an unflagged move leaves it at the stale
+                # external-claim count and the fallback chunk runs with
+                # shifted positions / inflated seq_lens (on Ascend the rope
+                # cache gather asserts and takes the engine down with a
+                # vector-core exception at 32K; see the rewound-flag
+                # contract introduced by a3863c1e5d, whose move-site list
+                # missed this upstream truncation path).
+                self._mark_num_computed_tokens_rewound(request)
                 num_affected_tokens = (
                     req_num_computed_tokens - request.num_computed_tokens
                 )
@@ -4723,6 +4736,9 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens - req_num_computed_tokens
                     )
                     request.num_computed_tokens = req_num_computed_tokens
+                    # Same non-ordinary move as the truncation above: the
+                    # worker must restage its count at the next scheduling.
+                    self._mark_num_computed_tokens_rewound(request)
 
                 affected_req_ids.add(request.request_id)
                 # The flat channel vs a pending plan:
