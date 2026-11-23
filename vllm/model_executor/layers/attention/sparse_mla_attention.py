@@ -60,6 +60,7 @@ from vllm.v1.attention.ops.shardq import (
 from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
+    hisparse_staging_block_capacity,
 )
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
@@ -524,7 +525,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         )
         prefill_max_seq_len = 0
         prefill: SparseMLAPrefillMetadata | None = None
-        if num_prefills > 0 and self._prefill_backend is not None:
+        if num_prefills > 0 and (
+            self._prefill_backend is not None
+            or self.vllm_config.attention_config.hisparse_config is not None
+        ):
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             assert seq_lens_cpu is not None
             prefill_max_seq_len = int(
@@ -539,20 +543,14 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             )
             staging_plan = None
             if self.vllm_config.attention_config.hisparse_config is not None:
-                prefill_seq_lens_cpu = seq_lens_cpu[
-                    num_decodes : num_decodes + num_prefills
-                ]
-                staging_block_capacity = int(
-                    (
-                        (prefill_seq_lens_cpu + self.kv_cache_spec.block_size - 1)
-                        // self.kv_cache_spec.block_size
-                    ).sum()
-                )
                 staging_plan = build_hisparse_prefill_staging_plan(
                     block_table,
                     common_attn_metadata.seq_lens[num_decodes:],
                     self.kv_cache_spec.block_size,
-                    staging_block_capacity,
+                    hisparse_staging_block_capacity(
+                        seq_lens_cpu[num_decodes : num_decodes + num_prefills],
+                        self.kv_cache_spec.block_size,
+                    ),
                 )
                 if chunked_context is not None:
                     block_table = staging_plan.block_table
@@ -575,7 +573,8 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                     use_shardq=shardq_split is not None,
                 ),
             )
-            self._prefill_backend.prepare_metadata(prefill)
+            if self._prefill_backend is not None:
+                self._prefill_backend.prepare_metadata(prefill)
 
         metadata = self.metadata_cls(  # type: ignore[call-arg]
             num_reqs=common_attn_metadata.num_reqs,
@@ -925,7 +924,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             self.index_group, self.index_group_index = (
                 index_group_builder.register_layer(
                     indexer is not None,
-                    vllm_config,
+                    vllm_config if sliding_window is None else None,
                     row_width=(
                         self.get_fp8_ds_mla_row_bytes()
                         if kv_cache_dtype == "fp8_ds_mla"
