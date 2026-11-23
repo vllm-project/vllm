@@ -871,8 +871,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        # Compute lookup IDs once for the full token stream. Profile runs use
-        # valid placeholder rows and mask their contribution to the residual.
+        # Engram n-gram hashes for the whole (flattened) batch, computed once
+        # on the full token stream — before any sequence-parallel sharding —
+        # and consumed by the engram layers (1 and 14) below. Profile runs
+        # (KV cache unbound) look up dead rows instead.
         engram_hashes: torch.Tensor | None = None
         engram_mask: torch.Tensor | None = None
         if (
