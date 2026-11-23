@@ -293,22 +293,22 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 
 ## Custom model loaders
 
-A custom `BaseModelLoader` can react to sleep and wake-up by overriding three optional methods. All are inert by default, so existing loaders are unaffected. For example, a loader that serves weights to other processes over RDMA directly from GPU memory must stop serving before that memory is freed.
+A custom `BaseModelLoader` can react to sleep and wake-up by overriding three optional methods. All keep today's behavior by default, so existing loaders are unaffected. For example, a loader that serves weights to other processes over RDMA directly from GPU memory must stop serving before that memory is freed.
 
 | Method | Called | Default |
 | --- | --- | --- |
 | `on_sleep(level)` | Before `Worker.sleep(level)` frees GPU memory. Pause anything that reads that memory. | No-op |
 | `on_wake_up(tags)` | After `Worker.wake_up(tags)` returns. | No-op |
-| `reload_weights_inplace(vllm_config, model_config, model)` | From `reload_weights()`, when no weights are passed. | Returns `False` |
+| `reload_model(vllm_config, model_config, model, *, is_checkpoint_format)` | From `reload_weights()`, when no weights are passed. | `get_all_weights()` + `model.load_weights()` |
 
-What the weights contain when `on_wake_up` runs depends on the sleep level:
+What the weights contain when `on_wake_up` runs for a wake-up that includes them (`tags` is `None` or contains `"weights"`) depends on the sleep level:
 
 | Sleep level | Weights in `on_wake_up` | When to resume |
 | --- | --- | --- |
 | 1 | Restored and valid | In `on_wake_up` |
-| 2 | Discarded; memory is re-allocated but empty | After `reload_weights_inplace` completes |
+| 2 | Discarded; memory is re-allocated but empty | After `reload_model` completes |
 
-`reload_weights_inplace` lets a loader own the `reload_weights()` step of the level-2 flow. When it returns `False`, the runner falls back to `get_all_weights()` + `model.load_weights()`, which requires the loader to expose weights as an iterator of tensors. A loader that writes final weights into the model itself should override it, perform the reload, and return `True`.
+The hooks go to the loader instance that loaded the model, which records itself in `BaseModelLoader.load_model()`. A loader that overrides `load_model()` must call `bind_model_loader(model, self)` to receive them. When a loader overrides `reload_model`, `reload_weights()` reuses that same instance, so state kept across `on_sleep` and `on_wake_up` sees the reload. Loaders that keep the default get a fresh instance, as before.
 
 See the docstrings on `BaseModelLoader` for the exact contract.
 

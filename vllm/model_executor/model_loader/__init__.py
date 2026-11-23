@@ -8,7 +8,10 @@ from torch import nn
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.base_loader import (
+    BaseModelLoader,
+    bind_model_loader,
+)
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.modelexpress_loader import (
@@ -154,6 +157,7 @@ def get_model(
 
 
 __all__ = [
+    "bind_model_loader",
     "get_model",
     "get_model_loader",
     "get_model_loader_cls",

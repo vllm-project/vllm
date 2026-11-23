@@ -78,6 +78,11 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
     share_source_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.base_loader import (
+    BaseModelLoader,
+    get_bound_model_loader,
+    unbind_model_loader,
+)
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
@@ -145,6 +150,11 @@ from .gpu.warmup import run_kv_cache_sizing_warmup, warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
+
+
+def _bound_model_loader(model_runner: "GPUModelRunner") -> BaseModelLoader | None:
+    """The loader that loaded the runner's model, if it recorded itself."""
+    return get_bound_model_loader(getattr(model_runner, "model", None))
 
 
 def _min_across_ranks(value: int) -> int:
@@ -349,9 +359,8 @@ class Worker(WorkerBase):
         return set(storage.values()) - preserved
 
     def sleep(self, level: int = 1) -> None:
-        loader = self.model_runner.model_loader
-        assert loader is not None
-        loader.on_sleep(level)
+        if loader := _bound_model_loader(self.model_runner):
+            loader.on_sleep(level)
 
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
@@ -404,9 +413,8 @@ class Worker(WorkerBase):
 
         self.synchronize_device()
 
-        loader = self.model_runner.model_loader
-        assert loader is not None
-        loader.on_wake_up(tags)
+        if loader := _bound_model_loader(self.model_runner):
+            loader.on_wake_up(tags)
 
     def discard(self, tags: tuple[str, ...]) -> None:
         if has_kv_transfer_group() and "kv_cache" in tags:
@@ -1892,6 +1900,7 @@ class Worker(WorkerBase):
         # Release GPU resources held by the model runner so that memory
         # can be reclaimed when running in-process
         if model_runner := getattr(self, "model_runner", None):
+            unbind_model_loader(getattr(model_runner, "model", None))
             model_runner.shutdown()
 
         # Release kept-alive cumem pools while the pluggable allocator wrappers

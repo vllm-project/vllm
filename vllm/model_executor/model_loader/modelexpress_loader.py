@@ -9,7 +9,10 @@ from torch import nn
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.base_loader import (
+    BaseModelLoader,
+    bind_model_loader,
+)
 from vllm.tracing import instrument
 
 _MODELEXPRESS_LOADER_MODULE = "modelexpress.engines.vllm.loader"
@@ -63,20 +66,27 @@ class ModelExpressModelLoader(BaseModelLoader):
         if hasattr(self._loader, "on_wake_up"):
             self._loader.on_wake_up(tags)
 
-    def reload_weights_inplace(
+    def reload_model(
         self,
         vllm_config: VllmConfig,
         model_config: ModelConfig,
         model: nn.Module,
-    ) -> bool:
+        *,
+        is_checkpoint_format: bool = True,
+    ) -> None:
         if not hasattr(self._loader, "reload_model"):
-            return False
+            super().reload_model(
+                vllm_config,
+                model_config,
+                model,
+                is_checkpoint_format=is_checkpoint_format,
+            )
+            return
         self._loader.reload_model(
             vllm_config=vllm_config,
             model_config=model_config,
             model=model,
         )
-        return True
 
     @instrument(span_name="Load model")
     def load_model(
@@ -90,4 +100,6 @@ class ModelExpressModelLoader(BaseModelLoader):
             model_config=model_config,
             prefix=prefix,
         )
-        return model.eval()
+        model = model.eval()
+        bind_model_loader(model, self)
+        return model
