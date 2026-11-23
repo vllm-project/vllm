@@ -177,6 +177,11 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         self._shm_cache.release_touches()
 
     @override
+    def release_sender_obligations(self, mm_hashes: Sequence[str]) -> None:
+        for mm_hash in mm_hashes:
+            self._shm_cache.release_obligation(mm_hash)
+
+    @override
     def validate_input_item(
         self,
         mm_item: MultiModalKwargsItem,
