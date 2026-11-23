@@ -445,12 +445,7 @@ class SamplingParams(
 
     # Debugging / RL-specific parameters. Not intended for production serving.
     routed_experts_prompt_start: int = 0
-    """When enable_return_routed_experts is active, skip the first
-    routed_experts_prompt_start prompt tokens from the returned routing
-    data. In multi-turn agent scenarios, set this to the length of the
-    already-returned prefix to avoid duplicating routing for prompt tokens
-    covered by earlier turns. Default 0 returns routing for all prompt
-    tokens."""
+    """Deprecated alias of `aux_prompt_start`."""
     trace_decode_token_ids: list[int] | None = None
     """If provided, forces the engine to emit this predetermined sequence of
     token IDs during decoding instead of sampling randomly. Real logprobs are
@@ -460,6 +455,17 @@ class SamplingParams(
     experts are neither recorded nor returned, and it gets no sampling masks.
     The KV blocks it computes hold no routed experts: a request that records
     them computes those blocks again."""
+    aux_prompt_start: int = 0
+    """Number of leading prompt positions whose auxiliary outputs the client
+    already holds: they are not returned. In multi-turn agent scenarios, set
+    this to the length of the already-returned prefix. Default 0 returns all
+    prompt positions. At most the prompt length."""
+    aux_namespace: str | None = None
+    """Namespace whose auxiliary outputs are delivered as shared objects under
+    `AuxOutputConfig.object_key_prefix` and listed in `aux_objects`. Only
+    requests of the same namespace share prefix-cache blocks. Segments of
+    `[A-Za-z0-9._-]` separated by `/` name namespaces nested in the namespace
+    of their leading segments, whose release also removes them."""
 
     @staticmethod
     def from_optional(
@@ -673,6 +679,24 @@ class SamplingParams(
                 or self.prompt_logprob_token_ids is not None
             )
 
+    def _fold_prompt_start_alias(self) -> None:
+        """Fold the deprecated `routed_experts_prompt_start` into
+        `aux_prompt_start`; 0 counts as unset."""
+        alias = self.routed_experts_prompt_start
+        if not alias:
+            return
+        logger.warning_once(
+            "routed_experts_prompt_start is deprecated; use aux_prompt_start."
+        )
+        if self.aux_prompt_start not in (0, alias):
+            raise VLLMValidationError(
+                f"aux_prompt_start ({self.aux_prompt_start}) and "
+                f"routed_experts_prompt_start ({alias}) disagree.",
+                parameter="aux_prompt_start",
+            )
+        self.aux_prompt_start = alias
+        self.routed_experts_prompt_start = 0
+
     def _verify_args(self) -> None:
         _verify_num_sequences(self.n, "n")
         if self.extra_args:
@@ -787,6 +811,25 @@ class SamplingParams(
                 f"bad_words cannot contain an empty string. "
                 f"Got bad_words={self.bad_words}"
             )
+
+    def verify_aux_namespace(self) -> None:
+        """Check `aux_namespace` and the rules of a request with one. Called
+        once the request's parameters are final."""
+        if (namespace := self.aux_namespace) is None:
+            return
+        if not namespace:
+            reason = "must not be empty"
+        elif self.stop:
+            reason = "does not support stop strings; use stop_token_ids"
+        elif self.n > 1:
+            reason = "does not support n > 1"
+        elif not self.return_aux_outputs:
+            reason = "does not support return_aux_outputs=False"
+        else:
+            return
+        raise VLLMValidationError(
+            f"aux_namespace {reason}.", parameter="aux_namespace", value=namespace
+        )
 
     def _verify_extra_args(self) -> None:
         # JSON accepts arbitrary integers, but the engine's MessagePack

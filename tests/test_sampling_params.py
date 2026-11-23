@@ -316,3 +316,30 @@ def test_aux_outputs_opt_out_keeps_logprobs(make, return_aux_outputs):
     assert params.return_aux_outputs == return_aux_outputs
     assert params.logprobs == 2
     assert params.logprob_token_ids == [1, 2]
+
+
+@pytest.mark.parametrize(
+    "kwargs,error",
+    [
+        ({"aux_namespace": "g.1/s_0-a", "stop_token_ids": [2]}, None),
+        ({"aux_namespace": ""}, "must not be empty"),
+        ({"aux_namespace": "g", "stop": ["</s>"]}, "stop strings"),
+        ({"aux_namespace": "g", "n": 2}, "n > 1"),
+        ({"aux_namespace": "g", "return_aux_outputs": False}, "return_aux_outputs"),
+    ],
+    ids=[
+        "nested",
+        "empty",
+        "stop-string",
+        "parallel-sampling",
+        "opted-out",
+    ],
+)
+def test_aux_namespace_is_validated(kwargs, error):
+    params = SamplingParams(**kwargs)
+    if error is None:
+        params.verify_aux_namespace()
+        return
+    with pytest.raises(VLLMValidationError, match=error) as exc_info:
+        params.verify_aux_namespace()
+    assert exc_info.value.parameter == "aux_namespace"
