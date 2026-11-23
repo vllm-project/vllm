@@ -27,7 +27,7 @@ use llm_multimodal::{
     TransparencyPolicy, VideoClip, VisionPreProcessor, VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
 use thiserror_ext::AsReport as _;
 use tracing::{Instrument as _, warn};
