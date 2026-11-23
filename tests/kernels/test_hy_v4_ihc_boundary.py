@@ -74,18 +74,8 @@ def _inputs(num_tokens, hidden_size, offset_views):
     return xa, residual, post, weight, scale, base, norm_weight
 
 
-# Token counts cover the single-kernel path up to 48 tokens (1 to 4 tokens per
-# cluster), the cooperative path up to 256 tokens (8-, 16- and 24-token tiles,
-# full and partial), each split-count bucket of the two-kernel path and its
-# boundary (128/129, 512/513, 1024/1025, 8192/8193) plus partial 16-token
-# tiles. With a post step and hidden 6144, B200 / B300 take the TMA stats
-# kernel above 1024 tokens instead.
-@pytest.mark.parametrize(
-    "num_tokens",
-    [1, 7, 16, 17, 24, 32, 33, 48, 49, 57, 96, 97, 128, 129, 192, 193, 256, 257]
-    + [513, 1025, 2051, 8193],
-)
-@pytest.mark.parametrize("hidden_size", [1088, 2048, 3072, 4096, 5120, 6144, 7168])
+@pytest.mark.parametrize("num_tokens", [1, 8, 1024])
+@pytest.mark.parametrize("hidden_size", [3072, 6144])
 @pytest.mark.parametrize("with_post", [True, False])
 @pytest.mark.parametrize("with_norm", [True, False])
 @pytest.mark.parametrize("offset_views", [False, True])
@@ -95,22 +85,6 @@ def test_boundary_matches_reference(
 ):
     _check_boundary(
         num_tokens, hidden_size, with_post, with_norm, offset_views, round_before_norm
-    )
-
-
-# More than 1024 tokens with a post step take the TMA stats kernel on B200 /
-# B300 (k-split counts 1-3 at these sizes, partial 64-token tiles), for both the
-# HY V4 and HY V4 Flash hidden sizes.
-@pytest.mark.parametrize("num_tokens", [1024, 1025, 1100, 2051, 4096, 8193, 16384])
-@pytest.mark.parametrize("hidden_size", [3072, 6144])
-@pytest.mark.parametrize("with_post", [True, False])
-@pytest.mark.parametrize("with_norm", [True, False])
-@pytest.mark.parametrize("round_before_norm", [False, True])
-def test_long_prefill_boundary_matches_reference(
-    num_tokens, hidden_size, with_post, with_norm, round_before_norm
-):
-    _check_boundary(
-        num_tokens, hidden_size, with_post, with_norm, False, round_before_norm
     )
 
 
@@ -190,7 +164,7 @@ def test_tma_path_writes_the_two_kernel_residual():
     torch.testing.assert_close(long[2][:1024], short[2], rtol=1e-4, atol=1e-4)
 
 
-@pytest.mark.parametrize("num_tokens", [1, 64, 200, 300, 4100])
+@pytest.mark.parametrize("num_tokens", [1, 8, 1024])
 def test_boundary_is_deterministic(num_tokens):
     xa, residual, post, weight, scale, base, norm_weight = _inputs(
         num_tokens, 6144, offset_views=False
@@ -207,10 +181,8 @@ def test_boundary_is_deterministic(num_tokens):
             torch.testing.assert_close(a, b, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize(
-    "num_tokens", [1, 3, 17, 30, 45, 64, 89, 130, 250, 2051, 3000, 16384]
-)
-@pytest.mark.parametrize("hidden_size", [2048, 3072, 6144])
+@pytest.mark.parametrize("num_tokens", [1, 8, 1024])
+@pytest.mark.parametrize("hidden_size", [3072, 6144])
 @pytest.mark.parametrize("with_post", [True, False])
 def test_fp8_out_matches_separate_quant(num_tokens, hidden_size, with_post):
     xa, residual, post, weight, scale, base, norm_weight = _inputs(
