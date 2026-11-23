@@ -158,7 +158,7 @@ def _plan_kernel(
         row = (pid // G) * (G * stride) + pid % G
     est_row = _estimate_row(row, G, stride)
     d = tl.arange(0, 128)
-    if gated != 0:
+    if gated != 0:  # noqa: SIM102
         if (tl.load(FLAG) == 0) | est_row:
             return
     if (estimate != 0) & (row >= num_q):
@@ -346,7 +346,7 @@ def _key_norm_kernel(
 ):
     """Scale * ||k|| per key, rounded up, and zeros to n_out, BLOCK keys at a time over
     the grid; GATED: only when FLAG is set."""
-    if GATED:
+    if GATED:  # noqa: SIM102
         if tl.load(FLAG) == 0:
             return
     d = tl.arange(0, 128)

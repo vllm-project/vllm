@@ -368,7 +368,7 @@ class Select:
                         cute.arch.sync_threads()
                         for j in cutlass.range(tid, n, THREADS, unroll=1):
                             v = load_value(mVal, row, lo + j, src)
-                            if finite(v):
+                            if finite(v):  # noqa: SIM102
                                 if ascending_key(v) == pivot:
                                     ik = cutlass.Uint32(
                                         load_index(mIdx, row, lo + j, src)
@@ -569,7 +569,7 @@ class Select:
                 mScores[(out_row, i)] = bits_f32(cutlass.Uint32(_NEG_INF_BITS))
                 mIndices[(out_row, i)] = Int32(-1)
 
-            if cutlass.const_expr(src == CANDIDATES):
+            if cutlass.const_expr(src == CANDIDATES):  # noqa: SIM102
                 if tid == 0:
                     expected = min(max(mKe[row] - mKs[row], Int32(0)), Int32(K))
                     health = mHealth.iterator.toint()

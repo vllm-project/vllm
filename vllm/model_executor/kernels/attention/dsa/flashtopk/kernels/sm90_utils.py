@@ -110,7 +110,7 @@ def load_row_count(sCnt, tidx, row_q, num_q, mCandCnt, single_split: cutlass.Con
     rows and appends after what an earlier kernel left in cand_cnt (adaptive pruning
     runs the scan, then the refine on the other rows); else from 0 (unused)."""
     sCnt[tidx] = Int32(0)
-    if cutlass.const_expr(single_split):
+    if cutlass.const_expr(single_split):  # noqa: SIM102
         if row_q < num_q:
             sCnt[tidx] = mCandCnt[row_q]
 
@@ -120,7 +120,7 @@ def store_row_counts(sCnt, tidx, query_start, num_q, mCandCnt, rows: cutlass.Con
     """One KV split: the rows' counts back to cand_cnt, once the math warps are done
     appending (math threads only)."""
     cute.arch.barrier(barrier_id=MATH_BARRIER, number_of_threads=MATH_THREADS)
-    if tidx < rows:
+    if tidx < rows:  # noqa: SIM102
         if query_start + tidx < num_q:
             mCandCnt[query_start + tidx] = sCnt[tidx]
 
@@ -334,7 +334,7 @@ def produce_kv_and_q(
     """TMA warp PRODUCER_WARP + g: warp PRODUCER_WARP first loads Q and the weights
     (if the CTA has work), then fills ring g with blocks 2t + g, each its WGMMA_KEYS
     K rows and the per-key vectors (vec_atoms[i] from vec_gmem[i] to vec_smem[i])."""
-    if g == 0:
+    if g == 0:  # noqa: SIM102
         if has_work:
             q_prod = pipeline.make_pipeline_state(pipeline.PipelineUserType.Producer, 1)
             q_pipeline.producer_acquire(q_prod)
