@@ -114,7 +114,7 @@ from vllm.config.parallel import (
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
 )
-from vllm.config.scheduler import SchedulerPolicy
+from vllm.config.scheduler import PrefillOrder, SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.config.watermarking import WatermarkConfig
@@ -715,6 +715,20 @@ class EngineArgs:
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
+    prefill_decode_interval: int = SchedulerConfig.prefill_decode_interval
+    prefill_decode_min_interval: int = SchedulerConfig.prefill_decode_min_interval
+    prefill_cadence_mixed: bool = SchedulerConfig.prefill_cadence_mixed
+    prefill_cadence_release_on_full_budget: bool = (
+        SchedulerConfig.prefill_cadence_release_on_full_budget
+    )
+    prefill_cadence_count_slotless: bool = (
+        SchedulerConfig.prefill_cadence_count_slotless
+    )
+    prefill_cadence_lookahead_loads: int = (
+        SchedulerConfig.prefill_cadence_lookahead_loads
+    )
+    prefill_order: PrefillOrder = SchedulerConfig.prefill_order
+    prefill_order_max_bypass: int = SchedulerConfig.prefill_order_max_bypass
 
     watermark: float = SchedulerConfig.watermark
 
@@ -1809,6 +1823,38 @@ class EngineArgs:
             **scheduler_kwargs["prefill_schedule_interval"],
         )
         scheduler_group.add_argument(
+            "--prefill-decode-interval",
+            **scheduler_kwargs["prefill_decode_interval"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-decode-min-interval",
+            **scheduler_kwargs["prefill_decode_min_interval"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-cadence-mixed",
+            **scheduler_kwargs["prefill_cadence_mixed"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-cadence-release-on-full-budget",
+            **scheduler_kwargs["prefill_cadence_release_on_full_budget"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-cadence-count-slotless",
+            **scheduler_kwargs["prefill_cadence_count_slotless"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-cadence-lookahead-loads",
+            **scheduler_kwargs["prefill_cadence_lookahead_loads"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-order",
+            **scheduler_kwargs["prefill_order"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-order-max-bypass",
+            **scheduler_kwargs["prefill_order_max_bypass"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -2683,6 +2729,14 @@ class EngineArgs:
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
+            prefill_decode_interval=self.prefill_decode_interval,
+            prefill_decode_min_interval=self.prefill_decode_min_interval,
+            prefill_cadence_mixed=self.prefill_cadence_mixed,
+            prefill_cadence_release_on_full_budget=self.prefill_cadence_release_on_full_budget,
+            prefill_cadence_count_slotless=self.prefill_cadence_count_slotless,
+            prefill_cadence_lookahead_loads=self.prefill_cadence_lookahead_loads,
+            prefill_order=self.prefill_order,
+            prefill_order_max_bypass=self.prefill_order_max_bypass,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,

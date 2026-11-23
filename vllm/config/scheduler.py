@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, cast
 
 from pydantic import Field, field_validator
 
+import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
@@ -19,6 +20,7 @@ logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
 SchedulerPolicy = Literal["fcfs", "priority"]
+PrefillOrder = Literal["fcfs", "short_uncached_first"]
 
 
 @config
@@ -208,6 +210,67 @@ class SchedulerConfig:
     already-admitted prompt, so a long prompt can take up to N times as many
     steps to finish prefilling."""
 
+    prefill_decode_interval: int = Field(default=0, ge=0)
+    """TokenSpeed-style prefill cadence: a step that carries prefill owes the
+    running decodes this many decode rounds, during which prefill is held while
+    there is a decode to run. The hold is lifted for a prompt held this many
+    rounds in total, so no prompt waits longer. Rounds count only when a decode
+    ran. 0 (the default) disables it. Mutually exclusive with
+    `prefill_schedule_interval` > 1."""
+
+    prefill_decode_min_interval: int = Field(default=0, ge=0)
+    """Like `prefill_decode_interval`, but nothing lifts it: an overdue
+    prompt's chunks still alternate with this many decode rounds. 0 (the
+    default) disables it."""
+
+    prefill_cadence_mixed: bool = True
+    """With the prefill cadence enabled: if False, a released prefill step
+    carries no decode rows (TokenSpeed non-mixed mode); decodes run on the held
+    steps in between. After a released step that schedules no prefill (e.g.
+    its allocation failed), released steps are mixed until prefill runs again,
+    so the decodes cannot be starved by empty steps. With a KV connector, a
+    new prompt that has not looked up its hit yet does not make a step
+    prefill-only (it may only start an async load); its prefill after the load
+    does. Set `prefill_decode_min_interval` too: with M=0 there are no held
+    steps between the chunks of a long prompt once a prompt aged past the
+    interval, so the decodes stall until it finishes."""
+
+    prefill_cadence_release_on_full_budget: bool = False
+    """With the prefill cadence enabled: lift `prefill_decode_interval` (but
+    not the min interval) once the pending prefill can fill a whole step's
+    token budget. Pending prefill counts the local prefix cache hit of waiting
+    prompts but not hits in a KV connector's tiers (e.g. CPU offload), which
+    are only known at admission; with such a connector, long cached prompts
+    lift the interval whenever they wait."""
+
+    prefill_cadence_count_slotless: bool = True
+    """With the prefill cadence enabled: age every waiting prompt on a held
+    step, including those that could not be admitted for lack of a free
+    request slot (TokenSpeed semantics). If False, only prompts that have a
+    slot age. When max_num_seqs is below the offered concurrency, prompts
+    waiting for a slot reach the interval in the queue, so nearly every
+    prefill step is an aging lift and mainly the min interval paces
+    prefill."""
+
+    prefill_cadence_lookahead_loads: int = Field(default=0, ge=0)
+    """With the prefill cadence enabled: on a held step, examine up to this
+    many waiting requests past the first held one, so their asynchronous KV
+    connector loads (e.g. CPU offload) overlap the hold instead of starting at
+    release. Loads are capped at the free request slots, and stop once a
+    load would take KV cache usage past 0.9. 0 (the default) disables it."""
+
+    prefill_order: PrefillOrder = "fcfs"
+    """Order of new prompts in the waiting queue. "short_uncached_first"
+    admits the prompt with the fewest tokens not covered by the local prefix
+    cache first (hits in a KV connector's tiers, e.g. CPU offload, are not
+    counted); prompts that already started keep FCFS order and go first, and
+    the oldest prompt goes first once `prefill_order_max_bypass` admissions
+    went ahead of it. Requires the fcfs scheduling policy."""
+
+    prefill_order_max_bypass: int = Field(default=8, ge=1)
+    """With `prefill_order` "short_uncached_first": the number of admissions
+    that may go ahead of the oldest waiting prompt before it goes first."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
@@ -313,6 +376,40 @@ class SchedulerConfig:
             )
 
         self.verify_max_model_len(max_model_len)
+        self.verify_prefill_cadence()
+
+    def verify_prefill_cadence(self) -> None:
+        if self.prefill_decode_interval > 0 or self.prefill_decode_min_interval > 0:
+            if self.prefill_schedule_interval > 1:
+                raise ValueError(
+                    "prefill_decode_interval / prefill_decode_min_interval "
+                    "cannot be combined with prefill_schedule_interval "
+                    f"({self.prefill_schedule_interval}); use one prefill "
+                    "cadence."
+                )
+            if envs.VLLM_PREFILL_CADENCE_NO_ESCAPE:
+                logger.warning_once(
+                    "VLLM_PREFILL_CADENCE_NO_ESCAPE is ignored with "
+                    "prefill_decode_interval / prefill_decode_min_interval, "
+                    "which have no queue-wide escape."
+                )
+            if (
+                not self.prefill_cadence_mixed
+                and self.prefill_decode_interval > 0
+                and self.prefill_decode_min_interval == 0
+            ):
+                logger.warning_once(
+                    "Non-mixed prefill cadence without "
+                    "prefill_decode_min_interval: once a prompt has waited "
+                    "prefill_decode_interval rounds, a long prompt's chunks "
+                    "run back to back with no decode in between. Set "
+                    "prefill_decode_min_interval to bound the decode stall."
+                )
+        if self.prefill_order != "fcfs" and self.policy != "fcfs":
+            raise ValueError(
+                f"prefill_order={self.prefill_order!r} requires the 'fcfs' "
+                f"scheduling policy, got policy={self.policy!r}."
+            )
 
     def verify_max_model_len(self, max_model_len: int) -> Self:
         if (

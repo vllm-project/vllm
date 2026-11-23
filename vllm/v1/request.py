@@ -215,6 +215,14 @@ class Request:
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 
+        # Prefill cadence (prefill_decode_interval): the number of decode
+        # rounds this prompt's prefill has been held back, across its chunks.
+        # Never reset, as in TokenSpeed.
+        self.prefill_deferred_rounds = 0
+        # Prefill ordering (prefill_order): the number of admissions that went
+        # ahead of this prompt while it was the oldest waiting one.
+        self.prefill_bypassed = 0
+
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
         # Per-request speculative-decoding acceptance accumulator. Populated by

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import torch
 
 import vllm.envs as envs
@@ -93,6 +95,7 @@ def create_scheduler(
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
+    **scheduler_kwargs: Any,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -106,6 +109,8 @@ def create_scheduler(
       long_prefill_token_threshold: cap on prefill chunk size
       long_prefill_token_threshold_adaptive: floor the cap at a
                              fair share of the token budget
+      scheduler_kwargs: extra `SchedulerConfig` fields (e.g. the prefill
+                        cadence knobs)
 
     Returns:
       {class}`Scheduler` instance
@@ -143,6 +148,7 @@ def create_scheduler(
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
         policy=scheduling_policy,
+        **scheduler_kwargs,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(

@@ -327,6 +327,38 @@ class KVCacheManager:
         blocks = self.create_kv_cache_blocks(computed_blocks)
         return blocks, num_new_computed_tokens, shared_prefix_boundary
 
+    def peek_cached_prefix_len(
+        self, request: Request, max_cache_hit_length: int | None = None
+    ) -> int:
+        """Number of tokens ``get_computed_blocks`` would report as a local
+        prefix cache hit for the request right now.
+
+        Side-effect free, so it may be called any number of times (e.g. to rank
+        waiting requests): it records no prefix cache stats, emits no KV cache
+        events, takes no block references and does not reorder the free block
+        queue. The result is advisory -- blocks may be cached or evicted before
+        the request is admitted, which redoes the lookup.
+
+        Args:
+            request: The request to look up.
+            max_cache_hit_length: Upper bound on the hit length, as for
+                ``get_computed_blocks``.
+
+        Returns:
+            The number of locally cached prefix tokens (0 when the request skips
+            the prefix cache lookup).
+
+        """
+        if not self.prefix_cache_lookup_enabled(request):
+            return 0
+        max_cache_hit_length = request.get_max_cache_hit_length(max_cache_hit_length)
+        # The coordinators' lookup only reads the cached block hash map; the
+        # reconciled hit already accounts for hybrid groups and the EAGLE drop.
+        _, num_cached_tokens, _ = self.coordinator.find_longest_cache_hit(
+            request.block_hashes, max_cache_hit_length
+        )
+        return num_cached_tokens
+
     def get_computed_blocks_for_connector(
         self, request: Request, max_cache_hit_length: int | None = None
     ) -> tuple[KVCacheBlocks, int, int, bool]:

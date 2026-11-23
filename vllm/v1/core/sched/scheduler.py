@@ -50,6 +50,14 @@ from vllm.v1.core.sched.output import (
     ScheduledEncoderInputStats,
     SchedulerOutput,
 )
+from vllm.v1.core.sched.prefill_cadence import PrefillCadence, note_deferred
+from vllm.v1.core.sched.prefill_order import (
+    is_new_prompt,
+    make_uncached_fn,
+    note_admitted,
+    oldest_new_prompt,
+    order_new_prompts,
+)
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
     SchedulingPolicy,
@@ -82,6 +90,12 @@ from vllm.v1.structured_output.utils import strip_speculative_padding
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+# Prefill cadence lookahead loads stop above this KV cache usage, so loads
+# started for queued prompts cannot crowd out the running requests' blocks.
+_CADENCE_LOOKAHEAD_MAX_KV_USAGE = 0.9
+# Executed steps between DEBUG dumps of the prefill cadence counters.
+_CADENCE_LOG_INTERVAL_STEPS = 1000
 
 
 class Scheduler(SchedulerInterface):
@@ -447,6 +461,68 @@ class Scheduler(SchedulerInterface):
         # schedule() call including empty ones, so it would expire the hold
         # early; it keeps its own meaning (next_decode_eligible_step).
         self.num_executed_steps = 0
+        # TokenSpeed-style two-clock prefill cadence (prefill_decode_interval /
+        # prefill_decode_min_interval, see prefill_cadence.py). Local only, by
+        # the same rule as `local_prefill_interval`: a DP rank (size > 1) is
+        # driven by the engine core instead.
+        self.prefill_cadence = PrefillCadence(
+            self.scheduler_config.prefill_decode_interval
+            if self.parallel_config.data_parallel_size == 1
+            else 0,
+            self.scheduler_config.prefill_decode_min_interval
+            if self.parallel_config.data_parallel_size == 1
+            else 0,
+            self.scheduler_config.prefill_cadence_release_on_full_budget,
+        )
+        # Set by a non-mixed prefill-only step that ran no prefill (e.g. its
+        # allocation failed). Until a step runs prefill again, released steps
+        # are mixed, so the decodes are not held back by steps that run
+        # nothing.
+        self._prefill_cadence_fallback = False
+        # Async KV loads started by held steps since the last prefill step
+        # (prefill_cadence_lookahead_loads is a budget per hold window).
+        self._prefill_cadence_lookahead_used = 0
+        if self.parallel_config.data_parallel_size != 1 and (
+            self.scheduler_config.prefill_decode_interval > 0
+            or self.scheduler_config.prefill_decode_min_interval > 0
+        ):
+            logger.warning_once(
+                "Prefill cadence: prefill_decode_interval and "
+                "prefill_decode_min_interval are ignored with "
+                "data_parallel_size=%d (no cross-rank agreement on the "
+                "cadence).",
+                self.parallel_config.data_parallel_size,
+            )
+        if self.prefill_cadence.enabled:
+            logger.info_once(
+                "Prefill cadence: prefill_decode_interval=%d, "
+                "prefill_decode_min_interval=%d, mixed=%s, "
+                "release_on_full_budget=%s, count_slotless=%s, "
+                "lookahead_loads=%d.",
+                self.prefill_cadence.interval,
+                self.prefill_cadence.min_interval,
+                self.scheduler_config.prefill_cadence_mixed,
+                self.scheduler_config.prefill_cadence_release_on_full_budget,
+                self.scheduler_config.prefill_cadence_count_slotless,
+                self.scheduler_config.prefill_cadence_lookahead_loads,
+            )
+        # Prefill ordering of new prompts in the waiting queue (prefill_order).
+        self.prefill_order_short_uncached_first = (
+            self.scheduler_config.prefill_order == "short_uncached_first"
+        )
+        if self.prefill_order_short_uncached_first:
+            if self.policy != SchedulingPolicy.FCFS:
+                # SchedulerConfig rejects this too; the priority queue is a
+                # heap and cannot be reordered.
+                raise ValueError(
+                    "prefill_order='short_uncached_first' requires the 'fcfs' "
+                    f"scheduling policy, got {self.policy.value!r}."
+                )
+            self._prefill_order_uncached_fn = make_uncached_fn(self.kv_cache_manager)
+            logger.info_once(
+                "Prefill order: short_uncached_first (max_bypass=%d).",
+                self.scheduler_config.prefill_order_max_bypass,
+            )
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -748,6 +824,159 @@ class Scheduler(SchedulerInterface):
         page = self.prefill_context_page_tokens
         return -(-(num_computed_tokens + num_new_tokens) // page)
 
+    def _prefill_cadence_candidates(
+        self,
+    ) -> tuple[list[Request], list[Request], bool]:
+        """Prompts the prefill cadence applies to this step.
+
+        Returns:
+            The prompts that could prefill now: running prefill chunks, then
+            ready waiting requests in queue order while request slots last
+            (including blocked requests the waiting loop will promote this
+            step: finished async KV loads and compiled grammars).
+            The prompts that age on a held step: the former, plus the ready
+            waiting requests without a slot if `prefill_cadence_count_slotless`
+            (TokenSpeed ages every prompt).
+            Whether any prompt that could prefill now has prefill compute
+            left: a non-mixed step needs one, or it would hold the decodes
+            back for a step that computes no prefill. (With a KV connector,
+            a new prompt may still turn into an async load instead.)
+
+        """
+        candidates = [r for r in self.running if r.is_prefill_chunk]
+        has_compute = bool(candidates)
+        num_free_slots = (
+            self.max_num_active_reqs
+            - len(self.running)
+            - self.num_waiting_for_streaming_input
+        )
+        slotless: list[Request] = []
+        for queue in (self.kv_holding_waiting, self.waiting):
+            for request in queue:
+                if not self._prefill_cadence_ready(request):
+                    # Blocked (remote KV load, grammar, streaming input).
+                    continue
+                if num_free_slots > 0:
+                    candidates.append(request)
+                    num_free_slots -= 1
+                    has_compute = has_compute or (
+                        request.num_computed_tokens < request.num_tokens - 1
+                    )
+                else:
+                    slotless.append(request)
+        if slotless and self.scheduler_config.prefill_cadence_count_slotless:
+            return candidates, candidates + slotless, has_compute
+        return candidates, candidates, has_compute
+
+    def _pending_prefill_tokens(self, candidates: list[Request]) -> int:
+        """Prefill tokens the candidates still need, for
+        `prefill_cadence_release_on_full_budget`. A waiting prompt's local
+        prefix cache hit is peeked; hits in a KV connector's tiers are not
+        known before admission, so this is an upper bound with a connector.
+        """
+        num_tokens = 0
+        for request in candidates:
+            if request.num_computed_tokens == 0 and request.status in (
+                RequestStatus.WAITING,
+                RequestStatus.PREEMPTED,
+            ):
+                num_tokens += max(
+                    request.num_tokens
+                    - self.kv_cache_manager.peek_cached_prefix_len(request),
+                    0,
+                )
+            else:
+                num_tokens += request.num_tokens - request.num_computed_tokens
+        return num_tokens
+
+    def _kv_usage_after(self, num_tokens: int) -> float:
+        """KV cache usage once `num_tokens` more tokens take new blocks in
+        every KV cache group (an upper bound: cached blocks among them and
+        sliding windows are not discounted)."""
+        block_pool = self.kv_cache_manager.block_pool
+        num_blocks = -(-num_tokens // self.block_size) * max(
+            len(self.kv_cache_config.kv_cache_groups), 1
+        )
+        return min(
+            1.0,
+            self.kv_cache_manager.usage
+            + num_blocks / max(block_pool.num_gpu_blocks - 1, 1),
+        )
+
+    def _prefill_cadence_ready(self, request: Request) -> bool:
+        """Whether the waiting loop can schedule the request this step, by the
+        rules of `_handle_blocked_waiting_request` (without promoting it)."""
+        if request.status in (RequestStatus.WAITING, RequestStatus.PREEMPTED):
+            return True
+        if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+            return request.request_id in self.finished_recving_kv_req_ids
+        if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
+            struct_output_req = request.structured_output_request
+            return (
+                struct_output_req is not None
+                and struct_output_req.grammar is not None
+                and not isinstance(struct_output_req.grammar, Exception)
+            )
+        return False
+
+    def _prefill_cadence_decode_runnable(self, request: Request) -> bool:
+        """Whether a running request can run a decode this step, by the skip
+        rules at the top of the running loop."""
+        if request.is_prefill_chunk:
+            return False
+        if (
+            request.num_output_placeholders > 0
+            and request.num_computed_tokens + 2 - request.num_output_placeholders
+            >= request.num_prompt_tokens + request.max_tokens
+        ):
+            # Async scheduling: its last token is already in flight.
+            return False
+        # V2+PP+async: the decode stagger.
+        return self.current_step >= request.next_decode_eligible_step
+
+    def _commit_prefill_cadence(
+        self,
+        pushed_prefill: bool,
+        pushed_decode: bool,
+        cadence_hold: bool,
+        cadence_prefill_only: bool,
+        cadence_aging: list[Request],
+        num_scheduled_tokens: dict[str, int],
+        started_loads: bool = False,
+        lookahead_loads: int = 0,
+    ) -> None:
+        """Account for the step just scheduled in the prefill cadence."""
+        if cadence_hold and pushed_decode:
+            # The prompts this step held back age one round; one scheduled
+            # anyway (one token left, e.g. a full prefix-cache hit) was not.
+            note_deferred(
+                r for r in cadence_aging if r.request_id not in num_scheduled_tokens
+            )
+        if pushed_prefill:
+            self._prefill_cadence_fallback = False
+            # A new hold window: lookahead loads are budgeted per window.
+            self._prefill_cadence_lookahead_used = 0
+        elif cadence_prefill_only and not started_loads:
+            # The prefill-only step ran no prefill (e.g. its allocation
+            # failed) and held the decodes back for nothing. A step that only
+            # started async KV loads is not a failure: the loaded prompts
+            # prefill on a later prefill-only step.
+            self._prefill_cadence_fallback = True
+        self._prefill_cadence_lookahead_used += lookahead_loads
+        self.prefill_cadence.commit(pushed_prefill, pushed_decode)
+        if (
+            pushed_prefill or pushed_decode
+        ) and self.num_executed_steps % _CADENCE_LOG_INTERVAL_STEPS == 0:
+            cadence = self.prefill_cadence
+            logger.debug(
+                "Prefill cadence after %d steps: %d prefill steps, %d held "
+                "steps, %d aging lifts.",
+                self.num_executed_steps,
+                cadence.num_prefill_steps,
+                cadence.num_held_steps,
+                cadence.num_aging_lifts,
+            )
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -789,6 +1018,9 @@ class Scheduler(SchedulerInterface):
         # Whether a waiting request was admitted with prompt left to compute.
         # Separate from `prefill_scheduled`, which covers only the running loop.
         prefill_admitted = False
+        # Whether a waiting request was admitted with at most one token left
+        # (a decode row). Only read by the prefill cadence.
+        decode_admitted = False
         # Whether any scheduled request has a synchronous connector KV load.
         has_sync_kv_loads = False
 
@@ -848,6 +1080,76 @@ class Scheduler(SchedulerInterface):
         ):
             defer_prefills = True
 
+        # TokenSpeed-style prefill cadence (prefill_decode_interval / _min_
+        # interval): while decode rounds are owed, a step with a decode to run
+        # holds all prefill, through the same plumbing as the gates above. A
+        # step with nothing to decode runs prefill, so the engine never idles.
+        # There is no queue-wide escape; the per-prompt aging in
+        # PrefillCadence bounds the wait instead.
+        cadence_hold = False
+        # Non-mixed cadence: a released step carries prefill without decodes.
+        cadence_prefill_only = False
+        cadence_aging: list[Request] = []
+        cadence_lookahead_left = 0
+        cadence_lookahead_active = False
+        cadence_waiting_first = False
+        # Async KV loads this step started (non-mixed fallback, lookahead).
+        cadence_started_loads = 0
+        cadence_lookahead_loads = 0
+        if self.prefill_cadence.enabled and not defer_prefills:
+            candidates, cadence_aging, cadence_has_compute = (
+                self._prefill_cadence_candidates()
+            )
+            # A decode this step can actually run: holding prefill for a
+            # decode that is skipped anyway would leave the step empty.
+            has_decode = any(
+                self._prefill_cadence_decode_runnable(r) for r in self.running
+            )
+            # Decided even with no pending prompt, so that a prompt the
+            # candidate scan missed is still held while rounds are owed.
+            max_deferred_rounds = max(
+                (r.prefill_deferred_rounds for r in cadence_aging), default=0
+            )
+            decision = self.prefill_cadence.decide(
+                max_deferred_rounds,
+                self._pending_prefill_tokens(candidates)
+                if self.prefill_cadence.release_on_full_budget
+                else 0,
+                self.max_num_scheduled_tokens,
+                pending=bool(cadence_aging),
+            )
+            cadence_hold = decision.owes and has_decode
+            # Only with a prompt known to prefill now: otherwise the
+            # prefill-only step would run nothing.
+            cadence_prefill_only = (
+                not cadence_hold
+                and has_decode
+                and cadence_has_compute
+                and not self.scheduler_config.prefill_cadence_mixed
+                and not self._prefill_cadence_fallback
+            )
+            if cadence_hold:
+                defer_prefills = True
+                # Lookahead loads let the requests behind a held prompt jump
+                # ahead of it, so they are budgeted per hold window and stop
+                # once a held prompt has waited as long as the aging bound.
+                aging_bound = (
+                    self.prefill_cadence.interval
+                    or self.scheduler_config.prefill_order_max_bypass
+                )
+                if max_deferred_rounds < aging_bound:
+                    cadence_lookahead_left = max(
+                        self.scheduler_config.prefill_cadence_lookahead_loads
+                        - self._prefill_cadence_lookahead_used,
+                        0,
+                    )
+            # On a released step with lookahead, a waiting prompt that arrived
+            # before the lookahead-loaded requests is admitted ahead of them.
+            cadence_waiting_first = (
+                not cadence_hold
+                and self.scheduler_config.prefill_cadence_lookahead_loads > 0
+            )
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -880,6 +1182,12 @@ class Scheduler(SchedulerInterface):
             if defer_prefills and request.is_prefill_chunk:
                 # DP prefill balancing: defer this in-progress prefill chunk to a
                 # cadence-aligned step; decodes still run to fill this step.
+                req_index += 1
+                continue
+
+            if cadence_prefill_only and not request.is_prefill_chunk:
+                # Non-mixed prefill cadence: this step carries prefill alone;
+                # the decodes run on the held steps around it.
                 req_index += 1
                 continue
 
@@ -1131,11 +1439,54 @@ class Scheduler(SchedulerInterface):
                 else:
                     step_skipped_waiting.appendleft(request_to_skip)
 
+            def pass_over_request(from_queue: RequestQueue) -> None:
+                # Like skip_request, for a prompt the prefill cadence holds:
+                # it is not deferred (stats, prefill_capacity_bound).
+                request_to_pass = from_queue.pop_request()
+                if self._holds_kv_blocks(request_to_pass):
+                    step_skipped_kv_holding.appendleft(request_to_pass)
+                else:
+                    step_skipped_waiting.appendleft(request_to_pass)
+
+            # Prefill order: on a step that may admit prefill, rank the new
+            # prompts (short_uncached_first). Requests that are not new prompts
+            # (preempted, KV-loaded, blocked or previously skipped) keep their
+            # FCFS position ahead of them. Not ranked when no request slot is
+            # free, as nothing can be admitted (the ranking peeks the prefix
+            # cache for every new prompt).
+            prefill_order_new: set[Request] = set()
+            prefill_order_oldest: Request | None = None
+            prefill_order_admitted: list[Request] = []
+            if (
+                self.prefill_order_short_uncached_first
+                and not defer_prefills
+                and len(self.waiting) > 1
+                and len(self.running) + self.num_waiting_for_streaming_input
+                < self.max_num_active_reqs
+            ):
+                ordered = order_new_prompts(
+                    self.waiting,
+                    self._prefill_order_uncached_fn,
+                    self.scheduler_config.prefill_order_max_bypass,
+                )
+                self.waiting.clear()
+                self.waiting.extend(ordered)
+                prefill_order_new = {r for r in ordered if is_new_prompt(r)}
+                prefill_order_oldest = oldest_new_prompt(ordered)
+
             while token_budget > 0:
                 # Requests holding KV blocks are always drained first, and are
                 # the only ones admitted under PAUSED_NEW (e.g. async KV loads).
                 request_queue = self.kv_holding_waiting
-                if not request_queue and self._pause_state == PauseState.UNPAUSED:
+                if self._pause_state == PauseState.UNPAUSED and (
+                    not request_queue
+                    or (
+                        cadence_waiting_first
+                        and self.waiting
+                        and self.waiting.peek_request().arrival_time
+                        < request_queue.peek_request().arrival_time
+                    )
+                ):
                     request_queue = self.waiting
                 if not request_queue or input_budget <= draft_slots:
                     break
@@ -1147,6 +1498,16 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+
+                if cadence_lookahead_active:
+                    # Prefill cadence lookahead: past the first held prompt,
+                    # each request examined uses one lookahead slot.
+                    if (
+                        cadence_lookahead_left == 0
+                        or self.kv_cache_manager.usage > _CADENCE_LOOKAHEAD_MAX_KV_USAGE
+                    ):
+                        break
+                    cadence_lookahead_left -= 1
 
                 ready_to_schedule = self._handle_blocked_waiting_request(request)
                 if not ready_to_schedule:
@@ -1359,7 +1720,39 @@ class Scheduler(SchedulerInterface):
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
+                    if (
+                        cadence_lookahead_active
+                        and self._kv_usage_after(num_computed_tokens)
+                        > _CADENCE_LOOKAHEAD_MAX_KV_USAGE
+                    ):
+                        # Prefill cadence lookahead: this load's blocks would
+                        # take KV usage past the cap.
+                        break
                 elif defer_prefills and num_computed_tokens < request.num_tokens - 1:
+                    if not cadence_lookahead_active and cadence_lookahead_left > 0:
+                        # A load admission takes no request slot until its
+                        # load finishes, so cap the lookahead at the slots
+                        # left once this held prompt and the requests already
+                        # holding KV blocks are admitted.
+                        cadence_lookahead_left = min(
+                            cadence_lookahead_left,
+                            self.max_num_active_reqs
+                            - num_running
+                            - 1
+                            - len(self.kv_holding_waiting)
+                            - len(step_skipped_kv_holding),
+                        )
+                    if cadence_lookahead_active or (
+                        cadence_lookahead_left > 0
+                        and self.kv_cache_manager.usage
+                        <= _CADENCE_LOOKAHEAD_MAX_KV_USAGE
+                    ):
+                        # Prefill cadence lookahead: keep walking the queue
+                        # past held prompts, so the requests behind them start
+                        # their async KV loads during the hold.
+                        cadence_lookahead_active = True
+                        pass_over_request(request_queue)
+                        continue
                     # DP prefill balancing: defer this step's local prefill
                     # compute to a cadence-aligned step.
                     break
@@ -1607,6 +2000,9 @@ class Scheduler(SchedulerInterface):
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    cadence_started_loads += 1
+                    if cadence_lookahead_active:
+                        cadence_lookahead_loads += 1
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
                     # the request finished the KV transfer.
@@ -1675,6 +2071,9 @@ class Scheduler(SchedulerInterface):
                 # and every remote-KV resume, since those set
                 # num_computed_tokens = num_tokens - 1.
                 prefill_admitted |= num_computed_tokens < request.num_tokens - 1
+                decode_admitted |= num_computed_tokens >= request.num_tokens - 1
+                if request in prefill_order_new:
+                    prefill_order_admitted.append(request)
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
                     self._inflight_prefills.add(request)
@@ -1696,6 +2095,16 @@ class Scheduler(SchedulerInterface):
             if step_skipped_waiting:
                 self.waiting.prepend_requests(step_skipped_waiting)
 
+            # Prefill order aging: charge each admission to the oldest new
+            # prompt still waiting when it was admitted (TokenSpeed
+            # recordPrefillBypass).
+            if prefill_order_admitted:
+                note_admitted(
+                    prefill_order_admitted,
+                    prefill_order_oldest,
+                    new_prompts=prefill_order_new,
+                )
+
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
             if not defer_prefills:
@@ -1714,6 +2123,21 @@ class Scheduler(SchedulerInterface):
         # whether a new admission or a running chunk.
         if self.local_prefill_interval > 1 and (prefill_scheduled or prefill_admitted):
             self.last_prefill_step = self.num_executed_steps
+
+        if self.prefill_cadence.enabled:
+            self._commit_prefill_cadence(
+                # Same predicate as the stamp above: a full prefix-cache hit
+                # with one token left does not restart the cadence.
+                pushed_prefill=prefill_scheduled or prefill_admitted,
+                pushed_decode=decode_admitted
+                or any(not r.is_prefill_chunk for r in scheduled_running_reqs),
+                cadence_hold=cadence_hold,
+                cadence_prefill_only=cadence_prefill_only,
+                cadence_aging=cadence_aging,
+                num_scheduled_tokens=num_scheduled_tokens,
+                started_loads=cadence_started_loads > 0,
+                lookahead_loads=cadence_lookahead_loads,
+            )
 
         assert token_budget >= 0
         assert input_budget >= 0
