@@ -1614,22 +1614,14 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.models.qwen4_exp.common.ple_mode import validate_ple_embedding_config
         from vllm.platforms import current_platform
 
         Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
         text_config = vllm_config.model_config.hf_text_config
         if text_config.hc_count <= 1:
             raise ValueError("Qwen4Exp requires hc_count > 1")
-        from vllm.models.qwen4_exp.common.ple_mode import (
-            PleEmbeddingMode,
-            validate_ple_embedding_config,
-        )
-
-        ple_mode = validate_ple_embedding_config(text_config)
-        if ple_mode == PleEmbeddingMode.PER_TOKEN and not current_platform.is_rocm():
-            raise NotImplementedError(
-                f"ple_embedding_mode={ple_mode.value!r} is only implemented for ROCm"
-            )
+        validate_ple_embedding_config(text_config)
         parallel_config = vllm_config.parallel_config
         # MoE SP also enables HC SP without the explicit HC flag.
         if (
