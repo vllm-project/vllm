@@ -179,7 +179,6 @@ def _base_serve_args(
     all2all_backend: str = DEFAULT_ALL2ALL_BACKEND,
 ) -> list[str]:
     args = [
-        "--trust-remote-code",
         "--tensor-parallel-size",
         "1",
         "--gpu-memory-utilization",

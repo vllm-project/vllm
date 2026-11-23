@@ -39,20 +39,26 @@ DRAFT_ARCH = "K3DSparkModel"
 
 
 def register() -> None:
-    """Serve the DSpark draft with `SpecializedK3DSparkForCausalLM` in this
-    process (`ModelRegistry.register_model`, vLLM's model-class extension point).
+    """Serve the DSpark draft with `SpecializedK3DSparkForCausalLM` (MLA drafts)
+    or `gqa.SpecializedQwen3DSparkForCausalLM` (GQA drafts) in this process
+    (`ModelRegistry.register_model`, vLLM's model-class extension point).
 
     `specialized_decode_config` calls it when the deployment selects the
     specialized decode: the target model is built (and calls it) before the
     speculator loads the drafter. A draft class resolved earlier in this process
     (cached by `get_model_architecture`) is dropped so the load resolves again."""
     from vllm.model_executor.model_loader import utils as loader_utils
+    from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
     from vllm.model_executor.models.registry import ModelRegistry
 
+    from .gqa import DRAFT_ARCH as GQA_DRAFT_ARCH
+    from .gqa import SpecializedQwen3DSparkForCausalLM
+
     ModelRegistry.register_model(DRAFT_ARCH, SpecializedK3DSparkForCausalLM)
+    ModelRegistry.register_model(GQA_DRAFT_ARCH, SpecializedQwen3DSparkForCausalLM)
     cached = loader_utils._MODEL_ARCH_BY_HASH
     for key, (cls, _) in list(cached.items()):
-        if cls is K3DSparkForCausalLM:
+        if cls in (K3DSparkForCausalLM, Qwen3DSparkForCausalLM):
             del cached[key]
 
 
@@ -139,6 +145,10 @@ def install_draft_fold(attn) -> None:
     from .attention import draft_forward_mqa
 
     if not attn.non_causal_multi_token_decode:
+        # A causal draft block: the TP decode folds its shared context
+        # (attention.causal_folded_decode), and DraftDcp serves it under DCP.
+        attn.impl.__class__ = _folded_impl(type(attn.impl))  # type: ignore[arg-type]
+        attn.draft_fold = draft_forward_mqa  # read by DraftDcp.eligible
         return
     attn.draft_fold = draft_forward_mqa  # read by DraftDcp.eligible
     attn.impl.__class__ = _folded_impl(type(attn.impl))  # type: ignore[arg-type]

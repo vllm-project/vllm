@@ -12,7 +12,7 @@ use vllm_metrics::METRICS;
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::utils::utility_call_error;
+use crate::utils::{deserialize_query_bool, utility_call_error};
 
 #[derive(Serialize)]
 pub(crate) struct IsSleepingResponse {
@@ -43,13 +43,19 @@ pub(crate) struct SleepParams {
     level: SleepLevel,
     #[serde(default)]
     mode: PauseMode,
-    #[serde(default = "default_reset_connector")]
+    #[serde(
+        default = "default_reset_connector",
+        deserialize_with = "deserialize_query_bool"
+    )]
     reset_connector: bool,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ReleaseKvCacheMemoryParams {
-    #[serde(default = "default_reset_connector")]
+    #[serde(
+        default = "default_reset_connector",
+        deserialize_with = "deserialize_query_bool"
+    )]
     reset_connector: bool,
 }
 

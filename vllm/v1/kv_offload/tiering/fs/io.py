@@ -93,11 +93,16 @@ def _store_block(
     offset: int,
     block_size: int,
     use_o_direct: bool = True,
-) -> None:
-    """Store callback: write to a temp file then atomically replace the target."""
+) -> bool:
+    """Write to a temp file then atomically replace the target.
+
+    Returns False, writing nothing, if the target already exists. A block
+    another writer publishes during the rename still returns True: its bytes
+    were written, so it counts for bandwidth accounting.
+    """
     # Check if block already exists to avoid redundant writes
     if os.path.exists(dest_path):
-        return
+        return False
 
     tmp_path = dest_path + _get_tmp_suffix()
     # Ensure parent directories exist
@@ -116,8 +121,12 @@ def _store_block(
         try:
             written = os.write(fd, view_slice)
             if written < len(view_slice):
+                # write(2) sets no errno on a short write, so name the likely
+                # cause. Keep in sync with the message in csrc/fs_io.cpp.
                 raise OSError(
-                    f"Short write: expected {len(view_slice)} bytes, wrote {written}"
+                    f"Encountered short-write error when writing {dest_path}. "
+                    "This could be a hardware error or the filesystem may be "
+                    "full (ENOSPC)"
                 )
         finally:
             os.close(fd)
@@ -130,6 +139,7 @@ def _store_block(
             # place holds this block and the store is done.
             with contextlib.suppress(OSError):
                 os.remove(tmp_path)
+        return True
     except Exception:
         try:
             os.remove(tmp_path)
@@ -177,11 +187,17 @@ def batch_store_block(
     offsets: list[int],
     block_size: int,
     use_o_direct: bool = True,
-) -> None:
+) -> int:
     """Store a batch of KV blocks from a shared buffer to disk in one call.
 
     Each block buffer[offsets[i] : offsets[i]+block_size] is written atomically
-    to dest_paths[i] via a temp-file rename.  Raises on first error.
+    to paths[i] via a temp-file rename. Blocks whose file already exists are
+    skipped. Raises on first error.
+
+    Returns:
+        The number of blocks transferred, including blocks another writer
+        published during the call (written, then dropped).
+
     """
     _validate_offsets(view, offsets, block_size)
 
@@ -190,9 +206,10 @@ def batch_store_block(
         view_slices = [view_B[x : x + block_size] for x in offsets]
         tmp_paths = [p + _get_tmp_suffix() for p in paths]
         return batch_store_block_C(tmp_paths, paths, view_slices, use_o_direct)
-    else:
-        for path, offset in zip(paths, offsets):
-            _store_block(path, view, offset, block_size, use_o_direct)
+    return sum(
+        _store_block(path, view, offset, block_size, use_o_direct)
+        for path, offset in zip(paths, offsets)
+    )
 
 
 def batch_load_block(

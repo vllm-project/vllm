@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import dataclasses
 import enum
 import json
 
@@ -14,6 +15,19 @@ from vllm.v1.metrics.stats import SchedulerStats
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+
+def _is_dataclass_instance(obj) -> bool:
+    return dataclasses.is_dataclass(obj) and not isinstance(obj, type)
+
+
+def _object_items(obj) -> dict[str, object]:
+    """Attributes of `obj`, including the ones a slotted dataclass keeps outside
+    `__dict__`, so they get anonymized rather than falling through to `repr`."""
+    items: dict[str, object] = {}
+    if _is_dataclass_instance(obj):
+        items = {f.name: getattr(obj, f.name, None) for f in dataclasses.fields(obj)}
+    return {**items, **getattr(obj, "__dict__", {})}
 
 
 def prepare_object_to_dump(obj) -> str:
@@ -39,8 +53,8 @@ def prepare_object_to_dump(obj) -> str:
         return f"Tensor(shape={obj.shape}, device={obj.device},dtype={obj.dtype})"
     elif hasattr(obj, "anon_repr"):
         return obj.anon_repr()
-    elif hasattr(obj, "__dict__"):
-        items = obj.__dict__.items()
+    elif hasattr(obj, "__dict__") or _is_dataclass_instance(obj):
+        items = _object_items(obj).items()
         dict_str = ", ".join(
             [f"{str(k)}={prepare_object_to_dump(v)}" for k, v in items]
         )
