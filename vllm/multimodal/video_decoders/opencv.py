@@ -116,7 +116,7 @@ class OpenCVVideoBackendMixin:
         # may land mid-stream on corrupt files, so only trust it when the
         # stream really ends there. A one-frame tolerance keeps mere header
         # miscounts from being "corrected".
-        if cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1.0):
+        if total_frames_num > 1 and cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1.0):
             visible_frames = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
             at_stream_end = not cap.grab()
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)

@@ -1538,6 +1538,19 @@ def test_opencv_reuses_capture_for_metadata(make_video, loader, monkeypatch):
     assert decoder_opens == 1
 
 
+@pytest.mark.parametrize("frame_recovery", [False, True])
+def test_opencv_single_frame_video_survives_metadata_probe(frame_recovery):
+    """The metadata probe must leave a single frame available for decoding."""
+    data = create_long_gop_video(num_frames=1)
+    frames, metadata = VideoBackend.load_bytes(
+        data, backend="opencv", frame_recovery=frame_recovery
+    )
+
+    np.testing.assert_array_equal(frames, np.zeros((1, 64, 64, 3), dtype=np.uint8))
+    assert metadata["total_num_frames"] == 1
+    assert metadata["frames_indices"] == [0]
+
+
 def test_video_backend_handles_edit_list_trimmed_video(
     monkeypatch: pytest.MonkeyPatch,
 ):
