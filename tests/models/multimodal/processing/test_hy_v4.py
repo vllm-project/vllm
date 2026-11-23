@@ -76,7 +76,8 @@ def test_hy_v4_rejects_invalid_video_timestamps(timestamps):
         )
 
 
-def test_hy_v4_projector_outputs_contiguous_embeddings():
+@pytest.mark.parametrize("projector_type", [None, "rmsnorm_mlp_adapter"])
+def test_hy_v4_projector_outputs_contiguous_embeddings(projector_type):
     from vllm.models.hy_v4.nvidia.vision import HYV4VisionPatchMerger
 
     config = VllmConfig(device_config=DeviceConfig(device="cpu"))
@@ -85,7 +86,7 @@ def test_hy_v4_projector_outputs_contiguous_embeddings():
             HYV4VLVisionConfig(
                 hidden_size=8,
                 out_hidden_size=16,
-                projector_type="rmsnorm_mlp_adapter",
+                projector_type=projector_type,
                 use_image_newline_token=False,
             )
         )
