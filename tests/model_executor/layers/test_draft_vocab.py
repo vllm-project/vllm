@@ -7,15 +7,29 @@ import pytest
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.layers.draft_vocab import DraftVocab, load_draft_token_ids
+from vllm.model_executor.layers.draft_vocab import (
+    DraftVocab,
+    load_draft_token_map,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    _quantize_nvfp4,
+    refresh_quantized_lm_heads,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_to_dtype,
+)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_gemv_bf16_fp4_gather
 
 VOCAB = 200
 HIDDEN = 32
 DRAFT_IDS = [0, 3, 7, 50, 51, 128, 130, 199]
-DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
 
 
 def _head(vocab: int = VOCAB, device: str = "cpu") -> ParallelLMHead:
@@ -30,13 +44,6 @@ def _head(vocab: int = VOCAB, device: str = "cpu") -> ParallelLMHead:
 def _hidden(n: int = 64, device: str = "cpu") -> torch.Tensor:
     gen = torch.Generator().manual_seed(1)
     return torch.randn(n, HIDDEN, generator=gen).to(device)
-
-
-@pytest.mark.cpu_test
-def test_load_draft_token_ids(tmp_path):
-    path = tmp_path / "map.pt"
-    torch.save(torch.tensor([9, 2, 9, 4]), path)
-    assert load_draft_token_ids(str(path), extra_ids=[7, 2]).tolist() == [2, 4, 7, 9]
 
 
 @pytest.mark.cpu_test
@@ -55,25 +62,93 @@ def test_pruned_head_maps_draft_ids_to_target_ids(default_vllm_config):
     assert torch.equal(draft_vocab.get_top_tokens(head, hidden), logits.argmax(-1))
 
 
-@pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("num_rows", [0, 16])
-def test_token_map_drafts_over_listed_and_picked_rows(
-    default_vllm_config, dist_init, device, num_rows
-):
-    """Each token drafts over the list plus `num_rows` picked rows, with the
-    exact logits of the full head on all of them."""
-    head = _head(device=device)
-    hidden = _hidden(device=device)
-    draft_vocab = DraftVocab(LogitsProcessor(VOCAB), VOCAB)
-    full = draft_vocab.compute_logits(head, hidden).float()
-    draft_vocab.load_token_map(head, torch.tensor(DRAFT_IDS), num_rows)
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="NVFP4 rows need CUDA"
+)
+requires_dynamic_rows = pytest.mark.skipif(
+    not (
+        current_platform.is_device_capability_family(120)
+        and has_flashinfer_gemv_bf16_fp4_gather()
+    ),
+    reason="Dynamic rows need SM12x and FlashInfer's gemv_bf16_fp4_gather",
+)
+TM_VOCAB, TM_HIDDEN, TM_STATIC = 4000, 512, 1333
 
-    logits = draft_vocab.compute_logits(head, hidden).float()
-    kept = logits.isfinite()
-    assert torch.all(kept[:, DRAFT_IDS])
-    assert torch.all(kept.sum(dim=-1) == len(DRAFT_IDS) + num_rows)
-    torch.testing.assert_close(logits[kept], full[kept], atol=1e-4, rtol=1e-4)
-    assert torch.equal(draft_vocab.get_top_tokens(head, hidden), logits.argmax(-1))
+
+def _token_map_drafter(monkeypatch, dynamic_rows: int):
+    """An MTP-like drafter sharing a tied BF16 lm_head, as in Qwen3.5."""
+    # Online methods read the model dtype from the current config.
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.fp8.get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16)),
+    )
+    drafter = nn.Module()
+    drafter.lm_head = VocabParallelEmbedding(TM_VOCAB, TM_HIDDEN, disable_tp=True)
+    drafter.lm_head.to("cuda", torch.bfloat16).weight.data.normal_(std=0.02)
+    drafter.draft_vocab = DraftVocab(LogitsProcessor(TM_VOCAB), TM_VOCAB)
+    spec = SimpleNamespace(
+        draft_token_map_static_rows=TM_STATIC,
+        draft_token_map_dynamic_rows=dynamic_rows or None,
+    )
+    load_draft_token_map(drafter, spec)
+    return drafter
+
+
+@requires_cuda
+@pytest.mark.parametrize(
+    "dynamic_rows", [0, pytest.param(16, marks=requires_dynamic_rows)]
+)
+def test_token_map_logits_match_reference(
+    default_vllm_config, dist_init, monkeypatch, dynamic_rows
+):
+    """Drafted logits are the NVFP4 logits of the static and the picked rows,
+    and -inf everywhere else."""
+    drafter = _token_map_drafter(monkeypatch, dynamic_rows)
+    head, draft_vocab = drafter.lm_head, drafter.draft_vocab
+    hidden = torch.randn(64, TM_HIDDEN, device="cuda", dtype=torch.bfloat16)
+    out = draft_vocab.compute_logits(head, hidden).float()
+
+    def nvfp4_logits(packed, scales, global_scale):
+        rows = dequantize_to_dtype(
+            packed, scales, global_scale, torch.float32, swizzle=False
+        )
+        return hidden.float() @ rows.t()
+
+    expected = torch.full_like(out, float("-inf"))
+    expected[:, :TM_STATIC] = nvfp4_logits(*_quantize_nvfp4(head.weight[:TM_STATIC]))
+    if dynamic_rows:
+        picked = out[:, TM_STATIC:].isfinite()
+        assert torch.all(picked.sum(dim=-1) == dynamic_rows)
+        reference = nvfp4_logits(*draft_vocab.nvfp4)
+        expected[:, TM_STATIC:] = torch.where(picked, reference, float("-inf"))
+    torch.testing.assert_close(out, expected, atol=1e-2, rtol=1e-2)
+    assert torch.equal(draft_vocab.get_top_tokens(head, hidden), out.argmax(-1))
+
+
+@requires_cuda
+@requires_dynamic_rows
+def test_token_map_follows_target_head(default_vllm_config, dist_init, monkeypatch):
+    """After a weight update of the lm_head, refreshing re-derives the static
+    rows, the dynamic rows and the scorer, in place."""
+    drafter = _token_map_drafter(monkeypatch, 16)
+    head, draft_vocab = drafter.lm_head, drafter.draft_vocab
+    ptrs = [t.data_ptr() for t in (*draft_vocab.nvfp4, draft_vocab.basis)]
+    hidden = torch.randn(64, TM_HIDDEN, device="cuda", dtype=torch.bfloat16)
+
+    def state(dv: DraftVocab) -> list[torch.Tensor]:
+        static = dv.compute_logits(head, hidden)[:, :TM_STATIC]
+        return [static, *dv.nvfp4, dv.basis, dv.scorer.weight]
+
+    head.weight.data.normal_(std=0.02)
+    fresh = DraftVocab(LogitsProcessor(TM_VOCAB), TM_VOCAB)
+    fresh.load_token_map(head, TM_STATIC, 16)
+    # The picks themselves may break score ties either way, so compare what
+    # refresh derives rather than the drafted logits.
+    assert not any(map(torch.equal, state(draft_vocab), state(fresh)))
+
+    refresh_quantized_lm_heads(drafter)
+    assert all(map(torch.equal, state(draft_vocab), state(fresh)))
+    assert [t.data_ptr() for t in (*draft_vocab.nvfp4, draft_vocab.basis)] == ptrs
 
 
 @pytest.mark.cpu_test
