@@ -363,7 +363,7 @@ def _flashinfer_bf16_mm(
 
 
 _warned_bf16_points: set[tuple[int, int, int]] = set()
-_warned_bf16_misses: set[tuple[int, int, int]] = set()
+_warned_bf16_misses: set[tuple[int, int]] = set()
 
 
 def warn_flashinfer_bf16_untuned(m: int, n: int, k: int) -> None:
@@ -430,15 +430,25 @@ def flashinfer_bf16_mm(
     if misses is not None and stats.cache_misses > misses:
         k = a.shape[-1]
         m = a.numel() // k
-        point = (_bf16_lookup_bucket(m) or m, b.shape[-1], k)
-        if point not in _warned_bf16_misses:
-            _warned_bf16_misses.add(point)
+        bucket = _bf16_lookup_bucket(m) or m
+        shape = (b.shape[-1], k)
+        if shape not in _warned_bf16_misses:
+            _warned_bf16_misses.add(shape)
             logger.warning(
-                "FlashInfer found no tuned tactic for a BF16 GEMM with M bucket "
-                "%d, N=%d, K=%d although a tuning file is loaded: it ran its "
-                "default tactic. The file may have been made with a different "
-                "FlashInfer version. The same shape is not reported again.",
-                *point,
+                "FlashInfer found no tuned tactic for a BF16 GEMM with N=%d, "
+                "K=%d (first seen at M bucket %d) although a tuning file is "
+                "loaded: it ran its default tactic. The file may have been made "
+                "with a different FlashInfer version. Other M buckets of this "
+                "shape are not reported (VLLM_LOGGING_LEVEL=DEBUG shows them).",
+                *shape,
+                bucket,
+            )
+        else:
+            logger.debug(
+                "FlashInfer ran its default tactic for a BF16 GEMM with M bucket "
+                "%d, N=%d, K=%d.",
+                bucket,
+                *shape,
             )
     return out
 

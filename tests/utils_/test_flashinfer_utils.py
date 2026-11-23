@@ -513,10 +513,13 @@ def test_flashinfer_bf16_mm_warns_when_flashinfer_misses_the_cache(monkeypatch):
     a, b = torch.empty(4, 8), torch.empty(8, 16)
     fi.flashinfer_bf16_mm(a, b, None, True, "auto")  # miss
     assert warn.call_count == 1
-    assert warn.call_args.args[1:] == (4, 16, 8)
+    assert warn.call_args.args[1:] == (16, 8, 4)  # N, K, M bucket
     fi.flashinfer_bf16_mm(a, b, None, True, "auto")  # hit
     fi.flashinfer_bf16_mm(a, b, None, True, "auto")  # miss again, same shape
     assert warn.call_count == 1  # reported once
+    fi.flashinfer_bf16_mm(a, b, None, True, "auto")  # hit
+    fi.flashinfer_bf16_mm(torch.empty(6, 8), b, None, True, "auto")  # miss, other M
+    assert warn.call_count == 1  # the shape (N, K) is reported once
 
 
 def test_flashinfer_bf16_mm_is_silent_without_a_tuning_file(monkeypatch):
