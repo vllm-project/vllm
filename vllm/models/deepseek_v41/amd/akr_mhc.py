@@ -383,6 +383,10 @@ def defer_aux(model, nxt: int, layer_ids: range, m: int) -> bool:
     if nxt not in layer_ids or nxt == model.decoder_replay_start:
         return False
     layer = model.layers[nxt]
+    if layer.mono is not None and layer.mono.takes_step(layer, m):
+        # The mono decode layer takes this step and returns before the seam, so
+        # no seam would produce the auxiliary state: take the stock post-mix.
+        return False
     return (
         layer.akr_mhc is not None
         and layer.akr_mhc.ready

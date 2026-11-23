@@ -728,6 +728,11 @@ class MonoDecodeLayer:
                 why = "SWA decode metadata missing"
         return why, swa, comp
 
+    def takes_step(self, layer: "DeepseekV4DecoderLayer", rows: int) -> bool:
+        """Whether `__call__` runs this step on the mono kernels, so that the
+        layer returns before its amd_kernels seam."""
+        return not self.ffn_only and self._whole_step(layer, rows)[0] is None
+
     def _defers(self, layer: "DeepseekV4DecoderLayer", runner, rows: int) -> bool:
         nxt = self.next_layer
         if nxt is None or not runner.merges(rows) or _hooked(layer, nxt):
