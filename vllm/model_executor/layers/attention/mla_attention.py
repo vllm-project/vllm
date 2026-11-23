@@ -521,13 +521,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache_dtype,
             )
 
-        if sliding_window is not None and kv_cache_dtype in (
-            "fp8_ds_mla",
-            "nvfp4_ds_mla",
-        ):
-            raise ValueError(
-                f"Sliding-window MLA does not support kv_cache_dtype={kv_cache_dtype}."
-            )
         dtype = torch.get_default_dtype()
         self.act_dtype = dtype
         if attn_backend is not None:
@@ -550,6 +543,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         normalized_kv_cache_dtype = _canonicalize_sparse_mla_kv_cache_dtype(
             self.attn_backend, kv_cache_dtype
         )
+        if (
+            sliding_window is not None
+            and normalized_kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
+            and not self.attn_backend.supports_quantized_mla_sliding_window(
+                normalized_kv_cache_dtype
+            )
+        ):
+            raise ValueError(
+                "Sliding-window MLA does not support "
+                f"kv_cache_dtype={normalized_kv_cache_dtype} "
+                f"for backend {self.attn_backend.__name__}."
+            )
         if normalized_kv_cache_dtype != kv_cache_dtype:
             if cache_config is not None:
                 cache_config.cache_dtype = normalized_kv_cache_dtype

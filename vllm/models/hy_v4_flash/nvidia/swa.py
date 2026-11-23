@@ -46,6 +46,10 @@ class FlashSWABackend(FlashSparseBackend):
     def supports_sliding_window(cls):
         return True
 
+    @classmethod
+    def supports_quantized_mla_sliding_window(cls, kv_cache_dtype: str) -> bool:
+        return kv_cache_dtype == "fp8_ds_mla"
+
 
 def window_indices(positions: torch.Tensor, window: int, width: int) -> torch.Tensor:
     if window < 1 or width < window:

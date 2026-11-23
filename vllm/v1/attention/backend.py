@@ -204,6 +204,11 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_quantized_mla_sliding_window(cls, kv_cache_dtype: str) -> bool:
+        """Whether sliding-window MLA supports this packed cache format."""
+        return False
+
+    @classmethod
     def supports_rswa(cls) -> bool:
         return False
 
