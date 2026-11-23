@@ -284,6 +284,34 @@ def test_sparse_mla_sink_validation(sinks: torch.Tensor, match: str) -> None:
         )
 
 
+def test_sparse_mla_sink_rejects_dcp_on_direct_construction(monkeypatch) -> None:
+    """Models that pass the backend explicitly skip the selector's DCP check;
+    each rank would add the sink mass before the merge, counting it N times."""
+    from vllm.distributed import parallel_state
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
+
+    monkeypatch.setattr(
+        parallel_state, "get_dcp_world_size_and_rank", lambda enabled=True: (2, 0)
+    )
+    with pytest.raises(ValueError, match="DCP not supported with attention sinks"):
+        ROCMAiterMLASparseImpl(
+            num_heads=4,
+            head_size=Q_HEAD_DIM,
+            scale=SM_SCALE,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="bfloat16",
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            sinks=torch.zeros(4, dtype=torch.float32),
+            kv_lora_rank=V_HEAD_DIM,
+        )
+
+
 def test_sparse_mla_backend_reports_sink_support_for_current_hardware() -> None:
     from vllm.platforms.rocm import get_cdna_version
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
@@ -293,7 +321,8 @@ def test_sparse_mla_backend_reports_sink_support_for_current_hardware() -> None:
     assert ROCMAiterMLASparseBackend.supports_sink() == (get_cdna_version() in (3, 4))
 
 
-def test_sparse_mla_backend_allows_dcp() -> None:
+def test_sparse_mla_backend_rejects_dcp_with_sinks() -> None:
+    """Each DCP rank would add the sink mass before the LSE merge."""
     from vllm.platforms.rocm import RocmPlatform
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -312,11 +341,11 @@ def test_sparse_mla_backend_allows_dcp() -> None:
         use_dcp=True,
     )
 
-    backend_cls = RocmPlatform.get_attn_backend_cls(
-        selected_backend=AttentionBackendEnum.ROCM_AITER_MLA_SPARSE,
-        attn_selector_config=selector_config,
-    )
-    assert backend_cls == AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
+    with pytest.raises(ValueError, match="DCP not supported"):
+        RocmPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.ROCM_AITER_MLA_SPARSE,
+            attn_selector_config=selector_config,
+        )
 
 
 @pytest.mark.parametrize("num_heads,block_size", [(8, 16), (20, 32)])
@@ -478,6 +507,7 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
     impl.topk_indices_buffer[:, : selected.shape[1]] = selected
     impl.owns_indexer = True
     impl.index_epoch = 0
+    impl.dcp_world_size = 1
     impl.q_concat_buffer = torch.empty_like(q)
     metadata = SimpleNamespace(
         attn_out_dtype=dtype,
