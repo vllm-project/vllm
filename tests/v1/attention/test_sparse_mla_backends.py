@@ -6288,3 +6288,97 @@ def test_flashmla_padded_query_buffer_has_model_lifetime():
     assert reference() is None
     reloaded = _shared_fp8_q_padded(7, 64, 576)
     assert torch.count_nonzero(reloaded).item() == 0
+
+
+@pytest.mark.parametrize("num_heads", [8, 16])
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8_ds_mla", "nvfp4_ds_mla"])
+def test_flashmla_persistent_query_cuda_graph_matches_per_call_padding(
+    num_heads, kv_cache_dtype
+):
+    """Replaying real native attention must observe updated persistent query rows."""
+    from vllm.v1.attention.backends.mla.flashmla_sparse import _shared_fp8_q_padded
+    from vllm.v1.kv_cache_interface import DS_MLA_STATE_CONTENT_BYTES
+
+    supported, reason = flashmla.is_flashmla_sparse_supported()
+    if not supported:
+        pytest.skip(reason)
+    if kv_cache_dtype == "nvfp4_ds_mla" and not (
+        current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip("NVFP4 DS-MLA cache requires SM100-family native kernels")
+    device = torch.device(DEVICE_TYPE)
+    dtype = torch.bfloat16
+    generator = torch.Generator(device=device).manual_seed(42)
+    tokens, block_size, context = 4, 64, 256
+    nope = torch.randn(
+        tokens, num_heads, 512, dtype=dtype, device=device, generator=generator
+    )
+    rope = torch.randn(
+        tokens, num_heads, 64, dtype=dtype, device=device, generator=generator
+    )
+    cache = torch.zeros(
+        context // block_size,
+        block_size,
+        DS_MLA_STATE_CONTENT_BYTES[kv_cache_dtype],
+        dtype=torch.uint8,
+        device=device,
+    )
+    kv = torch.randn(context, 512, dtype=dtype, device=device, generator=generator)
+    k_pe = torch.randn(context, 64, dtype=dtype, device=device, generator=generator)
+    ops.concat_and_cache_mla(
+        kv,
+        k_pe,
+        cache,
+        torch.arange(context, dtype=torch.int64, device=device),
+        kv_cache_dtype=kv_cache_dtype,
+        scale=torch.ones(1, dtype=torch.float32, device=device),
+    )
+    indices = torch.arange(128, dtype=torch.int32, device=device)
+    indices = indices.view(1, 1, -1).expand(1, tokens, -1).contiguous()
+    cache_lens = torch.full((1,), context, dtype=torch.int32, device=device)
+    block_table = torch.zeros((1, 1), dtype=torch.int32, device=device)
+    persistent = _shared_fp8_q_padded(tokens, 64, 576)
+    scheduler, _ = flashmla.get_mla_metadata()
+
+    def attend(query):
+        return flashmla.flash_mla_with_kvcache(
+            q=query.unsqueeze(0),
+            k_cache=cache.unsqueeze(-2),
+            block_table=block_table,
+            head_dim_v=512,
+            cache_seqlens=cache_lens,
+            tile_scheduler_metadata=scheduler,
+            is_fp8_kvcache=True,
+            indices=indices,
+            softmax_scale=576**-0.5,
+        )[0][:, :, :num_heads]
+
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        ops.concat_mla_q(nope, rope, persistent[:, :num_heads])
+        attend(persistent)
+    torch.cuda.current_stream(device).wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        ops.concat_mla_q(nope, rope, persistent[:, :num_heads])
+        actual = attend(persistent)
+
+    previous = None
+    for _ in range(3):
+        nope.copy_(
+            torch.randn(nope.shape, dtype=dtype, device=device, generator=generator)
+        )
+        rope.copy_(
+            torch.randn(rope.shape, dtype=dtype, device=device, generator=generator)
+        )
+        per_call = torch.zeros_like(persistent)
+        ops.concat_mla_q(nope, rope, per_call[:, :num_heads])
+        expected = attend(per_call)
+        graph.replay()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert torch.isfinite(actual).all()
+        assert torch.count_nonzero(persistent[:, num_heads:]).item() == 0
+        if previous is not None:
+            assert not torch.equal(actual, previous)
+        previous = actual.clone()
