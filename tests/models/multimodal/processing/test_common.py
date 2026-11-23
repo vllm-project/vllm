@@ -106,6 +106,8 @@ _XPU_EXCLUDED_MODEL_IDS = {
 _CPU_EXCLUDED_MODEL_IDS = {
     # DeepSeek-V4 vision variant is only supported on NVIDIA GPUs for now.
     "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+    # HY4 requires CUDA.
+    "tencent/Hy4",
 }
 
 
@@ -146,7 +148,9 @@ def get_model_ids_to_test():
     vllm_only_archs = {
         arch
         for arch, info in _MULTIMODAL_EXAMPLE_MODELS.items()
-        if not any(
+        # GLM-5.3-Flash media preprocessing is owned by the Rust frontend.
+        if arch != "Glm5NextForConditionalGeneration"
+        and not any(
             model_id in transformers_arch_ids
             for model_id in (info.default, *info.extras.values())
         )

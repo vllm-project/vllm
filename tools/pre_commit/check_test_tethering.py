@@ -183,7 +183,7 @@ def _glob_match_path(pattern: str, path: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-@dataclass
+@dataclass(slots=True)
 class PytestSelection:
     """A `pytest`-style command: run everything under `included_paths`
     except what an `--ignore` (path prefix) or `--ignore-glob` (whole-path
@@ -216,7 +216,7 @@ class PytestSelection:
         return _glob_match_path(path_arg, test_file)
 
 
-@dataclass
+@dataclass(slots=True)
 class FindSelection:
     """A `find <root> -name ... [-not -name ...] [-maxdepth N] | xargs pytest`
     pipeline. `pytest` runs one file per `find` hit, so the `find`
