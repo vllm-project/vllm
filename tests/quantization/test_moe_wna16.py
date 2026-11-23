@@ -15,6 +15,8 @@ from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     WNA16MoEBackend,
     _backend_incompatibility_reason,
     _convert_moe_wna16_humming_tensors,
+    _process_awq_weights_marlin,
+    _process_weights_marlin,
     convert_to_wna16_moe_kernel_format,
     map_wna16_backend,
 )
@@ -24,6 +26,9 @@ from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.moe_wna16 import (
     MoeWNA16Config,
     MoeWNA16Method,
+)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_moe_permute_scales,
 )
 from vllm.platforms import current_platform
 
@@ -621,3 +626,58 @@ def test_moe_wna16_w13_qzeros_shard_split_int8_asym_gptq(monkeypatch):
     expected_w3 = raw_w3.view(torch.uint8).T + 1
     assert torch.equal(layer.w13_qzeros[0, :intermediate].cpu(), expected_w1)
     assert torch.equal(layer.w13_qzeros[0, intermediate:].cpu(), expected_w3)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Marlin MoE repack requires CUDA"
+)
+@pytest.mark.parametrize("quant_method", ["awq", "gptq"])
+def test_marlin_moe_w13_scales_permuted_with_hidden_size_as_k(quant_method):
+    """W13's K is the hidden size, not the per-rank intermediate size.
+
+    With intermediate 128 == group size (e.g. TP=8), using the intermediate
+    size as K selects the single-group scale permutation even though W13 has
+    hidden // group_size groups along K.
+    """
+    E, K, N, group_size, pack = 1, 1024, 128, 128, 8
+    layer = SimpleNamespace(intermediate_size_per_partition=N)
+
+    def ints(*shape):
+        return torch.randint(-(2**31), 2**31 - 1, shape, dtype=torch.int32).cuda()
+
+    def scales(*shape):
+        return torch.rand(shape, dtype=torch.float16).cuda()
+
+    if quant_method == "awq":  # K-first, packed along N
+        w13_scales = scales(E, K // group_size, 2 * N)
+        out = _process_awq_weights_marlin(
+            layer,
+            4,
+            pack,
+            group_size,
+            w13_qweight=ints(E, K, 2 * N // pack),
+            w2_qweight=ints(E, N, K // pack),
+            w13_scales=w13_scales,
+            w2_scales=scales(E, N // group_size, K),
+            w13_qzeros=ints(E, K // group_size, 2 * N // pack),
+            w2_qzeros=ints(E, N // group_size, K // pack),
+        )
+        w13_scales_kn = w13_scales
+    else:  # canonical N-first, packed along K
+        w13_scales = scales(E, 2 * N, K // group_size)
+        out = _process_weights_marlin(
+            layer,
+            4,
+            pack,
+            group_size,
+            w13_qweight=ints(E, 2 * N, K // pack),
+            w2_qweight=ints(E, K, N // pack),
+            w13_scales=w13_scales,
+            w2_scales=scales(E, K, N // group_size),
+        )
+        w13_scales_kn = w13_scales.transpose(1, 2).contiguous()
+
+    expected = marlin_moe_permute_scales(
+        s=w13_scales_kn, size_k=K, size_n=2 * N, group_size=group_size
+    )
+    assert torch.equal(out[2], expected)
