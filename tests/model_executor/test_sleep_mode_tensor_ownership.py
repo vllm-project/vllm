@@ -35,7 +35,6 @@ SLEEP_MODEL_CASES = (
         architecture="FireRedASR2ForConditionalGeneration",
         model="vllm-project/FireRedASR2-LLM-vllm",
         tensor_names=("pe",),
-        trust_remote_code=True,
     ),
     SleepModelCase(
         name="gemma3n",
