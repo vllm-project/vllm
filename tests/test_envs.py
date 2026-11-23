@@ -620,3 +620,20 @@ class TestVllmMaxNSequences:
 
         with pytest.raises(VLLMValidationError, match="n must be at most 128"):
             SamplingParams(n=129)
+
+
+def test_zygote_address_passes_validation_and_is_not_a_compile_factor():
+    from vllm.platforms.interface import Platform
+
+    with patch.dict(
+        os.environ,
+        {
+            "VLLM_WORKER_MULTIPROC_METHOD": "zygote",
+            "VLLM_ZYGOTE_ADDRESS": "/tmp/test-zygote/sock",
+        },
+        clear=True,
+    ):
+        Platform.validate_environ(hard_fail=True)
+        assert envs.VLLM_WORKER_MULTIPROC_METHOD == "zygote"
+        assert envs.VLLM_ZYGOTE_ADDRESS == "/tmp/test-zygote/sock"
+        assert "VLLM_ZYGOTE_ADDRESS" not in envs.compile_factors()

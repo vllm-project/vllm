@@ -145,6 +145,39 @@ RuntimeError:
         section in https://docs.python.org/3/library/multiprocessing.html
 ```
 
+## The `zygote` Method
+
+Set `VLLM_WORKER_MULTIPROC_METHOD=zygote` to share EngineCore, executor and
+worker imports on Linux with CUDA or ROCm. A separate Python interpreter
+preloads those modules and forks children on request. It serves requests
+between imports, allowing EngineCore to start while worker modules are still
+loading. The `serve` and `run-batch` commands start the zygote before loading
+CLI subcommands. Library callers start it on the first process launch and need
+the same `__main__` guard as with `spawn`.
+
+Children receive the requester's environment, working directory, `sys.path`
+and `sys.argv`. Although the zygote is their OS parent, the requester can use
+the usual `Process` API to monitor, join and terminate them. EngineCore uses
+the same zygote to launch its workers. vLLM sets the internal
+`VLLM_ZYGOTE_ADDRESS` to a Unix socket in a private temporary directory. Both endpoints verify
+the peer's user ID before exchanging process state.
+
+Requests fall back to `spawn` if the zygote is unavailable, preloading
+starts a Python thread or initializes CUDA, the requested executable changes,
+or a preload-dependent environment variable changes incompatibly. Before each
+fork the zygote also releases idle libgomp threads. A requester remembers an
+unreachable socket or permanent preload hazard and uses `spawn` for subsequent
+launches at that address. Ray actors and WSL retain their `spawn` requirement.
+
+Set `LD_LIBRARY_PATH` before launching vLLM to configure the zygote's dynamic
+loader. A later change in the requester is forwarded in the child's environment
+for programs it executes.
+
+EngineCore and workers use the same resolved NUMA options as with `spawn`.
+Each zygote child sets its CPU affinity and memory policy before running its
+bootstrap. If the host rejects the memory policy, the child keeps its CPU
+binding. Bound workers continue to launch serially.
+
 ## Alternatives Considered
 
 ### Detect if a `__main__` guard is present
@@ -183,7 +216,8 @@ that works around these challenges.
 
 1. We could implement something `forkserver`-like, but have the process manager
    be something we initially launch by running our own subprocess and a custom
-   entrypoint for worker management (launch a `vllm-manager` process).
+   entrypoint for worker management (launch a `vllm-manager` process). This is
+   now available as [the `zygote` method](#the-zygote-method).
 
 2. We can explore other libraries that may better suit our needs. Examples to
    consider:

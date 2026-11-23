@@ -8,7 +8,6 @@ import ctypes
 import logging
 import multiprocessing
 import os
-import signal
 import sys
 from collections.abc import Callable, Generator
 from pathlib import Path
@@ -124,7 +123,8 @@ def _maybe_force_spawn():
     """Check if we need to force the use of the `spawn` multiprocessing start
     method.
     """
-    if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn":
+    method = os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
+    if method == "spawn":
         return
 
     reasons = []
@@ -137,18 +137,21 @@ def _maybe_force_spawn():
         os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
         reasons.append("In a Ray actor and can only be spawned")
 
-    # NUMA binding uses executable hijacking, which requires spawn.
-    if any(
+    # A zygote child applies its own NUMA policy.
+    if method != "zygote" and any(
         arg.split("=", 1)[0].replace("_", "-")
         in ("--numa-bind", "--numa-bind-nodes", "--numa-bind-cpus")
         for arg in sys.argv
     ):
         reasons.append("NUMA binding requires spawn method")
 
-    if cuda_is_initialized():
-        reasons.append("CUDA is initialized")
-    elif xpu_is_initialized():
-        reasons.append("XPU is initialized")
+    # The zygote forks its children from its own accelerator state.
+    # CUDA or XPU initialization in this requester does not carry over.
+    if method != "zygote":
+        if cuda_is_initialized():
+            reasons.append("CUDA is initialized")
+        elif xpu_is_initialized():
+            reasons.append("XPU is initialized")
 
     if in_wsl():
         reasons.append("WSL is detected and NVML is not compatible with fork")
@@ -186,7 +189,7 @@ def _release_libgomp_threads() -> None:
 
 
 def get_mp_context():
-    """Get a multiprocessing context with a particular method (spawn or fork).
+    """Get a multiprocessing context with a particular method (spawn, fork or zygote).
     By default we follow the value of the VLLM_WORKER_MULTIPROC_METHOD to
     determine the multiprocessing method (default is fork). However, under
     certain conditions, we may enforce spawn and override the value of
@@ -198,6 +201,10 @@ def get_mp_context():
     # of whether spawn was already set.
     _sync_visible_devices_env_vars()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
+    if mp_method == "zygote":
+        from vllm.utils import zygote
+
+        return zygote.get_context()
     if mp_method == "fork":
         _release_libgomp_threads()
     return multiprocessing.get_context(mp_method)
@@ -237,27 +244,34 @@ def kill_process_tree(pid: int):
         pid (int): Process ID of the parent process
 
     """
-    try:
+    from vllm.utils import zygote
+
+    children: dict[int, psutil.Process] = {}
+    parent = None
+    with contextlib.suppress(psutil.NoSuchProcess):
         parent = psutil.Process(pid)
-    except psutil.NoSuchProcess:
-        return
+        children.update((p.pid, p) for p in parent.children(recursive=True))
 
-    # Get all children recursively
-    children = parent.children(recursive=True)
+    # Even a reaped requester can have live workers parented by the zygote.
+    for forked_pid in zygote.descendants([pid, *children]):
+        with contextlib.suppress(psutil.NoSuchProcess):
+            forked = psutil.Process(forked_pid)
+            children[forked.pid] = forked
+            children.update((p.pid, p) for p in forked.children(recursive=True))
 
-    # Send SIGKILL to all children first
-    for child in children:
+    for child in children.values():
         with contextlib.suppress(ProcessLookupError, psutil.NoSuchProcess):
             logger.warning(
                 "[shutdown] force killing sub process %s pid %d",
                 child.name(),
                 child.pid,
             )
-            os.kill(child.pid, signal.SIGKILL)
+            child.kill()
 
     # Finally kill the parent
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(pid, signal.SIGKILL)
+    if parent is not None:
+        with contextlib.suppress(ProcessLookupError, psutil.NoSuchProcess):
+            parent.kill()
 
 
 # Resource utilities

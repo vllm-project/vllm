@@ -1035,3 +1035,68 @@ def test_auto_numa_checks_cpu_affinity(monkeypatch, affinity):
     assert numa_utils._is_auto_numa_available(
         verbose=False, require_unbound_process=True
     ) is (affinity == [3, 2, 1, 0])
+
+
+@pytest.mark.parametrize(
+    "memory_arg,mode",
+    [("--membind=0,65", 2), ("--preferred=0", 1), ("--preferred-many=0,65", 5)],
+)
+@pytest.mark.parametrize("reject_policy", [False, True])
+def test_zygote_applies_cpu_and_memory_binding(
+    monkeypatch, caplog, memory_arg, mode, reject_policy
+):
+    binding = numa_utils._parse_numa_binding(f"--physcpubind=2-3,7 {memory_arg}")
+    affinity: dict[int, list[int]] = {}
+    monkeypatch.setattr(os, "sched_setaffinity", affinity.__setitem__, raising=False)
+    kernel_calls = []
+
+    class LibNuma:
+        def set_mempolicy(self, policy, mask, maxnode):
+            kernel_calls.append((policy, list(mask), maxnode.value))
+            if reject_policy:
+                import errno
+
+                numa_utils.ctypes.set_errno(errno.EPERM)
+                return -1
+            return 0
+
+    monkeypatch.setattr(numa_utils, "get_libnuma", LibNuma)
+    numa_utils._apply_numa_binding(binding)
+    assert affinity == {0: [2, 3, 7]}
+    assert kernel_calls == [(mode, [1], 65) if mode == 1 else (mode, [1, 2], 129)]
+    assert ("keeping CPU affinity" in caplog.text) == reject_policy
+
+
+def test_zygote_resolves_auto_numa_per_launching_thread(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    nodes = [0, 1]
+    _patch_auto_numa(monkeypatch, "zygote", lambda: nodes, visible_gpus=2)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda tid: {1, 2}, raising=False)
+    monkeypatch.setattr(numa_utils.subprocess, "run", _fake_numactl_run([]))
+    config = _make_config(numa_bind=None, tensor_parallel_size=2)
+    ready = threading.Barrier(2)
+
+    def worker_spec(rank):
+        with numa_utils.configure_subprocess(config, local_rank=rank):
+            ready.wait(timeout=5)
+            return numa_utils.zygote_numa_binding.get()
+
+    with numa_utils.configure_subprocess(
+        config, local_rank=0, process_kind="EngineCore"
+    ):
+        engine_spec = numa_utils.zygote_numa_binding.get()
+        with ThreadPoolExecutor(2) as pool:
+            workers = list(pool.map(worker_spec, range(2)))
+        assert numa_utils.zygote_numa_binding.get() == engine_spec
+    assert numa_utils.zygote_numa_binding.get() is None
+    assert engine_spec == {
+        "cpus": [1, 2],
+        "memory_policy": "preferred-many",
+        "nodes": [0, 1],
+    }
+    assert workers == [
+        {"cpus": [1, 2], "memory_policy": "preferred", "nodes": [node]}
+        for node in nodes
+    ]
