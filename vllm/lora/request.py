@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import Any
+
 import msgspec
 
 
@@ -66,3 +68,30 @@ class LoRARequest(
 
     def __hash__(self) -> int:
         return hash((self.lora_name, self.lora_int_id))
+
+
+class _TensorLoRARequest(LoRARequest):
+    """Worker-local request for internal integrations such as verl.
+
+    Construct this after the framework has received and retained the complete
+    adapter tensors on the worker. Do not pass it through engine requests or
+    the public add_lora RPC. The framework owns update synchronization.
+
+    Warning:
+        Prefix cache keys use the adapter name and path, not tensor contents.
+        Replacing weights under the same name and path can reuse stale KV cache
+        and produce incorrect outputs, even if the adapter ID changes. The
+        framework must invalidate the old KV cache before resuming inference;
+        loading or removing an adapter does not do this automatically.
+
+    """
+
+    _lora_tensors: dict[str, Any] | None = None
+    _peft_config: dict[str, Any] | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self._lora_tensors is None or self._peft_config is None:
+            raise ValueError("_lora_tensors and _peft_config must be provided together")
+        if not self._lora_tensors:
+            raise ValueError("_lora_tensors cannot be empty")
