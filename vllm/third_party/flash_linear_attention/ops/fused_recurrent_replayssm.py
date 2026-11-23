@@ -12,6 +12,8 @@ from vllm.model_executor.layers.mamba.ops.replayssm_config import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
+from .fused_recurrent import validate_packed_decode_inputs
+
 
 @triton.jit
 def fused_recurrent_gated_delta_rule_replayssm_kernel(
@@ -297,41 +299,30 @@ def fused_recurrent_gated_delta_rule_replayssm(
     per-decode-row ``write_pos`` cursor. ``initial_state`` is both the
     checkpoint read (h0) and the (flush-only) checkpoint write (ht), in place.
     """
-    if mixed_qkv.ndim != 2:
+    B, H, HV, K, V = validate_packed_decode_inputs(
+        mixed_qkv, a, b, A_log, dt_bias, initial_state, out, ssm_state_indices
+    )
+    if any(
+        t.device != mixed_qkv.device
+        for t in (d_cache, k_cache, g_cache, write_pos, is_flush)
+    ):
+        raise ValueError("All inputs must be on the same device.")
+    if (
+        write_pos.ndim != 1
+        or write_pos.dtype != torch.int32
+        or not write_pos.is_contiguous()
+    ):
+        raise ValueError("`write_pos` must be a contiguous 1D int32 tensor.")
+    if (
+        is_flush.ndim != 1
+        or is_flush.dtype != torch.int8
+        or not is_flush.is_contiguous()
+    ):
+        raise ValueError("`is_flush` must be a contiguous 1D int8 tensor.")
+    if write_pos.numel() < B or is_flush.numel() < B:
         raise ValueError(
-            f"`mixed_qkv` must be a 2D tensor (got ndim={mixed_qkv.ndim})."
-        )
-    if mixed_qkv.stride(-1) != 1:
-        raise ValueError("`mixed_qkv` must be contiguous in the last dim.")
-    if a.ndim != 2 or b.ndim != 2:
-        raise ValueError(
-            f"`a` and `b` must be 2D tensors (got a.ndim={a.ndim}, b.ndim={b.ndim})."
-        )
-    if A_log.ndim != 1 or dt_bias.ndim != 1:
-        raise ValueError("`A_log`/`dt_bias` must be 1D tensors.")
-    if initial_state.ndim != 4:
-        raise ValueError(
-            f"`initial_state` must be a 4D tensor (got ndim={initial_state.ndim})."
-        )
-    if not out.is_contiguous():
-        raise ValueError("`out` must be contiguous.")
-    if write_pos.ndim != 1 or write_pos.dtype != torch.int32:
-        raise ValueError("`write_pos` must be a 1D int32 tensor.")
-    if is_flush.ndim != 1 or is_flush.dtype != torch.int8:
-        raise ValueError("`is_flush` must be a 1D int8 tensor.")
-
-    B = mixed_qkv.shape[0]
-    num_state_slots, HV, V, K = initial_state.shape
-    qkv_dim = mixed_qkv.shape[1]
-    q_dim = (qkv_dim - HV * V) // 2
-    if q_dim <= 0 or q_dim % K != 0:
-        raise ValueError(
-            f"Invalid packed `mixed_qkv` last dim={qkv_dim} for HV={HV}, V={V}, K={K}."
-        )
-    H = q_dim // K
-    if H <= 0 or HV % H != 0:
-        raise ValueError(
-            f"Invalid head config inferred from mixed_qkv: H={H}, HV={HV}."
+            f"`write_pos` and `is_flush` must cover all {B} decode rows "
+            f"(got {write_pos.numel()} and {is_flush.numel()})."
         )
     max_cache_len = d_cache.shape[2]
 
@@ -362,6 +353,17 @@ def fused_recurrent_gated_delta_rule_replayssm(
             f"`g_cache` per-slot shape must be {(HV, max_cache_len)} "
             f"(got {tuple(g_cache.shape[1:])})."
         )
+    for name, cache in (
+        ("d_cache", d_cache),
+        ("k_cache", k_cache),
+        ("g_cache", g_cache),
+    ):
+        if cache.shape[0] != initial_state.shape[0] or not cache[0].is_contiguous():
+            raise ValueError(
+                f"`{name}` must hold one contiguous ring for each of the "
+                f"{initial_state.shape[0]} state slots (got shape "
+                f"{tuple(cache.shape)}, stride {cache.stride()})."
+            )
     if g_cache.dtype != torch.float32:
         raise ValueError(f"`g_cache` must be float32 (got {g_cache.dtype}).")
 

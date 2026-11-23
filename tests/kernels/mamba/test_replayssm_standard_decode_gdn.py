@@ -62,6 +62,46 @@ def test_replayssm_flush_keeps_beta_in_fp32(act_dtype):
     )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
+@pytest.mark.parametrize(
+    ("defect", "error"),
+    [
+        ("short_state_indices", "ssm_state_indices"),
+        ("short_write_pos", "decode rows"),
+        ("slot_major_ring", "contiguous ring"),
+    ],
+)
+def test_replayssm_rejects_misaddressed_inputs(defect, error):
+    """Inputs the kernel would misaddress must be rejected before it runs."""
+    device = "cuda"
+    batch, num_slots, H, HV, K, V, L = 2, 3, 1, 2, 64, 16, 4
+    inputs = dict(
+        mixed_qkv=torch.zeros(batch, 2 * H * K + HV * V, device=device),
+        a=torch.zeros(batch, HV, device=device),
+        b=torch.zeros(batch, HV, device=device),
+        A_log=torch.zeros(HV, device=device),
+        dt_bias=torch.zeros(HV, device=device),
+        initial_state=torch.zeros(num_slots, HV, V, K, device=device),
+        d_cache=torch.zeros(num_slots, HV, L, V, device=device),
+        k_cache=torch.zeros(num_slots, H, L, K, device=device),
+        g_cache=torch.zeros(num_slots, HV, L, device=device),
+        out=torch.empty(batch, 1, HV, V, device=device),
+        ssm_state_indices=torch.tensor([1, 2], device=device, dtype=torch.int32),
+        write_pos=torch.zeros(batch, device=device, dtype=torch.int32),
+        is_flush=torch.zeros(batch, device=device, dtype=torch.int8),
+    )
+    if defect == "short_state_indices":
+        inputs["ssm_state_indices"] = inputs["ssm_state_indices"][:1]
+    elif defect == "short_write_pos":
+        inputs["write_pos"] = inputs["write_pos"][:1]
+    else:
+        inputs["d_cache"] = torch.zeros(num_slots, L, HV, V, device=device).transpose(
+            1, 2
+        )
+    with pytest.raises(ValueError, match=error):
+        fused_recurrent_gated_delta_rule_replayssm(scale=K**-0.5, **inputs)
+
+
 def _output_tolerances(act_dtype: torch.dtype) -> tuple[float, float]:
     if act_dtype == torch.float32:
         return 1e-5, 1e-5
