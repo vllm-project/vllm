@@ -5,7 +5,7 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Looped multimodal (text and image in, text out) MoE from Thinking Machines Lab with 26B total and 3.5B active parameters and up to 1M context: its 12 middle layers run three passes per token, each with its own KV cache and gated messages from the previous pass. Bundles a DSpark speculator."
   date_added: 2026-11-20
-  date_updated: 2026-11-23
+  date_updated: 2026-11-22
   difficulty: intermediate
   tasks:
     - multimodal
