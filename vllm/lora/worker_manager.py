@@ -166,6 +166,7 @@ class WorkerLoRAManager:
                     expected_lora_modules=expected_lora_modules,
                     moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
                     unsupported_lora_modules=self._adapter_manager.unsupported_lora_modules,
+                    copy_lora_b=True,
                 )
             else:
                 lora = self._lora_model_cls.from_local_checkpoint(

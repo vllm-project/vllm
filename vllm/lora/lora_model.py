@@ -177,12 +177,16 @@ class LoRAModel:
         expected_lora_modules: set[str] | None = None,
         unsupported_lora_modules: set[str] | None = None,
         moe_ep_spec: MoEEPLoadSpec | None = None,
+        copy_lora_b: bool = False,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors.
 
         The tensors are not pinned here. LoRAModelManager pins them once, in
         `_create_merged_loras_inplace`, after weight packing and expert-parallel
         slicing, so that a rank only pins the weights it keeps.
+
+        Set `copy_lora_b` for caller-owned tensors to keep the manager's
+        in-place scaling from modifying them.
         """
         if expected_lora_modules is not None:
             cls._validate_lora_modules(
@@ -234,7 +238,11 @@ class LoRAModel:
                     )
                 loras[module_name].lora_a = tensor.to(device=device, dtype=dtype)
             else:
-                loras[module_name].lora_b = tensor.to(device=device, dtype=dtype)
+                loras[module_name].lora_b = tensor.to(
+                    device=device,
+                    dtype=dtype,
+                    copy=copy_lora_b and loras[module_name].scaling != 1,
+                )
 
         modules_to_save = {}
         for module_name, parameters in full_parameters.items():
