@@ -2154,52 +2154,6 @@ def _flat_sigmoid_bias_topk_is_profitable(
     )
 
 
-def get_rdna_mla_decode() -> Callable | None:
-    """Resolve the opt-in RDNA Triton MLA kernel."""
-    if not rocm_aiter_ops.is_rdna_mla_enabled():
-        logger.debug_once("RDNA AITER MLA decode disabled; using native Triton MLA.")
-        return None
-
-    from vllm.platforms.rocm import on_gfx1100
-
-    if not on_gfx1100():
-        logger.debug_once("No RDNA AITER MLA decode route for this architecture.")
-        return None
-
-    return _get_rdna_mla_decode()
-
-
-@functools.cache
-def _get_rdna_mla_decode() -> Callable | None:
-    """Probe the AITER kernel's availability and gfx1100 tuning once."""
-    try:
-        from aiter.ops.triton.attention.mla import mla_decode_fwd
-    except (ImportError, AttributeError):
-        logger.info_once("RDNA AITER MLA decode unavailable; using native Triton MLA.")
-        return None
-
-    try:
-        from aiter.ops.triton.utils.config_utils import (
-            load_config_json,
-            resolve_config_dir,
-        )
-
-        config_dir = resolve_config_dir("attention", "MLA_DECODE")
-        config = load_config_json(f"{config_dir}/DEFAULT.json", required=False)
-    except (ImportError, AttributeError):
-        config = None
-
-    # Untuned gfx1100 launches can exceed GPU resources during graph capture.
-    if not config or not config.get("bfloat16"):
-        logger.info_once(
-            "AITER Triton MLA decode requires gfx1100 BF16 tuning; "
-            "using native Triton MLA."
-        )
-        return None
-    logger.info_once("Using tuned RDNA AITER Triton MLA decode.")
-    return mla_decode_fwd
-
-
 class rocm_aiter_ops:
     """ROCm AITER operations wrapper for AMD GPU acceleration in vLLM.
 
@@ -2400,6 +2354,23 @@ class rocm_aiter_ops:
     def is_rdna_mla_enabled(cls) -> bool:
         """RDNA analog of is_mla_enabled() (aiter Triton MLA)."""
         return cls.is_rdna_aiter_enabled() and cls._MLA_ENABLED
+
+    @staticmethod
+    @functools.cache
+    def is_triton_mla_decode_tuned() -> bool:
+        """Whether AITER ships a BF16 Triton MLA decode tuning for this GPU."""
+        try:
+            import aiter.ops.triton.attention.mla  # noqa: F401
+            from aiter.ops.triton.utils.config_utils import (
+                load_config_json,
+                resolve_config_dir,
+            )
+
+            config_dir = resolve_config_dir("attention", "MLA_DECODE")
+            config = load_config_json(f"{config_dir}/DEFAULT.json", required=False)
+        except (AssertionError, AttributeError, ImportError, OSError):
+            return False
+        return bool(config and config.get("bfloat16"))
 
     @classmethod
     @if_aiter_supported
