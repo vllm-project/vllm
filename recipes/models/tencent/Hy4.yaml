@@ -108,6 +108,7 @@ notes:
     body: |
       The BF16 checkpoint is 1,549 GB across 245 shards. Provision host RAM and
       page cache for loading it; the evaluation host had 2 TiB.
+
 guide: |
   ## Overview
 
