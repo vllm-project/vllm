@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Requests dropped before dispatch must release their SHM cache references."""
 
+import copy
 import multiprocessing
 import uuid
 from types import SimpleNamespace
@@ -112,21 +113,16 @@ ITEM_BYTES = 700 * 1024
 N_FILLERS = 12
 
 
-def _payload_item() -> MultiModalKwargsItem:
+def _payload_item(fill: int = 0) -> MultiModalKwargsItem:
     elem = MultiModalFieldElem(
-        data=torch.zeros(ITEM_BYTES, dtype=torch.int8),
+        data=torch.full((ITEM_BYTES,), fill, dtype=torch.int8),
         field=MultiModalSharedField(batch_size=1),
     )
     return MultiModalKwargsItem({"pixel_values": elem})
 
 
-def _run_abort_scenario(*, release: bool) -> list[bool]:
-    """Real sender cache + scheduler + worker-side cache code, no model.
-
-    A queued image request is aborted before it is scheduled, then more
-    images than the ring can hold are sent, each read by every worker.
-    Returns, per later image, whether it was stored in the ring.
-    """
+def _make_caches():
+    """A real SHM sender cache and `N_WORKERS` receiver caches (one per worker)."""
     mm_config = SimpleNamespace(
         mm_processor_cache_gb=4 / 1024,  # ~5 payloads fit in the ring
         mm_shm_cache_max_object_size_mb=1,
@@ -142,6 +138,23 @@ def _run_abort_scenario(*, release: bool) -> list[bool]:
         ShmObjectStoreReceiverCache(vllm_config, lock)  # type: ignore[arg-type]
         for _ in range(N_WORKERS)
     ]
+    return sender, receivers
+
+
+def _close_caches(sender, receivers) -> None:
+    for receiver in receivers:
+        receiver._shm_cache.close()
+    sender.close()
+
+
+def _run_abort_scenario(*, release: bool) -> list[bool]:
+    """Real sender cache + scheduler + worker-side cache code, no model.
+
+    A queued image request is aborted before it is scheduled, then more
+    images than the ring can hold are sent, each read by every worker.
+    Returns, per later image, whether it was stored in the ring.
+    """
+    sender, receivers = _make_caches()
     try:
         scheduler = create_scheduler(model=_MM_MODEL, max_num_seqs=1)
         blocker = create_requests(1, req_ids=["blocker"])[0]
@@ -177,9 +190,7 @@ def _run_abort_scenario(*, release: bool) -> list[bool]:
                     receiver.get_and_update_item(item, key)
         return stored
     finally:
-        for receiver in receivers:
-            receiver._shm_cache.close()
-        sender.close()
+        _close_caches(sender, receivers)
 
 
 def test_aborted_request_without_release_stalls_the_ring():
@@ -191,3 +202,54 @@ def test_aborted_request_without_release_stalls_the_ring():
 
 def test_aborted_request_release_keeps_the_ring_usable():
     assert all(_run_abort_scenario(release=True))
+
+
+def test_request_aborted_after_dispatch_is_still_read_under_ring_pressure():
+    """The window an abort-time release cannot see: the request was already
+    dispatched to the workers, which have not read it yet, when it is aborted.
+
+    Its item must stay readable however much traffic cycles through the ring
+    in between, and it must be reclaimable once the workers have read it.
+    """
+    sender, receivers = _make_caches()
+    try:
+        scheduler = create_scheduler(model=_MM_MODEL, max_num_seqs=1)
+        (request,) = create_requests(
+            1,
+            mm_hashes_list=[["victim_hash"]],
+            mm_positions=[[PlaceholderRange(offset=0, length=4)]],
+            req_ids=["victim"],
+        )
+        handle, _ = sender.get_and_update_item((_payload_item(7), []), "victim_hash")
+        assert "address" in handle
+        request.mm_features[0].data = handle
+
+        scheduler.add_request(request)
+        dispatched = scheduler.schedule()  # sent to the workers, not read yet
+        assert [r.req_id for r in dispatched.scheduled_new_reqs] == ["victim"]
+
+        # The client disconnects before any worker runs the step.
+        scheduler.finish_requests("victim", RequestStatus.FINISHED_ABORTED)
+        assert not scheduler.schedule().unread_mm_features
+
+        # Other traffic cycles through the ring while the step is in flight.
+        for i in range(N_FILLERS):
+            key = f"filler_{i}"
+            item, _ = sender.get_and_update_item((_payload_item(10 + i), []), key)
+            if "address" in item:
+                for receiver in receivers:
+                    receiver.get_and_update_item(item, key)
+
+        # The workers now run the step: each reads the item that was handed out.
+        for receiver in receivers:
+            worker = SimpleNamespace(mm_receiver_cache=receiver)
+            step = copy.deepcopy(dispatched)  # each worker gets its own copy
+            WorkerWrapperBase._apply_mm_cache(worker, step)  # type: ignore
+            loaded = step.scheduled_new_reqs[0].mm_features[0].data
+            assert loaded is not None
+            assert bool((loaded["pixel_values"].data == 7).all())
+
+        sender._shm_cache.free_unused()
+        assert not sender.is_cached_item("victim_hash")  # reclaimable once read
+    finally:
+        _close_caches(sender, receivers)
