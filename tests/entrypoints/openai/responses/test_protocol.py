@@ -122,12 +122,31 @@ def test_input_list_validation_stops_at_first_invalid_item() -> None:
     assert multiple.value.error_count() == first.value.error_count()
 
 
-def test_custom_tool_grammar_format_rejected() -> None:
+def test_custom_tool_grammar_format_accepted() -> None:
     grammar = {"type": "grammar", "syntax": "lark", "definition": 'start: "pwd"'}
+
+    request = ResponsesRequest(
+        input="hi", tools=[{"type": "custom", "name": "emit", "format": grammar}]
+    )
+
+    assert request.tools is not None
+    assert request.tools[0].type == "custom"
+    assert request.tools[0].format is not None
+    assert request.tools[0].format.type == "grammar"
+    assert request.tools[0].format.syntax == "lark"
+
+
+@pytest.mark.parametrize(
+    ("syntax", "definition"), [("lark", "start: <"), ("regex", "(")]
+)
+def test_custom_tool_grammar_definition_is_validated(syntax, definition) -> None:
+    grammar = {"type": "grammar", "syntax": syntax, "definition": definition}
+
     with pytest.raises(VLLMValidationError) as exc_info:
         ResponsesRequest(
             input="hi", tools=[{"type": "custom", "name": "emit", "format": grammar}]
         )
+
     assert exc_info.value.parameter == "tools"
 
     request = ResponsesRequest(

@@ -41,8 +41,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 from vllm.tool_parsers.utils import (
     custom_tool_parameters,
+    custom_tools_with_grammar,
     get_function_tools,
     require_function_tools,
+    warn_custom_tool_grammar_fallback,
 )
 
 ToolChoice: TypeAlias = (
@@ -208,6 +210,9 @@ def get_model_structural_tag(
     """Build a structural tag with xgrammar's builtin model templates."""
     if not tools or tool_choice == "none":
         return None
+
+    if custom_tools_with_grammar(tools):
+        warn_custom_tool_grammar_fallback(tools)
 
     tools = get_structural_tag_tools(model, tools, tool_choice)
     if not tools:
