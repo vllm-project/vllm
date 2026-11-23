@@ -20,7 +20,9 @@ from vllm.models.hy_v4.nvidia.model import (
     HYV4DecoderLayer,
     HYV4ForCausalLM,
     HYV4Model,
+    IHCCarry,
 )
+from vllm.models.hy_v4.nvidia.mrope import set_token_rope
 from vllm.models.hy_v4.weight_utils import HYV4_MLP_MAPPER, HYV4_WEIGHTS_MAPPER
 from vllm.models.hy_v4_flash.configs import HYV4FlashConfig
 from vllm.platforms import current_platform
@@ -77,6 +79,7 @@ class HYV4FlashDecoderLayer(HYV4DecoderLayer):
         self.hc_mlp_layer = HYV4HCLayer(
             config, self.layer_idx, prefix=f"{prefix}.hc_mlp_layer"
         )
+        self.init_ihc_boundaries()
 
 
 class HYV4FlashModel(HYV4Model):
@@ -103,6 +106,14 @@ class HYV4FlashModel(HYV4Model):
         self.token_lookback_depth = (
             self.config.engram_max_ngram_size - 1 if self.engram_hash is not None else 0
         )
+        # SWA and sparse layers rotate with different thetas, and each rotary
+        # module holds its own per-forward rows for the fused RoPE kernels.
+        self.rotary_embs = list(
+            {
+                id(layer.self_attn.rotary_emb): layer.self_attn.rotary_emb
+                for layer in self.layers
+            }.values()
+        )
 
     def forward(
         self,
@@ -112,17 +123,18 @@ class HYV4FlashModel(HYV4Model):
         inputs_embeds: torch.Tensor | None = None,
         lookback_token_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.engram_hash is None:
-            return super().forward(
-                input_ids, positions, intermediate_tensors, inputs_embeds
-            )
-        if input_ids is None:
-            raise ValueError("Flash Engram requires original input token IDs")
         hidden = (
             inputs_embeds
             if inputs_embeds is not None
             else self.embed_input_ids(input_ids)
         )
+        for rotary_emb in self.rotary_embs[1:]:
+            set_token_rope(rotary_emb, positions, hidden)
+        if self.engram_hash is None:
+            return super().forward(input_ids, positions, intermediate_tensors, hidden)
+        if input_ids is None:
+            raise ValueError("Flash Engram requires original input token IDs")
+        set_token_rope(self.rotary_embs[0], positions, hidden)
         hashes = input_ids.new_empty(
             (
                 len(self.config.engram_layer_ids),
@@ -141,11 +153,21 @@ class HYV4FlashModel(HYV4Model):
             layer_id - 1: index
             for index, layer_id in enumerate(self.config.engram_layer_ids)
         }
+        fused = self.uses_fused_ihc(use_ihc_sequence_parallel=False)
+        carry: IHCCarry | None = None
         for index, layer in enumerate(self.layers):
             if index in hash_indices:
+                if carry is not None:
+                    hidden = self.layers[index - 1].hc_mlp_layer.post(*carry)
+                    carry = None
                 hidden = layer.hc_attn_layer.prepare_input(hidden)
                 hidden = layer.engram_layer(hidden, hashes[hash_indices[index]])
-            hidden, _ = layer(positions, hidden, None)
+            if fused:
+                carry = layer.forward_ihc_fused(positions, hidden, carry)
+            else:
+                hidden, _ = layer(positions, hidden, None)
+        if carry is not None:
+            hidden = layer.hc_mlp_layer.post(*carry)
         return self.norm(self.hc_head(hidden))
 
     def _record_part(self, name: str, part: Any) -> None:
@@ -172,10 +194,11 @@ class HYV4FlashModel(HYV4Model):
                     self._record_part(name, None)
                     self.engram_hash.load_lookup(value)
                     continue
-                module = self.layers[int(layer)].engram_layer
-                for local_name in module.load_weights([(leaf, value)]):
+                filled = self.layers[int(layer)].engram_layer.load_weight(leaf, value)
+                if filled is not None:
+                    local_name, part = filled
                     target = f"layers.{layer}.engram_layer.{local_name}"
-                    self._record_part(target, None)
+                    self._record_part(target, part)
                     loaded.add(target)
                 continue
             expert = _EXPERT_WEIGHT.fullmatch(name)
@@ -263,8 +286,11 @@ class HYV4FlashModel(HYV4Model):
                 )
                 shards = ("w1", "w3") if leaf.startswith("w13_") else ("w2",)
                 expected = {(i, s) for i in local_ids for s in shards}
-            else:
+            elif hasattr(module, "output_sizes"):
                 expected = set(range(len(module.output_sizes)))
+            else:
+                # Engram stacks one checkpoint tensor per parameter row.
+                expected = set(range(getattr(module, leaf).shape[0]))
             if parts != expected:
                 raise ValueError(f"Incomplete Flash checkpoint shards: {name}")
 
@@ -277,6 +303,10 @@ class HYV4FlashForCausalLM(HYV4ForCausalLM):
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     hf_to_vllm_mapper = HYV4_MLP_MAPPER | WeightsMapper(
         orig_to_new_substr={".compressed_indexer.": ".indexer."},
+        orig_to_new_stacked={
+            ".indexer.key_value_projection.": (".indexer.key_projection.", 0),
+            ".indexer.key_gate_projection.": (".indexer.key_projection.", 1),
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
