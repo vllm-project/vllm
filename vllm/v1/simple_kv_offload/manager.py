@@ -3,6 +3,7 @@
 """Scheduler-side manager for SimpleCPUOffloadConnector."""
 
 import contextlib
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field, fields, replace
 from enum import Enum, auto
@@ -246,6 +247,9 @@ class SimpleCPUOffloadScheduler:
 
         # Store metadata
         self._lazy_mode = lazy_offload
+        self._lazy_walks = 0
+        self._lazy_store_walk: dict[int, int] = {}
+        self._lazy_store_lags: deque[int] = deque(maxlen=32)
         if self._lazy_mode:
             self._target_free = self._estimate_lazy_target_blocks(
                 kv_cache_config,
@@ -570,6 +574,8 @@ class SimpleCPUOffloadScheduler:
         if store_gpu:
             store_event = self._store_event_counter
             self._store_event_counter += 1
+            if self._lazy_mode:
+                self._lazy_store_walk[store_event] = self._lazy_walks
             self._store_event_to_blocks[store_event] = TransferMeta(
                 store_gpu, store_cpu, store_meta
             )
@@ -640,7 +646,8 @@ class SimpleCPUOffloadScheduler:
 
         Walks the GPU free queue from its head, counting blocks that are
         free-or-offloaded (safe for the allocator to evict). Stops when
-        target_free blocks are covered or CPU capacity is reached.
+        target_free blocks, widened by the allocations made while recent
+        stores were in flight, are covered or CPU capacity is reached.
         """
         gpu_pool = self._gpu_block_pool
         if gpu_pool is None or self._target_free <= 0:
@@ -649,11 +656,14 @@ class SimpleCPUOffloadScheduler:
         free_queue = gpu_pool.free_block_queue
         cpu_pool = self.cpu_block_pool
         num_cpu_free = cpu_pool.get_num_free_blocks()
+        self._lazy_walks += 1
+        lag = max(self._lazy_store_lags, default=1)
+        window = max(self._target_free, (lag + 1) * (self._target_free // 2))
 
         gpu_ids: list[int] = []
 
         for covered, node in enumerate(free_queue.iter_blocks_after(None)):
-            if covered >= self._target_free or len(gpu_ids) >= num_cpu_free:
+            if covered >= window or len(gpu_ids) >= num_cpu_free:
                 break
 
             bhash = node.block_hash
@@ -1097,6 +1107,8 @@ class SimpleCPUOffloadScheduler:
 
         if not self._lazy_mode:
             self._in_flight_store_gpu_blocks.difference_update(transfer.gpu_block_ids)
+        elif (walk := self._lazy_store_walk.pop(event_idx, None)) is not None:
+            self._lazy_store_lags.append(self._lazy_walks - walk)
 
         self._process_store_completion(
             transfer.gpu_block_ids,
@@ -1475,6 +1487,7 @@ class SimpleCPUOffloadScheduler:
         self._pending_finished_stores.clear()
 
         self._store_event_to_blocks.clear()
+        self._lazy_store_walk.clear()
         self._in_flight_store_gpu_blocks.clear()
 
         # Loads that have not been sent to the worker cannot have running DMA.
