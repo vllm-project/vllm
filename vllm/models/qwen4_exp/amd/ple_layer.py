@@ -325,9 +325,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
     ) -> torch.Tensor:
         """Return full embeddings or a token shard after combining vocabulary owners."""
         if query_start_loc is None or ngram_context is None:
-            raise RuntimeError(
-                "N-gram PLE requires request boundaries and token history"
-            )
+            raise RuntimeError("PLE inputs were not prepared")
         input_ids = input_ids.reshape(-1)
         ngram_ids = input_ids.new_empty(
             (input_ids.shape[0], self.ngram_heads), dtype=torch.int64

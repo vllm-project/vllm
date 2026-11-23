@@ -293,7 +293,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 prev_block_output = prev_injection = None
 
             if input_ids is None:
-                raise RuntimeError("PLE requires input_ids")
+                raise RuntimeError("PLE inputs were not prepared")
             hidden_states = self.ple(
                 hidden_states,
                 input_ids,
