@@ -880,7 +880,20 @@ steps:
   - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/prims_ts_nvfp4_moe.py
+  - vllm/model_executor/layers/fused_moe/flashinfer_moe_ep.py
   - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
+  - vllm/model_executor/warmup/prims_ts_moe_warmup.py
+  - vllm/model_executor/warmup/kernel_warmup.py
+  - vllm/models/mistral/nvidia/indexer.py
+  - vllm/v1/attention/backends/mla/triton_mla.py
+  - vllm/v1/worker/workspace.py
+  - vllm/utils/flashinfer.py
+  - tests/model_executor/test_prims_ts_moe_warmup.py
+  - tests/model_executor/test_mistral_indexer_cache.py
+  - tests/kernels/attention/test_triton_mla_logits_workspace.py
+  - tests/kernels/moe/test_flashinfer_moe_ep.py
+  - tests/kernels/moe/test_trtllm_nvfp4_moe.py
   - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_one_sided.py
   - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_two_sided.py
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
@@ -953,6 +966,14 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
+    - >-
+      pytest -v -s
+      tests/model_executor/test_prims_ts_moe_warmup.py
+      tests/model_executor/test_mistral_indexer_cache.py
+      tests/kernels/attention/test_triton_mla_logits_workspace.py
+    # Config construction exercises the SM107 NVFP4/MXFP4 policy on B200;
+    # the SM107-only distributed kernels still require external Rubin validation.
+    - pytest -v -s tests/kernels/moe/test_flashinfer_moe_ep.py -k test_adapter_kwargs_match_installed_flashinfer
     - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   mirror:
     amd:

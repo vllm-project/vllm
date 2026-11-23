@@ -138,6 +138,9 @@ EPv2 limitations:
 
 ### FlashInfer MegaMoE on SM107
 
+For the separate modular `flashinfer_prims_ts` NVFP4 expert backend, see
+[NVFP4 MoE with FlashInfer Prims-TS](../features/quantization/nvfp4_moe.md).
+
 The Rubin Docker build installs `flashinfer-python[sm107]==0.7.4` through
 `requirements/rubin-prerelease.txt` when `INSTALL_RUBIN_PRERELEASE=true`.
 The shared CUDA requirements retain the plain FlashInfer pin so CUDA 12
