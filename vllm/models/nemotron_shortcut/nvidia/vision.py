@@ -31,6 +31,7 @@ from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
     SupportsPP,
+    SupportsReplaySSM,
 )
 from vllm.model_executor.models.mistral3 import (
     Mistral3DummyInputsBuilder,
@@ -1001,7 +1002,12 @@ class NemotronShortcutMultiModalProjector(Mistral3MultiModalProjector):
     dummy_inputs=NemotronShortcutDummyInputsBuilder,
 )
 class NemotronShortcutForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, IsHybrid, SdsaKVCacheGrouping
+    nn.Module,
+    SupportsMultiModal,
+    SupportsPP,
+    IsHybrid,
+    SdsaKVCacheGrouping,
+    SupportsReplaySSM,
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

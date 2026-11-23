@@ -1,0 +1,367 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""GDP replay (`--use-replayssm` on GDP layers) wiring, on CPU with the
+FlashInfer op faked: the tracker commit rule, tracker binding and the per-step
+commit claim, the gate parameters the op reads,
+and what `NemotronShortcutGDPMixer` hands the op for spec, decode and prefill rows.
+The op's arithmetic is FlashInfer's and is covered by its own tests."""
+
+import sys
+import types
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.forward_context import set_forward_context
+from vllm.models.nemotron_shortcut.nvidia import gdp as gdp_module
+from vllm.models.nemotron_shortcut.nvidia.gdp import (
+    NemotronShortcutGDPMixer,
+    gdp_replay_state_dtype,
+    gdp_replay_state_shape,
+)
+from vllm.models.nemotron_shortcut.nvidia.gdp_replay import (
+    FLUSH_MIN,
+    GdpReplayTrackers,
+)
+
+from .utils import make_config
+
+HEADS, NUM_BLOCKS = 2, 12
+
+
+def _bound_trackers(num_blocks: int, conv_rows: int) -> GdpReplayTrackers:
+    trackers = GdpReplayTrackers()
+    trackers.bind(torch.zeros(num_blocks, conv_rows, 4))
+    return trackers
+
+
+def _reference_commit(base, hist_len, bank, prev_query_len, accepted, modulus):
+    """COMMON.md §4.3 of FlashInfer's gdp_conv_replay, plus the deferral:
+    nothing is committed for a block whose last step was not a replay step."""
+    if prev_query_len == 0:
+        return base, hist_len, bank
+    flush = hist_len >= FLUSH_MIN
+    if flush:
+        base = (base + hist_len) % modulus
+        bank ^= 1
+        hist_len = 0
+    return base, hist_len + accepted, bank
+
+
+def test_commit_follows_the_op_contract_over_many_steps():
+    generator = torch.Generator().manual_seed(0)
+    modulus, tokens = 12, 8
+    trackers = _bound_trackers(NUM_BLOCKS, modulus)
+    slots = torch.tensor([3, 5, 9], dtype=torch.int32)
+    expected = {int(s): (0, 0, 0) for s in slots}
+    prev_query_len = {int(s): 0 for s in slots}
+    for _ in range(200):
+        query_lens = torch.randint(1, tokens + 1, (3,), generator=generator)
+        accepted = torch.minimum(
+            torch.randint(1, tokens + 1, (3,), generator=generator),
+            torch.tensor([max(prev_query_len[int(s)], 1) for s in slots]),
+        )
+        base, hist_len, bank = trackers.commit(slots, accepted, query_lens)
+        for row, slot in enumerate(slots.tolist()):
+            expected[slot] = _reference_commit(
+                *expected[slot], prev_query_len[slot], int(accepted[row]), modulus
+            )
+            prev_query_len[slot] = int(query_lens[row])
+            assert (int(base[row]), int(hist_len[row]), int(bank[row])) == (
+                expected[slot]
+            )
+            # The op's bounds: banked history fits one bank of 8 + T slots.
+            assert int(hist_len[row]) <= 8 + tokens
+            assert 0 <= int(base[row]) < modulus
+
+
+def test_commit_skips_reset_blocks_and_records_query_lengths():
+    trackers = _bound_trackers(NUM_BLOCKS, 4)
+    trackers.hist_len[2], trackers.prev_query_len[2] = 5, 4
+    trackers.hist_len[3], trackers.prev_query_len[3] = 5, 4
+    trackers.reset(torch.tensor([3], dtype=torch.int32))
+
+    slots = torch.tensor([2, 3], dtype=torch.int32)
+    _, hist_len, _ = trackers.commit(
+        slots, torch.tensor([2, 2]), torch.tensor([4, 1], dtype=torch.int32)
+    )
+
+    assert hist_len.tolist() == [7, 0]
+    assert trackers.prev_query_len[slots.long()].tolist() == [4, 1]
+
+
+def test_padding_rows_touch_only_the_null_block():
+    trackers = _bound_trackers(NUM_BLOCKS, 4)
+    trackers.hist_len[1:] = 3
+    trackers.prev_query_len[1:] = 2
+    before = trackers.hist_len[1:].clone()
+
+    trackers.commit(torch.zeros(4, dtype=torch.int32), torch.ones(4), torch.ones(4))
+    trackers.reset(torch.zeros(4, dtype=torch.int32))
+
+    assert torch.equal(trackers.hist_len[1:], before)
+
+
+def test_binding_sizes_the_trackers_and_keeps_captured_addresses():
+    trackers = GdpReplayTrackers()
+    trackers.bind(torch.zeros(NUM_BLOCKS, 8, 4))
+    base = trackers.base
+    assert base.numel() == NUM_BLOCKS and trackers.base_modulus == 8
+
+    # Every layer binds, and an extensible cache rebinds after capture.
+    trackers.bind(torch.zeros(NUM_BLOCKS, 8, 4))
+    trackers.bind(torch.zeros(NUM_BLOCKS - 2, 8, 4))
+    assert trackers.base is base
+
+    # Growing would drop the cursors live requests and captured graphs hold.
+    with pytest.raises(RuntimeError, match="would drop them"):
+        trackers.bind(torch.zeros(NUM_BLOCKS + 4, 8, 4))
+
+
+def test_the_first_layer_to_see_a_steps_metadata_commits():
+    step, other_group, next_step = (
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+    )
+    assert GdpReplayTrackers.claim(step)
+    assert not GdpReplayTrackers.claim(step)
+    assert GdpReplayTrackers.claim(other_group)
+    assert GdpReplayTrackers.claim(next_step)
+
+
+# --- The mixer -----------------------------------------------------------
+
+
+@pytest.fixture
+def forward_context(dist_init, monkeypatch):
+    monkeypatch.setattr(gdp_module, "missing_gdp_kernels", lambda: ())
+    monkeypatch.setattr(gdp_module, "gdp_replay_kernel_missing", lambda: False)
+    with torch.inference_mode(), set_forward_context(None, get_current_vllm_config()):
+        yield
+
+
+class _FakeOp:
+    """Records each call and returns a recognizable output."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        x, out_rows = args[0], args[10]
+        batch = out_rows.size(0)
+        tokens = x.size(0) // batch
+        out = torch.arange(batch * tokens * HEADS * 64, dtype=x.dtype)
+        return out.view(batch, tokens, HEADS, 64)
+
+
+@pytest.fixture
+def fake_op(monkeypatch):
+    op = _FakeOp()
+    module = types.ModuleType("flashinfer.gdp_conv_replay_decode")
+    module.gdp_conv_replay = op
+    if "flashinfer" not in sys.modules:
+        monkeypatch.setitem(sys.modules, "flashinfer", types.ModuleType("flashinfer"))
+    monkeypatch.setitem(sys.modules, "flashinfer.gdp_conv_replay_decode", module)
+    return op
+
+
+def _mixer(
+    num_spec: int, prefix: str, trackers: GdpReplayTrackers | None = None
+) -> NemotronShortcutGDPMixer:
+    config = make_config(
+        hidden_size=32,
+        layer_types=["linear_attention"],
+        gdp_num_heads=HEADS,
+        gdp_num_groups=HEADS,
+        gdp_head_dim=64,
+        gdp_key_head_dim=128,
+        gdp_num_householder=3,
+        gdp_conv_kernel=4,
+        gdp_norm_eps=1e-5,
+    )
+    mixer = NemotronShortcutGDPMixer(
+        config,
+        cache_config=CacheConfig(use_replayssm=True),
+        prefix=prefix,
+        gdp_replay_trackers=trackers,
+    )
+    mixer.num_spec = num_spec
+    mixer.replay_capture_sizes = []
+    shapes = gdp_replay_state_shape(1, HEADS, HEADS, 128, 64, 4, 3, num_spec)
+    dtypes = gdp_replay_state_dtype(torch.bfloat16, "auto")
+    mixer.kv_cache = tuple(
+        torch.zeros(NUM_BLOCKS, *shape, dtype=dtype)
+        for shape, dtype in zip(shapes, dtypes)
+    )
+    assert mixer.gdp_replay_trackers is not None
+    mixer.gdp_replay_trackers.bind(mixer.kv_cache[0])
+    return mixer
+
+
+def _replay_group(num_spec: int):
+    """Two GDP layers sharing the model's trackers."""
+    trackers = GdpReplayTrackers()
+    first, second = (
+        _mixer(num_spec, f"model.layers.{i}.gdp_replay_{num_spec}", trackers)
+        for i in (0, 1)
+    )
+    return first, second
+
+
+def test_a_standalone_layer_keeps_its_own_trackers(forward_context):
+    first, second = _replay_group(num_spec=3)
+    alone = _mixer(3, "model.layers.5.gdp_replay_alone")
+    assert first.gdp_replay_trackers is second.gdp_replay_trackers
+    assert alone.gdp_replay_trackers is not first.gdp_replay_trackers
+
+
+def _run(mixer, metadata, projected):
+    mixer._gdn_metadata = lambda: metadata
+    core_out = torch.zeros(projected.size(0), HEADS, 64, dtype=projected.dtype)
+    mixer._forward_replay(projected, core_out)
+    return core_out
+
+
+def _projected(rows: int) -> torch.Tensor:
+    width = HEADS * (64 + 704 + 4)
+    return torch.randn(rows, width).to(torch.bfloat16)
+
+
+def _spec_metadata(slots, query_lens, num_accepted, num_spec):
+    loc = torch.zeros(len(query_lens) + 1, dtype=torch.int32)
+    loc[1:] = torch.tensor(query_lens).cumsum(0)
+    tokens = int(loc[-1])
+    return SimpleNamespace(
+        num_actual_tokens=tokens,
+        spec_sequence_masks=torch.ones(len(slots), dtype=torch.bool),
+        num_prefills=0,
+        num_decodes=0,
+        num_spec_decodes=len(slots),
+        spec_token_indx=torch.arange(tokens),
+        non_spec_token_indx=torch.empty(0, dtype=torch.long),
+        spec_state_indices_tensor=torch.tensor(slots, dtype=torch.int32)
+        .unsqueeze(1)
+        .repeat(1, num_spec + 1),
+        spec_query_start_loc=loc,
+        num_accepted_tokens=torch.tensor(num_accepted, dtype=torch.int32),
+    )
+
+
+def test_gate_params_are_the_loaded_parameters(forward_context):
+    mixer = _mixer(3, "gate_params")
+    mixer.A_log.weight_loader(mixer.A_log, torch.tensor([0.5, 1.5]))
+    mixer.dt_bias.weight_loader(mixer.dt_bias, torch.tensor([-1.0, 2.0]))
+    assert mixer.gate_params.tolist() == [[0.5, 1.5], [-1.0, 2.0]]
+
+
+def test_spec_rows_take_whole_in_proj_rows(forward_context, fake_op):
+    first, second = _replay_group(num_spec=3)
+    trackers = first.gdp_replay_trackers
+    # Block 5 committed 3 tokens last step; block 7 is due to flush.
+    trackers.base[5], trackers.hist_len[5], trackers.prev_query_len[5] = 1, 3, 4
+    trackers.base[7], trackers.hist_len[7], trackers.prev_query_len[7] = 2, 9, 4
+    metadata = _spec_metadata([5, 7], [4, 4], [2, 3], num_spec=3)
+    projected = _projected(8)
+
+    core_out = _run(first, metadata, projected)
+    _run(second, metadata, projected)
+
+    assert len(fake_op.calls) == 2
+    for args, kwargs in fake_op.calls:
+        x, ab, slots, base, hist_len, valid_len = (
+            args[0],
+            args[1],
+            args[4],
+            args[11],
+            args[12],
+            args[13],
+        )
+        # x and ab are the conv and gate columns of the same in_proj rows.
+        assert x.data_ptr() == projected.data_ptr() + HEADS * 64 * 2
+        assert ab.data_ptr() == projected.data_ptr() + HEADS * 768 * 2
+        assert x.shape == (8, 704 * HEADS) and ab.shape == (8, 4 * HEADS)
+        assert x.stride() == ab.stride() == projected.stride()
+        assert slots.tolist() == [5, 7] and args[10] is slots
+        # Block 5: 3 + 2 accepted; block 7 flushed: base 2 + 9 mod 8 rows, bank 1.
+        assert base.tolist() == [1, 3]
+        assert hist_len.tolist() == [5, 3]
+        assert kwargs["ring_bank"].tolist() == [0, 1]
+        assert valid_len.tolist() == [4, 4]
+        assert kwargs["null_block_id"] == 0 and kwargs["zero_inactive_out"]
+        assert args[5] is first.gate_params or args[5] is second.gate_params
+    # The second layer read the committed trackers without committing again.
+    assert trackers.hist_len[[5, 7]].tolist() == [5, 3]
+    assert torch.equal(core_out.flatten(), torch.arange(8 * HEADS * 64).to(core_out))
+
+
+def test_ragged_windows_are_padded_for_the_op(forward_context, fake_op):
+    first, _ = _replay_group(num_spec=3)
+    metadata = _spec_metadata([5, 7], [4, 1], [1, 1], num_spec=3)
+    projected = _projected(5)
+
+    core_out = _run(first, metadata, projected)
+
+    x, valid_len = fake_op.calls[0][0][0], fake_op.calls[0][0][13]
+    assert x.size(0) == 8 and valid_len.tolist() == [4, 1]
+    rows = HEADS * 64
+    full = torch.arange(8 * rows).view(8, HEADS, 64).to(core_out)
+    # Request 1's single token sits at padded row 4.
+    assert torch.equal(core_out, full[[0, 1, 2, 3, 4]])
+
+
+def test_decode_and_prefill_rows_without_spec(forward_context, fake_op, monkeypatch):
+    first, _ = _replay_group(num_spec=0)
+    trackers = first.gdp_replay_trackers
+    trackers.hist_len[7], trackers.prev_query_len[7] = 4, 1
+    prefill_calls = []
+
+    def fake_prefill(*args):
+        prefill_calls.append(args)
+        return torch.full((3, HEADS, 64), 7.0, dtype=torch.bfloat16)
+
+    monkeypatch.setattr(first, "_prefill", fake_prefill)
+    metadata = SimpleNamespace(
+        num_actual_tokens=4,
+        spec_sequence_masks=None,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_prefills=1,
+        non_spec_state_indices_tensor=torch.tensor([5, 7], dtype=torch.int32),
+        prefill_query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+        prefill_state_indices=torch.tensor([7], dtype=torch.int32),
+        prefill_has_initial_state=torch.tensor([False]),
+    )
+    trackers.hist_len[5], trackers.prev_query_len[5] = 2, 1
+
+    core_out = _run(first, metadata, _projected(4))
+
+    (args, kwargs) = fake_op.calls[0]
+    assert args[0].size(0) == 1 and args[4].tolist() == [5]
+    assert args[12].tolist() == [3] and args[13].tolist() == [1]
+    (prefill_args,) = prefill_calls
+    assert prefill_args[7].tolist() == [7] and prefill_args[9] is None
+    # Prefilled block 7 starts over; decoded block 5 kept its history.
+    assert trackers.hist_len[[5, 7]].tolist() == [3, 0]
+    assert trackers.prev_query_len[7] == 0
+    assert torch.all(core_out[1:] == 7.0)
+
+
+def test_eager_batches_pad_to_a_captured_size(forward_context, fake_op):
+    first, _ = _replay_group(num_spec=3)
+    # Captured sizes are token counts: 16 tokens hold 4 requests of 4 tokens.
+    first.replay_capture_sizes = [4, 16, 32]
+    metadata = _spec_metadata([5, 7], [4, 4], [1, 1], num_spec=3)
+    projected = _projected(8)
+
+    core_out = _run(first, metadata, projected)
+
+    args, _ = fake_op.calls[0]
+    assert args[0].size(0) == 16
+    assert torch.equal(args[0][:8], projected[:, HEADS * 64 : HEADS * 768])
+    assert not args[0][8:].any()
+    assert args[4].tolist() == [5, 7, 0, 0] and args[13].tolist() == [4, 4, 0, 0]
+    assert torch.equal(core_out.flatten(), torch.arange(8 * HEADS * 64).to(core_out))
