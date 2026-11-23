@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""/v1/systemone and /v1/decisions on Qwen3_5ForSlotDecision, served from the
-random four-layer checkpoint that test_block_bidirectional.py builds."""
+"""/v1/systemone and /v1/decisions on the slot decision models, served from the
+random four-layer checkpoints that test_block_bidirectional.py builds."""
 
 import json
+from functools import partial
 
 import pytest
 import requests
 
 from tests.models.language.generation.test_block_bidirectional import (
     build_tiny_checkpoint,
+    build_tiny_gemma4_checkpoint,
 )
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
@@ -39,10 +41,16 @@ QUESTIONS = {
 }
 
 
-@pytest.fixture(scope="module")
-def server(tmp_path_factory):
-    checkpoint = str(tmp_path_factory.mktemp("slot-decision"))
-    build_tiny_checkpoint(checkpoint)
+CHECKPOINTS = {
+    "qwen3_5": build_tiny_checkpoint,
+    "gemma4-moe": partial(build_tiny_gemma4_checkpoint, moe=True),
+}
+
+
+@pytest.fixture(scope="module", params=list(CHECKPOINTS))
+def server(request, tmp_path_factory):
+    checkpoint = str(tmp_path_factory.mktemp(f"slot-decision-{request.param}"))
+    CHECKPOINTS[request.param](checkpoint)
     args = [
         "--dtype",
         "bfloat16",

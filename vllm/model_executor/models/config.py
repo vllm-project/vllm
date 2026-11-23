@@ -1886,6 +1886,48 @@ class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
         _verify_prefix_lm_serving(vllm_config)
 
 
+class Gemma4ForSlotDecisionConfig(Gemma4Config):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        served = {
+            "attention": {
+                "full_attention": "block_bidirectional",
+                "sliding_attention": "causal",
+            },
+            "readout": "slot_lm",
+        }
+        _verify_slot_overrides(
+            model_config, "baseten_modeling_overrides", served, 131072
+        )
+        # The inner language model is built from the text config.
+        hf_config = model_config.hf_config
+        text_config = hf_config.get_text_config()
+        if getattr(text_config, "head_dtype", None) is None:
+            text_config.head_dtype = hf_config.head_dtype
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        # Triton applies the PrefixLM ranges. Set it before the Gemma 4 hook.
+        attention_config = vllm_config.attention_config
+        if attention_config.backend is None:
+            attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+        Gemma4Config.verify_and_update_config(vllm_config)
+        scheduler_config = vllm_config.scheduler_config
+        _verify_prefix_lm_serving(
+            vllm_config,
+            {
+                # The sliding layers would join the full-attention group.
+                "--disable-hybrid-kv-cache-manager": (
+                    scheduler_config.disable_hybrid_kv_cache_manager
+                ),
+            },
+        )
+        # vLLM then raises instead of turning the hybrid KV cache manager off.
+        scheduler_config.disable_hybrid_kv_cache_manager = False
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1946,6 +1988,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma3TextModel": Gemma3TextModelConfig,
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,
+    "Gemma4ForSlotDecision": Gemma4ForSlotDecisionConfig,
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
     "Glm5NextForCausalLM": Glm5NextModelConfig,
     "Glm5NextForConditionalGeneration": Glm5NextModelConfig,

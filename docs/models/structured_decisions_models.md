@@ -8,12 +8,13 @@ used for classification and routing.
 
 ### Text-only Models
 
-| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models       |
-|---------------------------|---------------------|------------------|-------------------|-------------------------|
-| `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
-| `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it` |
-| `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
-| `Qwen3_5ForSlotDecision`  | `SlotLMStrategy`    | `generate`       | LM head (fp32)    | `baselabs/mammoth-1`    |
+| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models                            |
+|---------------------------|---------------------|------------------|-------------------|----------------------------------------------|
+| `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash`                      |
+| `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it`                      |
+| `Gemma4ForSlotDecision`   | `SlotLMStrategy`    | `generate`       | LM head (fp32)    | `baselabs/bison-1`, `baselabs/groundhog-1`   |
+| `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc.                      |
+| `Qwen3_5ForSlotDecision`  | `SlotLMStrategy`    | `generate`       | LM head (fp32)    | `baselabs/mammoth-1`                         |
 
 ### Multimodal Models
 
@@ -424,6 +425,68 @@ vllm serve baselabs/mammoth-1
   automatically. KV transfer connectors, `--kv-offloading-size`, speculative
   decoding, context parallelism, micro-batching, `--prefix-match-unit` and
   `--scheduler-cls` are refused.
+- `instructions` returns 400, as does any `chat_template_kwargs` other than
+  `{"enable_thinking": false}`. `/v1/decisions` reads every question as a
+  choice and returns 400 for score levels with the same label.
+
+### Bison-1 and Groundhog-1
+
+Base Labs [`baselabs/bison-1`](https://huggingface.co/baselabs/bison-1) and
+[`baselabs/groundhog-1`](https://huggingface.co/baselabs/groundhog-1) are
+Gemma 4 checkpoints, bison-1 dense (31B) and groundhog-1 a mixture of experts
+(26B, about 4B active). Their `baseten_modeling_overrides` select
+`Gemma4ForSlotDecision`. They read the same slot prompt as Mammoth-1, in the
+Gemma 4 chat format.
+
+```bash
+vllm serve baselabs/bison-1
+```
+
+On one H200, bison-1's KV cache holds about 66,000 tokens, less than the
+default `--max-model-len` of 131,072, so the server does not start. Serve it on
+two GPUs with `--tensor-parallel-size 2`, where the KV cache holds about
+180,000 tokens, or set a lower `--max-model-len`. groundhog-1 serves at the
+default length on one H200.
+
+```bash
+vllm serve baselabs/bison-1 --tensor-parallel-size 2
+```
+
+- The full attention layers read the shared prefix and the question as two
+  bidirectional blocks. The sliding window layers stay causal. Each prompt is
+  prefilled in one step. Chunked prefill is therefore off for every request on
+  the server, a `--max-num-batched-tokens` below `--max-model-len` is raised to
+  it, and a smaller `--max-num-scheduled-tokens` is refused. `--max-model-len`
+  defaults to the trained 131,072 tokens.
+- Prefix caching (on by default) prefills the shared prefix once per decision
+  request instead of once per question. Unlike Mammoth-1, it does not depend on
+  the GatedDeltaNet prefill backend: these models have no GatedDeltaNet layers.
+  A cache hit never extends past the shared prefix, and
+  the cache is salted with the whole prefix, so a question never reuses KV
+  computed with another block layout.
+- The LM head runs in fp32, in the inner Gemma 4 language model as well: the
+  `head_dtype` of the checkpoint config is copied to its `text_config`. A
+  `head_dtype` set on the text config itself wins, for example
+  `--hf-overrides '{"text_config": {"head_dtype": "model"}}'`.
+- A `choice` can have up to 255 options, labeled `A` to `Z` and then with
+  two-letter labels in the prompt.
+- On `/v1/systemone` and `/v1/decisions`, media inputs return 400, although the
+  checkpoints take images.
+  `/v1/chat/completions` still takes images, with stock Gemma 4 attention: the
+  full attention layers are causal and the sliding window layers are
+  bidirectional over each image.
+- Only the `TRITON_ATTN` attention backend is supported for full attention,
+  and it is selected automatically. KV transfer connectors,
+  `--kv-offloading-size`, speculative decoding, context parallelism,
+  micro-batching, `--prefix-match-unit`, `--scheduler-cls` and
+  `--disable-hybrid-kv-cache-manager` are refused. Without the hybrid KV cache
+  manager, the sliding window layers would share the full attention layers'
+  KV cache group and get their bidirectional blocks.
+- Full CUDA graphs apply no block ranges, so only one-token steps run in one,
+  where the mask is causal anyway: a `cudagraph_mode` such as `FULL`, or the
+  default with an empty `-cc.splitting_ops`, falls back to
+  `FULL_AND_PIECEWISE`, or to `FULL_DECODE_ONLY` when attention is not among
+  the splitting ops.
 - `instructions` returns 400, as does any `chat_template_kwargs` other than
   `{"enable_thinking": false}`. `/v1/decisions` reads every question as a
   choice and returns 400 for score levels with the same label.
