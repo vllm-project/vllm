@@ -1284,7 +1284,7 @@ async fn generative_scoring_rejects_invalid_requests_before_submission() {
     }
     expect_test::expect![[r#"
         [
-            "{\"model\":\"missing\"} -> 404 Not Found: \"The model `missing` does not exist.\"",
+            "{\"model\":\"missing\"} -> 404 Not Found: \"The model `missing` does not exist. Valid aliases: Qwen/Qwen1.5-0.5B-Chat.\"",
             "{\"label_token_ids\":[]} -> 400 Bad Request: \"label_token_ids must contain at least one token ID.\"",
             "{\"items\":[]} -> 400 Bad Request: \"items must contain at least one item.\"",
             "{\"label_token_ids\":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]} -> 400 Bad Request: \"requested logprobs of 21, which is greater than max allowed: 20\"",
@@ -2750,6 +2750,63 @@ async fn render_accepts_lora_adapter_model() {
     assert_eq!(lora_card["parent"], "render-model");
 }
 
+/// Like Python's `CompletionRequest` validator, a missing or null prompt
+/// without prompt embeddings is a 400 naming `prompt`, and an empty
+/// `prompt_embeds` list counts as absent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_reject_missing_prompt() {
+    let (mut app, engine_task) = test_app().await;
+
+    let mut results = Vec::new();
+    for body in [
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat"}),
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": null}),
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": null, "prompt_embeds": []}),
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt_embeds": ["AAAA"]}),
+    ] {
+        let (status, json) = post_json(&mut app, "/v1/completions", body.clone()).await;
+        results.push(format!("{body} -> {status} {json}"));
+    }
+    expect_test::expect![[r#"
+        {"model":"Qwen/Qwen1.5-0.5B-Chat"} -> 400 Bad Request {"error":{"message":"Either prompt or prompt_embeds must be provided and non-empty.","type":"BadRequestError","param":"prompt","code":400}}
+        {"model":"Qwen/Qwen1.5-0.5B-Chat","prompt":null} -> 400 Bad Request {"error":{"message":"Either prompt or prompt_embeds must be provided and non-empty.","type":"BadRequestError","param":"prompt","code":400}}
+        {"model":"Qwen/Qwen1.5-0.5B-Chat","prompt":null,"prompt_embeds":[]} -> 400 Bad Request {"error":{"message":"Either prompt or prompt_embeds must be provided and non-empty.","type":"BadRequestError","param":"prompt","code":400}}
+        {"model":"Qwen/Qwen1.5-0.5B-Chat","prompt_embeds":["AAAA"]} -> 400 Bad Request {"error":{"message":"prompt_embeds is not supported.","type":"BadRequestError","param":"prompt_embeds","code":400}}"#]].assert_eq(&results.join("\n"));
+    engine_task.abort_and_join().await;
+}
+
+/// The render route lowers the same request, so it rejects a missing prompt
+/// too and shows the tokens of the accepted ones. Unlike Python, which rejects
+/// `prompt: ""` before tokenizing, an empty text prompt is left to
+/// tokenization: it is accepted when the tokenizer adds a BOS token, and
+/// otherwise fails as an empty token prompt.
+#[tokio::test]
+async fn completions_render_checks_prompt_presence() {
+    let mut app = test_render_app();
+
+    let mut results = Vec::new();
+    for body in [
+        json!({"model": "render-model"}),
+        json!({"model": "render-model", "prompt": ""}),
+        json!({"model": "render-model", "prompt": "", "add_special_tokens": false}),
+        json!({"model": "render-model", "prompt": "hello", "prompt_embeds": []}),
+    ] {
+        let (status, json) = post_json(&mut app, "/v1/completions/render", body.clone()).await;
+        let summary = if status == StatusCode::OK {
+            json[0]["token_ids"].to_string()
+        } else {
+            json.to_string()
+        };
+        results.push(format!("{body} -> {status} {summary}"));
+    }
+    expect_test::expect![[r#"
+        {"model":"render-model"} -> 400 Bad Request {"error":{"message":"Either prompt or prompt_embeds must be provided and non-empty.","type":"BadRequestError","param":"prompt","code":400}}
+        {"model":"render-model","prompt":""} -> 200 OK [256]
+        {"model":"render-model","prompt":"","add_special_tokens":false} -> 400 Bad Request {"error":{"message":"token_ids must contain at least one token ID.","type":"BadRequestError","param":"token_ids","code":400}}
+        {"model":"render-model","prompt":"hello","prompt_embeds":[]} -> 200 OK [256,104,101,108,108,111]"#]].assert_eq(&results.join("\n"));
+}
+
 /// Like Python's `TokenizeParams` check, a requested output budget above the
 /// context window is a 400, while one that fits the window is accepted.
 #[tokio::test]
@@ -3820,6 +3877,29 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["data"][1]["id"], "adapter-a");
 
+    // A loaded adapter is selectable but not listed among the valid aliases.
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "missing",
+                        "prompt": "hello",
+                        "max_tokens": 2
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    expect_test::expect![[r#"{"error":{"message":"The model `missing` does not exist. Valid aliases: Qwen/Qwen1.5-0.5B-Chat.","type":"NotFoundError","param":"model","code":404}}"#]].assert_eq(std::str::from_utf8(&body).expect("utf-8 body"));
+
     let response = app
         .call(
             Request::builder()
@@ -3930,6 +4010,22 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
         .expect("call app");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
+    // Unloading an adapter that is not loaded reports the adapter, not a model.
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/unload_lora_adapter")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"lora_name": "adapter-a"}).to_string()))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    expect_test::expect![[r#"{"error":{"message":"LoRA adapter `adapter-a` is not loaded","type":"NotFoundError","param":null,"code":404}}"#]].assert_eq(std::str::from_utf8(&body).expect("utf-8 body"));
+
     drop(app);
     engine_task.finish().await;
 }
@@ -3949,6 +4045,71 @@ async fn server_info_endpoint_returns_not_found_without_snapshot() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unload_lora_adapter_succeeds_when_engine_already_evicted_it() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            for (method, result) in [("add_lora", true), ("remove_lora", false)] {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
+
+                let payload = decode_value(&utility[1]).expect("decode utility payload");
+                let array = payload.as_array().expect("utility payload array");
+                let call_id = array[1].as_u64().expect("call id");
+                assert_eq!(array[2], Value::from(method));
+
+                // The engine answers `false` for an adapter its LRU cache already evicted.
+                send_outputs(push, utility_outputs(call_id, utility_result_value(result))).await;
+            }
+        })
+    })
+    .await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/load_lora_adapter")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "lora_name": "adapter-a",
+                        "lora_path": "org/adapter-a"
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/unload_lora_adapter")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "lora_name": "adapter-a" }).to_string()))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let models = app
+        .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    let body = to_bytes(models.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["data"].as_array().expect("model data").len(), 1);
+
+    drop(app);
+    engine_task.finish().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4457,6 +4618,23 @@ async fn skip_model_name_validation_serves_unknown_model_with_base_model() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn tokenize_rejects_invalid_response_format() {
+    let (mut app, _engine_task) = test_app().await;
+    let (status, body) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "response_format": {"type": "not-a-format"},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], 400);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn invalid_request_returns_openai_error() {
     let (mut app, _engine_task) = test_app().await;
     let response = app
@@ -4944,6 +5122,88 @@ async fn chat_structured_outputs_use_configured_backend() {
             .await
             .expect("call app");
         assert_eq!(response.status(), StatusCode::OK, "{backend:?}");
+        to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+        engine_task.await.expect("mock engine task");
+    }
+}
+
+/// `allowed_tools` restricts the calls the grammar admits to the allowed
+/// subset, in both modes, while plain `required` admits every tool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_allowed_tools_restrict_the_call_grammar() {
+    let allowed = |mode| {
+        json!({
+            "type": "allowed_tools",
+            "allowed_tools": {
+                "mode": mode,
+                "tools": [{"type": "function", "function": {"name": "get_time"}}],
+            },
+        })
+    };
+    for (tool_choice, callable) in [
+        (json!("required"), ["get_weather", "get_time"].as_slice()),
+        (allowed("required"), ["get_time"].as_slice()),
+        (allowed("auto"), ["get_time"].as_slice()),
+    ] {
+        let case = tool_choice.to_string();
+        let chat_backend = Arc::new(FakeChatBackend::new());
+        let (app, engine_task) = test_app_with_chat_and_engine_request_check(
+            |llm| {
+                ChatLlm::new(TextLlm::new(llm, chat_backend.clone()), chat_backend)
+                    .with_tool_call_parser(ParserSelection::Explicit("qwen3_coder".to_string()))
+            },
+            {
+                let case = case.clone();
+                move |request| {
+                    let params = request.sampling_params.as_ref().expect("sampling params");
+                    let structured_outputs =
+                        params.structured_outputs.as_ref().expect("structured outputs");
+                    let tag = structured_outputs
+                        .params
+                        .constraint
+                        .as_structural_tag()
+                        .expect("structural tag");
+                    for name in ["get_weather", "get_time"] {
+                        let grammar_name = format!("<function={name}>");
+                        assert_eq!(
+                            tag.contains(&grammar_name),
+                            callable.contains(&name),
+                            "{case}: {name} in {tag}"
+                        );
+                    }
+                }
+            },
+        )
+        .await;
+
+        let tool = |name: &str| {
+            json!({
+                "type": "function",
+                "function": {"name": name, "parameters": {"type": "object"}},
+            })
+        };
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "max_tokens": 2,
+                            "tools": [tool("get_weather"), tool("get_time")],
+                            "tool_choice": tool_choice,
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{case}");
         to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
         engine_task.await.expect("mock engine task");
     }
@@ -5488,6 +5748,44 @@ async fn generate_text_output_mode_rejects_missing_tokenizer_and_detokenize_fals
             "400 Bad Request: \"output_mode='text' requires sampling_params.detokenize to be true\"",
         ]
     "#]].assert_debug_eq(&errors);
+}
+
+/// Stop strings are matched on decoded text, so a server without a tokenizer
+/// must reject them rather than silently never apply them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_rejects_stop_strings_without_tokenizer() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-generate-rejects-stop-without-tokenizer",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::without_tokenizer()),
+    )
+    .await;
+    let mut app = build_router_with_gates(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
+
+    let (status, json) = post_json(
+        &mut app,
+        "/inference/v1/generate",
+        json!({
+            "token_ids": [11, 22],
+            "sampling_params": {"stop": ["never"]},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        json["error"]["message"].as_str().unwrap().contains("stop strings"),
+        "unexpected error: {json}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7297,6 +7595,25 @@ async fn engine_request_errors_map_to_http_status() {
                 status,
             ),
             ("/inference/v1/generate", raw(true), StatusCode::OK),
+            // Plain, echoed and prompt only completion streams that request
+            // logprobs report the engine's error.
+            (
+                "/v1/completions",
+                json!({"model": model, "prompt": "hello", "logprobs": 1, "stream": true}),
+                StatusCode::OK,
+            ),
+            (
+                "/v1/completions",
+                json!({"model": model, "prompt": "hello", "echo": true, "logprobs": 1,
+                       "stream": true}),
+                StatusCode::OK,
+            ),
+            (
+                "/v1/completions",
+                json!({"model": model, "prompt": "hello", "echo": true, "max_tokens": 0,
+                       "logprobs": 1, "stream": true}),
+                StatusCode::OK,
+            ),
         ];
         for (uri, request, expected_status) in cases {
             let engine_error = error.clone();
@@ -13588,7 +13905,7 @@ async fn error_log_lines(log_error_stack: bool) -> Vec<String> {
 async fn log_error_stack_logs_error_responses() {
     expect_test::expect![[r#"
         [
-            "ERROR message=Error response method=POST path=\"/v1/chat/completions\" status=404 error_type=\"NotFoundError\" error=\"The model `missing` does not exist.\"",
+            "ERROR message=Error response method=POST path=\"/v1/chat/completions\" status=404 error_type=\"NotFoundError\" error=\"The model `missing` does not exist. Valid aliases: test-model.\"",
             "ERROR message=Error response method=POST path=\"/v1/chat/completions\" status=400 error_type=\"Bad Request\" error=\"Failed to parse the request body as JSON: key must be a string at line 1 column 2\"",
         ]
     "#]].assert_debug_eq(&error_log_lines(true).await);
