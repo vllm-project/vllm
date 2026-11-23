@@ -18,7 +18,6 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
-    cdiv_fn,
     compute_kv_seq_mask,
     compute_tile_loop_bounds,
     find_seq_idx,
@@ -26,6 +25,7 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
     load_qq_bias_tile,
     resolve_seq_and_query_len,
     softmax_step,
+    split_k_segment_layout,
     store_segm_reduce_scalars,
 )
 from vllm.v1.kv_cache_interface import KVQuantMode
@@ -405,6 +405,11 @@ def kernel_unified_attention(
     # instead of letting them override it. Default False preserves the
     # original (causal AND SW) OR mm_prefix behavior for all other models.
     MM_PREFIX_CLAMP_SW: tl.constexpr = False,
+    # 3D only: split the sliding window's tiles, not the whole sequence, into
+    # segments so every segment does useful work once seq_len exceeds the
+    # window. Enabled by the launcher for plain causal sliding windows only;
+    # ``reduce_segments`` must be launched with the same value.
+    WINDOW_SEGMENTS: tl.constexpr = False,
 ):
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
@@ -436,11 +441,14 @@ def kernel_unified_attention(
         return
 
     if IS_3D:
-        tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
-        if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
+        segm_base_tile, tiles_per_segment, num_active_segments = split_k_segment_layout(
+            seq_len, NUM_SEGMENTS_PER_SEQ, SLIDING_WINDOW, TILE_SIZE, WINDOW_SEGMENTS
+        )
+        if segm_idx >= num_active_segments:
             return
     else:
         tiles_per_segment = 0
+        segm_base_tile = 0
 
     # Number of valid query rows in this block (used by TD descriptor
     # shapes, but always computed so the variable stays in scope).
@@ -535,6 +543,7 @@ def kernel_unified_attention(
         MAX_MM_RANGES,
         mm_prefix_range_ptr,
         seq_idx,
+        segm_base_tile_or_0=segm_base_tile,
     )
 
     # iterate through tiles (now limited to the sliding window range)
@@ -833,6 +842,10 @@ def reduce_segments(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    # Must match the WINDOW_SEGMENTS / SLIDING_WINDOW the segments were
+    # produced with (see kernel_unified_attention).
+    WINDOW_SEGMENTS: tl.constexpr = False,
+    SLIDING_WINDOW: tl.constexpr = 0,
 ):
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
@@ -851,11 +864,11 @@ def reduce_segments(
         return
 
     # number of segments for this particular sequence
-    num_segments = NUM_SEGMENTS_PER_SEQ
-    tiles_per_segment = cdiv_fn(seq_len, num_segments * TILE_SIZE)
+    _, _, act_num_segments = split_k_segment_layout(
+        seq_len, NUM_SEGMENTS_PER_SEQ, SLIDING_WINDOW, TILE_SIZE, WINDOW_SEGMENTS
+    )
 
     # create masks for subsequent loads
-    act_num_segments = cdiv_fn(seq_len, tiles_per_segment * TILE_SIZE)
     segm_mask = tl.arange(0, NUM_SEGMENTS_PER_SEQ) < tl.full(
         [NUM_SEGMENTS_PER_SEQ], act_num_segments, dtype=tl.int32
     )
@@ -987,6 +1000,10 @@ def unified_attention(
     # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window.
     # Default False keeps the original behavior for every other model.
     mm_prefix_clamp_sliding_window: bool = False,
+    # Split only the sliding window's tiles into the 3D segments (see
+    # WINDOW_SEGMENTS). Takes effect only for plain causal sliding windows;
+    # False forces the whole-sequence split (for testing and A/B runs).
+    window_aware_segments: bool = True,
 ):
     # Resolve causal: bool or per-seq tensor.
     use_per_seq_causal = isinstance(causal, torch.Tensor)
@@ -1078,22 +1095,32 @@ def unified_attention(
     # Tuned launch parameters; ``None`` lets Triton pick its defaults.
     launch_num_warps: int | None = None
     launch_num_stages: int | None = None
+    tuned_prefill_tile: int | None = None
 
-    # head_size 256 with many query rows per sequence (e.g. diffusion-gemma
-    # bidirectional canvas passes) is prefill-shaped, but the decode-oriented
-    # defaults (BLOCK_Q=8, TILE=32, 4 warps) under-tile it. A wider KV tile +
-    # more query rows per block + 8 warps is ~2x faster on B200.
+    # Prefill-shaped head_size 256 batches (diffusion-gemma canvas, gemma-4
+    # sliding layers) are under-tiled by the decode defaults. BLOCK_M=32 is
+    # ~2x faster on B200 (128 KV tile, 8 warps) and ~1.6x on B70 (4 warps:
+    # XPU warps are 16 lanes). XPU keeps short spec-decode verify batches on
+    # the 3D split-K path, which is faster for them.
+    is_xpu = current_platform.is_xpu()
     tuned_large_head = (
         head_size == 256
+        # Preserve batch invariance between single- and multi-query calls.
+        and not is_batch_invariant
         and max_seqlen_q > 1
         and num_queries_per_kv <= 16
-        and current_platform.is_device_capability_family(100)
+        and (
+            (is_xpu and max_seqlen_q > MAX_3D_QUERY_LEN)
+            or current_platform.is_device_capability_family(100)
+        )
     )
     if tuned_large_head:
         BLOCK_M = 32
         BLOCK_Q = BLOCK_M // num_queries_per_kv
-        launch_num_warps = 8
+        launch_num_warps = 4 if is_xpu else 8
         launch_num_stages = 2
+        if not is_xpu:
+            tuned_prefill_tile = 128
 
     # gfx1201: prefill / chunked-prefill / mixed launch. It sets BLOCK_Q, so it comes
     # before the grid size and the 2D/3D choice. The default launch is kept for
@@ -1146,10 +1173,9 @@ def unified_attention(
         head_size, sliding_window_val, q.element_size(), is_prefill=False
     )
 
-    # Wider KV tile for the tuned large-head path (see above). Only the 2D
-    # path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
-    if tuned_large_head:
-        TILE_SIZE_PREFILL = 128
+    # Only the 2D path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
+    if tuned_prefill_tile is not None:
+        TILE_SIZE_PREFILL = tuned_prefill_tile
     elif rdna_prefill_tile is not None:
         TILE_SIZE_PREFILL = rdna_prefill_tile
 
@@ -1354,6 +1380,23 @@ def unified_attention(
                 if config is not None:
                     TILE_SIZE_PREFILL, launch_num_warps, launch_num_stages = config
 
+    # With a sliding window, splitting the whole sequence into segments leaves
+    # most of them outside the window once seq_len exceeds it. For a plain
+    # causal window and one query token per sequence (what
+    # split_k_segment_layout assumes), split only the window's tiles
+    # instead. Every other case keeps the whole-sequence split.
+    window_segments = (
+        use_3d
+        and window_aware_segments
+        and max_seqlen_q == 1
+        and sliding_window_val > 0
+        and chunk_lookback < 0
+        and use_causal
+        and not use_per_seq_causal
+        and not use_mm_prefix
+        and not use_rswa
+    )
+
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
     # caches and their strides are passed as ``None`` when the
@@ -1468,6 +1511,7 @@ def unified_attention(
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
         MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
+        WINDOW_SEGMENTS=window_segments,
         **launch_kwargs,
     )
 
@@ -1490,5 +1534,7 @@ def unified_attention(
             query_start_len_ptr=cu_seqlens_q,
             BLOCK_Q=BLOCK_Q,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
+            WINDOW_SEGMENTS=window_segments,
+            SLIDING_WINDOW=sliding_window_val if window_segments else 0,
             USE_FP8=output_scale is not None,
         )

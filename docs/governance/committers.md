@@ -24,6 +24,7 @@ Sorted alphabetically by GitHub handle:
 - [@esmeetu](https://github.com/esmeetu): developer marketing, community
 - [@gau-nernst](https://github.com/gau-nernst): Kernels and performance
 - [@gshtras](https://github.com/gshtras): ROCm / AMD GPU integration
+- [@gty111](https://github.com/gty111): Multimodal EPD, encoder cache transfer
 - [@Harry-Chen](https://github.com/Harry-Chen): Build, CI, CUDA architecture
 - [@heheda12345](https://github.com/heheda12345): Hybrid memory allocator
 - [@hmellor](https://github.com/hmellor): Hugging Face integration, documentation
@@ -55,6 +56,7 @@ Sorted alphabetically by GitHub handle:
 - [@tomeras91](https://github.com/tomeras91): MoE, Mamba, Ray
 - [@vadiklyutiy](https://github.com/vadiklyutiy): CI, performance, kernels
 - [@WoosukKwon](https://github.com/WoosukKwon): Project lead, engine core
+- [@wangxiyuan](https://github.com/wangxiyuan): Platform, KV cache, Mooncake
 - [@wzhao18](https://github.com/wzhao18): Kernels and performance, KV offloading
 - [@xinli-sw](https://github.com/xinli-sw): Quantization and model support
 - [@xuechendi](https://github.com/xuechendi): Intel CPU/XPU integration, KV connector
@@ -114,6 +116,8 @@ If you have PRs touching the area, please feel free to ping the area owner for r
     - @tlrmchlsmth, @youkaichao
 - Multimodality engine and memory management: core scheduling and memory management concerning vision, audio, and video inputs.
     - @ywang96, @DarkLight1337
+- EC Connector: Transfers multimodal encoder outputs between encoder and prefill workers.
+    - @gty111
 
 ### Model Implementations
 
@@ -188,7 +192,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 
 ### Hardware
 
-- Plugin Interface: @youkaichao, @Yikun
+- Plugin Interface: @youkaichao, @Yikun, @wangxiyuan
 - NVIDIA GPU: @pavanimajety, @wzhao18
 - AMD GPU: @gshtras, @tjtanaa, @hongxiayang, @shen-shanshan, @AndreasKaratzas
 - Intel CPU/GPU: @jikunshang, @bigPYJ1151, @xuechendi

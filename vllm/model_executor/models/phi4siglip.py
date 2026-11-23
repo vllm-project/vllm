@@ -11,7 +11,12 @@ from typing import Annotated, Any, Literal
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, PreTrainedConfig, Siglip2VisionConfig
+from transformers import (
+    BatchFeature,
+    Phi3Config,
+    PreTrainedConfig,
+    Siglip2VisionConfig,
+)
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
@@ -270,10 +275,15 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
                 prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
 
+        # The Transformers modeling backend builds the text model from its config
+        text_kwargs = config.to_dict()
+        for key in ("model_type", "architectures", "auto_map", "vision_config"):
+            text_kwargs.pop(key, None)
+
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
-                hf_config=config,
+                hf_config=Phi3Config(**text_kwargs),
                 prefix=maybe_prefix(prefix, "language_model"),
                 architectures=["Phi3ForCausalLM"],
             )
@@ -374,7 +384,7 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        hidden_states = self.language_model.model(
+        hidden_states = self.language_model(
             input_ids,
             positions,
             intermediate_tensors,
