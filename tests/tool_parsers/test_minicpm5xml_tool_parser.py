@@ -119,7 +119,10 @@ def test_registered_in_tool_parser_manager() -> None:
 
 def test_adjust_request_skip_special_tokens(parser: ToolParser) -> None:
     request = make_request(make_tools_weather())
-    assert request.skip_special_tokens is True
+    assert (
+        request.to_sampling_params(1, default_sampling_params={}).skip_special_tokens
+        is True
+    )
     adjusted = parser.adjust_request(request)
     assert adjusted.skip_special_tokens is False
 
@@ -127,7 +130,10 @@ def test_adjust_request_skip_special_tokens(parser: ToolParser) -> None:
 def test_adjust_request_tool_choice_none(parser: ToolParser) -> None:
     request = make_request(make_tools_weather(), tool_choice="none")
     adjusted = parser.adjust_request(request)
-    assert adjusted.skip_special_tokens is True
+    assert (
+        adjusted.to_sampling_params(1, default_sampling_params={}).skip_special_tokens
+        is True
+    )
 
 
 def test_no_tool_call(parser: ToolParser) -> None:
@@ -786,3 +792,27 @@ class TestParameterWhitespace:
         assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
             "content": "    def foo():\n        pass\n"
         }
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("param", "expected"),
+    [
+        ('<param name="v">1.10</param>', "1.10"),
+        ('<param name="v">null</param>', None),
+        ('<param name="arguments">{"v": 1984}</param>', "1984"),
+    ],
+)
+def test_nullable_string_keeps_raw_text(
+    parser: ToolParser, param: str, expected, stream: bool
+) -> None:
+    schema = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    request = make_request([_tool("f", {"properties": {"v": schema}})])
+    text = f'<function name="f">{param}</function>'
+    if stream:
+        calls = run_tool_extraction_streaming(
+            parser, list(text), request, assert_one_tool_per_delta=False
+        ).tool_calls
+    else:
+        calls = parser.extract_tool_calls(text, request).tool_calls
+    assert [json.loads(call.function.arguments) for call in calls] == [{"v": expected}]

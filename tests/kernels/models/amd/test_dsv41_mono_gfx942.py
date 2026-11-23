@@ -478,11 +478,18 @@ def test_moe_up_gate_matches_float64():
     assert _rel_err(got, ref) < 1e-5
 
 
-def _build_down(s, experts):
-    d = SimpleNamespace(inter_real=576, inter=640, mid_words=160)
+def _build_down(s, experts, inter_real):
+    inter = -(-inter_real // 128) * 128
+    d = SimpleNamespace(inter_real=inter_real, inter=inter, mid_words=inter // 4)
 
-    @flyc.kernel(name=f"test_down942_{s}", known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(
+        name=f"test_down942_{s}_{inter_real}", known_block_size=[THREADS, 1, 1]
+    )
     def kern(w2: Int64, w2s: Int64, mid: Int64, mids: Int64, out: Int64):
+        # FlyDSL keys its compile cache on the source and the scalar closure
+        # values. `d` is not a scalar, so `inter_real` is read here as one:
+        # otherwise the TP8 build would reuse the TP4 kernel.
+        assert d.inter_real == inter_real
         tid = fx.thread_idx.x
         bid = fx.block_idx.x
         lane, wave = tid % 64, tid // 64
@@ -522,26 +529,32 @@ def _build_down(s, experts):
     return launch
 
 
-def test_moe_down_matches_float64():
+@pytest.mark.parametrize("tp", [4, 8])
+def test_moe_down_matches_float64(tp):
     """down_weights_942, mid_operands_942 and fp4_mfma_942 with w2 in the
     copy's fp4_tile_major byte order, against intermediate rows in the layout
-    that ug_mid_store_942 writes."""
+    that ug_mid_store_942 writes. At TP8 a w2 row is 288 wide and ends in one
+    K block, which takes the one-dword tail load. This runs on one GPU, so CI
+    covers the TP8 width without an 8-GPU node."""
     s, experts = 6, 2
+    inter_real = 2304 // tp
+    inter = -(-inter_real // 128) * 128
     g = torch.Generator(device="cuda").manual_seed(3)
-    wq, code, deq = _fp4_weights(experts * HIDDEN, 576, g)
-    y = torch.randn(s, 576, device="cuda", generator=g)
+    wq, code, deq = _fp4_weights(experts * HIDDEN, inter_real, g)
+    y = torch.randn(s, inter_real, device="cuda", generator=g)
     y[:, 7] = -50.0
     y8, ycode, ydeq = _fnuz_rows(y, q_order=False)
-    mid = torch.zeros(s, 640, device="cuda", dtype=torch.uint8)
-    mid[:, :576] = y8
+    mid = torch.zeros(s, inter, device="cuda", dtype=torch.uint8)
+    mid[:, :inter_real] = y8
     # Within each 128-byte step, the four 8-byte chunks of lane group j are
     # together, and each chunk holds the even K first.
-    mid = mid.view(s, 5, 4, 4, 8)[..., EVEN_ODD].permute(0, 1, 3, 2, 4)
-    mid = mid.contiguous().view(s, 640)
-    mids = torch.full((s, 20), 127, device="cuda", dtype=torch.int32)
-    mids[:, :18] = ycode
+    steps = inter // 128
+    mid = mid.view(s, steps, 4, 4, 8)[..., EVEN_ODD].permute(0, 1, 3, 2, 4)
+    mid = mid.contiguous().view(s, inter)
+    mids = torch.full((s, inter // 32), 127, device="cuda", dtype=torch.int32)
+    mids[:, : inter_real // 32] = ycode
     out = torch.zeros(s, experts * HIDDEN, device="cuda", dtype=torch.float32)
-    _build_down(s, experts)(
+    _build_down(s, experts, inter_real)(
         fp4_tile_major(wq).data_ptr(),
         code.data_ptr(),
         mid.data_ptr(),
@@ -624,3 +637,108 @@ def test_contrib_942_is_bf16_of_product(routing):
     torch.accelerator.synchronize()
     ref = (v * w.view(rs.picks, 1)).to(torch.bfloat16).float()
     assert torch.equal(out.view(rs.picks, 16), ref)
+
+
+def _build_nan_route(rs):
+    """stage_route then load_route, then a flat load of each ordered pick.
+
+    The draft's all-NaN scores pick one expert twice. load_route counts picks
+    with a token bitmap, so the order table is short and the unread entries stay
+    at the sentinel. The flat load of that index is the gather that faults."""
+    from vllm.models.deepseek_v41.amd.mono.common.sync import Addr, Mailbox, Space
+
+    words = rs.tab_words
+    tokens, topk = rs.tokens, rs.topk
+    n = tokens * topk
+
+    @fx.struct
+    class Lds:
+        tab: fx.Array[fx.Int32, words, 16]
+        red: fx.Array[fx.Float32, 16, 16]
+
+    @fx.union
+    class U:
+        t: Lds
+
+    @flyc.kernel(
+        name=f"test_nan_route_{tokens}_{topk}", known_block_size=[THREADS, 1, 1]
+    )
+    def kern(logit: Int64, bias: Int64, route: Int64, x: Int64, ids: Int64):
+        tid = fx.thread_idx.x
+        lds = fx.SharedAllocator().allocate(U).t.peek()
+        for i in range_constexpr(-(-words // THREADS)):
+            u = tid + THREADS * i
+            if u < words:
+                fx.ptr_store(fx.Int32(0x7FFFFFFF), lds.tab.ptr + u)
+        gpu.barrier()
+        mb = Mailbox(fx.Int32(1))
+        c = {
+            "S": tokens,
+            "tid": tid,
+            "bid": fx.block_idx.x,
+            "lane": tid % 64,
+            "wave": tid // 64,
+            "rs": rs,
+            "red": lds.red.ptr,
+            "tab": lds.tab.ptr,
+            "args": {"bias": bias},
+            "put": mb.put,
+            "poll": mb.poll,
+            "logit": Addr("logit", Space.SCRATCH, logit),
+            "route": Addr("route", Space.SCRATCH, route),
+        }
+        for t in range_constexpr(tokens):
+            M.stage_route(c, t)
+        gpu.barrier()
+        M.load_route(c, lds.tab.ptr)
+        gpu.barrier()
+        if tid < n:
+            t = tid // topk
+            eid = fx.ptr_load(lds.tab.ptr + (t * 2 * topk + tid % topk))
+            _st(eid, ids, tid)
+            pick = rs.pick_at(lds.tab.ptr, tid)
+            at = x + (fx.Int64(pick) // topk) * 4
+            ptr = fx.inttoptr(fx.PointerType.get(T.f32, fx.AddressSpace.Global, 4), at)
+            # Kept: an unread load is deleted, and so is the fault it raises.
+            _st(fx.ptr_load(ptr).bitcast(fx.Int32), ids, n + tid)
+
+    @flyc.jit
+    def launch(logit: Int64, bias: Int64, route: Int64, x: Int64, ids: Int64):
+        kern(logit, bias, route, x, ids).launch(grid=(1,), block=(THREADS,))
+
+    return launch
+
+
+def test_nan_draft_route_stays_in_range():
+    """10 draft tokens, 128 experts, top-3, every logit NaN.
+
+    This is the gfx942 multi-tile shape from the capture fault. Each token's
+    three ids are unique and in range, and the ordered-pick load finishes."""
+    from vllm.models.deepseek_v41.amd.mono.stages.moe_shape import RouteShape
+
+    tokens, experts, topk = 10, 128, 3
+    rs = RouteShape(experts, topk, tokens, 4)
+    parts = M.ROUTER_PARTS
+    n_pairs = tokens * experts * parts
+    nan_bits = torch.tensor(float("nan")).view(torch.int32)
+    logit = torch.empty(n_pairs * 2, device="cuda", dtype=torch.int32)
+    logit[0::2] = nan_bits
+    logit[1::2] = 1
+    route = torch.zeros(
+        M.ROUTE_COPIES * tokens * 2 * topk * 2, device="cuda", dtype=torch.int32
+    )
+    bias = torch.zeros(experts, device="cuda", dtype=torch.float32)
+    x = torch.zeros(tokens, device="cuda", dtype=torch.float32)
+    ids = torch.full((2 * tokens * topk,), -1, device="cuda", dtype=torch.int32)
+    _build_nan_route(rs)(
+        logit.data_ptr(),
+        bias.data_ptr(),
+        route.data_ptr(),
+        x.data_ptr(),
+        ids.data_ptr(),
+    )
+    torch.accelerator.synchronize()
+    got = ids[: tokens * topk].view(tokens, topk).cpu()
+    for row in got.tolist():
+        assert all(0 <= e < experts for e in row)
+        assert len(set(row)) == topk

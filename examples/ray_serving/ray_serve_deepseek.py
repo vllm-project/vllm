@@ -39,13 +39,11 @@ llm_config = LLMConfig(
     engine_kwargs={
         "tensor_parallel_size": 8,
         "pipeline_parallel_size": 2,
-        "gpu_memory_utilization": 0.92,
         "dtype": "auto",
         "max_num_seqs": 40,
         "max_model_len": 16384,
         "enable_chunked_prefill": True,
         "enable_prefix_caching": True,
-        "trust_remote_code": True,
     },
 )
 
