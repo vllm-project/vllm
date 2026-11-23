@@ -65,6 +65,41 @@ With `--mamba-backend triton` (for example on ROCm), ReplaySSM also supports spe
 
 Prefix reuse still requires a shared prefix with a saved Mamba checkpoint. The matching rules for hybrid Mamba models above also apply.
 
+#### Qwen3.5 and Qwen4Exp Gated DeltaNet
+
+On Qwen3.5 and Qwen4Exp models, `--use-replayssm` applies ReplaySSM to the Gated DeltaNet layers. It requires FlashInfer 0.7.3 or later and FP16 or BF16 recurrent state (`--mamba-ssm-cache-dtype float16` or `bfloat16`). vLLM selects one of two FlashInfer kernels:
+
+- On SM100-class GPUs, FP16 state runs on the UMMA kernel. It supports standard decoding and up to seven MTP draft tokens.
+- BF16 state, and FP16 state on other NVIDIA GPUs from SM90 (Hopper) onward, run on the HMMA kernel. It supports only MTP with three or seven draft tokens.
+
+This example runs the UMMA kernel:
+
+```bash
+vllm serve nvidia/Qwen3.5-122B-A10B-NVFP4 \
+    --dtype bfloat16 \
+    --mamba-ssm-cache-dtype float16 \
+    --use-replayssm \
+    --enable-prefix-caching \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":7}'
+```
+
+Remove `--speculative-config` for standard decoding. For the HMMA kernel, use `--mamba-ssm-cache-dtype bfloat16` or run on Hopper, and keep three or seven draft tokens. The Gated DeltaNet ReplaySSM path has these limits:
+
+- Model activations and the convolution state must be BF16, with 128-element key and value heads and a whole number of value heads per key head. The UMMA kernel allows at most four value heads per key head.
+- Speculative decoding supports up to seven draft tokens on the UMMA kernel, and three or seven on the HMMA kernel. Adaptive verification is not supported; set `enable_adaptive_verification` to `false`.
+- `--replayssm-buffer-len` must be 16, the default.
+- Mamba cache stochastic rounding, pipeline parallelism, microbatching, and KV connectors are not supported.
+
+Qwen3.8-Flash-Next uses the Qwen4Exp architecture. Its PLE convolution cache keeps its canonical state and speculative input window. Only the GDN layers use replay rings. The Qwen4Exp MTP draft uses attention layers and keeps ReplaySSM disabled.
+
+For `Qwen/Qwen3.8-Flash-Next-FP8`, add `--tensor-parallel-size 4 --block-size 192` to the example. With seven MTP drafts, the explicit block size satisfies the QSA raw-key ring alignment.
+
+`--gdn-prefill-backend` selects the prefill kernel independently. Triton prefill can run with FlashInfer ReplaySSM decode.
+
+FlashInfer reads its GDN settings only when it is first imported. vLLM imports FlashInfer while it creates the model config, so it sets them before that step: `GDN_UCACHE_STATE_DTYPE` is `fp16` or `bf16` to match the recurrent state, and with the HMMA kernel `SGLANG_GDN_WY_STRIDED_QKV` is `1`. If your own code imports FlashInfer before it creates the engine, set these variables before that import.
+
+FlashInfer releases without [flashinfer-ai/flashinfer#8975](https://github.com/flashinfer-ai/flashinfer/pull/8975) compile the HMMA kernel for each new batch size. Full CUDA graph decode compiles its sizes at startup, but mixed prefill and decode steps can stall for about a second the first time each size occurs. vLLM logs a warning in this case. With that change, vLLM compiles the HMMA variants for both Q/K/V layouts and all launch tactics at startup.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:

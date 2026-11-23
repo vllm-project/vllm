@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, TypeAlias
@@ -26,6 +27,99 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 ConvStateLayoutType = Literal["SD", "DS"]
+
+
+GDN_REPLAYSSM_LOGICAL_WINDOW = 16
+"""Committed tokens per request kept in the GDN ReplaySSM rings. Older history
+is folded into the checkpoint state."""
+GDN_REPLAYSSM_RING_SLOTS = 32
+"""Physical u/k/G ring slots per request. FlashInfer's UMMA kernel appends up
+to eight tokens after the 16-token window and takes a 32-slot ring."""
+
+
+def gdn_replayssm_executed_width(num_speculative_tokens: int) -> int:
+    """Return the tokens per request that one GDN ReplaySSM launch computes.
+
+    Shorter rows are padded with no-op tokens up to this width.
+    """
+    if not 0 <= num_speculative_tokens <= 7:
+        raise ValueError(
+            "FlashInfer GDN ReplaySSM supports 0 through 7 speculative tokens; got "
+            f"{num_speculative_tokens}"
+        )
+    return num_speculative_tokens + 1
+
+
+GDN_REPLAYSSM_HMMA_WIDTHS = (4, 8)
+"""Tokens per request that FlashInfer's HMMA GDN ReplaySSM kernel supports,
+that is, MTP with 3 or 7 draft tokens."""
+
+
+def gdn_replayssm_backend(state_dtype: torch.dtype) -> Literal["umma", "hmma"]:
+    """Return the FlashInfer GDN ReplaySSM decode kernel for this GPU.
+
+    BF16 state runs on the HMMA kernel. FP16 state runs on the UMMA kernel,
+    except on NVIDIA GPUs other than SM100-class, which use the HMMA kernel.
+    """
+    from vllm.platforms import current_platform
+
+    if state_dtype == torch.bfloat16 or (
+        current_platform.is_cuda()
+        and not current_platform.is_device_capability_family(100)
+    ):
+        return "hmma"
+    return "umma"
+
+
+_FLASHINFER_GDN_STATE_ENV = {
+    torch.float16: ("fp16", ("fp16", "float16", "half")),
+    torch.bfloat16: ("bf16", ("bf16", "bfloat16")),
+}
+
+
+def preset_flashinfer_gdn_env(mamba_ssm_cache_dtype: str) -> None:
+    """Set default FlashInfer GDN variables before vLLM first imports FlashInfer.
+
+    Building the model config imports FlashInfer, and FlashInfer reads these
+    variables only then. A forked engine process keeps that import. This
+    function only sets defaults, which affect only FlashInfer's GDN kernels;
+    `configure_flashinfer_gdn_env` checks them for GDN models.
+    """
+    state_dtype = STR_DTYPE_TO_TORCH_DTYPE.get(mamba_ssm_cache_dtype)
+    if state_dtype not in _FLASHINFER_GDN_STATE_ENV:
+        return
+    os.environ.setdefault(
+        "GDN_UCACHE_STATE_DTYPE", _FLASHINFER_GDN_STATE_ENV[state_dtype][0]
+    )
+    if gdn_replayssm_backend(state_dtype) == "hmma":
+        os.environ.setdefault("SGLANG_GDN_WY_STRIDED_QKV", "1")
+
+
+def configure_flashinfer_gdn_env(state_dtype: torch.dtype, hmma: bool) -> None:
+    """Set the FlashInfer GDN environment that ReplaySSM needs.
+
+    FlashInfer reads these variables once, when `flashinfer` is first
+    imported, so they must be set before vLLM starts its workers.
+    `GDN_UCACHE_STATE_DTYPE` selects the state dtype of the HMMA kernel and
+    the prefix materializer. The HMMA kernel also needs
+    `SGLANG_GDN_WY_STRIDED_QKV=1` to read Q/K/V rows from block-strided pools.
+
+    Raises:
+        ValueError: The environment already selects another setting.
+
+    """
+    default, accepted = _FLASHINFER_GDN_STATE_ENV[state_dtype]
+    state = os.environ.setdefault("GDN_UCACHE_STATE_DTYPE", default)
+    if state.strip().lower() not in accepted:
+        raise ValueError(
+            f"GDN_UCACHE_STATE_DTYPE={state!r} conflicts with the {state_dtype} "
+            "recurrent state cache that GDN ReplaySSM uses; unset it"
+        )
+    if hmma and os.environ.setdefault("SGLANG_GDN_WY_STRIDED_QKV", "1") == "0":
+        raise ValueError(
+            "SGLANG_GDN_WY_STRIDED_QKV=0 conflicts with FlashInfer's HMMA GDN "
+            "ReplaySSM kernel, which reads Q/K/V from block-strided pools; unset it"
+        )
 
 
 def mamba_state_alignment(vllm_config: "VllmConfig") -> int:
@@ -136,6 +230,15 @@ class MambaStateDtypeCalculator:
         return cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
         )
+
+    @classmethod
+    def gated_delta_net_replayssm_ring_dtypes(
+        cls,
+        model_dtype: ModelDType | torch.dtype,
+    ) -> tuple[torch.dtype, torch.dtype, torch.dtype]:
+        """Return FlashInfer GDN `(u, k, G)` ring dtypes."""
+        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+        return (activation_dtype, activation_dtype, torch.float32)
 
     @classmethod
     def kda_state_dtype(
@@ -299,6 +402,25 @@ class MambaStateShapeCalculator:
             head_k_dim,
         )
         return conv_state_shape, temporal_state_shape
+
+    @classmethod
+    def gated_delta_net_replayssm_ring_shapes(
+        cls,
+        tp_world_size: int,
+        num_k_heads: int,
+        num_v_heads: int,
+        head_k_dim: int,
+        head_v_dim: int,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        """Return FlashInfer GDN `(u, k, G)` ring shapes."""
+        local_k_heads = divide(num_k_heads, tp_world_size)
+        local_v_heads = divide(num_v_heads, tp_world_size)
+        slots = GDN_REPLAYSSM_RING_SLOTS
+        return (
+            (local_v_heads, slots, head_v_dim),
+            (local_k_heads, slots, head_k_dim),
+            (local_v_heads, slots),
+        )
 
     @classmethod
     def kda_state_shape(

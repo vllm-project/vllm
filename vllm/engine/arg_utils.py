@@ -2258,6 +2258,14 @@ class EngineArgs:
 
         NOTE: If VllmConfig is incompatible, we raise an error.
         """
+        if self.use_replayssm:
+            # Creating the model config below imports FlashInfer, which reads
+            # its GDN ReplaySSM settings once, at import.
+            from vllm.model_executor.layers.mamba.mamba_utils import (
+                preset_flashinfer_gdn_env,
+            )
+
+            preset_flashinfer_gdn_env(self.mamba_ssm_cache_dtype)
         logging_config = self.create_logging_config()
         configure_logging_if_needed(logging_config)
 

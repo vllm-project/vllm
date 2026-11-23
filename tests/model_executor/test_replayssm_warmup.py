@@ -45,6 +45,7 @@ def _autotune_runner(
             use_flashinfer_replayssm=(
                 use_replayssm and backend == MambaBackendEnum.FLASHINFER
             ),
+            is_gdn_replayssm_enabled=lambda: False,
         ),
         uniform_decode_query_len=query_len,
         decode_query_len=query_len,
@@ -165,7 +166,7 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(layout):
         mixer = MambaMixer2.__new__(MambaMixer2)
         torch.nn.Module.__init__(mixer)
         mixer.use_replayssm = True
-        mixer.use_flashinfer_replayssm = True
+        mixer.use_flashinfer_replayssm = mixer.use_replayssm_trackers = True
         mixer.replayssm_buffer_len = 16
         mixer.get_state_shape = lambda: spec.shapes
         mixer.get_state_dtype = lambda: spec.dtypes
@@ -202,3 +203,19 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(layout):
         assert torch.count_nonzero(tensor) == 0
     for page in pages.values():
         assert torch.all(page[..., spec.state_content_size_bytes :] == 3)
+
+
+@pytest.mark.parametrize(("num_v_heads", "num_sms"), [(64, 132), (64, 152), (12, 148)])
+def test_hmma_warmup_covers_every_launch_tactic(monkeypatch, num_v_heads, num_sms):
+    """One warmup batch per HMMA min_blocks_per_mp value, 2 through 7."""
+    monkeypatch.delenv("GDN_WY_MBP", raising=False)
+    batches = warmup.hmma_warmup_batch_sizes(num_v_heads, num_sms, max_num_reqs=4096)
+    # FlashInfer's tactic: min(ceil(HV * B / SMs) + 1, 7).
+    tactics = [min(-(-num_v_heads * b // num_sms) + 1, 7) for b in batches]
+    assert tactics == [2, 3, 4, 5, 6, 7]
+    assert (
+        warmup.hmma_warmup_batch_sizes(num_v_heads, num_sms, batches[2])
+        == (batches[:3])
+    )
+    monkeypatch.setenv("GDN_WY_MBP", "4")
+    assert warmup.hmma_warmup_batch_sizes(num_v_heads, num_sms, 4096) == [1]
