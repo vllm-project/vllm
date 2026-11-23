@@ -5,6 +5,8 @@ Quantization trades off model precision for smaller memory footprint, allowing l
 !!! tip
     To get started with quantization, see [LLM Compressor](llm_compressor/README.md), a library for optimizing models for deployment with vLLM that supports FP8, INT8, INT4, and other quantization formats.
 
+    For the names vLLM accepts for methods and schemes, see [Methods and Schemes](formats.md). For the kernel backends of quantized linear layers, see [Kernel Backends](kernels.md).
+
 The following are the supported quantization formats for vLLM:
 
 - [AutoAWQ](auto_awq.md)
@@ -20,25 +22,14 @@ The following are the supported quantization formats for vLLM:
 - [Online Quantization](online.md)
 - [AMD Quark](quark.md)
 - [Quantized KV Cache](quantized_kvcache.md)
-- [TorchAO](torchao.md)
+- [TorchAO](torchao.md) (deprecated)
 - [FP8 ViT Encoder Attention](fp8_vit_attn.md)
 
-## Selecting Linear Backends per Quantization
+## Selecting Linear Backends
 
-`--linear-backend` selects one backend for all quantized linear layers. For
-mixed-precision models that use more than one linear quantization scheme, use
-`linear_backend_per_quant` to override the backend for individual schemes:
-
-```bash
-vllm serve <model> \
-  --linear-backend cutlass \
-  --kernel-config '{"linear_backend_per_quant":{"nvfp4_w4a16":"humming"}}'
-```
-
-Here, NVFP4 W4A16 linear layers use Humming, while all other quantized linear
-layers use CUTLASS. Per-quantization overrides take precedence over
-`--linear-backend`; schemes without an override continue to use the global
-setting, including automatic selection when it is `auto`.
+To choose the kernel backend of quantized linear layers, for all of them with
+`--linear-backend` or per quantization type with `linear_backend_per_quant`,
+see [Kernel Backends](kernels.md#selecting-a-backend).
 
 ## Hadamard Input Transforms (QuIP)
 
@@ -78,6 +69,21 @@ The interleaved AITER MXFP4 MoE kernels (`AITER_MXFP4_BF16`, ROCm gfx950) run ei
 | `mxfp8` | MXFP8 for any token count | selected on gfx950 only; elsewhere it is a BF16 fallback and is skipped |
 | `null` | BF16 for any token count | BF16 as requested |
 | not set (for example a checkpoint's own scheme) | MXFP8 for any token count | BF16, instead of adding MXFP8 activations to a weight-only request |
+
+The activation setting is process-wide for this backend. If any layer requests BF16, it takes precedence over MXFP8 requests in other layers.
+
+### Migrating from the ROCm MoE quantization environment variables
+
+`VLLM_FP8_MOE_REQUANT`, `VLLM_FP8_MOE_REQUANT_ACT`, and `VLLM_ROCM_MUSE_MOE_ONLINE_QUANT` are deprecated and will be removed in v0.35.0. Remove these variables before passing `--quantization-config`.
+
+| Previous setting | Replacement |
+| --- | --- |
+| FP8 requantization with `a4w4` | `--quantization-config.moe mxfp4` |
+| FP8 requantization with `a8w4` (default) | `--quantization-config.moe '{"weight":"mxfp4","activation":"mxfp8"}'` |
+| FP8 requantization with `a16w4` | `--quantization-config.moe '{"weight":"mxfp4","activation":null}'` |
+| Muse Spark BF16 with `VLLM_ROCM_MUSE_MOE_ONLINE_QUANT=mxfp4` | `--quantization-config '{"moe":"mxfp4","ignore":["*layers.0.*","*layers.<last>.*"]}'` (replace `<last>` with the last layer index) |
+
+For `a16w4`, pass `--moe-backend aiter_triton_mxfp4_bf16` if you need to keep the previous Triton backend.
 
 ## Supported Hardware
 

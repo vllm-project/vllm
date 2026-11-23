@@ -22,6 +22,9 @@ from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import _print_warning_once
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
+from vllm.model_executor.layers.fused_moe.router.aiter_shared_routed_fused_moe_router import (  # noqa: E501
+    AiterSharedRoutedFusedMoERouter,
+)
 from vllm.model_executor.layers.quantization.experts_int8 import ExpertsInt8Config
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
@@ -1373,7 +1376,6 @@ def test_models_fse_init(
     use_fse: bool,
     exclude: list[str],
     monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
 ) -> None:
     """Construction and loading preserve each shared expert's precision."""
     _print_warning_once.cache_clear()
@@ -1528,16 +1530,6 @@ def test_models_fse_init(
 
     import vllm.envs as envs
     from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
-
-    def reset_aiter() -> None:
-        rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
-        importlib.reload(envs)
-        rocm_aiter_ops.refresh_env_variables()
-
-    # Also on failure: `skip_global_cleanup` skips the conftest cleanup. Runs after
-    # the environment patches below are undone.
-    request.addfinalizer(reset_aiter)
 
     warning_logger = fused_moe_utils.logger
 
@@ -1553,6 +1545,7 @@ def test_models_fse_init(
         importlib.reload(envs)
         mp.setattr(envs, "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", use_fse)
         rocm_aiter_ops.refresh_env_variables()
+        from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
 
         mp.setattr(rocm_aiter_moe, "aiter_topK_meta_data", None)
         rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
@@ -1603,6 +1596,11 @@ def test_models_fse_init(
                     moe.experts.moe_config.is_fused_shared_expert_requested
                     is aiter_fse_enabled
                 )
+                router = moe.experts.router
+                if isinstance(router, AiterSharedRoutedFusedMoERouter):
+                    assert router.has_shared_expert_gate is (
+                        shared_name == "shared_expert"
+                    )
                 if not fused and not exclude and model_type != "deepseek_v4":
                     scheme = getattr(moe, shared_name).gate_up_proj.scheme
                     expected_dtype = (
@@ -1799,6 +1797,10 @@ def test_models_fse_init(
                     in (warning.call_args.args[0])
                 )
                 assert "excludes shared experts" in warning.call_args.args[1]
+
+    rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
+    importlib.reload(envs)
+    rocm_aiter_ops.refresh_env_variables()
 
 
 def _modelopt_mxfp8_config(exclude_modules=(), moe_quant_algo="NVFP4"):
@@ -2012,7 +2014,6 @@ def test_online_fp8_shared_expert_rejects_quark_mxfp4_fse() -> None:
         {"weight": "mxfp4", "activation": None},
     ],
 )
-@pytest.mark.skip_global_cleanup
 def test_online_mxfp4_shared_expert_fse_compares_resolved_keys(
     routed_weight_only: bool, target: str | dict
 ) -> None:

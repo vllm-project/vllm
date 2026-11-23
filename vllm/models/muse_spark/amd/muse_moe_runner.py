@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm MoE implementation for Muse Spark checkpoints."""
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, fields
 
 import torch
+import torch.distributed as dist
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
@@ -14,6 +16,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
@@ -60,6 +63,7 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Dynamic,
+    kMxfp4Static,
 )
 from vllm.models.muse_spark.amd.ops.fused_norm_expand import take_expanded
 from vllm.models.muse_spark.common.layers import MuseSparkRMSNorm
@@ -75,6 +79,24 @@ from vllm.models.muse_spark.common.ops.fused_finalize import (
 _FINALIZE_CHUNK_ELEMS = 32 * 1024 * 1024
 # Below this, one custom all-reduce beats the two-RCCL-kernel RS + AG pair.
 _TOKEN_SHARDED_MIN_TOKENS = 256
+# Set while the model's residual stream is token-sharded across the TP ranks.
+_token_sharded_output = False
+
+
+@contextmanager
+def token_sharded_moe_output() -> Iterator[None]:
+    """Make the TP finalize write only current rank's rows of a token-sharded stream.
+
+    Rank `r` keeps rows `[r * R, (r + 1) * R)` with `R = ceil(T / tp)`, the
+    rows its reduce-scatter receives; the other rows of the output are left
+    unwritten.
+    """
+    global _token_sharded_output
+    previous, _token_sharded_output = _token_sharded_output, True
+    try:
+        yield
+    finally:
+        _token_sharded_output = previous
 
 
 def _validate_tp_post_norm_deployment(
@@ -97,7 +119,7 @@ def _validate_tp_post_norm_deployment(
         raise NotImplementedError(
             f"Muse Spark {precision} on ROCm does not support MoE LoRA."
         )
-    if moe_config.skip_final_all_reduce:
+    if moe_config.skip_final_all_reduce and parallel_config.tp_size > 1:
         raise NotImplementedError(
             f"Muse Spark {precision} performs the TP reduction before its post-expert "
             "norm and cannot return an unreduced MoE output."
@@ -222,23 +244,49 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
             routed.masked_fill_((expert_map[topk_ids.long()] < 0).unsqueeze(-1), 0)
             expert_map = None
 
-        chunk_size = self._chunk_size(top_k, hidden_dim)
+        if _token_sharded_output and self.pre_norm_all_reduce:
+            if self.fused_norm is None or routed.dtype != self.reduce_dtype:
+                raise NotImplementedError(
+                    "A token-sharded Muse Spark stream needs the fused post-expert "
+                    "norm and VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE=bf16."
+                )
+            self._token_sharded_finalize(
+                routed,
+                topk_weights,
+                output,
+                get_tensor_model_parallel_world_size(),
+                gather=False,
+            )
+            return output
+
+        token_sharded = (
+            self.pre_norm_all_reduce
+            and self.fused_norm is not None
+            and (tp_size := get_tensor_model_parallel_world_size()) > 1
+        )
+        chunk_size = max_padded_tokens = self._chunk_size(top_k, hidden_dim)
+        if token_sharded and routed.dtype == self.reduce_dtype:
+            # The chunks only bound the reduce-dtype copy of ``routed``; with no
+            # copy, one reduce-scatter and all-gather beat one pair per chunk.
+            chunk_size = max(num_tokens, 1)
         for start in range(0, num_tokens, chunk_size):
             end = min(start + chunk_size, num_tokens)
-            rows = routed[start:end]
-            if (
-                self.pre_norm_all_reduce
-                and self.fused_norm is not None
-                and rows.shape[0] >= self.rs_min_tokens
-                and (tp_size := get_tensor_model_parallel_world_size()) > 1
-            ):
+            tail = start
+            if token_sharded and end - start >= self.rs_min_tokens:
+                tail = end
+                if end - start > max_padded_tokens:
+                    # Padding copies the whole chunk; past one default chunk
+                    # the few tokens beyond a TP multiple take the all-reduce.
+                    tail -= (end - start) % tp_size
                 self._token_sharded_finalize(
-                    rows.to(self.reduce_dtype),
-                    topk_weights[start:end],
-                    output[start:end],
+                    routed[start:tail].to(self.reduce_dtype),
+                    topk_weights[start:tail],
+                    output[start:tail],
                     tp_size,
                 )
-                continue
+                if tail == end:
+                    continue
+            rows = routed[tail:end]
             if self.pre_norm_all_reduce:
                 rows = tensor_model_parallel_all_reduce(rows.to(self.reduce_dtype))
 
@@ -246,18 +294,18 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
                 fused_post_expert_finalize(
                     rows,
                     self.fused_norm.weight if self.fused_norm.has_weight else None,
-                    topk_weights[start:end],
+                    topk_weights[tail:end],
                     self.fused_norm.variance_epsilon,
                     self.fused_norm.fused_gain_center,
                     self.fused_norm.applies_weight_before_norm,
-                    output[start:end],
-                    topk_ids=None if expert_map is None else topk_ids[start:end],
+                    output[tail:end],
+                    topk_ids=None if expert_map is None else topk_ids[tail:end],
                     expert_map=expert_map,
                 )
                 continue
             normalized = self.post_expert_norm_fn(rows, out_dtype=torch.float32)
-            normalized.mul_(topk_weights[start:end].float().unsqueeze(-1))
-            output[start:end].copy_(normalized.sum(dim=1).to(output.dtype))
+            normalized.mul_(topk_weights[tail:end].float().unsqueeze(-1))
+            output[tail:end].copy_(normalized.sum(dim=1).to(output.dtype))
 
         return output
 
@@ -267,7 +315,11 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
         topk_weights: torch.Tensor,
         out: torch.Tensor,
         tp_size: int,
+        gather: bool = True,
     ) -> None:
+        """Reduce-scatter `rows` by token, finalize the current rank's tokens, and
+        all-gather them into `out`. Without `gather`, only current rank's rows
+        are written to `out`."""
         num_tokens, top_k, hidden_dim = rows.shape
         pad = (-num_tokens) % tp_size
         if pad:
@@ -279,9 +331,14 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
         per_rank = local.shape[0]
         rank = get_tensor_model_parallel_rank()
         tw_local = topk_weights[rank * per_rank : (rank + 1) * per_rank]
-        out_local = torch.empty(
-            (per_rank, hidden_dim), dtype=out.dtype, device=out.device
-        )
+        owned = max(0, min(per_rank, num_tokens - rank * per_rank))
+        gather_in_place = gather and not pad and out.is_contiguous()
+        if gather_in_place or (not gather and owned == per_rank):
+            out_local = out[rank * per_rank : (rank + 1) * per_rank]
+        else:
+            out_local = torch.empty(
+                (per_rank, hidden_dim), dtype=out.dtype, device=out.device
+            )
         norm = self.fused_norm
         assert norm is not None
         fused_post_expert_finalize(
@@ -293,6 +350,15 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
             norm.applies_weight_before_norm,
             out_local,
         )
+        if not gather:
+            if owned != per_rank:
+                out[rank * per_rank : rank * per_rank + owned].copy_(out_local[:owned])
+            return
+        if gather_in_place:
+            dist.all_gather_into_tensor(
+                out, out_local, group=get_tp_group().device_group
+            )
+            return
         gathered = tensor_model_parallel_all_gather(out_local, dim=0)
         out.copy_(gathered[:num_tokens])
 
@@ -696,24 +762,36 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
         quant_config: QuantizationConfig | None,
         moe_config: FusedMoEConfig,
     ) -> FusedMoEMethodBase:
-        if isinstance(quant_config, OnlineQuantizationConfig):
+        if quant_config is not None and not isinstance(
+            quant_config, (QuarkConfig, OnlineQuantizationConfig)
+        ):
+            raise NotImplementedError(
+                "Muse Spark on ROCm supports BF16 (optionally with online "
+                "quantization), Quark FP8, or Quark OCP-MXFP4 checkpoints; got "
+                f"{quant_config.get_name()!r}."
+            )
+        online_config = (
+            quant_config
+            if isinstance(quant_config, OnlineQuantizationConfig)
+            else getattr(quant_config, "online_quantization_config", None)
+        )
+        if online_config is not None:
             reject_muse_env_with_quantization_config()
-        if quant_config is None:
-            # Deprecated VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: same as the equivalent
-            # `--quantization-config`.
-            args = muse_moe_online_quant_args(
+        elif quant_config is None and envs.VLLM_ROCM_MUSE_MOE_ONLINE_QUANT == "mxfp4":
+            num_layers = (
                 get_current_vllm_config().model_config.hf_text_config.num_hidden_layers
             )
-            if args is None:
-                return MuseSparkUnquantizedFusedMoE(moe_config)
-            quant_config = OnlineQuantizationConfig(args)
-        if isinstance(quant_config, OnlineQuantizationConfig):
-            return self._get_online_quant_method(prefix, quant_config, moe_config)
-        if not isinstance(quant_config, QuarkConfig):
-            raise NotImplementedError(
-                "Muse Spark on ROCm supports BF16, Quark FP8, or Quark OCP-MXFP4 "
-                f"checkpoints; got {quant_config.get_name()!r}."
+            args = muse_moe_online_quant_args(num_layers)
+            assert args is not None
+            self.quant_config = online_config = OnlineQuantizationConfig(args)
+        if online_config is not None and (
+            resolved := online_config.resolve_quant_method_cls(type(self), prefix)
+        ):
+            return self._online_quant_method(
+                prefix, quant_config, online_config, resolved, moe_config
             )
+        if not isinstance(quant_config, QuarkConfig):
+            return MuseSparkUnquantizedFusedMoE(moe_config)
 
         quant_method = quant_config.get_quant_method(self, prefix)
         if isinstance(quant_method, UnquantizedFusedMoEMethod):
@@ -735,27 +813,36 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
             quant_method.activation_quant_key,
         )
 
-    def _get_online_quant_method(
+    def _online_quant_method(
         self,
         prefix: str,
-        quant_config: OnlineQuantizationConfig,
+        quant_config: QuantizationConfig | None,
+        online_config: OnlineQuantizationConfig,
+        resolved: tuple,
         moe_config: FusedMoEConfig,
     ) -> FusedMoEMethodBase:
-        """Online quantization (`--quantization-config`) of the BF16 experts.
+        """Map an online quantization target on these experts to a Muse method.
 
-        Layers excluded by the config (`ignore`, e.g. the first and last decoder
-        layers, which the Quark MXFP4 export keeps in BF16) stay unquantized.
+        Muse normalizes each route's output before the top-k sum, which the
+        generic online MoE methods skip, so only W4A4 MXFP4 on BF16 experts is
+        supported: it runs as the Muse AITER experts.
         """
-        resolved = quant_config.resolve_quant_method_cls(type(self), prefix)
-        if resolved is None:
-            return MuseSparkUnquantizedFusedMoE(moe_config)
-        source, quant_key_str, target_pattern, spec, method_cls = resolved
-        if method_cls is not Mxfp4OnlineMoEMethod:
+        source, quant_key_str, target_pattern, spec, _ = resolved
+        if isinstance(quant_config, QuarkConfig) and (
+            quant_config.get_quant_method_target(prefix, type(self))[2]
+            is not UnquantizedFusedMoEMethod
+        ):
             raise NotImplementedError(
-                "Muse Spark on ROCm supports online MXFP4 routed experts only; "
-                f"got {quant_key_str!r} ({method_cls.__name__})."
+                "Muse Spark on ROCm cannot re-quantize the checkpoint's "
+                f"quantized routed experts ({prefix}); online quantization "
+                "may only target the BF16 experts."
             )
-        quant_config.quantized_layers[prefix] = (
+        if spec.weight != kMxfp4Static or spec.activation != kMxfp4Dynamic:
+            raise NotImplementedError(
+                "Muse Spark on ROCm supports only the W4A4 'mxfp4' online "
+                f"quantization for routed experts; got {quant_key_str} for {prefix}."
+            )
+        online_config.quantized_layers[prefix] = (
             source.value,
             quant_key_str,
             target_pattern,
@@ -765,9 +852,7 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        if isinstance(
-            self.quant_method, MuseSparkOnlineMXFP4FusedMoE
-        ) or not isinstance(
+        if not isinstance(
             self.quant_method,
             (MuseSparkQuarkW8A8Fp8FusedMoE, MuseSparkQuarkOCPMXFusedMoE),
         ):
@@ -821,5 +906,6 @@ __all__ = [
     "MuseSparkTritonExperts",
     "validate_bf16_deployment",
     "validate_fp8_deployment",
+    "token_sharded_moe_output",
     "validate_mxfp4_deployment",
 ]

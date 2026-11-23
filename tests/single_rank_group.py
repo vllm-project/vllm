@@ -3,8 +3,9 @@
 """A single-rank stand-in for the parallel groups, to build layers in unit tests
 without initializing `torch.distributed`."""
 
-from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import ContextDecorator
+from functools import wraps
+from inspect import isgeneratorfunction
 from typing import Any
 
 import torch
@@ -72,14 +73,40 @@ class SingleRankGroup:
         return None
 
 
-@contextmanager
-def override_parallel_groups(group: "SingleRankGroup") -> Generator[None]:
-    """Use `group` for all the parallel groups of `parallel_state`."""
-    saved = {name: getattr(parallel_state, name) for name in _GROUP_NAMES}
-    for name in _GROUP_NAMES:
-        setattr(parallel_state, name, group)
-    try:
-        yield
-    finally:
-        for name, value in saved.items():
+class _ParallelGroupOverride(ContextDecorator):
+    def __init__(self, group: SingleRankGroup):
+        self.group = group
+        self.saved: list[dict[str, Any]] = []
+
+    def __enter__(self) -> None:
+        self.saved.append(
+            {name: getattr(parallel_state, name) for name in _GROUP_NAMES}
+        )
+        for name in _GROUP_NAMES:
+            setattr(parallel_state, name, self.group)
+
+    def __exit__(self, *exc: Any) -> None:
+        for name, value in self.saved.pop().items():
             setattr(parallel_state, name, value)
+
+    def _recreate_cm(self) -> "_ParallelGroupOverride":
+        return _ParallelGroupOverride(self.group)
+
+    def __call__(self, function):
+        if isgeneratorfunction(function):
+
+            @wraps(function)
+            def wrapped(*args: Any, **kwargs: Any):
+                with self._recreate_cm():
+                    return (yield from function(*args, **kwargs))
+        else:
+            wrapped = super().__call__(function)
+
+        decorated: Any = wrapped
+        decorated._uses_single_rank_groups = True
+        return decorated
+
+
+def override_parallel_groups(group: SingleRankGroup) -> _ParallelGroupOverride:
+    """Use `group` for all parallel groups, including across generator yields."""
+    return _ParallelGroupOverride(group)

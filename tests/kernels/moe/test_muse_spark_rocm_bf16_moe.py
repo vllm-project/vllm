@@ -9,8 +9,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import vllm.models.muse_spark.amd.muse_moe_runner as amd_muse_moe_runner
+from tests.kernels.moe.muse_spark_utils import run_moe
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
@@ -39,6 +43,7 @@ from vllm.model_executor.layers.quantization.online.base import (
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkOCP_MX_MoEMethod,
     QuarkW8A8Fp8MoEMethod,
@@ -48,6 +53,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kMxfp4Dynamic,
     kMxfp4Static,
+)
+from vllm.model_executor.model_loader.reload.layerwise import (
+    finalize_layerwise_processing,
 )
 from vllm.models.muse_spark.amd.muse_moe_runner import (
     MuseMoERunner,
@@ -65,7 +73,9 @@ from vllm.models.muse_spark.amd.muse_moe_runner import (
     validate_fp8_deployment,
     validate_mxfp4_deployment,
 )
+from vllm.models.muse_spark.common.moe import MuseSparkMoEConfig, MuseSparkRouter
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 
 def _parallel_config(
@@ -429,7 +439,12 @@ _FAIL_CLOSED_EVERYWHERE = [
     (_moe_config(parallel_config=_parallel_config(sp_size=2)), "sequence"),
     (_moe_config(parallel_config=_parallel_config(enable_eplb=True)), "EPLB"),
     (_moe_config(is_lora_enabled=True), "LoRA"),
-    (_moe_config(skip_final_all_reduce=True), "unreduced"),
+    (
+        _moe_config(
+            parallel_config=_parallel_config(tp_size=8), skip_final_all_reduce=True
+        ),
+        "unreduced",
+    ),
 ]
 
 
@@ -448,6 +463,15 @@ def test_unsupported_deployments_fail_closed(
 ) -> None:
     with pytest.raises(NotImplementedError, match=reason):
         validate(config)
+
+
+def test_expert_parallel_moe_may_leave_the_final_reduce_to_the_model() -> None:
+    config = _moe_config(
+        parallel_config=_parallel_config(ep_size=8), skip_final_all_reduce=True
+    )
+    validate_bf16_deployment(config)
+    validate_fp8_deployment(config)
+    validate_mxfp4_deployment(config)
 
 
 @pytest.mark.parametrize(
@@ -989,109 +1013,220 @@ def test_token_sharded_finalize_pads_and_slices_per_rank(monkeypatch) -> None:
     assert torch.count_nonzero(actual[3:]) == 0
 
 
-def _fake_online_mxfp4_init(monkeypatch, backend: Mxfp4MoeBackend) -> None:
-    def _init(self, *, moe, activation_quant_key=kMxfp4Dynamic) -> None:
-        self.moe = moe
-        self.activation_quant_key = activation_quant_key
-        self.mxfp4_backend = backend
-        self.experts_cls = None
-
-    monkeypatch.setattr(Mxfp4OnlineMoEMethod, "__init__", _init)
-
-
-@pytest.mark.skip_global_cleanup
-def test_muse_online_mxfp4_method_requires_w4a4_aiter(monkeypatch) -> None:
-    config = _moe_config(parallel_config=_parallel_config(tp_size=8))
-
-    _fake_online_mxfp4_init(monkeypatch, Mxfp4MoeBackend.AITER_MXFP4_MXFP4)
-    method = MuseSparkOnlineMXFP4FusedMoE(config)
-    assert isinstance(method, Mxfp4OnlineMoEMethod)
-    assert method.experts_cls is MuseSparkAiterExperts
-
-    _fake_online_mxfp4_init(monkeypatch, Mxfp4MoeBackend.EMULATION)
-    with pytest.raises(NotImplementedError, match="AITER_MXFP4_MXFP4"):
-        MuseSparkOnlineMXFP4FusedMoE(config)
-
-
-@pytest.mark.parametrize(
-    "quantization_config, first_layers_method",
-    [
-        # The first and last decoder layers stay BF16, as in the Quark export.
-        (
-            {"moe": "mxfp4", "ignore": ["*layers.0.*", "*layers.61.*"]},
-            MuseSparkUnquantizedFusedMoE,
-        ),
-        ({"moe": "mxfp4"}, MuseSparkOnlineMXFP4FusedMoE),
-        (
-            {"targets": {"re:.*layers\\.(?!0\\.|61\\.).*experts": "mxfp4"}},
-            MuseSparkUnquantizedFusedMoE,
-        ),
-    ],
-)
-@pytest.mark.skip_global_cleanup
-def test_muse_online_quantization_config_selects_the_experts_method(
-    monkeypatch, default_vllm_config, quantization_config, first_layers_method
+def test_online_mxfp4_is_opt_in_and_skips_the_first_and_last_layer(
+    monkeypatch,
 ) -> None:
-    _fake_online_mxfp4_init(monkeypatch, Mxfp4MoeBackend.AITER_MXFP4_MXFP4)
-    online_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(**quantization_config)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(num_hidden_layers=62)
+        )
     )
-    experts = object.__new__(MuseSparkRoutedExperts)
-    config = _moe_config(parallel_config=_parallel_config(tp_size=8))
+    monkeypatch.setattr(amd_muse_moe_runner, "get_current_vllm_config", lambda: config)
     prefix = "model.layers.{}.feed_forward.experts"
 
-    for layer in (5, 30):
-        method = experts._get_online_quant_method(
-            prefix.format(layer), online_config, config
-        )
-        assert isinstance(method, MuseSparkOnlineMXFP4FusedMoE)
-        assert prefix.format(layer) in online_config.quantized_layers
-    for layer in (0, 61):
-        method = experts._get_online_quant_method(
-            prefix.format(layer), online_config, config
-        )
-        assert type(method) is first_layers_method
+    def fake_init(self, *, moe, activation_quant_key):
+        self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_MXFP4
 
-
-@pytest.mark.skip_global_cleanup
-def test_muse_online_quantization_rejects_other_formats() -> None:
-    online_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(moe="fp8_per_block")
-    )
+    monkeypatch.setattr(Mxfp4OnlineMoEMethod, "__init__", fake_init)
     experts = object.__new__(MuseSparkRoutedExperts)
-    with pytest.raises(NotImplementedError, match="online MXFP4"):
-        experts._get_online_quant_method(
-            "model.layers.5.feed_forward.experts", online_config, _moe_config()
-        )
-
-
-@pytest.mark.skip_global_cleanup
-def test_muse_deprecated_online_quant_env_redirects_to_quantization_config(
-    monkeypatch, default_vllm_config
-) -> None:
-    default_vllm_config.model_config = SimpleNamespace(
-        hf_text_config=SimpleNamespace(num_hidden_layers=62)
-    )
-    _fake_online_mxfp4_init(monkeypatch, Mxfp4MoeBackend.AITER_MXFP4_MXFP4)
-    experts = object.__new__(MuseSparkRoutedExperts)
-    config = _moe_config(parallel_config=_parallel_config(tp_size=8))
-    prefix = "model.layers.{}.feed_forward.experts"
-
+    moe = _moe_config(parallel_config=_parallel_config(tp_size=8))
     monkeypatch.delenv("VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", raising=False)
-    method = experts._get_quant_method(prefix.format(5), None, config)
-    assert type(method) is MuseSparkUnquantizedFusedMoE
+    assert type(experts._get_quant_method(prefix.format(5), None, moe)) is (
+        MuseSparkUnquantizedFusedMoE
+    )
 
     monkeypatch.setenv("VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", "mxfp4")
-    # The first and last decoder layers stay BF16.
     for layer, expected in (
         (0, MuseSparkUnquantizedFusedMoE),
         (5, MuseSparkOnlineMXFP4FusedMoE),
         (61, MuseSparkUnquantizedFusedMoE),
     ):
-        method = experts._get_quant_method(prefix.format(layer), None, config)
-        assert type(method) is expected
+        assert type(experts._get_quant_method(prefix.format(layer), None, moe)) is (
+            expected
+        )
 
-    # The env var and --quantization-config cannot be combined.
-    online_config = OnlineQuantizationConfig(QuantizationConfigArgs(moe="mxfp4"))
+    online = OnlineQuantizationConfig(QuantizationConfigArgs(moe="mxfp4"))
     with pytest.raises(ValueError, match="cannot be used together"):
-        experts._get_quant_method(prefix.format(5), online_config, config)
+        experts._get_quant_method(prefix.format(5), online, moe)
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="requires a ROCm GPU")
+def test_token_sharded_stream_keeps_only_the_current_ranks_finalized_rows(
+    monkeypatch,
+) -> None:
+    set_random_seed(0)
+    num_tokens, top_k, hidden = 8, 8, 256
+    norm = _post_expert_norm_module(hidden).cuda()
+    routed = torch.randn(num_tokens, top_k, hidden, device="cuda", dtype=torch.bfloat16)
+    weights = torch.softmax(torch.randn(num_tokens, top_k, device="cuda"), dim=-1)
+    ids = torch.zeros(num_tokens, top_k, dtype=torch.int32, device="cuda")
+    scattered: list[int] = []
+
+    def _reduce_scatter(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        assert dim == 0
+        scattered.append(x.shape[0])
+        return x[x.shape[0] // 2 :]
+
+    module = "vllm.models.muse_spark.amd.muse_moe_runner"
+    monkeypatch.setattr(
+        f"{module}.tensor_model_parallel_reduce_scatter", _reduce_scatter
+    )
+    for name in ("all_gather", "all_reduce"):
+        monkeypatch.setattr(
+            f"{module}.tensor_model_parallel_{name}",
+            lambda *args, **kwargs: pytest.fail("the stream stays token-sharded"),
+        )
+    monkeypatch.setattr(f"{module}.get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(f"{module}.get_tensor_model_parallel_rank", lambda: 1)
+    monkeypatch.setattr(f"{module}._FINALIZE_CHUNK_ELEMS", 4 * top_k * hidden)
+
+    reducer = MuseSparkTopKWeightAndReduce(norm.forward, pre_norm_all_reduce=True)
+    reducer.reduce_dtype = torch.bfloat16
+    output = torch.full(
+        (num_tokens, hidden), float("nan"), device="cuda", dtype=torch.bfloat16
+    )
+    with amd_muse_moe_runner.token_sharded_moe_output():
+        reducer.apply(output, routed, weights, ids, False)
+
+    assert scattered == [num_tokens]
+    reference = MuseSparkTopKWeightAndReduce(norm.forward, pre_norm_all_reduce=False)
+    expected = reference.apply(None, routed[4:], weights[4:], ids[4:], False)
+    torch.testing.assert_close(output[4:], expected)
+    assert output[:4].isnan().all()
+
+
+@pytest.fixture
+def muse_vllm_config(dist_init):
+    # The Quark OCP MX MoE method reads the model type from the current config.
+    config = VllmConfig(model_config=ModelConfig(dtype=torch.bfloat16))
+    with set_current_vllm_config(config):
+        yield config
+
+
+def _muse_moe(
+    layer: int,
+    targets: dict,
+    checkpoint_format: str = "quark",
+    num_experts: int = 8,
+    hidden: int = 256,
+):
+    """Decoder `layer`'s routed experts, built as `MuseSparkMoE` does, with
+    online-quantization `targets` on a BF16 checkpoint (`checkpoint_format="bf16"`) or
+    on the Muse Spark Open Quark MXFP4 config (W4A4, layers 0 and 61 excluded).
+    """
+    online_config = OnlineQuantizationConfig(QuantizationConfigArgs(targets=targets))
+    quant_config: QuarkConfig | OnlineQuantizationConfig = online_config
+    if checkpoint_format == "quark":
+        mxfp4 = dict(
+            dtype="fp4", qscheme="per_group", group_size=32, scale_format="e8m0"
+        )
+        quant_config = QuarkConfig(
+            {
+                "global_quant_config": {
+                    "weight": {**mxfp4, "is_dynamic": False},
+                    "input_tensors": {**mxfp4, "is_dynamic": True},
+                },
+                "layer_type_quant_config": {},
+                "exclude": [
+                    f"model.layers.{i}.feed_forward.experts.{e}.{proj}"
+                    for i in (0, 61)
+                    for e in range(num_experts)
+                    for proj in ("down_proj", "gate_proj", "up_proj")
+                ],
+            }
+        )
+        # As `get_quant_config` composes `--quantization-config` onto it.
+        quant_config.online_quantization_config = online_config
+    router = MuseSparkRouter(2, num_experts, torch.zeros(num_experts), 1.0)
+    norm = _post_expert_norm_module(hidden)
+    runner = FusedMoEFactory(
+        num_experts=num_experts,
+        top_k=2,
+        hidden_size=hidden,
+        intermediate_size=hidden,
+        router=router,
+        quant_config=quant_config,
+        prefix=f"model.layers.{layer}.feed_forward.experts",
+        params_dtype=torch.bfloat16,
+        routed_experts_cls=MuseSparkRoutedExperts,
+        runner_cls=MuseMoERunner,
+        runner_args={"post_expert_norm": norm},
+        moe_config_cls=MuseSparkMoEConfig,
+    )
+    return online_config, router, norm, runner
+
+
+@pytest.mark.skipif(not ROCM_GFX950, reason="requires a GFX950 GPU")
+@pytest.mark.skipif(not ROCM_AITER_SUPPORTED, reason="requires supported AITER")
+@pytest.mark.parametrize("checkpoint_format", ["quark", "bf16"])
+@torch.inference_mode()
+def test_mxfp4_target_rounds_a_bf16_edge_layer(
+    enable_rocm_aiter, muse_vllm_config, workspace_init, checkpoint_format
+) -> None:
+    """An `mxfp4` target on layer 0's BF16 experts runs them as the Muse W4A4
+    AITER experts with the post-expert norm; untargeted layer 61 stays BF16."""
+    pattern = "*layers.0.feed_forward.experts*"
+    targets = {pattern: "mxfp4"}
+    with torch.device("cuda"):
+        online, router, norm, runner = _muse_moe(0, targets, checkpoint_format)
+        last = _muse_moe(61, targets, checkpoint_format)[-1].routed_experts
+    assert type(last.quant_method) is MuseSparkUnquantizedFusedMoE
+
+    torch.manual_seed(0)
+    w13 = (torch.randn(8, 512, 256, device="cuda") / 16).bfloat16()
+    w2 = (torch.randn(8, 256, 256, device="cuda") / 16).bfloat16()
+    # The checkpoint stores these BF16 experts per expert and projection.
+    gate, up = w13.chunk(2, dim=1)
+    checkpoint = [
+        (f"{e}.{proj}.weight", w[e])
+        for e in range(8)
+        for proj, w in (("gate_proj", gate), ("up_proj", up), ("down_proj", w2))
+    ]
+    routed = runner.routed_experts
+    assert len(list(routed.load_weights(checkpoint))) == len(checkpoint)
+    finalize_layerwise_processing(runner, muse_vllm_config.model_config)
+    x = torch.randn(16, 256, dtype=torch.bfloat16, device="cuda")
+    logits = torch.randn(16, 8, device="cuda")
+    out = run_moe(runner, muse_vllm_config, x, logits)
+
+    # Reference: one AITER W4A4 call per route on the same weights rounded to
+    # MXFP4, then the post-expert norm and the weighted top-k sum in fp32.
+    topk_weights, topk_ids = router._compute_routing(x, logits, None)
+    w13_q, w2_q, quant_config = _mxfp4_weights(w13, w2)
+    routes = rocm_aiter_fused_experts(
+        hidden_states=x.repeat_interleave(2, dim=0),
+        w1=w13_q,
+        w2=w2_q,
+        topk_weights=torch.ones(32, 1, device="cuda"),
+        topk_ids=topk_ids.view(32, 1),
+        moe_config=routed.moe_config,
+        activation=MoEActivation.SILU,
+        quant_config=quant_config,
+        quant_type=derive_aiter_quant_type(quant_config),
+    ).view(16, 2, 256)
+    expected = norm.forward_native(routes, out_dtype=torch.float32)
+    expected = (expected * topk_weights[..., None]).sum(dim=1)
+    torch.testing.assert_close(out, expected.to(out.dtype))
+    assert type(routed.quant_method) is MuseSparkOnlineMXFP4FusedMoE
+    assert online.quantized_layer_summaries == [
+        f"feed_forward.experts: 1 (from targets: {pattern}, mxfp4)"
+    ]
+    assert online.online_quantization_time > 0
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="requires a ROCm GPU")
+@pytest.mark.parametrize(
+    "target, layer, checkpoint_format, match",
+    [
+        # Layer 5's experts are MXFP4 in the Quark checkpoint.
+        ("mxfp4", 5, "quark", "re-quantize"),
+        # Only W4A4 MXFP4 maps to the Muse experts with the post-expert norm.
+        ("fp8_per_tensor", 0, "quark", "W4A4"),
+        ("fp8_per_tensor", 5, "bf16", "W4A4"),
+    ],
+)
+def test_unsupported_online_expert_targets_raise(
+    muse_vllm_config, target, layer, checkpoint_format, match
+) -> None:
+    with pytest.raises(NotImplementedError, match=match):
+        _muse_moe(layer, {"*feed_forward.experts*": target}, checkpoint_format)

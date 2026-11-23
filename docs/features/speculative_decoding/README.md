@@ -12,6 +12,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [LiLiCorr](lilicorr.md)
 - [DSpine](#dspine)
 - [Multi-Token Prediction (MTP)](mtp.md)
+- [DFly](dfly.md)
 - [Draft Model](draft_model.md)
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)
@@ -58,6 +59,15 @@ vllm serve Qwen/Qwen3.8-27B \
 ```
 
 Set `num_speculative_tokens` to the checkpoint's block size minus one.
+
+## DFlash query layouts
+
+DFlash and DFlash2 drafts default to the fill-in layout: the anchor is the
+bonus token, followed by one mask query per draft token (`1 + K` queries per
+request). Checkpoints whose `dflash_config` (or speculators config) sets
+`sample_from_anchor: true` use the anchor-first layout instead: the anchor
+query predicts the first draft token, so `K` drafts take `K` queries. vLLM
+reads the layout from the checkpoint; no extra flag is needed.
 Draft sampling defaults to `greedy`; set `draft_sample_method` to
 `probabilistic` for probabilistic proposals.
 Set `enable_adaptive_verification` to `true` in the speculative config to
@@ -128,6 +138,14 @@ The speculator reads its options from
 `speculative_config.custom_method` is the registered name (`"my_spec"`), and
 `speculative_config.method` is the built-in method its config is based on
 (`"eagle3"`), so vLLM treats it like that built-in speculator.
+
+A speculator that keeps per-request state can override `BaseSpeculator`'s
+no-op request hooks, `add_request` and `on_requests_finished`, and `shutdown`.
+An override of `shutdown` must call `super().shutdown()`, which releases the
+draft model.
+A preempted request's slot is freed without a hook, and the request is added
+again when it resumes, so keep such state per slot and reset it in
+`add_request`.
 
 ## `--speculative-config` schema
 
