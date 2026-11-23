@@ -6,11 +6,13 @@ private quantized copies of an already-loaded lm_head for speculative-decoding
 drafters (`draft_lm_head_quantization`)."""
 
 from abc import abstractmethod
+from collections.abc import Callable
 from itertools import chain
 from typing import ClassVar, Literal
 from weakref import WeakKeyDictionary
 
 import torch
+import torch.nn.functional as F
 from torch.nn import Module, Parameter
 
 from vllm.logger import init_logger
@@ -272,9 +274,7 @@ _LM_HEAD_METHODS: dict[str, type[OnlineLinearBase]] = {
 
 
 def _quantize_copy(
-    lm_head: VocabParallelEmbedding,
-    quantization: str,
-    token_ids: torch.Tensor | None = None,
+    lm_head: VocabParallelEmbedding, quantization: str, num_rows: int | None = None
 ) -> ParallelLMHead:
     if (
         not isinstance(
@@ -287,16 +287,16 @@ def _quantize_copy(
             "Quantizing an lm_head copy needs an unquantized fp16/bf16 lm_head "
             "without bias."
         )
-    assert token_ids is None or lm_head.tp_size == 1
-    num_rows, org_rows = lm_head.num_embeddings, lm_head.org_vocab_size
-    if token_ids is not None:
-        num_rows = org_rows = token_ids.numel()
+    assert num_rows is None or lm_head.tp_size == 1
+    rows, org_rows = lm_head.num_embeddings, lm_head.org_vocab_size
+    if num_rows is not None:
+        rows = org_rows = num_rows
     # Online methods take their output dtype from the default dtype, which is
     # only the model dtype while the model itself is being built.
     dtype = lm_head.weight.dtype
     with set_default_torch_dtype(dtype):
         head = ParallelLMHead(
-            num_rows,
+            rows,
             lm_head.embedding_dim,
             params_dtype=dtype,
             org_num_embeddings=org_rows,
@@ -305,12 +305,11 @@ def _quantize_copy(
             disable_tp=lm_head.disable_tp,
             quant_method=_LM_HEAD_METHODS[quantization](),
         )
-    # Never loaded: a new param sharing the source storage, never a copy of
-    # it, unless only some rows are kept.
-    weight = lm_head.weight.data
-    if token_ids is not None:
-        weight = weight.new_zeros(head.weight.shape)
-        weight[:num_rows] = lm_head.weight.data[token_ids]
+    # Never loaded: a new param sharing the source storage (its first rows,
+    # with num_rows), never a copy of it.
+    weight = lm_head.weight.data[: head.weight.shape[0]]
+    if weight.shape[0] < head.weight.shape[0]:
+        weight = F.pad(weight, (0, 0, 0, head.weight.shape[0] - weight.shape[0]))
     head.weight = torch.nn.Parameter(weight, requires_grad=False)
     head.quant_method.process_weights_after_loading(head)
     # The copy is never loaded. The online loader wrapper captures the layer,
@@ -321,17 +320,18 @@ def _quantize_copy(
     return head
 
 
-# Each quantized copy maps to the head and rows it is derived from. Weak keys,
-# and no module attribute, so the copy never owns the source as a submodule.
-_SOURCES: WeakKeyDictionary[
-    Module, tuple[VocabParallelEmbedding, str, torch.Tensor | None]
-] = WeakKeyDictionary()
+# Each quantized copy maps to the head and row count it is derived from. Weak
+# keys, and no module attribute, so the copy never owns the source as a
+# submodule.
+_SOURCES: WeakKeyDictionary[Module, tuple[VocabParallelEmbedding, str, int | None]] = (
+    WeakKeyDictionary()
+)
 
 
 def quantized_lm_head_copy(
     lm_head: VocabParallelEmbedding,
     quantization: Literal["fp8", "nvfp4"],
-    token_ids: torch.Tensor | None = None,
+    num_rows: int | None = None,
 ) -> ParallelLMHead:
     """A ParallelLMHead holding this rank's shard of `lm_head`, quantized.
 
@@ -341,14 +341,14 @@ def quantized_lm_head_copy(
     unchanged and no bf16 copy of its weight is made. The copy is derived state:
     `refresh_quantized_lm_heads` re-derives it after `lm_head` changes.
 
-    With `token_ids` (tensor parallel size 1 only), the copy holds just those
-    rows of `lm_head`, in that order, padded like any lm_head.
+    With `num_rows` (tensor parallel size 1 only), the copy holds just the
+    first `num_rows` rows of `lm_head`, padded like any lm_head.
     """
-    head = _quantize_copy(lm_head, quantization, token_ids)
+    head = _quantize_copy(lm_head, quantization, num_rows)
     # Keep it out of layerwise reload, which would re-run
     # process_weights_after_loading on the already-quantized weight.
     get_layerwise_info(head).reset()
-    _SOURCES[head] = (lm_head, quantization, token_ids)
+    _SOURCES[head] = (lm_head, quantization, num_rows)
     logger.info(
         "Quantized a %s copy of the lm_head (%d x %d per rank).",
         quantization,
@@ -359,19 +359,38 @@ def quantized_lm_head_copy(
 
 
 @torch.no_grad()
+def refresh_quantized_lm_head(head: Module) -> None:
+    """Re-derive one `quantized_lm_head_copy` from its source head, in place."""
+    fresh = _quantize_copy(*_SOURCES[head])
+    for name, tensor in chain(
+        fresh.named_parameters(recurse=False), fresh.named_buffers(recurse=False)
+    ):
+        getattr(head, name).copy_(tensor)
+
+
+# Other state derived from a source lm_head, keyed by the module that owns it:
+# re-derived with the quantized copies, see register_lm_head_refresh.
+_REFRESH_HOOKS: WeakKeyDictionary[Module, Callable[[], None]] = WeakKeyDictionary()
+
+
+def register_lm_head_refresh(module: Module, refresh: Callable[[], None]) -> None:
+    """Have `refresh_quantized_lm_heads` call `refresh` on any model holding
+    `module`, after weight updates of the source lm_head."""
+    _REFRESH_HOOKS[module] = refresh
+
+
+@torch.no_grad()
 def refresh_quantized_lm_heads(model: Module) -> None:
-    """Re-derive the quantized lm_head copies in `model` from their source heads.
+    """Re-derive the quantized lm_head copies in `model`, and the state
+    registered with `register_lm_head_refresh`, from their source heads.
 
     Copies in place, so CUDA graphs keep pointing at valid tensors.
     """
     for module in model.modules():
-        if module not in _SOURCES:
-            continue
-        fresh = _quantize_copy(*_SOURCES[module])
-        for name, tensor in chain(
-            fresh.named_parameters(recurse=False), fresh.named_buffers(recurse=False)
-        ):
-            getattr(module, name).copy_(tensor)
+        if module in _SOURCES:
+            refresh_quantized_lm_head(module)
+        if (refresh := _REFRESH_HOOKS.get(module)) is not None:
+            refresh()
 
 
 # (parent, attribute, copy) for each copy swapped out by share_source_lm_heads.
@@ -388,8 +407,7 @@ def share_source_lm_heads(model: Module) -> None:
         (module, name, child)
         for module in model.modules()
         for name, child in module.named_children()
-        # A copy of some rows cannot stand in for its source.
-        if child in _SOURCES and _SOURCES[child][2] is None
+        if child in _SOURCES
     ]
     for module, name, child in swapped:
         setattr(module, name, _SOURCES[child][0])

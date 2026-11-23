@@ -240,7 +240,8 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
         self.draft_vocab = DraftVocab(
             self.logits_processor,
             config.vocab_size,
-            keep_quantized_head=spec is not None and spec.draft_token_map is not None,
+            keep_quantized_head=spec is not None
+            and spec.draft_token_map_static_rows is not None,
         )
 
         self.make_empty_intermediate_tensors = (

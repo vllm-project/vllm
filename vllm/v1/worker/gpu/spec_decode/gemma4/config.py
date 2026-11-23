@@ -9,5 +9,7 @@ class Gemma4MTPSpeculatorConfig(MTPSpeculatorConfig):
     )
     # Gemma-4 MTP scores tied embedding rows directly; no lm_head to share.
     supported_options = MTPSpeculatorConfig.supported_options - {
-        "draft_lm_head_quantization"
+        "draft_lm_head_quantization",
+        "draft_token_map_static_rows",
+        "draft_token_map_dynamic_rows",
     }
