@@ -291,7 +291,8 @@ def test_static_image_preprocessing_budget(
     dtype = torch.bfloat16 if do_cpu_normalize else torch.uint8
     # One tile for the first image, two tiles and a thumbnail for the second.
     # The outputs coexist with their concatenated copy.
-    required_bytes = 2 * sum(expected_patches) * 3 * 16 * 16 * torch.float32.itemsize
+    itemsize = torch.float32.itemsize if do_cpu_normalize else torch.uint8.itemsize
+    required_bytes = 2 * sum(expected_patches) * 3 * 16**2 * itemsize
     monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", required_bytes - 1)
     with pytest.raises(VLLMValidationError, match="VLLM_MAX_MEDIA_PREPROCESSING_BYTES"):
         processor(text=text, images=images, max_num_tiles=2)
@@ -336,9 +337,47 @@ def test_cpu_image_preprocessing_budget_counts_largest_source(
 
 
 @pytest.mark.core_model
+def test_dynamic_uint8_image_budget_counts_resize_temporary(
+    monkeypatch: pytest.MonkeyPatch, default_vllm_config
+):
+    processor = _make_processor(do_rescale=False, do_normalize=False)
+    image = Image.new("RGB", (48, 64))
+    # The 40x24 output may coexist with the source and horizontal resize buffer.
+    budget = 3 * (40 * 24 + 64 * 48 + 64 * 24)
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget - 1)
+    with pytest.raises(VLLMValidationError, match="Image preprocessing exceeds"):
+        processor(text="<image>", images=[image])
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget)
+    output = processor(text="<image>", images=[image])
+    assert output["pixel_values_flat"][0].shape == (3, 40, 24)
+    assert output["pixel_values_flat"][0].dtype == torch.uint8
+
+
+@pytest.mark.core_model
+def test_device_resize_image_budget_counts_staged_source_pixels(
+    monkeypatch: pytest.MonkeyPatch, default_vllm_config
+):
+    # Only configure the capability here. Actual resizing occurs in the model.
+    monkeypatch.setattr(nemotron_processors, "_cvcuda_available", lambda: True)
+    processor = _make_processor(
+        do_rescale=False, do_normalize=False, device_resize=True
+    )
+    images = [Image.new("RGB", (96, 96)), Image.new("RGB", (8, 8))]
+    budget = 3 * (96**2 + 8**2)
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget - 1)
+    with pytest.raises(VLLMValidationError, match="Image preprocessing exceeds"):
+        processor(text="<image><image>", images=images)
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget)
+    output = processor(text="<image><image>", images=images)
+    assert sum(tensor.nbytes for tensor in output["pixel_values_raw"]) == budget
+
+
+@pytest.mark.core_model
 @pytest.mark.parametrize(
     ("static_tiling", "normalize_on_cpu", "first_image_size", "budget"),
-    [(True, False, 8, 8000), (False, False, 8, 1000), (False, True, 64, 20_000)],
+    [(True, False, 8, 2000), (False, False, 8, 650), (False, True, 64, 20_000)],
     ids=["static", "dynamic", "dynamic-cpu-normalize"],
 )
 def test_render_rejects_over_budget_image_patches(

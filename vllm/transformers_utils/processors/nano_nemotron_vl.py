@@ -294,6 +294,7 @@ def dynamic_preprocess(
             do_cpu_normalize=do_cpu_normalize,
             dtype=dtype,
         )
+        del tensor
         patches = torch.cat([patches, thumb], dim=0)
 
     return patches
@@ -846,27 +847,40 @@ class BaseNanoNemotronVLProcessor(ABC):
 
         return num_patches * self.num_image_token
 
-    def _validate_image_preprocessing_budget(
+    def _estimate_image_resize_bytes(
         self,
         images: Sequence[Image.Image],
+        resize_sizes: Sequence[tuple[int, int]],
         pixels: int,
-        limit: int,
         *,
         concatenates: bool = False,
-    ) -> None:
-        # Account for float32 even when normalization runs on the model device.
-        dtype = self.dtype or torch.float32
-        bytes_per_channel = max(torch.float32.itemsize, dtype.itemsize)
-        output_bytes = pixels * 3 * bytes_per_channel
-        source_bytes = 0
+    ) -> int:
         if self.do_cpu_normalize:
-            source_pixels = max(
+            dtype = self.dtype or torch.float32
+            itemsize = max(torch.float32.itemsize, dtype.itemsize)
+            scratch_pixels = max(
                 (image.width * image.height for image in images), default=0
             )
-            source_bytes = source_pixels * 3 * torch.float32.itemsize
-        # Each source cast is released before its tiles are concatenated.
+            scratch_itemsize = torch.float32.itemsize
+        else:
+            itemsize = scratch_itemsize = torch.uint8.itemsize
+            # Reserve the RGB source copy and the larger of the horizontal
+            # interpolation buffer and the contiguous output's layout copy.
+            scratch_pixels = max(
+                (
+                    image.width * image.height + max(image.height, height) * width
+                    for image, (height, width) in zip(images, resize_sizes, strict=True)
+                ),
+                default=0,
+            )
+        output_bytes = pixels * 3 * itemsize
+        scratch_bytes = scratch_pixels * 3 * scratch_itemsize
+        # Resize working buffers are released before concatenating the tiles.
         concat_bytes = output_bytes if concatenates else 0
-        size_bytes = output_bytes + max(source_bytes, concat_bytes)
+        return output_bytes + max(scratch_bytes, concat_bytes)
+
+    @staticmethod
+    def _validate_image_preprocessing_budget(size_bytes: int, limit: int) -> None:
         if size_bytes > limit:
             raise VLLMValidationError(
                 "Image preprocessing exceeds VLLM_MAX_MEDIA_PREPROCESSING_BYTES="
@@ -882,24 +896,26 @@ class BaseNanoNemotronVLProcessor(ABC):
         limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
         if limit > 0 and not is_profiling_media():
             target_ratios = get_internvl_target_ratios(1, max_num_tiles)
-            num_patches = sum(
+            tilings = [
                 calculate_internvl_targets(
                     orig_width=image.width,
                     orig_height=image.height,
                     target_ratios=target_ratios,
                     image_size=self.image_size,
                     use_thumbnail=self.use_thumbnail,
-                )[0]
+                )
                 for image in images
-            )
-            self._validate_image_preprocessing_budget(
+            ]
+            num_patches = sum(count for count, _, _ in tilings)
+            size_bytes = self._estimate_image_resize_bytes(
                 images,
+                [(height, width) for _, width, height in tilings],
                 num_patches * self.image_size**2,
-                limit,
                 concatenates=(
                     len(images) > 1 or (self.use_thumbnail and num_patches > 1)
                 ),
             )
+            self._validate_image_preprocessing_budget(size_bytes, limit)
 
         return [
             dynamic_preprocess(
@@ -937,9 +953,16 @@ class BaseNanoNemotronVLProcessor(ABC):
             imgs_sizes = [tiler.get_target_size(p) for p in params]
             limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
             if limit > 0 and not is_profiling_media():
-                self._validate_image_preprocessing_budget(
-                    images, sum(height * width for height, width in imgs_sizes), limit
-                )
+                if self.device_resize:
+                    source_pixels = sum(p.media.width * p.media.height for p in params)
+                    size_bytes = source_pixels * 3 * torch.uint8.itemsize
+                else:
+                    size_bytes = self._estimate_image_resize_bytes(
+                        images,
+                        imgs_sizes,
+                        sum(height * width for height, width in imgs_sizes),
+                    )
+                self._validate_image_preprocessing_budget(size_bytes, limit)
             if self.device_resize:
                 pixel_values_lst = [_pil_to_nhwc_tensor(p.media)[0] for p in params]
                 num_tokens_per_image = [p.num_embeddings for p in params]

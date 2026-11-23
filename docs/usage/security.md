@@ -121,10 +121,13 @@ lookup.
 - FunAudioChat estimates peak live buffers for waveform padding, FFT, and
   log-Mel feature extraction. The byte-derived item cap applies to waveforms.
   The configured multimodal item limit applies to waveforms and `audio_embeds`.
-- Nano Nemotron VL, DeepSeek-VL2, and Molmo2 account for image tiles and
-  temporary tensors before materializing them. With CPU normalization enabled,
-  the Nano Nemotron VL estimate includes the largest full-resolution float32
-  source buffer.
+- Nano Nemotron VL estimates host-side image preprocessing. The CPU resize
+  path accounts for resized tiles, resize temporaries, and concatenation. It
+  includes the largest full-resolution float32 source buffer when CPU
+  normalization is enabled. The dynamic tiler charges the full-resolution
+  `uint8` images staged for upload when resizing on the device.
+- DeepSeek-VL2 and Molmo2 account for image tiles and temporary tensors before
+  materializing them.
 - DeepSeek-OCR and Unlimited-OCR account for all global views and local tiles
   in the document plus temporary buffers for one view. Size the limit for the
   page count and crop settings when serving long multi-page scans.

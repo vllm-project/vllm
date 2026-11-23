@@ -1213,14 +1213,8 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         # so we divide by 2 to get the maximum number of image pixels.
         video_max_pixels = video_size["longest_edge"]
 
-        # With the HF processor's per-frame pixel cap enabled
-        # (cap_pixels_per_frame, huggingface/transformers#48071), a 2-frame
-        # dummy is processed at only 2 * cap pixels, so memory profiling
-        # underestimates the largest possible item: a fully sampled video
-        # still reaches the whole longest_edge budget. Spread the budget
-        # over enough frames that the cap is not binding for the dummy.
-        # This takes precedence over a shrinking num_frames override, which
-        # would otherwise reintroduce the under-profiling.
+        # Spread the nominal video pixel budget over more frames when HF's
+        # per-frame cap can make a two-frame dummy smaller than a request.
         max_video_tokens = _get_max_video_tokens_per_frame(
             video_processor, video_mm_kwargs
         )
@@ -1229,10 +1223,8 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         ):
             patch_size = video_mm_kwargs.get("patch_size", video_processor.patch_size)
             merge_size = video_mm_kwargs.get("merge_size", video_processor.merge_size)
-            per_frame_cap = max(
-                max_video_tokens * (patch_size * merge_size) ** 2,
-                int(video_size["shortest_edge"] * 1.05),
-            )
+            # The shortest-edge floor can apply independently to every frame.
+            per_frame_cap = max(max_video_tokens * (patch_size * merge_size) ** 2, 1)
             target_num_frames = max(
                 target_num_frames,
                 min(video_processor.max_frames, cdiv(video_max_pixels, per_frame_cap)),
