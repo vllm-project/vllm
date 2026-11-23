@@ -32,6 +32,31 @@ def prompt_embeds_row_bytes(vllm_config: "VllmConfig") -> int:
     return model_config.get_inputs_embeds_size() * model_config.dtype.itemsize
 
 
+def prompt_embeds_budget_bytes(
+    vllm_config: "VllmConfig", max_model_len: int | None = None
+) -> int:
+    """GPU memory of the `prompt_embeds` rows the workers may hold, for
+    `max_model_len` (the configured one by default), or 0 without prompt
+    embeds."""
+    row_bytes = prompt_embeds_row_bytes(vllm_config)
+    if not row_bytes:
+        return 0
+    if max_model_len is None:
+        max_model_len = vllm_config.model_config.max_model_len
+    rows = prompt_embeds_budget_rows(max_model_len, vllm_config.scheduler_config)
+    return rows * row_bytes
+
+
+def prompt_embeds_freed_bytes(
+    vllm_config: "VllmConfig", old_max_model_len: int, new_max_model_len: int
+) -> int:
+    """GPU memory of the `prompt_embeds` rows a shorter `max_model_len` no
+    longer needs, or 0 without prompt embeds."""
+    return prompt_embeds_budget_bytes(
+        vllm_config, old_max_model_len
+    ) - prompt_embeds_budget_bytes(vllm_config, new_max_model_len)
+
+
 class PromptEmbedsBudget:
     """The `prompt_embeds` rows the workers hold on the GPU, against the
     `max_num_rows` that KV cache planning sets memory aside for.

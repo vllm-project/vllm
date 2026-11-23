@@ -30,6 +30,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.prompt_embeds_budget import prompt_embeds_row_bytes
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
     MambaManager,
@@ -833,6 +834,25 @@ def test_prompt_embeds_limit_follows_auto_fit_max_model_len():
     )
     with pytest.raises(RuntimeError, match="exceed the prompt_embeds budget"):
         state.add_request(0, new_req_data)
+
+
+def test_auto_fit_after_warmup_lowers_torch_cap_by_freed_prompt_embeds_rows(
+    gpu_model_runner_for_requests,
+):
+    """The torch cap set after warmup kept room for the prompt_embeds rows of
+    the provisional context. When the engine fits a shorter one, it gives the
+    rows it no longer needs to the KV cache, so torch must not grow into them."""
+    runner = gpu_model_runner_for_requests
+    runner.vllm_config.model_config.enable_prompt_embeds = True
+    row_bytes = prompt_embeds_row_bytes(runner.vllm_config)
+    caps: list[int | None] = []
+    runner.extensible_kv_cache = SimpleNamespace(
+        torch_memory_limit=1 << 30, set_torch_memory_limit=caps.append
+    )
+
+    runner.update_max_model_len(runner.max_model_len - 256)
+
+    assert caps == [(1 << 30) - 256 * row_bytes]
 
 
 def test_speculator_request_hooks(gpu_model_runner_for_requests):

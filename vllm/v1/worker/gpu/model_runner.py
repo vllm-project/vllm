@@ -84,6 +84,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.conf_compute_utils import install as install_conf_compute_copy_patches
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.core.sched.prompt_embeds_budget import prompt_embeds_freed_bytes
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import (
     DraftTokenIds,
@@ -388,6 +389,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         set_offloader(create_offloader(self.vllm_config.offload_config))
 
     def update_max_model_len(self, max_model_len: int) -> None:
+        # Set by initialize_kv_cache, after the auto-fit before warmup.
+        kv_cache = getattr(self, "extensible_kv_cache", None)
+        if kv_cache is not None and kv_cache.torch_memory_limit is not None:
+            # After warmup, torch's cap kept room for the prompt_embeds rows of
+            # the provisional context. The final context is shorter and needs
+            # fewer rows; the engine gave the rest to the KV cache, so lower
+            # the cap by that much.
+            freed_bytes = prompt_embeds_freed_bytes(
+                self.vllm_config, self.max_model_len, max_model_len
+            )
+            if freed_bytes > 0:
+                # Give the freed rows to the KV cache.
+                kv_cache.set_torch_memory_limit(
+                    kv_cache.torch_memory_limit - freed_bytes
+                )
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
         self.model_state.update_max_model_len(max_model_len)

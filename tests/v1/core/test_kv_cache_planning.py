@@ -2605,6 +2605,44 @@ def test_finalize_extensible_kv_cache_refits_auto_max_model_len():
     assert config.num_blocks == 9
 
 
+def test_finalize_extensible_kv_cache_refit_returns_prompt_embeds_rows():
+    """Workers measure after keeping prompt_embeds rows of the provisional
+    max_model_len free. When warmup forces a shorter context, the re-fit counts
+    KV and prompt_embeds bytes per token, and the rows the shorter context no
+    longer needs go back to the KV cache."""
+    from vllm.v1.worker.worker_base import CompilationTimes
+
+    spec = new_kv_cache_spec()
+    provisional_len = spec.block_size * 16
+    model_config = ModelConfig(max_model_len=provisional_len, enable_prompt_embeds=True)
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 32
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+    block_bytes = 2 * spec.page_size_bytes
+    row_bytes = prompt_embeds_row_bytes(vllm_config)
+    # 8 usable blocks were measured besides the null block, after the workers
+    # kept the provisional context's rows free.
+    measured_bytes = 8 * block_bytes + provisional_len * row_bytes
+
+    kv_cache_planning.finalize_extensible_kv_cache(
+        vllm_config, [config], scheduler_config, [CompilationTimes(0.0, 0.0, 9)]
+    )
+
+    max_len = vllm_config.model_config.max_model_len
+    # Longer than the 8 blocks a fit to KV bytes alone allows, and those blocks
+    # are in the cache.
+    assert spec.block_size * 8 < max_len < provisional_len
+    assert (config.num_blocks - 1) * spec.block_size >= max_len
+    assert (config.num_blocks - 1) * block_bytes + max_len * row_bytes <= (
+        measured_bytes
+    )
+
+
 @pytest.mark.parametrize("short", [True, False])
 def test_finalize_extensible_kv_cache_auto_max_model_len_warns_when_short(
     short, monkeypatch, caplog_vllm
