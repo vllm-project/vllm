@@ -128,11 +128,10 @@ import `vllm`. Start the server with `VLLM_SERVER_DEV_MODE=1` (and
 - **NCCL (separate GPUs)**: [NCCL wire contract](engines/nccl.md#trainer-without-vllm-over-http) · example [`rlhf_http_nccl_no_vllm.py`](../../../examples/rl/rlhf_http_nccl_no_vllm.py)
 - **IPC (colocated GPUs)**: [IPC wire contract](engines/ipc.md#trainer-without-vllm-over-http) · example [`rlhf_http_ipc_no_vllm.py`](../../../examples/rl/rlhf_http_ipc_no_vllm.py)
 
-Key invariants when driving the HTTP protocol directly:
+Key invariants when driving NCCL directly over HTTP:
 
-- **NCCL concurrency**: send `/init_weight_transfer_engine` and `/update_weights` in the background while the trainer joins/broadcasts on NCCL, otherwise both sides deadlock.
-- **NCCL warm-up**: immediately after init, issue a matching `all_reduce` (sum) of `torch.zeros(1)` (`float32`) before any weight broadcast.
-- **Failure recovery**: if `/update_weights` fails, `/health` remains 200 while `/finish_weight_update` is rejected; resend a full `/start_weight_update` → `/update_weights` → `/finish_weight_update` cycle before generating again.
+- **Concurrency**: send `/init_weight_transfer_engine` and `/update_weights` in the background while the trainer joins/broadcasts on NCCL, otherwise both sides deadlock.
+- **Warm-up**: immediately after init, issue a matching `all_reduce` (sum) of `torch.zeros(1)` (`float32`) before any weight broadcast.
 
 ## Where Each Setting Lives
 
@@ -199,7 +198,7 @@ and start from `tools/state_transition_verifier/README.md`.
 
 ## API Endpoints
 
-When running vLLM as an HTTP server, the following endpoints are available for weight transfer. `HTTPVLLMWeightSyncClient` speaks the first five for you. A trainer may also implement the protocol directly without importing vLLM: see the wire contracts in [NCCL](engines/nccl.md#trainer-without-vllm-over-http) and [IPC](engines/ipc.md#trainer-without-vllm-over-http). This keeps the trainer decoupled from vLLM: it needs no vLLM install or version pin, only this documented HTTP and wire contract, so trainer and server can upgrade independently (non-PyTorch trainers such as JAX can use it too).
+When running vLLM as an HTTP server, the following endpoints are available for weight transfer. `HTTPVLLMWeightSyncClient` speaks the first five for you, or a trainer can drive them directly without importing vLLM (see [Trainer Without Importing vLLM](#trainer-without-importing-vllm-http-only)).
 
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
