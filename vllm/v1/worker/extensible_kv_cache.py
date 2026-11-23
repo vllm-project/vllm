@@ -632,6 +632,7 @@ def measure_kv_cache_blocks(
     *,
     init_free_memory: int,
     requested_memory: int,
+    connector_reserved_bytes: int = 0,
 ) -> int:
     """Size an extensible KV cache from the memory free after warmup.
 
@@ -648,7 +649,8 @@ def measure_kv_cache_blocks(
     transient_peak = kv_cache.reserved_headroom_bytes
     measured = dict(
         init_free_memory=init_free_memory,
-        free_memory=free_memory,
+        # The connector's buffers are allocated after the final KV commit.
+        free_memory=free_memory - connector_reserved_bytes,
         committed_bytes=kv_cache.physical_bytes,
         transient_peak_bytes=transient_peak,
         torch_reserve_growth_bytes=kv_cache.torch_reserve_growth_bytes,
