@@ -9,16 +9,18 @@ import torch.nn as nn
 
 from vllm.model_executor.layers.draft_vocab import (
     DraftVocab,
+    draft_ids_to_target,
     load_draft_token_map,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.online.lm_head import (
-    _quantize_nvfp4,
     refresh_quantized_lm_heads,
 )
+from vllm.model_executor.layers.quantization.online.nvfp4 import _quantize_nvfp4
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import weight_amax
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -59,7 +61,8 @@ def test_pruned_head_maps_draft_ids_to_target_ids(default_vllm_config):
     logits = draft_vocab.compute_logits(head, hidden)
     assert torch.equal(logits[:, DRAFT_IDS], draft_vocab.logits_processor(head, hidden))
     assert torch.isinf(logits).sum() == hidden.shape[0] * (VOCAB - len(DRAFT_IDS))
-    assert torch.equal(draft_vocab.get_top_tokens(head, hidden), logits.argmax(-1))
+    top = draft_vocab.logits_processor.get_top_tokens(head, hidden)
+    assert torch.equal(draft_ids_to_target(top, d2t), logits.argmax(-1))
 
 
 requires_cuda = pytest.mark.skipif(
@@ -115,7 +118,10 @@ def test_token_map_logits_match_reference(
         return hidden.float() @ rows.t()
 
     expected = torch.full_like(out, float("-inf"))
-    expected[:, :TM_STATIC] = nvfp4_logits(*_quantize_nvfp4(head.weight[:TM_STATIC]))
+    static = head.weight[:TM_STATIC]
+    expected[:, :TM_STATIC] = nvfp4_logits(
+        *_quantize_nvfp4(static, weight_amax(static))
+    )
     if dynamic_rows:
         picked = out[:, TM_STATIC:].isfinite()
         assert torch.all(picked.sum(dim=-1) == dynamic_rows)

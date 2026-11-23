@@ -13,3 +13,5 @@ class Gemma4MTPSpeculatorConfig(MTPSpeculatorConfig):
         "draft_token_map_static_rows",
         "draft_token_map_dynamic_rows",
     }
+    # The Q-only drafter reads the target's KV and writes none of its own.
+    draft_kv_depends_on_lookahead = False

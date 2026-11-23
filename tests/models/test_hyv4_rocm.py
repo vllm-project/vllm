@@ -94,7 +94,6 @@ def test_hyv4_dummy_generation(
     """Exercise prefill, decode, and batch consistency with dummy HY weights."""
     with vllm_runner(
         "tencent/Hy4-preview",
-        trust_remote_code=True,
         skip_tokenizer_init=True,
         load_format="dummy",
         disable_log_stats=not mtp,
@@ -157,7 +156,6 @@ def test_hyv4_defaults_to_breakable_graphs(
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
     with vllm_runner(
         "tencent/Hy4-preview",
-        trust_remote_code=True,
         skip_tokenizer_init=True,
         load_format="dummy",
         dtype="bfloat16",

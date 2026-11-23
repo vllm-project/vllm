@@ -54,17 +54,25 @@ def test_get_draft_quant_config_without_draft_model():
     assert result is None
 
 
+@pytest.fixture
+def default_device(device):
+    original = torch.get_default_device()
+    torch.set_default_device(device)
+    yield
+    torch.set_default_device(original)
+
+
 @torch.inference_mode()
 @pytest.mark.parametrize("device", DEVICES)
-def test_fc_layer_quant_config_usage(default_vllm_config, dist_init, device) -> None:
+def test_fc_layer_quant_config_usage(
+    default_vllm_config, dist_init, device, default_device
+) -> None:
     import torch
 
     from vllm.model_executor.layers.linear import ReplicatedLinear
 
     if current_platform.is_cuda_alike():
         torch.accelerator.set_device_index(device)
-
-    torch.set_default_device(device)
 
     input_size = 256
     output_size = 128

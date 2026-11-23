@@ -25,6 +25,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8StaticChannelSym,
+    weight_amax,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -172,11 +173,7 @@ class DraftVocab:
         if self.num_static_rows:
             return self._token_map_logits(hidden_states).argmax(dim=-1)
         top = self.logits_processor.get_top_tokens(lm_head, hidden_states)
-        return self.map_draft_to_target(top)
-
-    def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
-        """Target ids of draft-vocabulary ids from the pruned lm_head."""
-        return draft_ids_to_target(draft_ids, self.draft_id_to_target_id)
+        return draft_ids_to_target(top, self.draft_id_to_target_id)
 
     def load_token_map(
         self, lm_head: VocabParallelEmbedding, static_rows: int, dynamic_rows: int
@@ -242,13 +239,13 @@ class DraftVocab:
         projected on the top right singular vectors of the lm_head (the top
         eigenvectors of `W^T W`), so `(x @ basis) @ scorer[i]` approximates the
         logit of row `i`."""
-        from vllm.model_executor.layers.quantization.online.lm_head import (
+        from vllm.model_executor.layers.quantization.online.nvfp4 import (
             _quantize_nvfp4,
         )
 
         weight = self.head.weight[: self.head.org_vocab_size]
         rows = weight[self.num_static_rows :]
-        packed, scales, global_scale = _quantize_nvfp4(rows)
+        packed, scales, global_scale = _quantize_nvfp4(rows, weight_amax(rows))
         self.nvfp4 = (packed, scales, global_scale.reshape(1))
         gram = weight.new_zeros(weight.shape[1], weight.shape[1], dtype=torch.float32)
         for block in weight.split(_CHUNK):
