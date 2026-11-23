@@ -953,13 +953,12 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk():
     assert {4, 5} <= coordinator.request_states[request.request_id].pinned_clean
 
 
-@pytest.mark.parametrize("reserved_blocks,admitted", [(0, True), (1, False)])
-def test_hisparse_reclaim_must_fund_full_sequence(reserved_blocks, admitted):
+@pytest.mark.parametrize("shared_pages,admitted", [((), True), ((0,), False)])
+def test_hisparse_reclaim_must_fund_full_sequence(shared_pages, admitted):
     """Reclaim must cover the full-sequence deficit, not just the next chunk.
 
     With 10 blocks free, the next chunk is 4 blocks short and the full sequence
-    12. Exactly 12 resident blocks are reclaimable, so reserving one block for
-    another request must reject admission.
+    12. Sharing page 0 leaves 9 reclaimable blocks, enough for the chunk only.
     """
     manager = make_hisparse_kv_cache_manager(
         35,
@@ -975,16 +974,19 @@ def test_hisparse_reclaim_must_fund_full_sequence(reserved_blocks, admitted):
     request.num_computed_tokens = 6 * HISPARSE_BLOCK_SIZE
     _publish_hisparse_pages(manager)
     coordinator = get_hisparse_coordinator(manager)
+    for resident in coordinator.resident_managers:
+        manager.block_pool.touch(
+            resident.get_residency_pages(request.request_id, shared_pages)
+        )
     for hot in coordinator.hot_managers:
         hot.require_hot(request.request_id)
     assert manager.block_pool.get_num_free_blocks() == 10
-    assert coordinator.get_num_reclaimable_blocks(request.request_id) == 12
+    assert coordinator.get_num_reclaimable_blocks(request.request_id) == 12 - 3 * len(
+        shared_pages
+    )
 
     blocks = manager.allocate_slots(
-        request,
-        2 * HISPARSE_BLOCK_SIZE,
-        full_sequence_must_fit=True,
-        reserved_blocks=reserved_blocks,
+        request, 2 * HISPARSE_BLOCK_SIZE, full_sequence_must_fit=True
     )
 
     assert (blocks is not None) == admitted
@@ -1307,6 +1309,11 @@ def _finish_hisparse_step(scheduler, output, sampled_tokens):
 
 @pytest.mark.parametrize("resume_tokens", [64, 80])
 def test_hisparse_streaming_resume_under_pressure(tmp_path, resume_tokens):
+    """A resumed streaming chunk funds Hot by reclaiming its own resident pages.
+
+    Without reclaim the chunk waits for free blocks that only its own pinned
+    pages can provide, and the request stalls.
+    """
     scheduler = _hot_transition_scheduler(tmp_path, max_num_batched_tokens=160)
 
     def chunk(tokens):
@@ -1347,8 +1354,8 @@ def test_hisparse_streaming_resume_under_pressure(tmp_path, resume_tokens):
     _finish_hisparse_step(
         scheduler, output, {req_id: [7] for req_id in output.num_scheduled_tokens}
     )
-    if "B" not in output.num_scheduled_tokens:
-        assert scheduler.schedule().num_scheduled_tokens["B"] == 1
+    assert "B" not in output.num_scheduled_tokens
+    assert scheduler.schedule().num_scheduled_tokens["B"] == 1
 
 
 def test_hisparse_async_admission_fits_beside_inflight_import(tmp_path):

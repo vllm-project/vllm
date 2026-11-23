@@ -196,7 +196,7 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
-        self.try_preallocate: Callable[[str, int, int, bool], bool] | None = None
+        self.try_preallocate: Callable[[str, int, int], bool] | None = None
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers
@@ -610,18 +610,13 @@ class KVCacheManager:
         required_blocks = num_blocks_to_allocate + watermark_blocks
         deficit = required_blocks - available_blocks
         if full_sequence_shortfall > 0:
-            deficit = max(deficit, full_sequence_shortfall + reserved_blocks)
+            deficit = max(deficit, full_sequence_shortfall)
         if deficit > 0 and (
             self.try_preallocate is None
             or not self.try_preallocate(
                 request.request_id,
                 deficit,
                 available_blocks - watermark_blocks,
-                bool(
-                    num_new_computed_tokens
-                    or num_external_computed_tokens
-                    or any(new_computed_block_list)
-                ),
             )
         ):
             return None

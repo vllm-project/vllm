@@ -504,12 +504,9 @@ class HiSparseCoordinator:
         request_id: str,
         shortfall: int,
         available: int,
-        has_new_computed_kv: bool,
     ) -> bool:
         """Fund this allocation only if Hot fits and reclaim covers the shortfall."""
-        # Computed KV must be attached before any group grows. Empty groups
-        # without new computed tokens can come from a retained streaming request.
-        if has_new_computed_kv or not self.resident_managers:
+        if not self.resident_managers:
             return False
         upfront = 0
         for manager in self.hot_managers:

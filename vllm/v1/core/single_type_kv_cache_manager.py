@@ -3237,7 +3237,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         self.hot_required.discard(request_id)
-        self.preallocated.pop(request_id, None)
+        assert request_id not in self.preallocated
         return super().pop_blocks_for_free(request_id)
 
 
