@@ -236,6 +236,7 @@ mod tests {
                 files,
                 Arc::new(qwen3_vl_tokenizer()),
                 std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
             )
         };
 
