@@ -1824,13 +1824,10 @@ class DeepseekV2ForCausalLM(
             dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim)
         )
 
+        self.packed_modules_mapping = dict(self.packed_modules_mapping)
         if self.use_mha:
             self.packed_modules_mapping["qkv_proj"] = ["q_proj", "k_proj", "v_proj"]
 
-        # `packed_modules_mapping` needs to be modified before
-        # initializing DeepseekV2Model, as it is passed inplace to
-        # quantization config init and may be used to select the
-        # quant_method for relevant layers during initialization.
         self.fuse_qkv_a_proj = (
             hasattr(config, "q_lora_rank") and config.q_lora_rank is not None
         )
@@ -1839,6 +1836,14 @@ class DeepseekV2ForCausalLM(
                 "q_a_proj",
                 "kv_a_proj_with_mqa",
             ]
+
+        # The quant config selects each layer's quant method from this mapping
+        # while the backbone is built.
+        if quant_config is not None:
+            quant_config.packed_modules_mapping = {
+                **quant_config.packed_modules_mapping,
+                **self.packed_modules_mapping,
+            }
 
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")

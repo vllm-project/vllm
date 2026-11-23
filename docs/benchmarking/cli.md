@@ -1601,6 +1601,26 @@ vllm bench serve \
 
 </details>
 
+### Decisions Benchmark
+
+To benchmark [structured decisions](../models/structured_decisions_models.md), set
+`--backend vllm-systemone --endpoint /v1/systemone` or
+`--backend openai-decisions --endpoint /v1/decisions` with a dataset that produces
+one text prompt per request, such as `random` or `custom` JSONL. The matching
+`--endpoint` is required; the default `/v1/completions` is not supported.
+Batched prompts (`--random-batch-size > 1`) are rejected. Concurrent requests
+are supported.
+
+These backends send plain text and let the server apply the chat template.
+Client-side templating is skipped automatically; `--skip-chat-template` is not required.
+
+Each prompt is sent as the state with one choice, one yes/no and one score
+question; pass `--extra-body '{"questions": ...}'` to override these questions
+for every request. Results report latency, throughput and input-token usage,
+with each question counted as one input, as for embeddings. This benchmark
+does not evaluate decision accuracy or load per-item questions and labels from
+decision datasets.
+
 ### Reranker Benchmark
 
 Benchmark the performance of rerank requests in vLLM.
@@ -1686,3 +1706,36 @@ roughly every 100 ms, although this cadence varies by GPU and driver.
 Without this flag, NVML is not initialized and
 the result schema is unchanged. Async, HF, and MII backends are not supported
 by this option.
+
+## Startup Benchmark
+
+By default, `vllm bench startup` times engine construction. To measure how
+long a new server takes to answer its first request, pass the full server
+command, including its engine arguments, to `--serve-cmd`.
+
+```bash
+vllm bench startup --serve-cmd 'vllm serve Qwen/Qwen3-0.6B --port 8100' \
+  --num-iters-cold 1 --num-iters-warmup 1 --num-iters-warm 3 \
+  --output-json startup.json
+```
+
+Each iteration launches a fresh server on the specified address, which must
+be idle. Both clocks start at launch. One stops at the first successful
+`/health` poll, the other at the first non-empty text in a streamed completion.
+A start verifies when the completion finishes normally and its text and token
+IDs (when returned) match the first completed start. A healthy server can
+fail verification if it returns only empty text or EOS, lacks the
+`/v1/completions` endpoint, or tunes kernels differently across starts and
+flips a near-tie between tokens. The benchmark then exits with status 1.
+The per-iteration JSON retains the observed timings. Only verified starts
+contribute to the summaries.
+
+Shutdown sends SIGTERM to the root process. If it fails to exit within 30
+seconds, the benchmark marks the iteration failed and skips later starts.
+It sends SIGKILL to the process group to clear any remaining workers.
+
+Cold starts use empty `VLLM_CACHE_ROOT`, TorchInductor and Triton caches.
+Other libraries' caches follow the environment. Warmup and warm starts reuse
+the caller's caches. `--server-ready-timeout` defaults to 1800 seconds to
+allow for a large model's first start. With `--output-json`, each iteration
+records the path to its server log. Otherwise the server writes to the terminal.

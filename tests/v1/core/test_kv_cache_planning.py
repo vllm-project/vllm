@@ -41,6 +41,7 @@ from vllm.v1.core.kv_cache_planning import (
     check_enough_kv_cache_memory,
     estimate_max_model_len,
     get_kv_cache_groups,
+    get_pipeline_stages,
     kv_cache_groups_tp_replicas,
 )
 from vllm.v1.core.kv_cache_utils import (
@@ -791,6 +792,29 @@ def test_project_kv_cache_groups_to_worker():
         "layer1": layer_a.spec,
         "layer3": layer_a.spec,
     }
+
+
+def test_pipeline_stages_describe_every_stage():
+    """Every worker learns each PP stage's block size in bytes, draft layers on
+    the last stage included."""
+    layer = new_kv_cache_layer()
+    stage0 = {"layer0": layer, "layer1": layer}
+    stage1 = {
+        "layer2": layer,
+        "layer3": layer,
+        "draft.layer0": replace(layer, is_draft=True),
+    }
+    # Two TP ranks per stage.
+    layer_configs = [stage0, stage0, stage1, stage1]
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=512))
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    vllm_config.parallel_config.pipeline_parallel_size = 2
+    kv_cache_configs = get_kv_cache_configs(vllm_config, layer_configs, [2**30] * 4)
+
+    stages = get_pipeline_stages(vllm_config, kv_cache_configs)
+
+    page = kv_cache_planning._get_layer_block_stride(layer.spec)
+    assert [stage.bytes_per_block for stage in stages] == [2 * page, 3 * page]
 
 
 @pytest.mark.parametrize("stage_layers", [["other"], ["mixed_mla", "attn1"]])
@@ -2268,8 +2292,6 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
         draft_model_config=SimpleNamespace(
             hf_config=SimpleNamespace(), architectures=[]
         ),
-        use_eagle=lambda: True,
-        use_dflash=lambda: method == "dflash",
         use_dspark=lambda: method == "dspark",
         use_multi_module_mtp=lambda: False,
         parallel_drafting=False,
