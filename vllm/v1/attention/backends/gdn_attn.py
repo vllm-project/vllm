@@ -347,7 +347,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
-        aligned_state_indices = getattr(self, "mamba_aligned_state_indices", None)
+        aligned_state_indices = m.mamba_working_state_indices
+        if aligned_state_indices is None:
+            aligned_state_indices = getattr(self, "mamba_aligned_state_indices", None)
         if aligned_state_indices is not None:
             block_table_tensor = aligned_state_indices[: m.num_reqs]
         else:

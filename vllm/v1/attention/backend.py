@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
@@ -463,6 +463,12 @@ class CommonAttentionMetadata:
     """(batch_size,) bool tensor: True if request is still in prefill phase
     (num_computed_tokens < num_prompt_tokens). Used by some backends to
     distinguish actual decodes from short extends."""
+
+    mamba_working_state_indices: torch.Tensor | None = field(default=None, kw_only=True)
+    """Physical state slots selected for the full step, in local request order."""
+
+    skip_mamba_prefill_checkpoints: bool = field(default=False, kw_only=True)
+    """The full step reserved no internal checkpoint; don't plan from a slice."""
 
     seq_lens_cpu_upper_bound: torch.Tensor | None = None
     """(batch_size,) CPU upper bound on seq_lens. Precise for prefill rows

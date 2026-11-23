@@ -1775,6 +1775,13 @@ class Scheduler(SchedulerInterface):
             ),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             has_sync_kv_loads=has_sync_kv_loads,
+            has_mamba_prefill_checkpoint=(
+                self.parallel_config.use_ubatching
+                and self.has_mamba_layers
+                and self.kv_cache_manager.has_mamba_prefill_checkpoint(
+                    num_scheduled_tokens.keys()
+                )
+            ),
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,

@@ -1930,6 +1930,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
 
+        hybrid_dbo = (
+            self.ubatch_runner is not None and self.kv_cache_config.has_mamba_layers
+        )
         batch_desc, dp_sync_state = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,
@@ -1942,7 +1945,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_active_loras=num_active_loras,
             parallel_config=self.parallel_config,
             allow_ubatching=(
-                self.ubatch_runner is not None and not skip_attn_for_dummy_run
+                self.ubatch_runner is not None
+                and not skip_attn_for_dummy_run
+                and not scheduler_output.has_mamba_prefill_checkpoint
+                and not (hybrid_dbo and dummy_run)
             ),
             uniform_decode=uniform_tok_count == self.decode_query_len,
             allow_skip_drafts=scheduler_output.skip_drafts,

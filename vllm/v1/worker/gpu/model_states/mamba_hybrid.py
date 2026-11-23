@@ -37,7 +37,13 @@ from vllm.v1.worker.mamba_utils import (
     validate_mamba_state_copy_funcs,
 )
 from vllm.v1.worker.replayssm_utils import initialize_replayssm_ring_trackers
+from vllm.v1.worker.ubatch_utils import UBatchSlices
 from vllm.v1.worker.utils import AttentionGroup
+
+
+@dataclass
+class MambaUBatchAttnInputs(ModelSpecificAttnMetadata):
+    working_state_indices: dict[int, torch.Tensor]
 
 
 @dataclass
@@ -45,11 +51,18 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    ubatch_inputs: MambaUBatchAttnInputs | None = None
 
     def get_extra_common_attn_kwargs(
         self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
-        return {"is_prefilling": self.is_prefilling[:num_reqs]}
+        kwargs: dict[str, Any] = {"is_prefilling": self.is_prefilling[:num_reqs]}
+        if self.ubatch_inputs is not None:
+            kwargs["skip_mamba_prefill_checkpoints"] = True
+            kwargs["mamba_working_state_indices"] = (
+                self.ubatch_inputs.working_state_indices.get(kv_cache_group_id)
+            )
+        return kwargs
 
     def get_extra_attn_kwargs(
         self, attn_metadata_builder: Any, num_reqs: int
@@ -226,6 +239,42 @@ class MambaHybridModelState(DefaultModelState):
             input_batch.idx_mapping,
         )
 
+    def _gather_aligned_state_indices(
+        self, seq_lens: torch.Tensor, num_reqs: int
+    ) -> dict[int, torch.Tensor]:
+        """Gather the full step's working slots keyed by KV cache group ID."""
+        mamba_ctx = self._mamba_ctx
+        assert mamba_ctx is not None
+        indices = mamba_ctx.compute_aligned_state_indices(seq_lens, num_reqs)
+        return dict(zip(mamba_ctx.mamba_group_ids, indices.unbind(0), strict=True))
+
+    def prepare_ubatch_attn_inputs(
+        self,
+        input_batch: InputBatch,
+        ubatch_slices: UBatchSlices,
+    ) -> list[ModelSpecificAttnMetadata]:
+        if not self.prefix_caching:
+            # The sliced compact tables already name the same working slot.
+            return [MambaUBatchAttnInputs({}) for _ in ubatch_slices]
+
+        # FULL decode includes padded request rows, whose tables contain null
+        # blocks. Use the full table so every captured row has an index.
+        full_indices = self._gather_aligned_state_indices(
+            input_batch.seq_lens, input_batch.num_reqs_after_padding
+        )
+        # Empty eager slices use the runner's dummy table for state lookup.
+        return [
+            MambaUBatchAttnInputs(
+                {}
+                if ubatch_slice.is_empty()
+                else {
+                    group_id: indices[ubatch_slice.request_slice]
+                    for group_id, indices in full_indices.items()
+                },
+            )
+            for ubatch_slice in ubatch_slices
+        ]
+
     def prepare_attn(
         self,
         input_batch: InputBatch,
@@ -238,8 +287,11 @@ class MambaHybridModelState(DefaultModelState):
         ubatch_idx: int = 0,
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
-        assert ubatch_idx == 0, "DBO is not supported"
-        assert model_specific_attn_metadata is None
+        ubatch_inputs = model_specific_attn_metadata
+        if ubatch_inputs is None:
+            assert ubatch_idx == 0
+        else:
+            assert isinstance(ubatch_inputs, MambaUBatchAttnInputs)
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding
@@ -300,26 +352,41 @@ class MambaHybridModelState(DefaultModelState):
             )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
-        if self.prefix_caching:
+        if self.prefix_caching and ubatch_inputs is None:
             ctx = self._mamba_ctx
             assert ctx is not None
             aligned_index_builders = []
-            for group_idx, group_id in enumerate(ctx.mamba_group_ids):
+            for group_id in ctx.mamba_group_ids:
                 for group in attn_groups[group_id]:
                     builder = group.get_metadata_builder(0)
                     if hasattr(builder, "mamba_aligned_state_indices"):
-                        aligned_index_builders.append((group_idx, builder))
+                        aligned_index_builders.append((group_id, builder))
             if aligned_index_builders:
-                all_group_indices = ctx.compute_aligned_state_indices(
+                full_indices = self._gather_aligned_state_indices(
                     input_batch.seq_lens, num_reqs
                 )
-                for group_idx, builder in aligned_index_builders:
-                    builder.mamba_aligned_state_indices = all_group_indices[group_idx]
+                for group_id, builder in aligned_index_builders:
+                    builder.mamba_aligned_state_indices = full_indices[group_id]
+        elif (
+            self.prefix_caching
+            and ubatch_inputs is not None
+            and not ubatch_inputs.working_state_indices
+        ):
+            # Padding-only eager microbatches have their own null block rows.
+            ctx = self._mamba_ctx
+            assert ctx is not None
+            ubatch_inputs = MambaUBatchAttnInputs(
+                {
+                    group_id: block_tables[group_id][:num_reqs, :1]
+                    for group_id in ctx.mamba_group_ids
+                }
+            )
 
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            ubatch_inputs=ubatch_inputs,
         )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
@@ -339,6 +406,7 @@ class MambaHybridModelState(DefaultModelState):
             model_specific_attn_metadata=mamba_attn_metadata,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+            ubatch_idx=ubatch_idx,
         )
         if self._use_replayssm_trackers:
             self._replayssm_query_start_loc = None

@@ -22,6 +22,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.ubatch_utils import UBatchSlices
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -245,6 +246,18 @@ class ModelState(ABC):
     @abstractmethod
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         raise NotImplementedError
+
+    def prepare_ubatch_attn_inputs(
+        self,
+        input_batch: InputBatch,
+        ubatch_slices: UBatchSlices,
+    ) -> list[ModelSpecificAttnMetadata] | None:
+        """Prepare per-ubatch inputs from the unsliced batch.
+
+        A state returning inputs receives them as `model_specific_attn_metadata`
+        in its `prepare_attn` implementation.
+        """
+        return None
 
     @abstractmethod
     def prepare_attn(

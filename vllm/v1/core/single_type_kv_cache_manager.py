@@ -3,7 +3,7 @@
 import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -2148,6 +2148,11 @@ class MambaManager(SingleTypeKVCacheManager):
                 if blocks[last_state_block_idx] != self._null_block:
                     self.block_pool.free_blocks([blocks[last_state_block_idx]])
                     blocks[last_state_block_idx] = self._null_block
+
+    def has_prefill_checkpoint(self, request_ids: Collection[str]) -> bool:
+        return self.has_prefill_checkpoint_blocks and not (
+            self._checkpoints.keys().isdisjoint(request_ids)
+        )
 
     def _needs_internal_checkpoint(
         self,

@@ -539,6 +539,8 @@ def test_checkpoint_metadata_preserves_non_spec_order(
     torch.testing.assert_close(
         actual.checkpoint.state_indices, torch.tensor(slots, dtype=torch.int32)
     )
+    fragment_metadata = common.replace(skip_mamba_prefill_checkpoints=True)
+    assert builder.build(0, fragment_metadata, **kwargs).checkpoint is None
 
 
 @pytest.mark.parametrize("num_spec", [0, 3])

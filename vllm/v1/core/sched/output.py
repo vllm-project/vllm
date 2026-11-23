@@ -304,6 +304,9 @@ class SchedulerOutput:
     # synchronously during this step (load_async=False).
     has_sync_kv_loads: bool = False
 
+    # Whether this step reserved an internal Mamba prefill checkpoint.
+    has_mamba_prefill_checkpoint: bool = field(default=False, kw_only=True)
+
     # Execution-auxiliary output control metadata consumed by the worker connector.
     aux_output_connector_metadata: AuxOutputConnectorMetadata | None = None
 

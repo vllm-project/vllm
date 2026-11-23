@@ -2867,6 +2867,10 @@ def test_checkpoint_reservation_matches_worker(
             num_hash_lookahead_tokens=lookahead,
         )
         reserved = mamba_manager._checkpoints.get(request.request_id)
+        assert manager.has_mamba_prefill_checkpoint([request.request_id]) == (
+            reserved is not None
+        )
+        assert not manager.has_mamba_prefill_checkpoint(["unscheduled"])
         if reserved is not None:
             assert reserved == (start + offsets[0], cols[0])
             assert retention_interval is None or end >= prefill_end

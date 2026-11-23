@@ -474,13 +474,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         is_flush_d = None
         replayssm_scratch = None
 
-        state_indices_tensor = mamba_get_block_table_tensor(
-            common_attn_metadata.block_table_tensor,
-            common_attn_metadata.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.enable_prefix_caching,
-            self.num_speculative_blocks,
-        )
+        state_indices_tensor = common_attn_metadata.mamba_working_state_indices
+        if state_indices_tensor is None:
+            state_indices_tensor = mamba_get_block_table_tensor(
+                common_attn_metadata.block_table_tensor,
+                common_attn_metadata.seq_lens,
+                self.kv_cache_spec,
+                self.vllm_config.cache_config.enable_prefix_caching,
+                self.num_speculative_blocks,
+            )
 
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)
