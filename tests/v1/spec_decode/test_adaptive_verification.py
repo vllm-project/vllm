@@ -343,6 +343,16 @@ def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
     assert num_non_draft_tokens == {"low": 1, "high": 1}
 
 
+def test_invalid_stale_confidence_does_not_hide_other_requests():
+    manager = make_manager(
+        np.array([[np.nan, np.nan], [0.9, 0.9]], dtype=np.float32), np.ones(7)
+    )
+    num_tokens = manager.get_num_tokens(
+        {"low": 3, "high": 3}, {"low": [0, 0], "high": [0, 0]}
+    )
+    assert num_tokens == 4  # Two target tokens and two drafts with positive survival.
+
+
 def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):
     manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
     manager.req_states = SimpleNamespace(max_num_batched_tokens=4096, max_num_reqs=64)
@@ -509,6 +519,18 @@ def test_draft_budget_kernel_matches_global_topk(num_steps, num_reqs):
             confidence_probs, idx_mapping, scheduled, draft_budget
         )
         assert torch.equal(capacities, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(("budget", "expected"), [(1, [1, 0]), (6, [5, 1])])
+def test_invalid_live_confidence_preserves_draft_budget(budget, expected):
+    confidence = torch.tensor([[0.3] * 5, [float("nan")] * 5], device="cuda")
+    capacities = torch.full((2,), 5, dtype=torch.int32, device="cuda")
+    survival = torch.empty(10, dtype=torch.int32, device="cuda")
+    assign_draft_token_budget(
+        confidence, torch.arange(2, device="cuda"), capacities, budget, survival
+    )
+    assert capacities.tolist() == expected
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
