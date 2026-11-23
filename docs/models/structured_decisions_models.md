@@ -475,10 +475,15 @@ vllm serve baselabs/bison-1 --tensor-parallel-size 2
   `/v1/chat/completions` still takes images, with stock Gemma 4 attention: the
   full attention layers are causal and the sliding window layers are
   bidirectional over each image.
-- Only the `TRITON_ATTN` attention backend is supported for full attention,
-  and it is selected automatically. KV transfer connectors,
-  `--kv-offloading-size`, speculative decoding, context parallelism,
-  micro-batching, `--prefix-match-unit`, `--scheduler-cls` and
+- The attention backend is selected automatically. On Hopper the full
+  attention layers run on `FLASH_ATTN` (FlashAttention 4) and on Blackwell on
+  `FLASHINFER` (trtllm-gen kernels), and the sliding window layers on the
+  backend stock Gemma 4 uses. Elsewhere, and for an fp32 model or a quantized
+  KV cache, `TRITON_ATTN` runs all layers; pass `--attention-backend
+  TRITON_ATTN` to select it. No other backend is supported for full
+  attention. KV transfer connectors, `--kv-offloading-size`, speculative
+  decoding, context parallelism, micro-batching, `--prefix-match-unit`,
+  `--scheduler-cls` and
   `--disable-hybrid-kv-cache-manager` are refused. Without the hybrid KV cache
   manager, the sliding window layers would share the full attention layers'
   KV cache group and get their bidirectional blocks.

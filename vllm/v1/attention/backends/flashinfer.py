@@ -78,6 +78,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
+from vllm.v1.attention.backends.doc_range_segments import build_doc_range_segments
 from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
     get_dcp_local_seq_lens,
@@ -126,7 +127,7 @@ _MM_PREFIX_READS_SWIZZLED_V_SF = (
 
 def _native_mm_prefix(vllm_config: VllmConfig | None) -> bool:
     """Whether FlashInfer serves this model's mm-prefix ranges itself; on SM100
-    only when FLASHINFER is selected explicitly."""
+    only when FLASHINFER is selected explicitly, globally or per kind."""
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     if vllm_config is None or vllm_config.model_config is None:
@@ -145,7 +146,11 @@ def _native_mm_prefix(vllm_config: VllmConfig | None) -> bool:
         )
         and (
             not current_platform.is_device_capability_family(100)
-            or vllm_config.attention_config.backend == AttentionBackendEnum.FLASHINFER
+            or AttentionBackendEnum.FLASHINFER
+            in (
+                vllm_config.attention_config.backend,
+                *vllm_config.attention_config.backend_per_kind.values(),
+            )
         )
     )
 
@@ -936,6 +941,9 @@ class TRTLLMPrefill:
     token_causal: torch.Tensor | None = None
     """Per-token causal flags (mixed-causal only)."""
 
+    causal: bool = True
+    """False runs the context call dense."""
+
 
 @dataclass(slots=True)
 class FlashInferTrtllmAPIDecode:
@@ -1276,6 +1284,25 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.mm_prefix_query_ranges is not None and (self.logits_soft_cap or 0) > 0:
             raise NotImplementedError(
                 "FlashInfer mm-prefix does not support logits_soft_cap"
+            )
+        layers = vllm_config.compilation_config.static_forward_context
+        self.use_doc_segments = all(
+            getattr(layers[name], "doc_range_segments", False) for name in layer_names
+        )
+        # trtllm-gen has paged dense and causal context kernels at every head
+        # size, H512 included, for pages of up to 64 tokens.
+        if self.use_doc_segments and not (
+            current_platform.is_device_capability_family(100)
+            and not self.has_sinks
+            and not (self.logits_soft_cap or 0)
+            and self.page_size <= 64
+            and self.q_data_type_prefill != FP8_DTYPE
+            and can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
+        ):
+            raise ValueError(
+                "PrefixLM blocks run as FlashInfer varlen segments only on SM100, "
+                "with trtllm-gen, pages of up to 64 tokens, no sinks, no soft cap "
+                "and an unquantized query"
             )
         capability = current_platform.get_device_capability()
         arch = f"sm{capability.major}{capability.minor}" if capability else "unknown"
@@ -1780,6 +1807,61 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_last_page_len.copy_to_gpu(num_reqs)
         return paged_kv_indices
 
+    def _build_doc_segments(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> FlashInferMetadata:
+        """The step as one trtllm-gen context prefill over its segments."""
+        ranges = common_attn_metadata.mm_req_doc_ranges
+        assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+        num_reqs = common_attn_metadata.num_reqs
+        num_tokens = common_attn_metadata.num_actual_tokens
+        segments = build_doc_range_segments(
+            ranges,
+            common_attn_metadata.query_start_loc_cpu,
+            common_attn_metadata.seq_lens_cpu_upper_bound,
+            common_attn_metadata.seq_lens,
+            common_attn_metadata.block_table_tensor,
+            num_reqs,
+        )
+        num_segments = segments.seqused_k.shape[0]
+        # trtllm-gen reads cum_seq_lens_kv in pages, as paged_kv_indptr.
+        cum_pages = torch.zeros(num_segments + 1, dtype=torch.int32, device=self.device)
+        torch.cumsum(
+            (segments.seqused_k + self.page_size - 1) // self.page_size,
+            dim=0,
+            out=cum_pages[1:],
+        )
+        token_causal = None
+        if isinstance(segments.causal, torch.Tensor):
+            # A causal and a dense call, picked per token in forward().
+            q_lens = segments.cu_seqlens_q[1:] - segments.cu_seqlens_q[:-1]
+            token_causal = torch.repeat_interleave(
+                segments.causal.bool(), q_lens, output_size=num_tokens
+            )
+        return FlashInferMetadata(
+            kv_cache_layout=self.kv_cache_layout,
+            num_actual_tokens=num_tokens,
+            slot_mapping=common_attn_metadata.slot_mapping,
+            q_data_type_prefill=self.q_data_type_prefill,
+            q_data_type_decode=self.q_data_type_decode,
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_prefills=num_segments,
+            num_prefill_tokens=num_tokens,
+            causal=True,
+            prefill=TRTLLMPrefill(
+                block_tables=segments.block_table,
+                seq_lens=segments.seqused_k,
+                cum_seq_lens_q=segments.cu_seqlens_q,
+                cum_seq_lens_kv=cum_pages,
+                max_q_len=segments.max_seqlen_q,
+                max_seq_len=segments.max_seqlen_k,
+                token_causal=token_causal,
+                causal=segments.causal is not False,
+            ),
+            decode=None,
+        )
+
     def build(
         self,
         common_prefix_len: int,
@@ -1789,6 +1871,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         causal = common_attn_metadata.causal
+        ranges = common_attn_metadata.mm_req_doc_ranges
+        if self.use_doc_segments and ranges and any(ranges.values()):
+            return self._build_doc_segments(common_attn_metadata)
         dynamic_causal = isinstance(causal, torch.Tensor)
         assert not dynamic_causal or self.vllm_config.diffusion_config is not None
         # Defensive: no mixed-causal model passes multimodal ranges yet.
@@ -2993,6 +3078,7 @@ class FlashInferImpl(AttentionImpl):
                 run_context(
                     variable_window_token_starts=variable_window_starts,
                     variable_window_token_ends=variable_window_ends,
+                    causal=attn_metadata.prefill.causal,
                     out=out,
                 )
                 if token_causal is not None:

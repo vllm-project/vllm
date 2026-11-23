@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.single_type_kv_cache_manager import get_kv_cache_kind
@@ -126,6 +127,14 @@ class Gemma4SlotDecisionModelState(PrefixLMBlocksMixin, DefaultModelState):
 
 
 class Gemma4ForSlotDecision(Gemma4ForConditionalGeneration):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        text_model = self.language_model.model
+        layer_types = vllm_config.model_config.hf_text_config.layer_types
+        for i in range(text_model.start_layer, text_model.end_layer):
+            if layer_types[i] == "full_attention":
+                text_model.layers[i].self_attn.attn.doc_range_segments = True
+
     @staticmethod
     def get_model_state_cls() -> type[Gemma4SlotDecisionModelState]:
         return Gemma4SlotDecisionModelState

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
     from vllm.config import CacheConfig, ModelConfig, VllmConfig
     from vllm.config.cache import MambaDType
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 logger = init_logger(__name__)
@@ -1783,7 +1784,9 @@ def _verify_slot_overrides(
 
 
 def _verify_prefix_lm_serving(
-    vllm_config: "VllmConfig", model_unsupported: dict[str, object] | None = None
+    vllm_config: "VllmConfig",
+    model_unsupported: dict[str, object] | None = None,
+    segments_backend: "AttentionBackendEnum | None" = None,
 ) -> None:
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -1814,18 +1817,20 @@ def _verify_prefix_lm_serving(
             f"{model_config.architecture} does not support {', '.join(features)}"
         )
 
-    # Triton attention applies the PrefixLM ranges to every request. A
-    # per-kind backend wins over the global one, as in the selector.
+    # Triton applies the PrefixLM ranges in every layer, segments_backend in the
+    # full-attention ones. A per-kind backend wins, as in the selector.
     attention_config = vllm_config.attention_config
-    if attention_config.backend is None:
-        attention_config.backend = AttentionBackendEnum.TRITON_ATTN
-    backend = attention_config.backend_per_kind.get(
-        "full_attention", attention_config.backend
-    )
-    if backend != AttentionBackendEnum.TRITON_ATTN:
+    triton = AttentionBackendEnum.TRITON_ATTN
+    supported = [triton] if segments_backend is None else [triton, segments_backend]
+    backend = attention_config.backend_per_kind.get("full_attention")
+    if attention_config.backend is None and backend in (None, triton):
+        attention_config.backend = triton
+    backend = backend or attention_config.backend
+    if backend not in supported:
         raise ValueError(
-            f"{model_config.architecture} needs the TRITON_ATTN attention "
-            f"backend for full attention, not {backend.name}"
+            f"{model_config.architecture} needs the "
+            f"{' or '.join(b.name for b in supported)} attention backend for "
+            f"full attention, not {backend.name}"
         )
 
     # Each prompt is prefilled from its cache hit in one step, or waits.
@@ -1886,6 +1891,65 @@ class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
         _verify_prefix_lm_serving(vllm_config)
 
 
+def _doc_segments_backend(vllm_config: "VllmConfig") -> "AttentionBackendEnum | None":
+    """The backend that runs the full layers' PrefixLM blocks as varlen segments."""
+    import torch
+
+    from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    model_config = vllm_config.model_config
+    text_config = model_config.hf_text_config
+    cache_config = vllm_config.cache_config
+    if (
+        cache_config.cache_dtype != "auto"
+        or model_config.dtype not in (torch.float16, torch.bfloat16)
+        or getattr(text_config, "attn_logit_softcapping", None)
+        or not current_platform.is_cuda()
+    ):
+        return None
+    full_layers = [
+        model_config.model_arch_config[i]
+        for i, layer_type in enumerate(text_config.layer_types)
+        if layer_type == "full_attention"
+    ]
+    if current_platform.is_device_capability_family(90):
+        if vllm_config.attention_config.flash_attn_version not in (None, 4) or not (
+            is_fa_version_supported(4)
+        ):
+            return None
+        backend = AttentionBackendEnum.FLASH_ATTN
+    elif current_platform.is_device_capability_family(100):
+        from vllm.utils.flashinfer import has_flashinfer, supports_trtllm_attention
+
+        if (
+            not has_flashinfer()
+            or vllm_config.attention_config.use_trtllm_attention is False
+            or not supports_trtllm_attention(is_prefill=True)
+            or any(
+                layer.total_num_attention_heads % layer.total_num_kv_heads
+                for layer in full_layers
+            )
+        ):
+            return None
+        # trtllm-gen runs H512 contexts on pages of up to 64 tokens.
+        if cache_config.user_specified_block_size and cache_config.block_size > 64:
+            return None
+        backend = AttentionBackendEnum.FLASHINFER
+    else:
+        return None
+    backend_cls = backend.get_class()
+    if not all(
+        backend_cls.supports_head_size(layer.head_size) for layer in full_layers
+    ):
+        return None
+    if cache_config.user_specified_block_size and not backend_cls.supports_block_size(
+        cache_config.block_size
+    ):
+        return None
+    return backend
+
+
 class Gemma4ForSlotDecisionConfig(Gemma4Config):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1909,9 +1973,17 @@ class Gemma4ForSlotDecisionConfig(Gemma4Config):
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-        # Triton applies the PrefixLM ranges. Set it before the Gemma 4 hook.
+        # Set before the Gemma 4 hook, which otherwise picks its own backend. With
+        # segments, the platform picks the sliding layers' backend, as for Gemma 4.
         attention_config = vllm_config.attention_config
-        if attention_config.backend is None:
+        segments_backend = _doc_segments_backend(vllm_config)
+        if (
+            segments_backend is not None
+            and attention_config.backend is None
+            and not attention_config.backend_per_kind
+        ):
+            attention_config.backend_per_kind = {"full_attention": segments_backend}
+        elif attention_config.backend is None:
             attention_config.backend = AttentionBackendEnum.TRITON_ATTN
         Gemma4Config.verify_and_update_config(vllm_config)
         scheduler_config = vllm_config.scheduler_config
@@ -1923,6 +1995,7 @@ class Gemma4ForSlotDecisionConfig(Gemma4Config):
                     scheduler_config.disable_hybrid_kv_cache_manager
                 ),
             },
+            segments_backend,
         )
         # vLLM then raises instead of turning the hybrid KV cache manager off.
         scheduler_config.disable_hybrid_kv_cache_manager = False

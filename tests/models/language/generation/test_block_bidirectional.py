@@ -25,6 +25,7 @@ from vllm.model_executor.models.gemma4_slot import Gemma4SlotDecisionModelState
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.core.sched.prefix_lm_scheduler import PREFIX_LM_LEN
@@ -98,12 +99,15 @@ def hf_logprobs(path: str, prompts: dict, prefix_len: int) -> list[dict]:
         return [{q: run(p, b) for q, p in prompts.items()} for b in (True, False)]
 
 
-def build_tiny_gemma4_checkpoint(path: str, moe: bool = False) -> None:
+def build_tiny_gemma4_checkpoint(
+    path: str, moe: bool = False, head_dims: tuple[int, int] = (64, 128)
+) -> None:
     """A random four-layer Gemma4ForSlotDecision, dense or MoE."""
     from transformers import AutoProcessor, Gemma4ForConditionalGeneration
 
     torch.manual_seed(0)
-    model = Gemma4ForConditionalGeneration(tiny_gemma4_config(moe)).to(torch.float32)
+    config = tiny_gemma4_config(moe, head_dims=head_dims)
+    model = Gemma4ForConditionalGeneration(config).to(torch.float32)
     # As for Qwen; the full layers have K = V, so no v_proj.
     with torch.no_grad():
         for name, param in model.named_parameters():
@@ -178,12 +182,83 @@ def test_gemma4_block_attention_matches_transformers(
     )
 
 
+# Where the full layers run the PrefixLM blocks as varlen segments.
+SEGMENTS = (
+    AttentionBackendEnum.FLASH_ATTN
+    if current_platform.is_device_capability_family(90)
+    else AttentionBackendEnum.FLASHINFER
+    if current_platform.is_device_capability_family(100)
+    else AttentionBackendEnum.TRITON_ATTN
+)
+
+
+@pytest.mark.parametrize(
+    "engine_args,backend",
+    [
+        ({}, SEGMENTS),
+        ({"attention_backend": "TRITON_ATTN"}, AttentionBackendEnum.TRITON_ATTN),
+        # FlashAttention and FlashInfer run fp16 and bf16 only.
+        ({"dtype": "float32"}, AttentionBackendEnum.TRITON_ATTN),
+        # FA4 non-causal attention on an SM90 FP8 KV cache is inaccurate.
+        ({"kv_cache_dtype": "fp8"}, AttentionBackendEnum.TRITON_ATTN),
+    ],
+    ids=["default", "triton", "fp32", "fp8_kv_cache"],
+)
+def test_gemma4_full_attention_backend(tmp_path, engine_args, backend):
+    config = make_vllm_config(tmp_path, head_dims=(256, 512), **engine_args)
+    attention_config = config.attention_config
+    full = attention_config.backend_per_kind.get(
+        "full_attention", attention_config.backend
+    )
+    assert full == backend
+
+
+@pytest.mark.skipif(
+    SEGMENTS == AttentionBackendEnum.TRITON_ATTN,
+    reason="PrefixLM blocks run as varlen segments on SM90 and SM100 only",
+)
+def test_gemma4_segments_block_attention_matches_transformers(vllm_runner, tmp_path):
+    """As above, with the checkpoints' head sizes and the full layers on varlen
+    segments, held to Triton in fp16, whose rounding moves the reads past ATOL."""
+    checkpoint = str(tmp_path)
+    build = partial(build_tiny_gemma4_checkpoint, head_dims=(256, 512))
+    prefix, questions, expected, wrong = block_attention_references(
+        checkpoint, build, gemma4_hf_logprobs
+    )
+    reads = partial(vllm_reads, vllm_runner, checkpoint, False, prefix, questions)
+    segments = reads("float16")
+    triton = reads("float16", attention_backend="TRITON_ATTN")
+    for name, got in segments.items():
+        reference = reference_of(name, expected, wrong[0])
+        error = (got - reference).abs().max().item()
+        triton_error = (triton[name] - reference).abs().max().item()
+        assert error < triton_error + ATOL, (name, error, triton_error)
+        if name != "q0 causal":
+            for other in wrong:
+                q = name.split()[0]
+                assert error + 5 * ATOL < (got - other[q]).abs().max().item(), name
+
+
 def check_block_attention(
     vllm_runner, checkpoint: str, enforce_eager, build, reference, dtype="bfloat16"
 ):
-    from vllm import SamplingParams
-    from vllm.inputs import TokensPrompt
+    prefix, questions, expected, wrong = block_attention_references(
+        checkpoint, build, reference
+    )
+    reads = vllm_reads(vllm_runner, checkpoint, enforce_eager, prefix, questions, dtype)
+    for name, got in reads.items():
+        error = (got - reference_of(name, expected, wrong[0])).abs().max().item()
+        assert error < ATOL, (name, error)
 
+
+def reference_of(name: str, expected: dict, causal: dict) -> torch.Tensor:
+    """The reference of a read named by vllm_reads."""
+    return causal["q0"] if name == "q0 causal" else expected[name.split()[0]]
+
+
+def block_attention_references(checkpoint: str, build, reference):
+    """The prompts and their references, block-masked first, which the other
+    masks must move."""
     build(checkpoint)
     g = torch.Generator().manual_seed(1)
 
@@ -198,14 +273,24 @@ def check_block_attention(
         "q1": prefix + shared + tokens(50),
         "q2": prefix + shared + tokens(50),
     }
-    p = len(prefix)
-    expected, *wrong = reference(checkpoint, questions, p)
-    causal = wrong[0]
+    expected, *wrong = reference(checkpoint, questions, len(prefix))
     torch.accelerator.empty_cache()
     for q in questions:
         # The mask must matter, or the comparison proves nothing.
         for other in wrong:
             assert (other[q] - expected[q]).abs().max() > 5 * ATOL, q
+    return prefix, questions, expected, wrong
+
+
+def vllm_reads(
+    vllm_runner, checkpoint, enforce_eager, prefix, questions, dtype, **engine_args
+) -> dict[str, torch.Tensor]:
+    """The reads of a vLLM run by name: each question, "q0 causal" and, with
+    prefix caching, "q1 cached" and so on."""
+    from vllm import SamplingParams
+    from vllm.inputs import TokensPrompt
+
+    p = len(prefix)
 
     def params(prefix_len: int | None) -> SamplingParams:
         return SamplingParams(
@@ -214,6 +299,10 @@ def check_block_attention(
             logprob_token_ids=list(range(NUM_SCORED)),
             extra_args=None if prefix_len is None else {"prefix_lm_len": prefix_len},
         )
+
+    def logprobs(out) -> torch.Tensor:
+        lp = out.outputs[0].logprobs[0]
+        return torch.tensor([lp[t].logprob for t in range(NUM_SCORED)])
 
     # Room for every prompt in one step, so the reads share a batch.
     with vllm_runner(
@@ -225,6 +314,7 @@ def check_block_attention(
         enforce_eager=enforce_eager,
         gpu_memory_utilization=0.4,
         limit_mm_per_prompt={"image": 0, "video": 0},
+        **engine_args,
     ) as runner:
         llm = runner.llm
         vllm_config = llm.llm_engine.vllm_config
@@ -243,31 +333,25 @@ def check_block_attention(
             [params(p)] * len(questions) + [params(None)],
             use_tqdm=False,
         )
-        references = [*expected.values(), causal["q0"]]
-
-        def check(name: str, out, reference) -> None:
-            logprobs = out.outputs[0].logprobs[0]
-            got = torch.tensor([logprobs[t].logprob for t in range(NUM_SCORED)])
-            error = (got - reference).abs().max().item()
-            assert error < ATOL, (name, error)
-
-        for args in zip([*questions, "q0 causal"], outputs, references):
-            check(*args)
+        reads = {
+            name: logprobs(out) for name, out in zip([*questions, "q0 causal"], outputs)
+        }
 
         if not prefix_caching:
-            return
+            return reads
         # The prefix alone, as the strategy's warm-up sends it. The questions
         # then reuse its cache, and never past it: q1 and q2 share 40 more
         # tokens, and q2 comes twice.
         llm.generate(TokensPrompt(prompt_token_ids=prefix), params(p), use_tqdm=False)
-        for name in ("q1", "q2", "q2"):
+        for name in ("q1 cached", "q2 cached", "q2 cached again"):
             (out,) = llm.generate(
-                TokensPrompt(prompt_token_ids=questions[name]),
+                TokensPrompt(prompt_token_ids=questions[name.split()[0]]),
                 params(p),
                 use_tqdm=False,
             )
-            check(f"{name} cached", out, expected[name])
+            reads[name] = logprobs(out)
             assert 0 < (out.num_cached_tokens or 0) <= p, out.num_cached_tokens
+    return reads
 
 
 SLIDING, FULL = "model.layers.0.self_attn.attn", "model.layers.1.self_attn.attn"

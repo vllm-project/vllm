@@ -27,6 +27,10 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
+from vllm.v1.attention.backends.doc_range_segments import (
+    DocRangeSegments,
+    build_doc_range_segments,
+)
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_kv_cache_dtype,
     flash_attn_supports_quant_query_input,
@@ -117,6 +121,8 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         use_batch_lookup: bool
         variant: str
         seqlen_k_capacity: int
+        # "causal", or "noncausal" or "dynamic" for document-range segments.
+        mask: str = "causal"
 
     @staticmethod
     def kernel(*args: Any, **kwargs: Any) -> Any:
@@ -140,6 +146,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         is_static_persistent: bool = True,
         use_batch_lookup: bool = False,
         variant: str = "",
+        mask: str = "causal",
     ) -> CompileKey:
         return self.CompileKey(
             q_stage=q_stage,
@@ -162,6 +169,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             use_batch_lookup=use_batch_lookup,
             variant=variant,
             seqlen_k_capacity=seqlen_k_capacity,
+            mask=mask,
         )
 
     def get_warmup_keys(
@@ -171,6 +179,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         kv_cache_spec: AttentionSpec,
         num_qo_heads: int,
         window_size: tuple[int, int],
+        doc_segments: bool = False,
     ) -> list[CompileKey]:
         capability = current_platform.get_device_capability()
         major = capability.major if capability is not None else None
@@ -193,6 +202,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         single_batches = WarmupChoices(False)
         split_counts = WarmupChoices(1)
         batch_lookups = WarmupChoices(False)
+        masks = WarmupChoices("causal")
         seqlen_k_capacity = FA4_DENSE_MAX_SEQLEN_K
         if major in (10, 11) and (8 <= head_dim <= 128 or head_dim == 256):
             from vllm.vllm_flash_attn.cute.interface import BIN_BATCH_SEARCH_THRESH
@@ -241,6 +251,8 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             # combine specializes at 32/64/128/256 splits.
             q_tiles = zip_inputs(dict(q_stage=1, is_static_persistent=True, variant=""))
             split_counts = WarmupChoices(1, 32, 64, 128, 256)
+            if doc_segments:
+                masks = WarmupChoices("causal", "noncausal", "dynamic")
         else:
             return []
 
@@ -250,7 +262,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             num_splits=split_counts,
             use_batch_lookup=batch_lookups,
             # SplitKV schedules with a tile semaphore, not the batch lookup.
-            _when=lambda *, num_splits, use_batch_lookup, variant: (
+            _when=lambda *, num_splits, use_batch_lookup, variant, mask: (
                 (
                     (num_splits > 1) == (variant == "long_kv")
                     or variant in ("", "decode")
@@ -259,6 +271,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
                     not use_batch_lookup
                     or (num_splits == 1 and variant in ("", "packed_tile"))
                 )
+                and (mask == "causal" or num_splits == 1)
             ),
             dtype=vllm_config.model_config.dtype,
             num_qo_heads=num_qo_heads,
@@ -268,6 +281,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             window_size=WarmupChoices(window_size),
             softcap=softcap,
             seqlen_k_capacity=seqlen_k_capacity,
+            mask=masks,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -342,7 +356,10 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             ),
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
-            causal=True,
+            causal=compile_key.mask != "noncausal",
+            dynamic_causal_shape=(
+                (batch_size,) if compile_key.mask == "dynamic" else None
+            ),
             window_size=[
                 (max_seqlen_k if compile_key.variant == "long_kv" else 1)
                 if compile_key.has_window_left
@@ -650,6 +667,8 @@ class FlashAttentionMetadata:
     # (-1, -1) for query tokens outside every multimodal range.
     mm_prefix_query_range_tensor: torch.Tensor | None = None
 
+    doc_segments: DocRangeSegments | None = None
+
     # Reference Sliding Window Attention (R-SWA) fields.
     # rswa_prefix_lens:  per-request prompt lengths [num_reqs], int32, CUDA.
     # rswa_window:       sliding window size (scalar int, for logic checks).
@@ -808,6 +827,19 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         )
         self.aot_schedule = fa_version == 3
 
+        layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+        self.use_doc_segments = bool(layers) and all(
+            getattr(layer, "doc_range_segments", False) for layer in layers.values()
+        )
+        # FA4's per-sequence causal flag, which mixed batches need, is SM90 only.
+        if self.use_doc_segments and not (
+            fa_version == 4 and current_platform.is_device_capability_family(90)
+        ):
+            raise ValueError(
+                "PrefixLM blocks run as FlashAttention varlen segments on SM90 "
+                f"with FA4 only, not FA{fa_version} on this GPU"
+            )
+
         if vllm_config.kernel_config.enable_jit_warmup and fa_version == 4:
             window_sizes = {
                 getattr(layer.impl, "sliding_window", None)
@@ -821,6 +853,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     kv_cache_spec=kv_cache_spec,
                     num_qo_heads=self.num_heads_q,
                     window_size=window_sizes.pop() or (-1, -1),
+                    doc_segments=self.use_doc_segments,
                 )
 
         self.dcp_world_size, self.dcp_rank = get_dcp_world_size_and_rank(
@@ -1077,7 +1110,18 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         # multimodal tokens with bidirectional ranges.  Built for every FA
         # group; Gemma4 nulls the field for its non-sliding layers.
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
-        if mm_ranges is not None and self.mm_prefix_query_ranges_np is not None:
+        if self.use_doc_segments and mm_ranges and any(mm_ranges.values()):
+            # The upper bound is exact for the prefill rows that carry ranges.
+            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+            attn_metadata.doc_segments = build_doc_range_segments(
+                mm_ranges,
+                common_attn_metadata.query_start_loc_cpu,
+                common_attn_metadata.seq_lens_cpu_upper_bound,
+                seq_lens,
+                block_table_tensor,
+                num_reqs,
+            )
+        elif mm_ranges is not None and self.mm_prefix_query_ranges_np is not None:
             # The upper bound is exact for prefill rows, which is where
             # mm_prefix ranges live; decode rows only ever get an optimistic
             # (larger) context, moving them further past every range.
@@ -1408,6 +1452,30 @@ class FlashAttentionImpl(AttentionImpl):
                 q_descale=q_descale,
                 k_descale=k_descale,
                 v_descale=v_descale,
+            )
+            return output
+        elif (segments := attn_metadata.doc_segments) is not None:
+            causal = segments.causal
+            dynamic_causal = causal if isinstance(causal, torch.Tensor) else None
+            _FA4_DENSE_ATTENTION_KERNEL(
+                q=query[:num_actual_tokens],
+                k=key_cache,
+                v=value_cache,
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=segments.cu_seqlens_q,
+                max_seqlen_q=segments.max_seqlen_q,
+                seqused_k=segments.seqused_k,
+                max_seqlen_k=segments.max_seqlen_k,
+                softmax_scale=self.scale,
+                causal=dynamic_causal is not None or causal is True,
+                alibi_slopes=self.alibi_slopes,
+                window_size=None,
+                block_table=segments.block_table,
+                softcap=self.logits_soft_cap,
+                fa_version=self.vllm_flash_attn_version,
+                dynamic_causal=dynamic_causal,
+                num_splits=attn_metadata.max_num_splits,
+                s_aux=self.sinks,
             )
             return output
         else:
