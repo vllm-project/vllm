@@ -320,6 +320,7 @@ class TestNCCLEngineParsing:
 
         monkeypatch.setattr(reload_mod, "plan_loads", logged_plan_loads)
         engine = self._make_engine()
+        engine.model._ckpt_param_names = frozenset()  # as a direct cold start records
         engine.init_transfer_engine(
             NCCLWeightTransferInitInfo(
                 master_address="127.0.0.1",
@@ -383,7 +384,8 @@ class TestNCCLEngineParsing:
             nccl_engine_mod, "worker_init_process_group", lambda info, pc: group
         )
         model = _module_with(("w", torch.arange(6.0).view(2, 3)))
-        record_checkpoint_layout(model)
+        if refusal == "eplb":  # a layerwise cold start records no layout
+            record_checkpoint_layout(model)
         model.w.data = model.w.data.t()  # post-load processing re-laid it out
         if refusal == "eplb":
             parallel = SimpleNamespace(enable_eplb=True)
@@ -394,7 +396,7 @@ class TestNCCLEngineParsing:
             torch.device("cpu"),
             model,
         )
-        match = "VLLM_RELOAD_MODE=direct" if refusal == "layerwise" else "EPLB"
+        match = "reloads layerwise" if refusal == "layerwise" else "EPLB"
         with pytest.raises(RuntimeError, match=match):
             engine.init_transfer_engine(
                 NCCLWeightTransferInitInfo(
@@ -1788,6 +1790,65 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
         engine.receive_weights(update_info)
 
 
+def _packed_ipc_engine(monkeypatch, bufs: list[torch.Tensor]):
+    """A packed IPC worker engine whose handle `(i, ...)` rebuilds to
+    `bufs[i]`."""
+    import vllm.distributed.weight_transfer.packed_tensor as packed_mod
+    import vllm.model_executor.model_loader.reload as reload_mod
+
+    monkeypatch.setattr(packed_mod, "rebuild_cuda_tensor", lambda *a: bufs[a[0]])
+    monkeypatch.setattr(reload_mod, "start_reload", lambda model: None)
+    monkeypatch.setattr(reload_mod, "finish_reload", lambda *args: None)
+    model = MagicMock(spec=torch.nn.Module)
+    model.load_weights = MagicMock()
+    engine = IPCWeightTransferEngine(
+        WeightTransferConfig(backend="ipc"),
+        create_mock_vllm_config(),
+        torch.device("cuda:0"),
+        model,
+    )
+    engine.init_transfer_engine(IPCWeightTransferInitInfo(packed=True))
+    return engine, model
+
+
+def _packed_ipc_chunk(handle: dict, names: list[str], n: int, last: bool = False):
+    return IPCWeightTransferUpdateInfo(
+        names=names,
+        dtype_names=["float32"] * len(names),
+        shapes=[[n]] * len(names),
+        ipc_handles=handle,
+        chunk_capacity=16 if handle else None,
+        last=last,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_packed_ipc_handle_once_and_cut_short_transfer_raises(monkeypatch):
+    """Only each transfer's first chunk carries the handle; finishing before
+    the last chunk raises."""
+    bufs = [
+        torch.arange(k, k + 4, dtype=torch.float32, device="cuda:0").view(torch.uint8)
+        for k in (0, 4)
+    ]
+    engine, model = _packed_ipc_engine(monkeypatch, bufs)
+    uuid = str(torch.cuda.get_device_properties(0).uuid)
+    starts = [_packed_ipc_chunk({uuid: (k, *range(7))}, ["w"], 8) for k in (0, 1)]
+    rest = _packed_ipc_chunk({}, [], 8, last=True)  # each transfer has 2 chunks
+
+    engine.start_weight_update()
+    for start in starts:
+        engine.receive_weights(start)
+        engine.receive_weights(rest)
+    engine.finish_weight_update()
+    loaded = [a[0][0][1].tolist() for a, _ in model.load_weights.call_args_list]
+    assert loaded == [[0, 1, 2, 3] * 2, [4, 5, 6, 7] * 2]
+
+    engine.start_weight_update()
+    engine.receive_weights(starts[0])
+    with pytest.raises(RuntimeError, match="before its last chunk"):
+        engine.finish_weight_update()
+
+
 class RecordingClient:
     """A fake VLLMWeightSyncClient that records the order of calls."""
 
@@ -2442,6 +2503,45 @@ def test_nccl_trainer_sends_metadata_only_when_changed():
     engine.source = ModuleSource(_module_with(("w", torch.zeros(8, device="cuda"))))
     engine.send_weights()
     assert client.last_update_info["shapes"] == [[8]]
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 1,
+    reason="Need at least 1 GPU (NCCL broadcast / CUDA stream).",
+)
+def test_nccl_trainer_resends_metadata_after_a_failed_update():
+    """The workers keep the metadata of an update whose finish failed (a
+    partial update a direct reload refuses): the next update must send its
+    own metadata, not reuse the one before the failed update."""
+
+    class FailingFinish(RecordingClient):
+        fail = False
+
+        def finish_weight_update(self, weight_version=None):
+            super().finish_weight_update(weight_version)
+            if self.fail:
+                raise RuntimeError("refused")
+
+    def source(*names):
+        pairs = [(n, torch.zeros(4, device="cuda")) for n in names]
+        return ModuleSource(_module_with(*pairs))
+
+    client = FailingFinish()
+    engine = NCCLTrainerWeightTransferEngine(
+        client=client, source=source("v", "w"), packed=False
+    )
+    engine.model_update_group = MagicMock(rank=0)
+
+    engine.send_weights()  # full
+    engine.source, client.fail = source("w"), True  # partial, refused
+    with pytest.raises(RuntimeError, match="refused"):
+        engine.send_weights()
+    assert client.last_update_info is not None
+    assert client.last_update_info["names"] == ["w"]
+    engine.source, client.fail = source("v", "w"), False  # full again
+    engine.send_weights()
+    assert client.last_update_info is not None
+    assert client.last_update_info["names"] == ["v", "w"]
 
 
 def test_nccl_worker_reuses_metadata_per_model(monkeypatch):

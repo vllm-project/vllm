@@ -149,12 +149,17 @@ impl Error {
             | Self::ToolChoiceFunctionNotFound { .. }
             | Self::ToolReferenceNotFound { .. }
             | Self::AllToolsDeferred
+            | Self::ParserUnavailableForModel { .. }
             | Self::ParserDisabled { .. }
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate
             | Self::UnsupportedRequestChatTemplate
             | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => true,
             Self::Text(error) => error.is_request_validation_error(),
+            Self::OutputGrammar { error } => matches!(
+                error.downcast_ref(),
+                Some(vllm_parser::output_grammar::OutputGrammarError::UnsupportedRequest(_))
+            ),
             Self::MediaAfterPreprocessed { source, .. } => source.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
