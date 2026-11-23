@@ -49,6 +49,11 @@ RUN mkdir -p /app
 WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 
+# apt retries a transient failure (e.g. a deadsnakes PPA 503) only 3 times
+# by default, about 100 s in all; ride out longer outages.
+RUN printf 'Acquire::Retries "10";\nAcquire::Retries::Delay::Maximum "60";\n' \
+    > /etc/apt/apt.conf.d/80-retries
+
 # Install Python and other dependencies
 RUN apt-get update -y \
     && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev libnuma-dev libdrm-dev pkg-config g++ \

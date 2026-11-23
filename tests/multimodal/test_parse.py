@@ -6,6 +6,7 @@ import torch
 from PIL import Image
 
 from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageProcessorItems,
@@ -225,6 +226,27 @@ def test_parse_video_frame_list_as_single_video(frames):
     video = items.get(0)
     assert isinstance(video, np.ndarray)
     np.testing.assert_array_equal(video, np.stack([np.asarray(f) for f in frames]))
+
+
+@pytest.mark.parametrize("mode", ["L", "LA", "RGBA", "P"])
+@pytest.mark.parametrize("with_metadata", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_parse_video_converts_pil_frames_to_rgb(mode, with_metadata):
+    """PIL video frames are converted to RGB like PIL images."""
+    rng = np.random.default_rng(0)
+    channels = {"L": (), "LA": (2,), "RGBA": (4,), "P": (3,)}[mode]
+    frames = [
+        Image.fromarray(rng.integers(0, 256, (H, W, *channels), dtype=np.uint8))
+        for _ in range(2)
+    ]
+    if mode == "P":
+        frames = [frame.convert("P") for frame in frames]
+    data = (frames, {"fps": 1.0}) if with_metadata else frames
+
+    parsed = MultiModalDataParser().parse_mm_data({"video": data})["video"].get(0)
+
+    expected = [convert_image_mode(frame, "RGB") for frame in frames]
+    np.testing.assert_array_equal(np.array(parsed), np.array(expected))
 
 
 @pytest.mark.parametrize(
