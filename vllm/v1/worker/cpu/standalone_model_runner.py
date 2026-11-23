@@ -452,6 +452,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         randomize_inputs: bool = False,
         num_active_loras: int | None = None,
+        allow_skip_drafts: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if skip_attn and not is_profile:
             raise ValueError(

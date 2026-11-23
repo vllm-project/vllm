@@ -252,3 +252,19 @@ def test_scheduler_passes_max_num_seqs_as_dsd_runtime_batch_limit():
     assert len(scheduler.dynamic_sd_lookup) == 17
     assert len(output.num_scheduled_tokens) == 16
     assert output.num_spec_tokens_to_schedule == 3
+    assert not output.skip_drafts
+
+
+def test_dynamic_sd_zero_k_sets_skip_drafts():
+    """Selecting K=0 via dynamic SD must also set `skip_drafts=True`."""
+    scheduler = _make_scheduler_with_dynamic_sd(
+        [(1, 2, 3), (3, 16, 0)],
+        max_num_seqs=8,
+        max_num_batched_tokens=256,
+        runtime_num_speculative_tokens=3,
+    )
+    output = _add_requests_and_schedule(scheduler, 4)
+
+    assert len(output.num_scheduled_tokens) == 4
+    assert output.num_spec_tokens_to_schedule == 0
+    assert output.skip_drafts
