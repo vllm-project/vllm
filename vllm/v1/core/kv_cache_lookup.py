@@ -4,7 +4,8 @@
 
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from itertools import groupby
+from typing import TYPE_CHECKING, Protocol, Self
 
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -15,20 +16,20 @@ from vllm.v1.core.kv_cache_utils import (
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_coordinator import KVCacheCoordinator
 
+# Read-only sentinel block used during admission capacity checks for CPU load
+# positions (`block_id < 0`, `ref_cnt == 0`, `not is_null`). Never inserted
+# into any block pool.
+_CPU_LOAD_PLACEHOLDER = KVCacheBlock(block_id=-1)
+
 
 def iter_true_runs(flags: Iterable[bool], start: int = 0) -> Iterator[tuple[int, int]]:
     """Yield contiguous `[run_start, run_end)` spans where `flags` are True."""
-    run_start: int | None = None
     index = start
-    for flag in flags:
-        if flag and run_start is None:
-            run_start = index
-        elif not flag and run_start is not None:
-            yield run_start, index
-            run_start = None
-        index += 1
-    if run_start is not None:
-        yield run_start, index
+    for flag, run in groupby(flags):
+        run_len = sum(1 for _ in run)
+        if flag:
+            yield index, index + run_len
+        index += run_len
 
 
 class CacheLookup(Protocol):
@@ -43,6 +44,8 @@ class CacheLookup(Protocol):
 class JointCacheLookup:
     """Prefer GPU independently for each group, memoizing physical lookups."""
 
+    __slots__ = ("gpu", "cpu", "hash_block_size", "null_block", "_hits")
+
     def __init__(self, gpu: BlockPool, cpu: BlockPool):
         self.gpu = gpu
         self.cpu = cpu
@@ -53,15 +56,18 @@ class JointCacheLookup:
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
-        result = []
+        result: list[KVCacheBlock] = []
+        hits = self._hits
         for group in kv_cache_group_ids:
             key = (block_hash, group)
-            if key not in self._hits:
-                hit = self.gpu.get_cached_block(block_hash, [group])
-                if hit is None:
-                    hit = self.cpu.get_cached_block(block_hash, [group])
-                self._hits[key] = hit[0] if hit is not None else None
-            block = self._hits[key]
+            if key in hits:
+                block = hits[key]
+            else:
+                found = self.gpu.get_cached_block(
+                    block_hash, [group]
+                ) or self.cpu.get_cached_block(block_hash, [group])
+                block = found[0] if found else None
+                hits[key] = block
             if block is None:
                 return None
             result.append(block)
@@ -99,7 +105,7 @@ class JointCacheHit:
         num_request_tokens: int | None = None,
         *,
         allow_partial_cpu_hits: bool = False,
-    ) -> "JointCacheHit":
+    ) -> Self:
         def _is_cpu(block: KVCacheBlock) -> bool:
             return block.pool is not None and block.pool() is lookup.cpu
 
@@ -147,34 +153,36 @@ class JointCacheHit:
     def needs_load(self) -> bool:
         return self.num_cpu_tokens > 0
 
+    def _partition_blocks(self) -> tuple[list[KVCacheBlock], list[KVCacheBlock]]:
+        by_pool: tuple[list[KVCacheBlock], list[KVCacheBlock]] = ([], [])
+        for group in self.blocks:
+            for hit in group:
+                if not hit.block.is_null:
+                    by_pool[hit.is_cpu].append(hit.block)
+        return by_pool
+
     def pin(self) -> None:
         assert not self.pinned
-        for pool, is_cpu in ((self.lookup.gpu, False), (self.lookup.cpu, True)):
-            pool.touch(
-                [
-                    hit.block
-                    for group in self.blocks
-                    for hit in group
-                    if not hit.block.is_null and hit.is_cpu == is_cpu
-                ]
-            )
+        gpu_blocks, cpu_blocks = self._partition_blocks()
+        if gpu_blocks:
+            self.lookup.gpu.touch(gpu_blocks)
+        if cpu_blocks:
+            self.lookup.cpu.touch(cpu_blocks)
         self.pinned = True
 
     def release(self) -> None:
         if not self.pinned:
             return
-        for pool, is_cpu in ((self.lookup.gpu, False), (self.lookup.cpu, True)):
-            pool.free_blocks(
-                hit.block
-                for group in self.blocks
-                for hit in group
-                if not hit.block.is_null and hit.is_cpu == is_cpu
-            )
+        gpu_blocks, cpu_blocks = self._partition_blocks()
+        if gpu_blocks:
+            self.lookup.gpu.free_blocks(gpu_blocks)
+        if cpu_blocks:
+            self.lookup.cpu.free_blocks(cpu_blocks)
         self.pinned = False
 
     def allocation_blocks(self) -> tuple[list[KVCacheBlock], ...]:
         """Use unowned placeholders only for the allocator's capacity check."""
         return tuple(
-            [KVCacheBlock(block_id=-1) if hit.is_cpu else hit.block for hit in group]
+            [_CPU_LOAD_PLACEHOLDER if hit.is_cpu else hit.block for hit in group]
             for group in self.blocks
         )

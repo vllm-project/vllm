@@ -286,12 +286,11 @@ class SingleTypeKVCacheManager(ABC):
         )
 
     def _is_reused_partial_tail(self, request_id: str, num_tokens: int) -> bool:
-        reused = self._joint_cache_reused_partial_tail.get(request_id)
-        if reused is None:
+        if (reused := self._joint_cache_reused_partial_tail.get(request_id)) is None:
             return False
         if num_tokens <= reused:
             return True
-        self._joint_cache_reused_partial_tail.pop(request_id, None)
+        del self._joint_cache_reused_partial_tail[request_id]
         return False
 
     def get_num_blocks_to_reserve(self, request_id: str, num_tokens: int) -> int | None:
@@ -469,8 +468,8 @@ class SingleTypeKVCacheManager(ABC):
         blocks = [self._null_block if hit.block.is_null else hit.block for hit in hits]
         cpu_positions = [
             index
-            for index, hit in enumerate(hits)
-            if index >= skipped_blocks and hit.is_cpu and not hit.block.is_null
+            for index, hit in enumerate(hits[skipped_blocks:], start=skipped_blocks)
+            if hit.is_cpu and not hit.block.is_null
         ]
         # Allocate directly so async load targets bypass worker-side zeroing.
         targets = self.block_pool.get_new_blocks(len(cpu_positions))
@@ -491,10 +490,10 @@ class SingleTypeKVCacheManager(ABC):
             self.num_cached_block[request_id] = first_cpu
             self._joint_cache_reused_blocks[request_id] = {
                 index
-                for index, hit in enumerate(hits)
-                if first_cpu < index < num_full_blocks
-                and not hit.is_cpu
-                and not hit.block.is_null
+                for index, hit in enumerate(
+                    hits[first_cpu + 1 : num_full_blocks], start=first_cpu + 1
+                )
+                if not hit.is_cpu and not hit.block.is_null
             }
 
     def allocate_external_computed_blocks(

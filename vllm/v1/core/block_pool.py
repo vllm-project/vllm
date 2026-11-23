@@ -416,7 +416,9 @@ class BlockPool:
             return
 
         full_end_token_idx = end_token_idx // block_size * block_size
-        spans = [(start_token_idx, full_end_token_idx, block_size)]
+        spans: list[tuple[int, int, int]] = []
+        if full_end_token_idx > start_token_idx:
+            spans.append((start_token_idx, full_end_token_idx, block_size))
         if full_end_token_idx < end_token_idx:
             spans.append(
                 (
@@ -428,8 +430,6 @@ class BlockPool:
 
         curr_mm_idx = 0
         for start, end, event_block_size in spans:
-            if start == end:
-                continue
             cached_hashes: list[ExternalBlockHash] = []
             extra_keys_list: list[tuple[Any, ...] | None] = []
             lookahead_token_ids: list[list[int]] | None = (

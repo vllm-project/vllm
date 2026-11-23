@@ -386,18 +386,21 @@ class SimpleCPUOffloadScheduler:
             self._pending_joint_hits[request.request_id] = result
         return result
 
+    def _release_pending_joint_hits(self) -> None:
+        for hit in self._pending_joint_hits.values():
+            hit.release()
+        self._pending_joint_hits.clear()
+
     def _consume_joint_hit(
         self, request: "Request", blocks: "KVCacheBlocks", hit: JointCacheHit
     ) -> None:
-        gpu_blocks = []
-        cpu_blocks = []
-        for group_idx, group in enumerate(hit.blocks):
-            for index, source in enumerate(group):
-                if source.is_cpu:
-                    target = blocks.blocks[group_idx][index]
-                    if not target.is_null:
-                        gpu_blocks.append(target)
-                        cpu_blocks.append(source.block)
+        gpu_blocks: list[KVCacheBlock] = []
+        cpu_blocks: list[KVCacheBlock] = []
+        for hit_group, target_group in zip(hit.blocks, blocks.blocks, strict=True):
+            for source, target in zip(hit_group, target_group):
+                if source.is_cpu and not target.is_null:
+                    gpu_blocks.append(target)
+                    cpu_blocks.append(source.block)
         if cpu_blocks:
             assert self._gpu_block_pool is not None
             self.cpu_block_pool.touch(cpu_blocks)
@@ -624,9 +627,7 @@ class SimpleCPUOffloadScheduler:
         scheduler_output: SchedulerOutput,
     ) -> SimpleCPUOffloadMetadata:
         # Queries not admitted this step must not retain eviction pins.
-        for hit in self._pending_joint_hits.values():
-            hit.release()
-        self._pending_joint_hits.clear()
+        self._release_pending_joint_hits()
         # --- Stores ---
         store_event = -1
         store_gpu, store_cpu, store_req_ids, store_meta = self.prepare_store_specs(
@@ -1540,9 +1541,7 @@ class SimpleCPUOffloadScheduler:
         the transfer finished, then release refs without caching abandoned
         store results.
         """
-        for hit in self._pending_joint_hits.values():
-            hit.release()
-        self._pending_joint_hits.clear()
+        self._release_pending_joint_hits()
         for pending in self._pending_cpu_hits.values():
             self._free_pending_cpu_hit(pending)
         self._pending_cpu_hits.clear()
