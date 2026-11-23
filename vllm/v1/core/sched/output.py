@@ -53,6 +53,10 @@ class NewRequestData:
     prompt_is_token_ids: list[bool] | None = None
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
+    evicted_token_ranges: list[tuple[int, int]] | None = None
+    is_reprefill: bool = False
+    position_offset: int = 0
+    is_bounded_session: bool = False
 
     @classmethod
     def from_request(
@@ -62,6 +66,10 @@ class NewRequestData:
         prefill_token_ids: list[int],
         uses_mrope: bool = False,
     ) -> "NewRequestData":
+        evicted_token_ranges = request.pending_evicted_token_ranges or None
+        request.pending_evicted_token_ranges = []
+        is_reprefill = request.pending_reprefill
+        request.pending_reprefill = False
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
@@ -79,6 +87,10 @@ class NewRequestData:
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
             replay_start=request.replay_start,
+            evicted_token_ranges=evicted_token_ranges,
+            is_reprefill=is_reprefill,
+            position_offset=request.position_offset,
+            is_bounded_session=request.streaming_retention is not None,
         )
 
     def __setstate__(self, state: dict) -> None:

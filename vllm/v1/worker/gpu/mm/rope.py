@@ -81,6 +81,12 @@ class RopeState:
             # clamp so none index below 0.
             prefill_positions = (prefill_positions + position_delta).clamp_(min=0)
             delta = position_delta
+        self.stage_prefill_positions(req_idx, prefill_positions, delta)
+
+    def stage_prefill_positions(
+        self, req_idx: int, prefill_positions: torch.Tensor, delta: int
+    ) -> None:
+        """Install precomputed positions without changing cached keys."""
         self.prefill_delta.np[req_idx] = delta
 
         for i in range(self.num_dims):

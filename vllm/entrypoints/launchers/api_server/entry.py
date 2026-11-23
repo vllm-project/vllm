@@ -53,6 +53,10 @@ async def build_async_engine_client(
     from vllm.entrypoints.common.cli_args import propagate_flash_late_interaction
 
     propagate_flash_late_interaction(args, engine_args)
+    if getattr(args, "enable_streaming", False):
+        from vllm.entrypoints.openai.streaming.config import configure_streaming
+
+        configure_streaming(args, engine_args)
     if client_config:
         engine_args._api_process_count = client_config.get("client_count", 1)
         engine_args._api_process_rank = client_config.get("client_index", 0)

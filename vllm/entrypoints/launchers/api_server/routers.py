@@ -89,6 +89,13 @@ def register_api_routers(
 
         register_pooling_api_routers(app, supported_tasks, model_config)
 
+    if getattr(args, "enable_streaming", False):
+        if "generate" not in supported_tasks:
+            raise ValueError("--enable-streaming requires a generate-capable model")
+        from vllm.entrypoints.openai.streaming.api_router import attach_router
+
+        attach_router(app)
+
     if getattr(args, "enable_fault_tolerance", False):
         from vllm.entrypoints.serve.fault_tolerance.api_router import (
             register_fault_tolerance_api_router,

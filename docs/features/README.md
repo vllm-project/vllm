@@ -1,5 +1,8 @@
 # Features
 
+- [Bounded streaming sessions](streaming_sessions.md): opt-in image sessions with
+  bounded KV history and one reply per image.
+
 ## KV Cache Offloading
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)

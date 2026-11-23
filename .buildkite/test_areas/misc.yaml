@@ -391,6 +391,9 @@ steps:
     - vllm/distributed/
     - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
+    - vllm/entrypoints/common/cli_args.py
+    - vllm/entrypoints/launchers/
+    - vllm/entrypoints/openai/streaming/
     - vllm/inputs/
     - vllm/lora/
     - vllm/multimodal/
@@ -411,6 +414,7 @@ steps:
   commands:
     # split the test to avoid interference
     - pytest -v -s -m 'cpu_test' v1/core
+    - pytest -v -s -m 'cpu_test' v1/streaming
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
     - pytest -v -s v1/worker/test_cpu_worker_kv_budget.py
