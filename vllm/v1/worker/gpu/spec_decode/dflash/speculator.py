@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.cp_utils import cp_local_slot
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
@@ -63,8 +64,12 @@ class DFlashSpeculator(DraftModelSpeculator):
         # Multimodal inputs not currently supported.
         self.supports_mm_inputs = False
 
-        # Each request emits exactly (bonus + N mask) query tokens per step.
-        self.num_query_per_req = 1 + self.num_speculative_steps
+        # Fill-in: bonus + N mask queries; anchor-first: N queries, the anchor
+        # predicting the first draft token. See _prepare_dflash_inputs_kernel.
+        speculator_config = speculative_config.speculator_config
+        assert isinstance(speculator_config, DFlashSpeculatorConfig)
+        self.sample_from_anchor = speculator_config.sample_from_anchor
+        self.num_query_per_req = speculator_config.num_query_tokens
 
         self.parallel_drafting_token_id = get_parallel_drafting_token_id(
             self.draft_model_config.hf_config
@@ -75,20 +80,6 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.requires_non_causal = dflash_has_any_non_causal(
             self.draft_model_config.hf_config
         )
-
-        # Whether the anchor query position is itself a prediction. DFlash default uses
-        # the anchor as the bonus token (only mask tokens predict); DSpark samples from
-        # the anchor and the N-1 mask token positions. See _prepare_dflash_inputs_kernel
-        dflash_config = (
-            getattr(self.draft_model_config.hf_config, "dflash_config", None) or {}
-        )
-        if dflash_config.get("sample_from_anchor", False):
-            raise ValueError(
-                "sample_from_anchor=True is not supported for DFlash. "
-                "DFlash uses a fixed 1+N query layout where the anchor "
-                "is the bonus token."
-            )
-        self.sample_from_anchor = False
 
         # Context positions for the K/V precompute, populated by prepare_dflash_inputs.
         self.context_positions = torch.zeros(
@@ -939,10 +930,10 @@ def _prepare_dflash_inputs_kernel(
     tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=is_query)
 
     # --- Sample indices / positions / idx_mapping ---
-    # When SAMPLE_FROM_ANCHOR (DSpark), so we sample at EVERY query position
-    # and each position k predicts the NEXT token (sampled position = query_pos + 1).
-    # Otherwise (DFlash default) the anchor is the bonus token and only the mask tokens
-    # at offsets > 0 are sampled from, each AT its own position.
+    # When SAMPLE_FROM_ANCHOR (anchor-first layout), we sample at EVERY query
+    # position and each position k predicts the NEXT token (sampled position =
+    # query_pos + 1). Otherwise (fill-in layout) the anchor is the bonus token and
+    # only the mask tokens at offsets > 0 are sampled from, each AT its own position.
     sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
     is_sample = is_query & (query_off >= sample_off)
     sample_idx = req_idx * num_speculative_steps + (query_off - sample_off)
