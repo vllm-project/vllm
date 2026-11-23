@@ -7,7 +7,7 @@ meta:
   description: "Deploy ERNIE-5.5-Flash with vLLM: Baidu's 280B-total / 14B-active Mixture-of-Experts model with hybrid HCA + MLA-DSA attention and up to 1M context, served through the vLLM-ERNIE plugin. The Base model (FP8, BF16) with ECHO (MTP) speculative decoding, and the ERNIE-5.5-Flash-Preview chat model (FP4, FP8, BF16) with reasoning, tool calling and DSpark speculative decoding, on B300, GB300, B200, GB200 and H100, with KV cache offload and PD disaggregation."
   performance_headline: "280B / 14B-active MoE with hybrid HCA + MLA-DSA attention, up to 1M context, ECHO (MTP) and DSpark speculative decoding"
   date_added: 2026-11-05
-  date_updated: 2026-11-10
+  date_updated: 2026-11-23
   tasks:
     - text
   related_recipes:
@@ -523,6 +523,9 @@ guide: |
     keep the FP8 indexer.
   - **KV Cache.** Every recipe passes `--kv-cache-dtype fp8`, which stores
     the KV cache in FP8 and is what was tested; `auto` keeps it in BF16.
+  - **FlashIndexer.** Off by default; pass
+    `--hf-overrides '{"enable_flashindexer": true}'` to cut the DSA
+    indexer's prefill cost at long context. See 3.6.
 
   ## 3. Advanced usage
 
@@ -645,7 +648,26 @@ guide: |
   the FP4 checkpoint (GB200, PD, 1M context). Turn **Spec Decoding** off to
   serve without a draft.
 
-  ### 3.6 Prefill / decode disaggregation
+  ### 3.6 FlashIndexer
+
+  FlashIndexer attaches a lightweight head router to the DSA indexer of the
+  6 MLA-DSA layers. For each token the router looks only at that token's own
+  hidden state and selects 8 of the 64 indexer heads for sparse selection,
+  which cuts sparse-indexing computation in prefill and keeps the routing
+  cost independent of context length. The DSA interface and the downstream
+  sparse attention are unchanged, and the MTP and DSpark drafts keep all
+  heads. Add to any command:
+
+  ```bash
+  --hf-overrides '{"enable_flashindexer": true}'
+  ```
+
+  The router weights are read from the checkpoint's `flashindexer/`
+  subfolder; a checkpoint without it exits at startup, so drop the flag
+  there to run all heads. FlashIndexer needs CUDA with vLLM's DeepGEMM
+  indexer.
+
+  ### 3.7 Prefill / decode disaggregation
 
   Pick **PD Cluster** as the strategy; on GB200 the 1P1D Mooncake preset
   is the default. The tested setup is one prefill and one decode GB200
