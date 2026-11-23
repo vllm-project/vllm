@@ -145,6 +145,52 @@ def test_padding_tokens_are_routed_to_local_experts(monkeypatch):
     assert op.sent_ids.tolist() == [[0, 7], [2, 3]]
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("ids_dtype", [torch.int64, torch.int32])
+@pytest.mark.parametrize("weights_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("num_tokens,topk", [(0, 4), (1, 4), (130, 4), (4097, 8)])
+def test_fused_dispatch_args_match_torch(num_tokens, topk, weights_dtype, ids_dtype):
+    """The Triton dispatch-argument kernel equals the casts + padding remap."""
+    pf = _make_pf(FakeOp(), num_local_experts=3, rank_expert_offset=6)
+    g = torch.Generator(device="cuda").manual_seed(num_tokens)
+    weights = torch.rand(num_tokens, topk, device="cuda", generator=g).to(weights_dtype)
+    ids = torch.randint(
+        -1, 24, (num_tokens, topk), device="cuda", generator=g, dtype=ids_dtype
+    )
+    ids[::3] = -1  # padding tokens: every slot -1
+    got_w, got_ids = pf._dispatch_args(weights, ids)
+    ref_w = weights.to(torch.float32)
+    ref_ids = pf._route_padding_locally(ids.to(torch.int32))
+    assert got_w.dtype == torch.float32 and got_ids.dtype == torch.int32
+    torch.testing.assert_close(got_w, ref_w, rtol=0, atol=0)
+    assert torch.equal(got_ids, ref_ids)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("rows,recv", [(0, 0), (32, 0), (32, 32), (96, 37), (1024, 1)])
+@pytest.mark.parametrize("hidden", [7, 6144])
+def test_fused_clear_unused_rows_matches_torch(rows, recv, hidden):
+    """The Triton row-clearing kernel equals the masked fills, past `recv` only."""
+    g = torch.Generator(device="cuda").manual_seed(rows + recv)
+    capacity = rows + 8  # bounded views of a larger receive buffer
+    a1 = torch.randn(capacity, hidden, device="cuda", generator=g).to(torch.bfloat16)
+    weights = torch.rand(capacity, 8, device="cuda", generator=g)
+    ids = torch.randint(0, 64, (capacity, 8), device="cuda", generator=g).to(
+        torch.int32
+    )
+    recv_num = torch.tensor([recv], dtype=torch.int32, device="cuda")
+    tensors = [t.clone() for t in (a1, weights, ids)]
+    MoriEPv2PrepareAndFinalize._clear_unused_rows(
+        tensors[0][:rows], tensors[1][:rows], tensors[2][:rows], recv_num
+    )
+    unused = (torch.arange(rows, device="cuda") >= recv).unsqueeze(1)
+    a1[:rows].masked_fill_(unused, 0)
+    weights[:rows].masked_fill_(unused, 0)
+    ids[:rows].masked_fill_(unused, -1)
+    for got, ref in zip(tensors, (a1, weights, ids)):
+        assert torch.equal(got, ref)
+
+
 @pytest.mark.parametrize("world_size,lsa_size", [(8, 8), (8, 4)])
 def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
     from vllm.distributed.device_communicators import all2all
