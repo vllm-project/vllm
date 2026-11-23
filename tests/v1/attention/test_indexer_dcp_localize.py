@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import pytest
 import torch
 
 import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_cutedsl
 from vllm.v1.attention.backends.mla.indexer import build_prefill_chunk_metadata
@@ -12,7 +14,14 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
-from vllm.v1.attention.ops.common import CPTritonContext, correct_attn_out
+from vllm.v1.attention.ops.dcp import CPTritonContext, correct_attn_out
+
+DEVICE_TYPE = current_platform.device_type
+
+requires_accelerator = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="This test requires CUDA, ROCm or XPU",
+)
 
 
 def _local_count(length: int, rank: int, world: int, interleave: int) -> int:
@@ -117,16 +126,18 @@ def _dcp_lse_merge(
     return merged_out, merged_lse
 
 
-class _FakeDCPGroup:
-    """Single-process stand-in: ``all_gather`` returns the pre-built
-    concatenation of every rank's packed ``(score, global_id)`` candidates,
-    mirroring the one packed all-gather the merge issues."""
+class _FakeDCPGroup(GroupCoordinator):
+    """Single-process stand-in: `all_gather` returns the pre-built dim-0
+    concatenation of every rank's packed `(score, global_id)` candidates,
+    mirroring the one packed all-gather the merge issues.
+
+    `GroupCoordinator.__init__` is never run, so no process group exists."""
 
     def __init__(self, gathered_packed: torch.Tensor) -> None:
         self.gathered_packed = gathered_packed
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
-        assert dim == 1
+        assert dim == 0
         return self.gathered_packed.clone()
 
 
@@ -203,10 +214,10 @@ def _merge_local_topks_global_with_fake_dcp(
     interleave: int,
     row_starts: list[torch.Tensor | None] | None = None,
 ) -> list[torch.Tensor]:
-    """Run ``_merge_dcp_topk_global`` for every rank against a faked
+    """Run `_merge_dcp_topk_global` for every rank against a faked
     all-gather and return each rank's global-index result (all ranks should
     agree). The fake pre-builds the packed candidate concatenation the merge's
-    single ``all_gather`` would return."""
+    single `all_gather` would return."""
     # The merge is now CuteDSL-only (no PyTorch fallback), so it runs the real
     # Triton pack + CuteDSL selector kernels even behind the faked all-gather.
     if not current_platform.is_cuda() or not has_cutedsl():
@@ -230,14 +241,15 @@ def _merge_local_topks_global_with_fake_dcp(
             torch.stack((scores.float(), global_ids.to(torch.float32)), dim=-1)
         )
 
-    fake_group = _FakeDCPGroup(torch.cat(packed_per_rank, dim=1).contiguous())
+    fake_group = _FakeDCPGroup(torch.cat(packed_per_rank, dim=0).contiguous())
     original_get_dcp_group = sparse_indexer.get_dcp_group
     sparse_indexer.get_dcp_group = lambda: fake_group
     try:
         merged = []
         for rank, (logits, indices) in enumerate(zip(local_logits, local_topks)):
             rank_indices = indices.clone()
-            result = sparse_indexer._merge_dcp_topk_global(
+            # in-place merge; the None return is asserted below
+            result = sparse_indexer._merge_dcp_topk_global(  # type: ignore[func-returns-value]
                 logits,
                 rank_indices,
                 topk,
@@ -303,6 +315,23 @@ def test_get_dcp_local_seq_lens_preserves_mtp_bounds_shape():
     )
 
     assert actual.shape == seq_lens.shape
+    torch.testing.assert_close(actual, expected)
+
+
+def test_get_dcp_local_seq_lens_reuses_device_rank_tensor(monkeypatch):
+    seq_lens = torch.tensor([0, 1, 7, 8, 17], dtype=torch.int32)
+    world = 4
+    rank = 2
+    rank_tensor = torch.tensor(rank, dtype=torch.int32)
+    expected = get_dcp_local_seq_lens(seq_lens, world, rank, 2)
+
+    def fail_tensor_construction(*args, **kwargs):
+        raise AssertionError("rank tensor must be reused")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch, "tensor", fail_tensor_construction)
+        actual = get_dcp_local_seq_lens(seq_lens, world, rank_tensor, 2)
+
     torch.testing.assert_close(actual, expected)
 
 
@@ -417,7 +446,7 @@ def test_local_topk_union_is_not_equivalent_to_global_topk_attention():
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 def test_sparse_decode_dcp_persistent_topk_matches_non_dcp():
     torch.manual_seed(3)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     world = 2
     interleave = 1
     topk = 512
@@ -505,7 +534,7 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
     )
 
     torch.manual_seed(13)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     rows = 4
     valid_width = 1024
     width = valid_width + (8 if use_row_starts else 0)
@@ -552,13 +581,15 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
         torch.testing.assert_close(packed[..., 1], expected_ids)
         packed_by_rank.append(packed)
 
-    gathered = torch.cat(packed_by_rank, dim=1).contiguous()
+    # Rank-major [world, rows, topk, 2], as a dim-0 all-gather produces.
+    gathered = torch.stack(packed_by_rank)
     actual = torch.empty((rows, topk), device=device, dtype=torch.int32)
     returned = stable_topk_from_gathered_candidates_cutedsl(gathered, topk, out=actual)
     assert returned is actual
+    all_candidates = torch.cat(packed_by_rank, dim=1)
     expected = _ref_stable_topk_from_candidates_fp64(
-        gathered[..., 0],
-        gathered[..., 1].to(torch.int32),
+        all_candidates[..., 0],
+        all_candidates[..., 1].to(torch.int32),
         topk,
     )
 
@@ -566,9 +597,206 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
         assert set(actual[row].cpu().tolist()) == set(expected[row].cpu().tolist())
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_cutedsl(),
+    reason="This test requires CUDA and CuteDSL",
+)
+@pytest.mark.parametrize("logits_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("num_positions", [16384, 131072, 1 << 20])
+def test_cutedsl_gathered_select_compact_keys_match_reference(
+    num_positions: int, logits_dtype: torch.dtype
+):
+    """Scores at the logits dtype (upcast BF16 SM100 MQA logits tie at the
+    top-k boundary) keyed only by their high score bits and the id bits below
+    `num_positions` must select the same set as the full 64-bit key."""
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        dcp_topk_id_bits,
+        dcp_topk_score_bits,
+        stable_topk_from_gathered_candidates_cutedsl,
+    )
+
+    torch.manual_seed(7)
     device = torch.device("cuda")
+    rows, world, topk = 5, 8, 2048
+    num_candidates = world * topk
+    scores = torch.randn((rows, num_candidates), device=device)
+    # Row 1: 64 distinct values, so the boundary tie spans hundreds of ids.
+    scores[1] = (scores[1] * 8).round().clamp(-32, 31)
+    # Row 2: all negative. Row 3: padding mixed in. Row 4: all tied.
+    scores[2] = -scores[2].abs()
+    scores[4] = 0.5
+    scores = scores.to(logits_dtype).float()
+    ids = torch.stack(
+        [
+            torch.randperm(num_positions, device=device)[:num_candidates]
+            for _ in range(rows)
+        ]
+    ).to(torch.int32)
+    # Largest id first, swapped into place so ids stay unique even when
+    # num_candidates == num_positions.
+    largest = num_positions - 1
+    at = (ids == largest).int().argmax(dim=1)
+    ids[torch.arange(rows, device=device), at] = ids[:, 0]
+    ids[:, 0] = largest
+    ids[3, ::3] = -1
+    # Rank-major [world, rows, topk, 2], as a dim-0 all-gather produces.
+    gathered = (
+        torch.stack((scores, ids.float()), dim=-1)
+        .view(rows, world, topk, 2)
+        .transpose(0, 1)
+        .contiguous()
+    )
+
+    expected = _ref_stable_topk_from_candidates_fp64(scores, ids, topk)
+    full = torch.empty((rows, topk), device=device, dtype=torch.int32)
+    stable_topk_from_gathered_candidates_cutedsl(gathered, topk, out=full)
+    compact = torch.empty_like(full)
+    stable_topk_from_gathered_candidates_cutedsl(
+        gathered,
+        topk,
+        out=compact,
+        score_bits=dcp_topk_score_bits(logits_dtype),
+        id_bits=dcp_topk_id_bits(num_positions),
+    )
+    for row in range(rows):
+        want = sorted(expected[row].tolist())
+        assert sorted(full[row].tolist()) == want
+        assert sorted(compact[row].tolist()) == want
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("world", [2, 8])
+@pytest.mark.parametrize("interleave", [1, 64])
+def test_sparse_prefill_dcp_metadata_host_extents_without_sync(
+    world: int, interleave: int
+):
+    """The DCP chunk extents come from the CPU lengths, without a device sync,
+    and equal the device-side per-rank KV lengths."""
+    device = torch.device("cuda")
+    # (context, query) per request: no prefix, long prefix hits, page tails.
+    lens = [(0, 37), (200_000, 1), (4097, 599), (63, 64), (0, 1), (129_001, 300)]
+    for trial, (start, end) in enumerate([(0, 6), (1, 4), (5, 6)]):
+        context = torch.tensor([c for c, _ in lens])
+        query_lens = torch.tensor([q for _, q in lens])
+        seq_lens_cpu = (context + query_lens).to(torch.int32)
+        query_start_loc_cpu = torch.zeros(len(lens) + 1, dtype=torch.int32)
+        query_start_loc_cpu[1:] = torch.cumsum(query_lens, 0)
+        query_start_loc = query_start_loc_cpu.to(device)
+        seq_lens = seq_lens_cpu.to(device)
+        block_table = torch.zeros((len(lens), 1), dtype=torch.int32, device=device)
+        kwargs = dict(
+            start_idx=start,
+            end_idx=end,
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            uncompressed_seq_lens=seq_lens,
+            compressed_seq_lens=seq_lens,
+            compressed_seq_lens_cpu=seq_lens_cpu,
+            block_table=block_table,
+            compress_ratio=1,
+            dcp_world_size=world,
+            cp_kv_cache_interleave_size=interleave,
+        )
+
+        if trial == 0:
+            # JIT-compiles the metadata kernel outside the sync check.
+            build_prefill_chunk_metadata(dcp_rank=0, **kwargs)
+        for rank in range(world):
+            torch.accelerator.synchronize()
+            torch.cuda.set_sync_debug_mode("error")
+            try:
+                chunk = build_prefill_chunk_metadata(dcp_rank=rank, **kwargs)
+            finally:
+                torch.cuda.set_sync_debug_mode(0)
+            assert chunk is not None
+            local = get_dcp_local_seq_lens(seq_lens[start:end], world, None, interleave)
+            assert chunk.local_total_seq_lens == int(local[:, rank].sum()), trial
+            assert chunk.max_local_total_seq_lens == int(local.sum(0).max()), trial
+            assert chunk.local_cu_seq_lens is not None
+            assert int(chunk.local_cu_seq_lens[-1]) == chunk.local_total_seq_lens
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_cutedsl(),
+    reason="This test requires CUDA and CuteDSL",
+)
+@pytest.mark.parametrize("epoch", [1, 2])
+# 14 id bits fit the spare score bits; 20 leave 4 for the token-id passes.
+@pytest.mark.parametrize("score_bits,id_bits", [(32, 32), (16, 14), (16, 20)])
+def test_cutedsl_pingpong_select_matches_gathered_select(
+    epoch: int, score_bits: int, id_bits: int
+):
+    """The direct-exchange selector (32-bit score keys, token-id pass only for
+    boundary ties, no radix when the valid candidates fit) selects the same set
+    as the all-gather selector, reading the inbox slot of the published epoch.
+    Upcast BF16 scores rank on their high 16 bits and the ids on the bits they
+    need, in both selectors."""
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        stable_topk_from_gathered_candidates_cutedsl,
+    )
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_pingpong_cutedsl import (  # noqa: E501
+        stable_topk_from_pingpong_candidates_cutedsl,
+    )
+
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    world, topk, max_rows = 8, 2048, 8
+    num_candidates = world * topk
+    gathered = torch.empty((max_rows, num_candidates, 2), device=device)
+    gathered[..., 0] = torch.randn((max_rows, num_candidates), device=device)
+    gathered[..., 1] = torch.randperm(num_candidates, device=device).float()
+    # Row 1: coarse scores, so ties straddle the top-k boundary.
+    gathered[1, :, 0] = torch.randint(0, 64, (num_candidates,), device=device).float()
+    # Row 2: fewer valid candidates than topk.
+    gathered[2, 1000:, 1] = -1
+    # Row 3: no valid candidate.
+    gathered[3, :, 1] = -1
+    # Row 4: negative scores and padding mixed in.
+    gathered[4, :, 0] = -gathered[4, :, 0].abs()
+    gathered[4, ::3, 1] = -1
+    if score_bits == 16:
+        gathered[..., 0] = gathered[..., 0].bfloat16().float()
+
+    inboxes = torch.full((2, max_rows, num_candidates, 2), float("nan"), device=device)
+    inboxes[(epoch - 1) & 1] = gathered
+    write_seq = torch.tensor([epoch], device=device, dtype=torch.int64)
+
+    rows = 6
+    # The all-gather selector reads the rank-major [world, rows, topk, 2]
+    # layout; the ping-pong inbox is row-major.
+    rank_major = gathered[:rows].view(rows, world, topk, 2).transpose(0, 1).contiguous()
+    expected = torch.empty((rows, topk), device=device, dtype=torch.int32)
+    stable_topk_from_gathered_candidates_cutedsl(rank_major, topk, out=expected)
+    compact = torch.empty_like(expected)
+    stable_topk_from_gathered_candidates_cutedsl(
+        rank_major,
+        topk,
+        out=compact,
+        score_bits=score_bits,
+        id_bits=id_bits,
+    )
+    for row in range(rows):
+        assert sorted(compact[row].tolist()) == sorted(expected[row].tolist())
+    for use_pdl in (False, True):
+        actual = torch.full((rows, topk), -7, device=device, dtype=torch.int32)
+        stable_topk_from_pingpong_candidates_cutedsl(
+            inboxes,
+            write_seq,
+            topk,
+            out=actual,
+            use_pdl=use_pdl,
+            score_bits=score_bits,
+            id_bits=id_bits,
+        )
+        for row in range(rows):
+            got = actual[row].cpu().tolist()
+            want = expected[row].cpu().tolist()
+            assert sorted(got) == sorted(want), f"row {row}"
+
+
+@requires_accelerator
+def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
+    device = torch.device(DEVICE_TYPE)
     seq_len = 8
 
     query_start_loc = torch.tensor([0, seq_len], dtype=torch.int32, device=device)
@@ -641,15 +869,18 @@ def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-def test_dcp_filter_compacts_valid_slots_for_sparse_kernel():
+@requires_accelerator
+@pytest.mark.parametrize("block_stride_rows", [None, 12])
+def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
+    block_stride_rows: int | None,
+):
     block_size = 4
     num_topk = 128
     dcp_size = 2
-    req_id = torch.zeros(1, dtype=torch.int32, device="cuda")
-    token_indices = torch.full((1, num_topk), -1, dtype=torch.int32, device="cuda")
-    token_indices[0, :8] = torch.arange(8, dtype=torch.int32, device="cuda")
-    block_table = torch.tensor([[10]], dtype=torch.int32, device="cuda")
+    req_id = torch.zeros(1, dtype=torch.int32, device=DEVICE_TYPE)
+    token_indices = torch.full((1, num_topk), -1, dtype=torch.int32, device=DEVICE_TYPE)
+    token_indices[0, :8] = torch.arange(8, dtype=torch.int32, device=DEVICE_TYPE)
+    block_table = torch.tensor([[10]], dtype=torch.int32, device=DEVICE_TYPE)
 
     out, valid_counts = triton_filter_and_convert_dcp_index(
         req_id,
@@ -658,6 +889,7 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel():
         dcp_size=dcp_size,
         dcp_rank=0,
         BLOCK_SIZE=block_size,
+        BLOCK_STRIDE_ROWS=block_stride_rows,
         NUM_TOPK_TOKENS=num_topk,
         return_valid_counts=True,
     )
@@ -668,23 +900,29 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel():
     assert (out[0, valid:] == -1).all()
     # In-kernel compaction packs valid slots to the front; prefix order is
     # unspecified, so compare as a set.
-    assert set(out[0, :valid].cpu().tolist()) == {40, 41, 42, 43}
+    block_stride_rows = block_stride_rows or block_size
+    expected_base = 10 * block_stride_rows
+    assert set(out[0, :valid].cpu().tolist()) == set(
+        range(expected_base, expected_base + block_size)
+    )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_accelerator
 @pytest.mark.parametrize("interleave", [1, 2])
 @pytest.mark.parametrize("dcp_rank", [0, 1])
-def test_dcp_filter_compaction_matches_reference(interleave: int, dcp_rank: int):
-    """In-kernel compaction (atomic slot allocator across multiple column tiles)
-    must, for every row, produce exactly the rank-owned physical slots packed
-    into [0, valid_count) with -1 in the tail -- the same SET a reference filter
-    + sort/gather produces. Uses wide rows (> BLOCK_N valid slots) so the
-    cross-tile atomic allocation is exercised, with interior -1 gaps."""
-    device = torch.device("cuda")
+# Include padded single-tile compaction and the multi-tile atomic fallback.
+@pytest.mark.parametrize("num_topk", [1024, 2176, 4224])
+def test_dcp_filter_compaction_matches_reference(
+    interleave: int, dcp_rank: int, num_topk: int
+):
+    """In-kernel compaction must, for every row, produce exactly the rank-owned
+    physical slots packed into [0, valid_count) with -1 in the tail -- the same
+    SET a reference filter + sort/gather produces. Uses wide rows (> BLOCK_N
+    valid slots), with interior -1 gaps."""
+    device = torch.device(DEVICE_TYPE)
     torch.manual_seed(7)
     dcp_size = 2
     block_size = 8
-    num_topk = 1024  # > BLOCK_N(128) -> multiple tiles per row
     num_rows = 5
     max_blocks = 64
     seq = max_blocks * block_size
@@ -698,7 +936,9 @@ def test_dcp_filter_compaction_matches_reference(interleave: int, dcp_rank: int)
         (num_rows, num_topk), -1, dtype=torch.int32, device=device
     )
     for r in range(num_rows):
-        n_valid = int(torch.randint(200, 600, (1,)).item())
+        # Ids are distinct, so a row holds at most `seq` valid entries.
+        hi = min(num_topk * 3 // 4, seq)
+        n_valid = int(torch.randint(hi // 3, hi, (1,)).item())
         perm = torch.randperm(seq, device=device)[:n_valid].to(torch.int32)
         token_indices[r, :n_valid] = perm
 
@@ -732,11 +972,11 @@ def test_dcp_filter_compaction_matches_reference(interleave: int, dcp_rank: int)
         assert set(out[r, :n].cpu().tolist()) == set(expected.cpu().tolist())
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_accelerator
 @pytest.mark.parametrize("interleave", [1, 2, 4])
 def test_dcp_global_topk_physical_attention_matches_non_dcp(interleave: int):
     torch.manual_seed(2)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     dcp_size = 2
     block_size = 4
     num_topk = 128
@@ -805,14 +1045,14 @@ def test_dcp_global_topk_physical_attention_matches_non_dcp(interleave: int):
     torch.testing.assert_close(dcp_lse, ref_lse, atol=1e-5, rtol=1e-5)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_accelerator
 @pytest.mark.parametrize("is_lse_base_on_e", [True, False])
 def test_correct_attn_out_zeroes_empty_nan_partial(is_lse_base_on_e: bool):
-    out = torch.full((1, 1, 4), float("nan"), device="cuda")
+    out = torch.full((1, 1, 4), float("nan"), device=DEVICE_TYPE)
     lses = torch.tensor(
         [[[0.0]], [[float("-inf")]]],
         dtype=torch.float32,
-        device="cuda",
+        device=DEVICE_TYPE,
     )
 
     corrected, final_lse = correct_attn_out(
@@ -828,7 +1068,7 @@ def test_correct_attn_out_zeroes_empty_nan_partial(is_lse_base_on_e: bool):
     torch.testing.assert_close(final_lse, torch.zeros_like(final_lse))
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_accelerator
 def test_decode_topk_pads_surplus_with_negative_one():
     """When a row's valid length < topk the top-k kernel must pad the surplus
     slots with -1: the DCP merge (`topk_indices >= 0`) and
@@ -838,7 +1078,7 @@ def test_decode_topk_pads_surplus_with_negative_one():
     Checked on the *set* of valid indices (the kernel may order them by score,
     not position)."""
     torch.manual_seed(0)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     topk = 8
     next_n = 1
     seq_lens_list = [0, 3, 5, 8]
@@ -860,7 +1100,7 @@ def test_decode_topk_pads_surplus_with_negative_one():
 def test_persistent_topk_pads_surplus_with_negative_one():
     """Same surplus=-1 invariant for the persistent_topk kernel (k>=512)."""
     torch.manual_seed(0)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     topk = 512  # persistent_topk requires k in {512, 1024, 2048}
     seq_lens_list = [100, 300, 512]
     num_rows = len(seq_lens_list)
@@ -884,7 +1124,7 @@ def test_sparse_decode_dcp_short_context_matches_non_dcp():
     -> global top-k -> physical localize -> LSE merge chain for the common
     short-context decode case, vs the non-DCP reference."""
     torch.manual_seed(4)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     world = 2
     interleave = 1
     topk = 512
@@ -949,3 +1189,58 @@ def test_sparse_decode_dcp_short_context_matches_non_dcp():
     dcp_out, dcp_lse = _dcp_lse_merge(local_outs, local_lses)
     torch.testing.assert_close(dcp_out, ref_out, atol=1e-5, rtol=1e-5)
     torch.testing.assert_close(dcp_lse, ref_lse, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("dcp_world_size", [2, 4, 8])
+@pytest.mark.parametrize("interleave", [1, 64])
+@pytest.mark.parametrize("rows_per_req", [1, 2])
+@pytest.mark.parametrize(
+    "req_lens", [[7], [8, 8], [1, 9], [63, 64, 65], [255, 256, 257], [256, 1, 2730]]
+)
+def test_pcp_plan_deinterleave_restores_global_order(
+    monkeypatch, dcp_world_size, interleave, rows_per_req, req_lens
+):
+    """Gathering block-interleaved shards must restore each request's token order."""
+    from vllm.v1.attention.backends.mla.indexer import build_pcp_global_chunk_plan
+
+    monkeypatch.setattr("vllm.v1.attention.backends.mla.indexer.PIN_MEMORY", False)
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.indexer.async_tensor_h2d",
+        lambda x, device: x.to(device),
+    )
+    scheduled = np.array(req_lens, dtype=np.int64)
+    shard_rows = np.array(
+        [
+            max(
+                _local_count(g, r, dcp_world_size, interleave)
+                for r in range(dcp_world_size)
+            )
+            for g in req_lens
+        ]
+    )
+    rows = np.repeat(np.arange(len(scheduled)), rows_per_req)
+    plan = build_pcp_global_chunk_plan(
+        rows, shard_rows[rows], dcp_world_size, torch.device("cpu"), interleave
+    )
+
+    starts = np.concatenate([[0], np.cumsum(scheduled)])
+
+    # Build each rank's padded shard exactly as the cache gather would.
+    padded_cu = plan.padded_local_cu[::rows_per_req].tolist()
+    shards = torch.zeros(dcp_world_size, plan.padded_local_total, 1)
+    for r in range(dcp_world_size):
+        for i, g in enumerate(req_lens):
+            owned = [t for t in range(g) if (t // interleave) % dcp_world_size == r]
+            for local, t in enumerate(owned):
+                shards[r, padded_cu[i] + local, 0] = starts[i] + t
+
+    gathered = shards.reshape(dcp_world_size * plan.padded_local_total, 1)
+    restored = gathered[plan.deinterleave_idx]
+    # The layout is padded per request; only the real positions are read.
+    row_start = plan.row_start_cu.tolist()
+    for row, i in enumerate(rows):
+        g = req_lens[i]
+        torch.testing.assert_close(
+            restored[row_start[row] : row_start[row] + g, 0],
+            torch.arange(starts[i], starts[i] + g, dtype=torch.float32),
+        )

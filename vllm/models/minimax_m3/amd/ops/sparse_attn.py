@@ -5,7 +5,7 @@
 Only the prefill path is specialized on CDNA: each 128-token KV block is split
 into SUB_K-token sub-tiles to right-size the per-block QK/PV MFMAs. Everything
 else -- the decode split-K kernels, the FP8 dtype set, the sparse block size --
-is reused unchanged from ``common.ops.sparse_attn``.
+is reused unchanged from `common.ops.sparse_attn`.
 """
 
 import torch
@@ -33,10 +33,10 @@ _SPARSE_ATTN_PREFILL_KWARG: dict | None = None
 def _sparse_attn_prefill_kwargs() -> dict:
     """MFMA + pipeline launch params for the sub-tiled prefill kernel.
 
-    gfx942 and gfx950 share the same params: ``num_warps=1`` keeps one wave
-    resident on the small per-sub-tile GEMM, ``matrix_instr_nonkdim=16`` /
-    ``kpack=2`` select the MFMA_16x16 path, and ``num_stages=1`` fits LDS and is
-    fastest in the sweep. Only the sub-tile width (``_SPARSE_ATTN_SUB_K``)
+    gfx942 and gfx950 share the same params: `num_warps=1` keeps one wave
+    resident on the small per-sub-tile GEMM, `matrix_instr_nonkdim=16` /
+    `kpack=2` select the MFMA_16x16 path, and `num_stages=1` fits LDS and is
+    fastest in the sweep. Only the sub-tile width (`_SPARSE_ATTN_SUB_K`)
     differs by arch. Empty on other AMD archs. Cached: arch is fixed per process.
     """
     global _SPARSE_ATTN_PREFILL_KWARG
@@ -65,8 +65,9 @@ def _sparse_attn_prefill_kwargs() -> dict:
         "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
         "BLOCK_SIZE_H": lambda args: triton.next_power_of_2(args["gqa_group_size"]),
         "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["max_topk"]),
-        "BLOCK_SIZE_QH": lambda args: args["BLOCK_SIZE_Q"]
-        * triton.next_power_of_2(args["gqa_group_size"]),
+        "BLOCK_SIZE_QH": lambda args: (
+            args["BLOCK_SIZE_Q"] * triton.next_power_of_2(args["gqa_group_size"])
+        ),
     }
 )
 @triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
@@ -139,15 +140,15 @@ def _gqa_sparse_fwd_kernel(
         off_t = tl.arange(0, BLOCK_SIZE_T)
         topk_idx = tl.load(t_ptr_j + off_t * stride_tk, mask=off_t < max_topk, other=-1)
         real_topk = tl.sum((topk_idx >= 0).to(tl.int32), axis=0)
-        q_ptrs = tl.make_block_ptr(
+        q_desc = tl.make_tensor_descriptor(
             base=q_ptr + q_start * stride_qn + pid_h * stride_qh,
-            shape=(q_len, gqa_group_size, head_dim),
-            strides=(stride_qn, stride_qh, stride_qd),
-            offsets=(pid_q_j * BLOCK_SIZE_Q, 0, 0),
-            block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
-            order=(2, 1, 0),
+            shape=[q_len, gqa_group_size, head_dim],
+            strides=[stride_qn, stride_qh, stride_qd],
+            block_shape=[BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D],
+            padding_option="zero",
         )
-        q = tl.load(q_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
+
+        q = q_desc.load([pid_q_j * BLOCK_SIZE_Q, 0, 0])
         m_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), dtype=tl.float32)
         lse_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), dtype=tl.float32)
         acc_o = tl.zeros((BLOCK_SIZE_QH, BLOCK_SIZE_D), dtype=tl.float32)
@@ -228,15 +229,17 @@ def _gqa_sparse_fwd_kernel(
                 lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
         acc_o = acc_o * tl.exp2(m_i - lse_i)[:, None]
         acc_o = tl.reshape(acc_o, BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D)
-        o_ptrs = tl.make_block_ptr(
+        o_desc = tl.make_tensor_descriptor(
             base=o_ptr + q_start * stride_on + pid_h * stride_oh,
-            shape=(q_len, gqa_group_size, head_dim),
-            strides=(stride_on, stride_oh, stride_od),
-            offsets=(pid_q_j * BLOCK_SIZE_Q, 0, 0),
-            block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
-            order=(2, 1, 0),
+            shape=[q_len, gqa_group_size, head_dim],
+            strides=[stride_on, stride_oh, stride_od],
+            block_shape=[BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D],
         )
-        tl.store(o_ptrs, acc_o.to(o_ptr.dtype.element_ty), boundary_check=(0, 1, 2))
+
+        o_desc.store(
+            offsets=[pid_q_j * BLOCK_SIZE_Q, 0, 0],
+            value=acc_o.to(o_ptr.dtype.element_ty),
+        )
 
 
 @torch.no_grad()

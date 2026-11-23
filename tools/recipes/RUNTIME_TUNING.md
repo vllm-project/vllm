@@ -1,0 +1,357 @@
+# Runtime Tuning
+
+The Recipes JSON remains the baseline. vLLM Recipes already provide validated
+model, hardware, strategy, environment variables, and serving arguments.
+Runtime tuning is optional and is intended for parameters whose best value can
+depend on the actual deployment resources or expected request workload.
+
+## Information Sources
+
+Runtime tuning combines up to three inputs:
+
+- **vLLM Recipe** — the required baseline from the Recipes JSON API or a direct
+  recipe JSON file.
+- **Hardware information (optional)** — detected with `--detect-hardware`,
+  including effective CPU/NUMA topology and memory availability.
+- **Workload information (optional)** — supplied through CLI hints such as input
+  and output token lengths, concurrency, TTFT/TPOT objectives, and target QPS.
+
+If no optional hardware or workload information is supplied, the converter keeps
+the normal Recipes conversion behavior.
+
+See [Deployment-Time Parameters](#deployment-time-parameters) for the mapping
+between these inputs and individual runtime parameters.
+
+## Hardware Information
+
+Hardware detection is enabled only with `--detect-hardware`. It reports the
+effective resources available to the process or container, including CPU/NUMA
+topology and memory information. The current policy can use those values to
+refine `tensor-parallel-size` and `gpu-memory-utilization`.
+
+```bash
+python3 tools/recipes/recipe_json_to_vllm_config.py \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --hardware xeon6 \
+  --detect-hardware
+```
+
+Hardware detection is optional. Recipe hardware selects the tuning policy; host
+hardware detection provides resource information to that policy.
+
+## Workload Information
+
+Workload information is supplied explicitly because the converter runs before a
+vLLM server exists. Supported hints include:
+
+- `--input-tokens`
+- `--output-tokens`
+- `--concurrency`
+- `--ttft-sla-ms`
+- `--tpot-sla-ms`
+- `--target-qps`
+
+Example:
+
+```bash
+python3 tools/recipes/recipe_json_to_vllm_config.py \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --hardware xeon6 \
+  --input-tokens 128 \
+  --output-tokens 128 \
+  --concurrency 32 \
+  --ttft-sla-ms 3000 \
+  --tpot-sla-ms 100
+```
+
+Scheduler calculation is opt-in with `--tune-scheduler`; workload hints do
+not rewrite `max-num-seqs` or `max-num-batched-tokens` by default. The detailed
+scheduler and staged-sweep behavior is documented in
+[SWEEP_TUNING.md](SWEEP_TUNING.md).
+
+## Deployment-Time Parameters
+
+The parameters below may already exist in a recipe. They are candidates for
+deployment-time refinement when the recipe value is missing, generic, or based
+on a validation environment that differs from the user's target deployment.
+
+| Runtime parameter | Why it may need deployment-time refinement | Main decision input | Current policy |
+| --- | --- | --- | --- |
+| `tensor-parallel-size` | Available topology and model head counts constrain TP. | Hardware topology + model configuration | Use the largest head-compatible power-of-two TP within the effective NUMA-node count, for DP=1 and PP=1. |
+| `gpu-memory-utilization` | Available memory can differ by machine size, container limits, and other memory use. The vLLM option name is also used by the CPU backend. | Hardware memory + recipe baseline | Calculate a conservative fraction from the most constrained NUMA node. |
+| `max-num-seqs` | The useful scheduler concurrency depends on the number of requests expected to be active on each DP replica. | Workload concurrency + DP | Keep the recipe/vLLM value in `config.yml`; use `ceil(--concurrency / data-parallel-size)` as an explicit sweep seed. |
+| `max-num-batched-tokens` | Each scheduler iteration must share its token budget between active decodes and incoming prefills. | Input/output token shape, concurrency, and optional QPS/TPOT | Keep the recipe/vLLM value in `config.yml`; use decode budget + expected prefill demand as an explicit sweep seed. |
+| `data-parallel-size` | The required replica count depends on the requested throughput and the capacity of one replica. | Capacity target | Keep the recipe value today because per-replica SLA capacity is not known. |
+
+For `max-num-seqs` and `max-num-batched-tokens`, workload formulas now create
+benchmark-only seeds instead of overriding the directly deployable
+`config.yml`. The optional benchmark sweep measures those explicit seeds
+against vLLM's normal serving defaults. Default-reference runs leave the
+selected scheduler option unset at engine-configuration time so vLLM can
+resolve its platform-, world-size-, model-, and usage-context-aware default
+rather than assuming a fixed numeric value. See
+[SWEEP_TUNING.md](SWEEP_TUNING.md).
+
+This serving-default comparison is distinct from the `SchedulerConfig` fallback
+constants used inside the initial tuning heuristics below.
+
+## How Initial Runtime Tuning Seeds Are Calculated
+
+The hardware formulas below produce directly deployable starting values. The
+scheduler formulas produce explicit benchmark seeds and are not claimed to be
+universal performance optima. This separation avoids baking workload guesses
+into `config.yml` before measurements exist. The Tune All workflow benchmarks
+TP/DP first, then concurrency, and finally scheduler settings before writing a
+final recommendation. See [SWEEP_TUNING.md](SWEEP_TUNING.md).
+
+### `tensor-parallel-size`
+
+TP is derived from the effective NUMA topology reported by hardware detection:
+
+```text
+TP = largest power of two <= effective NUMA-node count
+```
+
+For example, 2 effective NUMA nodes produce TP=2, while 6 nodes currently
+produce TP=4. This is a topology-based starting point and avoids automatically
+selecting unusual non-power-of-two TP sizes before they are validated.
+
+The policy then reads the model configuration through vLLM's config loader,
+without loading weights. It honors the model path/ID, revision, code revision,
+`trust-remote-code`, config format and JSON `hf-overrides`. No model-specific
+numeric head-count table is maintained.
+
+Each candidate must divide the attention-head count. KV heads must divide
+across TP ranks when KV heads >= TP; otherwise TP must be a multiple of the KV
+head count so the heads can be replicated. An incompatible candidate is halved
+until it passes every detected constraint. Nested text configuration, global KV
+heads, Whisper encoder/decoder heads and hybrid linear-attention heads are
+checked. Vision head divisibility is checked conservatively unless
+`mm-encoder-tp-mode: data` is configured.
+
+For Phi-4-reasoning on four NUMA nodes, the detected 40 attention heads and 10
+KV heads reduce the initial TP=4 suggestion to TP=2. The printed tuning notes
+show the detected counts and the reduction; `config.yml` receives TP=2.
+
+If configuration loading or head extraction fails, the tool keeps the recipe
+TP (vLLM's default TP=1 when absent) and prints why detection failed. That
+fallback does not certify an existing recipe TP as compatible. Plain conversion
+without hardware detection does not fetch the model configuration.
+
+Automatic TP selection currently requires recipe DP=1 and PP=1; otherwise the
+recipe's parallelism is retained. Automatic DP tuning remains disabled pending
+CPU DP binding and capacity validation. No unused NUMA nodes are converted into
+DP replicas. These checks establish head compatibility, not memory fit or
+complete model/backend support. Explicit `vllm serve` CLI overrides still take
+precedence over the generated YAML and are validated by vLLM at startup.
+
+### `gpu-memory-utilization`
+
+For every effective NUMA memory node, the policy calculates:
+
+```text
+node_safe_fraction = available_memory / total_memory - 0.10
+safe_fraction = min(0.90, minimum node_safe_fraction)
+```
+
+The 10% reserve leaves memory for model/runtime overhead outside the vLLM cache
+budget. If the recipe already contains a smaller value, the policy preserves the
+smaller value. If it is absent, `0.80` is used as the initial ceiling:
+
+```text
+candidate = min(recipe value or 0.80, safe_fraction)
+```
+
+### `max-num-seqs`
+
+When `--concurrency` is supplied, it represents global client concurrency. Each
+DP replica needs capacity for its expected share of those requests:
+
+```text
+per_replica_concurrency = ceil(concurrency / data_parallel_size)
+max-num-seqs = per_replica_concurrency
+```
+
+For DP=1 this reduces to `max-num-seqs = concurrency`. This value seeds the
+scheduler benchmark; it is not added to `config.yml`. If concurrency is not
+supplied, no seed is calculated. Benchmark results show
+that setting `max-num-seqs` below per-replica concurrency can create request
+queueing and severe TTFT degradation; scheduler sweeps therefore do not use
+below-concurrency candidates.
+
+### `max-num-batched-tokens`
+
+The token budget is workload-derived and no longer assumes a fixed number of
+parallel prefills.
+
+First, the policy determines the active sequence count:
+
+```text
+active_sequences =
+    ceil(--concurrency / data_parallel_size)
+    or recipe max-num-seqs
+    or vLLM default max_num_seqs (128)
+```
+
+Decode requests consume approximately one token per active sequence in a
+scheduler iteration:
+
+```text
+decode_budget = active_sequences
+```
+
+The policy then estimates how many new prompts need prefill work per scheduler
+step:
+
+```text
+per_replica_qps = target_qps / data_parallel_size
+
+prefills_per_step = max(
+    1,
+    active_sequences / output_tokens,
+    per_replica_qps * tpot_sla_ms / 1000
+)
+
+prefills_per_step = min(active_sequences, prefills_per_step)
+prefill_budget = ceil(input_tokens * prefills_per_step)
+```
+
+The final explicit scheduler sweep seed is:
+
+```text
+max-num-batched-tokens = max(
+    vLLM default max_num_batched_tokens (2048),
+    active_sequences,
+    decode_budget + prefill_budget
+)
+```
+
+For example, with 128 input tokens, 128 output tokens, concurrency 32, and DP=1:
+
+```text
+decode_budget      = 32
+prefills_per_step  = max(1, 32 / 128) = 1
+prefill_budget     = 128
+candidate          = max(2048, 32, 32 + 128) = 2048
+```
+
+The calculated token budget is a scheduler sweep seed and is not added to
+`config.yml`. If P99 TTFT still
+misses its objective while P99 TPOT has substantial headroom, Tune All should
+reduce workload concurrency or select a different TP/DP layout rather than
+reducing `max-num-seqs` below per-replica concurrency.
+
+If chunked prefill is explicitly disabled and `max-model-len` is available, the
+policy also ensures:
+
+```text
+max-num-batched-tokens >= max-model-len
+```
+
+### `data-parallel-size`
+
+`--target-qps` alone is not enough to choose DP safely. A correct capacity rule
+also needs measured per-replica throughput that still satisfies TTFT/TPOT:
+
+```text
+DP = ceil(target_qps / qps_per_replica_at_SLO)
+```
+
+Because the converter does not have that measured capacity yet, its initial
+configuration intentionally keeps the recipe DP value rather than guessing.
+Tune All subsequently benchmarks supported TP/DP layouts and replaces this seed
+with a measured layout before concurrency and scheduler tuning.
+
+## Precedence
+
+```text
+vLLM defaults
+    -> vLLM Recipes baseline
+        -> hardware refinement (optional)
+            -> config.yml + env.sh
+
+workload / SLO hints (optional)
+    -> explicit scheduler sweep seed
+        -> benchmark-backed recommended-config.yml
+```
+
+## Runtime-Tuning Hardware Scope
+
+Runtime tuning is selected from the resolved recipe JSON's `hardware` field,
+rather than by inspecting which physical devices happen to be present on the
+host. This matters because a GPU server also exposes its host CPU topology.
+
+The current runtime-tuning policy registry contains `xeon6`. A tuning request
+for unregistered recipe hardware, such as `b200`, fails before host hardware
+detection:
+
+```text
+ERROR: Runtime tuning is not supported for recipe hardware 'b200'.
+Currently supported: xeon6.
+```
+
+Plain recipe conversion remains available for all recipe hardware. The gate only
+applies when optional runtime-tuning inputs are requested.
+
+## vLLM CPU Docker Shell
+
+Run hardware detection and runtime tuning inside the target vLLM CPU container
+so detected CPU, NUMA, memory, and cgroup limits match the deployment
+environment.
+
+From the vLLM source tree:
+
+```bash
+mkdir -p recipe-output
+
+docker run --rm -it \
+  --entrypoint bash \
+  --security-opt seccomp=unconfined \
+  --cap-add SYS_NICE \
+  --shm-size=4g \
+  -p 8000:8000 \
+  -v "$PWD/tools/recipes:/recipes:ro" \
+  -v "$PWD/recipe-output:/output" \
+  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+  -w /output \
+  vllm/vllm-openai-cpu:latest-x86_64
+```
+
+`/output` is writable; `/recipes` remains read-only.
+
+Inside the container, generate one runtime-tuned initial configuration:
+
+```bash
+python3 /recipes/recipe_json_to_vllm_config.py \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --hardware xeon6 \
+  --detect-hardware \
+  --input-tokens 128 \
+  --output-tokens 128 \
+  --concurrency 32 \
+  --ttft-sla-ms 3000 \
+  --tpot-sla-ms 100 \
+  --config-out /output/config.yml \
+  --env-out /output/env.sh
+```
+
+Deploy the generated initial configuration:
+
+```bash
+source /output/env.sh
+vllm serve --config /output/config.yml
+```
+
+For optional benchmark-backed validation of the scheduler settings, continue
+with [SWEEP_TUNING.md](SWEEP_TUNING.md).
+
+## Implementation
+
+- `hardware_detection.py` collects effective CPU/NUMA/memory information.
+- `sweep/runtime_tuning.py` owns hardware-policy selection and independent parameter
+  tuning functions.
+- `recipe_json_to_vllm_config.py` resolves the recipe, collects optional inputs,
+  applies the selected policy, and generates `config.yml` and `env.sh`.
+
+For benchmark-backed validation of the explicit scheduler seed, see
+[SWEEP_TUNING.md](SWEEP_TUNING.md).

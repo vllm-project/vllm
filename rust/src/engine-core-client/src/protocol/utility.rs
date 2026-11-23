@@ -62,6 +62,99 @@ impl FromStr for PauseMode {
     }
 }
 
+/// Process checkpoint lifecycle of an engine, as Python's `CheckpointState`.
+///
+/// It serves only while `Running`, and may go through the cycle any number of
+/// times. Display/from-str serde keeps the Python literal strings on the
+/// MessagePack wire and in JSON responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, SerializeDisplay, DeserializeFromStr)]
+pub enum CheckpointState {
+    /// Serving requests.
+    Running,
+    /// Draining, then releasing what a checkpoint must not contain.
+    Preparing,
+    /// Safe to capture.
+    Prepared,
+    /// Bringing back what preparing released.
+    Restoring,
+    /// Preparing or restoring failed.
+    Failed,
+}
+
+impl CheckpointState {
+    /// Return the Python literal used on the utility-call wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Preparing => "preparing",
+            Self::Prepared => "prepared",
+            Self::Restoring => "restoring",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl fmt::Display for CheckpointState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for CheckpointState {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "running" => Ok(Self::Running),
+            "preparing" => Ok(Self::Preparing),
+            "prepared" => Ok(Self::Prepared),
+            "restoring" => Ok(Self::Restoring),
+            "failed" => Ok(Self::Failed),
+            other => Err(format!(
+                "invalid checkpoint state `{other}`; expected one of: running, preparing, \
+                 prepared, restoring, failed"
+            )),
+        }
+    }
+}
+
+/// Level of the `sleep` utility call, sent as Python's integer level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "u32", try_from = "u32")]
+pub enum SleepLevel {
+    /// Level 0: pause scheduling only, without changing GPU memory.
+    PauseOnly,
+    /// Level 1: offload model weights to CPU and discard the KV cache.
+    OffloadWeights,
+    /// Level 2: discard all GPU memory.
+    DiscardAll,
+}
+
+impl From<SleepLevel> for u32 {
+    fn from(level: SleepLevel) -> Self {
+        match level {
+            SleepLevel::PauseOnly => 0,
+            SleepLevel::OffloadWeights => 1,
+            SleepLevel::DiscardAll => 2,
+        }
+    }
+}
+
+impl TryFrom<u32> for SleepLevel {
+    type Error = String;
+
+    fn try_from(level: u32) -> std::result::Result<Self, Self::Error> {
+        match level {
+            0 => Ok(Self::PauseOnly),
+            1 => Ok(Self::OffloadWeights),
+            2 => Ok(Self::DiscardAll),
+            other => Err(format!(
+                "invalid sleep level `{other}`; expected one of: 0, 1, 2"
+            )),
+        }
+    }
+}
+
 /// Utility call id as carried on the engine-core MessagePack wire.
 ///
 /// Python emits utility ids as MessagePack integers, including values that may

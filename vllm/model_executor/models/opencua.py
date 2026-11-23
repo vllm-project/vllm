@@ -7,6 +7,7 @@
 
 """Inference-only OpenCUA-7B model compatible with HuggingFace weights."""
 
+import typing
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -18,6 +19,7 @@ from transformers.models.qwen2_vl import (
     Qwen2VLProcessor,
     Qwen2VLVideoProcessor,
 )
+from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessorKwargs
 
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -27,6 +29,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     PromptReplacement,
     PromptUpdate,
@@ -57,6 +60,7 @@ class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
         return Qwen2VLMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_hf_config(self):
@@ -77,6 +81,11 @@ class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
 
 
 class OpenCUAProcessor(Qwen2VLProcessor):
+    @classmethod
+    def get_attributes(cls) -> list[str]:
+        # `__init__` builds the image and video processors from `vision_config`
+        return ["image_processor", "tokenizer", "video_processor"]
+
     def check_argument_for_proper_class(self, attribute_name: str, arg: object) -> None:
         if attribute_name == "tokenizer":
             return
@@ -121,9 +130,16 @@ class OpenCUAProcessor(Qwen2VLProcessor):
             if not isinstance(images, list):
                 images = [images]
             if len(images) > 0:
-                image_inputs = self.image_processor(
-                    images, return_tensors=return_tensors or "pt"
+                output_kwargs = self._merge_kwargs(
+                    Qwen2VLProcessorKwargs,
+                    tokenizer_init_kwargs=self.tokenizer.init_kwargs,
+                    **kwargs,
                 )
+                images_kwargs = {
+                    **output_kwargs["images_kwargs"],
+                    "return_tensors": return_tensors or "pt",
+                }
+                image_inputs = self.image_processor(images, **images_kwargs)
 
         combined_inputs = {**text_inputs, **image_inputs}
 
@@ -139,16 +155,6 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
         return _create_qwen2vl_field_factory(
             self.info.get_hf_config().vision_config.spatial_merge_size
         )(hf_inputs)
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        """vLLM이 prompt 업데이트를 처리하도록 False 반환."""
-        return False
 
     def _get_prompt_updates(
         self,
@@ -187,7 +193,13 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
         ]
 
 
-class OpenCUADummyInputsBuilder(Qwen2VLDummyInputsBuilder):
+if typing.TYPE_CHECKING:
+    _OpenCUADummyInputsBuilderBase = BaseDummyInputsBuilder[OpenCUAProcessingInfo]
+else:
+    _OpenCUADummyInputsBuilderBase = Qwen2VLDummyInputsBuilder
+
+
+class OpenCUADummyInputsBuilder(_OpenCUADummyInputsBuilderBase):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
@@ -218,6 +230,7 @@ class OpenCUAForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
     )
 
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = False
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -229,7 +242,7 @@ class OpenCUAForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.config = config

@@ -14,6 +14,7 @@ from vllm.transformers_utils.repo_utils import (
     get_hf_file_to_dict,
     is_mistral_model_repo,
     list_filtered_repo_files,
+    with_retry,
 )
 
 
@@ -185,3 +186,13 @@ def test_is_mistral_model_repo(files: list[str], expected_bool: bool):
             repo_type="model",
             token="token",
         )
+
+
+def test_with_retry_does_not_retry_fatal_errors():
+    """A definitive answer must not be retried, which costs a delay per attempt."""
+    func = MagicMock(side_effect=FileNotFoundError("no such file"))
+
+    with pytest.raises(FileNotFoundError):
+        with_retry(func, "Error", fatal_errors=(FileNotFoundError,))
+
+    func.assert_called_once()

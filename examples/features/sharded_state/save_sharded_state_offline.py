@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Saves each worker's model state dict directly to a checkpoint, which enables a
+"""Saves each worker's model state dict directly to a checkpoint, which enables a
 fast load path for large tensor-parallel models where each worker only needs to
 read its own shard rather than the entire checkpoint.
 
@@ -39,8 +38,11 @@ def parse_args():
     parser.add_argument(
         "--file-pattern",
         type=str,
-        default=ShardedStateLoader.DEFAULT_PATTERN,
-        help="string pattern of saved filenames",
+        help=f"string pattern of saved filenames."
+        f"{ShardedStateLoader.TP_ONLY_PATTERN!r} for tensor parallel only "
+        f"(pipeline parallelism is 1). "
+        f"{ShardedStateLoader.PP_AND_TP_PATTERN!r} for pipeline and "
+        f"tensor parallel.",
     )
     parser.add_argument(
         "--max-file-size",

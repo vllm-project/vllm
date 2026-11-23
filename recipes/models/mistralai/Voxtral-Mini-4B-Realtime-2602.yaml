@@ -1,0 +1,177 @@
+meta:
+  title: "Voxtral-Mini-4B-Realtime-2602"
+  slug: "voxtral-mini-4b-realtime-2602"
+  provider: "Mistral AI"
+  description: "Multilingual realtime speech transcription (13 languages) with a natively streaming causal audio encoder; configurable 80ms–2.4s transcription delay served via vLLM's Realtime API"
+  date_added: 2026-05-13
+  date_updated: 2026-05-13
+  tasks:
+    - multimodal
+  performance_headline: "Matches offline open-source ASR accuracy at 480ms delay; >12.5 tok/s on a single 16GB GPU"
+  related_recipes: []
+  hardware:
+    dgx_spark_gb10: verified
+
+model:
+  model_id: "mistralai/Voxtral-Mini-4B-Realtime-2602"
+  min_vllm_version: "0.20.0"
+  architecture: dense
+  parameter_count: "4.4B"
+  active_parameters: "4.4B"
+  context_length: 131072
+  base_args:
+    - "--tokenizer-mode"
+    - "mistral"
+    - "--compilation_config"
+    - '{"cudagraph_mode": "PIECEWISE"}'
+  base_env:
+    VLLM_DISABLE_COMPILE_CACHE: "1"
+
+dependencies:
+  - note: "mistral-common's audio extras bundle soxr/librosa/soundfile plus the Voxtral Realtime tokenizer (>= 1.9.0)"
+    command: 'uv pip install -U "mistral-common[audio]>=1.9.0"'
+  - note: "Transformers v5 silences a barrage of warnings emitted when serving Voxtral on v4 (see vllm-project/vllm#34642)"
+    command: "uv pip install -U transformers"
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 16
+    description: "BF16 weights — single 16GB+ GPU, full 131072 (~3h audio) context"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  Voxtral Mini 4B Realtime is Mistral AI's multilingual realtime speech
+  transcription model — among the first open-source ASR systems to hit
+  accuracy comparable to offline models with a **<500ms** end-to-end delay.
+
+  - **Architecture**: ≈3.4B Mistral text LM + ≈970M custom **causal** audio
+    encoder, both using sliding-window attention to support "infinite" streaming.
+  - **Languages**: 13 (English, French, Spanish, German, Russian, Chinese,
+    Japanese, Italian, Portuguese, Dutch, Arabic, Hindi, Korean).
+  - **Configurable delay**: any multiple of 80ms between 80ms and 1200ms,
+    plus 2400ms as a standalone value. Default is **480ms**, the sweet spot
+    Mistral identified between latency and accuracy.
+  - **Context**: 131072 tokens (≈3h of audio at 80ms/token).
+
+  ## Prerequisites
+
+  - **Hardware**: a single GPU with **≥ 16 GB** VRAM (BF16 weights only).
+  - **vLLM**: **>= 0.20.0** — the Voxtral Realtime architecture has been
+    registered since v0.16.0, but v0.20.0 is the first stable release with
+    the architecture documented in the supported-models list.
+
+  ### Install vLLM and audio dependencies
+
+  ```bash
+  uv venv && source .venv/bin/activate
+  uv pip install -U vllm --torch-backend=auto
+  uv pip install -U "mistral-common[audio]>=1.9.0" transformers
+  ```
+
+  Verify the audio extras pulled `mistral_common >= 1.9.0`:
+
+  ```bash
+  python -c "import mistral_common; print(mistral_common.__version__)"
+  ```
+
+  ## Launch command
+
+  ```bash
+  VLLM_DISABLE_COMPILE_CACHE=1 vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 \
+    --tokenizer-mode mistral \
+    --compilation_config '{"cudagraph_mode": "PIECEWISE"}'
+  ```
+
+  > `--tokenizer-mode mistral` is **required**: Voxtral Realtime's tokenizer
+  > only loads through `mistral_common`. Omitting it raises a tokenizer
+  > initialization error at startup.
+
+  Once it starts you should see the Realtime API route registered:
+
+  ```
+  Route: /v1/realtime, Endpoint: realtime_endpoint
+  ```
+
+  ### Tuning flags
+
+  - `--max-num-batched-tokens` — balance throughput vs latency (higher means
+    more throughput at the cost of per-request latency).
+  - `--max-model-len` — defaults to 131072 (≈3h). Reduce it if you know your
+    sessions are shorter; this cuts the memory reserved for pre-computed
+    RoPE frequencies. As a rule of thumb, one text token ≈ 80ms of audio,
+    so a 1h meeting needs `--max-model-len >= 3600/0.08 = 45000`.
+
+  ## Client usage
+
+  ### Recommended settings
+
+  - Always set `temperature=0.0`.
+  - Use **WebSockets** against `/v1/realtime` for streaming audio sessions.
+  - Adjust the transcription delay by editing the `transcription_delay_ms`
+    field in the model's
+    [`tekken.json`](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602/blob/main/tekken.json)
+    to any multiple of 80ms in `[80, 1200]`, or to `2400`.
+
+  ### Stream an audio file
+
+  See vLLM's
+  [Realtime audio file client example](https://docs.vllm.ai/en/latest/examples/online_serving/openai_realtime_client/).
+
+  ### Live microphone (Gradio demo)
+
+  See vLLM's
+  [Realtime microphone client example](https://docs.vllm.ai/en/latest/examples/online_serving/openai_realtime_microphone_client/)
+  for an end-to-end live-transcription UI.
+
+  ## Benchmarks (Fleurs, average WER)
+
+  | Delay   | AVG    | English | French | Chinese | Japanese |
+  |---------|--------|---------|--------|---------|----------|
+  | 160ms   | 12.60% | 6.46%   | 9.75%  | 17.67%  | 19.17%   |
+  | 240ms   | 10.80% | 5.91%   | 8.00%  | 13.84%  | 15.17%   |
+  | **480ms** | **8.72%** | **4.90%** | **6.42%** | **10.45%** | **9.59%** |
+  | 960ms   | 7.70%  | 4.34%   | 5.68%  | 8.99%   | 6.80%    |
+  | 2400ms  | 6.73%  | 4.05%   | 5.23%  | 8.48%   | 5.50%    |
+
+  At **480ms** Voxtral Mini Realtime matches Mistral's offline Voxtral
+  Transcribe 2.0 on Long-form English and Short-form English benchmarks
+  (within 1 WER point on TEDLIUM, Meanwhile, AMI IHM, etc.).
+
+  ## Troubleshooting
+
+  - **`Route: /v1/realtime` not registered** — your vLLM is < 0.16.0.
+    Upgrade to 0.20.0+.
+  - **Tokenizer initialization error** — you forgot `--tokenizer-mode mistral`.
+    Voxtral Realtime's tokenizer can only load through `mistral_common`.
+  - **`mistral_common` import error / wrong version** — install with the audio
+    extras: `pip install -U "mistral-common[audio]>=1.9.0"`.
+  - **Transformers v4 warning spam** — upgrade to Transformers v5
+    (`uv pip install -U transformers`), tracked in
+    [vllm-project/vllm#34642](https://github.com/vllm-project/vllm/issues/34642).
+  - **Hangs / crashes on long sessions** — known upstream issue, see
+    [#39996](https://github.com/vllm-project/vllm/issues/39996) (encoder KV
+    cache eviction) and [#38233](https://github.com/vllm-project/vllm/issues/38233)
+    (multi-session encode). Restart sessions periodically as a workaround.
+
+  ## References
+
+  - [Mistral blog: Voxtral Transcribe 2](https://mistral.ai/news/voxtral-transcribe-2)
+  - [vLLM Realtime API docs](https://docs.vllm.ai/en/latest/serving/openai_compatible_server/#realtime-api)
+  - [vLLM streaming-input blog post](https://vllm.ai/blog/streaming-realtime.html)
+  - [HuggingFace demo space](https://huggingface.co/spaces/mistralai/Voxtral-Mini-Realtime)

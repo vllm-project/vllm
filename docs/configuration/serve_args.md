@@ -29,6 +29,19 @@ To use the above config file:
 vllm serve --config config.yaml
 ```
 
+### Generate a configuration from vLLM Recipes
+
+[vLLM Recipes](https://recipes.vllm.ai/) can be converted into `config.yaml`
+and `env.sh`. See the
+[Recipes conversion tool README](../../tools/recipes/README.md) for usage.
+
+Source the generated environment before starting vLLM:
+
+```bash
+source env.sh
+vllm serve --config config.yaml
+```
+
 !!! note
     In case an argument is supplied simultaneously using command line and the config file, the value from the command line will take precedence.
     The order of priorities is `command line > config file values > defaults`.

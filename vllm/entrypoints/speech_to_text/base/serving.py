@@ -16,15 +16,14 @@ from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.generate.base.serving import GenerateBaseServing
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
-    ErrorResponse,
     RequestResponseMetadata,
-    UsageInfo,
 )
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.engine.types import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
@@ -32,7 +31,7 @@ from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
-from vllm.multimodal.audio import get_audio_duration, split_audio
+from vllm.multimodal.audio import AudioResampler, get_audio_duration, split_audio
 from vllm.multimodal.media.audio import load_audio
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
@@ -85,7 +84,7 @@ def asr_inter_chunk_separator(
 ) -> str:
     """Space to insert between ASR text chunks for streaming and non-streaming join.
 
-    Languages in ``no_space_languages`` (e.g. Chinese, Japanese) use an empty
+    Languages in `no_space_languages` (e.g. Chinese, Japanese) use an empty
     separator; others use a single ASCII space.
     """
     return "" if language and language.lower() in no_space_languages else " "
@@ -124,8 +123,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         self.enable_force_include_usage = enable_force_include_usage
 
-        self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
         self.max_audio_decode_duration_s: int = envs.VLLM_MAX_AUDIO_DECODE_DURATION_S
+        self.max_audio_decode_bytes: int = envs.VLLM_MAX_AUDIO_DECODE_BYTES
         if self.model_cls.supports_segment_timestamp:
             self.tokenizer = cast(
                 PreTrainedTokenizerBase,
@@ -174,13 +173,20 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         # NOTE resample to model SR here for efficiency. This is also a
         # pre-requisite for chunking, as it assumes Whisper SR.
         try:
+            resample_method = self.asr_config.audio_resample_method
             with io.BytesIO(audio_data) as buf:
                 y, sr = load_audio(
                     buf,
-                    sr=self.asr_config.sample_rate,
+                    sr=None if resample_method else self.asr_config.sample_rate,
                     mono=True,
                     max_duration_s=self.max_audio_decode_duration_s,
+                    max_decode_bytes=self.max_audio_decode_bytes,
                 )
+            if resample_method:
+                y = AudioResampler(
+                    target_sr=self.asr_config.sample_rate, method=resample_method
+                ).resample(y, orig_sr=sr)
+                sr = self.asr_config.sample_rate
         except ValueError:
             raise
         except Exception as exc:
@@ -211,12 +217,13 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         self,
         audio_chunk: np.ndarray,
         request_id: str,
+        data_parallel_rank: int | None = None,
     ) -> str:
         """Auto-detect the spoken language from an audio chunk.
 
         Delegates prompt construction and output parsing to the model class
-        via ``get_language_detection_prompt`` and
-        ``parse_language_detection_output``.
+        via `get_language_detection_prompt` and
+        `parse_language_detection_output`.
         """
         prompt = self.model_cls.get_language_detection_prompt(
             audio_chunk,
@@ -229,12 +236,14 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             max_tokens=1,
             temperature=0.0,
             allowed_token_ids=allowed_token_ids,
+            watermarking=False,
         )
 
         result_generator = self.engine_client.generate(
             prompt,
             sampling_params,
             request_id,
+            data_parallel_rank=data_parallel_rank,
         )
 
         try:
@@ -263,6 +272,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
+        data_parallel_rank: int | None = None,
     ) -> tuple[list[EngineInput], float, list[float]]:
         # Validate request
         request.language = self.model_cls.validate_language(request.language)
@@ -271,13 +281,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             if request.to_language
             else None
         )
-
-        if len(audio_data) / 1024**2 > self.max_audio_filesize_mb:
-            raise VLLMValidationError(
-                "Maximum file size exceeded",
-                parameter="audio_filesize_mb",
-                value=len(audio_data) / 1024**2,
-            )
 
         # Run cpu intensive preprocess step in a separate thread pool executor.
         chunks, duration = await self._decode_and_chunk_speech_async(audio_data)
@@ -294,7 +297,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         ):
             # Auto-detect language from the first chunk.
             request.language = await self._detect_language(
-                chunks[0], f"{request_id}-lang_detect"
+                chunks[0],
+                f"{request_id}-lang_detect",
+                data_parallel_rank=data_parallel_rank,
             )
 
         parsed_prompts: list[DictPrompt] = []
@@ -365,8 +370,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         segment_class: type[SpeechToTextSegment],
         start_time: float = 0,
     ) -> list[SpeechToTextSegment]:
-        """
-        Convert tokens to verbose segments.
+        """Convert tokens to verbose segments.
 
         This method expects the model to produce
         timestamps as tokens (similar to Whisper).
@@ -447,11 +451,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         if not request.model:
             request.model = self.models.model_name()
 
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight()
 
         if request.response_format not in [
             "text",
@@ -480,12 +480,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 f"Currently do not support diarized_json for {request.model}"
             )
 
-        if (
-            request.response_format in {"verbose_json", "diarized_json"}
-            and request.stream
-        ):
+        if request.response_format == "verbose_json" and request.stream:
             return self.create_error_response(
-                f"{request.response_format} format doesn't support streaming case"
+                "verbose_json format doesn't support streaming case"
             )
         request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 
@@ -495,6 +492,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         lora_request = self._maybe_get_adapters(request)
 
+        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+
         (
             engine_inputs,
             duration_s,
@@ -503,6 +502,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             request=request,
             audio_data=audio_data,
             request_id=request_id,
+            data_parallel_rank=data_parallel_rank,
         )
 
         # Schedule the request and get the result generator.
@@ -519,11 +519,13 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         # constrained by the size of the input audio, which is mapped to a
         # fixed-size log-mel-spectogram. Still, allow for fewer tokens to be
         # generated by respecting the extra completion tokens arg.
+        # A checkpoint's default output limit is for a chunk, not a whole recording
+        is_chunked = self.asr_config.max_audio_clip_s is not None
         max_tokens = get_max_tokens(
             max_model_len,
             request.max_completion_tokens,
             input_len,
-            self.default_sampling_params,
+            self.default_sampling_params if is_chunked else {},
         )
 
         if request.use_beam_search:
@@ -566,6 +568,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         request_id=request_id_item,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
+                        data_parallel_rank=data_parallel_rank,
                     )
                 else:
                     generator = self.engine_client.generate(
@@ -574,6 +577,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         request_id_item,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
+                        data_parallel_rank=data_parallel_rank,
                     )
 
                 list_result_generator.append(generator)
@@ -635,10 +639,12 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
                     chunk_segment_parts[idx].extend(segments)
                     chunk_text_parts[idx].extend([seg.text for seg in segments])
+                elif request.response_format == "diarized_json":
+                    chunk_text_parts[idx].append(op.outputs[0].text)
                 else:
                     raw_text = op.outputs[0].text
                     chunk_text_parts[idx].append(
-                        self.model_cls.post_process_output(raw_text)
+                        self.model_cls.post_process_output(raw_text, self.model_config)
                     )
             total_segments = [
                 segment
@@ -656,7 +662,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     "seconds": int(math.ceil(duration_s)),
                 }
                 if request.response_format == "diarized_json":
-                    diarized_segments = self.model_cls.parse_diarized_transcript(text)
+                    diarized_segments = self.model_cls.parse_diarized_transcript(
+                        text, self.model_config
+                    )
                     if not diarized_segments:
                         return self.create_error_response(
                             "Model output did not contain a valid diarized transcript"
