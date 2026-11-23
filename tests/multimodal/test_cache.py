@@ -1154,7 +1154,7 @@ async def test_cache_drift_invalidation_waits_for_render_without_delaying_output
         return result
 
     monkeypatch.setattr(processor, "_get_cache_missing_items", hold_cache_hit)
-    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    output_processor = OutputProcessor(tokenizer=None, collect_stats=False)
     collectors = []
     for idx in range(2):
         request = EngineCoreRequest(
@@ -1177,7 +1177,7 @@ async def test_cache_drift_invalidation_waits_for_render_without_delaying_output
         output_handler=None,
         engine_core=SimpleNamespace(get_output_async=outputs.get),
         output_processor=output_processor,
-        log_stats=False,
+        collect_stats=False,
         logger_manager=None,
         renderer=renderer,
     )

@@ -102,7 +102,7 @@ class Scheduler(SchedulerInterface):
         hash_block_size: int | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
-        log_stats: bool = False,
+        collect_stats: bool = False,
     ) -> None:
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
@@ -112,7 +112,7 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
-        self.log_stats = log_stats
+        self.collect_stats = collect_stats
         self.observability_config = vllm_config.observability_config
         self.spec_decode_metrics_level = (
             self.observability_config.per_request_spec_decode_metrics
@@ -188,7 +188,7 @@ class Scheduler(SchedulerInterface):
                 role=KVConnectorRole.SCHEDULER,
                 kv_cache_config=self.kv_cache_config,
             )
-            if self.log_stats:
+            if self.collect_stats:
                 self.connector_prefix_cache_stats = PrefixCacheStats()
             kv_load_failure_policy = kv_transfer_config.kv_load_failure_policy
             self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
@@ -373,7 +373,7 @@ class Scheduler(SchedulerInterface):
             use_eagle=self.use_eagle_block_drop,
             num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             num_prefill_lookahead=self.num_prefill_lookahead,
-            log_stats=self.log_stats,
+            collect_stats=self.collect_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=1,
@@ -473,7 +473,7 @@ class Scheduler(SchedulerInterface):
         self.deferred_loads: dict[str, tuple[int, int, int, int]] = {}
 
         self.perf_metrics: ModelMetrics | None = None
-        if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
+        if self.collect_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.aux_output_connector = (
@@ -500,7 +500,7 @@ class Scheduler(SchedulerInterface):
         self._kv_fetch_stages: dict[Request, str] | None = (
             {}
             if self.connector is not None
-            and (self.log_stats or self.scheduler_config.max_num_inflight_kv_loads)
+            and (self.collect_stats or self.scheduler_config.max_num_inflight_kv_loads)
             else None
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
@@ -728,7 +728,7 @@ class Scheduler(SchedulerInterface):
 
         iteration_details = None
         if (
-            self.log_stats
+            self.collect_stats
             and self.observability_config.enable_logging_iteration_details
         ) or self.vllm_config.profiler_config.profiler is not None:
             iteration_details = IterationDetails()
@@ -1609,7 +1609,7 @@ class Scheduler(SchedulerInterface):
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
-                if self.log_stats:
+                if self.collect_stats:
                     request.record_event(
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
                     )
@@ -1878,7 +1878,7 @@ class Scheduler(SchedulerInterface):
         request.num_output_placeholders = 0
         request.num_output_placeholder_steps = 0
         request.num_preemptions += 1
-        if self.log_stats:
+        if self.collect_stats:
             self._num_preempted_reqs += 1
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
@@ -1975,7 +1975,7 @@ class Scheduler(SchedulerInterface):
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
 
-        if self.log_stats:
+        if self.collect_stats:
             session.record_event(EngineCoreEventType.QUEUED)
         return True
 
@@ -3110,7 +3110,7 @@ class Scheduler(SchedulerInterface):
                     # Count P/D requests on arrival: connector matching is
                     # skipped while all run slots are taken.
                     self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START)
-            if self.log_stats:
+            if self.collect_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
             if self.ec_connector is not None:
@@ -3396,7 +3396,7 @@ class Scheduler(SchedulerInterface):
         if self.connector.reset_cache() is False:
             return False
 
-        if self.log_stats:
+        if self.collect_stats:
             assert self.connector_prefix_cache_stats is not None
             self.connector_prefix_cache_stats.reset = True
 
@@ -3420,7 +3420,7 @@ class Scheduler(SchedulerInterface):
         perf_stats: PerfStats | None = None,
         ec_connector_stats: ECConnectorStats | None = None,
     ) -> SchedulerStats | None:
-        if not self.log_stats:
+        if not self.collect_stats:
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
@@ -3467,7 +3467,7 @@ class Scheduler(SchedulerInterface):
         num_accepted_tokens: int,
         num_verified_tokens: int,
     ) -> SpecDecodingStats | None:
-        if not self.log_stats:
+        if not self.collect_stats:
             return None
         if spec_decoding_stats is None:
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)

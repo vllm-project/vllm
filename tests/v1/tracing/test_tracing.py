@@ -46,6 +46,8 @@ def test_traces(
                 gpu_memory_utilization=0.3,
                 disable_log_stats=disable_log_stats,
             )
+            # Tracing must not turn on console or Prometheus stat logging.
+            assert (llm.llm_engine.logger_manager is None) == disable_log_stats
             prompts = ["This is a short prompt"]
             outputs = llm.generate(prompts, sampling_params=sampling_params)
             print(f"test_traces outputs is : {outputs}")
