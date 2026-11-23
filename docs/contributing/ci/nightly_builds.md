@@ -12,7 +12,7 @@ Regular builds produce the CUDA 13.2 wheels for x86_64 and aarch64. Additional
 wheel variants and ROCm builds can be unblocked on demand and run automatically
 when `NIGHTLY=1`:
 
-- **Backend variants**: `cpu` and `cuXXX` (e.g., `cu129`, `cu132`).
+- **Backend variants**: `cpu` and `cuXXX` (e.g., `cu132`).
 - **Architecture variants**: `x86_64` and `aarch64`.
 
 Each build step:
@@ -79,7 +79,7 @@ Indices are organized by variant:
 
 - **Default variant**: Wheels without variant suffix (i.e., built with the current `VLLM_MAIN_CUDA_VERSION`) are placed in the root.
 - **Variant subdirectories**: Wheels with variant suffixes (e.g., `+cu130`, `.cpu`) are organized in subdirectories.
-- **Alias to default**: The default variant can have an alias (e.g., `cu129` for now) for consistency and convenience.
+- **Alias to default**: The default variant can have an alias (e.g., `cu132` for now) for consistency and convenience.
 
 The variant is extracted from the wheel filename (as described in the [file name convention](https://packaging.python.org/en/latest/specifications/binary-distribution-format/#file-name-convention)):
 
