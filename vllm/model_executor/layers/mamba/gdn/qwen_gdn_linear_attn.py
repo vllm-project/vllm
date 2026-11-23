@@ -67,7 +67,10 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
-from vllm.model_executor.layers.utils import cuda_unquantized_gemm
+from vllm.model_executor.layers.utils import (
+    _skinny_gemm_max_weight_bytes,
+    cuda_unquantized_gemm,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -766,6 +769,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and self.quant_config is None
             and vllm_config.lora_config is None
             and self.speculative_config is None
+            and self._fused_in_proj_fits_skinny_gemm(vllm_config)
         )
         if self.fuse_in_proj_qkvzba:
             self.in_proj_qkvzba = MergedColumnParallelLinear(
@@ -1051,6 +1055,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if not supports_fused_mtp_decode():
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
         return None
+
+    def _fused_in_proj_fits_skinny_gemm(self, vllm_config: VllmConfig) -> bool:
+        """Whether the fused per-rank in_proj weight stays under the skinny-GEMM
+        weight cap, so decode keeps wvSplitK instead of falling to the generic
+        GEMM (e.g. Qwen3.5-9B TP1 on gfx1100: 96.0 MiB qkvz, 96.5 MiB fused)."""
+        rows = (2 * self.key_dim + 2 * self.value_dim + 2 * self.num_v_heads) // (
+            self.tp_size
+        )
+        dtype_size = vllm_config.model_config.dtype.itemsize
+        return rows * self.hidden_size * dtype_size <= _skinny_gemm_max_weight_bytes()
 
     def create_qkvz_proj(
         self,
