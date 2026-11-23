@@ -189,6 +189,7 @@ class Probe:
             Glm5NextModel,
             Glm5NextMoE,
         )
+        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
         self._captured: dict = {}
         self._gaps: dict = {}
@@ -209,16 +210,20 @@ class Probe:
             for row, p in enumerate(positions.tolist()):
                 yield row, (idx, max(n for n in self._lens if n <= p), p)
 
+        # The hooks copy to the host mid-step on purpose: exempt them from the
+        # engine's VLLM_GPU_SYNC_CHECK (set to "error" in the ROCm CI image).
         def record(idx, positions, out, kernel=False):
             if not decode_only():
                 return
             if kernel:
                 self._kernel_layers.add(idx)
             # the last layer applies its own hc_post: no residual
-            for row, key in keys(idx, positions):
-                self._captured.setdefault(
-                    key, [None if t is None else t[row].float().cpu() for t in out[:2]]
-                )
+            with gpu_sync_allowed():
+                for row, key in keys(idx, positions):
+                    self._captured.setdefault(
+                        key,
+                        [None if t is None else t[row].float().cpu() for t in out[:2]],
+                    )
 
         positions: list = [None]  # the running decoder layer's
 
@@ -230,15 +235,17 @@ class Probe:
             if gate.e_score_correction_bias is not None:
                 scores = scores + gate.e_score_correction_bias.float()
             top = scores.topk(top_k + 1, dim=-1).values
-            gap = (top[:, top_k - 1] - top[:, top_k]).tolist()
-            for row, key in keys(idx, positions[0]):
-                self._gaps.setdefault(key, gap[row])
-            if idx in backbone.raw_moe:
-                # this rank's intermediate shard of the fp32 MoE on vLLM's input
-                bias = gate.e_score_correction_bias
-                exact = _exact_moe(h, gate.weight, bias, *backbone.raw_moe[idx])
+            with gpu_sync_allowed():
+                gap = (top[:, top_k - 1] - top[:, top_k]).tolist()
                 for row, key in keys(idx, positions[0]):
-                    self._exact.setdefault(key, exact[row].cpu())
+                    self._gaps.setdefault(key, gap[row])
+                if idx in backbone.raw_moe:
+                    # this rank's intermediate shard of the fp32 MoE on vLLM's
+                    # input
+                    bias = gate.e_score_correction_bias
+                    exact = _exact_moe(h, gate.weight, bias, *backbone.raw_moe[idx])
+                    for row, key in keys(idx, positions[0]):
+                        self._exact.setdefault(key, exact[row].cpu())
 
         model = self.model_runner.model  # type: ignore[attr-defined]
         backbone = next(m for m in model.modules() if isinstance(m, Glm5NextModel))
