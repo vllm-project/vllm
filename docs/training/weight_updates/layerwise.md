@@ -1,8 +1,8 @@
 # What is Layerwise (Re)loading?
 
-Layerwise reloading is the system used to handle the loading of new weight data into existing weight data destinations without triggering recompilation of the cuda graph and other runtime artifacts. This system is used to enable [QeRL](https://arxiv.org/pdf/2510.11696)-style post training flows, where full-precision trainer weights are quantized and loaded into a target vLLM instance for fast, high-exploration rollouts. The core implementation can be found in [layerwise.py](../../vllm/model_executor/model_loader/reload/layerwise.py).
+Layerwise reloading is the system used to handle the loading of new weight data into existing weight data destinations without triggering recompilation of the cuda graph and other runtime artifacts. This system is used to enable [QeRL](https://arxiv.org/pdf/2510.11696)-style post training flows, where full-precision trainer weights are quantized and loaded into a target vLLM instance for fast, high-exploration rollouts. The core implementation can be found in [layerwise.py](../../../vllm/model_executor/model_loader/reload/layerwise.py).
 
-![Layerwise](../assets/training/layerwise.png)
+![Layerwise](../../assets/training/layerwise.png)
 
 ## Layerwise Reloading for QeRL
 
@@ -16,7 +16,7 @@ In order to load new weights into existing weight data destinations, a weight mu
 
 Layerwise reloading achieves this using the following steps:
 
-1. Weights are **transferred** from the trainer to the target (see [weight_transfer](weight_transfer/README.md))
+1. Weights are **transferred** from the trainer to the target (see [weight_transfer](README.md))
 2. Weights loaded via `model.load_weights`, during which they are **sharded** and **fused**
 3. Weights are **processed** in an online fashion as soon as all of a layer's weights are loaded
 4. Weights are **copied** into the existing weight data destinations
@@ -62,7 +62,7 @@ and `VLLM_RELOAD_MODE=layerwise`.
 
 ### High Level Weight Transfer API
 
-The layerwise reloading system is integrated with the post-training weight transfer system. To use layerwise reloading in conjunction to the weight transfer system, follow the examples found [here](../../examples/rl/). Checkpoint-format weight transfer engines (e.g. the NCCL and IPC backends) reload inside their `start_weight_update`/`finish_weight_update` lifecycle, in the mode `VLLM_RELOAD_MODE` selects: by default [direct](direct_reload.md) where it applies, else layerwise.
+The layerwise reloading system is integrated with the post-training weight transfer system. To use layerwise reloading in conjunction to the weight transfer system, follow the examples found [here](../../../examples/rl/). Checkpoint-format weight transfer engines (e.g. the NCCL and IPC backends) reload inside their `start_weight_update`/`finish_weight_update` lifecycle, in the mode `VLLM_RELOAD_MODE` selects: by default [direct](direct_reload.md) where it applies, else layerwise.
 
 ### Mid Level `reload_weights` API
 
@@ -105,7 +105,7 @@ llm.collective_rpc("reload_weights", kwargs={"weights_iterator": weights_iterato
 
 ### Low Level `layerwise` API
 
-[layerwise.py](../../vllm/model_executor/model_loader/reload/layerwise.py) Implements the following functions to execute its lifecycle:
+[layerwise.py](../../../vllm/model_executor/model_loader/reload/layerwise.py) Implements the following functions to execute its lifecycle:
 
 | Function | Purpose | Quantized Reload | Online Quantization |
 | - | - | - | - |
@@ -137,7 +137,7 @@ finalize_layerwise_processing(model, llm.model_config)
 
 Layerwise reload updates DeepSeek-V4.1 CPU-offloaded Engram tables in their
 existing host storage. Checkpoint loaders write there directly, and the
-[`sharded_rdt` backend](weight_transfer/sharded_rdt.md) copies received slices
+[`sharded_rdt` backend](engines/sharded_rdt.md) copies received slices
 straight into that storage. Post-load hooks run when the update finishes.
 GPU-resident and peer-HBM Engram tables use the standard layerwise reload path.
 
@@ -147,7 +147,7 @@ For this reason, users must take care as to the order of weights when they are r
 
 | Correct Loading | Incorrect Loading |
 | - | - |
-| ![Layerwise](../assets/training/layerwise_good_loading.png) | ![Layerwise](../assets/training/layerwise_bad_loading.png) |
+| ![Layerwise](../../assets/training/layerwise_good_loading.png) | ![Layerwise](../../assets/training/layerwise_bad_loading.png) |
 
 Users will see a warning like the one below if weights are loaded out-of-order.
 

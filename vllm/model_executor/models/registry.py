@@ -584,6 +584,10 @@ _MULTIMODAL_MODELS = {
         "nemotron3_5_transcribe",
         "Nemotron3_5TranscribeForConditionalGeneration",
     ),
+    "Nemotron4ForConditionalGeneration": (
+        "vllm.models.nemotron_shortcut",
+        "NemotronShortcutForConditionalGeneration",
+    ),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "MuseGlimmerForConditionalGeneration": ("muse_glimmer", "MuseGlimmerForCausalLM"),
     "MuseSparkForConditionalGeneration": (
@@ -769,6 +773,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "Nemotron3_5TranscribeMTPModel": (
         "nemotron3_5_transcribe",
         "Nemotron3_5TranscribeMTP",
+    ),
+    "NemotronShortcutMTPModel": (
+        "vllm.models.nemotron_shortcut",
+        "NemotronShortcutMTP",
     ),
     "LongCatFlashMTPModel": ("longcat_flash_mtp", "LongCatFlashMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),

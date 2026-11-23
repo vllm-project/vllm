@@ -111,7 +111,7 @@ handled inside `send_weights()`.
 
 ## Trainer Without vLLM over HTTP
 
-A colocated trainer can speak the [HTTP endpoints](README.md#api-endpoints)
+A colocated trainer can speak the [HTTP endpoints](../README.md#api-endpoints)
 directly, with only PyTorch and an HTTP client. The server needs
 `VLLM_ALLOW_INSECURE_SERIALIZATION=1`; without it, init and start return 200 and
 the first `/update_weights` returns 500. Reference:
