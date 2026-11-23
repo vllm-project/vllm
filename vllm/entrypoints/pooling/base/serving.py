@@ -125,7 +125,7 @@ class PoolingBaseServing(ABC, BaseServing):
         lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)
         priorities = getattr(request, "priority", 0)
-        prompt_extras = request.build_engine_prompt_extras()
+        prompt_extras = request.build_prompt_extras()
 
         ctx = PoolingServeContext(
             request=request,

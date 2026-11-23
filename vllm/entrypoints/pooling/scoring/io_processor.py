@@ -610,7 +610,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         cmpl_tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
         chat_tok_params = ctx.build_tok_params(self.renderer.default_chat_tok_params)
 
-        prompt_extras = ctx.pooling_params.extra_kwargs
+        prompt_extras = ctx.build_prompt_extras(
+            ctx.pooling_params, self.model_config.multimodal_config
+        )
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
@@ -703,7 +705,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 "compressed_token_type_ids": compressed,
             }
 
-        engine_prompt_extras = (
+        prompt_extras = (
             {
                 k: v
                 for k in ("mm_processor_kwargs", "cache_salt")
@@ -713,11 +715,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             else None
         )
 
-        if engine_prompt_extras:
+        if prompt_extras:
             target_prompt = extract_target_prompt(self.model_config, engine_prompt)
-            target_prompt.update(engine_prompt_extras)
+            target_prompt.update(prompt_extras)
 
-        skip_mm_cache = render_params["prompt_extras"].pop("skip_mm_cache", False)
+        skip_mm_cache = prompt_extras.pop("skip_mm_cache", False)
         engine_input = self.renderer.process_for_engine(
             engine_prompt, arrival_time, skip_mm_cache=skip_mm_cache
         )

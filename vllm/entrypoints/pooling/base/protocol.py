@@ -142,7 +142,7 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
 
         return tok_params.with_kwargs(padding=self.padding)
 
-    def build_engine_prompt_extras(self, mm_config: MultiModalConfig | None = None):
+    def build_prompt_extras(self, mm_config: MultiModalConfig | None = None):
         prompt_extras: dict[str, Any] = {}
         merged = {
             k: v

@@ -147,7 +147,7 @@ class OfflineInputsContext:
     add_special_tokens: bool | None = None
     tokenization_kwargs: dict[str, Any] | None = None
 
-    # mm_params->engine_prompt_extras:
+    # mm_params->prompt_extras:
     skip_mm_cache: bool = False
     cache_salt: str | None = None
     media_io_kwargs: dict[str, dict[str, Any]] | None = None
@@ -166,7 +166,7 @@ class OfflineInputsContext:
             return default_tok_params
         return default_tok_params.with_kwargs(**tok_kwargs)
 
-    def build_engine_prompt_extras(
+    def build_prompt_extras(
         self, params: PoolingParams, mm_config: MultiModalConfig | None = None
     ):
         prompt_extras: dict[str, Any] = dict(params.extra_kwargs or {})

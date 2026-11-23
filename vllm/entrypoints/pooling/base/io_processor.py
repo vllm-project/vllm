@@ -11,6 +11,7 @@ from vllm import (
 )
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.chat_utils import ChatTemplateConfig
@@ -37,6 +38,8 @@ from ..types import (
     RequestGenerator,
     ScoringRenderParams,
 )
+
+logger = init_logger(__name__)
 
 
 class PoolingIOProcessor:
@@ -213,9 +216,15 @@ class PoolingIOProcessor:
         else:
             pooling_params = ctx.pooling_params
 
-        prompt_extras = ctx.build_engine_prompt_extras(
-            pooling_params if not isinstance(pooling_params, Sequence) else None
-        )
+        if isinstance(pooling_params, Sequence):
+            logger.warning(
+                "Received a Sequence of PoolingParams; skipping prompt_extras"
+                "construction because per-item pooling params are not supported here."
+            )
+            target_params = None
+        else:
+            target_params = pooling_params
+        prompt_extras = ctx.build_prompt_extras(target_params)
 
         # Clone to avoid modifying the caller's pooling parameters.
         params_seq = [
@@ -266,7 +275,8 @@ class PoolingIOProcessor:
     ) -> PoolingEngineInput:
         if "conversations" in render_params:
             render_params = cast(EncodeChatRenderParams, render_params)
-            skip_mm_cache = render_params["prompt_extras"].pop("skip_mm_cache", False)
+            prompt_extras = render_params.get("prompt_extras") or {}
+            skip_mm_cache = prompt_extras.pop("skip_mm_cache", False)
             (_,), engine_input = self.renderer.render_chat(
                 conversations=[render_params["conversations"]],
                 chat_params=render_params["chat_params"],
@@ -276,7 +286,8 @@ class PoolingIOProcessor:
             )
         elif "prompts" in render_params:
             render_params = cast(EncodeCMPLRenderParams, render_params)
-            skip_mm_cache = render_params["prompt_extras"].pop("skip_mm_cache", False)
+            prompt_extras = render_params.get("prompt_extras") or {}
+            skip_mm_cache = prompt_extras.pop("skip_mm_cache", False)
             engine_input = self.renderer.render_cmpl(
                 prompts=[render_params["prompts"]],
                 tok_params=render_params["tok_params"],
