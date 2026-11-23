@@ -1352,3 +1352,70 @@ def test_sleep_wake_preserves_mm_cache_consistency():
     llm.wake_up()
     output2 = llm.generate([prompt], sampling_params)
     assert output2[0].outputs[0].text
+
+
+def test_skip_mm_cache_avoids_receiver_eviction_and_drift():
+    """skip_mm_cache=True bypasses receiver cache updates without evicting items.
+
+    When a request sets skip_mm_cache=True, its payload must not touch,
+    insert into, or evict entries from the P1 LRU receiver cache, avoiding
+    P0/P1 cache drift and subsequent multimodal_cache_miss errors.
+    """
+    # Cache capacity holds 2 items of 64 bytes each (128 bytes total).
+    model_config = _StubModelConfig(mm_processor_cache_gb=128 / GiB_bytes)
+    sender = LruKeyReplicatedSenderCache(model_config)
+    receiver = LruKeyReplicatedReceiverCache(model_config)
+
+    item_a = MultiModalKwargsItem.dummy(nbytes=64)
+    item_b = MultiModalKwargsItem.dummy(nbytes=64)
+    item_skip = MultiModalKwargsItem.dummy(nbytes=64)
+
+    def _feature(
+        mm_hash: str,
+        data: MultiModalKwargsItem | None,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> MultiModalFeatureSpec:
+        return MultiModalFeatureSpec(
+            data=data,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=1),
+            mm_hash=mm_hash,
+            skip_mm_cache=skip_mm_cache,
+        )
+
+    # 1. Populate sender and receiver caches with A then B (LRU order: ["A", "B"]).
+    payload_a, _ = sender.get_and_update_item((item_a, []), "image_A")
+    payload_b, _ = sender.get_and_update_item((item_b, []), "image_B")
+    receiver.get_and_update_features(
+        [
+            _feature("image_A", payload_a),
+            _feature("image_B", payload_b),
+        ]
+    )
+    assert list(receiver._cache.order) == ["image_A", "image_B"]
+
+    # 2. A skipped request carries full data and must not touch/insert/evict P1.
+    skipped_features = [
+        _feature("image_SKIP", item_skip, skip_mm_cache=True),
+    ]
+    out_skipped = receiver.get_and_update_features(skipped_features)
+    assert out_skipped[0].data is item_skip
+    assert "image_SKIP" not in receiver._cache
+    assert list(receiver._cache.order) == ["image_A", "image_B"]
+
+    # 3. Subsequent sender hits (which send data=None) still resolve on P1.
+    hit_payload_a, _ = sender.get_and_update_item(None, "image_A")
+    hit_payload_b, _ = sender.get_and_update_item(None, "image_B")
+    assert hit_payload_a is None
+    assert hit_payload_b is None
+
+    resolved = receiver.get_and_update_features(
+        [
+            _feature("image_A", hit_payload_a),
+            _feature("image_B", hit_payload_b),
+        ]
+    )
+    assert resolved[0].data is item_a
+    assert resolved[1].data is item_b

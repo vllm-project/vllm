@@ -372,6 +372,11 @@ class MultiModalFeatureSpec:
     mm_hash: str | None = None
     """The hash for caching processor outputs (without LoRA prefix)."""
 
+    skip_mm_cache: bool = False
+    """
+    If true, skip the multimodal processor cache for this request.
+    """
+
     @staticmethod
     def gather_kwargs(features: list["MultiModalFeatureSpec"], keys: set[str]):
         kwargs = defaultdict[str, list[NestedTensors]](list)

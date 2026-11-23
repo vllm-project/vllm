@@ -995,7 +995,7 @@ class BaseRenderer(ABC, Generic[_T]):
             hf_processor_mm_kwargs=mm_processor_kwargs or {},
             media_io_kwargs=media_io_kwargs or {},
             cache=(
-                self._mm_processor_only_cache
+                None
                 if skip_mm_cache
                 else self._mm_processor_cache
             ),
@@ -1004,9 +1004,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
         with set_default_torch_num_threads():
             mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
+            mm_inputs["skip_mm_cache"] = skip_mm_cache
 
         self.update_mm_cache_stats()
-
         return mm_inputs
 
     def _process_tokens(

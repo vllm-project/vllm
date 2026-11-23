@@ -518,6 +518,7 @@ class InputProcessor:
             decoder_mm_inputs = decoder_input["mm_kwargs"]
             decoder_mm_positions = decoder_input["mm_placeholders"]
             decoder_mm_hashes = decoder_input["mm_hashes"]
+            skip_mm_cache = bool(decoder_input.get("skip_mm_cache", False))
 
             if not all(
                 isinstance(leaf, str) for leaf in json_iter_leaves(decoder_mm_hashes)
@@ -546,6 +547,7 @@ class InputProcessor:
                         ),
                         mm_position=decoder_mm_positions[modality][idx],
                         mm_hash=base_mm_hash,
+                        skip_mm_cache=skip_mm_cache,
                     )
                 )
 
