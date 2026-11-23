@@ -179,14 +179,11 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
         )
 
     @property
-    def num_lookahead_tokens(self) -> int:
+    def sample_from_anchor(self) -> bool:
+        # DSpark checkpoints default to anchor-first; speculators-format
+        # checkpoints set the flag explicitly.
         hf_config = self.spec_config.draft_model_config.hf_config
-        if getattr(hf_config, "sample_from_anchor", True):
-            # Anchor-sampling DSpark drafts a block of num_speculative_tokens
-            # query tokens in which the anchor itself is the first prediction
-            # position (no separate bonus query).
-            return self.num_scheduled_spec_tokens
-        return super().num_lookahead_tokens
+        return bool(getattr(hf_config, "sample_from_anchor", True))
 
     def hash_factors(self) -> list[Any]:
         # Adaptive verification and draft TP both change the draft graph.

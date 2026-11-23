@@ -13,6 +13,7 @@ prefetch only their own tokens without DP gathers.
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from itertools import product
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -297,7 +298,21 @@ def _worker(rank: int, tp_size: int, port: int, store_dir: str) -> None:
 def _check_pool_tables(store_dir: str):
     """GPUs of independent engines split one table in an Engram pool and read
     each other's rows, over every transport this machine has."""
-    modes = [("nvlink", False, 4)] if imex_channel_available() else []
+    modes = []
+    if current_platform.is_cuda() and imex_channel_available():
+        from cuda.bindings import driver as cu
+
+        modes.append(("nvlink", False, 4))
+        # Every rank must take the same collective path in a mixed GPU group.
+        attrs = cu.CUdevice_attribute
+        host_vmm = (
+            attrs.CU_DEVICE_ATTRIBUTE_HOST_NUMA_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED
+        )
+        if all(
+            cu.cuDeviceGetAttribute(host_vmm, device) == (cu.CUresult.CUDA_SUCCESS, 1)
+            for device in range(WORLD_SIZE)
+        ):
+            modes.append(("nvlink", True, 4))
     if current_platform.is_cuda() and verbs.active_devices():
         # GPUs of a node map each other's host shards; nodes of one use RDMA.
         modes += [("rdma", False, 4), ("rdma", True, 4), ("rdma", True, 1)]
@@ -312,11 +327,36 @@ def _check_pool_tables(store_dir: str):
         machine = str(group.rank_in_group) if node == 1 else rdma.node_id()
         with patch.object(rdma, "node_id", lambda machine=machine: machine):
             pool = EngramPool(group, transport, host, max_items, 72)
-        with torch.device("cuda"):
+        # Independent engines can own one GPU at a nonzero CUDA ordinal.
+        device = torch.accelerator.current_device_index()
+        assigned = [current_platform.visible_device_id_to_physical_device_id(device)]
+        with (
+            torch.device("cuda"),
+            patch(
+                "vllm.platforms.interface._assigned_physical_gpu_ids",
+                assigned if transport == "nvlink" else None,
+            ),
+        ):
             table = PoolEngramEmbedding(
                 sum(HEAD_SIZES), DIM, HEAD_SIZES, False, pool, "table"
             )
         assert table.dp_size == 1
+        if transport == "nvlink" and host:
+            error, handle = cu.cuMemRetainAllocationHandle(table.weight.data_ptr())
+            assert error == cu.CUresult.CUDA_SUCCESS
+            try:
+                error, prop = cu.cuMemGetAllocationPropertiesFromHandle(handle)
+                assert error == cu.CUresult.CUDA_SUCCESS
+                assert (
+                    prop.location.type
+                    == cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_HOST_NUMA
+                )
+                assert prop.location.id == current_platform.get_device_numa_node(
+                    torch.accelerator.current_device_index()
+                )
+            finally:
+                cu.cuMemRelease(handle)
+            _check_nvlink_startup_rollback(pool)
         table.weight.weight_loader(table.weight, weight)
         table.weight_scale_inv.weight_loader(table.weight_scale_inv, scale)
         table.process_weights_after_loading()
@@ -346,6 +386,64 @@ def _check_pool_tables(store_dir: str):
         del graph
         group.barrier()
         pool.close()
+
+
+def _check_nvlink_startup_rollback(pool: EngramPool):
+    """A failed rank must leave no allocation handles or address reservations."""
+    from cuda.bindings import driver as cu
+
+    for failure in (
+        "cuDeviceGetAttribute",
+        "cuMemCreate",
+        "cuMemExportToShareableHandle",
+        "cuMemImportFromShareableHandle",
+        "cuMemMap",
+        "cuMemSetAccess",
+    ):
+        with ExitStack() as stack:
+            calls = {
+                name: stack.enter_context(
+                    patch.object(cu, name, wraps=getattr(cu, name))
+                )
+                for name in (
+                    "cuMemCreate",
+                    "cuMemImportFromShareableHandle",
+                    "cuMemRelease",
+                    "cuMemAddressReserve",
+                    "cuMemAddressFree",
+                )
+            }
+            if pool.group.rank_in_group == 0:
+                stack.enter_context(
+                    patch.object(cu, failure, side_effect=MemoryError(failure))
+                )
+            with pytest.raises(RuntimeError, match=f"rank 0: MemoryError: {failure}"):
+                pool.table(32, 8, "rollback")
+
+        assert (
+            calls["cuMemAddressFree"].call_count
+            == calls["cuMemAddressReserve"].call_count
+        )
+        assert calls["cuMemRelease"].call_count == (
+            calls["cuMemCreate"].call_count
+            + calls["cuMemImportFromShareableHandle"].call_count
+        )
+
+
+def test_engram_peer_group_propagates_startup_failure(tmp_path):
+    path = str(tmp_path / "peers")
+    groups = [PeerGroup(2, path) for _ in range(2)]
+
+    def run(group):
+        with (
+            pytest.raises(RuntimeError, match="rank 1: IndexError: device"),
+            group.startup_stage("Allocating table"),
+        ):
+            if group.rank_in_group == 1:
+                raise IndexError("device")
+
+    with ThreadPoolExecutor(2) as executor:
+        list(executor.map(run, groups))
 
 
 def test_engram_peer_group_assigns_ranks_and_gathers(tmp_path):
