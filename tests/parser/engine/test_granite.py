@@ -219,6 +219,23 @@ class TestStreaming:
         assert _collect_names(results) == ["get_weather"]
         assert "Let me check." in _collect_content(results)
 
+    @pytest.mark.parametrize("chunk_size", [1, 3, 1000])
+    def test_string_encoded_arguments_match_non_streaming(
+        self, parser, mock_request, chunk_size
+    ):
+        # Arguments sent as a JSON-encoded string: non-streaming passes the
+        # string through; streaming must send the same arguments.
+        text = (
+            f'{TOOL_TOKEN} [{{"name": "get_weather", '
+            f'"arguments": "{{\\"city\\": \\"SF\\"}}"}}]'
+        )
+        _, _, tools = parser.parse(text, mock_request)
+        assert json.loads(tools[0].arguments) == {"city": "SF"}
+
+        results = _stream(parser, mock_request, text, chunk_size)
+        assert _collect_names(results) == ["get_weather"]
+        assert _collect_args(results) == {0: tools[0].arguments}
+
     def test_incomplete_array_at_eos(self, parser, mock_request):
         # Truncated mid-element must not raise and must not leak the marker.
         text = f'{TOOL_TOKEN} [{{"name": "func", "arguments": {{"a": 1'

@@ -393,6 +393,21 @@ def test_streaming_parallel_calls_are_chunk_invariant(
     assert json.loads(args[1]) == {"items": [1, 2]}
 
 
+@pytest.mark.parametrize("chunk_size", [1, 3, 1000])
+def test_streaming_string_encoded_arguments_match_non_streaming(
+    parser, mock_request, chunk_size
+):
+    # Arguments sent as a JSON-encoded string: non-streaming passes the string
+    # through (_extract_args_value); streaming must send the same arguments.
+    text = f'{TOOL_START}{{"name": "a", "parameters": "{{\\"city\\": \\"Paris\\"}}"}}'
+    _, _, tools = parser.parse(text, mock_request)
+    assert json.loads(tools[0].arguments) == {"city": "Paris"}
+
+    results = _stream(parser, mock_request, text, chunk_size)
+    assert _collect_names(results) == ["a"]
+    assert _collect_args(results) == {0: tools[0].arguments}
+
+
 @pytest.mark.parametrize("name", ["llama3_json", "llama4_json"])
 def test_registered_tool_parser_aliases(name):
     parser_class = ToolParserManager.get_tool_parser(name)
