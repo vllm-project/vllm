@@ -57,9 +57,7 @@ _GFX1201_2D_CONFIGS = {
     256: (None, (32, 32, 4, 1), (128, 32, 8, 1)),
     512: (None, (64, 16, 8, 1), (64, 16, 8, 1)),
 }
-# gfx1201 sliding-window layers: a window caps the keys each query block reads, so
-# the work per program is small and even, and smaller tiles win. The <= 64 band
-# applies to queries of more than MAX_3D_QUERY_LEN tokens only.
+# 2D launch for sliding-window prefill, same layout as _GFX1201_2D_CONFIGS.
 _GFX1201_SW_2D_CONFIGS = {
     64: ((32, 32, 2, 1), (64, 32, 2, 1), (128, 32, 4, 1)),
     128: ((32, 16, 2, 1), (64, 32, 4, 1), (64, 32, 4, 1)),
@@ -72,8 +70,7 @@ _GFX1100_2D_CONFIGS = {
     256: ((32, 32, 8, 1), (64, 32, 8, 1), (128, 64, 8, 1)),
     512: ((64, 32, 8, 1), (64, 32, 8, 1), (64, 32, 8, 1)),
 }
-# gfx1100 sliding-window layers, as _GFX1201_SW_2D_CONFIGS. The <= 64 band applies to
-# queries of more than MAX_3D_QUERY_LEN tokens only.
+# 2D launch for sliding-window prefill, same layout as _GFX1100_2D_CONFIGS.
 _GFX1100_SW_2D_CONFIGS = {
     64: ((16, 32, 2, 1), (32, 32, 2, 1), (128, 32, 4, 1)),
     128: ((64, 16, 4, 1), (64, 32, 4, 1), (128, 32, 8, 1)),
@@ -1157,7 +1154,7 @@ def unified_attention(
             max_seqlen_q,
         )
         if sliding_window_layer and max_seqlen_q <= MAX_3D_QUERY_LEN:
-            config = None  # decode and spec-decode verify keep their launch
+            config = None
         avg_query_len = q.shape[0] // max(num_seqs, 1)
         if (
             config is not None
@@ -1372,7 +1369,6 @@ def unified_attention(
                 # an fp8 KV tile needs TILE_SIZE >= 32
                 fp8_kv = kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
                 if max_seqlen_q > 1:
-                    # spec-decode verify keeps the full-attention launch
                     sliding_window_layer = (
                         window_size[0] >= 0
                         and chunk_lookback < 0
