@@ -16,6 +16,10 @@ from tests.utils import (
     ensure_model_parallel_initialized,
     init_test_distributed_environment,
 )
+from vllm.distributed.parallel_state import (
+    destroy_distributed_environment,
+    destroy_model_parallel,
+)
 from vllm.platforms import current_platform
 
 REPLAYS = 300
@@ -417,5 +421,15 @@ def _worker(check, *args):
             )
             ensure_model_parallel_initialized(tp_size, pp_size)
             check(rank, tp_size, device, *args)
+            _teardown()
 
     return run
+
+
+def _teardown() -> None:
+    """Destroy the groups while every rank is still in its task. A process group
+    left to interpreter exit joins its heartbeat thread, which polls the file
+    store that `multi_process_parallel` deletes after `ray.shutdown`, so the
+    worker and its VRAM outlive the test and starve the next one."""
+    destroy_model_parallel()
+    destroy_distributed_environment()

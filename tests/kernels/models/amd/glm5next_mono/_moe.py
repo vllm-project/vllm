@@ -25,7 +25,7 @@ from tests.utils import (
 )
 from vllm.models.glm5next.amd.specialized_decode.runtime.spec import WIDTHS
 
-from ._ffn import POLL_TIMEOUT_US, _dequant, _mxfp8, _rel, _vllm_seam
+from ._ffn import POLL_TIMEOUT_US, _dequant, _mxfp8, _rel, _teardown, _vllm_seam
 
 MODEL = "amd/GLM-5.3-Flash-Quark-MXFP4"
 PREFIX = "language_model.model.layers.7.mlp"
@@ -119,6 +119,7 @@ def _worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
         ensure_model_parallel_initialized(tp_size, pp_size)
         init_workspace_manager(device)
         _check(rank, tp_size, device)
+        _teardown()
 
 
 def _check(rank: int, tp: int, device) -> None:
