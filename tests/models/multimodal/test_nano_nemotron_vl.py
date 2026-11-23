@@ -33,6 +33,7 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
     VideoProcessorItems,
 )
+from vllm.multimodal.processing.context import profiling_media
 from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processors import nano_nemotron_vl as nemotron_processors
@@ -292,6 +293,10 @@ def test_static_image_preprocessing_budget(
     # The outputs coexist with their concatenated copy.
     required_bytes = 2 * sum(expected_patches) * 3 * 16 * 16 * torch.float32.itemsize
     monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", required_bytes - 1)
+    with pytest.raises(VLLMValidationError, match="VLLM_MAX_MEDIA_PREPROCESSING_BYTES"):
+        processor(text=text, images=images, max_num_tiles=2)
+    with profiling_media():
+        processor(text=text, images=images, max_num_tiles=2)
     with pytest.raises(VLLMValidationError, match="VLLM_MAX_MEDIA_PREPROCESSING_BYTES"):
         processor(text=text, images=images, max_num_tiles=2)
 

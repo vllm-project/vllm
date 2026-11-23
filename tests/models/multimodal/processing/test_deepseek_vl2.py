@@ -17,7 +17,7 @@ from vllm import envs
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.processing.context import TimingContext
+from vllm.multimodal.processing.context import TimingContext, profiling_media
 from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.utils import encode_image_url
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
@@ -83,6 +83,10 @@ def test_image_preprocessing_budget(
     required_bytes *= view_bytes
     limit = "VLLM_MAX_MEDIA_PREPROCESSING_BYTES"
     monkeypatch.setattr(envs, limit, required_bytes - 1)
+    with pytest.raises(VLLMValidationError, match="Image preprocessing exceeds"):
+        processor(**inputs)
+    with profiling_media():
+        processor(**inputs)
     with pytest.raises(VLLMValidationError, match="Image preprocessing exceeds"):
         processor(**inputs)
 
@@ -197,6 +201,27 @@ def processor():
         enable_mm_embeds=True,
     )
     return MULTIMODAL_REGISTRY.create_processor(config)
+
+
+def test_profiling_dummy_image_ignores_request_budget(tmp_path, monkeypatch):
+    config = DeepseekVLV2Config(
+        architectures=["DeepseekVLV2ForCausalLM"],
+        tile_tag="2D",
+        candidate_resolutions=((16, 16),),
+    ).to_dict()
+    config["language_config"] = config.pop("text_config")
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    DeepseekVLV2Processor(
+        tokenizer=_make_tokenizer(),
+        candidate_resolutions=((16, 16),),
+        patch_size=4,
+        downsample_ratio=2,
+    ).save_pretrained(tmp_path)
+    model_config = ModelConfig(model=str(tmp_path), max_model_len=128)
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 1)
+    dummy = processor.get_dummy_mm_inputs({"image": 1})
+    assert len(dummy["mm_placeholders"]["image"]) == 1
 
 
 @pytest.mark.parametrize("use_uuid", [False, True])

@@ -124,6 +124,7 @@ Supported processors account for their allocations as follows.
   across clips. Qwen3-VL also counts the concatenated output while the
   individual tensors are live. Both processors accept up to 32 videos per
   prompt by default. Configure the count with `--limit-mm-per-prompt.video`.
+  Frame, size, and embedding options alone do not change the default count.
 - Gemma 4 and EmbeddingGemma2 account for video pixel tensors retained across
   clips and the concatenated output while the individual tensors are live.
 

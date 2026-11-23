@@ -73,6 +73,24 @@ def test_chat_render_rejects_over_budget_video_tensors(
             assert response.status_code == 200, response.text[:1000]
 
 
+def test_chat_render_video_options_keep_default_count_limit():
+    model = "Qwen/Qwen3-VL-Reranker-2B"
+    video_url = encode_video_url(np.zeros((4, 16, 16, 3), dtype=np.uint8))
+    content = [{"type": "video_url", "video_url": {"url": video_url}}] * 33
+    with RemoteLaunchRenderServer(
+        model,
+        ["--limit-mm-per-prompt", '{"video": {"num_frames": 4}}'],
+    ) as server:
+        response = httpx.post(
+            server.url_for("v1/chat/completions/render"),
+            json={"model": model, "messages": [{"role": "user", "content": content}]},
+            timeout=30,
+        )
+
+    assert response.status_code == 400, response.text[:1000]
+    assert "At most 32 video" in response.json()["error"]["message"]
+
+
 @pytest.fixture(scope="module")
 def server():
     args: list[str] = []

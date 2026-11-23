@@ -541,8 +541,8 @@ class ModelConfig:
             # Adding modality into the hashing method to take multimodal
             # cache into consideration.
             factors["mm_limit_per_prompt"] = {
-                modality: (opts if isinstance(opts, int) else opts.count)
-                for modality, opts in self.multimodal_config.limit_per_prompt.items()
+                modality: self.multimodal_config.get_limit_per_prompt(modality)
+                for modality in self.multimodal_config.limit_per_prompt
             }
             factors["mm_enable_mm_embeds"] = self.multimodal_config.enable_mm_embeds
         return factors

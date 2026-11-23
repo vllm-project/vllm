@@ -57,9 +57,13 @@ def profiling_media() -> Iterator[None]:
         _profiling_media.reset(token)
 
 
+def is_profiling_media() -> bool:
+    return _profiling_media.get()
+
+
 def validate_video_preprocessing_budget(size_bytes: int) -> None:
     limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
-    if limit > 0 and size_bytes > limit and not _profiling_media.get():
+    if limit > 0 and size_bytes > limit and not is_profiling_media():
         raise VLLMValidationError(
             f"Video preprocessing exceeds VLLM_MAX_MEDIA_PREPROCESSING_BYTES={limit}.",
             parameter="video",
@@ -624,7 +628,8 @@ class BaseProcessingInfo:
         allowed_limits = dict[str, int]()
         for modality, supported_limit in self.supported_mm_limits.items():
             user_limit = mm_config.get_limit_per_prompt(modality)
-            if modality not in mm_config.limit_per_prompt:
+            configured_limit = mm_config.limit_per_prompt.get(modality)
+            if configured_limit is None or configured_limit.count is None:
                 user_limit = min(
                     user_limit, self.default_mm_limits.get(modality, user_limit)
                 )

@@ -21,15 +21,20 @@ from ...utils import build_model_context
     ],
 )
 def test_video_item_limit_defaults_to_32_and_honors_explicit_limit(model_id: str):
-    model_config = ModelConfig(model=model_id)
-    info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
-    info.validate_num_items("video", 32)
-    with pytest.raises(VLLMValidationError, match="At most 32 video"):
-        info.validate_num_items("video", 33)
+    for video_options in (None, {"num_frames": 16}, {"allow_embeds": False}):
+        limit = {} if video_options is None else {"video": video_options}
+        model_config = ModelConfig(model=model_id, limit_mm_per_prompt=limit)
+        info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
+        info.validate_num_items("video", 32)
+        with pytest.raises(VLLMValidationError, match="At most 32 video"):
+            info.validate_num_items("video", 33)
 
-    model_config = ModelConfig(model=model_id, limit_mm_per_prompt={"video": 33})
-    info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
-    info.validate_num_items("video", 33)
+    for video_limit in (33, {"count": 999, "num_frames": 16}):
+        model_config = ModelConfig(
+            model=model_id, limit_mm_per_prompt={"video": video_limit}
+        )
+        info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
+        info.validate_num_items("video", 33)
 
 
 @pytest.mark.parametrize(

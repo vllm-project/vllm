@@ -10,6 +10,7 @@ from transformers.image_utils import get_image_size
 import vllm.envs as envs
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.inputs import HfImageItem
+from vllm.multimodal.processing.context import is_profiling_media
 
 
 def get_image_width_height(image: HfImageItem) -> tuple[int, int]:
@@ -34,7 +35,7 @@ def validate_image_tensor_budget(
     in pixels to account for its conversion and normalization buffers.
     """
     limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
-    if limit <= 0:
+    if limit <= 0 or is_profiling_media():
         return
 
     # ToTensor uses the default floating dtype for byte images. Count at least

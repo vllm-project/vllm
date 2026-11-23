@@ -29,6 +29,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.model_executor.models.parakeet import ParakeetExtractor
 from vllm.multimodal.inputs import AudioItem
+from vllm.multimodal.processing.context import is_profiling_media
 from vllm.multimodal.processing.processor import PromptUpdateDetails, cached_encode
 from vllm.multimodal.video_prune.evs import compute_retained_tokens_count
 from vllm.platforms import current_platform
@@ -853,7 +854,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         max_num_tiles: int,
     ) -> list[torch.Tensor]:
         limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
-        if limit > 0:
+        if limit > 0 and not is_profiling_media():
             target_ratios = get_internvl_target_ratios(1, max_num_tiles)
             num_patches = sum(
                 calculate_internvl_targets(
