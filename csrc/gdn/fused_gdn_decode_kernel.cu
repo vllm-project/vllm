@@ -110,6 +110,16 @@ constexpr int kChunkV = 32;
 constexpr int kNumChunks = kDimV / kChunkV;
 constexpr int kRowsPerWarp = kChunkV / kWarps;
 constexpr int kTokenPasses = (kMaxMtpTokens + kWarps - 1) / kWarps;
+// Deferred spec state, in the layout of the Triton spec decode kernel
+// (fused_sigmoid_gating.py) so either kernel can continue the other's step:
+// slot 0 holds the state after the first token, and slot 1 holds one record
+// per later token and (value head, block of kStashBlockV V rows): the raw k,
+// the raw v of the block, and the raw a and b.
+constexpr int kStashBlockV = 16;
+constexpr int kStashBlocks = kDimV / kStashBlockV;
+constexpr int kStashWidth = kDimK + kStashBlockV + 2;
+static_assert((kMaxMtpTokens - 1) * kStashBlocks * kStashWidth <= kDimV * kDimK,
+              "records must fit in one state slot");
 __device__ __forceinline__ float sigmoid_fast(float x) {
   return 1.0f / (1.0f + __expf(-x));
 }
@@ -170,7 +180,7 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     const void* __restrict__ norm_weight, __nv_bfloat16* __restrict__ out,
     int H, int HV, int state_indices_width, int dt_bias_type,
     bool norm_weight_is_bf16, float scale, float norm_eps,
-    GdnDecodeStrides strides) {
+    GdnDecodeStrides strides, bool defer_spec_state) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
   // Reduce binary size on architectures without cluster support.
   if constexpr (SplitV > 1) {
@@ -196,10 +206,12 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
   }
 
   const int accepted = num_accepted_tokens[request];
-  const int source_slot =
-      accepted > 0 && accepted <= state_indices_width
-          ? state_indices[request * state_indices_width + accepted - 1]
-          : 0;
+  const int* row_slots = state_indices + request * state_indices_width;
+  // The host only allows deferral for an FP32 state with at least two slots.
+  const bool defer = std::is_same_v<StateT, float> && defer_spec_state;
+  const int source_slot = accepted > 0 && accepted <= state_indices_width
+                              ? row_slots[defer ? 0 : accepted - 1]
+                              : 0;
   if (source_slot <= 0 || num_tokens > kMaxMtpTokens) {
     for (int linear = tid; linear < num_tokens * kSliceV; linear += kThreads) {
       const int token = bos + linear / kSliceV;
@@ -224,6 +236,17 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
   StateT* source_state =
       state + static_cast<int64_t>(source_slot) * strides.state_slot +
       value_head * kDimV * kDimK;
+  float* stash = nullptr;
+  int64_t stash_stride = 0;
+  int num_replay = 0;
+  if (defer) {
+    stash =
+        reinterpret_cast<float*>(state + static_cast<int64_t>(row_slots[1]) *
+                                             strides.state_slot) +
+        value_head * kStashBlocks * kStashWidth;
+    stash_stride = static_cast<int64_t>(HV) * kStashBlocks * kStashWidth;
+    num_replay = accepted - 1;
+  }
   copy_state_chunk<StateT, kChunkV, kDimK, 2>(
       &shared_state[0][0][0], source_state, first_chunk, tid, kThreads);
 
@@ -303,6 +326,58 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       h[row][3] = state_value.w;
     }
 
+    // Replay the accepted records with the same arithmetic as the token loop
+    // below (and as the token setup for k, decay and beta), so the state is
+    // bit-identical to the one a per-token store would have kept.
+    for (int r = 0; r < num_replay; ++r) {
+      const float* records = stash + r * stash_stride;
+      const float* record =
+          records + (chunk * kChunkV / kStashBlockV) * kStashWidth;
+      float k_square = 0.0f;
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const float k_value = record[lane + i * 32];
+        k_square += k_value * k_value;
+      }
+      k_square = warp_reduce_sum(k_square);
+      const float k_scale = __shfl_sync(
+          0xffffffffu, lane == 0 ? rsqrtf(k_square + 1.0e-6f) : 0.0f, 0);
+      const float k_values[4] = {
+          record[k_base] * k_scale, record[k_base + 1] * k_scale,
+          record[k_base + 2] * k_scale, record[k_base + 3] * k_scale};
+      const float g =
+          -__expf(a_log[value_head]) *
+          softplus_fast(record[kDimK + kStashBlockV] +
+                        load_dt_bias(dt_bias, value_head, dt_bias_type));
+      const float decay = __expf(g);
+      const float beta = sigmoid_fast(record[kDimK + kStashBlockV + 1]);
+
+      float dot_hk[kRowsPerWarp] = {0.0f, 0.0f, 0.0f, 0.0f};
+#pragma unroll
+      for (int row = 0; row < kRowsPerWarp; ++row) {
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          h[row][i] *= decay;
+          dot_hk[row] += h[row][i] * k_values[i];
+        }
+      }
+      const Sum2 dot_hk_01 = warp_reduce_sum_pair(dot_hk[0], dot_hk[1]);
+      const Sum2 dot_hk_23 = warp_reduce_sum_pair(dot_hk[2], dot_hk[3]);
+      const float reduced_hk[kRowsPerWarp] = {dot_hk_01.x, dot_hk_01.y,
+                                              dot_hk_23.x, dot_hk_23.y};
+#pragma unroll
+      for (int row = 0; row < kRowsPerWarp; ++row) {
+        const int value = chunk * kChunkV + rows[row];
+        const float v_value = records[(value / kStashBlockV) * kStashWidth +
+                                      kDimK + value % kStashBlockV];
+        const float delta = (v_value - reduced_hk[row]) * beta;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          h[row][i] += k_values[i] * delta;
+        }
+      }
+    }
+
     for (int t = 0; t < num_tokens; ++t) {
       const float4 q4 = *reinterpret_cast<const float4*>(&shared_q[t][k_base]);
       const float4 k4 = *reinterpret_cast<const float4*>(&shared_k[t][k_base]);
@@ -350,7 +425,7 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       }
 
       const int destination_slot =
-          state_indices[request * state_indices_width + t];
+          defer ? (t == 0 ? row_slots[0] : 0) : row_slots[t];
       if (destination_slot > 0) {
         StateT* destination_state =
             state +
@@ -366,6 +441,38 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     }
   }
   __syncthreads();
+
+  // Record the later tokens for the next step, after every replay read above.
+  // Each CTA writes only the blocks of its V slice, so CTAs of a split never
+  // share a record.
+  if (defer) {
+    constexpr int kBlocksPerCta = kSliceV / kStashBlockV;
+    constexpr int kFieldsPerToken = kBlocksPerCta * kStashWidth;
+    for (int linear = tid; linear < (num_tokens - 1) * kFieldsPerToken;
+         linear += kThreads) {
+      const int t = 1 + linear / kFieldsPerToken;
+      const int block =
+          slice_begin / kStashBlockV + (linear % kFieldsPerToken) / kStashWidth;
+      const int field = linear % kStashWidth;
+      const int token = bos + t;
+      float value;
+      if (field < kDimK) {
+        value = __bfloat162float(
+            mixed_qkv[static_cast<int64_t>(token) * strides.mixed_row +
+                      H * kDimK + key_head * kDimK + field]);
+      } else if (field < kDimK + kStashBlockV) {
+        value =
+            __bfloat162float(shared_v[t][block * kStashBlockV + field - kDimK]);
+      } else if (field == kDimK + kStashBlockV) {
+        value = __bfloat162float(
+            a[static_cast<int64_t>(token) * strides.a_row + value_head]);
+      } else {
+        value = __bfloat162float(
+            b[static_cast<int64_t>(token) * strides.b_row + value_head]);
+      }
+      stash[(t - 1) * stash_stride + block * kStashWidth + field] = value;
+    }
+  }
 
   constexpr int kValuesPerLane = kSliceV / 32;
   const auto write_token = [&](int t, float sum_square) {
@@ -473,7 +580,8 @@ void launch_gdn_decode_post_conv_mtp(
     torch::stable::Tensor& state, torch::stable::Tensor const& norm_weight,
     torch::stable::Tensor& out, const __nv_bfloat16* a, const __nv_bfloat16* b,
     const __nv_bfloat16* output_gate, int num_key_heads, int num_value_heads,
-    double scale, double norm_eps, GdnDecodeStrides strides) {
+    double scale, double norm_eps, GdnDecodeStrides strides,
+    bool defer_spec_state) {
   using torch::headeronly::ScalarType;
 
   const auto dt_bias_scalar_type = dt_bias.scalar_type();
@@ -525,7 +633,8 @@ void launch_gdn_decode_post_conv_mtp(
         norm_weight.data_ptr(), static_cast<__nv_bfloat16*>(out.data_ptr()),
         num_key_heads, num_value_heads, static_cast<int>(state_indices.size(1)),
         dt_bias_type, norm_weight.scalar_type() == ScalarType::BFloat16,
-        static_cast<float>(scale), static_cast<float>(norm_eps), strides);
+        static_cast<float>(scale), static_cast<float>(norm_eps), strides,
+        defer_spec_state);
   };
   const cudaError_t error = split_v == 4   ? launch.template operator()<4>()
                             : split_v == 2 ? launch.template operator()<2>()
@@ -546,7 +655,8 @@ void fused_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& num_accepted_tokens,
     torch::stable::Tensor& state, torch::stable::Tensor const& output_gate,
     torch::stable::Tensor const& norm_weight, torch::stable::Tensor& out,
-    double scale, double norm_eps, const std::string& output_gate_activation) {
+    double scale, double norm_eps, const std::string& output_gate_activation,
+    bool defer_spec_state) {
   using torch::headeronly::ScalarType;
 
   STD_TORCH_CHECK(
@@ -665,6 +775,11 @@ void fused_gdn_decode_post_conv_mtp(
                   "output_gate head rows must be contiguous");
   STD_TORCH_CHECK(out.is_contiguous(), "out must be contiguous");
   STD_TORCH_CHECK(norm_eps >= 0.0, "norm_eps must be non-negative");
+  STD_TORCH_CHECK(
+      !defer_spec_state ||
+          (state_scalar_type == ScalarType::Float && state_indices.size(1) > 1),
+      "deferred spec state needs an FP32 state and two state slots "
+      "per request");
 
   const GdnDecodeStrides strides{mixed_qkv.stride(0), a.stride(0), b.stride(0),
                                  output_gate.stride(0), state.stride(0)};
@@ -678,7 +793,7 @@ void fused_gdn_decode_post_conv_mtp(
         mixed_qkv, a_log, dt_bias, state_indices, cu_seqlens,
         num_accepted_tokens, state, norm_weight, out, a_ptr, b_ptr,
         output_gate_ptr, num_key_heads, num_value_heads, scale, norm_eps,
-        strides);
+        strides, defer_spec_state);
   };
   const auto dispatch_state_type = [&]<int ValueHeadsPerKeyHead>() {
     if (state_scalar_type == ScalarType::Float) {
