@@ -332,9 +332,6 @@ class ModelConfig:
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
     model does not support sliding window, this argument is ignored."""
-    disable_cascade_attn: bool = True
-    """Deprecated: cascade attention has been removed, so this has no effect.
-    It will be removed in v0.33.0."""
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -386,6 +383,10 @@ class ModelConfig:
     used with `--generation-config auto`, the override parameters will be
     merged with the default config from the model. If used with
     `--generation-config vllm`, only the override parameters are used."""
+    masked_token_ids: list[int] | None = None
+    """Token ids that are never sampled (their logits are set to -inf before
+    sampling), e.g. the lm_head rows past the tokenizer or placeholder tokens.
+    Prompt logprobs are unaffected."""
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
@@ -461,6 +462,7 @@ class ModelConfig:
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_hasher_algorithm: InitVar[MMHasherAlgorithm | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
+    mm_shm_cache_buffer_name: InitVar[str | None] = None
     mm_encoder_only: InitVar[bool | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
     mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
@@ -502,7 +504,6 @@ class ModelConfig:
             "logprobs_mode",
             "use_fp64_gumbel",
             "enable_trace_replay",
-            "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
             "config_format",
@@ -518,11 +519,13 @@ class ModelConfig:
             "mm_processor_cache_gb",
             "mm_processor_cache_type",
             "mm_shm_cache_max_object_size_mb",
+            "mm_shm_cache_buffer_name",
             "mm_encoder_tp_mode",
             "interleave_mm_strings",
             "skip_mm_profiling",
             "mm_ipc_gpu_memory_gb",
             "checkpoint_prepare_on_startup",
+            "masked_token_ids",
         }
 
         factors = get_compile_factors(self, ignored_factors)
@@ -603,6 +606,7 @@ class ModelConfig:
         mm_processor_cache_type: MMCacheType | None,
         mm_hasher_algorithm: MMHasherAlgorithm | None,
         mm_shm_cache_max_object_size_mb: int | None,
+        mm_shm_cache_buffer_name: str | None,
         mm_encoder_only: bool | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
         mm_encoder_attn_backend: AttentionBackendEnum | str | None,
@@ -810,6 +814,7 @@ class ModelConfig:
                 "InklingForCausalLM",
                 "InklingForConditionalGeneration",
                 "Inkling2ForConditionalGeneration",
+                "Inkling2LoopForConditionalGeneration",
             ):
                 self.tokenizer_mode = "inkling"
 
@@ -904,6 +909,7 @@ class ModelConfig:
                 mm_processor_cache_type=mm_processor_cache_type,
                 mm_hasher_algorithm=mm_hasher_algorithm,
                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
+                mm_shm_cache_buffer_name=mm_shm_cache_buffer_name,
                 mm_encoder_only=mm_encoder_only,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 mm_encoder_attn_backend=mm_encoder_attn_backend,
@@ -969,6 +975,7 @@ class ModelConfig:
         self._try_verify_and_update_model_config()
         self._verify_quantization()
         self._verify_cuda_graph()
+        self._verify_masked_token_ids()
 
     def _supports_multimodal_inputs(self) -> bool:
         """Checks if the model supports multimodal inputs.
@@ -1595,6 +1602,16 @@ class ModelConfig:
                     "set `--allow-deprecated-quantization`.",
                     self.quantization,
                 )
+
+    def _verify_masked_token_ids(self) -> None:
+        if not self.masked_token_ids:
+            return
+        vocab_size = self.get_vocab_size()
+        invalid = [i for i in self.masked_token_ids if not 0 <= i < vocab_size]
+        if invalid:
+            raise ValueError(
+                f"masked_token_ids must be in [0, {vocab_size}), got {invalid}."
+            )
 
     def _verify_cuda_graph(self) -> None:
         # CUDAGraph capture not supported for encoder-decoder models on ROCm
