@@ -31,24 +31,32 @@ pytestmark = [
 
 
 @pytest.mark.parametrize(
-    ("plain", "shuffled", "picks_bpreshuffle"),
+    ("plain", "shuffled", "triton", "picks_bpreshuffle"),
     [
-        (0, 15, True),  # plain table empty: bpreshuffle covers the shape
-        (6, 15, True),  # plain tuned at a few M only
-        (15, 15, False),  # tie: keep the checkpoint layout
-        (15, 6, False),
-        (15, 0, False),  # bpreshuffle untuned
-        (0, 0, False),
+        (0, 15, False, True),  # plain table empty: bpreshuffle covers the shape
+        (6, 15, False, True),  # plain tuned at a few M only
+        (15, 15, False, False),  # tie: keep the checkpoint layout
+        (15, 6, False, False),
+        (15, 0, False, False),  # bpreshuffle untuned
+        (0, 0, False, False),
+        (0, 15, True, False),  # the plain Triton GEMM is tuned
     ],
 )
 def test_plain_blockscale_gemm_has_priority(
-    monkeypatch: pytest.MonkeyPatch, plain: int, shuffled: int, picks_bpreshuffle
+    monkeypatch: pytest.MonkeyPatch,
+    plain: int,
+    shuffled: int,
+    triton: bool,
+    picks_bpreshuffle: bool,
 ) -> None:
     def tuned_m_count(n: int, k: int, preshuffled: bool) -> int:
         return shuffled if preshuffled else plain
 
     monkeypatch.setattr(
         rocm_aiter_ops, "blockscale_tuned_m_count", staticmethod(tuned_m_count)
+    )
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_triton_gemm_w8a8_tuned", lambda n, k: triton
     )
     monkeypatch.setattr(rocm_aiter_ops, "is_linear_fp8_enabled", lambda: True)
     config = FP8ScaledMMLinearLayerConfig(

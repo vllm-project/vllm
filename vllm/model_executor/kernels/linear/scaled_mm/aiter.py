@@ -691,6 +691,15 @@ class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 False,
                 f"the plain aiter blockscale GEMM is tuned for N={n} and K={k}.",
             )
+        # So does the plain Triton GEMM AiterFp8BlockScaledMMKernel runs for
+        # a shape it has tuned.
+        if not current_platform.is_fp8_fnuz() and (
+            rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
+        ):
+            return (
+                False,
+                f"the plain Triton blockscale GEMM is tuned for N={n} and K={k}.",
+            )
 
         return True, None
 
