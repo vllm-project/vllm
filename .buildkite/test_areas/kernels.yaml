@@ -1018,10 +1018,14 @@ steps:
   - vllm/model_executor/kernels/linear/cute_dsl/ll_fp32w.py
   - vllm/model_executor/kernels/linear/cute_dsl/_ll_fp32w_dotprod.py
   - tests/kernels/test_ll_fp32w_gemm.py
+  - vllm/model_executor/layers/fused_moe/router/dsv4_topk.py
+  - vllm/model_executor/layers/fused_moe/router/dsv4_topk_cutedsl.py
+  - tests/kernels/moe/test_topk_softplus_sqrt.py
   commands:
     - nvidia-smi
     - pytest -v -s tests/kernels/test_ll_bf16_gemm.py
     - pytest -v -s tests/kernels/test_ll_fp32w_gemm.py
+    - pytest -v -s tests/kernels/moe/test_topk_softplus_sqrt.py -k cutedsl
   mirror:
     amd:
       automatic_shard: true

@@ -510,6 +510,7 @@ class _Dsv4TopkCutlass:
                 key[j0 + 2] = k2
                 key[j0 + 3] = k3
 
+            cute.arch.sync_warp()
             best_key, best_local_idx = self._find_best_local(key)
 
             for slot in cutlass.range_constexpr(_TOPK):

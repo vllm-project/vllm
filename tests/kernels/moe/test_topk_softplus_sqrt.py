@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import importlib.util
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -1015,23 +1017,34 @@ def test_dsv4_topk_direct_entry_unsupported_dtypes_fallback():
     torch.testing.assert_close(out_w2, ref_w2, atol=0, rtol=0)
 
 
+def _is_ll_bf16_pdl_replay_available() -> bool:
+    if not (
+        is_cutedsl_dsv4_topk_available() and current_platform.has_device_capability(90)
+    ):
+        return False
+    if importlib.util.find_spec("quack") is None:
+        return False
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+        is_available as is_ll_bf16_available,
+    )
+
+    return is_ll_bf16_available()
+
+
 @pytest.mark.skipif(
     not is_cutedsl_dsv4_topk_available(),
     reason="CuTe-DSL dsv4_topk requires CUDA SM80+ with cutlass.cute.",
 )
-def test_dsv4_topk_cutedsl_accelerator_stream_and_pdl_replay():
-    """Verify torch.accelerator.set_stream ordering and PDL GEMM->topk replay."""
-    torch.manual_seed(11)
+def test_dsv4_topk_cutedsl_accelerator_stream():
+    """Verify torch.accelerator.set_stream ordering and CUDA-graph buffer replay."""
     device = torch.device("cuda", 0)
-    num_tokens, num_experts = 8, 384
+    num_experts = 384
     bias = torch.zeros(num_experts, dtype=torch.float32, device=device)
 
     # 1. Stream switch via torch.accelerator.set_stream (bypassing torch.cuda).
     alt_stream = torch.Stream(device=device)
     prev_stream = torch.accelerator.current_stream(device)
-    logits = torch.full(
-        (num_tokens, num_experts), -10.0, dtype=torch.float32, device=device
-    )
+    logits = torch.full((8, num_experts), -10.0, dtype=torch.float32, device=device)
     torch.accelerator.synchronize()
     try:
         torch.accelerator.set_stream(alt_stream)
@@ -1040,25 +1053,60 @@ def test_dsv4_topk_cutedsl_accelerator_stream_and_pdl_replay():
     finally:
         torch.accelerator.set_stream(prev_stream)
     alt_stream.synchronize()
-    expected = torch.arange(10, 16, dtype=torch.int32, device=device).expand(
-        num_tokens, 6
-    )
+    expected = torch.arange(10, 16, dtype=torch.int32, device=device).expand(8, 6)
     torch.testing.assert_close(out_ids, expected, atol=0, rtol=0)
     assert out_w.isfinite().all()
 
-    # 2. PDL CUDA-graph replay reusing the exact same captured logits buffer
-    #    across alternating ll_bf16 split-K GEMM inputs with disjoint expert IDs.
-    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-        is_available as is_ll_bf16_available,
-    )
+    # 2. SM80+ CUDA-graph capture and buffer-reuse replay on both 4-warp and
+    #    packed single-warp paths.
+    for num_tokens in (8, 1027):
+        logits_buf = torch.full(
+            (num_tokens, num_experts), -10.0, dtype=torch.float32, device=device
+        )
+        logits_buf[:, 0:6] = 10.0
+        dsv4_topk(logits_buf, bias, torch.int32, 1.5)
+        torch.accelerator.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            g_w, g_ids = dsv4_topk(logits_buf, bias, torch.int32, 1.5)
+
+        exp_a = torch.arange(0, 6, dtype=torch.int32, device=device).expand(
+            num_tokens, 6
+        )
+        exp_b = torch.arange(200, 206, dtype=torch.int32, device=device).expand(
+            num_tokens, 6
+        )
+        for step in range(4):
+            logits_buf.fill_(-10.0)
+            if step % 2 == 0:
+                logits_buf[:, 0:6] = 10.0
+                exp = exp_a
+            else:
+                logits_buf[:, 200:206] = 10.0
+                exp = exp_b
+            graph.replay()
+            torch.accelerator.synchronize()
+            torch.testing.assert_close(g_ids, exp, atol=0, rtol=0)
+            assert g_w.isfinite().all()
+
+
+@pytest.mark.skipif(
+    not _is_ll_bf16_pdl_replay_available(),
+    reason=(
+        "PDL ll_bf16_gemm -> dsv4_topk replay requires CUDA SM90+ with "
+        "cutlass.cute and quack."
+    ),
+)
+def test_dsv4_topk_cutedsl_pdl_gemm_replay():
+    """Verify SM90+ PDL CUDA-graph replay after ll_bf16 split-K GEMM."""
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
         ll_bf16_gemm,
     )
 
-    if not is_ll_bf16_available():
-        return
-
-    k_dim = 5120
+    device = torch.device("cuda", 0)
+    num_tokens, num_experts, k_dim = 8, 384, 5120
+    bias = torch.zeros(num_experts, dtype=torch.float32, device=device)
     w_gate = torch.zeros((num_experts, k_dim), dtype=torch.bfloat16, device=device)
     w_gate[0:6, 0] = 4.0
     w_gate[200:206, 1] = 4.0
