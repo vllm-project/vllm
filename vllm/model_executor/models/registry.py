@@ -493,6 +493,10 @@ _MULTIMODAL_MODELS = {
         "vllm.models.kimi_k3",
         "KimiK3ForConditionalGeneration",
     ),
+    "Inkling2LoopForConditionalGeneration": (
+        "vllm.models.inkling2",
+        "Inkling2LoopForConditionalGeneration",
+    ),
     "Inkling2ForConditionalGeneration": (
         "vllm.models.inkling2",
         "Inkling2ForConditionalGeneration",
@@ -579,6 +583,10 @@ _MULTIMODAL_MODELS = {
     "Nemotron3_5TranscribeForConditionalGeneration": (
         "nemotron3_5_transcribe",
         "Nemotron3_5TranscribeForConditionalGeneration",
+    ),
+    "Nemotron4ForConditionalGeneration": (
+        "vllm.models.nemotron_shortcut",
+        "NemotronShortcutForConditionalGeneration",
     ),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "MuseGlimmerForConditionalGeneration": ("muse_glimmer", "MuseGlimmerForCausalLM"),
@@ -765,6 +773,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "Nemotron3_5TranscribeMTPModel": (
         "nemotron3_5_transcribe",
         "Nemotron3_5TranscribeMTP",
+    ),
+    "NemotronShortcutMTPModel": (
+        "vllm.models.nemotron_shortcut",
+        "NemotronShortcutMTP",
     ),
     "LongCatFlashMTPModel": ("longcat_flash_mtp", "LongCatFlashMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),

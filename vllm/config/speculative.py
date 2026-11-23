@@ -83,6 +83,7 @@ MTPModelTypes = Literal[
     "ernie_mtp",
     "nemotron_h_mtp",
     "nemotron3_5_transcribe_mtp",
+    "nemotron_shortcut_mtp",
     "exaone_moe_mtp",
     "exaone4_5_mtp",
     "qwen3_next_mtp",
@@ -1003,6 +1004,36 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
             )
 
+        if (
+            hf_config.model_type == "nemotron4"
+            and getattr(hf_config.get_text_config(), "num_nextn_predict_layers", 0) > 0
+        ):
+            # The MTP head reads the language model's fields; the quant config
+            # lives only at the top level of the VL checkpoint.
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = hf_config.get_text_config()
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.quantization_config = copy.deepcopy(quantization_config)
+        if (
+            hf_config.model_type == "nemotron4_text"
+            and getattr(hf_config, "num_nextn_predict_layers", 0) > 0
+        ):
+            hf_config.model_type = "nemotron_shortcut_mtp"
+        if hf_config.model_type == "nemotron_shortcut_mtp":
+            # With mtp_use_repeated_layer one physical block serves every draft
+            # step, so the drafter sees a single module and any draft length.
+            n_predict = (
+                1
+                if getattr(hf_config, "mtp_use_repeated_layer", False)
+                else getattr(hf_config, "num_nextn_predict_layers", 1)
+            )
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["NemotronShortcutMTPModel"]}
+            )
+
         if hf_config.architectures[0] in (
             "NemotronH_Super_Omni_Reasoning_V3",
             "NemotronH_Omni_Reasoning_V3",
@@ -1240,7 +1271,7 @@ class SpeculativeConfig:
                 }
             )
 
-        if hf_config.model_type == "inkling2":
+        if hf_config.model_type in ("inkling2", "inkling2_loop"):
             from vllm.models.inkling2.configs import Inkling2DSparkConfig
 
             hf_config = Inkling2DSparkConfig.from_target(hf_config)
@@ -1990,6 +2021,18 @@ class SpeculativeConfig:
             logger.warning_once(
                 "FLy cost overlay enabled with synthetic acceptance: "
                 "entropy is computed but never used to defer rejections."
+            )
+
+        if (
+            self.rejection_sample_method in ("synthetic", "fly")
+            and self.target_model_config is not None
+            and self.target_model_config.masked_token_ids
+        ):
+            # Only the target logits are masked, and these methods can accept
+            # draft tokens regardless of them.
+            raise ValueError(
+                "masked_token_ids is not supported with "
+                f"rejection_sample_method={self.rejection_sample_method!r}."
             )
 
         self.verify_equal_vocab_size_if_draft_model()

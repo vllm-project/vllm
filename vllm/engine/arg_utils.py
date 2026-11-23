@@ -786,6 +786,7 @@ class EngineArgs:
     sleep_preserve_parameter_names: list[str] = get_field(
         ModelConfig, "sleep_preserve_parameter_names"
     )
+    masked_token_ids: list[int] | None = ModelConfig.masked_token_ids
     enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
     enable_nccl_comm_suspend: bool = ModelConfig.enable_nccl_comm_suspend
     checkpoint_prepare_on_startup: bool = ModelConfig.checkpoint_prepare_on_startup
@@ -1037,6 +1038,9 @@ class EngineArgs:
         model_group.add_argument(
             "--sleep-preserve-parameter-names",
             **model_kwargs["sleep_preserve_parameter_names"],
+        )
+        model_group.add_argument(
+            "--masked-token-ids", **model_kwargs["masked_token_ids"]
         )
         model_group.add_argument(
             "--enable-cumem-allocator", **model_kwargs["enable_cumem_allocator"]
@@ -2054,6 +2058,7 @@ class EngineArgs:
             sleep_mode_backend=self.sleep_mode_backend,
             sleep_mode_offload_cudagraph=self.sleep_mode_offload_cudagraph,
             sleep_preserve_parameter_names=self.sleep_preserve_parameter_names,
+            masked_token_ids=self.masked_token_ids,
             enable_cumem_allocator=self.enable_cumem_allocator,
             enable_nccl_comm_suspend=self.enable_nccl_comm_suspend,
             checkpoint_prepare_on_startup=self.checkpoint_prepare_on_startup,
