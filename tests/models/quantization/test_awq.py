@@ -17,6 +17,15 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
     }
 )
 
+IMAGE_SIZE_FACTOR_GROUPS = (
+    # Single-scale
+    (1.0,),
+    # Single-scale, batched
+    (1.0, 1.0, 1.0),
+    # Multi-scale
+    (0.25, 0.5, 1.0),
+)
+
 
 def run_awq_test(
     vllm_runner: type[VllmRunner],
@@ -24,7 +33,7 @@ def run_awq_test(
     source_model: str,
     quant_model: str,
     *,
-    size_factors: list[float],
+    size_factor_groups: tuple[tuple[float, ...], ...],
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -33,11 +42,12 @@ def run_awq_test(
 ):
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_image = [
+    inputs_per_image_and_size_group = [
         (
             [prompt for _ in size_factors],
             [rescale_image_size(image, factor) for factor in size_factors],
         )
+        for size_factors in size_factor_groups
         for image, prompt in zip(images, HF_IMAGE_PROMPTS)
     ]
 
@@ -51,6 +61,7 @@ def run_awq_test(
         source_model,
         max_model_len=4096,
         dtype=dtype,
+        trust_remote_code=True,
         tensor_parallel_size=tensor_parallel_size,
         distributed_executor_backend=distributed_executor_backend,
         enforce_eager=True,
@@ -60,7 +71,7 @@ def run_awq_test(
             vllm_model.generate_greedy_logprobs(
                 prompts, max_tokens, num_logprobs=num_logprobs, images=images
             )
-            for prompts, images in inputs_per_image
+            for prompts, images in inputs_per_image_and_size_group
         ]
 
     with vllm_runner(
@@ -68,6 +79,7 @@ def run_awq_test(
         quantization="awq",
         max_model_len=4096,
         dtype=dtype,
+        trust_remote_code=True,
         tensor_parallel_size=tensor_parallel_size,
         distributed_executor_backend=distributed_executor_backend,
         enforce_eager=True,
@@ -77,7 +89,7 @@ def run_awq_test(
             vllm_model.generate_greedy_logprobs(
                 prompts, max_tokens, num_logprobs=num_logprobs, images=images
             )
-            for prompts, images in inputs_per_image
+            for prompts, images in inputs_per_image_and_size_group
         ]
 
     for source_outputs, quant_outputs in zip(
@@ -96,7 +108,7 @@ def run_awq_test(
 @pytest.mark.parametrize(
     ("model", "quantization", "dtype"),
     [
-        ("mattbucci/gemma-4-26B-AWQ", "awq", "float16"),
+        ("vllm-project/gemma-4-26B-AWQ", "awq", "float16"),
         ("cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit", "compressed-tensors", "bfloat16"),
     ],
     ids=[
@@ -128,17 +140,6 @@ def test_awq_load(
     ("source_model", "quant_model"),
     [("OpenGVLab/InternVL2-2B", "OpenGVLab/InternVL2-2B-AWQ")],
 )
-@pytest.mark.parametrize(
-    "size_factors",
-    [
-        # Single-scale
-        [1.0],
-        # Single-scale, batched
-        [1.0, 1.0, 1.0],
-        # Multi-scale
-        [0.25, 0.5, 1.0],
-    ],
-)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -148,7 +149,6 @@ def test_awq_models(
     image_assets,
     source_model,
     quant_model,
-    size_factors,
     dtype,
     max_tokens,
     num_logprobs,
@@ -158,7 +158,7 @@ def test_awq_models(
         image_assets,
         source_model,
         quant_model,
-        size_factors=size_factors,
+        size_factor_groups=IMAGE_SIZE_FACTOR_GROUPS,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,

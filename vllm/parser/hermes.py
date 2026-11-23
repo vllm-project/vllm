@@ -7,9 +7,9 @@ Tool calls repeat as back-to-back pairs::
     <tool_call>{"name": "get_weather", "arguments": {"city": "SF"}}</tool_call>
 
 The body is a JSON wrapper, so the name comes from the engine's
-name-from-args path and :func:`_hermes_arg_converter` carves out the
-``arguments`` value -- the same shape as Inkling, with the key spelled
-``arguments``.
+name-from-args path and `_hermes_arg_converter` carves out the
+`arguments` value -- the same shape as Inkling, with the key spelled
+`arguments`.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
-from vllm.entrypoints.openai.engine.protocol import ExtractedToolCallInformation
+from vllm.entrypoints.generate.base.protocol import ExtractedToolCallInformation
 from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
@@ -48,7 +48,7 @@ _WS = " \t\r\n"
 
 def _scan_json_value(raw: str, start: int) -> int | None:
     """Return the end index (exclusive) of the JSON object starting at
-    ``raw[start]``, or ``None`` when the object is still unterminated."""
+    `raw[start]`, or `None` when the object is still unterminated."""
     depth = 0
     in_string = False
     escape = False
@@ -75,11 +75,12 @@ def _scan_json_value(raw: str, start: int) -> int | None:
 
 
 def _args_value_span(raw: str) -> str | None:
-    """Return the verbatim text of the top-level ``"arguments"`` value,
-    possibly an unterminated prefix, or ``None`` if it has not started.
+    """Return the verbatim text of the top-level `"arguments"` value,
+    possibly an unterminated prefix, or `None` if it has not started.
 
     Raises:
         ValueError: the value is not a JSON object.
+
     """
     depth = 0
     in_string = False
@@ -121,15 +122,15 @@ def _args_value_span(raw: str) -> str | None:
 
 
 def _hermes_arg_converter(raw_args: str, partial: bool) -> str:
-    """Carve the ``arguments`` object out of the tool-call JSON wrapper.
+    """Carve the `arguments` object out of the tool-call JSON wrapper.
 
-    The engine treats the whole ``TOOL_ARGS`` span as the arguments, and
-    skips ``_fix_arg_types`` when there is no converter, so omitting one
+    The engine treats the whole `TOOL_ARGS` span as the arguments, and
+    skips `_fix_arg_types` when there is no converter, so omitting one
     makes streaming and non-streaming disagree on argument types.
 
     The span is returned verbatim rather than re-serialised: the engine
     requires each converter output to extend the previous one, and
-    ``json.dumps`` reflows whitespace between ticks, silently dropping
+    `json.dumps` reflows whitespace between ticks, silently dropping
     argument deltas.
     """
     span = _args_value_span(raw_args)
@@ -180,7 +181,7 @@ class HermesParser(ParserEngine):
     """Hermes 2 Pro parser backed by the declarative parser engine.
 
     Delimiters are class attributes so subclasses can reuse this grammar
-    with different tags; see :class:`~vllm.parser.longcat.LongcatParser`.
+    with different tags; see `LongcatParser`.
     """
 
     CONFIG_NAME: str = "hermes"

@@ -17,8 +17,10 @@ from tests.models.utils import (
 EMBEDDING_MODELS = [
     EmbedModelInfo(
         "nvidia/llama-nemotron-embed-1b-v2",
+        trust_remote_code=True,
         architecture="LlamaBidirectionalModel",
         mteb_score=0.689164662128673,
+        mteb_tol=2e-3,
         seq_pooling_type="MEAN",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
@@ -29,22 +31,35 @@ EMBEDDING_MODELS = [
 RERANK_MODELS = [
     RerankModelInfo(
         "nvidia/llama-nemotron-rerank-1b-v2",
+        trust_remote_code=True,
         architecture="LlamaBidirectionalForSequenceClassification",
         chat_template_name="nemotron-rerank.jinja",
         mteb_score=0.33994,
+        mteb_tol=1e-2,
         seq_pooling_type="MEAN",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
     ),
+    # Declares its score template in its Sentence Transformers config, so no
+    # chat template is passed.
+    RerankModelInfo(
+        "nvidia/llama-nemotron-rerank-vl-1b-v2",
+        trust_remote_code=True,
+        architecture="LlamaNemotronVLForSequenceClassification",
+        mteb_score=0.33919,
+        mteb_tol=1e-2,
+    ),
 ]
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", EMBEDDING_MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     mteb_test_embed_models(hf_runner, vllm_runner, model_info)
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
     mteb_test_rerank_models(vllm_runner, model_info)

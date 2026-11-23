@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-P2P KV cache sharing protocol constants and documentation.
+"""P2P KV cache sharing protocol constants and documentation.
 
 Protocol Overview
 =================
@@ -30,7 +29,7 @@ Block Transfer Flow (happy path)
    messages carry ROUND_SEQ so each round's supply, demand, and
    completion stay isolated. The terminal empty FetchMsg is the
    server-side "request finished" signal for the id: parked
-   LookupMsg batches are popped and ``cb.finish_request`` fires on
+   LookupMsg batches are popped and `cb.finish_request` fires on
    each.
 2. Server matches requested blocks against locally stored blocks:
    - Blocks already available are transferred immediately via RDMA.
@@ -125,9 +124,10 @@ class ConnectMsg:
         BLOCK_LEN: Size in bytes of each block (must match between peers).
         CONFIG_FINGERPRINT: SHA-256 prefix of the model configuration.
             Peers with different fingerprints are incompatible.
-        HASH_SEED: The peer's PYTHONHASHSEED. Block hashes chain from a seed
-            derived from it, so peers with different values compute different
-            hashes for identical content and must not exchange blocks.
+        HASH_SEED: The peer's effective prefix-cache hash seed (PYTHONHASHSEED
+            if set, otherwise the built-in default). Block hashes chain from a
+            seed derived from it, so peers with different values compute
+            different hashes for identical content and must not exchange blocks.
     """
 
     TYPE = "connect"
@@ -179,9 +179,9 @@ class FetchMsg:
     """Client → Server: request blocks for one lookup round.
 
     A non-empty fetch closes only its round. The terminal empty FetchMsg
-    (``KEYS`` and ``BLOCK_INDEXES`` both empty) is the "request
+    (`KEYS` and `BLOCK_INDEXES` both empty) is the "request
     finished" signal: the server pops parked LookupMsg batches, calls
-    ``cb.finish_request`` on each, and drains any leftover supply.
+    `cb.finish_request` on each, and drains any leftover supply.
 
     Fields:
         KV_REQUEST_ID: Identifies this block transfer request.

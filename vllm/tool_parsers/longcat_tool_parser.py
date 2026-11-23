@@ -5,5 +5,4 @@ from vllm.parser.engine.registered_adapters import LongcatParserToolAdapter
 
 
 class LongcatFlashToolParser(LongcatParserToolAdapter):  # type: ignore[valid-type, misc]
-    # Inherited from Hermes before the migration; kept for guided decoding.
-    structural_tag_model = "hermes"
+    structural_tag_model = "longcat"

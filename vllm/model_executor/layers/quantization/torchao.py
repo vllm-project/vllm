@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
+import itertools
 import json
 import types
+from collections.abc import Callable
 from importlib.util import find_spec
 from typing import Any
 
@@ -74,8 +76,7 @@ def torchao_version_at_least(torchao_version: str) -> bool:
 
 
 def should_skip(prefix: str, skip_modules: list[str]) -> bool:
-    """
-    Robust skipping logic:
+    """Robust skipping logic:
     should_skip("model.model.layers.1.q_proj",
                 ["model.model.layers.1.q_proj"])  # True
     should_skip("model.model.layers.10.o_proj", ["o_proj"])  -> True
@@ -141,6 +142,11 @@ class TorchAOConfig(QuantizationConfig):
         is_checkpoint_torchao_serialized: bool = False,
     ) -> None:
         super().__init__()
+        logger.warning_once(
+            "The TorchAO quantization backend is deprecated and will be removed "
+            "in v0.37. See https://github.com/vllm-project/vllm/issues/69030 "
+            "for alternatives."
+        )
         self.torchao_config = torchao_config
         self.skip_modules = skip_modules or []
         self.is_checkpoint_torchao_serialized = is_checkpoint_torchao_serialized
@@ -163,14 +169,14 @@ class TorchAOConfig(QuantizationConfig):
 
     @staticmethod
     def get_config_filenames() -> list[str]:
-        """torchao doesn't require additional config files, we use
+        """Torchao doesn't require additional config files, we use
         `config.json` from huggingface: `model_config.hf_config`
         """
         return []
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "TorchAOConfig":
-        """Create the quant config from an hf model config"""
+        """Create the quant config from an hf model config."""
         try:
             from torchao.core.config import config_from_dict
         except ImportError as err:
@@ -283,19 +289,17 @@ class TorchAOConfig(QuantizationConfig):
 
         return TorchAOLinearMethod(self)
 
-    def get_scaled_act_names(self) -> list[str]:
-        return []
-
 
 def torchao_quantize_param_data(
     param: torch.Tensor, torchao_config: Any
 ) -> torch.nn.Parameter:
-    """Quantize a Tensor with torchao quantization specified by torchao_config
+    """Quantize a Tensor with torchao quantization specified by torchao_config.
 
     Args:
         param: weight parameter of the linear module
         torchao_config: type of quantization and their arguments we want to
             use to quantize the Tensor
+
     """
     from torchao.core.config import AOBaseConfig
     from torchao.quantization import quantize_
@@ -319,12 +323,69 @@ def torchao_quantize_param_data(
     return dummy_linear[0].weight
 
 
+def _take_act_pre_scales(layer: torch.nn.Module, weight_loader: Callable) -> Callable:
+    """Wrap `weight_loader` to move each loaded shard's `act_pre_scale` (AWQ) into
+    `layer.torchao_act_pre_scales` before the weight data is copied in.
+
+    The weight has room for one `act_pre_scale`, but a fused layer such as
+    `qkv_proj` gets one per shard, and a row parallel layer gets the scale for
+    the full input.
+    """
+
+    def loader(param, loaded_weight, *args, **kwargs):
+        act_pre_scale = getattr(loaded_weight, "act_pre_scale", None)
+        if act_pre_scale is not None:
+            shard_id = args[0] if args else kwargs.get("loaded_shard_id")
+            for i in shard_id if isinstance(shard_id, tuple) else (shard_id,):
+                layer.torchao_act_pre_scales[i] = act_pre_scale
+            loaded_weight.act_pre_scale = None
+        return weight_loader(param, loaded_weight, *args, **kwargs)
+
+    return loader
+
+
+def _loaded_act_pre_scales(layer: torch.nn.Module) -> list[torch.Tensor] | None:
+    """The `act_pre_scale` the checkpoint gave this layer: one per shard, in
+    output order, if the shards of a fused layer differ, else a single one."""
+    scales = getattr(layer, "torchao_act_pre_scales", {})
+    if not scales:
+        return None
+    shard_ids = getattr(layer, "shard_ids", ())
+    if set(scales) == set(shard_ids):
+        ordered = [scales[shard_id] for shard_id in shard_ids]
+    elif set(scales) == {None}:
+        ordered = [scales[None]]
+    else:
+        raise ValueError(
+            f"act_pre_scale was loaded for shards {list(scales)} of {shard_ids}"
+        )
+    if all(torch.equal(ordered[0], scale) for scale in ordered[1:]):
+        ordered = ordered[:1]
+    input_size = layer.input_size_per_partition
+    if ordered[0].numel() != input_size:
+        # Row parallel: the scale covers the full input; keep this rank's part.
+        start = layer.tp_rank * input_size
+        ordered = [scale.narrow(-1, start, input_size) for scale in ordered]
+    return ordered
+
+
+def _narrow_rows(weight: torch.Tensor, start: int, size: int) -> torch.Tensor:
+    """Rows `[start, start + size)` of a torchao weight as a standalone tensor:
+    shares the packed weight data, copies the (small) non-contiguous slices of
+    the per-group scales, which its kernels require to be contiguous."""
+    rows = weight.narrow(0, start, size)
+    names, ctx = rows.__tensor_flatten__()
+    data = {name: getattr(rows, name).contiguous() for name in names}
+    return type(rows).__tensor_unflatten__(data, ctx, rows.shape, rows.stride())
+
+
 class TorchAOLinearMethod(LinearMethodBase):
     """Linear method for torchao.
 
     Args:
         quant_config: The torchao quantization config, a string that encodes
             the type of quantization and all relevant arguments.
+
     """
 
     def __init__(self, quant_config: TorchAOConfig):
@@ -352,6 +413,15 @@ class TorchAOLinearMethod(LinearMethodBase):
             weight = torchao_quantize_param_data(
                 weight, self.quant_config.torchao_config
             )
+            if (
+                getattr(weight, "act_pre_scale", None) is not None
+                and "weight_loader" in extra_weight_attrs
+            ):
+                weight.act_pre_scale = None
+                layer.torchao_act_pre_scales = {}
+                extra_weight_attrs["weight_loader"] = _take_act_pre_scales(
+                    layer, extra_weight_attrs["weight_loader"]
+                )
 
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
 
@@ -364,11 +434,32 @@ class TorchAOLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        shards = getattr(layer, "torchao_shards", None)
+        if shards is not None:
+            outs = [F.linear(x * scale, weight) for scale, weight in shards]
+            out = outs[0] if len(outs) == 1 else torch.cat(outs, dim=-1)
+            return out if bias is None else out + bias
         return F.linear(x, layer.weight, bias)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.quant_config.is_checkpoint_torchao_serialized:
             if not hasattr(layer, "weight"):
+                return
+
+            act_pre_scales = _loaded_act_pre_scales(layer)
+            if act_pre_scales is not None and len(act_pre_scales) > 1:
+                # One matmul per shard, each with its own act_pre_scale, on the
+                # loaded layout; hardware-packed layouts cannot be sliced.
+                sizes = list(layer.output_partition_sizes)
+                sizes[-1] += layer.weight.shape[0] - sum(sizes)  # padding rows
+                offsets = itertools.accumulate(sizes, initial=0)
+                layer.torchao_shards = [
+                    (
+                        scale.to(layer.weight.device),
+                        _narrow_rows(layer.weight, start, size),
+                    )
+                    for scale, start, size in zip(act_pre_scales, offsets, sizes)
+                ]
                 return
 
             # record attributes attached to the weight, so we can
@@ -381,6 +472,10 @@ class TorchAOLinearMethod(LinearMethodBase):
             )
 
             _restore_weight_attrs(layer.weight, recorded_weight_attr)
+            if act_pre_scales is not None:
+                layer.torchao_shards = [
+                    (act_pre_scales[0].to(layer.weight.device), layer.weight)
+                ]
             return
 
         # online quantize the weight if the checkpoint is not already

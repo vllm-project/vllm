@@ -35,8 +35,11 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
         return "TOKENSPEED_MLA"
 
     @classmethod
-    def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
-        return device_capability.major == 10
+    def supports_compute_capability(
+        cls,
+        device_capability: "DeviceCapability | None",
+    ) -> bool:
+        return device_capability is not None and device_capability.major == 10
 
     _INSTALL_HINT = (
         "tokenspeed_mla package is not installed. "
@@ -110,10 +113,9 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
         # Kernel signature requires `seq_lens` but the implementation never reads
         # it (per-batch lengths are derived from `cum_seq_lens` diffs); compute
         # for parity with trtllm_ragged. cuda-graph padding in
-        # `query_start_loc` is saturated to `total_num_tokens`
-        # (gpu_model_runner.py:1905), so trailing diffs are 0 and padded batches
-        # are kernel no-ops — same reason trtllm passes the padded length as
-        # batch_size directly.
+        # `query_start_loc` is saturated to `total_num_tokens`, so trailing diffs
+        # are 0 and padded batches are kernel no-ops — same reason trtllm passes
+        # the padded length as batch_size directly.
         self._query_seq_lens = (
             prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
         )
@@ -166,11 +168,13 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from tokenspeed_mla import tokenspeed_mla_prefill
 
         # See note in run_prefill_new_tokens — `v` is a split-view of `kv_nope`
-        # in `_compute_prefill_context` and arrives non-contiguous.
+        # in the generic `_compute_prefill_context` and arrives non-contiguous.
+        # (K3's fused fp8 K/V pack already hands over a contiguous `v`.)
         v = v.contiguous()
 
         attn_out, lse = tokenspeed_mla_prefill(
@@ -187,6 +191,7 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
             cum_seq_lens_q=chunk.query_start_loc,
             max_seq_len_q=chunk.max_query_len,
             enable_pdl=False,
+            out=out,
         )
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)

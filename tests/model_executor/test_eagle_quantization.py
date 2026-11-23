@@ -31,11 +31,11 @@ def test_get_draft_quant_config_with_draft_model():
     mock_quant_config = Mock()
     with patch.object(
         VllmConfig, "get_quantization_config", return_value=mock_quant_config
-    ):
+    ) as mock_get_quantization_config:
         result = get_draft_quant_config(mock_vllm_config)
 
         # Verify the function calls get_quantization_config with draft model config
-        VllmConfig.get_quantization_config.assert_called_once_with(
+        mock_get_quantization_config.assert_called_once_with(
             mock_draft_model_config, mock_load_config
         )
         assert result == mock_quant_config
@@ -54,17 +54,25 @@ def test_get_draft_quant_config_without_draft_model():
     assert result is None
 
 
+@pytest.fixture
+def default_device(device):
+    original = torch.get_default_device()
+    torch.set_default_device(device)
+    yield
+    torch.set_default_device(original)
+
+
 @torch.inference_mode()
 @pytest.mark.parametrize("device", DEVICES)
-def test_fc_layer_quant_config_usage(default_vllm_config, dist_init, device) -> None:
+def test_fc_layer_quant_config_usage(
+    default_vllm_config, dist_init, device, default_device
+) -> None:
     import torch
 
     from vllm.model_executor.layers.linear import ReplicatedLinear
 
     if current_platform.is_cuda_alike():
         torch.accelerator.set_device_index(device)
-
-    torch.set_default_device(device)
 
     input_size = 256
     output_size = 128
@@ -83,6 +91,7 @@ def test_fc_layer_quant_config_usage(default_vllm_config, dist_init, device) -> 
     assert fc_no_quant.output_size == output_size
 
     mock_quant_config = Mock()
+    mock_quant_config.online_quantization_config = None
     fc_with_quant = ReplicatedLinear(
         input_size=input_size,
         output_size=output_size,
@@ -134,7 +143,6 @@ def test_eagle3_lm_head_receives_quant_config():
     mock_vllm_config = Mock()
     mock_vllm_config.speculative_config.draft_model_config.hf_config = mock_hf_config
     mock_vllm_config.model_config.get_num_layers.return_value = 32
-    mock_vllm_config.speculative_config.parallel_drafting = False
 
     with (
         patch("vllm.model_executor.models.llama_eagle3.LlamaModel") as MockModel,
