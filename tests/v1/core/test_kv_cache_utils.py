@@ -6,7 +6,7 @@ import importlib
 from collections.abc import Callable
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, get_args
 
 import numpy as np
 import pytest
@@ -33,6 +33,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.attention import HiSparseConfig
+from vllm.config.cache import PrefixCachingHashAlgo
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.lora.request import LoRARequest
@@ -43,7 +44,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
+from vllm.utils.hashing import (
+    get_hash_fn_by_name,
+    sha256,
+    sha256_cbor,
+    xxhash,
+    xxhash_cbor,
+)
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -2120,12 +2127,12 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
     assert block_hashes[1] == expected_hash2
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor, xxhash, xxhash_cbor])
+@pytest.mark.parametrize("hash_algo", get_args(PrefixCachingHashAlgo))
 @pytest.mark.parametrize("mixed_prompt", [False, True])
 @pytest.mark.parametrize("num_lookahead", [0, 1])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_parallel_prompt_embeds_hashing_matches_sequential(
-    hash_fn: Callable[[Any], bytes],
+    hash_algo: str,
     mixed_prompt: bool,
     num_lookahead: int,
     dtype: torch.dtype,
@@ -2133,6 +2140,7 @@ def test_parallel_prompt_embeds_hashing_matches_sequential(
     """Hashing prompt embeds on the thread pool must not change any block hash,
     including blocks hashed later as the request grows. bfloat16 has no numpy
     dtype, so its bytes are exported through a uint8 view."""
+    hash_fn = get_hash_fn_by_name(hash_algo)
     block_size = 16
     num_prompt_tokens = 64 * block_size + 5
     prompt_embeds = torch.randn(num_prompt_tokens, 2048, dtype=dtype)
