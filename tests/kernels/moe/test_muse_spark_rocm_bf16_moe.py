@@ -1303,7 +1303,7 @@ def test_eplb_replicas_and_moved_experts_keep_the_layer_output(
     )
     # As --enable-eplb sets it; the BF16 method skips the ROCm MoE padding then.
     vllm_config.parallel_config.enable_eplb = True
-    torch.manual_seed(0)
+    set_random_seed(0)
     checkpoint = _eplb_checkpoint(fmt, num_logical, hidden)
     post_expert_norm = _post_expert_norm_module(hidden).cuda()
 
