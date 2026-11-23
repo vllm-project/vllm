@@ -137,7 +137,13 @@ def test_attention_sink_deepseek_hy_loading_uses_parameter_loader(
     monkeypatch, tp_rank, module_name, class_name, attention_name, sink_name
 ):
     """DeepSeek and HY-V4 pass global sinks to the parameter's current loader."""
-    module = import_module(f"vllm.models.{module_name}.nvidia.model")
+    from vllm.platforms import current_platform
+
+    # HY-V4 has its own ROCm model; test the one this platform runs.
+    vendor = (
+        "amd" if module_name == "hy_v4" and current_platform.is_rocm() else "nvidia"
+    )
+    module = import_module(f"vllm.models.{module_name}.{vendor}.model")
     from vllm.model_executor.model_loader import weight_utils
 
     monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 2)

@@ -3,6 +3,8 @@
 """The fused DFly input kernels must reproduce the torch preparation they
 replace: query block, sampling state, query slots and sparse reuse indices."""
 
+import importlib
+
 import pytest
 import torch
 
@@ -10,13 +12,18 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="HY4 DFly requires CUDA"
+    not current_platform.is_cuda_alike(), reason="HY4 DFly requires CUDA or ROCm"
 )
 
 QUERY_WIDTH = 4
 MASK_TOKEN_ID = 99
 MAX_MODEL_LEN = 106
 BLOCK_SIZE = 4
+
+
+def _dfly_inputs():
+    vendor = "amd" if current_platform.is_rocm() else "nvidia"
+    return importlib.import_module(f"vllm.models.hy_v4.{vendor}.dfly_inputs")
 
 
 def _reference_reuse_indices(snapshot_rows, anchors, local_window, active, width):
@@ -44,7 +51,7 @@ def _reference_reuse_indices(snapshot_rows, anchors, local_window, active, width
 
 @pytest.fixture
 def prepared():
-    from vllm.models.hy_v4.nvidia.dfly_inputs import prepare_dfly_inputs
+    prepare_dfly_inputs = _dfly_inputs().prepare_dfly_inputs
 
     device = torch.device("cuda")
     max_reqs, max_tokens, hidden_size, padded_batch = 8, 64, 16, 5
@@ -180,7 +187,7 @@ def test_prepare_inputs_matches_torch_reference(prepared):
 
 
 def test_query_slots_skip_inactive_and_null_blocks(prepared):
-    from vllm.models.hy_v4.nvidia.dfly_inputs import write_dfly_query_slots
+    write_dfly_query_slots = _dfly_inputs().write_dfly_query_slots
 
     out, inp = prepared
     device = out["positions"].device
@@ -210,7 +217,7 @@ def test_query_slots_skip_inactive_and_null_blocks(prepared):
 
 @pytest.mark.parametrize("layer_slots", [[0, 0], [1, 0]])
 def test_reuse_indices_match_torch_reference(prepared, layer_slots):
-    from vllm.models.hy_v4.nvidia.dfly_inputs import build_dfly_reuse_indices
+    build_dfly_reuse_indices = _dfly_inputs().build_dfly_reuse_indices
 
     out, inp = prepared
     device = out["positions"].device

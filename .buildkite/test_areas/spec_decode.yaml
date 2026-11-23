@@ -34,6 +34,8 @@ steps:
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - vllm/models/hy_v4/amd/dfly_inputs.py
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Eagle 1: DeepSeek + Qwen"
   key: spec-decode-eagle-1-deepseek-qwen
