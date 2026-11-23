@@ -1534,6 +1534,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
+        import os as alignment_os
+        if alignment_os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
+            from alignment_audit import capture_vllm_v2_step
+            capture_vllm_v2_step(self, logits, sample_hidden_states, input_batch)
+
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
