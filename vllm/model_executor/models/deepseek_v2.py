@@ -77,14 +77,12 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-    scaled_dequantize,
-)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
+    fuse_indexer_wk_weights_proj,
     fused_indexer_q_rope_quant,
+    init_indexer_wk_weights_proj,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -127,7 +125,6 @@ from .interfaces import (
 )
 from .utils import (
     PPMissingLayer,
-    get_pp_missing_layer_names,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -714,16 +711,7 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.wq_b",
         )
-        # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
-        # FP8 wk weights are upcasted to BF16 during loading to maintain fusion.
-        self.wk_weights_proj = MergedColumnParallelLinear(
-            hidden_size,
-            [self.head_dim, self.n_head],
-            bias=False,
-            quant_config=None,
-            disable_tp=True,
-            prefix=f"{prefix}.wk_weights_proj",
-        )
+        init_indexer_wk_weights_proj(self, hidden_size, quant_config, prefix)
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
         self.softmax_scale = self.head_dim**-0.5
 
@@ -766,6 +754,9 @@ class Indexer(nn.Module):
             and self.rope_dim == 64
             and self.scale_fmt is not None
         )
+
+    def process_weights_after_loading(self) -> None:
+        fuse_indexer_wk_weights_proj(self)
 
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
@@ -859,65 +850,6 @@ class Indexer(nn.Module):
         weights = weights * q_scale * self.softmax_scale * self.n_head_scale
 
         return self.indexer_op(hidden_states, q_fp8, k, weights)
-
-
-def _try_load_fp8_indexer_wk(
-    name, tensor, buf, params_dict, loaded_params, pp_missing_layer_names
-):
-    """We fuse the WK and weights_proj projections, but in some checkpoints WK is stored
-    in FP8 with a separate weight_scale_inv, while weights_proj is stored in BF16.
-    Upcasting to BF16 during loading enables the fusion. This function loads the FP8 WK
-    weights and scale, and when both are available, dequantizes to BF16 and stores into
-    the fused wk_weights_proj.weight parameter.
-    """
-    if "indexer.wk." not in name or "wk_weights" in name:
-        return False  # Weight is not an isolated WK weight for the indexer, ignore.
-    is_weight = name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn
-    is_scale = "weight_scale" in name
-    if not is_weight and not is_scale:
-        return False  # WK is not in FP8 format, ignore.
-    # Buffer this tensor (weight or scale) until both have arrived.
-    layer_prefix = name.rsplit(".wk.", 1)[0]  # e.g. "model.layers.0.self_attn.indexer"
-    fused_name = f"{layer_prefix}.wk_weights_proj.weight"
-    if any(
-        name.startswith(missing_layer_name)
-        for missing_layer_name in pp_missing_layer_names
-    ):
-        return True
-    entry = buf.setdefault(layer_prefix, {})
-    entry["weight" if is_weight else "scale"] = tensor
-    if "weight" not in entry or "scale" not in entry:
-        return True  # still waiting for the other param
-
-    # We have both weight and scale: dequantize FP8 to BF16.
-    weight_fp8, scale_inv = entry["weight"], entry["scale"]
-    del buf[layer_prefix]
-    if scale_inv.dtype in (torch.uint8, torch.float8_e8m0fnu):
-        # MXFP8 checkpoints store power-of-two E8M0 scales, decode them to float.
-        scale_inv = scale_inv.view(torch.float8_e8m0fnu).to(torch.float32)
-    if scale_inv.ndim == 1:
-        # Per-channel scale: one scale per row of [out, in]
-        group_shape = GroupShape(1, weight_fp8.shape[1])
-    else:
-        # Derive the block size independently per dim so that per-channel
-        # ([out, 1]), MX ([out, in / 32]) and 2D block ([out / 128, in / 128])
-        # scale layouts are all handled.
-        group_shape = GroupShape(
-            weight_fp8.shape[0] // scale_inv.shape[0],
-            weight_fp8.shape[1] // scale_inv.shape[1],
-        )
-    weight_bf16 = scaled_dequantize(
-        weight_fp8,
-        scale_inv,
-        group_shape=group_shape,
-        out_dtype=torch.bfloat16,
-    )
-
-    # Load the dequantized weight into shard 0 of the fused buffer.
-    param = params_dict[fused_name]
-    param.weight_loader(param, weight_bf16, 0)
-    loaded_params.add(fused_name)
-    return True
 
 
 def _min_latency_fused_qkv_a_proj_impl(
@@ -1192,7 +1124,8 @@ class DeepseekV2MLAAttention(nn.Module):
                 cache_config,
                 topk_indices_buffer,
                 f"{prefix}.indexer",
-                is_inplace_rope=self.indexer_rope_emb.enabled(),
+                is_inplace_rope=self.indexer_rope_emb.enabled()
+                and self.indexer_rope_emb.rope_is_inplace,
             )
         else:
             self.indexer_rope_emb = None
@@ -1624,17 +1557,6 @@ class DeepseekV2Model(nn.Module):
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
         ]
-        # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
-        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
-        if _pending_wk_fp8 is None:
-            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
-
-        indexer_fused_mapping = [
-            ("wk_weights_proj", "wk", 0),
-            ("wk_weights_proj", "weights_proj", 1),
-        ]
-        stacked_params_mapping.extend(indexer_fused_mapping)
-
         if self.use_mha:
             stacked_params_mapping.extend(mha_params_mapping)
         else:
@@ -1653,7 +1575,6 @@ class DeepseekV2Model(nn.Module):
             num_redundant_experts=self.num_redundant_experts,
         )
 
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         # With index_topk_freq>1 only some layers build an indexer, yet the
@@ -1680,16 +1601,6 @@ class DeepseekV2Model(nn.Module):
                 and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
                 and extract_layer_index(name) in self.fused_shared_expert_layers
             )
-
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
-                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
@@ -1913,13 +1824,10 @@ class DeepseekV2ForCausalLM(
             dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim)
         )
 
+        self.packed_modules_mapping = dict(self.packed_modules_mapping)
         if self.use_mha:
             self.packed_modules_mapping["qkv_proj"] = ["q_proj", "k_proj", "v_proj"]
 
-        # `packed_modules_mapping` needs to be modified before
-        # initializing DeepseekV2Model, as it is passed inplace to
-        # quantization config init and may be used to select the
-        # quant_method for relevant layers during initialization.
         self.fuse_qkv_a_proj = (
             hasattr(config, "q_lora_rank") and config.q_lora_rank is not None
         )
@@ -1928,6 +1836,14 @@ class DeepseekV2ForCausalLM(
                 "q_a_proj",
                 "kv_a_proj_with_mqa",
             ]
+
+        # The quant config selects each layer's quant method from this mapping
+        # while the backbone is built.
+        if quant_config is not None:
+            quant_config.packed_modules_mapping = {
+                **quant_config.packed_modules_mapping,
+                **self.packed_modules_mapping,
+            }
 
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
