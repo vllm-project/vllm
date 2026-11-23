@@ -81,6 +81,7 @@ void eagle_step_slot_mapping_metadata_kernel_impl(
     torch::Tensor& seq_lens, torch::Tensor& out_clamped_positions,
     torch::Tensor& out_slot_mapping, const int64_t block_size,
     const int64_t max_model_len, const int64_t PAD_ID) {
+  TORCH_CHECK(block_size > 0, "block_size must be > 0, got ", block_size);
   const int64_t batch_size = positions.size(0);
   const int64_t input_batch_size = out_slot_mapping.size(0);
 
@@ -218,6 +219,7 @@ void copy_and_expand_dflash_inputs_kernel_impl(
     const int64_t parallel_drafting_token_id, const int64_t block_size,
     const int64_t num_query_per_req, const int64_t num_speculative_tokens,
     const int64_t total_input_tokens, const bool has_num_rejected) {
+  TORCH_CHECK(block_size > 0, "block_size must be > 0, got ", block_size);
   const int64_t num_reqs = query_start_loc.size(0) - 1;
 
   const int64_t* next_ids_ptr = next_token_ids.data_ptr<int64_t>();
