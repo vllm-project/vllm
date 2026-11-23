@@ -1224,6 +1224,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "meta-models/Muse-Spark-Open-816B-A42B-NVFP4",
         is_available_online=False,
     ),
+    "Nemotron4ForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/NemotronShortcut",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
     "Llama_Nemotron_Nano_VL": _HfExamplesInfo(
         "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
@@ -1866,6 +1871,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Nemotron3_5TranscribeMTPModel": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
         speculative_model="nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
+        is_available_online=False,
+    ),
+    "NemotronShortcutMTPModel": _HfExamplesInfo(
+        "nvidia/NemotronShortcut",
+        speculative_model="nvidia/NemotronShortcut",
+        trust_remote_code=True,
         is_available_online=False,
     ),
     "OpenPanguMTPModel": _HfExamplesInfo(
