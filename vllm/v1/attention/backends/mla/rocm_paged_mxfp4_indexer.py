@@ -188,6 +188,9 @@ class RocmMxfp4IndexerMetadata(DeepseekV32IndexerMetadata):
     """Parallel to `prefill.chunks`."""
     decode_row_lens: torch.Tensor | None = None
     """[rows] int32 compressed context of each decode query row."""
+    decode_step_row_lens: torch.Tensor | None = None
+    """`decode_row_lens` for every decode row of the step, before
+    `decode_shard` narrows it to a TP rank's rows."""
     decode_block_ends: torch.Tensor | None = None
     """[rows] int32 candidate blocks each decode row sees, for the source's
     pool."""
@@ -515,6 +518,7 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             )
         if base.decode is not None:
             lengths = base.decode.seq_lens.view(-1)
+            metadata.decode_step_row_lens = lengths
             query_start_loc = cm.query_start_loc_cpu[: base.num_decodes + 1]
             native = native_decode(
                 lengths,
