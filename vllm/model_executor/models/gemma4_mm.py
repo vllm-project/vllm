@@ -67,7 +67,11 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import BaseDummyInputsBuilder
-from vllm.multimodal.processing.context import validate_video_preprocessing_budget
+from vllm.multimodal.processing.context import (
+    estimate_video_pixel_element_size,
+    get_video_frame_dimensions,
+    validate_video_preprocessing_budget,
+)
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -137,6 +141,24 @@ def _get_tower_quant_config(
 _SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
 _VIDEO_MAX_SOFT_TOKENS = 70  # soft tokens per video frame (vs 280 for images)
 _VIDEO_MAX_FRAMES = 32  # max sampled frames per video
+
+
+def _video_patch_bytes(
+    frame_count: int,
+    patch_size: int,
+    pooling_kernel_size: int,
+    max_soft_tokens: int,
+    channels: int,
+    element_size: int,
+) -> int:
+    return (
+        frame_count
+        * max_soft_tokens
+        * pooling_kernel_size**2
+        * patch_size**2
+        * channels
+        * element_size
+    )
 
 
 def _get_max_soft_tokens(
@@ -656,6 +678,24 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
             for item in videos:
                 video_array, metadata = item
+
+                image_processor = processor.image_processor
+                _, _, channels = get_video_frame_dimensions(video_array)
+                estimated_bytes = _video_patch_bytes(
+                    len(video_array),
+                    image_processor.patch_size,
+                    image_processor.pooling_kernel_size,
+                    _VIDEO_MAX_SOFT_TOKENS,
+                    channels,
+                    estimate_video_pixel_element_size(
+                        video_array,
+                        image_processor,
+                        self.info.ctx.get_merged_mm_kwargs(hf_kwargs),
+                    ),
+                )
+                validate_video_preprocessing_budget(
+                    video_tensor_bytes + 2 * estimated_bytes
+                )
 
                 # Convert frames to PIL images
                 if isinstance(video_array, np.ndarray):

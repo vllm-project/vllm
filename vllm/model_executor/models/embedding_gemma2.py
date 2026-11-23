@@ -47,6 +47,7 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4MultiModalProcessor,
     Gemma4ProcessingInfo,
     _get_max_soft_tokens,
+    _video_patch_bytes,
 )
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.interfaces_base import (
@@ -77,7 +78,11 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.processing.context import validate_video_preprocessing_budget
+from vllm.multimodal.processing.context import (
+    estimate_video_pixel_element_size,
+    get_video_frame_dimensions,
+    validate_video_preprocessing_budget,
+)
 from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
@@ -711,6 +716,26 @@ class EmbeddingGemma2MultiModalProcessor(Gemma4MultiModalProcessor):
                     video_mm_kwargs["do_sample_frames"] = metadata["do_sample_frames"]
                 elif hasattr(metadata, "do_sample_frames"):
                     video_mm_kwargs["do_sample_frames"] = metadata.do_sample_frames
+
+                video_processor = self.info.get_hf_processor(
+                    **video_mm_kwargs
+                ).video_processor
+                _, _, channels = get_video_frame_dimensions(video_array)
+                estimated_bytes = _video_patch_bytes(
+                    len(video_array),
+                    video_processor.patch_size,
+                    video_processor.pooling_kernel_size,
+                    video_processor.max_soft_tokens,
+                    channels,
+                    estimate_video_pixel_element_size(
+                        video_array,
+                        video_processor,
+                        self.info.ctx.get_merged_mm_kwargs(video_mm_kwargs),
+                    ),
+                )
+                validate_video_preprocessing_budget(
+                    video_tensor_bytes + 2 * estimated_bytes
+                )
 
                 single_video_out = self.info.ctx.call_hf_processor(
                     self.info.get_hf_processor(**video_mm_kwargs),

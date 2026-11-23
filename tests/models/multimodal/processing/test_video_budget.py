@@ -2,15 +2,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import numpy as np
 import pytest
+import torch
+from PIL import Image as PILImage
 
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import get_mm_max_toks_per_item
-from vllm.multimodal.processing.context import TimingContext
+from vllm.multimodal.processing.context import (
+    TimingContext,
+    get_video_frame_dimensions,
+)
 from vllm.multimodal.processing.inputs import ProcessorInputs
 
 from ...utils import build_model_context
+
+
+def test_video_preflight_accepts_pil_and_channel_first_frames():
+    pil_frames = [PILImage.new("RGB", (128, 64)) for _ in range(2)]
+    chw_frames = torch.zeros((2, 3, 64, 128), dtype=torch.uint8)
+
+    assert get_video_frame_dimensions(pil_frames) == (64, 128, 3)
+    assert get_video_frame_dimensions(chw_frames) == (64, 128, 3)
 
 
 @pytest.mark.parametrize(

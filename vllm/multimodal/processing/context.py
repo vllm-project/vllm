@@ -9,6 +9,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar, get_type_hints, overload
 
 import torch
+from PIL import Image as PILImage
 from typing_extensions import TypeVar
 
 from vllm import envs
@@ -68,6 +69,48 @@ def validate_video_preprocessing_budget(size_bytes: int) -> None:
             f"Video preprocessing exceeds VLLM_MAX_MEDIA_PREPROCESSING_BYTES={limit}.",
             parameter="video",
         )
+
+
+def estimate_video_pixel_element_size(
+    video: object, processor: Any, kwargs: Mapping[str, object]
+) -> int:
+    pixel_kwargs = kwargs.get("videos_kwargs", kwargs.get("images_kwargs"))
+    if isinstance(pixel_kwargs, Mapping):
+        kwargs = {**kwargs, **pixel_kwargs}
+    if kwargs.get("do_rescale", processor.do_rescale) or kwargs.get(
+        "do_normalize", processor.do_normalize
+    ):
+        return 4
+    frames = video if isinstance(video, list) else [video]
+    element_sizes = []
+    for frame in frames:
+        if isinstance(frame, torch.Tensor):
+            element_sizes.append(frame.element_size())
+        elif isinstance(frame, PILImage.Image):
+            element_sizes.append(1)
+        else:
+            itemsize = getattr(frame, "itemsize", None)
+            element_sizes.append(itemsize if isinstance(itemsize, int) else 4)
+    return max(element_sizes, default=4)
+
+
+def get_video_frame_dimensions(video: Any) -> tuple[int, int, int]:
+    frames = video if isinstance(video, list) else [video[0]]
+    height = width = channels = 0
+    for frame in frames:
+        if isinstance(frame, PILImage.Image):
+            frame_width, frame_height = frame.size
+            frame_channels = len(frame.getbands())
+        else:
+            shape = frame.shape
+            if shape[-1] in (1, 3, 4):
+                frame_height, frame_width, frame_channels = shape
+            else:
+                frame_channels, frame_height, frame_width = shape
+        height = max(height, frame_height)
+        width = max(width, frame_width)
+        channels = max(channels, frame_channels)
+    return height, width, max(channels, 3)
 
 
 # HuggingFace processors accept a shared flat namespace in addition to the

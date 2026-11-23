@@ -104,7 +104,11 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.processing.context import validate_video_preprocessing_budget
+from vllm.multimodal.processing.context import (
+    estimate_video_pixel_element_size,
+    get_video_frame_dimensions,
+    validate_video_preprocessing_budget,
+)
 from vllm.multimodal.video_prune.evs import (
     compute_mrope_for_media,
     compute_retained_tokens_count,
@@ -1498,6 +1502,54 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     and "fps" not in video_scoped_kwargs
                 ):
                     video_scoped_kwargs["fps"] = None
+
+                video_processor = self.info.get_video_processor(**video_mm_kwargs)
+                frame_count = len(video_array)
+                if video_scoped_kwargs["do_sample_frames"]:
+                    frame_count = len(
+                        video_processor.sample_frames(
+                            metadata,
+                            num_frames=video_scoped_kwargs.get("num_frames"),
+                            fps=video_scoped_kwargs.get("fps"),
+                        )
+                    )
+                height, width, channels = get_video_frame_dimensions(video_array)
+                if video_scoped_kwargs.get("do_resize", video_processor.do_resize):
+                    size = video_scoped_kwargs.get("size", video_processor.size)
+                    factor = video_processor.patch_size * video_processor.merge_size
+                    max_pixels = size["longest_edge"]
+                    if video_scoped_kwargs.get("cap_pixels_per_frame", False):
+                        frame_cap = video_processor.max_video_tokens * factor**2
+                        pixels_per_frame = max(
+                            min(frame_cap, max_pixels // frame_count),
+                            int(size["shortest_edge"] * 1.05),
+                        )
+                        max_pixels = pixels_per_frame * frame_count
+                    height, width = video_smart_resize(
+                        num_frames=frame_count,
+                        height=height,
+                        width=width,
+                        factor=factor,
+                        temporal_factor=video_processor.temporal_patch_size,
+                        min_pixels=size["shortest_edge"],
+                        max_pixels=max_pixels,
+                    )
+                temporal_patch = video_processor.temporal_patch_size
+                padded_frames = (
+                    (frame_count + temporal_patch - 1) // temporal_patch
+                ) * temporal_patch
+                estimated_bytes = (
+                    padded_frames
+                    * height
+                    * width
+                    * channels
+                    * estimate_video_pixel_element_size(
+                        video_array, video_processor, video_mm_kwargs
+                    )
+                )
+                validate_video_preprocessing_budget(
+                    video_tensor_bytes + 2 * estimated_bytes
+                )
 
                 video_outputs = self.info.ctx.call_hf_processor(
                     self.info.get_hf_processor(**video_mm_kwargs),

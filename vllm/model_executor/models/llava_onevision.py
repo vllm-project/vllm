@@ -30,7 +30,11 @@ from vllm.multimodal.parse import (
     VideoProcessorItems,
 )
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
-from vllm.multimodal.processing.context import validate_video_preprocessing_budget
+from vllm.multimodal.processing.context import (
+    estimate_video_pixel_element_size,
+    get_video_frame_dimensions,
+    validate_video_preprocessing_budget,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -374,7 +378,27 @@ class LlavaOnevisionMultiModalProcessor(
 
         pixel_values_videos = []
         video_tensor_bytes = 0
+        video_processor = self.info.get_hf_processor(**hf_kwargs).video_processor
+        merged_hf_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
         for video in videos:
+            frame_height, frame_width, channels = get_video_frame_dimensions(video)
+            if video_processor.do_resize:
+                height = video_processor.size["height"]
+                width = video_processor.size["width"]
+            else:
+                height, width = frame_height, frame_width
+            estimated_bytes = (
+                len(video)
+                * height
+                * width
+                * channels
+                * estimate_video_pixel_element_size(
+                    video,
+                    video_processor,
+                    merged_hf_kwargs,
+                )
+            )
+            validate_video_preprocessing_budget(video_tensor_bytes + estimated_bytes)
             item_outputs = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**hf_kwargs),
                 dict(text=video_token, **{"videos": video}),

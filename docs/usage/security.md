@@ -113,6 +113,10 @@ protection against resource-exhaustion attacks.
 ### 6. Media preprocessing limit
 
 Supported processors account for their allocations as follows.
+The image and video tensor checks count items processed on the current
+request. Cached items skip preprocessing, so a warm cache can admit a prompt
+that a cold cache rejects. FunAudioChat's waveform item cap runs before cache
+lookup.
 
 - FunAudioChat estimates padded raw audio, spectrum buffers, and feature
   tensors. The resulting item cap applies to waveforms, not precomputed
@@ -122,17 +126,19 @@ Supported processors account for their allocations as follows.
 - DeepSeek-OCR and Unlimited-OCR account for all global views and local tiles
   in the document plus temporary buffers for one view. Size the limit for the
   page count and crop settings when serving long multi-page scans.
-- Qwen3-VL and LLaVA-OneVision account for the video pixel tensors retained
-  across clips. Qwen3-VL also counts the concatenated output while the
-  individual tensors are live. Both processors accept up to 32 videos per
+- Qwen3-VL and LLaVA-OneVision reserve video pixel tensor bytes before each
+  clip is processed, then check the actual output bytes. Qwen3-VL also counts
+  the concatenated output while the individual tensors are live. Both
+  processors accept up to 32 videos per
   prompt by default. The Qwen3-VL default also applies to processors that
   inherit from it: Qwen3.5, Qwen3-VL-MoE, Cosmos3, Cosmos3-Edge,
   InternS1-Pro, InternS2-Preview, InternS2-Mobius, LFM3-VL, LFM3-Omni,
   ColQwen3, ColQwen3.5, Alpamayo2-Super, and D3. Configure the count with
   `--limit-mm-per-prompt.video`. Frame, size, and embedding options alone do
   not change the default count.
-- Gemma 4 and EmbeddingGemma2 account for video pixel tensors retained across
-  clips and the concatenated output while the individual tensors are live.
+- Gemma 4 and EmbeddingGemma2 reserve video patch tensor bytes before each
+  clip is processed and account for the concatenated output while the
+  individual tensors are live.
 
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 

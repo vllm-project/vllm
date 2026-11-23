@@ -14,15 +14,16 @@ MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 @pytest.mark.parametrize(
-    ("model", "budget", "cache_gb"),
+    ("model", "budget", "cache_gb", "device_normalize"),
     [
-        ("Qwen/Qwen3-VL-Reranker-2B", 512 * 1024, 0),
-        ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf", 3 * 1024**2, 1),
-        ("google/gemma-4-E2B-it", 6 * 1024**2, 0),
+        ("Qwen/Qwen3-VL-Reranker-2B", 512 * 1024, 0, True),
+        ("Qwen/Qwen3-VL-Reranker-2B", 2 * 1024**2, 0, False),
+        ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf", 3 * 1024**2, 1, True),
+        ("google/gemma-4-E2B-it", 6 * 1024**2, 0, True),
     ],
 )
 def test_chat_render_rejects_over_budget_video_tensors(
-    model: str, budget: int, cache_gb: int
+    model: str, budget: int, cache_gb: int, device_normalize: bool
 ):
     """Each clip fits alone, but the combined preprocessing tensors do not."""
     args = [
@@ -36,7 +37,11 @@ def test_chat_render_rejects_over_budget_video_tensors(
         '{"image": 0, "video": 2}',
         "--mm-processor-cache-gb",
         str(cache_gb),
-        "--mm-device-do-normalize",
+        (
+            "--mm-device-do-normalize"
+            if device_normalize
+            else "--no-mm-device-do-normalize"
+        ),
     ]
     videos = [
         {"type": "video_url", "video_url": {"url": encode_video_url(frames)}}
@@ -67,6 +72,17 @@ def test_chat_render_rejects_over_budget_video_tensors(
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": [video]}],
+                },
+                timeout=30,
+            )
+            assert response.status_code == 200, response.text[:1000]
+
+        if cache_gb:
+            response = httpx.post(
+                url,
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": videos}],
                 },
                 timeout=30,
             )
