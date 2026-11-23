@@ -28,8 +28,6 @@ class PerTokenTable(nn.Module):
         self.part_n_hash_cols = -(-n_hash_cols // tp_size)
         self.head_start = tp_rank * self.part_n_hash_cols
         self.weight = nn.Parameter(
-            # NaN marks a table that was never loaded (see
-            # `process_weights_after_loading`).
             torch.full(
                 (comp_vocab, self.part_n_hash_cols, self.head_dim),
                 float("nan"),
@@ -40,8 +38,7 @@ class PerTokenTable(nn.Module):
         set_weight_attrs(self.weight, {"weight_loader": self.weight_loader})
 
     def process_weights_after_loading(self) -> None:
-        """Fail if the table was never loaded (still NaN). Runs once after
-        every load, reload and weight update, not per `load_weights` call."""
+        """Reject a missing or NaN checkpoint table after loading."""
         if is_weights_pre_processed() or self.weight.device.type == "meta":
             return
         if torch.isnan(self.weight).any():

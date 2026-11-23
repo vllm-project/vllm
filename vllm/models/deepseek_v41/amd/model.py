@@ -893,7 +893,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 comp_ids = per_token_comp_ids(
                     self.engram_hash.token_map, input_ids, engram_mask
                 )
-                # All layers read the same IDs. expand shares their storage.
                 engram_hashes = comp_ids[:, None].expand(
                     -1, self.engram_hash.multipliers.shape[0]
                 )

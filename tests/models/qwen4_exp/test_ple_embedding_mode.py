@@ -21,15 +21,13 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPerTokenEmbedding
-from vllm.models.qwen4_exp.common.ple_mode import (
-    validate_ple_embedding_config,
-)
+from vllm.models.qwen4_exp.common.ple_mode import validate_ple_embedding_config
 from vllm.platforms import current_platform
 
 from .test_ple import _build_amd_ngram_embedding
 
 VOCAB = 64
-DIM = 6  # ngram_size=3, heads_per_ngram=1 -> 2 heads of dim 3
+DIM = 6
 
 
 def _config(**kwargs) -> Qwen4ExpTextConfig:
@@ -110,7 +108,6 @@ def test_per_token_runner_omits_ngram_capture_inputs(tmp_path) -> None:
 
 
 def test_forward_is_fullgraph_compilable_with_dynamic_token_count() -> None:
-    """No data-dependent host branches: fullgraph trace, then reuse for new sizes."""
     module = _per_token()
     table = _table()
     module.load_weights([("per_token_table.weight", table)])
@@ -134,7 +131,6 @@ def test_per_token_loader_dtype_policy() -> None:
     module = _per_token()
     with pytest.raises(ValueError, match="dtype mismatch"):
         module.load_weights([("per_token_table.weight", _table().float())])
-    # bf16 checkpoint into an fp16 model is the one allowed cast
     half = _per_token(dtype=torch.float16)
     half.load_weights([("per_token_table.weight", _table())])
     assert half.per_token_table.weight.dtype == torch.float16
@@ -150,7 +146,6 @@ def test_per_token_loader_rejects_wrong_shape_and_unknown_names() -> None:
 
 
 def test_loader_through_auto_weights_loader_with_checkpoint_names() -> None:
-    """Names as in the checkpoint, below the PLE layer (`ple_embedding.*`)."""
     owner = nn.Module()
     owner.ple_embedding = _per_token()
     weights = [(f"ple_embedding.{n}", w) for n, w in _NGRAM_CHECKPOINT_TENSORS]
@@ -161,7 +156,6 @@ def test_loader_through_auto_weights_loader_with_checkpoint_names() -> None:
 
 
 def test_ngram_mode_skips_per_token_checkpoint_tensor(monkeypatch) -> None:
-    """A checkpoint carrying both tables can be served in either mode."""
     module, loaded = _build_amd_ngram_embedding(
         monkeypatch, device="cpu", cpu_offload=False, fp8_checkpoint=False
     )
@@ -219,7 +213,6 @@ def test_per_token_nan_in_loaded_table_fails() -> None:
 def test_per_token_table_through_a_layerwise_weight_update(
     monkeypatch: pytest.MonkeyPatch, update_has_table: bool
 ) -> None:
-    """Weight updates reload layer by layer (the default `VLLM_RELOAD_MODE`)."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     module = _per_token()
     record_metadata_for_reloading(module)

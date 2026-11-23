@@ -456,7 +456,6 @@ class Qwen4ExpPerTokenEmbedding(nn.Module):
         self.per_token_table = nn.Embedding(
             *shape, _weight=torch.full(shape, float("nan"), dtype=dtype), _freeze=True
         )
-        logger.info("Initialized per-token PLE table with shape %s", shape)
 
     def forward(
         self,

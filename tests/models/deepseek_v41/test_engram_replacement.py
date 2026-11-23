@@ -11,9 +11,7 @@ import torch
 
 from vllm.config.engram import EngramConfig
 from vllm.config.utils import hash_config
-from vllm.model_executor.model_loader.weight_utils import (
-    finalize_model_weights,
-)
+from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.model_executor.utils import weights_already_processed
 from vllm.models.deepseek_v41.common.engram_replacement import (
@@ -23,7 +21,7 @@ from vllm.models.deepseek_v41.common.engram_replacement import (
 )
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
-N_COLS, HEAD_DIM, VOCAB = 24, 256, 50  # n_hash_cols, head_dim, compressed vocab
+N_COLS, HEAD_DIM, VOCAB = 24, 256, 50
 
 
 def _table() -> torch.Tensor:
@@ -113,8 +111,6 @@ def test_shards_reassemble_the_full_table(tp: int) -> None:
         assert tuple(table.weight.shape) == (VOCAB, part, HEAD_DIM)
         table.weight.weight_loader(table.weight, full)
         local.append(table.weight.detach())
-    # All-gather over TP and crop to n_hash_cols, as Engram.embed does; the
-    # padding of the last shard is zero.
     gathered = torch.cat(local, dim=1)
     assert torch.equal(gathered[:, :N_COLS], full)
     assert not gathered[:, N_COLS:].any()
@@ -129,10 +125,10 @@ def test_float_tables_are_rejected() -> None:
 @pytest.mark.parametrize(
     "shape",
     [
-        (VOCAB + 1, N_COLS, HEAD_DIM),  # compressed vocab mismatch
-        (VOCAB, N_COLS - 1, HEAD_DIM),  # n_hash_cols mismatch
-        (VOCAB, N_COLS, HEAD_DIM // 2),  # head_dim mismatch
-        (VOCAB, N_COLS * HEAD_DIM),  # wrong rank
+        (VOCAB + 1, N_COLS, HEAD_DIM),
+        (VOCAB, N_COLS - 1, HEAD_DIM),
+        (VOCAB, N_COLS, HEAD_DIM // 2),
+        (VOCAB, N_COLS * HEAD_DIM),
     ],
 )
 def test_wrong_table_shape_is_rejected(shape) -> None:
@@ -143,9 +139,9 @@ def test_wrong_table_shape_is_rejected(shape) -> None:
 
 
 def test_comp_ids_follow_the_token_map_and_dropped_positions_map_to_id_zero() -> None:
-    token_map = torch.arange(100, 0, -1, dtype=torch.int32)  # token t -> 100 - t
+    token_map = torch.arange(100, 0, -1, dtype=torch.int32)
     ids = torch.tensor([3, 0, 7, 5])
-    keep = torch.tensor([True, True, False, True])  # position 2: image span
+    keep = torch.tensor([True, True, False, True])
     out = per_token_comp_ids(token_map, ids, keep)
     assert out.dtype == torch.int64
     assert out.tolist() == [97, 100, 100, 95]
@@ -171,7 +167,6 @@ def test_comp_ids_clamp_ids_beyond_the_token_map() -> None:
 def test_each_mode_skips_only_the_table_it_does_not_use(
     name: str, skipped_in_per_token: bool, skipped_in_ngram: bool
 ) -> None:
-    """A checkpoint carrying both tables can be served in either mode."""
     assert skip_engram_weight(name, per_token=True) is skipped_in_per_token
     assert skip_engram_weight(name, per_token=False) is skipped_in_ngram
 
@@ -216,7 +211,7 @@ def test_engram_per_token_mode_builds_and_looks_up_rows(dist_init) -> None:
             engram_num_embeddings=[1000],
             engram_vocab_size=1000,
             engram_max_ngram_size=4,
-            engram_n_heads=N_COLS // 3,  # n_hash_cols = 3 * 8 = 24
+            engram_n_heads=N_COLS // 3,
             engram_head_dim=HEAD_DIM,
             engram_compressed_vocab_size=VOCAB,
             engram_pad_token_id=0,

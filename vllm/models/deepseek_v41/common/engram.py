@@ -1749,7 +1749,9 @@ class Engram(nn.Module):
         self._init_staging(max_tokens, layout.head_dim)
 
     def _init_embedding(self, layout: EngramLayout, layer_hash_index: int) -> None:
-        # Match the checkpoint mapper's embed.weight -> embed_tokens.weight rule.
+        # Named ``embed_tokens`` so the checkpoint's ``engram.embed.weight``
+        # survives the mapper's ``embed.weight`` -> ``embed_tokens.weight``
+        # suffix rule.
         self.embed_tokens = self._create_embedding(layout, layer_hash_index)
 
     @property
@@ -1863,19 +1865,18 @@ class Engram(nn.Module):
     def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
         """Gather heads, returning only local tokens when SP is enabled."""
         rows = self._ready_rows(hash_ids.shape[0])
-        tp_size = self.embedding_shard.tp_size
-        n_hash_cols = self.embedding_shard.n_hash_cols
-        if tp_size == 1:
-            return rows[:, :n_hash_cols]
+        if self.embedding_shard.tp_size == 1:
+            return rows[:, : self.embedding_shard.n_hash_cols]
         if self._gather_columns is not None:
             dim = rows.shape[-1]
             rows = self._gather_columns(rows.flatten(1)).unflatten(1, (-1, dim))
-            return rows[:, :n_hash_cols]
+            return rows[:, : self.embedding_shard.n_hash_cols]
         if self.use_sequence_parallel:
+            tp_size = self.embedding_shard.tp_size
             num_tokens, local_heads, dim = rows.shape
             gathered = tensor_model_parallel_all_gather(rows, dim=0)
             chunk = (num_tokens + tp_size - 1) // tp_size
-            out = rows.new_empty((chunk, n_hash_cols, dim))
+            out = rows.new_empty((chunk, self.embedding_shard.n_hash_cols, dim))
             _engram_select_rows(
                 gathered,
                 out,
@@ -1885,7 +1886,7 @@ class Engram(nn.Module):
             )
             return out
         rows = tensor_model_parallel_all_gather(rows, dim=1)
-        return rows[:, :n_hash_cols]
+        return rows[:, : self.embedding_shard.n_hash_cols]
 
     def forward(
         self,
