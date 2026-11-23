@@ -8,7 +8,12 @@ import torch
 from PIL import Image
 from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
-from transformers import BatchFeature, ProcessorMixin, TensorType
+from transformers import (
+    BatchFeature,
+    ImageProcessingMixin,
+    ProcessorMixin,
+    TensorType,
+)
 
 from vllm.tokenizers import TokenizerLike
 
@@ -240,7 +245,7 @@ class ImagePatcher:
             )
 
 
-class Step3VLImageProcessor:
+class Step3VLImageProcessor(ImageProcessingMixin):
     def __init__(
         self,
         image_size: int = 728,

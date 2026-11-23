@@ -8,6 +8,11 @@ from PIL import Image
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import AttentionConfig, KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+    ExampleConnector,
+    ReqMeta,
+)
+from vllm.inputs import TextPrompt
 from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
 
@@ -29,12 +34,12 @@ class InputCase(NamedTuple):
 
 
 def _check_path_len(path):
-    """Return the latest length in path"""
+    """Return the latest length in path."""
     return len(list(path.iterdir()))
 
 
 def _list_path(path):
-    """Return the list of foldername (hashes generated) under the path"""
+    """Return the list of foldername (hashes generated) under the path."""
     return list(path.iterdir())
 
 
@@ -47,8 +52,7 @@ def run_test(
     expected_len: int,
     info: str,
 ):
-    """
-    One individual test to process the prompt and output base on 1 set of input
+    """One individual test to process the prompt and output base on 1 set of input
     Then check if the length in the storage path matches the expected length
     `info` introduces details or purpose of the individual test
     """
@@ -67,9 +71,7 @@ def run_test(
 
 
 def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
-    """
-    Form the prompt based on the text and image input, then llm generate output
-    """
+    """Form the prompt based on the text and image input, then llm generate output."""
     placeholders = [
         {
             "type": "image_url",
@@ -93,13 +95,11 @@ def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    outputs = llm.generate(
-        {
-            "prompt": prompt,
-            **({"multi_modal_data": {"image": [*image_urls]}} if image_urls else {}),
-        },
-        sampling_params=SAMPLING_PARAMS,
-    )
+    prompt_input: TextPrompt = {"prompt": prompt}
+    if image_urls:
+        prompt_input["multi_modal_data"] = {"image": image_urls}
+
+    outputs = llm.generate(prompt_input, sampling_params=SAMPLING_PARAMS)
 
     print("-" * 50)
     print("Output:")
@@ -115,13 +115,12 @@ def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
         ["FLASH_ATTN", "TRITON_ATTN"]
         if current_platform.is_cuda()
         else ["TRITON_ATTN"]
-        if current_platform.is_rocm()
+        if current_platform.is_rocm() or current_platform.is_xpu()
         else []
     ),
 )
 def test_shared_storage_connector_hashes(tmp_path, attn_backend):
-    """
-    Tests that ExampleConnector saves KV to the storage locations
+    """Tests that ExampleConnector saves KV to the storage locations
     with proper hashes; that are unique for inputs with identical text but
     different images (same size), or same multiple images but different orders.
     """
@@ -150,6 +149,7 @@ def test_shared_storage_connector_hashes(tmp_path, attn_backend):
         max_num_seqs=1,
         gpu_memory_utilization=0.4,
         attention_config=AttentionConfig(backend=attn_backend),
+        block_size=16,
         enforce_eager=True,
         kv_transfer_config=KVTransferConfig(
             kv_connector="ExampleConnector",
@@ -251,3 +251,32 @@ def test_shared_storage_connector_hashes(tmp_path, attn_backend):
         run_test(tmp_path, processor, llm, text, img, expected_len, info)
 
     print("All tests passed successfully!")
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("num_stored_tokens", [40, 48])
+@pytest.mark.parametrize("lookahead", [0, 1, 2])
+def test_hit_key_covers_lookahead_tokens(tmp_path, num_stored_tokens, lookahead):
+    """A hit also needs the L tokens after the cached prefix to match, which the
+    draft KV of that prefix depends on; a load reads the stored key."""
+    block_size = 16
+    connector = object.__new__(ExampleConnector)
+    connector._block_size = block_size
+    connector._num_hash_lookahead_tokens = lookahead
+    connector._storage_path = str(tmp_path)
+
+    stored = list(range(num_stored_tokens))
+    store = ReqMeta.make_meta(stored, [0, 1, 2], block_size, True, [], lookahead)
+    connector._generate_foldername_debug(store.token_ids, [], create_folder=True)
+
+    # The cached prompt plus one generated token loads under the stored key.
+    extension = stored + [-1]
+    assert connector._found_match_for_prompt(extension, [])
+    load = ReqMeta.make_meta(extension, [0, 1, 2], block_size, False, [], lookahead)
+    assert load.token_ids.tolist() == store.token_ids.tolist()
+    assert len(load.slot_mapping) == len(store.slot_mapping)
+
+    # A prompt diverging right after the cached prefix hits only without lookahead.
+    num_cached = len(store.slot_mapping)
+    diverged = [*stored[:num_cached], -2, *stored[num_cached + 1 :], -1]
+    assert connector._found_match_for_prompt(diverged, []) == (lookahead == 0)

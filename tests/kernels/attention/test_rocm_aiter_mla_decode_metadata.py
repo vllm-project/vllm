@@ -4,7 +4,7 @@
 
 For the gfx950 fp8/fp8 nhead=32 qlen=1 fold path, the split/reduce metadata
 layout depends on the q/kv element size. The builder must forward dtype_q/dtype_kv
-to ``get_mla_metadata_v1``; omitting them lays out the work for the wrong dtype
+to `get_mla_metadata_v1`; omitting them lays out the work for the wrong dtype
 and corrupts decode output. The test pins the builder's metadata to a golden
 recomputed at runtime with the explicit correct dtypes.
 """
@@ -40,10 +40,11 @@ BATCH_SIZE = 128
 CONTEXT_LEN = 8192
 PAGE_SIZE = 1
 
-# Expected dtypes for this fold path: bf16 model dtype -> bf16 query; fp8
-# KV-cache -> fp8_e4m3 kv.
-EXPECTED_Q_DTYPE = torch.bfloat16
-EXPECTED_KV_DTYPE = torch.float8_e4m3fn
+# On the fp8 KV-cache path the builder forwards the platform fp8 dtype (aiter
+# dtypes.fp8) for both q and kv. Mirror it via current_platform.fp8_dtype()
+# instead of hardcoding a literal (see #47276).
+EXPECTED_Q_DTYPE = current_platform.fp8_dtype()
+EXPECTED_KV_DTYPE = current_platform.fp8_dtype()
 
 # The split/reduce content tensors filled by get_mla_metadata_v1. work_meta_data
 # is excluded: it holds raw device pointers, never equal across allocations.
@@ -71,8 +72,8 @@ _OUTPUT_ARG_FIELDS = (
 def _build_decode_metadata():
     """Build AITER MLA decode metadata for the fp8/fp8 nhead=32 fold path.
 
-    Returns ``(metadata, captured)`` where ``captured`` records the positional
-    args/kwargs the builder passed to ``get_mla_metadata_v1``, so the golden can
+    Returns `(metadata, captured)` where `captured` records the positional
+    args/kwargs the builder passed to `get_mla_metadata_v1`, so the golden can
     be recomputed from the identical inputs.
     """
     from tests.v1.attention.utils import (
@@ -81,6 +82,7 @@ def _build_decode_metadata():
         create_vllm_config,
     )
     from vllm.config.vllm import set_current_vllm_config
+    from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
     from vllm.v1.worker.workspace import init_workspace_manager
@@ -109,11 +111,20 @@ def _build_decode_metadata():
 
     builder_cls = AttentionBackendEnum.ROCM_AITER_MLA.get_class().get_builder_cls()
 
-    # The builder reads layer.prefill_backend from static_forward_context; a
-    # stub with the attribute is enough for metadata construction.
+    # The builder reads prefill_backend and the MLA latent dims off the layer,
+    # so the stub carries both; the dims come from the model config to stay in
+    # step with the checkpoint.
+    mla_dims = get_mla_dims(vllm_config.model_config)
     layer_name = "placeholder"
     vllm_config.compilation_config.static_forward_context[layer_name] = (
-        types.SimpleNamespace(prefill_backend=torch.empty((1,)))
+        types.SimpleNamespace(
+            prefill_backend=torch.empty((1,)),
+            q_lora_rank=mla_dims.q_lora_rank,
+            kv_lora_rank=mla_dims.kv_lora_rank,
+            qk_nope_head_dim=mla_dims.qk_nope_head_dim,
+            qk_rope_head_dim=mla_dims.qk_rope_head_dim,
+            v_head_dim=mla_dims.v_head_dim,
+        )
     )
 
     init_workspace_manager(device)
@@ -152,7 +163,7 @@ def _build_decode_metadata():
 def _compute_golden_metadata(captured: dict) -> dict[str, torch.Tensor]:
     """Recompute the persistent metadata with explicit fp8/bf16 dtypes.
 
-    Replays ``get_mla_metadata_v1`` on the builder's exact input tensors with
+    Replays `get_mla_metadata_v1` on the builder's exact input tensors with
     fresh output buffers and the explicitly-correct dtypes. This reference must
     match the builder's output when the fix is in place.
     """

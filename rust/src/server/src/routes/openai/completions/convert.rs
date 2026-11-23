@@ -1,26 +1,46 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use std::num::NonZeroU32;
+
 use thiserror_ext::AsReport as _;
-use vllm_text::tokenizer::Tokenizer;
-use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
+use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest, TextRequestProcessor};
 
 use super::types::CompletionRequest;
-use crate::error::ApiError;
+use crate::error::{ApiError, bail_invalid_request, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::validate;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
-use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
+use crate::routes::openai::utils::{resolve_generation_prompt_truncation, resolve_n};
+use crate::utils::{
+    ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
+    resolve_session_id,
+};
 
 /// Lowered completion request plus the public response metadata carried by
 /// every SSE chunk.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct PreparedRequest {
-    /// Stable OpenAI-style request ID, reused as the external text request ID.
+    /// Stable OpenAI-style request ID, reused as the external text request ID
+    /// of a single prompt.
     pub request_id: String,
     /// Public model ID echoed back to the client.
     pub response_model: String,
+    /// Number of choices to generate for each prompt.
+    pub n: NonZeroU32,
     /// Public response rendering options for route-layer helpers.
     pub options: ResponseOptions,
+    /// The request's prompts, in choice order; never empty.
+    pub prompts: Vec<PreparedPrompt>,
+}
+
+/// One prompt of a completion request.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct PreparedPrompt {
     /// Lowered text request for the shared `vllm-text` facade.
     pub text_request: TextRequest,
+    /// Prompt text that should be echoed back northbound when `echo=true`.
+    pub echo: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -31,16 +51,17 @@ pub(super) struct ResponseOptions {
     pub include_continuous_usage: bool,
     /// Whether the caller requested prompt-only echo via `max_tokens=0`.
     pub prompt_only: bool,
-    /// Prompt text that should be echoed back northbound when `echo=true`.
-    pub echo: Option<String>,
     /// Whether the caller requested output logprobs on completion choices.
-    pub requested_logprobs: Option<u32>,
+    pub requested_logprobs: Option<i32>,
     /// Whether the caller requested choice-level prompt logprobs.
     pub include_prompt_logprobs: bool,
     /// Whether to include token IDs alongside generated text.
     pub return_token_ids: bool,
-    /// Whether to format logprob tokens as `token_id:{id}`.
-    pub return_tokens_as_token_ids: bool,
+    /// The request's `return_tokens_as_token_ids`; `None` falls back to the
+    /// server's `--return-tokens-as-token-ids`.
+    pub return_tokens_as_token_ids: Option<bool>,
+    /// Whether to return the weight-version spans on each finished choice.
+    pub return_weight_versions: bool,
 }
 
 /// Validate and lower one OpenAI completions request into the internal
@@ -52,33 +73,31 @@ pub(super) fn prepare_completion_request(
     request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
-    tokenizer: &dyn Tokenizer,
+    processor: &TextRequestProcessor,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+    // Python's message; `prompt_embeds` itself is rejected above. An empty text
+    // prompt is left to tokenization, which may still yield a BOS token.
+    let Some(prompt) = request.prompt else {
+        bail_invalid_request!(
+            param = "prompt",
+            "Either prompt or prompt_embeds must be provided and non-empty."
+        );
+    };
+    let n = resolve_n(request.n)?;
+
+    let prompt_truncation = resolve_generation_prompt_truncation(
+        request.truncate_prompt_tokens,
+        request.truncation_side,
+    )
+    .map_err(|error| text_submit_error("invalid prompt truncation", error))?;
 
     let request_id = format!("cmpl-{}", ctx.request_id);
-    let response_model = lora_resolution
-        .lora_request
-        .as_ref()
-        .map(|request| request.lora_name.clone())
-        .unwrap_or_else(|| lora_resolution.model_names.first().cloned().unwrap_or_default());
+    let response_model = lora_resolution.response_model();
 
-    let logprobs = match request.logprobs {
-        Some(logprobs) => Some(i32::try_from(logprobs).map_err(|_| {
-            ApiError::invalid_request(
-                "`logprobs` must fit within a signed 32-bit integer.".to_string(),
-                Some("logprobs"),
-            )
-        })?),
-        None => None,
-    };
+    let logprobs = request.logprobs;
     let prompt_only = request.echo && request.max_tokens == Some(0);
-    let prompt_logprobs =
-        request.prompt_logprobs.or(if request.echo && (!request.stream || prompt_only) {
-            logprobs
-        } else {
-            None
-        });
+    let prompt_logprobs = request.prompt_logprobs.or(if request.echo { logprobs } else { None });
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
@@ -94,17 +113,32 @@ pub(super) fn prepare_completion_request(
     } else {
         request.max_tokens
     };
-    let echo = completion_echo_text(&request, tokenizer)?;
+    let logprob_token_ids = request.logprob_token_ids.filter(|ids| !ids.is_empty());
+    let logprobs = if logprob_token_ids.is_some() {
+        None
+    } else {
+        logprobs
+    };
 
     let structured_outputs =
         convert_from_response_format_value(&request.response_format, &request.structured_outputs)?;
+    let session_id = resolve_session_id(
+        &ctx,
+        request.session_id.as_deref(),
+        request.vllm_xargs.as_ref(),
+    );
 
+    let echo = request.echo;
+    let return_token_ids = request.return_token_ids.unwrap_or(false);
+    let prompts = prompt.into_prompts();
     let text_request = TextRequest {
         request_id: request_id.clone(),
-        prompt: request.prompt,
+        // Set per prompt below.
+        prompt: Prompt::default(),
         mm_features: None,
         sampling_params: SamplingParams {
             temperature: request.temperature,
+            watermarking: request.watermarking,
             top_p: request.top_p,
             top_k: request.top_k,
             seed: request.seed,
@@ -113,6 +147,8 @@ pub(super) fn prepare_completion_request(
             thinking_token_budget: request.thinking_token_budget,
             logprobs,
             prompt_logprobs,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
@@ -122,100 +158,174 @@ pub(super) fn prepare_completion_request(
             ignore_eos: request.ignore_eos,
             logit_bias: convert_logit_bias(request.logit_bias)?,
             allowed_token_ids: request.allowed_token_ids,
-            bad_words: None,
-            logprob_token_ids: None,
+            bad_words: request.bad_words,
+            bad_words_token_ids: None,
+            logprob_token_ids,
             structured_outputs,
             skip_reading_prefix_cache: None,
+            routed_experts_prompt_start: request.routed_experts_prompt_start,
             vllm_xargs: merge_kv_transfer_params(
-                request.vllm_xargs,
+                merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
             ),
+            stream_interval: request.stream_interval,
         },
         decode_options: TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,
             include_stop_str_in_output: request.include_stop_str_in_output,
             stop_strings: request.stop.map(|stop| stop.into_vec()),
             min_tokens: request.min_tokens.unwrap_or(0),
+            detokenize: true,
         },
         intermediate: request.stream,
-        priority: request.priority.unwrap_or(0),
+        prompt_truncation,
+        priority: ctx.priority.or(request.priority).unwrap_or(0),
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
-        reasoning_parser_kwargs: None,
+        session_id,
+        kv_hints: None,
+        reasoning_parser_kwargs: Default::default(),
+        reasoning_ended: None,
         lora_request: lora_resolution.lora_request.clone(),
+        arrival_time: None,
     };
+    // Like Python, each prompt of a batch is its own engine request, with the
+    // prompt index appended to the request ID.
+    let batched = prompts.len() > 1;
+    let prompts = itertools::repeat_n(text_request, prompts.len())
+        .zip(prompts)
+        .enumerate()
+        .map(|(index, (text_request, prompt))| {
+            let mut text_request = TextRequest {
+                prompt,
+                ..text_request
+            };
+            if batched {
+                text_request.request_id = format!("{request_id}-{index}");
+            }
+            let echo = completion_echo_text(&mut text_request, echo, return_token_ids, processor)?;
+            Ok(PreparedPrompt { text_request, echo })
+        })
+        .collect::<Result<_, ApiError>>()?;
 
     Ok(PreparedRequest {
         request_id,
         response_model,
+        n,
         options: ResponseOptions {
             include_usage,
             include_continuous_usage,
             prompt_only,
-            echo,
             requested_logprobs: request.logprobs,
             include_prompt_logprobs,
-            return_token_ids: request.return_token_ids.unwrap_or(false),
-            return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
+            return_token_ids,
+            return_tokens_as_token_ids: request.return_tokens_as_token_ids,
+            return_weight_versions: request.return_weight_versions.unwrap_or(false),
         },
-        text_request,
+        prompts,
     })
 }
 
+/// Return the prompt text to echo.
 fn completion_echo_text(
-    request: &CompletionRequest,
-    tokenizer: &dyn Tokenizer,
+    request: &mut TextRequest,
+    echo: bool,
+    return_token_ids: bool,
+    processor: &TextRequestProcessor,
 ) -> Result<Option<String>, ApiError> {
-    if !request.echo {
+    if !echo {
         return Ok(None);
     }
 
     match &request.prompt {
-        Prompt::Text(prompt) => Ok(Some(prompt.clone())),
-        Prompt::TokenIds(token_ids) if request.return_token_ids.unwrap_or(false) => {
-            Ok(Some(String::new()))
-        }
-        Prompt::TokenIds(token_ids) => {
-            tokenizer.decode(token_ids, false).map(Some).map_err(|error| {
-                ApiError::invalid_request(
-                    format!(
-                        "Failed to decode token-ID prompt for echo: {}",
-                        error.to_report_string()
-                    ),
-                    Some("prompt"),
-                )
-            })
-        }
+        Prompt::Text(prompt) => return Ok(Some(prompt.clone())),
+        Prompt::TokenIds(_) if return_token_ids => return Ok(Some(String::new())),
+        Prompt::TokenIds(_) => {}
     }
+    // Truncation decides which prompt tokens the engine receives, so apply it
+    // now and echo the text of the tokens that remain, like Python's renderer.
+    let token_ids = processor
+        .tokenize_in_place(request)
+        .map_err(|error| text_submit_error("failed to prepare the echoed prompt", error))?;
+    processor.tokenizer().decode(token_ids, false).map(Some).map_err(|error| {
+        ApiError::invalid_request(
+            format!(
+                "Failed to decode token-ID prompt for echo: {}",
+                error.to_report_string()
+            ),
+            Some("prompt"),
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+    use std::sync::Arc;
+
     use axum::http::HeaderMap;
     use serde_json::json;
-    use vllm_text::Prompt;
+    use validator::Validate;
+    use vllm_text::tokenizer::DynTokenizer;
+    use vllm_text::{
+        Prompt, PromptTruncation, PromptTruncationLimit, TextBackend, TextRequest,
+        TextRequestProcessor, TruncationSide,
+    };
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::prepare_completion_request;
     use crate::lora::LoraModelResolution;
-    use crate::routes::openai::completions::types::CompletionRequest;
+    use crate::model_names::ServedModelNames;
+    use crate::routes::openai::completions::types::{CompletionPrompt, CompletionRequest};
     use crate::routes::openai::utils::types::Normalizable;
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
+    impl super::PreparedRequest {
+        /// The lowered text request of a single-prompt request.
+        fn text_request(&self) -> &TextRequest {
+            &self.single_prompt().text_request
+        }
+
+        /// The echoed text of a single-prompt request.
+        fn echo(&self) -> Option<String> {
+            self.single_prompt().echo.clone()
+        }
+
+        fn single_prompt(&self) -> &super::PreparedPrompt {
+            let [prompt] = self.prompts.as_slice() else {
+                panic!("expected a single prompt, got {}", self.prompts.len());
+            };
+            prompt
+        }
+    }
+
     fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
-        resolve_request_context(headers, request_id)
+        resolve_request_context(headers, request_id).expect("valid headers")
     }
 
     fn served(names: &[&str]) -> LoraModelResolution {
         LoraModelResolution {
-            model_names: names.iter().map(|s| s.to_string()).collect(),
+            model_names: ServedModelNames::new(names.iter().map(|s| s.to_string()).collect()),
             lora_request: None,
         }
     }
 
-    fn test_tokenizer() -> TestTokenizer {
-        TestTokenizer::new()
+    #[derive(Debug)]
+    struct TestTextBackend;
+
+    impl TextBackend for TestTextBackend {
+        fn tokenizer(&self) -> DynTokenizer {
+            Arc::new(TestTokenizer::new())
+        }
+
+        fn model_id(&self) -> &str {
+            "Qwen/Qwen1.5-0.5B-Chat"
+        }
+    }
+
+    fn test_processor() -> TextRequestProcessor {
+        TextRequestProcessor::new(Arc::new(TestTextBackend), 64)
     }
 
     fn base_request_json() -> serde_json::Value {
@@ -231,8 +341,39 @@ mod tests {
         let request: CompletionRequest =
             serde_json::from_value(base_request_json()).expect("parse request");
 
-        assert_eq!(request.prompt, Prompt::Text("hello".to_string()));
-        assert_eq!(request.model, "Qwen/Qwen1.5-0.5B-Chat");
+        assert_eq!(
+            request.prompt,
+            Some(CompletionPrompt::Single(Prompt::Text("hello".to_string())))
+        );
+        assert_eq!(request.model.as_deref(), Some("Qwen/Qwen1.5-0.5B-Chat"));
+    }
+
+    #[test]
+    fn completion_http_request_defaults_missing_or_null_model() {
+        for model in [None, Some(serde_json::Value::Null)] {
+            let mut value = base_request_json();
+            let object = value.as_object_mut().expect("request object");
+            match model {
+                Some(model) => {
+                    object.insert("model".to_string(), model);
+                }
+                None => {
+                    object.remove("model");
+                }
+            }
+
+            let request: CompletionRequest =
+                serde_json::from_value(value).expect("parse request without model");
+            assert!(request.model.is_none());
+        }
+
+        let mut value = base_request_json();
+        value
+            .as_object_mut()
+            .expect("request object")
+            .insert("model".to_string(), json!(""));
+        let request: CompletionRequest = serde_json::from_value(value).expect("parse empty model");
+        assert_eq!(request.model.as_deref(), Some(""));
     }
 
     #[test]
@@ -246,9 +387,75 @@ mod tests {
         }))
         .expect("parse request");
 
-        assert_eq!(request.prompt, Prompt::TokenIds(vec![11, 22, 33]));
+        assert_eq!(
+            request.prompt,
+            Some(CompletionPrompt::Single(Prompt::TokenIds(vec![11, 22, 33])))
+        );
         assert_eq!(request.max_tokens, Some(7));
         assert!(request.ignore_eos);
+    }
+
+    #[test]
+    fn completion_http_request_rejects_empty_cache_salt() {
+        let mut value = base_request_json();
+        value
+            .as_object_mut()
+            .expect("request object")
+            .insert("cache_salt".to_string(), json!(""));
+        let request: CompletionRequest = serde_json::from_value(value).expect("parse cache_salt");
+
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn prepare_completion_request_normalizes_top_k_sentinels() {
+        for (top_k, expected) in [
+            (serde_json::Value::Null, None),
+            (json!(-1), Some(0)),
+            (json!(0), Some(0)),
+            (json!(20), Some(20)),
+        ] {
+            let mut value = base_request_json();
+            value
+                .as_object_mut()
+                .expect("request object")
+                .insert("top_k".to_string(), top_k);
+            let request: CompletionRequest = serde_json::from_value(value).expect("parse top_k");
+            let prepared = prepare_completion_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+                &test_processor(),
+            )
+            .expect("prepare top_k");
+
+            assert_eq!(prepared.text_request().sampling_params.top_k, expected);
+        }
+    }
+
+    #[test]
+    fn prepare_completion_request_uses_left_when_side_is_omitted() {
+        let mut value = base_request_json();
+        value
+            .as_object_mut()
+            .expect("request object")
+            .insert("truncate_prompt_tokens".to_string(), json!(-1));
+        let request = serde_json::from_value(value).expect("parse truncation");
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &test_processor(),
+        )
+        .expect("prepare truncation");
+
+        assert_eq!(
+            prepared.text_request().prompt_truncation,
+            Some(PromptTruncation {
+                limit: PromptTruncationLimit::InputBudget,
+                side: TruncationSide::Left,
+            })
+        );
     }
 
     #[test]
@@ -288,8 +495,10 @@ mod tests {
             "frequency_penalty": 0.2,
             "presence_penalty": 0.3,
             "repetition_penalty": 1.1,
+            "bad_words": ["hello"],
             "ignore_eos": true,
-            "skip_special_tokens": false
+            "skip_special_tokens": false,
+            "stream_interval": 4
         }))
         .expect("parse request");
 
@@ -297,34 +506,45 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_tokenizer(),
+            &test_processor(),
         )
         .expect("prepare");
 
         assert!(prepared.options.include_usage);
         assert_eq!(
-            prepared.text_request.prompt,
+            prepared.text_request().prompt,
             Prompt::TokenIds(vec![11, 22, 33])
         );
-        assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(7));
-        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(2));
-        assert_eq!(prepared.text_request.sampling_params.top_p, Some(0.9));
-        assert_eq!(prepared.text_request.sampling_params.top_k, Some(42));
-        assert_eq!(prepared.text_request.sampling_params.min_p, Some(0.1));
+        assert_eq!(prepared.text_request().sampling_params.max_tokens, Some(7));
+        assert_eq!(prepared.text_request().sampling_params.logprobs, Some(2));
+        assert_eq!(prepared.text_request().sampling_params.top_p, Some(0.9));
+        assert_eq!(prepared.text_request().sampling_params.top_k, Some(42));
+        assert_eq!(prepared.text_request().sampling_params.min_p, Some(0.1));
         assert_eq!(
-            prepared.text_request.sampling_params.frequency_penalty,
+            prepared.text_request().sampling_params.frequency_penalty,
             Some(0.2)
         );
         assert_eq!(
-            prepared.text_request.sampling_params.presence_penalty,
+            prepared.text_request().sampling_params.presence_penalty,
             Some(0.3)
         );
         assert_eq!(
-            prepared.text_request.sampling_params.repetition_penalty,
+            prepared.text_request().sampling_params.repetition_penalty,
             Some(1.1)
         );
-        assert!(prepared.text_request.sampling_params.ignore_eos);
-        assert!(!prepared.text_request.decode_options.skip_special_tokens);
+        assert_eq!(
+            prepared.text_request().sampling_params.bad_words,
+            Some(vec!["hello".to_string()])
+        );
+        assert!(prepared.text_request().sampling_params.ignore_eos);
+        assert_eq!(
+            prepared.text_request().decode_options.skip_special_tokens,
+            Some(false)
+        );
+        assert_eq!(
+            prepared.text_request().sampling_params.stream_interval,
+            NonZeroU32::new(4)
+        );
     }
 
     #[test]
@@ -340,10 +560,10 @@ mod tests {
                 request,
                 &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
                 ResolvedRequestContext::default(),
-                &test_tokenizer(),
+                &test_processor(),
             )
             .expect("prepare")
-            .text_request
+            .text_request()
             .sampling_params
             .thinking_token_budget
         };
@@ -374,13 +594,13 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_tokenizer(),
+            &test_processor(),
         )
         .expect("prepare");
 
         assert!(prepared.options.include_usage);
         assert!(prepared.options.include_continuous_usage);
-        assert!(prepared.options.return_tokens_as_token_ids);
+        assert_eq!(prepared.options.return_tokens_as_token_ids, Some(true));
     }
 
     #[test]
@@ -399,7 +619,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_tokenizer(),
+            &test_processor(),
         )
         .expect("prepare");
 
@@ -422,12 +642,12 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_tokenizer(),
+            &test_processor(),
         )
         .expect("prepare");
 
-        assert_eq!(prepared.options.echo, Some("hello".to_string()));
-        assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(7));
+        assert_eq!(prepared.echo(), Some("hello".to_string()));
+        assert_eq!(prepared.text_request().sampling_params.max_tokens, Some(7));
         assert!(!prepared.options.prompt_only);
     }
 
@@ -446,13 +666,13 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_tokenizer(),
+            &test_processor(),
         )
         .expect("prepare");
 
         assert!(prepared.options.prompt_only);
-        assert_eq!(prepared.options.echo, Some("hello".to_string()));
-        assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(1));
+        assert_eq!(prepared.echo(), Some("hello".to_string()));
+        assert_eq!(prepared.text_request().sampling_params.max_tokens, Some(1));
     }
 
     #[test]
@@ -471,14 +691,14 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_tokenizer(),
+            &test_processor(),
         )
         .expect("prepare");
 
         assert!(prepared.options.prompt_only);
-        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(3));
+        assert_eq!(prepared.text_request().sampling_params.logprobs, Some(3));
         assert_eq!(
-            prepared.text_request.sampling_params.prompt_logprobs,
+            prepared.text_request().sampling_params.prompt_logprobs,
             Some(3)
         );
     }
@@ -498,13 +718,13 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_tokenizer(),
+            &test_processor(),
         )
         .expect("prepare");
 
-        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(3));
+        assert_eq!(prepared.text_request().sampling_params.logprobs, Some(3));
         assert_eq!(
-            prepared.text_request.sampling_params.prompt_logprobs,
+            prepared.text_request().sampling_params.prompt_logprobs,
             Some(3)
         );
     }
@@ -523,15 +743,37 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_tokenizer(),
+            &test_processor(),
         )
         .expect("prepare");
 
-        assert_eq!(prepared.options.echo, Some("hello".to_string()));
+        assert_eq!(prepared.echo(), Some("hello".to_string()));
         assert_eq!(
-            prepared.text_request.prompt,
+            prepared.text_request().prompt,
             Prompt::TokenIds(vec![104, 101, 108, 108, 111])
         );
+    }
+
+    #[test]
+    fn selected_logprobs_override_completion_top_k_unless_empty() {
+        for ids in [vec![10, 20], vec![]] {
+            let request = serde_json::from_value(json!({
+                "prompt": "hello", "logprobs": 0, "logprob_token_ids": ids,
+            }))
+            .unwrap();
+            let prepared = prepare_completion_request(
+                request,
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+                &test_processor(),
+            )
+            .unwrap();
+            let params = &prepared.text_request().sampling_params;
+            let selected = !ids.is_empty();
+            assert_eq!(params.logprob_token_ids, selected.then_some(ids));
+            assert_eq!(params.logprobs, (!selected).then_some(0));
+            assert_eq!(prepared.options.requested_logprobs, Some(0));
+        }
     }
 
     #[test]
@@ -549,14 +791,36 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_tokenizer(),
+            &test_processor(),
         )
         .expect("prepare");
-        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(1));
+        assert_eq!(prepared.text_request().sampling_params.logprobs, Some(1));
         assert_eq!(
-            prepared.text_request.sampling_params.prompt_logprobs,
+            prepared.text_request().sampling_params.prompt_logprobs,
             Some(2)
         );
+    }
+
+    #[test]
+    fn prepare_completion_request_accepts_full_vocab_logprobs() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+            "logprobs": -1
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &test_processor(),
+        )
+        .expect("prepare full-vocabulary logprobs");
+
+        assert_eq!(prepared.text_request().sampling_params.logprobs, Some(-1));
+        assert_eq!(prepared.options.requested_logprobs, Some(-1));
     }
 
     #[test]
@@ -574,10 +838,101 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             request_context(&headers, None),
-            &test_tokenizer(),
+            &test_processor(),
         )
         .expect("prepare");
-        assert_eq!(prepared.text_request.data_parallel_rank, Some(3));
+        assert_eq!(prepared.text_request().data_parallel_rank, Some(3));
+    }
+
+    #[test]
+    fn prepare_completion_request_threads_body_session_id() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+            "session_id": "body-session",
+            "vllm_xargs": {"session_id": "xargs-session"},
+        }))
+        .expect("parse request");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Session-ID", "header-session".parse().unwrap());
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+            &test_processor(),
+        )
+        .expect("prepare");
+        assert_eq!(
+            prepared.text_request().session_id.as_deref(),
+            Some("body-session")
+        );
+    }
+
+    #[test]
+    fn prepare_completion_request_header_priority_overrides_body() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "priority": 10,
+        }))
+        .expect("parse request");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Vllm-Priority", "-5".parse().unwrap());
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+            &test_processor(),
+        )
+        .expect("prepare");
+        assert_eq!(prepared.text_request().priority, -5);
+    }
+
+    #[test]
+    fn prepare_completion_request_uses_vllm_xargs_session_id_fallback() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+            "vllm_xargs": {"session_id": "xargs-session"},
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &test_processor(),
+        )
+        .expect("prepare");
+        assert_eq!(
+            prepared.text_request().session_id.as_deref(),
+            Some("xargs-session")
+        );
+    }
+
+    #[test]
+    fn prepare_completion_request_ignores_empty_and_non_string_session_id_values() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+            "session_id": "",
+            "vllm_xargs": {"session_id": 7},
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &test_processor(),
+        )
+        .expect("prepare");
+        assert_eq!(prepared.text_request().session_id, None);
     }
 
     #[test]
@@ -593,9 +948,9 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &test_tokenizer(),
+            &test_processor(),
         )
         .expect("prepare");
-        assert_eq!(prepared.text_request.data_parallel_rank, None);
+        assert_eq!(prepared.text_request().data_parallel_rank, None);
     }
 }

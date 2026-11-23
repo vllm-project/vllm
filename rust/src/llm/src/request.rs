@@ -1,15 +1,21 @@
-use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use serde::Deserialize;
 use uuid::Uuid;
+use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::{EngineCoreRequest, ReasoningParserKwargs};
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
 use crate::error::{Error, Result};
+use crate::request_metrics::current_unix_timestamp_secs;
 
-/// Tokenized decoder-only generate request accepted by [`crate::Llm`].
+/// Tokenized decoder-only generate request accepted by [`crate::EngineCoreLlm`].
 ///
 /// This is the first-stage Rust subset of the inputs that eventually flow into
 /// Python `AsyncLLM.generate()`. The boundary is intentionally above
@@ -30,8 +36,9 @@ pub struct GenerateRequest {
     pub mm_features: Option<MmFeatures>,
     /// Unix timestamp, in seconds, when this request arrived at the frontend.
     ///
-    /// When omitted, the Rust frontend fills it immediately before sending the
-    /// request to engine-core, matching Python's default arrival-time behavior.
+    /// Stamped at the frontend entry, before render and tokenization, to match
+    /// Python's renderer-entry arrival_time. When omitted, it is filled as a
+    /// fallback before the request is sent to engine-core.
     pub arrival_time: Option<f64>,
     /// Optional salt used to partition prefix-cache entries for this request.
     pub cache_salt: Option<String>,
@@ -42,9 +49,18 @@ pub struct GenerateRequest {
     pub priority: i32,
     /// Optional data-parallel rank override for routing this request.
     pub data_parallel_rank: Option<u32>,
+    /// Stable session identity shared by related requests.
+    pub session_id: Option<String>,
+    /// Optional orchestrator-originated KV hints.
+    pub kv_hints: Option<KvHintsEnvelope>,
     /// Optional reasoning-parser kwargs forwarded to engine-side structured
     /// output logic.
     pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
+    /// Optional engine reasoning-gate override.
+    ///
+    /// `Some(true)` means the submitted grammar covers reasoning from the first
+    /// generated token.
+    pub reasoning_ended: Option<bool>,
     /// Optional LoRA adapter request applied to this generation.
     pub lora_request: Option<LoraRequest>,
 }
@@ -52,6 +68,8 @@ pub struct GenerateRequest {
 #[derive(Debug)]
 pub(crate) struct PreparedGenerateRequest {
     pub engine_request: EngineCoreRequest,
+    /// The original prompt token IDs, also moved into the raw engine request.
+    pub prompt_token_ids: Arc<[u32]>,
 }
 
 impl GenerateRequest {
@@ -72,7 +90,10 @@ impl GenerateRequest {
             trace_headers,
             priority,
             data_parallel_rank,
+            session_id,
+            kv_hints,
             reasoning_parser_kwargs,
+            reasoning_ended,
             lora_request,
         } = self;
 
@@ -84,9 +105,10 @@ impl GenerateRequest {
             external_request_id.clone()
         };
         Ok(PreparedGenerateRequest {
+            prompt_token_ids: prompt_token_ids.as_slice().into(),
             engine_request: EngineCoreRequest {
                 request_id: engine_request_id,
-                prompt_token_ids: Some(prompt_token_ids),
+                prompt_token_ids: Some(prompt_token_ids.into()),
                 mm_features,
                 sampling_params: Some(sampling_params),
                 pooling_params: None,
@@ -101,40 +123,57 @@ impl GenerateRequest {
                 priority,
                 trace_headers,
                 resumable: false,
+                session_id,
+                kv_hints,
                 external_req_id: Some(external_request_id),
-                // Rust parser doesn't expose this information, leave it unset and let the
-                // reasoning logic in engine-sided structured output manager handle it.
-                reasoning_ended: None,
+                reasoning_ended,
                 reasoning_parser_kwargs,
                 abort_immediately: false,
+                // Computed by the engine-core client, which knows the engine's
+                // prefix hash config.
+                block_hashes: None,
             },
         })
     }
 }
 
-impl PreparedGenerateRequest {
-    /// Return the original prompt token IDs copied into the raw engine request.
-    pub fn prompt_token_ids(&self) -> &[u32] {
-        self.engine_request
-            .prompt_token_ids
-            .as_ref()
-            .expect("prepared request must have prompt token ids")
-    }
+/// The remote-prefill fields of `kv_transfer_params` read by the frontend.
+///
+/// The prefiller's scheduler fills `remote_prefill_cached_tokens` next to
+/// `do_remote_prefill` in the parameters it returns, which the P/D proxy then
+/// forwards to the decoder.
+#[derive(Deserialize)]
+struct RemotePrefillParams {
+    #[serde(default)]
+    do_remote_prefill: bool,
+    remote_prefill_cached_tokens: Option<usize>,
 }
 
-fn current_unix_timestamp_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before unix epoch")
-        .as_secs_f64()
+impl PreparedGenerateRequest {
+    /// Return the prefiller's cache hits when this is the decode side of a
+    /// P/D request, so response usage reports them instead of the transferred
+    /// KV that the decoder counts as cached.
+    pub fn remote_prefill_cached_tokens(&self) -> Option<usize> {
+        let params = (self.engine_request.sampling_params.as_ref()?.extra_args.as_ref()?)
+            .get("kv_transfer_params")?;
+        let params = RemotePrefillParams::deserialize(params).ok()?;
+        if params.do_remote_prefill {
+            params.remote_prefill_cached_tokens
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
+    use serde_json::json;
+    use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
     use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
     use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
+    use vllm_engine_core_client::test_utils::decode_prompt_token_ids;
 
     use super::GenerateRequest;
     use crate::error::Error;
@@ -153,6 +192,17 @@ mod tests {
             )])),
             priority: 3,
             data_parallel_rank: Some(2),
+            session_id: Some("session-1".to_string()),
+            kv_hints: Some(KvHintsEnvelope {
+                protocol_version: "0.1".to_string(),
+                message_id: "msg-1".to_string(),
+                actions: vec![KvHintAction {
+                    action_id: "action-1".to_string(),
+                    action_type: "example.action".to_string(),
+                    action_version: "1.0".to_string(),
+                    payload: BTreeMap::new(),
+                }],
+            }),
             reasoning_parser_kwargs: Some(ReasoningParserKwargs {
                 chat_template_kwargs: [(
                     "chat_template_kwargs".to_string(),
@@ -162,6 +212,7 @@ mod tests {
                 )]
                 .into(),
             }),
+            reasoning_ended: None,
             lora_request: None,
         }
     }
@@ -170,16 +221,24 @@ mod tests {
     fn prepare_builds_engine_core_request() {
         let prepared = sample_request().prepare(true).unwrap();
 
-        assert_eq!(prepared.prompt_token_ids(), &[11, 22, 33]);
+        assert_eq!(&*prepared.prompt_token_ids, &[11, 22, 33]);
 
         let request = prepared.engine_request;
         assert_eq!(request.external_req_id.as_deref(), Some("req-1"));
         assert!(request.request_id.starts_with("req-1-"));
         assert_ne!(request.request_id, "req-1");
-        assert_eq!(request.prompt_token_ids.as_deref(), Some(&[11, 22, 33][..]));
+        assert_eq!(
+            decode_prompt_token_ids(&request).as_deref(),
+            Some(&[11, 22, 33][..])
+        );
         assert_eq!(request.arrival_time, 42.5);
         assert_eq!(request.cache_salt.as_deref(), Some("salt"));
         assert_eq!(request.data_parallel_rank, Some(2));
+        assert_eq!(request.session_id.as_deref(), Some("session-1"));
+        assert_eq!(
+            request.kv_hints.as_ref().map(|hints| hints.message_id.as_str()),
+            Some("msg-1")
+        );
         assert_eq!(
             request.trace_headers,
             Some(BTreeMap::from([(
@@ -228,5 +287,44 @@ mod tests {
         let prepared = request.prepare(false).unwrap();
 
         assert_eq!(prepared.engine_request.mm_features, Some(Vec::new()));
+    }
+
+    #[test]
+    fn remote_prefill_cached_tokens_requires_remote_prefill() {
+        let cases = [
+            (
+                "positive",
+                Some(json!({"do_remote_prefill": true, "remote_prefill_cached_tokens": 5})),
+                Some(5),
+            ),
+            (
+                "zero",
+                Some(json!({"do_remote_prefill": true, "remote_prefill_cached_tokens": 0})),
+                Some(0),
+            ),
+            (
+                "missing_count",
+                Some(json!({"do_remote_prefill": true})),
+                None,
+            ),
+            (
+                "false_flag",
+                Some(json!({"do_remote_prefill": false, "remote_prefill_cached_tokens": 5})),
+                None,
+            ),
+            (
+                "missing_flag",
+                Some(json!({"remote_prefill_cached_tokens": 5})),
+                None,
+            ),
+            ("no_kv_transfer_params", None, None),
+        ];
+        for (name, kv_transfer_params, expected) in cases {
+            let mut request = sample_request();
+            request.sampling_params.extra_args = kv_transfer_params
+                .map(|params| [("kv_transfer_params".to_string(), params)].into());
+            let actual = request.prepare(false).unwrap().remote_prefill_cached_tokens();
+            assert_eq!(actual, expected, "{name}");
+        }
     }
 }

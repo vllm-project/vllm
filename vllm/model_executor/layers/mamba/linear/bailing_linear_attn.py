@@ -4,7 +4,7 @@ import copy
 
 import torch
 import torch.nn.functional as F
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.config import (
     VllmConfig,
@@ -16,10 +16,6 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.fla.ops.layernorm_guard import (
-    RMSNormGated,
-    layernorm_fn,
-)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -33,27 +29,12 @@ from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
     linear_attention_decode,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+    RMSNormGated,
+    layernorm_fn,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
-
-
-def _build_rope_parameters(config: PretrainedConfig) -> dict | None:
-    rope_parameters = copy.deepcopy(getattr(config, "rope_parameters", None)) or {}
-    if "rope_theta" not in rope_parameters and hasattr(config, "rope_theta"):
-        rope_parameters["rope_theta"] = config.rope_theta
-    if "partial_rotary_factor" not in rope_parameters and hasattr(
-        config, "partial_rotary_factor"
-    ):
-        rope_parameters["partial_rotary_factor"] = config.partial_rotary_factor
-
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if isinstance(rope_scaling, dict):
-        rope_scaling = copy.deepcopy(rope_scaling)
-        if "type" in rope_scaling and "rope_type" not in rope_scaling:
-            rope_scaling["rope_type"] = rope_scaling.pop("type")
-        rope_parameters.update(rope_scaling)
-
-    return rope_parameters or None
 
 
 def clear_linear_attention_cache_for_new_sequences(
@@ -385,7 +366,7 @@ class BailingMoELinearAttention(LinearAttention):
     # --8<-- [end:bailing_moe_linear_attention]
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         vllm_config: VllmConfig,
         prefix: str = "linear_attn",
     ):
@@ -464,7 +445,7 @@ class BailingMoELinearAttention(LinearAttention):
         )
 
         # use fp32 rotary embedding
-        rope_parameters = _build_rope_parameters(config)
+        rope_parameters = copy.deepcopy(getattr(config, "rope_parameters", None))
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -498,32 +479,13 @@ class BailingMoELinearAttention(LinearAttention):
 
         return BailingLinearAttentionBackend
 
-    @staticmethod
-    def weight_direct_load(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
-        """Load weight for linear attention layers.
-
-        For FP8 quantized parameters, we need to use the weight_loader if available,
-        as it handles special cases like tensor parallelism sharding.
-        """
-        # Check if param has a weight_loader (for vLLM ModelWeightParameter)
-        weight_loader = getattr(param, "weight_loader", None)
-        if weight_loader is not None:
-            # Use the weight_loader which handles TP sharding and quantization
-            weight_loader(param, loaded_weight)
-        else:
-            # Fall back to direct copy for standard tensors
-            assert param.size() == loaded_weight.size(), (
-                f"Shape mismatch: {param.shape} vs {loaded_weight.shape}"
-            )
-            param.data.copy_(loaded_weight)
-
     def forward(
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
-        """Forward method called by torch.ops.vllm.linear_attention"""
+        """Forward method called by torch.ops.vllm.linear_attention."""
         torch.ops.vllm.linear_attention(
             hidden_states,
             output,
@@ -542,7 +504,8 @@ class BailingMoELinearAttention(LinearAttention):
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
-            attn_metadata = attn_metadata[self.prefix]  # type: ignore
+            attn_metadata = attn_metadata.get(self.prefix)  # type: ignore
+        if attn_metadata is not None:
             assert isinstance(attn_metadata, LinearAttentionMetadata)
             num_actual_tokens = (
                 attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens

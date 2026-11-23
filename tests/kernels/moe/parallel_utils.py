@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-DeepEP test utilities
-"""
+"""DeepEP test utilities."""
 
 import dataclasses
-import os
 import traceback
 from collections.abc import Callable
 from typing import Concatenate
@@ -16,7 +13,7 @@ from torch.multiprocessing import spawn  # pyright: ignore[reportPrivateImportUs
 from typing_extensions import ParamSpec
 
 from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2
-from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import get_file_store_init_method
 
 if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
@@ -36,7 +33,11 @@ if has_deep_ep_v2():
 P = ParamSpec("P")
 
 
-@dataclasses.dataclass
+class GINNotAvailableError(RuntimeError):
+    pass
+
+
+@dataclasses.dataclass(slots=True)
 class ProcessGroupInfo:
     world_size: int
     world_local_size: int
@@ -96,30 +97,38 @@ def parallel_launch(
     **kwargs: P.kwargs,
 ) -> None:
     assert not kwargs
-    spawn(
-        _worker_parallel_launch,
-        args=(
-            world_size,
-            world_size,
-            0,
-            f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{get_open_port()}",
-            worker,
+    try:
+        spawn(
+            _worker_parallel_launch,
+            args=(
+                world_size,
+                world_size,
+                0,
+                get_file_store_init_method(),
+                worker,
+            )
+            + args,
+            nprocs=world_size,
+            join=True,
         )
-        + args,
-        nprocs=world_size,
-        join=True,
-    )
+    except Exception as exc:
+        # pytest.skip cannot propagate directly through torch.multiprocessing.
+        if "GINNotAvailableError" in str(exc):
+            import pytest
+
+            pytest.skip("NCCL GIN not available (no IBGDA-capable hardware)")
+        raise
 
 
 ## DeepEP specific utils
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class DeepEPHTArgs:
     num_local_experts: int
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class DeepEPLLArgs:
     max_tokens_per_rank: int
     hidden_size: int
@@ -206,7 +215,7 @@ def make_deepep_a2a(
     return make_deepep_ll_a2a(pg, pgi, deepep_ll_args, q_dtype, block_shape)
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class DeepEPV2Args:
     num_local_experts: int
     num_experts: int
@@ -221,9 +230,20 @@ def make_deepep_v2_a2a(
     pgi: ProcessGroupInfo,
     dp_size: int,
     v2_args: DeepEPV2Args,
-    use_cudagraph: bool = False,
 ):
     import deep_ep
+
+    from vllm.utils.nccl import query_nccl_gin_type
+
+    # ElasticBuffer can segfault when GIN is unavailable. Initialize the
+    # lazy communicator and reject unsupported systems before entering DeepEP.
+    probe = torch.zeros(1, device=pgi.device)
+    torch.distributed.all_reduce(probe, group=pg)
+    gin_type = query_nccl_gin_type(pg)
+    if gin_type is None:
+        raise RuntimeError("Failed to determine NCCL GIN support")
+    if gin_type == 0:
+        raise GINNotAvailableError("NCCL GIN not available")
 
     buffer = deep_ep.ElasticBuffer(
         group=pg,
@@ -231,6 +251,7 @@ def make_deepep_v2_a2a(
         hidden=v2_args.hidden_size,
         num_topk=v2_args.num_topk,
         use_fp8_dispatch=v2_args.use_fp8_dispatch,
+        allow_hybrid_mode=False,
         explicitly_destroy=True,
     )
     return DeepEPV2PrepareAndFinalize(
@@ -241,5 +262,4 @@ def make_deepep_v2_a2a(
         num_experts=v2_args.num_experts,
         num_topk=v2_args.num_topk,
         use_fp8_dispatch=v2_args.use_fp8_dispatch,
-        use_cudagraph=use_cudagraph,
     )

@@ -18,7 +18,8 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
+    GateLinear,
     MoERunner,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -47,7 +48,6 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
@@ -72,7 +72,6 @@ class AfmoeMoE(nn.Module):
         self.route_norm = config.route_norm
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.num_experts
         self.n_shared_experts: int = config.num_shared_experts
@@ -84,11 +83,12 @@ class AfmoeMoE(nn.Module):
             )
 
         # Router gate
-        self.gate = nn.Linear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
-            dtype=torch.float32,
+            out_dtype=torch.float32,
+            params_dtype=torch.float32,
+            prefix=f"{prefix}.gate",
         )
         self.expert_bias = nn.Parameter(
             torch.empty(config.num_experts, dtype=torch.float32)
@@ -104,11 +104,6 @@ class AfmoeMoE(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
-
         self.shared_experts = None
         # Shared experts
         if config.num_shared_experts > 0:
@@ -122,8 +117,8 @@ class AfmoeMoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
-        # Routed experts using FusedMoE
-        self.experts = FusedMoE(
+        # Routed experts using FusedMoEFactory
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
@@ -147,7 +142,7 @@ class AfmoeMoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        router_logits = self.gate(hidden_states.to(dtype=torch.float32))
+        router_logits, _ = self.gate(hidden_states)
 
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
@@ -232,7 +227,7 @@ class AfmoeAttention(nn.Module):
 
         # Only create rotary embeddings for local attention
         if self.is_local_attention:
-            self.rotary_emb = get_rope(
+            self.rotary_emb: nn.Module | None = get_rope(
                 self.head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
@@ -408,10 +403,6 @@ class AfmoeModel(nn.Module, EagleModelMixin):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

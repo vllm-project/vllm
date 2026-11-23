@@ -6,26 +6,31 @@ When multimodal media is decoded on the GPU in the API-server (frontend)
 process, the decoded buffers compete for the same device memory that the
 engine reserves for weights, activations, and the KV cache. To keep the
 frontend's GPU usage within a sequestered budget (see
-``MultiModalConfig.mm_ipc_gpu_memory_gb``), decode paths acquire the number of
-bytes they need from a process-global :class:`MultiModalGPUMemoryPool` before
+`MultiModalConfig.mm_ipc_gpu_memory_gb`), decode paths acquire the number of
+bytes they need from a process-global `MultiModalGPUMemoryPool` before
 allocating on the device and release them once the device memory is freed.
 
-The pool is a simple byte-counting semaphore: ``acquire`` blocks until enough
+The pool is a simple byte-counting semaphore: `acquire` blocks until enough
 budget is free, so concurrent requests serialize rather than oversubscribe the
 GPU. It lives only in the frontend process; the engine carves the matching
 amount out of its KV-cache budget so the headroom physically exists.
 """
 
 import threading
+from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import format_gib
+
+if TYPE_CHECKING:
+    from vllm.config.multimodal import MultiModalConfig
 
 logger = init_logger(__name__)
 
 
 class MultiModalGPUMemoryLease:
-    """A handle for bytes acquired from a :class:`MultiModalGPUMemoryPool`.
+    """A handle for bytes acquired from a `MultiModalGPUMemoryPool`.
 
     Releasing is idempotent and the lease doubles as a context manager so the
     budget is returned even if the decode raises.
@@ -49,7 +54,7 @@ class MultiModalGPUMemoryLease:
 class MultiModalGPUMemoryPool:
     """Blocking byte-counting semaphore for frontend GPU multimodal memory.
 
-    Thread-safe in both directions: ``acquire`` (blocking) and ``release`` are
+    Thread-safe in both directions: `acquire` (blocking) and `release` are
     typically called from the renderer's multimodal executor threads.
     """
 
@@ -73,9 +78,9 @@ class MultiModalGPUMemoryPool:
             return self._available
 
     def acquire(self, nbytes: int) -> MultiModalGPUMemoryLease:
-        """Reserve ``nbytes``, blocking until that much budget is free.
+        """Reserve `nbytes`, blocking until that much budget is free.
 
-        Raises ``ValueError`` if ``nbytes`` exceeds the pool's total capacity,
+        Raises `ValueError` if `nbytes` exceeds the pool's total capacity,
         since such a request could never be satisfied.
         """
         if nbytes < 0:
@@ -115,7 +120,7 @@ def set_mm_gpu_ipc_pool(pool: MultiModalGPUMemoryPool | None) -> None:
 
 
 def get_mm_gpu_ipc_pool() -> MultiModalGPUMemoryPool | None:
-    """Return the process-global pool, or ``None`` when gating is disabled."""
+    """Return the process-global pool, or `None` when gating is disabled."""
     return _GLOBAL_POOL
 
 
@@ -125,7 +130,7 @@ def maybe_init_mm_gpu_ipc_pool(
 ) -> MultiModalGPUMemoryPool | None:
     """Create and install the global pool from the configured GiB budget.
 
-    Returns ``None`` (and leaves gating disabled) when the budget is 0. When
+    Returns `None` (and leaves gating disabled) when the budget is 0. When
     multiple API-server processes share one engine, each process gets an equal
     slice of the user-provided frontend budget.
     """
@@ -145,3 +150,118 @@ def maybe_init_mm_gpu_ipc_pool(
         api_process_count,
     )
     return pool
+
+
+def reserve_mm_ipc_gpu_memory(
+    available_kv_cache_memory_bytes: int,
+    mm_config: "MultiModalConfig | None",
+    api_process_count: int = 1,
+) -> int:
+    """Return KV-cache memory remaining after frontend multimodal reservations.
+
+    The reservation covers:
+
+    * The total `mm_ipc_gpu_memory_gb` budget for transient decoded-frame
+      buffers. This budget is divided among API processes, so it is not
+      multiplied by `api_process_count`.
+    * For GPU video backends, a fixed upper bound for each API process's
+      retained decoder surfaces and CUDA context. The PyNvVideoCodec surface
+      reservation scales with its configured `hw_decoders` value, and the
+      entire decoder reservation scales with `api_process_count` because
+      these resources are not shared between processes.
+
+    Args:
+        available_kv_cache_memory_bytes: KV-cache capacity before reserving
+            memory for frontend multimodal processing.
+        mm_config: Multimodal configuration, or `None` when multimodal
+            processing is disabled.
+        api_process_count: Number of frontend API processes sharing the GPU.
+            Values below one are treated as one.
+
+    Returns:
+        KV-cache capacity after subtracting the frontend reservation.
+
+    Raises:
+        ValueError: If the reservation leaves no memory for the KV cache.
+
+    """
+    if mm_config is None:
+        return available_kv_cache_memory_bytes
+
+    from vllm import envs
+    from vllm.multimodal.video_decoders import (
+        PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
+        PYNVVIDEOCODEC_VIDEO_BACKEND,
+    )
+    from vllm.multimodal.video_decoders.pynvvideocodec import (
+        PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
+        PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
+        get_pynvvideocodec_decoder_gpu_memory_bytes,
+        validate_pynvvideocodec_hw_decoders,
+    )
+
+    raw_frame_reserved_bytes = int(mm_config.mm_ipc_gpu_memory_gb * GiB_bytes)
+    # Each API server process runs its own decoder surfaces and NVDEC/CUVID CUDA
+    # context on the GPU, outside the worker memory pool. Reserve that footprint
+    # per process so gpu_memory_utilization bounds total GPU usage across them.
+    num_api_servers = max(1, api_process_count)
+    video_kwargs = mm_config.media_io_kwargs.get("video", {})
+    video_loader_backend = (
+        video_kwargs.get("video_backend") or envs.VLLM_VIDEO_LOADER_BACKEND
+    )
+    codec_backend = video_kwargs.get("backend")
+    uses_pynvvideocodec = (
+        video_loader_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+        or codec_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+    )
+    hw_decoders = (
+        validate_pynvvideocodec_hw_decoders(
+            video_kwargs.get("hw_decoders", PYNVVIDEOCODEC_DEFAULT_HW_DECODERS)
+        )
+        if uses_pynvvideocodec
+        else 1
+    )
+    decoder_bytes = (
+        get_pynvvideocodec_decoder_gpu_memory_bytes(
+            video_kwargs.get("max_width"), video_kwargs.get("max_height")
+        )
+        if uses_pynvvideocodec
+        else PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
+    )
+    per_server_decoder_bytes = (
+        decoder_bytes * hw_decoders + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+    )
+    decoder_reserved_bytes = (
+        num_api_servers * per_server_decoder_bytes
+        if mm_config.use_gpu_video_backend()
+        else 0
+    )
+    reserved_bytes = raw_frame_reserved_bytes + decoder_reserved_bytes
+    if reserved_bytes <= 0:
+        return available_kv_cache_memory_bytes
+
+    remaining = available_kv_cache_memory_bytes - reserved_bytes
+    if remaining <= 0:
+        raise ValueError(
+            f"frontend multimodal GPU decoding reserves "
+            f"{format_gib(reserved_bytes)} GiB "
+            f"({format_gib(raw_frame_reserved_bytes)} GiB raw-frame budget, "
+            f"{format_gib(decoder_reserved_bytes)} GiB decoder cache budget), "
+            f"but only {format_gib(available_kv_cache_memory_bytes)} GiB is "
+            "available for the KV cache. Reduce mm_ipc_gpu_memory_gb or "
+            "hw_decoders, use a different video backend, or increase "
+            "gpu_memory_utilization."
+        )
+    logger.info_once(
+        "Reserving %s GiB of GPU memory for frontend multimodal decoding "
+        "(%s GiB raw-frame semaphore budget, %s GiB decoder+CUDA-context "
+        "across %d API server(s) @ %s GiB/server); "
+        "KV cache memory reduced to %s GiB.",
+        format_gib(reserved_bytes),
+        format_gib(raw_frame_reserved_bytes),
+        format_gib(decoder_reserved_bytes),
+        num_api_servers,
+        format_gib(per_server_decoder_bytes),
+        format_gib(remaining),
+    )
+    return remaining

@@ -1,11 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! TLS tests: `build_server_config` unit checks plus end-to-end OpenSSL handshakes
 //! through the production listener/connection path, with a trivial router since TLS
 //! terminates below the app.
 
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::time::Duration;
 
 use axum::Router;
+use axum::extract::ConnectInfo;
 use axum::routing::get;
 use openssl::asn1::Asn1Time;
 use openssl::bn::{BigNum, MsbOption};
@@ -276,7 +281,10 @@ async fn spawn_server_with_timeouts(
 
     let server_config =
         tls_config.map(|cfg| tls::build_server_config(&cfg).expect("build server config"));
-    let app = Router::new().route("/health", get(|| async { "ok" }));
+    let app = Router::new().route("/health", get(|| async { "ok" })).route(
+        "/peer",
+        get(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move { peer.to_string() }),
+    );
     let shutdown = CancellationToken::new();
     let server_shutdown = shutdown.clone();
     tokio::spawn(async move {
@@ -356,10 +364,12 @@ async fn legacy_suite_handshake(certs: &TestCerts, addr: &str) -> std::io::Resul
     stream.as_mut().connect().await.map_err(std::io::Error::other)
 }
 
-async fn plain_get(addr: &str) -> std::io::Result<String> {
+async fn plain_get(addr: &str, path: &str) -> std::io::Result<String> {
     let mut tcp = TcpStream::connect(addr).await?;
-    tcp.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .await?;
+    tcp.write_all(
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").as_bytes(),
+    )
+    .await?;
     let mut response = String::new();
     tcp.read_to_string(&mut response).await?;
     Ok(response)
@@ -511,8 +521,18 @@ async fn mtls_rejects_untrusted_client_certificate() {
 #[tokio::test]
 async fn plain_http_serves_when_tls_is_disabled() {
     let (addr, shutdown) = spawn_server(None).await;
-    let response = plain_get(&addr).await.expect("http request");
+    let response = plain_get(&addr, "/health").await.expect("http request");
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    shutdown.cancel();
+}
+
+/// Handlers, such as the access log, see the TCP peer as `ConnectInfo`.
+#[tokio::test]
+async fn plain_http_exposes_tcp_peer_as_connect_info() {
+    let (addr, shutdown) = spawn_server(None).await;
+    let response = plain_get(&addr, "/peer").await.expect("http request");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("\r\n\r\n127.0.0.1:"), "{response}");
     shutdown.cancel();
 }
 
@@ -523,15 +543,18 @@ async fn tls_handshake_timeout_drops_silent_client() {
     let (addr, shutdown) = spawn_server(Some(server_tls(&certs, 0))).await;
 
     let mut tcp = TcpStream::connect(&addr).await.expect("connect");
-    tokio::task::yield_now().await;
-    tokio::time::advance(tls::TLS_HANDSHAKE_TIMEOUT + Duration::from_millis(1)).await;
-    tokio::task::yield_now().await;
-
+    let start = tokio::time::Instant::now();
     let mut buf = [0u8; 1];
-    let read = tokio::time::timeout(Duration::from_secs(1), tcp.read(&mut buf)).await;
+    let read = tcp.read(&mut buf).await;
     assert!(
-        matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+        matches!(read, Ok(0) | Err(_)),
         "server must drop a stalled TLS handshake (expected close, got {read:?})"
+    );
+    // The close is the handshake deadline, not an earlier one
+    assert!(
+        start.elapsed() >= tls::TLS_HANDSHAKE_TIMEOUT,
+        "closed too early to be the handshake deadline: {:?}",
+        start.elapsed()
     );
     shutdown.cancel();
 }
