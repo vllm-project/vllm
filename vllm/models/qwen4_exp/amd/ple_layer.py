@@ -320,12 +320,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        query_start_loc: torch.Tensor | None,
-        ngram_context: torch.Tensor | None,
+        query_start_loc: torch.Tensor,
+        ngram_context: torch.Tensor,
     ) -> torch.Tensor:
         """Return full embeddings or a token shard after combining vocabulary owners."""
-        if query_start_loc is None or ngram_context is None:
-            raise RuntimeError("PLE inputs were not prepared")
         input_ids = input_ids.reshape(-1)
         ngram_ids = input_ids.new_empty(
             (input_ids.shape[0], self.ngram_heads), dtype=torch.int64
@@ -870,8 +868,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self,
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor,
-        query_start_loc: torch.Tensor | None,
-        ngram_context: torch.Tensor | None,
+        query_start_loc: torch.Tensor,
+        ngram_context: torch.Tensor,
     ) -> torch.Tensor:
         input_ids = input_ids.reshape(-1)
         if (

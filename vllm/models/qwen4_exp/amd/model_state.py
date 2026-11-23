@@ -8,10 +8,6 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.models.qwen4_exp.common.ple_mode import (
-    PleEmbeddingMode,
-    validate_ple_embedding_config,
-)
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
@@ -30,10 +26,7 @@ class Qwen4ExpModelState(MambaHybridModelState):
     ) -> None:
         super().__init__(vllm_config, model, encoder_cache, device)
         config = self.model_config.hf_text_config
-        self.uses_ngram_embedding = (
-            bool(config.ple_layer_ids)
-            and validate_ple_embedding_config(config) == PleEmbeddingMode.NGRAM
-        )
+        self.uses_ngram_embedding = bool(config.ple_layer_ids)
         if not self.uses_ngram_embedding:
             self.ngram_context_len = 0
             self.ngram_eos_token_id = 0

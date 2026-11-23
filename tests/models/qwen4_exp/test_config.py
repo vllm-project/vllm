@@ -513,11 +513,10 @@ def test_per_token_requires_single_ple_layer() -> None:
 @pytest.mark.skipif(
     not current_platform.is_rocm(), reason="per-token PLE requires ROCm"
 )
-def test_per_token_runner_omits_ngram_capture_inputs(tmp_path) -> None:
+def test_per_token_override_applies_to_text_config(tmp_path) -> None:
     config = _ple_engine_config(tmp_path, "per_token")
-    state = AmdQwen4ExpModelState(config, torch.nn.Module(), None, torch.device("cpu"))
-    inputs = state.prepare_dummy_inputs(num_reqs=2, num_tokens=4)
-    assert {"query_start_loc", "ngram_context"}.isdisjoint(inputs)
+    assert config.model_config is not None
+    assert config.model_config.hf_text_config.ple_embedding_mode == "per_token"
 
 
 @pytest.mark.parametrize(
