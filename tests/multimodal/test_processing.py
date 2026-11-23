@@ -1347,6 +1347,40 @@ def test_effective_mm_processor_kwargs_apply_processor_level_defaults():
     assert effective["images_kwargs"]["crop_to_patches"] is True
 
 
+def test_video_frame_limits_read_the_hf_video_processor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info = BaseProcessingInfo(SimpleNamespace())
+    info.__dict__["supported_mm_limits"] = {"video": None}
+    monkeypatch.setattr(
+        info,
+        "get_hf_processor",
+        lambda **_: SimpleNamespace(
+            video_processor=SimpleNamespace(max_frames=384, min_frames=4)
+        ),
+    )
+
+    assert info.get_video_frame_limits() == {"max_frames": 384, "min_frames": 4}
+
+
+def test_video_frame_limits_skip_the_hf_processor_without_video(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info = BaseProcessingInfo(SimpleNamespace())
+    info.__dict__["supported_mm_limits"] = {"audio": None}
+    calls = 0
+
+    def get_hf_processor(**_):
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace()
+
+    monkeypatch.setattr(info, "get_hf_processor", get_hf_processor)
+
+    assert info.get_video_frame_limits() == {}
+    assert calls == 0
+
+
 def test_resolve_mm_processor_kwargs_routes_supported_flat_kwargs():
     kwargs = {
         "size": {"shortest_edge": 64},
