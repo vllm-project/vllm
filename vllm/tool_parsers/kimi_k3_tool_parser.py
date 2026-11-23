@@ -161,6 +161,7 @@ class KimiK3ToolParser(ToolParser):
         self._sent_tool_call_count = 0
         self._stream_tool_idx = 0
         self._stream_call: _StreamingCall | None = None
+        self._stream_tools_closed = False
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -362,6 +363,11 @@ class KimiK3ToolParser(ToolParser):
         """
         deltas: list[DeltaToolCall] = []
         pos = self._stream_tool_idx
+        if self._stream_tools_closed:
+            return deltas
+        m_tools_close = self._tools_close_re.search(text, pos, partial=True)
+        tools_end = len(text) if m_tools_close is None else m_tools_close.start()
+        text = text[:tools_end]
         while True:
             call = self._stream_call
             if call is None:
@@ -478,6 +484,16 @@ class KimiK3ToolParser(ToolParser):
             call.arg_type = None
             pos = m_value_close.end()
 
+        if m_tools_close is not None and not m_tools_close.partial:
+            call = self._stream_call
+            if call is not None:
+                # Tool calls cannot continue after the tools channel closes. Close
+                # an already announced call so its streamed arguments stay valid.
+                suffix = '"}' if call.arg_type == "string" else "}"
+                self._append_arguments(deltas, call.index, suffix)
+                self._stream_call = None
+            self._stream_tools_closed = True
+            pos = m_tools_close.end()
         self._stream_tool_idx = pos
         return deltas
 

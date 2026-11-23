@@ -557,6 +557,24 @@ def test_streaming_unclosed_argument_respects_call_boundary(value_type):
         assert streamed[0]["arguments"] == expected.tool_calls[0].function.arguments
 
 
+@pytest.mark.parametrize("chunk_size", [1, 3, 7, 4096])
+def test_streaming_stops_at_tools_close(chunk_size):
+    output = (
+        _response("answer")
+        + f'{OPEN}tools{SEP}{OPEN}call tool="calc" index="1"{SEP}'
+        + f'{OPEN}argument key="text" type="string"{SEP}partial'
+        + f"{CLOSE}tools{SEP}"
+        + _call("calc", 2, _arg("x", "number", "2"))
+    )
+
+    messages = _stream(KimiK3ToolParser(_dummy_tokenizer()), output, chunk_size)
+    streamed = _streamed_functions(messages)
+
+    assert streamed == [{"name": "calc", "arguments": '{"text": "partial"}'}]
+    assert all(OPEN not in call["arguments"] for call in streamed)
+    assert all(CLOSE not in call["arguments"] for call in streamed)
+
+
 def test_chat_stream_processor_streams_kimi_k3_tool_arguments():
     request = _request().model_copy(
         update={"chat_template_kwargs": {"thinking": False}}
