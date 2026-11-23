@@ -464,14 +464,25 @@ def test_warn_flashinfer_bf16_untuned_warns_once_per_point(monkeypatch):
 
     monkeypatch.setattr(fi, "_warned_bf16_points", set())
     monkeypatch.setattr(fi, "_bf16_lookup_bucket", lambda m: 8 if m <= 8 else None)
+    monkeypatch.setattr(
+        fi, "_bf16_tuning_points", frozenset({(8, 64, 128), (16, 64, 128)})
+    )
     warn = MagicMock()
     monkeypatch.setattr(fi.logger, "warning", warn)
 
+    # The file has (N=64, K=128), but not for these M buckets: once per bucket.
     fi.warn_flashinfer_bf16_untuned(5, 64, 128)
     fi.warn_flashinfer_bf16_untuned(7, 64, 128)  # same M bucket
     assert warn.call_count == 1
-    fi.warn_flashinfer_bf16_untuned(5, 65, 128)
+    fi.warn_flashinfer_bf16_untuned(100, 64, 128)  # another bucket
     assert warn.call_count == 2
+
+    # The file has no (N=65, K=128) at all: once, whatever M.
+    fi.warn_flashinfer_bf16_untuned(5, 65, 128)
+    assert warn.call_count == 3
+    fi.warn_flashinfer_bf16_untuned(100, 65, 128)
+    fi.warn_flashinfer_bf16_untuned(3, 65, 128)
+    assert warn.call_count == 3
 
 
 def test_flashinfer_bf16_mm_warns_when_flashinfer_misses_the_cache(monkeypatch):

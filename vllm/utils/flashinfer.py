@@ -369,20 +369,35 @@ _warned_bf16_misses: set[tuple[int, int, int]] = set()
 def warn_flashinfer_bf16_untuned(m: int, n: int, k: int) -> None:
     """Warn that a GEMM is not in the tuning file and runs on torch linear.
 
-    Reported once per (M bucket, N, K), so a server log lists each shape that
-    fell back without one line per call.
+    A shape (N, K) that the file does not have at all is reported once, however
+    many M buckets it is called with (CUDA graph capture alone visits dozens).
+    A shape the file has, but not for this M bucket, is reported once per
+    (M bucket, N, K).
     """
-    point = (_bf16_lookup_bucket(m) or m, n, k)
-    if point in _warned_bf16_points:
+    bucket = _bf16_lookup_bucket(m) or m
+    point = (bucket, n, k)
+    shape_point = (0, n, k)
+    if point in _warned_bf16_points or shape_point in _warned_bf16_points:
         return
-    _warned_bf16_points.add(point)
-    logger.warning(
-        "FlashInfer BF16 tuning file has no entry for M bucket %d, N=%d, K=%d "
-        "(M=%d): this GEMM runs on torch linear. The same shape is not "
-        "reported again.",
-        *point,
-        m,
-    )
+    if any(p[1:] == (n, k) for p in _bf16_tuning_points):
+        _warned_bf16_points.add(point)
+        logger.warning(
+            "FlashInfer BF16 tuning file has no entry for M bucket %d, N=%d, K=%d "
+            "(M=%d): this GEMM runs on torch linear. The same shape is not "
+            "reported again.",
+            *point,
+            m,
+        )
+    else:
+        _warned_bf16_points.add(shape_point)
+        logger.warning(
+            "FlashInfer BF16 tuning file has no entry for N=%d, K=%d at any M "
+            "(first seen at M=%d): GEMMs of this shape run on torch linear. The "
+            "same shape is not reported again.",
+            n,
+            k,
+            m,
+        )
 
 
 def _flashinfer_autotuner_stats():
