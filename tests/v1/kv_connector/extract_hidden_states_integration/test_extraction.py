@@ -3,6 +3,8 @@
 
 import os
 import tempfile
+from dataclasses import dataclass
+from typing import Any
 
 import pytest
 import torch
@@ -19,6 +21,7 @@ from vllm.assets.image import ImageAsset
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     example_hidden_states_connector,
 )
+from vllm.inputs import TextPrompt
 from vllm.platforms import current_platform
 
 
@@ -259,32 +262,63 @@ def test_extract_hidden_states_with_predictable_dummy_model(
     example_hidden_states_connector.cleanup_hidden_states(custom_path)
 
 
+@dataclass(frozen=True)
+class _VLMExtractionCase:
+    model: str
+    prompt: str
+    image: ImageAsset
+    image_ext: str
+    layer_ids: tuple[int, ...]
+    engine_kwargs: dict[str, Any]
+
+
 @pytest.mark.parametrize(
-    ("model", "engine_kwargs", "prompt_text", "image_token_id", "layer_ids"),
+    "case",
     [
         pytest.param(
-            NEMOTRON_PARSE_MODEL,
-            {"trust_remote_code": True, "max_model_len": 4096},
-            f"<pad>{NEMOTRON_PARSE_PROMPT}",
-            1,
-            [2, 5, 9, 10],
+            _VLMExtractionCase(
+                model=NEMOTRON_PARSE_MODEL,
+                prompt=f"<pad>{NEMOTRON_PARSE_PROMPT}",
+                image=ImageAsset("paper-11"),
+                image_ext="png",
+                layer_ids=(2, 5, 9, 10),
+                engine_kwargs={"trust_remote_code": True, "max_model_len": 4096},
+            ),
             id="nemotron-parse",
+        ),
+        pytest.param(
+            _VLMExtractionCase(
+                model="Qwen/Qwen3-VL-2B-Instruct",
+                prompt=(
+                    "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+                    "Describe this image.<|im_end|>\n<|im_start|>assistant\n"
+                ),
+                image=ImageAsset("stop_sign"),
+                image_ext="jpg",
+                layer_ids=(2, 5, 9, 10),
+                engine_kwargs={
+                    "max_model_len": 2048,
+                    "max_num_batched_tokens": 2048,
+                    "limit_mm_per_prompt": {"image": 1, "video": 0},
+                },
+            ),
+            id="qwen3-vl",
         ),
     ],
 )
 @create_new_process_for_each_test()
 def test_extract_hidden_states_vision_language_model(
-    vllm_runner, tmp_path, model, engine_kwargs, prompt_text, image_token_id, layer_ids
+    vllm_runner, tmp_path, case: _VLMExtractionCase
 ):
     with vllm_runner(
-        model,
+        case.model,
         enforce_eager=True,
         gpu_memory_utilization=0.5,
         speculative_config={
             "method": "extract_hidden_states",
             "num_speculative_tokens": 1,
             "draft_model_config": {
-                "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": list(case.layer_ids)}
             },
         },
         kv_transfer_config={
@@ -292,21 +326,26 @@ def test_extract_hidden_states_vision_language_model(
             "kv_role": "kv_producer",
             "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
         },
-        **engine_kwargs,
+        **case.engine_kwargs,
     ) as runner:
-        image = ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
-        prompt = {
-            "prompt": prompt_text,
-            "multi_modal_data": {"image": image},
-        }
+        with case.image.pil_image_ext(ext=case.image_ext) as image:
+            prompt = TextPrompt(
+                prompt=case.prompt, multi_modal_data={"image": image.convert("RGB")}
+            )
+
+        (rendered,) = runner.llm.renderer.render_cmpl([prompt], skip_mm_cache=True)
+        assert rendered["type"] == "multimodal"
+        (image_span,) = rendered["mm_placeholders"]["image"]
+        assert image_span.get_num_embeds() > 1
+
         (output,) = runner.llm.generate(
             prompt, SamplingParams(max_tokens=1, temperature=0)
         )
 
-        assert output.prompt_token_ids is not None
-        assert output.prompt_token_ids.count(image_token_id) > 100
+        prompt_token_ids = rendered["prompt_token_ids"]
+        assert output.prompt_token_ids == prompt_token_ids
         hidden_size = runner.llm.model_config.get_hidden_size()
-        expected_shape = (len(output.prompt_token_ids), len(layer_ids), hidden_size)
+        expected_shape = (len(prompt_token_ids), len(case.layer_ids), hidden_size)
         get_and_check_output(output, expected_shape)
 
 
