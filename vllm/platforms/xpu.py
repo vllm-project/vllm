@@ -702,3 +702,29 @@ class XPUPlatform(Platform):
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
+
+    @classmethod
+    def get_accelerator_view_from_cpu_tensor(
+        cls, cpu_tensor: torch.Tensor
+    ) -> torch.Tensor:
+        # TODO: Remove once vllm-xpu-kernels#513
+        # is available in a released package.
+        if cpu_tensor.numel() == 0:
+            return torch.empty(
+                cpu_tensor.shape,
+                dtype=cpu_tensor.dtype,
+                device="xpu",
+            )
+
+        if not cpu_tensor.is_pinned():
+            pinned = torch.empty_strided(
+                cpu_tensor.size(),
+                cpu_tensor.stride(),
+                dtype=cpu_tensor.dtype,
+                device="cpu",
+                pin_memory=True,
+            )
+            pinned.copy_(cpu_tensor)
+            cpu_tensor = pinned
+
+        return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)

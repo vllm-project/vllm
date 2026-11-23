@@ -805,6 +805,12 @@ class CudaPlatformBase(Platform):
             return False
         return major >= 9
 
+    @classmethod
+    def get_accelerator_view_from_cpu_tensor(
+        cls, cpu_tensor: torch.Tensor
+    ) -> torch.Tensor:
+        return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
