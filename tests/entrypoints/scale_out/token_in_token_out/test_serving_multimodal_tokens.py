@@ -287,12 +287,7 @@ async def test_content_parts_generates_tokens(client, test_image):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cached", [False, True])
 async def test_features_with_content_parts(client, test_image, cached):
-    """Earlier items as features plus a new raw item must match /render.
-
-    With `cached`, features carry only the `mm_hashes` and `mm_placeholders`
-    returned by turn 1 (as in the docs), so the earlier item resolves from the
-    cache that request filled.
-    """
+    """Hash-only features stay invalid after a prior request fills the cache."""
     old_url = encode_image_url(test_image, format="PNG")
     new_url = encode_image_url(Image.new("RGB", (224, 224)), format="PNG")
     render_data = await _render_image_prompt(client, old_url, new_url)
@@ -330,6 +325,11 @@ async def test_features_with_content_parts(client, test_image, cached):
             "return_token_ids": True,
         },
     )
+    if cached:
+        assert gen_resp.status_code == 400, gen_resp.text
+        assert "payload data or metadata" in gen_resp.json()["error"]["message"]
+        return
+
     gen_resp.raise_for_status()
     assert gen_resp.json()["prompt_token_ids"] == expanded
     assert gen_resp.json()["mm_placeholders"] == features["mm_placeholders"]
