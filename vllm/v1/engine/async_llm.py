@@ -663,9 +663,7 @@ class AsyncLLM(EngineClient):
                         break
                     sp = input_chunk.sampling_params
                     if sp:
-                        self._validate_streaming_input_sampling_params(
-                            sp, sampling_params
-                        )
+                        self._validate_streaming_input_sampling_params(sp)
                     else:
                         sp = sampling_params
                     # TODO(nick): Avoid re-validating reused sampling parameters
@@ -721,7 +719,6 @@ class AsyncLLM(EngineClient):
     @staticmethod
     def _validate_streaming_input_sampling_params(
         params: SamplingParams | PoolingParams,
-        stream_params: SamplingParams | PoolingParams | None = None,
     ):
         if (
             not isinstance(params, SamplingParams)
@@ -733,13 +730,6 @@ class AsyncLLM(EngineClient):
                 "Input streaming not currently supported "
                 "for pooling models, n > 1, request_kind = FINAL_ONLY "
                 "or with stop strings."
-            )
-        if (
-            isinstance(stream_params, SamplingParams)
-            and params.return_aux_outputs != stream_params.return_aux_outputs
-        ):
-            raise VLLMValidationError(
-                "An input chunk's return_aux_outputs must match the input stream's."
             )
 
     # TODO: we should support multiple prompts in one call, as you

@@ -280,18 +280,3 @@ async def test_handle_inputs_stops_after_session_finished(
     sent = [call.args[0] for call in llm._add_request.await_args_list]
     # Both chunks then the final request, or only the first chunk.
     assert sent == ([reqs[1], reqs[2], reqs[0]] if session_live else [reqs[1]])
-
-
-@pytest.mark.parametrize(
-    "stream_flag,chunk_flag",
-    [(True, True), (False, False), (True, False), (False, True)],
-    ids=["records", "opts-out", "chunk-opts-out", "chunk-records"],
-)
-def test_input_chunk_matches_stream_return_aux_outputs(stream_flag, chunk_flag):
-    stream = SamplingParams(max_tokens=4, return_aux_outputs=stream_flag)
-    chunk = SamplingParams(max_tokens=4, return_aux_outputs=chunk_flag)
-    if stream_flag == chunk_flag:
-        AsyncLLM._validate_streaming_input_sampling_params(chunk, stream)
-    else:
-        with pytest.raises(VLLMValidationError, match="return_aux_outputs"):
-            AsyncLLM._validate_streaming_input_sampling_params(chunk, stream)
