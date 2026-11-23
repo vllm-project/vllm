@@ -551,7 +551,20 @@ def test_prefill_seed_honors_padded_tail_block_stride():
         "plain_decode",
     ],
 )
-def test_batched_matches_reference(case_id):
+@pytest.mark.parametrize(
+    "pos_dtype",
+    [
+        torch.int32,
+        pytest.param(
+            torch.int64,
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(),
+                reason="the AMD indexer passes int64 positions",
+            ),
+        ),
+    ],
+)
+def test_batched_matches_reference(case_id, pos_dtype):
     torch.manual_seed(0)
     if case_id == "no_completion":
         B, next_n, blocks = 3, 4, [0, 1, 2]
@@ -608,7 +621,9 @@ def test_batched_matches_reference(case_id):
     kv, tail = _make_caches()
     _seed_prior(tail, blocks, n_prior)
     r_ref = _torch_reference(kv, tail, tail_slot, key, score, ape, slot_map, pos)
-    r_kern = _run_kernel(kv, tail, tail_slot, key, score, ape, slot_map, pos)
+    r_kern = _run_kernel(
+        kv, tail, tail_slot, key, score, ape, slot_map, pos.to(pos_dtype)
+    )
     _assert_eq(r_ref, r_kern)
 
 
@@ -668,3 +683,53 @@ def test_batched_matches_reference_fuzz(seed):
     # Random inputs can land the pooled value on a bf16 rounding midpoint,
     # where the kernel and the CPU reference may round apart by one fp8 step.
     _assert_eq(r_ref, r_kern, k_byte_tol=1)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AMD kpool ops")
+@pytest.mark.parametrize("row_start", [0, 5])
+@pytest.mark.parametrize("rows", [1, 16, 64])
+def test_expand_pools_and_append_tail_in_place(rows, row_start):
+    """The fused in-place call the AMD indexer makes (int32 pool ids, int64
+    positions, `seq_len_offset=1`, `out=` a wide buffer row slice) matches
+    `expand_pools_to_tokens` + `append_tail_to_topk`. `row_start` > 0 is the
+    prefill-chunk call, where `out` and `positions` are offset views."""
+    from vllm.models.glm5next.amd.ops.kpool_compress import (
+        append_tail_to_topk,
+        expand_pools_and_append_tail,
+        expand_pools_to_tokens,
+    )
+
+    pool_size, n_groups = 4, 512
+    topk = n_groups * pool_size
+    width = topk + 128  # topk_indices_buffer rows are wider than the result
+    g = torch.Generator(device="cuda").manual_seed(rows)
+    positions_full = torch.randint(
+        0, 60000, (row_start + rows,), dtype=torch.int64, device="cuda", generator=g
+    )
+    positions = positions_full[row_start : row_start + rows]
+    # A request's first decode steps: no complete pool, then exactly one.
+    first = torch.arange(min(rows, 5), device="cuda")
+    positions[: first.shape[0]] = first
+    seq_lens = (positions + 1).to(torch.int32)
+    pool_lens = seq_lens // pool_size
+    rand = torch.rand(rows, n_groups, device="cuda", generator=g)
+    pool_ids = (rand * pool_lens.clamp(min=1)[:, None]).to(torch.int32)
+    pool_ids[rand < 0.15] = -1  # unused top-k slots
+    pool_ids[pool_lens == 0] = -1  # no complete pool to select yet
+
+    expanded = expand_pools_to_tokens(
+        pool_ids.to(torch.int64), pool_ids >= 0, topk, pool_size
+    )
+    ref_rows = append_tail_to_topk(expanded, seq_lens, pool_lens, pool_size)
+    ref = torch.full((rows, width), -1, dtype=torch.int32, device="cuda")
+    ref[:, : ref_rows.shape[1]] = ref_rows
+
+    end = row_start + rows
+    buf = torch.full((end + 3, width), 7, dtype=torch.int32, device="cuda")
+    expand_pools_and_append_tail(
+        pool_ids, positions, pool_size, seq_len_offset=1, out=buf[row_start:end]
+    )
+
+    torch.testing.assert_close(buf[row_start:end], ref, rtol=0, atol=0)
+    # Rows outside the slice are untouched.
+    assert (buf[:row_start] == 7).all() and (buf[end:] == 7).all()

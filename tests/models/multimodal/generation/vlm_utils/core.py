@@ -66,7 +66,10 @@ def run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
 
-    vllm_runner_kwargs_: dict[str, Any] = {"mm_processor_cache_gb": 0}
+    vllm_runner_kwargs_: dict[str, Any] = {
+        "mm_processor_cache_gb": 0,
+        "trust_remote_code": model_info.trust_remote_code,
+    }
     if model_info.tokenizer:
         vllm_runner_kwargs_["tokenizer_name"] = model_info.tokenizer
     if model_info.tokenizer_mode:
@@ -119,6 +122,7 @@ def run_test(
             vllm_outputs_per_mm.append(vllm_output)
 
     hf_runner_kwargs = dict(hf_runner_kwargs or {})
+    hf_runner_kwargs.setdefault("trust_remote_code", model_info.trust_remote_code)
     if model_info.tokenizer:
         hf_runner_kwargs["tokenizer_name"] = model_info.tokenizer
     if hf_processor is not None:
