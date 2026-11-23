@@ -17,7 +17,7 @@ those refusals; `VLLM_RELOAD_MODE=layerwise` turns it off.
   storage.
 - **Load**: the model's weight loaders write the new checkpoint tensors, as at
   cold start, through `reload_weights` or a checkpoint-format
-  [weight transfer](weight_transfer/README.md) backend.
+  [weight transfer](README.md) backend.
 - **Finish** reruns the cold-start post-load processing.
 
 No layer is buffered and no tensor changes address, so captured CUDA graphs
@@ -26,7 +26,7 @@ stay valid. Each update must send every weight.
 ## Online Quantization
 
 With `VLLM_RELOAD_MODE=direct`, the
-[online quantization](../features/quantization/online.md) schemes below quantize
+[online quantization](../../features/quantization/online.md) schemes below quantize
 each high-precision tensor as it is loaded, into the layout of the matching
 pre-quantized checkpoint; the trainer keeps sending BF16 weights under their
 checkpoint names.
