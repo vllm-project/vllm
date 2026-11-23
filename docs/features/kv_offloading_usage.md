@@ -536,8 +536,8 @@ Byte-valued settings use integer bytes; 1 GiB is `1073741824` bytes.
 | `cpu_hot_cache` | `8589934592` (8 GiB) | Hot KV data capacity per worker in bytes, rounded down to complete blocks. Must be non-negative; `0` disables the hot pool. Fixed staging and alignment overhead are allocated separately. |
 | `disk_capacity_bytes` | `107374182400` (100 GiB) | SSD capacity per worker; must be positive. |
 | `hot_cache_tokens_per_request` | `2048` | First N tokens eligible for DRAM copies, rounded down to complete KV blocks. An upper limit, not a guaranteed allocation. `0` disables retention, not the allocated pool. |
-| `disk_buffer_slots` | `2` | Fixed staging slots per direction: N load slots and N store slots, each holding one KV block. Allocated even when the hot cache is disabled. Minimum effective value is `1`. |
-| `max_load_slots` | `max(8, disk_buffer_slots)` | Maximum load slots after borrowing hot-cache capacity; actual usage can be lower. Must be at least `disk_buffer_slots`; setting them equal disables borrowing. Without a hot pool, load slots remain at `disk_buffer_slots`. |
+| `disk_buffer_slots` | `2` | Number of store staging slots and minimum number of load slots, each holding one KV block. Allocated even when the hot cache is disabled. Minimum effective value is `1`. |
+| `max_load_slots` | `max(8, disk_buffer_slots)` | Number of preallocated load staging slots, independent of hot-cache capacity. Must be at least `disk_buffer_slots`. |
 | `num_cpu_blocks` | Automatically sized | Explicit number of SSD slots, bounded by `disk_capacity_bytes`. See [explicit pool sizing](#explicit-pool-sizing-for-simplecpuoffloadconnector). |
 | `use_page_cache` | `false` | Use OS page-cache I/O instead of `O_DIRECT`. `true` is allowed only with `cpu_hot_cache=0`. |
 | `lazy_offload` | `false` | Enable inherited lazy offload. Must remain `false` when `cpu_hot_cache` is positive. |

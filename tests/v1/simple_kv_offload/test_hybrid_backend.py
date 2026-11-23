@@ -26,7 +26,7 @@ BLOCK_BYTES = 2 * 4096
 
 
 @contextmanager
-def make_backend(tmp_path, num_blocks, hot_rows):
+def make_backend(tmp_path, num_blocks, hot_rows, max_load_slots=4):
     gpu = {
         str(i): (torch.arange(2 * num_blocks * 4096, device="cuda") + i * 17)
         .remainder(127)
@@ -45,7 +45,7 @@ def make_backend(tmp_path, num_blocks, hot_rows):
             num_blocks,
             BLOCK_BYTES,
             num_hot_slots=hot_rows,
-            max_load_slots=4,
+            max_load_slots=max_load_slots,
         )
         yield backend, gpu
     finally:
@@ -76,6 +76,7 @@ def test_hot_budget_is_independent_of_staging(tmp_path, hot_bytes, staging_slots
             "kv_offload_backend": "hybrid",
             "cpu_hot_cache": hot_bytes,
             "disk_buffer_slots": staging_slots,
+            "max_load_slots": staging_slots + 2,
             "disk_path": str(tmp_path / "kv"),
             "disk_capacity_bytes": 8 * 4096,
         },
@@ -104,8 +105,12 @@ def test_hot_budget_is_independent_of_staging(tmp_path, hot_bytes, staging_slots
         assert sum(t.nbytes for t in backend._hot_caches.values()) == (
             hot_bytes // 4096 * 4096
         )
-        for pool in (backend._store_buffer_caches, backend._load_buffer_caches):
-            assert sum(t.nbytes for t in pool.values()) == staging_slots * 4096
+        assert sum(t.nbytes for t in backend._store_buffer_caches.values()) == (
+            staging_slots * 4096
+        )
+        assert sum(t.nbytes for t in backend._load_buffer_caches.values()) == (
+            (staging_slots + 2) * 4096
+        )
         transfer(backend, [0, 1, 2, 3], [3, 2, 1, 0], is_store=True, hot_blocks=[3])
         transfer(backend, [3, 2, 1, 0], [4, 5, 6, 7], is_store=False)
         assert torch.equal(gpu[: 4 * 4096], gpu[4 * 4096 :])
@@ -113,9 +118,9 @@ def test_hot_budget_is_independent_of_staging(tmp_path, hot_bytes, staging_slots
         connector.shutdown()
 
 
-@pytest.mark.parametrize("hot_rows", [0, 4])
+@pytest.mark.parametrize("hot_rows", [0, 2, 4])
 def test_store_load_and_slot_reuse(tmp_path, monkeypatch, hot_rows):
-    """Restore beyond host capacity; hot hits avoid reads and leases are returned."""
+    """Restore beyond host capacity without evicting hot copies for staging."""
     num_blocks = 100
     reads = []
     preadv = os.preadv
@@ -133,7 +138,7 @@ def test_store_load_and_slot_reuse(tmp_path, monkeypatch, hot_rows):
         expected = {name: tensor[:num_blocks].cpu() for name, tensor in gpu.items()}
         transfer(backend, src, disk, is_store=True, hot_blocks=hot)
 
-        # Repeat to check both lease release and staging reuse without readmission.
+        # Repeat to check staging reuse and preservation of the hot copies.
         for _ in range(2):
             reads.clear()
             for tensor in gpu.values():
@@ -142,7 +147,7 @@ def test_store_load_and_slot_reuse(tmp_path, monkeypatch, hot_rows):
             assert sorted(reads) == sorted(set(disk) - set(hot))
             for name, tensor in gpu.items():
                 assert torch.equal(tensor[num_blocks:].cpu(), expected[name])
-            assert backend._peak_load_slots == (4 if hot_rows else 2)
+            assert len(backend._load_slot_views) == 4
             assert len(backend._free_hot_rows) == hot_rows - len(hot)
             assert not any(backend._hot_refs)
 
@@ -173,7 +178,7 @@ def test_ready_reads_bypass_blocked_read(tmp_path, monkeypatch, hot_rows):
             later_started.set()
         return preadv(fd, views, offset)
 
-    with make_backend(tmp_path, 5, hot_rows) as (backend, gpu):
+    with make_backend(tmp_path, 5, hot_rows, max_load_slots=2) as (backend, gpu):
         expected = {name: tensor[:5].cpu() for name, tensor in gpu.items()}
         transfer(
             backend,

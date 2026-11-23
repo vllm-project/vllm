@@ -57,8 +57,7 @@ class HybridBackend:
     - Overlap GPU DMA on one staging slot with disk I/O on another
     - O_DIRECT by default; page cache is opt-in via `use_page_cache`
     - Consume ready SSD reads out of order; fill read gaps with hot H2D
-    - Borrow unpinned hot rows to expand the bounded read window
-    - With zero hot rows, use only the fixed staging pools
+    - Preallocate load staging independently of the optional hot cache
 
     Shares the `DmaCopyBackend` task/completion interface; `launch_copy` also
     accepts `hot_blocks` to select stores eligible for a DRAM copy.
@@ -110,10 +109,7 @@ class HybridBackend:
         self._store_stream = store_stream
         self._total_block_bytes = total_block_bytes
         self._num_buffer_slots = num_buffer_slots
-        self._max_load_slots = min(
-            max_load_slots or num_buffer_slots, num_buffer_slots + num_hot_slots
-        )
-        self._peak_load_slots = num_buffer_slots
+        self._max_load_slots = max_load_slots or num_buffer_slots
         self._tensor_names = list(gpu_caches.keys())
         self._per_tensor_bpb = [
             t.stride(0) * t.element_size() for t in gpu_caches.values()
@@ -134,7 +130,7 @@ class HybridBackend:
             store_buf = _alloc_aligned(num_buffer_slots, bpb)
             pin_tensor(store_buf)
             self._store_buffer_caches[name] = store_buf
-            load_buf = _alloc_aligned(num_buffer_slots, bpb)
+            load_buf = _alloc_aligned(self._max_load_slots, bpb)
             pin_tensor(load_buf)
             self._load_buffer_caches[name] = load_buf
 
@@ -151,7 +147,7 @@ class HybridBackend:
                 memoryview(self._load_buffer_caches[name][slot].numpy())
                 for name in self._tensor_names
             ]
-            for slot in range(num_buffer_slots)
+            for slot in range(self._max_load_slots)
         ]
 
         self._store_params = build_params(
@@ -300,20 +296,15 @@ class HybridBackend:
         self._store_slot_views.clear()
         self._load_slot_views.clear()
 
-    def _take_hot_rows(self, count: int) -> list[int]:
-        """Caller holds _hot_lock; reserved rows leave the cache until released."""
-        rows: list[int] = []
-        while self._free_hot_rows and len(rows) < count:
-            rows.append(self._free_hot_rows.pop())
-        if len(rows) == count:
-            return rows
-        for block, row in list(self._hot_blocks.items()):
-            if len(rows) >= count:
-                break
+    def _take_hot_row(self) -> int | None:
+        """Caller holds _hot_lock; reserve a free row or evict an unpinned LRU."""
+        if self._free_hot_rows:
+            return self._free_hot_rows.pop()
+        for block, row in self._hot_blocks.items():
             if not self._hot_refs[row]:
                 del self._hot_blocks[block]
-                rows.append(row)
-        return rows
+                return row
+        return None
 
     def _invalidate_hot(self, disk_block: int) -> None:
         with self._hot_lock:
@@ -326,10 +317,9 @@ class HybridBackend:
 
     def _retain_hot(self, buf_slot: int, disk_block: int) -> None:
         with self._hot_lock:
-            rows = self._take_hot_rows(1)
-        if not rows:
+            row = self._take_hot_row()
+        if row is None:
             return
-        row = rows[0]
         try:
             for name, tensor in self._hot_caches.items():
                 tensor[row].copy_(self._store_buffer_caches[name][buf_slot])
@@ -446,9 +436,9 @@ class HybridBackend:
     def _do_load(
         self, disk_blocks: list[int], gpu_blocks: list[int], stream: torch.cuda.Stream
     ) -> None:
-        """Coordinate hot/cold restores and bounded staging leases."""
+        """Coordinate hot/cold restores within preallocated staging."""
         hot, cold = [], []
-        # Pin hot sources before borrowing rows; staging has admission priority.
+        # Protect hot DMA sources from concurrent store-side eviction.
         with self._hot_lock:
             for disk, gpu in zip(disk_blocks, gpu_blocks):
                 row = self._hot_blocks.get(disk)
@@ -458,12 +448,6 @@ class HybridBackend:
                     self._hot_refs[row] += 1
                     self._hot_blocks.move_to_end(disk)
                     hot.append((row, gpu))
-            target = min(self._max_load_slots, (len(cold) + 31) // 32)
-            leased = self._take_hot_rows(max(0, target - self._num_buffer_slots))
-        active = min(len(cold), self._num_buffer_slots + len(leased))
-        if active > self._peak_load_slots:
-            self._peak_load_slots = active
-            logger.info("Hybrid KV load-slot peak: %d", active)
         hot_index = 0
         previous_hot: torch.Event | None = None
 
@@ -485,7 +469,7 @@ class HybridBackend:
             return True
 
         try:
-            self._do_load_parallel(cold, leased, stream, hot_batch)
+            self._do_load_parallel(cold, stream, hot_batch)
             while hot_batch():
                 pass
         finally:
@@ -493,38 +477,25 @@ class HybridBackend:
             with self._hot_lock:
                 for row, _ in hot:
                     self._hot_refs[row] -= 1
-                self._free_hot_rows.extend(leased)
 
     def _do_load_parallel(
         self,
         cold: list[tuple[int, int]],
-        leased: list[int],
         stream: torch.cuda.Stream,
         hot_batch: Callable[[Callable[[], bool]], bool],
     ) -> None:
-        """Prioritize ready SSD reads, filling gaps with hot H2D; leases add slots."""
+        """Prioritize ready SSD reads, filling gaps with hot H2D."""
         assert self._read_executor is not None
         executor = self._read_executor
         assert self._load_params is not None
-        slots = [
-            (views, self._load_params, i)
-            for i, views in enumerate(self._load_slot_views)
-        ] + [
-            (
-                [memoryview(t[row].numpy()) for t in self._hot_caches.values()],
-                self._hot_load_params,
-                row,
-            )
-            for row in leased
-        ]
-        slots = slots[: len(cold)]
+        num_slots = min(self._max_load_slots, len(cold))
         pending: dict[Future[None], tuple[int, int]] = {}
 
         def read(slot: int, block: int) -> None:
             disk, gpu = cold[block]
             future = executor.submit(
                 self._read_into,
-                slots[slot][0],
+                self._load_slot_views[slot],
                 disk * self._total_block_bytes,
             )
             pending[future] = (slot, gpu)
@@ -533,9 +504,9 @@ class HybridBackend:
             return any(future.done() for future in pending)
 
         try:
-            for i in range(len(slots)):
+            for i in range(num_slots):
                 read(i, i)
-            next_block = len(slots)
+            next_block = num_slots
             while pending:
                 done = {future for future in pending if future.done()}
                 if not done:
@@ -545,9 +516,7 @@ class HybridBackend:
                 for future in done:
                     index, gpu = pending.pop(future)
                     future.result()
-                    _, params, row = slots[index]
-                    assert params is not None
-                    copy_blocks([row], [gpu], params)
+                    copy_blocks([index], [gpu], self._load_params)
                     if next_block < len(cold):
                         event = torch.Event()
                         event.record(stream)
