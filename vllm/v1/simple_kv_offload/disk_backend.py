@@ -197,13 +197,16 @@ class DiskBackend:
         os.ftruncate(self._fd, num_disk_slots * total_block_bytes)
 
         logger.info(
-            "DiskBackend: path=%s, slots=%d, total=%.2f GB, buf=%dx%d bytes"
+            "DiskBackend: path=%s, slots=%d, total=%.2f GB, block=%d bytes, "
+            "store_slots=%d, load_slots=%d, hot_slots=%d"
             " (page_cache=%s)",
             disk_path,
             num_disk_slots,
             (num_disk_slots * total_block_bytes) / (1024**3),
-            num_buffer_slots,
             total_block_bytes,
+            num_buffer_slots,
+            self._max_load_slots,
+            num_hot_slots,
             use_page_cache,
         )
 

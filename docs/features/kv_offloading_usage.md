@@ -546,6 +546,9 @@ Byte-valued settings use integer bytes; 1 GiB is `1073741824` bytes.
 backend. For disk hot copies, use `cpu_hot_cache`; total host buffer memory includes
 the hot pool, both fixed staging pools, and alignment overhead.
 
+Increasing `hot_cache_tokens_per_request` can avoid more SSD reads, but may
+evict copies belonging to other requests when the hot pool is full.
+
 Prefix caching is required. With a positive `cpu_hot_cache`, the disk backend currently
 supports one GPU, no data parallelism, and one full-attention KV cache group;
 the SSD filesystem must support `O_DIRECT`.

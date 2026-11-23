@@ -211,7 +211,7 @@ class SimpleCPUOffloadWorker:
         device: torch.device,
     ) -> None:
         logger.info(
-            "SimpleCPUOffloadWorker [HYBRID]: %d tensors, %d disk slots (%.2f GB)",
+            "SimpleCPUOffloadWorker [DISK]: %d tensors, %d disk slots (%.2f GB)",
             len(unique_gpu_caches),
             self.num_cpu_blocks,
             (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
