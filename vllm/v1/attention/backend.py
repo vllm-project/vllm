@@ -1091,9 +1091,9 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         return
 
     def decode_query_padded_num_heads(self, attn_metadata: T) -> int | None:
-        """Head count forward_mqa pads this step's query to by repeating each
-        head, so the caller may hand it the padded query directly; None when
-        forward_mqa needs the unpadded query."""
+        """Head count of the query forward_mqa reads this step, each head
+        repeated count // num_heads times, so the caller may hand it that query
+        directly; None to keep the default query preparation."""
         return None
 
     def fused_output_quant_supported(self, quant_key: "QuantKey"):

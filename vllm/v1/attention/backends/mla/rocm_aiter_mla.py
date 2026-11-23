@@ -2091,7 +2091,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 self._decode_num_heads,
                 self._gluon_kv_dtype,
                 use_2d_view=False,
-                out=(work_info, split_meta[: paged_kv_indptr.numel()]),
+                out=(work_info, split_meta),
             )
         use_gluon_verify = AiterMLAHelper.use_gluon_verify(
             self._decode_num_heads,
@@ -3097,24 +3097,24 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             self.kv_lora_rank,
             self.qk_rope_head_dim,
         )
-        if self._gluon_fp8_decode_max_batch:
-            self.supports_quant_query_input = False
 
     def decode_query_padded_num_heads(
         self, attn_metadata: AiterMLAMetadata
     ) -> int | None:
-        """The asm decode's head count when this step pads the query with
-        get_mla_padded_q's head repeat. Gluon decode/verify and the DCP routes
-        read the unpadded query; non-divisor counts are tiled, not repeated."""
+        """The head count this step's decode reads: the asm decode's, when it
+        pads the query with get_mla_padded_q's head repeat, or the real one for
+        Gluon decode. Gluon verify and the DCP routes take the query as is;
+        non-divisor counts are tiled, not repeated."""
         decode = attn_metadata.decode
         if (
             decode is None
-            or decode.use_gluon_decode
             or decode.use_gluon_verify
             or decode.dcp_route is not _DCPDecodeRoute.PLAIN
             or self.dcp_world_size > 1
         ):
             return None
+        if decode.use_gluon_decode:
+            return self._decode_num_heads
         num_heads = AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
         return None if num_heads % self._decode_num_heads else num_heads
 
@@ -3860,6 +3860,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 ),
                 min_kv_seq_len=decode.min_kv_seq_len,
                 kv_split_info=decode.gluon_kv_split_info,
+                q_scale=(
+                    layer._q_scale_float
+                    if q_nope.dtype == current_platform.fp8_dtype()
+                    else 1.0
+                ),
             )
             return o, None
 

@@ -387,10 +387,12 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm-only")
 @pytest.mark.parametrize("num_tokens", [1, 64, 300])
 @pytest.mark.parametrize("q_scale", [1.0, 0.37])
-def test_aiter_fused_decode_query_matches_unfused_ops(num_tokens, q_scale):
+@pytest.mark.parametrize("padded", [True, False])
+def test_aiter_fused_decode_query_matches_unfused_ops(num_tokens, q_scale, padded):
     """The fused AITER decode query (Kimi-K2 at TP8: 8 heads, L=512, P=128) is
-    the padded fp8 query MLAAttention builds otherwise: torch.bmm into a
-    token-major buffer, _DecodeConcatQuantFP8, then get_mla_padded_q."""
+    the fp8 query MLAAttention builds otherwise: torch.bmm into a token-major
+    buffer, _DecodeConcatQuantFP8, then get_mla_padded_q for the asm decode
+    (Gluon decode reads it unpadded)."""
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
 
@@ -424,7 +426,9 @@ def test_aiter_fused_decode_query_matches_unfused_ops(num_tokens, q_scale):
     )
     w_uk_t = w_uk.permute(1, 2, 0)
     scale = torch.tensor(q_scale, dtype=torch.float32, device="cuda")
-    padded_heads = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+    padded_heads = (
+        AiterMLAHelper.get_actual_mla_num_heads(num_heads) if padded else num_heads
+    )
 
     ql_nope = q_nope.new_empty(num_tokens, num_heads, kv_lora_rank)
     torch.bmm(q_nope, w_uk_t, out=ql_nope.transpose(0, 1))
@@ -432,9 +436,9 @@ def test_aiter_fused_decode_query_matches_unfused_ops(num_tokens, q_scale):
         concat_quant = _DecodeConcatQuantFP8(
             static=True, group_shape=GroupShape.PER_TENSOR, compile_native=True
         )
-    ref = AiterMLAHelper.get_mla_padded_q(
-        num_heads, concat_quant.forward_native(ql_nope, q_pe, scale)
-    )
+    ref = concat_quant.forward_native(ql_nope, q_pe, scale)
+    if padded:
+        ref = AiterMLAHelper.get_mla_padded_q(num_heads, ref)
     out = rocm_aiter_ops.fused_bf16_bmm_cat_quant_pad_mla(
         q_nope, w_uk_t, q_pe, scale, padded_heads
     )
@@ -1716,10 +1720,13 @@ def run_attention_backend(
         ):
             from vllm import envs
 
-            # Gluon decode takes the split rebalance, so the comparison below
-            # checks the rebalanced output.
+            # Gluon decode takes the split rebalance and, on an fp8 cache, the
+            # fp8 query, so the comparison below checks both.
             if not envs.VLLM_BATCH_INVARIANT:
                 assert decode.gluon_kv_split_info is not None
+            assert impl.supports_quant_query_input or not is_quantized_kv_cache(
+                kv_cache_dtype
+            )
 
         # Create output buffer
         num_tokens = query.shape[0]
