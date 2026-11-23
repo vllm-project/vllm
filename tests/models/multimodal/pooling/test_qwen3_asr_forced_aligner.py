@@ -35,11 +35,6 @@ def test_qwen3_forced_aligner(
         dtype=dtype,
         enforce_eager=True,
         max_model_len=512,
-        hf_overrides={
-            "architectures": [
-                "Qwen3ASRForcedAlignerForTokenClassification",
-            ],
-        },
     ) as vllm_model:
         outputs = vllm_model.llm.encode(
             [{"prompt": prompt, "multi_modal_data": {"audio": audio}}],

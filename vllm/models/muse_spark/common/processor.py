@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Multimodal preprocessing for MuseSpark1x Omni checkpoints."""
+"""Multimodal preprocessing for Muse Spark Omni checkpoints."""
 
 import itertools
 import math
@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from PIL import Image
 from transformers import BatchFeature
+from transformers.image_transforms import to_pil_image
 from transformers.models.auto.video_processing_auto import VIDEO_PROCESSOR_MAPPING_NAMES
 
 from vllm.config.multimodal import (
@@ -48,7 +49,7 @@ DEFAULT_IMAGE_STD: tuple[float, float, float] = (0.5, 0.5, 0.5)
 RGBA_BACKGROUND_COLOR: tuple[int, int, int] = (255, 255, 255)
 
 
-@dataclass
+@dataclass(slots=True)
 class PreprocessConfig:
     patch_height: int = 14
     patch_width: int = 14
@@ -243,14 +244,14 @@ def find_resize_target(
 
 
 def preprocess_image(
-    image: Image.Image,
+    image: Image.Image | np.ndarray | torch.Tensor,
     config: PreprocessConfig,
     resize_to_max_canvas: bool = False,
 ) -> tuple[torch.Tensor, int]:
     """Preprocess one image into fp32 [C, H, W] and its output token count."""
     # Composite before resizing: LANCZOS would otherwise bleed the arbitrary
     # RGB of fully-transparent pixels into the visible edge.
-    image = _to_rgb(image)
+    image = _to_rgb(to_pil_image(image))
 
     w, h = image.size
 
@@ -343,7 +344,7 @@ def preprocess_video(
     return video_tensor, per_frame_token_counts, factored_timestamps
 
 
-@dataclass
+@dataclass(slots=True)
 class VideoClipMetadata:
     """Metadata for temporal clips in a preprocessed video."""
 
@@ -407,6 +408,8 @@ def _preprocess_single_video(
     else:
         frames = video_item
         metadata = {}
+    if isinstance(frames, list) and frames and isinstance(frames[0], Image.Image):
+        frames = np.stack([np.asarray(_to_rgb(frame)) for frame in frames])
 
     fps = float(metadata.get("fps", 1.0))
     frames_indices = metadata.get("frames_indices", list(range(len(frames))))
@@ -446,11 +449,11 @@ VIDEO_PROCESSOR_MAPPING_NAMES.setdefault("muse_spark", "MuseSparkVideoProcessor"
     "muse_spark",
     video_processor="MuseSparkVideoProcessor",
 )
-class MuseSpark1xOmniVideoBackend(VideoBackend):
+class MuseSparkOmniVideoBackend(VideoBackend):
     """Video loader that applies the model's frame sampling at load time.
 
-    The connector's default ``num_frames=32`` is indistinguishable from an
-    explicit request, so ``num_frames`` is always replaced by the model's cap.
+    The connector's default `num_frames=32` is indistinguishable from an
+    explicit request, so `num_frames` is always replaced by the model's cap.
     """
 
     @classmethod
@@ -481,7 +484,7 @@ class MuseSpark1xOmniVideoBackend(VideoBackend):
         return np.linspace(0, total - 1, n, dtype=int).tolist()
 
 
-class MuseSpark1xOmniProcessingInfo(BaseProcessingInfo):
+class MuseSparkOmniProcessingInfo(BaseProcessingInfo):
     def get_placeholder(self, modality: str) -> str:
         if modality == "image":
             return "<|patch|>"
@@ -568,8 +571,8 @@ class MuseSpark1xOmniProcessingInfo(BaseProcessingInfo):
         )
 
 
-class MuseSpark1xOmniDummyInputsBuilder(
-    BaseDummyInputsBuilder[MuseSpark1xOmniProcessingInfo]
+class MuseSparkOmniDummyInputsBuilder(
+    BaseDummyInputsBuilder[MuseSparkOmniProcessingInfo]
 ):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         parts: list[str] = ["Question:"]
@@ -623,8 +626,8 @@ class MuseSpark1xOmniDummyInputsBuilder(
         return data
 
 
-class MuseSpark1xOmniMultiModalProcessor(
-    BaseMultiModalProcessor[MuseSpark1xOmniProcessingInfo]
+class MuseSparkOmniMultiModalProcessor(
+    BaseMultiModalProcessor[MuseSparkOmniProcessingInfo]
 ):
     """Omni processor using native preprocessing instead of an HF processor."""
 

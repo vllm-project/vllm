@@ -8,8 +8,8 @@ import importlib.metadata as metadata
 def test_mooncake_engine_imports():
     """Fail here rather than as "Mooncake is not available" at engine startup.
 
-    The PyPI mooncake-transfer-engine wheel is built against CUDA 12, so on the
-    CUDA 13 image install-kv-connectors.sh replaces it with the cuda13 variant.
+    The PyPI mooncake-transfer-engine wheel is built against CUDA 12, so the
+    CUDA 13 CI image ships the cuda13 variant instead.
     A mismatch surfaces as an ImportError on the compiled extension.
     """
     for package_name in ("mooncake-transfer-engine", "mooncake-transfer-engine-cuda13"):

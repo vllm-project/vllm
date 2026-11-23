@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Numeric tests for the MuseSpark1x BF16/NVFP4 MoE on TRT-LLM and MegaMoE."""
+"""Numeric tests for the Muse Spark BF16/NVFP4 MoE on TRT-LLM and MegaMoE."""
 
 import functools
 
@@ -22,16 +22,34 @@ from tests.kernels.quantization.nvfp4_utils import (
     dequantize_nvfp4_to_dtype,
 )
 from vllm import _custom_ops as ops
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    KernelConfig,
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.distributed import get_tp_group
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
+from vllm.model_executor.layers.quantization.online.nvfp4 import (
+    Nvfp4OnlineMoEMethod,
+    _quantize_moe_weight_to_nvfp4,
+)
+from vllm.model_executor.offloader import UVAOffloader, set_offloader
 from vllm.models.muse_spark.common.layers import (
-    MuseSpark1xRMSNorm,
-    MuseSpark1xRMSNormWithInputScale,
+    MuseSparkRMSNorm,
+    MuseSparkRMSNormWithInputScale,
 )
 from vllm.models.muse_spark.nvidia.mega_moe import MuseSparkMegaMoEExperts
-from vllm.models.muse_spark.nvidia.muse_moe_runner import MuseSparkTrtLlmNvFp4Experts
+from vllm.models.muse_spark.nvidia.muse_moe_runner import (
+    MusePostExpertFinalize,
+    MuseSparkTrtLlmNvFp4Experts,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -196,7 +214,7 @@ def test_megamoe_bf16_nvfp4_shared_buffer(
     )
     torch.manual_seed(42)
     experts, hidden, intermediate, topk = 8, 4096, 1024, 4
-    norm = MuseSpark1xRMSNormWithInputScale(
+    norm = MuseSparkRMSNormWithInputScale(
         hidden_size=hidden,
         eps=1e-8,
         has_weight=True,
@@ -313,7 +331,7 @@ def test_megamoe_staging_preserves_quantization_and_padding(num_tokens):
 def test_muse_spark_bf16_moe_numeric(dist_init, workspace_init):
     """The norm sits between GEMM2 and the reduce, matching the fp32 reference."""
     ckpt = _bf16_checkpoint()
-    router, _, norm, vllm_config, runner = build_moe(MuseSpark1xRMSNorm, ckpt)
+    router, _, norm, vllm_config, runner = build_moe(MuseSparkRMSNorm, ckpt)
 
     x, logits = _inputs(1)
     out = run_moe(runner, vllm_config, x, logits)
@@ -336,7 +354,7 @@ def test_muse_spark_nvfp4_moe_numeric(dist_init, workspace_init):
     torch.manual_seed(0)
     ckpt = _nvfp4_checkpoint()
     router, routed, norm, vllm_config, runner = build_moe(
-        MuseSpark1xRMSNormWithInputScale, ckpt, nvfp4_quant_config()
+        MuseSparkRMSNormWithInputScale, ckpt, nvfp4_quant_config()
     )
 
     # Gate scalar from the w1 column, g1_scale_c from the w3 column.
@@ -380,11 +398,84 @@ def test_muse_spark_nvfp4_moe_numeric(dist_init, workspace_init):
     assert _rel(out, ref_full) < 1.5e-1
 
 
+@pytest.mark.parametrize("cpu_offload", [False, True])
+@torch.inference_mode()
+def test_muse_spark_online_nvfp4_moe_numeric(cpu_offload, dist_init, workspace_init):
+    """Experts an NVFP4 checkpoint leaves in BF16 take nvfp4_per_token online
+    quantization and keep the post-expert norm.
+
+    With CPU offloading the BF16 experts are staged on the CPU.
+    """
+    quant_config = nvfp4_quant_config(exclude_modules=["moe.experts"])
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"*moe.experts*": "nvfp4_per_token"})
+    )
+    ckpt = _bf16_checkpoint()
+    bf16_bytes = sum(w.nbytes for w in ckpt.values())
+    if cpu_offload:
+        set_offloader(UVAOffloader(cpu_offload_max_bytes=0))
+    torch.accelerator.reset_peak_memory_stats()
+    allocated = torch.accelerator.memory_allocated()
+    try:
+        router, routed, norm, vllm_config, runner = build_moe(
+            MuseSparkRMSNorm,
+            {name: w.to("cpu" if cpu_offload else "cuda") for name, w in ckpt.items()},
+            quant_config,
+        )
+    finally:
+        set_offloader(None)
+    method = routed.quant_method
+    assert isinstance(method, Nvfp4OnlineMoEMethod)
+    assert method.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
+    assert routed.w13_weight.is_cuda and routed.w2_weight.is_cuda
+    if cpu_offload:
+        # Staged experts never hold the whole BF16 layer on the device.
+        assert torch.accelerator.max_memory_allocated() - allocated < bf16_bytes
+
+    x, logits = _inputs(1)
+    out = run_moe(runner, vllm_config, x, logits)
+    assert out.shape == (M, K) and out.dtype == torch.bfloat16
+
+    def quantized(weight: torch.Tensor) -> torch.Tensor:
+        q, sf, s2 = _quantize_moe_weight_to_nvfp4(weight)
+        return torch.stack([_dequant(q[e], sf[e], 1.0 / s2[e]) for e in range(E)])
+
+    # The reference uses the exact weights the experts run.
+    w13, w2 = quantized(ckpt["w13_weight"]), quantized(ckpt["w2_weight"])
+    topk_weights, topk_ids = router._compute_routing(x, logits, None)
+    with set_current_vllm_config(vllm_config):
+        ref = swiglu_moe_ref(x, w13, w2, topk_weights, topk_ids, norm.forward_native)
+        unnormed = swiglu_moe_ref(x, w13, w2, topk_weights, topk_ids, lambda y: y)
+    # Per-token NVFP4 activations are the only error left.
+    assert _rel(out, ref) < 2e-1
+    assert _rel(out, unnormed) > 5e-1
+
+
+def test_muse_spark_rejects_unsupported_online_moe(dist_init, workspace_init):
+    """Experts without the post-GEMM2 hook would silently skip the norm."""
+    quant_config = nvfp4_quant_config(exclude_modules=["moe.experts"])
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"*moe.experts*": "fp8_per_tensor"})
+    )
+    with pytest.raises(NotImplementedError, match="nvfp4_per_token"):
+        build_moe(MuseSparkRMSNorm, _bf16_checkpoint(), quant_config)
+
+
+def test_muse_spark_rejects_online_target_on_nvfp4_experts(dist_init, workspace_init):
+    """A target on checkpoint-NVFP4 experts must not be silently ignored."""
+    quant_config = nvfp4_quant_config()
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"*moe.experts*": "nvfp4_per_token"})
+    )
+    with pytest.raises(NotImplementedError, match="re-quantize"):
+        build_moe(MuseSparkRMSNorm, _nvfp4_checkpoint(), quant_config)
+
+
 @torch.inference_mode()
 def test_muse_spark_bf16_moe_kernel_router_matches_reference(dist_init, workspace_init):
     """The fused router must select on biased scores but weight by unbiased ones."""
     ckpt = _bf16_checkpoint(seed=3)
-    router, routed, _, vllm_config, runner = build_moe(MuseSpark1xRMSNorm, ckpt)
+    router, routed, _, vllm_config, runner = build_moe(MuseSparkRMSNorm, ckpt)
 
     captured: list[UnfinalizedMoEOutput] = []
     experts = routed.quant_method.moe_kernel.fused_experts
@@ -430,5 +521,127 @@ def test_muse_spark_moe_cudagraph(nvfp4, dist_init, workspace_init):
         ckpt, quant_config = _nvfp4_checkpoint(), nvfp4_quant_config()
     else:
         ckpt, quant_config = _bf16_checkpoint(), None
-    _, _, _, vllm_config, runner = build_moe(MuseSpark1xRMSNorm, ckpt, quant_config)
+    _, _, _, vllm_config, runner = build_moe(MuseSparkRMSNorm, ckpt, quant_config)
     assert_cudagraph_replays(runner, vllm_config, *_inputs(5), *_inputs(6))
+
+
+@torch.inference_mode()
+def test_megamoe_trtllm_weight_layout_matches_native(dist_init, workspace_init):
+    """Shared TRT storage must preserve native MegaMoE outputs and graph replay."""
+    from vllm.models.muse_spark.nvidia.mega_moe import _get_deep_gemm
+    from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_nvfp4 import (
+        prepare_megamoe_nvfp4_inputs,
+    )
+
+    torch.manual_seed(137)
+    ckpt = _nvfp4_checkpoint()
+    norm = MuseSparkRMSNormWithInputScale(
+        hidden_size=K,
+        eps=1e-8,
+        has_weight=True,
+        is_post_norm=True,
+        zero_centered_gamma=True,
+    ).cuda()
+    norm.weight.copy_(torch.linspace(-0.5, 0.5, K, device="cuda"))
+    layers = []
+    for layout, tp_size in (("native", 1), ("trtllm", 4)):
+        config = VllmConfig(
+            kernel_config=KernelConfig(moe_backend="deep_gemm_mega_moe"),
+            quant_config=nvfp4_quant_config(),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=tp_size,
+                enable_expert_parallel=True,
+                distributed_executor_backend="mp",
+            ),
+        )
+        with set_current_vllm_config(config):
+            layer = MuseSparkMegaMoEExperts(
+                config,
+                num_experts=E,
+                num_local_experts=E,
+                experts_start_idx=0,
+                top_k=TOPK,
+                hidden_size=K,
+                intermediate_size=N,
+                post_expert_norm=norm,
+                num_max_tokens_per_rank=128,
+                prefix=f"shared_layout.{layout}",
+            ).cuda()
+            assert layer.weight_layout == layout
+            assert set(layer.load_weights(ckpt.items())) == set(ckpt)
+            layer.finalize_weights()
+            layers.append(layer)
+    native, shared = layers
+    for view, parameter in (
+        (shared._transformed_l1[0], shared.w13_weight),
+        (shared._transformed_l1[1], shared.w13_weight_scale),
+        (shared._transformed_l2[0], shared.w2_weight),
+        (shared._transformed_l2[1], shared.w2_weight_scale),
+    ):
+        assert view.data_ptr() == parameter.data_ptr()
+        assert view.untyped_storage().nbytes() == parameter.untyped_storage().nbytes()
+    shared.finalize_weights()  # Must not shuffle the already finalized weights again.
+
+    dg = _get_deep_gemm()
+    buffer = dg.SymmBuffer(
+        torch.distributed.group.WORLD, E, 128, TOPK, K, N, mma_type="fp4xfp4"
+    )
+    try:
+        for tokens in (1, 8, 32, 64):
+            x = torch.randn(tokens, K, device="cuda", dtype=torch.bfloat16) / 10
+            weights, ids = torch.randn(tokens, E, device="cuda").topk(TOPK)
+            weights = weights.softmax(-1)
+            ids = ids.int()
+            ids[::3, -1] = -1
+            buffer.topk_idx.fill_(-1)
+            buffer.topk_weights.zero_()
+
+            def stage(x=x, weights=weights, ids=ids, tokens=tokens):
+                prepare_megamoe_nvfp4_inputs(
+                    x,
+                    weights,
+                    ids,
+                    buffer.x[:tokens],
+                    buffer.x_sf[:tokens].view(torch.uint8),
+                    buffer.topk_idx[:tokens],
+                    buffer.topk_weights[:tokens],
+                    None,
+                )
+
+            stage()
+            expected = native.forward_prepared(x, buffer)
+            actual = shared.forward_prepared(x, buffer)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = shared.forward_prepared(x, buffer)
+            for _ in range(3):
+                x.normal_(std=0.1)
+                ids.copy_(torch.randn(tokens, E, device="cuda").topk(TOPK).indices)
+                stage()
+                expected = native.forward_prepared(x, buffer)
+                graph.replay()
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    finally:
+        buffer.destroy()
+
+
+def test_post_expert_norm_weight_refilled_after_reload():
+    """The activation-dtype norm weight is built on the first forward; a weight
+    reload must refresh it where captured CUDA graphs read it."""
+    from types import SimpleNamespace
+
+    norm = SimpleNamespace(has_weight=True, weight=torch.rand(8), hidden_size=8)
+    finalize = MusePostExpertFinalize.__new__(MusePostExpertFinalize)
+    finalize._norm = norm
+    finalize._fused_weight = None
+
+    finalize.process_weights_after_loading()  # cold start: not built yet
+    assert finalize._fused_weight is None
+    first = finalize._effective_weight(torch.bfloat16, torch.device("cpu"))
+
+    norm.weight = norm.weight * 3
+    finalize.process_weights_after_loading()
+
+    assert finalize._fused_weight is first
+    torch.testing.assert_close(first, norm.weight.to(torch.bfloat16))

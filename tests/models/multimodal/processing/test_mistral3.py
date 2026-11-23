@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for Mistral3's multimodal preprocessing kwargs."""
+"""Tests for Mistral3's and Pixtral (HF)'s multimodal preprocessing kwargs."""
 
 import pytest
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from transformers import AutoProcessor, BatchFeature
+from transformers import AutoProcessor, BatchFeature, PreTrainedConfig
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.model_executor.layers.fusion.mm_input_norm import (
@@ -35,6 +35,7 @@ from ...utils import build_model_context
 _MODEL_CONFIG_KWARGS = {"config_format": "hf"}
 _MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 _LIGHTON_MODEL_ID = "lightonai/LightOnOCR-1B-1025"
+_PIXTRAL_HF_MODEL_ID = "mistral-community/pixtral-12b"
 
 _RGB_MEAN = [0.48145466, 0.4578275, 0.40821073]
 _RGB_STD = [0.26862954, 0.26130258, 0.27577711]
@@ -43,7 +44,8 @@ _RGB_RESCALE = 1.0 / 255.0
 
 @pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.skipif(
-    not HAS_TRITON or not current_platform.is_cuda(), reason="CUDA Triton kernel"
+    not HAS_TRITON or not current_platform.is_cuda_alike(),
+    reason="CUDA or ROCm Triton kernel",
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("normalize", [False, True])
@@ -79,6 +81,9 @@ def test_pixtral_patch_embed_preserves_image_order_and_strides(
     reference = []
     for image in images:
         if normalize:
+            assert isinstance(norm, FusedMMInputNorm)
+            assert isinstance(norm.weight, torch.Tensor)
+            assert isinstance(norm.bias, torch.Tensor)
             normalized = (
                 image.float() * norm.weight[:, None, None] + norm.bias[:, None, None]
             )
@@ -230,6 +235,48 @@ def test_processor_size_override(
     assert prompt_update_tokens == hf_placeholder_tokens
 
 
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "expected_toks_per_img"),
+    [
+        ({}, 3072),
+        ({"size": {"longest_edge": 512}}, 768),
+        ({"images_kwargs": {"size": {"longest_edge": 512}}}, 768),
+    ],
+)
+@pytest.mark.parametrize("kwargs_on_init", [True, False])
+def test_pixtral_hf_processor_size_override(
+    mm_processor_kwargs: dict[str, object],
+    expected_toks_per_img: int,
+    kwargs_on_init: bool,
+):
+    ctx = build_model_context(
+        _PIXTRAL_HF_MODEL_ID,
+        mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
+    hf_processor = AutoProcessor.from_pretrained(
+        _PIXTRAL_HF_MODEL_ID,
+        fix_mistral_regex=True,
+    )
+
+    image = Image.new("RGB", (1024, 768), color=(127, 127, 127))
+    merged_mm_kwargs = processor.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
+    pixel_values, hf_placeholder_tokens = _process_images_with_hf(
+        hf_processor, [image], merged_mm_kwargs
+    )
+    prompt_update_tokens = _placeholder_tokens_from_prompt_updates(
+        processor, [image], pixel_values, hf_processor_mm_kwargs
+    )
+
+    assert (
+        _expected_placeholder_tokens_per_image(hf_processor, pixel_values[0])
+        == expected_toks_per_img
+    )
+    assert prompt_update_tokens == hf_placeholder_tokens
+
+
 @pytest.mark.usefixtures("default_vllm_config")
 def test_mm_device_do_normalize():
     ctx = build_model_context(
@@ -250,13 +297,19 @@ def test_mm_device_do_normalize():
 
     normalized_inputs = processor(prompt, mm_items=mm_items)
     normalized_values = normalized_inputs["mm_kwargs"].get_data()["pixel_values"]
+    assert isinstance(normalized_values, (list, torch.Tensor))
 
     ctx.model_config.multimodal_config.mm_device_do_normalize = True
     raw_inputs = processor(prompt, mm_items=mm_items)
     raw_values = raw_inputs["mm_kwargs"].get_data()["pixel_values"]
-    assert all(value.dtype == torch.uint8 for value in raw_values)
+    assert isinstance(raw_values, (list, torch.Tensor))
+    assert all(
+        isinstance(value, torch.Tensor) and value.dtype == torch.uint8
+        for value in raw_values
+    )
 
-    input_norm = build_mm_input_norm(ctx.model_config)
+    device = torch.device(current_platform.device_type)
+    input_norm = build_mm_input_norm(ctx.model_config).to(device)
     patch_size = processor.info.get_hf_config().vision_config.patch_size
 
     def pack_patches(image: torch.Tensor) -> torch.Tensor:
@@ -271,9 +324,11 @@ def test_mm_device_do_normalize():
         )
 
     for raw, normalized in zip(raw_values, normalized_values):
-        output = input_norm(pack_patches(raw), normalized.dtype)
+        assert isinstance(raw, torch.Tensor)
+        assert isinstance(normalized, torch.Tensor)
+        output = input_norm(pack_patches(raw).to(device), normalized.dtype)
         torch.testing.assert_close(
-            output, pack_patches(normalized), rtol=1e-5, atol=1e-6
+            output, pack_patches(normalized).to(device), rtol=1e-5, atol=1e-6
         )
 
 
@@ -325,6 +380,6 @@ def test_lightonocr_keeps_vision_config_image_size():
     encoder_info = processor.info.get_vision_encoder_info()
     assert isinstance(encoder_info, PixtralHFEncoderInfo)
     assert not isinstance(encoder_info, Mistral3HFEncoderInfo)
-    assert encoder_info.get_image_size() == (
-        processor.info.get_hf_config().vision_config.image_size
-    )
+    vision_config = processor.info.get_hf_config().vision_config
+    assert isinstance(vision_config, PreTrainedConfig)
+    assert encoder_info.get_image_size() == vision_config.image_size

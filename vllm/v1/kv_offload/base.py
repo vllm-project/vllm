@@ -7,7 +7,16 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, fields
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    NamedTuple,
+    NewType,
+    Protocol,
+    TypeVar,
+    runtime_checkable,
+)
 
 import numpy as np
 import torch
@@ -18,7 +27,7 @@ if TYPE_CHECKING:
     )
 
 from vllm.v1.kv_hints import KvHintsEnvelope
-from vllm.v1.kv_offload.config import OffloadingConfig
+from vllm.v1.kv_offload.config import OffloadAccessMode, OffloadingConfig
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
@@ -71,7 +80,7 @@ class TierMatcher(NamedTuple):
         return medium_matches and locality_matches
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TierFilter:
     """Per-request filter controlling which tiers participate."""
 
@@ -88,8 +97,13 @@ class TierFilter:
 TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
 
 
-@dataclass
+@dataclass(slots=True)
 class ReqContext:
+    """Per-request offloading state with optional token counts.
+
+    Counts are live until the scheduler finishes the request, then frozen.
+    """
+
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
     kv_hints: KvHintsEnvelope | None = None
@@ -104,6 +118,26 @@ class ReqContext:
     _offload_key_positions: dict[OffloadKey, int] = field(
         default_factory=dict, repr=False, init=False
     )
+
+    @property
+    def num_computed_tokens(self) -> int | None:
+        """Scheduler's computed token count, including in-flight work."""
+        return None
+
+    @property
+    def num_in_flight_tokens(self) -> int | None:
+        """Scheduled tokens whose output has not yet been processed."""
+        return None
+
+    @property
+    def num_prompt_tokens(self) -> int | None:
+        """Number of prompt tokens."""
+        return None
+
+    @property
+    def num_tokens(self) -> int | None:
+        """Number of prompt and output tokens, excluding speculative tokens."""
+        return None
 
     def set_state(self, val: Any) -> None:
         self._state[type(val)] = val
@@ -127,6 +161,16 @@ class LookupResult(Enum):
     RETRY = auto()
 
 
+class StoreTrigger(Enum):
+    """Why the connector asks the manager to store the keys."""
+
+    # The chunks are complete. The eager store.
+    ON_COMPUTE = auto()
+    # The KV cache manager hands off a state block that is about to be reused.
+    # The source is short-lived, so the store cannot be postponed.
+    ON_HANDOFF = auto()
+
+
 class OffloadPolicy(Enum):
     # Offload only newly-computed chunks as they arrive; prefix-hit
     # chunks (already offloaded by a prior request) are skipped.
@@ -136,7 +180,7 @@ class OffloadPolicy(Enum):
     REQUEST_LEVEL = "request_level"
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestOffloadingContext:
     policy: OffloadPolicy = OffloadPolicy.CHUNK_LEVEL
 
@@ -156,14 +200,19 @@ class LoadStoreSpec:
     """
 
 
-@dataclass
+@dataclass(slots=True)
 class PrepareStoreOutput:
     keys_to_store: list[OffloadKey]
     store_spec: LoadStoreSpec
     evicted_keys: list[OffloadKey]
+    # Offered keys to offer again because the manager had no room. Within a
+    # group (get_offload_group_idx), they are the offered keys from the first
+    # one that did not fit on, by token position, including keys that are
+    # already stored. Disjoint from keys_to_store.
+    keys_to_retry: list[OffloadKey] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class OffloadingEvent:
     keys: list[OffloadKey]
     medium: Medium
@@ -175,6 +224,8 @@ class OffloadingEvent:
     removal_expected: bool = False
     # Failed allocations release metadata without announcing a public eviction.
     metadata_only: bool = False
+    # Originating request context for a stored event.
+    req_context: ReqContext | None = field(default=None, repr=False, compare=False)
 
 
 """
@@ -189,11 +240,6 @@ The class provides the following primitives:
         The given blocks will be protected from eviction.
         This function returns a LoadSpec which encapsulates
         information required for performing the load.
-    touch() - marks the give blocks as recently used. Can be used
-        to track block's LRU. This function is separated from the
-        prepare_load function to allow setting block recency even
-        for blocks which do not need reading from the cache, such as
-        blocks that are cached by the GPU prefix cache.
     complete_load() - mark blocks which were previously prepared to be
         loaded as done loading. This is to re-allow their eviction.
     prepare_store() - prepare the given blocks to be written.
@@ -214,18 +260,18 @@ Exclusion:
 """
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingMetricMetadata:
     documentation: str
     labelnames: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingCounterMetadata(OffloadingMetricMetadata):
     pass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingGaugeMetadata(OffloadingMetricMetadata):
     # Gauge-only in prometheus_client: how MultiProcessCollector merges samples
     # written by different API-server processes. Offloading stats reach one
@@ -235,12 +281,12 @@ class OffloadingGaugeMetadata(OffloadingMetricMetadata):
     multiprocess_mode: str = "mostrecent"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingHistogramMetadata(OffloadingMetricMetadata):
     buckets: tuple[float, ...] | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingKVEventsConfig:
     # Global vLLM KV event publishing flag. When false, connector-specific
     # event capture must stay inert because take_events() is not drained.
@@ -254,7 +300,7 @@ class OffloadingKVEventsConfig:
 ConfigInfoMapping = Mapping[str, str | int | float | bool]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ConfigInfo:
     """Static facts that one component publishes on vllm:kv_offload_config_info.
 
@@ -322,7 +368,7 @@ class OffloadingManager(ABC):
     ) -> CacheHitSource:
         """Return the cache tier that supplied a successful lookup.
 
-        This is queried only after ``lookup`` resolves to ``HIT``. Composing
+        This is queried only after `lookup` resolves to `HIT`. Composing
         managers can override it to retain the origin across asynchronous
         promotion into a primary tier. The default keeps out-of-tree managers
         compatible while making unknown provenance explicit.
@@ -351,17 +397,6 @@ class OffloadingManager(ABC):
         """
         pass
 
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """Mark the given blocks as recently used.
-        This could in practice mean moving them to the end of an LRU list.
-
-        Args:
-            keys: the keys identifying the blocks.
-            req_context: per-request context (e.g. kv_transfer_params).
-
-        """
-        return
-
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """Marks previous blocks that were prepared to load as done loading.
 
@@ -377,6 +412,8 @@ class OffloadingManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
+        trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
         """Prepare the given blocks to be offloaded.
         The given blocks will be protected from eviction until
@@ -385,11 +422,14 @@ class OffloadingManager(ABC):
         Args:
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
+            trigger: why the connector asks for the store.
 
         Returns:
             A PrepareStoreOutput indicating which blocks need storing,
             where to store them (LoadStoreSpec), and list of blocks that
-            were evicted as a result.
+            were evicted as a result. A manager short on room may store
+            only some of the keys and report the rest in keys_to_retry,
+            under the constraints documented on that field.
             None is returned if the blocks cannot be stored.
 
         """
@@ -399,6 +439,8 @@ class OffloadingManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
+        trigger: StoreTrigger,
         success: bool = True,
     ):
         """Marks blocks which were previously prepared to be stored, as stored.
@@ -409,6 +451,7 @@ class OffloadingManager(ABC):
         Args:
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
+            trigger: the trigger given to the matching prepare_store.
             success: whether the blocks were stored successfully.
 
         """
@@ -484,6 +527,11 @@ class OffloadingManager(ABC):
         """Evict all tracked blocks and reset internal state."""
         return
 
+    def on_reset_flushed(self) -> None:
+        """Called once workers have reported every job in flight at the last
+        reset_cache(); blocks it freed are no longer written by them."""
+        return
+
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return collected metrics since last call, or None if disabled."""
         return None
@@ -498,7 +546,7 @@ class OffloadingManager(ABC):
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources.
 
-        The one exception to the rule that callers hold ``lock``: call this
+        The one exception to the rule that callers hold `lock`: call this
         without it. A manager with a background thread stops that thread here
         and may need the lock to do so.
         """
@@ -552,12 +600,14 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
         self.block_indices: Sequence[int] = block_indices
 
 
-@dataclass
+@dataclass(slots=True)
 class CanonicalKVCacheTensor:
     """A canonicalized KV cache tensor whose first dimension is num_blocks.
 
-    With standardized layouts (RFC #42082) num_blocks is always the leading
-    logical dimension.
+    For attention backends where the raw tensor has num_blocks at a
+    non-leading physical dimension (e.g. FlashAttention's
+    (2, num_blocks, ...) layout), the tensor is split so that each
+    resulting CanonicalKVCacheTensor starts with (num_blocks, ...).
     """
 
     # The KV cache tensor with shape (num_blocks, ...)
@@ -566,7 +616,7 @@ class CanonicalKVCacheTensor:
     page_size_bytes: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CopyRun:
     """A strided byte correspondence between this worker's physical page and
     a canonical page: for i in range(num_fragments), fragment i spans
@@ -581,7 +631,7 @@ class CopyRun:
     canonical_stride: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CanonicalPageMapping:
     """How this worker's page maps into a canonical (parallelism-free) page.
     In-process only, never serialized. Runs cover the full local page in both
@@ -608,7 +658,7 @@ class CanonicalPageMapping:
         return block_id % self.num_writers == self.writer_index
 
 
-@dataclass
+@dataclass(slots=True)
 class CanonicalKVCacheRef:
     """Per-layer (or group of layers) reference to a specific (by index)
     CanonicalKVCacheTensor and records the un-padded page size used by that layer.
@@ -622,7 +672,7 @@ class CanonicalKVCacheRef:
     mapping: CanonicalPageMapping | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class CanonicalKVCaches:
     """Canonicalized block-level representation of the KV caches.
 
@@ -641,7 +691,46 @@ class CanonicalKVCaches:
     group_data_refs: list[list[CanonicalKVCacheRef]]
 
 
-@dataclass
+@dataclass(slots=True)
+class DevicePointers:
+    """Pre-resolved device pointers for a transfer.
+
+    Flat arrays in canonical order:
+        for each group:
+            for each data_ref in group:
+                for each block in group:
+                    ptrs[i], sizes[i]
+    """
+
+    ptrs: np.ndarray  # uint64, device memory addresses
+    sizes: np.ndarray  # uint64, byte sizes per copy op
+    group_block_counts: tuple[int, ...]  # device blocks per group
+    group_data_ref_counts: tuple[int, ...]  # data_refs per group
+    block_indices: tuple[int, ...]  # logical block offset per group
+
+
+class DevicePointerGroupInfo(NamedTuple):
+    group_idx: int
+    group_size: int
+    n_data_refs: int
+    skip: int
+    n_chunks: int
+    dev_ptr_offset: int
+
+
+@runtime_checkable
+class IOCompletion(Protocol):
+    """Completion handle for an async I/O operation.
+
+    `concurrent.futures.Future` satisfies this unchanged.  Stream-ordered
+    backends can implement this with a CUDA event, avoiding a thread.
+    """
+
+    def done(self) -> bool: ...
+    def result(self, timeout: float | None = None) -> object: ...
+
+
+@dataclass(slots=True)
 class TransferResult:
     job_id: int
     success: bool
@@ -656,21 +745,40 @@ class OffloadingWorker(ABC):
 
     @abstractmethod
     def submit_store(
-        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+        self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
     ) -> bool:
-        """Async GPU -> offloaded medium."""
+        """Async device -> offloaded medium."""
 
     @abstractmethod
     def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        device_ptrs: DevicePointers,
+        expedited: bool = False,
     ) -> bool:
-        """Async offloaded medium -> GPU."""
+        """Async offloaded medium -> device.
+
+        An expedited load is waited on within the step, so it should not queue
+        behind regular loads. Submission itself must still not block.
+        """
 
     @abstractmethod
     def get_finished(self) -> list[TransferResult]: ...
 
     @abstractmethod
     def wait(self, job_ids: set[int]) -> None: ...
+
+    def start_deferred_setup(self) -> None:
+        """Start setup deferred by async_init.
+
+        No transfers are submitted until is_ready().
+        """
+        return
+
+    def is_ready(self) -> bool:
+        """Whether this worker can take transfers."""
+        return True
 
     def shutdown(self) -> None:
         return
@@ -702,6 +810,9 @@ class OffloadingSpec(ABC):
         self.config = config
         self.extra_config = config.extra_config
         self.replicated_layout: bool = False
+        # When True, the worker finishes its setup in the background and the
+        # engine serves without offloading until every worker is ready.
+        self.async_init: bool = False
         self.kv_events_config = OffloadingKVEventsConfig(
             enable_kv_cache_events=config.enable_kv_cache_events,
             self_describing_kv_events=bool(
@@ -715,6 +826,13 @@ class OffloadingSpec(ABC):
         # reasoning models that strip thinking).
         self.offload_prompt_only: bool = bool(
             self.extra_config.get("offload_prompt_only", True)
+        )
+
+        # Direction(s) in which this connector's managers may transfer data.
+        # A read-only manager never accepts stores; a write-only manager never
+        # serves loads.
+        self.access_mode: OffloadAccessMode = OffloadAccessMode.from_config(
+            self.extra_config.get("access_mode")
         )
 
         self.tokens_per_block = tuple(group.tokens_per_block for group in config.groups)

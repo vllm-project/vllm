@@ -13,7 +13,7 @@ from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelWithQuantization:
     model_path: str
     quantization: str
@@ -24,17 +24,17 @@ MODELS: list[ModelWithQuantization]
 if current_platform.is_rocm():
     MODELS = [
         ModelWithQuantization(
-            model_path="JunHowie/Qwen3-0.6B-GPTQ-Int4",
+            model_path="vllm-project/Qwen3-0.6B-GPTQ-Int4",
             quantization="gptq",
         ),
     ]
 else:
     MODELS = [
         ModelWithQuantization(
-            model_path="Orion-zhen/Qwen3-0.6B-AWQ", quantization="awq"
+            model_path="vllm-project/Qwen3-0.6B-AWQ", quantization="awq"
         ),
         ModelWithQuantization(
-            model_path="JunHowie/Qwen3-0.6B-GPTQ-Int4",
+            model_path="vllm-project/Qwen3-0.6B-GPTQ-Int4",
             quantization="gptq",
         ),
     ]
