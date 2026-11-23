@@ -452,8 +452,9 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   // write, and every write lands at or before its source column.
   const bool pack_attention =
       valid_counts != nullptr && attention_indices != nullptr;
+  bool any_row_needs_compaction = false;
   const auto pack_valid_to_front = [&]() {
-    if (!pack_attention) return;
+    if (!any_row_needs_compaction) return;
     const int num_chunks = (top_k + kWarpSize - 1) / kWarpSize;
     const int iters = (num_chunks + NUM_WARPS - 1) / NUM_WARPS;
     for (int row = first_row; row < end_row; ++row) {
@@ -599,13 +600,16 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     }
   }
   __syncthreads();
+  int needs_compaction = 0;
   for (int row = first_row + tid; row < end_row; row += blockDim.x) {
     const int r = row - first_row;
     if (pack_attention) {
       const int last_valid = s_last_valid[r] - 1;
+      const bool compact = top_k - s_first_invalid[r] < last_valid;
+      needs_compaction |= compact;
       // -1 marks rows that pack_valid_to_front must compact.
       valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
-          top_k - s_first_invalid[r] < last_valid ? -1 : last_valid + 1;
+          compact ? -1 : last_valid + 1;
       s_last_valid[r] = 0;
     } else if (valid_counts != nullptr) {
       valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
@@ -613,6 +617,8 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     }
     s_row_valid[r] = 0;
   }
+  any_row_needs_compaction =
+      pack_attention && __syncthreads_or(needs_compaction) != 0;
   // Fully resident rows need only request-relative page translation. Avoid
   // building the table or touching the hot LRU when no row can consult it.
   const int host_positions = s_counters[3];
