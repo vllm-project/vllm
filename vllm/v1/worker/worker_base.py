@@ -411,6 +411,9 @@ class WorkerWrapperBase:
         if mm_cache is None:
             return
 
+        if scheduler_output.unread_mm_features:
+            mm_cache.release_unread_features(scheduler_output.unread_mm_features)
+
         for req_data in scheduler_output.scheduled_new_reqs:
             req_data.mm_features = mm_cache.get_and_update_features(
                 req_data.mm_features

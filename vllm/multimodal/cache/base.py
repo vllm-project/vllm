@@ -446,6 +446,17 @@ class BaseMultiModalReceiverCache(
 ):
     """The required interface for caches on P1."""
 
+    def release_unread_features(
+        self,
+        mm_features: list["MultiModalFeatureSpec"],
+    ) -> None:
+        """Release features whose request was dropped before being read.
+
+        Only caches that hold a per-read reference on the producer side
+        (the shared memory cache) need to do anything here.
+        """
+        return None
+
     def get_and_update_features(
         self,
         mm_features: list["MultiModalFeatureSpec"],

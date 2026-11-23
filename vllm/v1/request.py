@@ -198,6 +198,9 @@ class Request:
 
         # Multi-modal related
         self.mm_features = mm_features or []
+        # Set once the request has been sent to the workers, which then read
+        # its multimodal inputs.
+        self.mm_features_dispatched = False
 
         # Read-only views
         # Prevent directly appending to these lists since

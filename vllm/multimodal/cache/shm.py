@@ -289,6 +289,22 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
         return mm_features
 
     @override
+    def release_unread_features(
+        self, mm_features: list["MultiModalFeatureSpec"]
+    ) -> None:
+        for feature in mm_features:
+            if feature.data is None:
+                continue
+            if (handle := _get_shm_handle(feature.data)) is not None:
+                address, monotonic_id, signature = handle
+                self._shm_cache.release_unread(
+                    address,
+                    monotonic_id,
+                    signature,
+                    feature.mm_hash or feature.identifier,
+                )
+
+    @override
     def get_and_update_item(
         self,
         mm_item: MultiModalKwargsItem | None,
