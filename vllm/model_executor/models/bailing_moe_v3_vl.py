@@ -13,7 +13,7 @@ import torch.nn as nn
 from transformers import AutoProcessor, BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -186,9 +186,7 @@ class BailingMoeV3VLProcessingInfo(Qwen2VLProcessingInfo):
             "video": self.get_max_video_tokens(seq_len, mm_counts),
         }
 
-    def _get_video_size_with_most_features(
-        self, overrides: VideoDummyOptions | None = None
-    ) -> ImageSize:
+    def _get_video_size_with_most_features(self) -> ImageSize:
         return self.get_image_size_with_most_features()
 
 

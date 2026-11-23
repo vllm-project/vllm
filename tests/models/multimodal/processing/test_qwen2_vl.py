@@ -466,68 +466,6 @@ def _count_video_tokens(processor_inputs) -> int:
 
 
 @pytest.mark.parametrize(
-    ("mm_processor_kwargs", "hint", "frame_size"),
-    [
-        (None, {"width": 1400, "height": 2800}, (1400, 2800)),
-        (_SCOPED_HALF_VIDEO_SIZE, {"width": 1792, "height": 2520}, (1792, 2520)),
-        (_SCOPED_HALF_VIDEO_SIZE, {"width": 1792}, (1792, 3584)),
-        (_SCOPED_HALF_VIDEO_SIZE, {"height": 1792}, (3584, 1792)),
-        (_SCOPED_HALF_VIDEO_SIZE, {"width": 2357, "height": 2726}, (2357, 2726)),
-        (_SCOPED_HALF_VIDEO_SIZE, {"width": 192, "height": 108}, (192, 108)),
-        (None, {"width": 60, "height": 60}, (19, 19)),
-        ({"do_resize": False}, {"width": 448, "height": 448}, (448, 448)),
-        (
-            {"videos_kwargs": {"do_resize": False}},
-            {"width": 1400, "height": 2800},
-            (1400, 2800),
-        ),
-        ({"videos_kwargs": {"do_resize": False}}, {"width": 2800}, (1792, 7168)),
-        (
-            {"videos_kwargs": {"do_resize": False}},
-            {"width": 28, "height": 5628},
-            (28, 5628),
-        ),
-    ],
-)
-def test_dummy_video_follows_size_hint(
-    mm_processor_kwargs: dict[str, object] | None,
-    hint: dict[str, int],
-    frame_size: tuple[int, int],
-) -> None:
-    num_frames = 2
-    ctx = build_model_context(
-        "Qwen/Qwen2.5-VL-3B-Instruct",
-        mm_processor_kwargs=mm_processor_kwargs,
-        model_config_kwargs={"max_model_len": 40000},
-        limit_mm_per_prompt={
-            "image": 0,
-            "video": {"count": 1, "num_frames": num_frames, **hint},
-        },
-    )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-
-    width, height = frame_size
-    video = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
-    metadata = {
-        "fps": 2.0,
-        "duration": num_frames / 2.0,
-        "total_num_frames": num_frames,
-        "frames_indices": list(range(num_frames)),
-        "video_backend": "opencv",
-        "do_sample_frames": False,
-    }
-    processed = processor(
-        "<|vision_start|><|video_pad|><|vision_end|>",
-        mm_items=processor.info.parse_mm_data({"video": [(video, metadata)]}),
-        hf_processor_mm_kwargs={},
-    )
-
-    assert _count_video_tokens(
-        processor.get_dummy_mm_inputs({"video": 1})
-    ) == _count_video_tokens(processed)
-
-
-@pytest.mark.parametrize(
     ("max_model_len", "mm_processor_kwargs", "video_options"),
     [
         (40000, None, {"count": 1, "width": 3584, "height": 3584}),

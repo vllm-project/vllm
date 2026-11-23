@@ -3,7 +3,6 @@
 """EmbeddingGemma2: bidirectional Gemma4-derived multimodal embedding model."""
 
 import dataclasses
-import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, cast
 
@@ -80,7 +79,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.processing.dummy_inputs import MIN_DUMMY_SIDE
 from vllm.multimodal.video import EmbeddingGemma2VideoBackend
 from vllm.sequence import IntermediateTensors
 
@@ -499,6 +497,8 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
         video_kwargs: Mapping[str, Any],
         overrides: VideoDummyOptions | None = None,
     ) -> ImageSize:
+        if overrides is not None and (overrides.width or overrides.height):
+            return ImageSize(width=_VIDEO_FRAME_WIDTH, height=_VIDEO_FRAME_HEIGHT)
         vision_config = self.get_hf_config().vision_config
         unit = vision_config.patch_size * vision_config.pooling_kernel_size
         max_soft_tokens = self.get_video_max_soft_tokens(video_kwargs)
@@ -510,32 +510,6 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
             for h in range(1, max_soft_tokens + 1)
             if max_soft_tokens % h == 0
         ]
-        if overrides is not None and (overrides.width or overrides.height):
-            max_width = overrides.width or unit * max_soft_tokens
-            max_height = overrides.height or unit * max_soft_tokens
-            sizes = [
-                ImageSize(
-                    width=min(size.width, max_width),
-                    height=min(size.height, max_height),
-                )
-                for size in sizes
-            ]
-            sizes.append(ImageSize(width=max_width, height=max_height))
-            for h in range(1, max_soft_tokens + 1):
-                w = max_soft_tokens // h
-                if unit * h <= max_height and (w_fit := min(w, max_width // unit)):
-                    sizes.append(ImageSize(width=unit * w_fit, height=unit * h))
-                divisor = math.gcd(w, h)
-                aspect_w, aspect_h = w // divisor, h // divisor
-                k = min(max_width // aspect_w, max_height // aspect_h)
-                if k * min(aspect_w, aspect_h) >= MIN_DUMMY_SIDE:
-                    sizes.append(ImageSize(width=k * aspect_w, height=k * aspect_h))
-            if not do_resize:
-                for h in range(1, min(max_patches, max_height // patch_size) + 1):
-                    if w := min(max_patches // h, max_width // patch_size):
-                        sizes.append(
-                            ImageSize(width=patch_size * w, height=patch_size * h)
-                        )
 
         def num_soft_tokens(size: ImageSize) -> int:
             if do_resize:

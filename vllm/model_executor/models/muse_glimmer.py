@@ -41,9 +41,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import BatchFeature, MuseGlimmerConfig, MuseGlimmerProcessor
-from transformers.models.muse_glimmer.image_processing_muse_glimmer import (
-    smart_resize,
-)
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -88,7 +85,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.processing.dummy_inputs import MIN_DUMMY_SIDE
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
@@ -131,64 +127,14 @@ def _get_canvas_with_most_tokens(
     max_tokens: int,
     factor: int,
     overrides: ImageDummyOptions | VideoDummyOptions | None = None,
-    do_resize: bool = True,
 ) -> ImageSize:
-    if overrides is None or not (overrides.width or overrides.height):
-        height = next(
-            h for h in range(math.isqrt(max_tokens), 0, -1) if max_tokens % h == 0
-        )
-        return ImageSize(width=factor * (max_tokens // height), height=factor * height)
-
-    max_width = overrides.width or factor * max_tokens
-    max_height = overrides.height or factor * max_tokens
-    if not do_resize:
-        ph, pw = max(
-            (
-                (ph, min(max_tokens // ph, max_width // factor))
-                for ph in range(1, min(max_tokens, max_height // factor) + 1)
-            ),
-            key=lambda grid: grid[0] * grid[1],
-            default=(1, 1),
-        )
-        return ImageSize(width=factor * max(pw, 1), height=factor * ph)
-
-    def num_tokens(width: int, height: int) -> int:
-        height, width = smart_resize(height, width, factor, max_tokens)
-        return (height // factor) * (width // factor)
-
-    best, best_tokens = ImageSize(width=factor, height=factor), 0
-    if overrides.width and overrides.height:
-        best = ImageSize(width=max_width, height=max_height)
-        best_tokens = num_tokens(*best)
-    grids = sorted(
-        (
-            (ph, pw)
-            for ph in range(1, min(max_tokens, max_height // factor + 1) + 1)
-            for pw in range(1, min(max_tokens // ph, max_width // factor + 1) + 1)
-        ),
-        key=lambda grid: grid[0] * grid[1],
-        reverse=True,
+    if overrides is not None and (overrides.width or overrides.height):
+        side = factor * math.isqrt(max_tokens)
+        return ImageSize(width=side, height=side)
+    height = next(
+        h for h in range(math.isqrt(max_tokens), 0, -1) if max_tokens % h == 0
     )
-    for ph, pw in grids:
-        if ph * pw <= best_tokens:
-            break
-        h_lo = max((ph - 1) * factor + 1, min(MIN_DUMMY_SIDE, max_height))
-        h_hi = min(ph * factor, max_height)
-        w_lo = max((pw - 1) * factor + 1, min(MIN_DUMMY_SIDE, max_width))
-        w_hi = min(pw * factor, max_width)
-        if h_lo > h_hi or w_lo > w_hi:
-            continue
-        candidates = [(w, h) for w in (w_lo, w_hi) for h in (h_lo, h_hi)]
-        candidates += [
-            (w, min(h_hi, max(h_lo, round(ph * w / pw)))) for w in (w_lo, w_hi)
-        ]
-        candidates += [
-            (min(w_hi, max(w_lo, round(pw * h / ph))), h) for h in (h_lo, h_hi)
-        ]
-        for width, height in candidates:
-            if (tokens := num_tokens(width, height)) > best_tokens:
-                best, best_tokens = ImageSize(width=width, height=height), tokens
-    return best
+    return ImageSize(width=factor * (max_tokens // height), height=factor * height)
 
 
 IMAGE_TOKEN = "<|patch|>"
@@ -247,17 +193,13 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         mm_kwargs: Mapping[str, Any],
         seq_len: int,
         num_videos: int,
-        *,
-        use_hints: bool = True,
     ) -> tuple[dict[str, int], dict[str, int]]:
         video_kwargs = mm_kwargs["videos_kwargs"]
         group_tokens = {
             "image": int(mm_kwargs["images_kwargs"]["max_image_tokens"]),
             "video": int(video_kwargs["max_video_frame_tokens"]),
         }
-        num_frames = self._get_num_frames(
-            seq_len, num_videos, video_kwargs, use_hints=use_hints
-        )
+        num_frames = self._get_num_frames(seq_len, num_videos, video_kwargs)
         num_groups = num_frames // int(video_kwargs["temporal_patch_size"])
         return group_tokens, {
             **group_tokens,
@@ -280,8 +222,6 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         num_videos: int,
         video_kwargs: Mapping[str, Any],
-        *,
-        use_hints: bool = True,
     ) -> int:
         video_processor = self.get_hf_processor().video_processor
         mm_config = self.ctx.get_mm_config()
@@ -297,11 +237,6 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         if loader_frames >= 0:
             max_frames = max(int(video_processor.num_frames), loader_frames)
             num_frames = min(num_frames, round_up(max_frames, temporal_patch_size))
-        video_options = mm_config.limit_per_prompt.get("video")
-        if use_hints and video_options and video_options.num_frames:
-            num_frames = min(
-                num_frames, round_up(video_options.num_frames, temporal_patch_size)
-            )
         return num_frames
 
 
@@ -324,13 +259,11 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
             int(image_kwargs["max_image_tokens"]),
             int(image_kwargs["patch_size"]) * int(image_kwargs["merge_size"]),
             mm_options.get("image"),
-            image_kwargs.get("do_resize") is not False,
         )
         video_size = _get_canvas_with_most_tokens(
             int(video_kwargs["max_video_frame_tokens"]),
             int(video_kwargs["patch_size"]) * int(video_kwargs["merge_size"]),
             mm_options.get("video"),
-            video_kwargs.get("do_resize") is not False,
         )
         return {
             "image": self._get_dummy_images(
@@ -366,7 +299,6 @@ class MuseGlimmerMultiModalProcessor(
             self.info._get_effective_mm_processor_kwargs({}),
             self.info.ctx.model_config.max_model_len,
             1,
-            use_hints=False,
         )
         merge_length = self.info.get_hf_config().vision_config.merge_size ** 2
         for modality in ("image", "video"):
