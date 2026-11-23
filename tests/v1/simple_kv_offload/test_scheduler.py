@@ -380,7 +380,7 @@ def test_lookahead_mamba_partial_tail_survives_finish(
 
 @pytest.mark.parametrize(
     ("backend", "source"),
-    [("cpu", CacheHitSource.HOST), ("hybrid", CacheHitSource.DISK)],
+    [("cpu", CacheHitSource.HOST), ("disk", CacheHitSource.DISK)],
 )
 def test_connector_reports_configured_cache_source(
     tmp_path, backend: str, source: CacheHitSource
@@ -391,7 +391,7 @@ def test_connector_reports_configured_cache_source(
         "cpu_bytes_to_use_per_rank": _BYTES_PER_BLOCK * 4,
         "kv_offload_backend": backend,
     }
-    if backend == "hybrid":
+    if backend == "disk":
         extra_config.update(
             cpu_hot_cache=0,
             disk_path=str(tmp_path / "kv-offload.bin"),
@@ -413,7 +413,7 @@ def test_connector_reports_configured_cache_source(
 
 
 @pytest.mark.parametrize("num_layers", [1, 2])
-@pytest.mark.parametrize("backend", ["cpu", "hybrid"])
+@pytest.mark.parametrize("backend", ["cpu", "disk"])
 def test_connector_explicit_cpu_blocks_align_uneven_stages(
     tmp_path, num_layers: int, backend: str
 ):
@@ -430,7 +430,7 @@ def test_connector_explicit_cpu_blocks_align_uneven_stages(
         "num_cpu_blocks": 4,
         "kv_offload_backend": backend,
     }
-    if backend == "hybrid":
+    if backend == "disk":
         extra.update(
             cpu_hot_cache=0,
             disk_path=str(tmp_path / "offload.bin"),

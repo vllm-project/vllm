@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Hybrid DRAM/SSD backend for GPU KV transfers via pinned staging buffers.
+"""Disk backend with optional hot copies for GPU KV transfers via pinned staging.
 
 Uses separate IO threads for store and load so that loads (latency-critical)
 never block behind stores (background work). Each thread owns its own pinned
@@ -49,7 +49,7 @@ def _alloc_aligned(num_slots: int, bpb: int) -> torch.Tensor:
     return raw[offset : offset + nbytes].view(num_slots, bpb)
 
 
-class HybridBackend:
+class DiskBackend:
     """Async disk offload with bounded staging and an optional DRAM hot cache.
 
     Architecture:
@@ -197,7 +197,7 @@ class HybridBackend:
         os.ftruncate(self._fd, num_disk_slots * total_block_bytes)
 
         logger.info(
-            "HybridBackend: path=%s, slots=%d, total=%.2f GB, buf=%dx%d bytes"
+            "DiskBackend: path=%s, slots=%d, total=%.2f GB, buf=%dx%d bytes"
             " (page_cache=%s)",
             disk_path,
             num_disk_slots,

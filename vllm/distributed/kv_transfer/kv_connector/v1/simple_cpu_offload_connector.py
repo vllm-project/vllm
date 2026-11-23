@@ -55,7 +55,7 @@ logger = init_logger(__name__)
 # Default CPU capacity: 8 GB
 DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
 
-VALID_KV_OFFLOAD_BACKENDS = ("cpu", "hybrid")
+VALID_KV_OFFLOAD_BACKENDS = ("cpu", "disk")
 # Keys that only apply to the disk backend, warned about under "cpu".
 _DISK_ONLY_KEYS = (
     "cpu_hot_cache",
@@ -106,14 +106,14 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 f"Unknown kv_offload_backend {kv_offload_backend!r}; "
                 f"expected one of {VALID_KV_OFFLOAD_BACKENDS}"
             )
-        uses_disk = kv_offload_backend == "hybrid"
+        uses_disk = kv_offload_backend == "disk"
         cpu_capacity_bytes = int(
             extra_config.get(
                 "cpu_hot_cache" if uses_disk else "cpu_bytes_to_use",
-                DEFAULT_CPU_CAPACITY_BYTES,
+                0 if uses_disk else DEFAULT_CPU_CAPACITY_BYTES,
             )
         )
-        # Hybrid sizes hot KV per worker; the CPU backend divides a total budget.
+        # Disk sizes hot KV per worker; the CPU backend divides a total budget.
         world_size = vllm_config.parallel_config.world_size
         cpu_capacity_per_rank = (
             cpu_capacity_bytes if uses_disk else cpu_capacity_bytes // world_size
@@ -161,7 +161,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 or "cpu_bytes_to_use_per_rank" in extra_config
             ):
                 logger.warning(
-                    "Hybrid ignores cpu_bytes_to_use and cpu_bytes_to_use_per_rank; "
+                    "Disk ignores cpu_bytes_to_use and cpu_bytes_to_use_per_rank; "
                     "use cpu_hot_cache to size the hot cache."
                 )
 
@@ -170,15 +170,13 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             )
             if cpu_capacity_per_rank == 0:
                 hot_cache_tokens = 0
-            max_load_slots = int(
-                extra_config.get("max_load_slots", max(8, disk_buffer_slots))
-            )
+            max_load_slots = int(extra_config.get("max_load_slots", disk_buffer_slots))
             if (
                 cpu_capacity_per_rank < 0
                 or hot_cache_tokens < 0
                 or max_load_slots < disk_buffer_slots
             ):
-                raise ValueError("Invalid Hybrid hot-cache or load-slot limit")
+                raise ValueError("Invalid disk hot-cache or load-slot limit")
             if cpu_capacity_per_rank > 0 and (
                 lazy_offload
                 or use_page_cache
@@ -191,7 +189,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 )
             ):
                 raise ValueError(
-                    "Hybrid requires eager offload, O_DIRECT, one GPU and "
+                    "The disk hot cache requires eager offload, O_DIRECT, one GPU and "
                     "one full-attention group"
                 )
         cpu_hugepage_size = parse_hugepage_size(
@@ -201,11 +199,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         if uses_disk:
             if disk_path is None:
                 raise ValueError(
-                    'kv_offload_backend="hybrid" requires disk_path to be set.'
+                    'kv_offload_backend="disk" requires disk_path to be set.'
                 )
             if disk_capacity_bytes <= 0:
                 raise ValueError(
-                    'kv_offload_backend="hybrid" requires disk_capacity_bytes > 0.'
+                    'kv_offload_backend="disk" requires disk_capacity_bytes > 0.'
                 )
             if cpu_hugepage_size is not None:
                 raise ValueError(
@@ -216,7 +214,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             if ignored:
                 logger.warning(
                     'kv_offload_backend is "cpu", ignoring disk-only config: %s. '
-                    'Set kv_offload_backend="hybrid" to enable SSD offload.',
+                    'Set kv_offload_backend="disk" to enable SSD offload.',
                     ", ".join(ignored),
                 )
             disk_path = None

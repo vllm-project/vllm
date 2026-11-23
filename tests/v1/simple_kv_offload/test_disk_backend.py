@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Hybrid store/load correctness and bounded out-of-order SSD restores."""
+"""Disk store/load correctness and bounded out-of-order SSD restores."""
 
 import os
 import threading
@@ -17,7 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector i
 )
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheTensor
-from vllm.v1.simple_kv_offload.hybrid_backend import HybridBackend
+from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
 
 if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
@@ -34,7 +34,7 @@ def make_backend(tmp_path, num_blocks, hot_rows, max_load_slots=4):
         .view(2 * num_blocks, 4096)
         for i in range(2)
     }
-    backend = HybridBackend()
+    backend = DiskBackend()
     try:
         backend.init(
             gpu,
@@ -64,7 +64,7 @@ def transfer(backend, src, dst, *, is_store, hot_blocks=None):
     assert events[0][0] == 7 and events[0][1].query()
 
 
-@pytest.mark.parametrize("hot_bytes", [0, 4095, 4096, 6 * 4096 + 17])
+@pytest.mark.parametrize("hot_bytes", [None, 0, 4095, 4096, 6 * 4096 + 17])
 @pytest.mark.parametrize("staging_slots", [1, 4])
 def test_hot_budget_is_independent_of_staging(tmp_path, hot_bytes, staging_slots):
     """Even a sub-block hot budget must preserve the configured SSD staging."""
@@ -73,10 +73,10 @@ def test_hot_budget_is_independent_of_staging(tmp_path, hot_bytes, staging_slots
         kv_connector="SimpleCPUOffloadConnector",
         kv_role="kv_both",
         kv_connector_extra_config={
-            "kv_offload_backend": "hybrid",
-            "cpu_hot_cache": hot_bytes,
+            "kv_offload_backend": "disk",
+            **({"cpu_hot_cache": hot_bytes} if hot_bytes is not None else {}),
             "disk_buffer_slots": staging_slots,
-            "max_load_slots": staging_slots + 2,
+            **({"max_load_slots": staging_slots + 2} if hot_bytes is not None else {}),
             "disk_path": str(tmp_path / "kv"),
             "disk_capacity_bytes": 8 * 4096,
         },
@@ -101,15 +101,15 @@ def test_hot_budget_is_independent_of_staging(tmp_path, hot_bytes, staging_slots
         connector.register_kv_caches({"k": gpu})
         assert connector.worker_handler is not None
         backend = connector.worker_handler._backend
-        assert isinstance(backend, HybridBackend)
+        assert isinstance(backend, DiskBackend)
         assert sum(t.nbytes for t in backend._hot_caches.values()) == (
-            hot_bytes // 4096 * 4096
+            (hot_bytes or 0) // 4096 * 4096
         )
         assert sum(t.nbytes for t in backend._store_buffer_caches.values()) == (
             staging_slots * 4096
         )
         assert sum(t.nbytes for t in backend._load_buffer_caches.values()) == (
-            (staging_slots + 2) * 4096
+            (staging_slots if hot_bytes is None else staging_slots + 2) * 4096
         )
         transfer(backend, [0, 1, 2, 3], [3, 2, 1, 0], is_store=True, hot_blocks=[3])
         transfer(backend, [3, 2, 1, 0], [4, 5, 6, 7], is_store=False)
