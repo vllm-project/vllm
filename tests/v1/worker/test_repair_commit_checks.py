@@ -1280,11 +1280,17 @@ def test_rewound_flag_rides_repair_moves_and_drains():
     assert out4.rewound_req_ids == set()
 
 
-def test_speculative_decoding_coexists_with_repair_steps():
-    """Speculative decoding is not refused under the repair policy, but a
-    repair-only step must never carry drafts: the span arithmetic yields
-    none for a rewound request, the repair-work construction pins it, and
-    the repair still commits while the worker's drafter skips the step."""
+def test_scheduler_refuses_speculative_decoding_under_repair_policy():
+    """kv_load_failure_policy='repair' + speculative decoding must fail at
+    init, on the same refuse list as pipeline parallelism, data
+    parallelism, multi-group, context parallelism, and async scheduling.
+
+    The combination has no validated support: the repair-only step's
+    layer replay neither runs nor refreshes the drafter, so drafts
+    proposed around a detected load failure are neither re-proposed nor
+    validated against the repaired KV, and the engine's post-step draft
+    transfer would re-publish the stale drafts after the repair step.
+    Fail closed at init instead of shipping an unvalidated path."""
     from tests.v1.kv_connector.unit.utils import (
         create_scheduler,
         create_vllm_config,
@@ -1298,29 +1304,52 @@ def test_speculative_decoding_coexists_with_repair_steps():
         num_speculative_tokens=3,
     )
     # The fixture default resolves async_scheduling on, which the repair
-    # policy refuses at init (same pin as make_scheduler).
+    # policy also refuses at init (same pin as make_scheduler).
     vllm_config.scheduler_config.async_scheduling = False
-    scheduler = create_scheduler(vllm_config)
-    r1 = create_request(num_tokens=3328)
-    scheduler.add_request(r1)
-    admit_sync_external_hit(scheduler, r1, 3072)
-    out1 = scheduler.schedule()
-    reports, attestations = full_fault_evidence(scheduler, r1)
-    deliver(scheduler, out1, [r1], reports=reports, attestations=attestations)
-    plan = scheduler.recovery_plans[r1.request_id]
+    with pytest.raises(RuntimeError, match="not supported with speculative decoding"):
+        create_scheduler(vllm_config)
 
-    out2 = scheduler.schedule()
-    assert out2.repair_works is not None
-    # The repair step carries no drafts for the rewound request.
-    assert r1.request_id not in out2.scheduled_spec_decode_tokens
-    drive_repair_result(
-        scheduler, r1, out2, structural_check=True, plan=plan, span=plan.repair_span
+
+def test_repair_policy_allows_non_speculative_decoding():
+    """The spec-dec guard is repair-specific: the same repair-policy config
+    without a speculative_config constructs a scheduler that carries the
+    repair policy (the validation logic accepts)."""
+    from tests.v1.kv_connector.unit.utils import (
+        create_scheduler,
+        create_vllm_config,
     )
-    out3 = scheduler.schedule()
-    assert r1.request_id in out3.num_scheduled_tokens
-    assert r1.request_id in out3.rewound_req_ids
-    out4 = scheduler.schedule()
-    assert out4.rewound_req_ids == set()
+
+    vllm_config = create_vllm_config(
+        model="facebook/opt-125m",
+        hf_overrides={"num_hidden_layers": 16, "max_position_embeddings": 8192},
+        kv_load_failure_policy="repair",
+    )
+    vllm_config.scheduler_config.async_scheduling = False
+    assert vllm_config.speculative_config is None
+    scheduler = create_scheduler(vllm_config)
+    assert scheduler.repair_kv_load_failures
+
+
+def test_speculative_decoding_allows_non_repair_policies():
+    """The spec-dec guard does not over-reject: speculative decoding with
+    the non-repair load-failure policies constructs normally (no new
+    refusal for spec-dec itself)."""
+    from tests.v1.kv_connector.unit.utils import (
+        create_scheduler,
+        create_vllm_config,
+    )
+
+    vllm_config = create_vllm_config(
+        model="facebook/opt-125m",
+        hf_overrides={"num_hidden_layers": 16, "max_position_embeddings": 8192},
+        kv_load_failure_policy="recompute",
+        num_speculative_tokens=3,
+    )
+    vllm_config.scheduler_config.async_scheduling = False
+    assert vllm_config.speculative_config is not None
+    scheduler = create_scheduler(vllm_config)
+    assert scheduler.recompute_kv_load_failures
+    assert not scheduler.repair_kv_load_failures
 
 
 def test_intra_span_permutation_refused():

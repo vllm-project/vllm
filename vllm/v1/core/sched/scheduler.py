@@ -440,6 +440,33 @@ class Scheduler(SchedulerInterface):
                     "async scheduling in v1 (the batch-queue step would "
                     "discard the repair verdicts)"
                 )
+            if self.repair_kv_load_failures and (
+                vllm_config.speculative_config is not None
+            ):
+                # Speculative decoding x repair has no validated support.
+                # The repair-only step's layer replay (execute_repair_only)
+                # neither runs nor refreshes the drafter, so drafts proposed
+                # around a detected load failure are neither re-proposed
+                # nor validated against the repaired KV: the engine's
+                # post-step draft transfer would re-publish the drafts the
+                # speculator proposed BEFORE the repair (stale against the
+                # repaired request), and the model runner's spec-decode
+                # logits geometry (num_new_sampled_tokens_per_step bonus
+                # rows per request) is not repair-span-aware. Fail closed at
+                # init, exactly like PP/DP/group/CP/async, until the
+                # combination is validated end-to-end.
+                raise RuntimeError(
+                    "kv_load_failure_policy='repair' is not supported with "
+                    "speculative decoding in v1 (the repair-only step's "
+                    "replay neither runs nor refreshes the drafter, so "
+                    "drafts proposed around a detected load failure are "
+                    "neither re-proposed nor validated against the repaired "
+                    "KV). Disable one of the two: set kv_load_failure_policy "
+                    "to 'fail' or 'recompute' (see the KV connector usage "
+                    "docs, e.g. docs/features/mooncake_store_connector_usage."
+                    "md), or remove the speculative decoding configuration "
+                    "(--speculative-config / --num-speculative-tokens)"
+                )
 
             # With overlapping batches (async scheduling or PP), a step may
             # still be writing a freed request's KV blocks. A consumer KV
