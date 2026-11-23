@@ -2,16 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for ScoringIOProcessor helpers."""
 
+import asyncio
+import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import cast
 
 import pytest
 import torch
+from PIL import Image
 from tokenizers import Tokenizer, models, pre_tokenizers, processors
-from transformers import TokenizersBackend
+from transformers import (
+    Mistral3Config,
+    Qwen3Config,
+    Qwen3VLConfig,
+    TokenizersBackend,
+)
 
 from vllm import PoolingParams, TokensPrompt
+from vllm.config import ModelConfig, VllmConfig
+from vllm.connections import MediaRequestDownloadSizeExceededError
+from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.entrypoints.pooling.scoring.io_processor import (
     BiEncoderIOProcessor,
     CrossEncoderIOProcessor,
@@ -22,12 +33,25 @@ from vllm.entrypoints.pooling.scoring.io_processor import (
 from vllm.entrypoints.pooling.scoring.types import ScoringData
 from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
 from vllm.entrypoints.pooling.types import (
+    EncodeCMPLRenderParams,
     OfflineScoringInputsContext,
+    PoolingEngineInput,
     ScoringRenderParams,
 )
 from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
+from vllm.multimodal.utils import encode_image_url
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
 from vllm.renderers import TokenizeParams
+from vllm.renderers.chat_utils import (
+    AsyncMultiModalItemTracker,
+    ChatTemplateConfig,
+    MultiModalItemTracker,
+)
+from vllm.renderers.chat_utils.item_tracker import (
+    MediaRequestBudgets,
+    use_media_request_budgets,
+)
+from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers import TokenizerLike
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -43,7 +67,7 @@ class _DummyTokenizer:
 
 
 @pytest.fixture
-def llm_reranker_processor() -> CrossEncoderIOProcessor:
+def scoring_tokenizer():
     vocab = {
         "[UNK]": 0,
         "[CLS]": 1,
@@ -60,20 +84,100 @@ def llm_reranker_processor() -> CrossEncoderIOProcessor:
         special_tokens=[("[CLS]", 1), ("[SEP]", 2)],
     )
 
-    processor = CrossEncoderIOProcessor.__new__(CrossEncoderIOProcessor)
-    processor.model_config = SimpleNamespace(enable_prompt_embeds=False)
-    processor.tokenizer = TokenizersBackend(
+    return TokenizersBackend(
         tokenizer_object=backend,
         unk_token="[UNK]",
         cls_token="[CLS]",
         sep_token="[SEP]",
     )
-    processor.supports_score_template = False
-    processor.use_sep_token = False
-    processor.model = None
-    processor.saved_chat_template = None
-    processor.saved_chat_template_kwargs = {}
-    return processor
+
+
+@pytest.fixture
+def llm_reranker_processor(tmp_path, scoring_tokenizer):
+    Qwen3Config(
+        architectures=["Qwen3ForSequenceClassification"], use_sep_token=False
+    ).save_pretrained(tmp_path)
+    scoring_tokenizer.save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            runner="pooling",
+            max_model_len=64,
+            enforce_eager=True,
+        )
+    )
+    renderer = HfRenderer(config, TokenizersBackend.from_pretrained(tmp_path))
+    try:
+        yield CrossEncoderIOProcessor(config, renderer, ChatTemplateConfig())
+    finally:
+        renderer.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("budget_attr", "limit_env", "limit_setting", "limit_bytes", "error_type"),
+    [
+        ("decoded_budget", "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "8", 8, ValueError),
+        (
+            "download_budget",
+            "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB",
+            "1",
+            1 << 20,
+            MediaRequestDownloadSizeExceededError,
+        ),
+    ],
+)
+async def test_pooling_workers_share_only_their_request_media_budget(
+    llm_reranker_processor,
+    monkeypatch,
+    budget_attr,
+    limit_env,
+    limit_setting,
+    limit_bytes,
+    error_type,
+):
+    monkeypatch.setenv(limit_env, limit_setting)
+
+    class AccountingProcessor(PoolingIOProcessor):
+        def render(self, render_params):
+            tracker = MultiModalItemTracker(self.model_config)
+            getattr(tracker, budget_attr).charge(limit_bytes)
+            return super().render(render_params)
+
+    processor = AccountingProcessor(
+        llm_reranker_processor.vllm_config,
+        llm_reranker_processor.renderer,
+        ChatTemplateConfig(),
+    )
+    params = EncodeCMPLRenderParams(
+        prompts=TokensPrompt(prompt_token_ids=[3]),
+        tok_params=TokenizeParams(max_total_tokens=64),
+        prompt_extras=None,
+        skip_mm_cache=False,
+        params=PoolingParams(),
+        lora_requests=None,
+        priorities=0,
+    )
+
+    budget = MediaRequestBudgets()
+    with use_media_request_budgets(budget):
+        tracker = AsyncMultiModalItemTracker(processor.model_config)
+        getattr(tracker, budget_attr).charge(1)
+
+    rejected: PoolingEngineInput | BaseException
+    accepted: PoolingEngineInput | BaseException
+    rejected, accepted = await asyncio.gather(
+        processor.render_async(params, budget),
+        processor.render_async(params, MediaRequestBudgets()),
+        return_exceptions=True,
+    )
+    assert isinstance(rejected, error_type)
+    assert limit_env in str(rejected)
+    assert not isinstance(accepted, BaseException)
+    prompt = accepted["prompts"]
+    assert prompt["type"] == "token"
+    assert prompt["prompt_token_ids"] == [3]
+    assert getattr(MultiModalItemTracker(processor.model_config), budget_attr).used == 0
 
 
 def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(
@@ -110,7 +214,8 @@ def test_offline_scoring_uses_default_template_unless_overridden(
     processor = llm_reranker_processor
     processor.chat_template = default_template
     processor.renderer = SimpleNamespace(
-        default_cmpl_tok_params=TokenizeParams(max_total_tokens=32)
+        default_cmpl_tok_params=TokenizeParams(max_total_tokens=32),
+        default_chat_tok_params=TokenizeParams(max_total_tokens=32),
     )
     ctx = OfflineScoringInputsContext(
         pooling_task="classify",
@@ -155,6 +260,7 @@ def test_truncation_keeps_jinavl_score_token(
             data_1="a",
             data_2="bc bc bc bc",
             chat_template=None,
+            chat_template_content_format="string",
             max_tokens_per_query=0,
             max_tokens_per_doc=0,
             tok_params=TokenizeParams(
@@ -297,3 +403,161 @@ def test_jina_scoring_preserves_request_error_before_indexing_output():
     failed = _pooling_output("request", torch.empty(0), error)
 
     assert processor._post_process([failed], n_queries=1) == [failed]
+
+
+_BLOCK_TEMPLATE = """
+{%- for message in messages -%}
+  {{- message.role + ':' -}}
+  {%- for part in message.content -%}
+    {%- if part.type == 'text' -%}
+      {{- part.text | replace('[IMG]', '[literal IMG]') -}}
+    {%- elif part.type == 'image' -%}
+      {{- '[IMG]' -}}
+    {%- endif -%}
+  {%- endfor -%}
+{%- endfor -%}
+"""
+
+
+@pytest.fixture
+def multimodal_reranker_processor(tmp_path, request, scoring_tokenizer):
+    model_type = getattr(request, "param", "mistral3")
+    config_cls = Mistral3Config if model_type == "mistral3" else Qwen3VLConfig
+    architecture = (
+        f"{config_cls.__name__.removesuffix('Config')}ForConditionalGeneration"
+    )
+    config_cls(architectures=[architecture], use_sep_token=False).save_pretrained(
+        tmp_path
+    )
+    scoring_tokenizer.chat_template = _BLOCK_TEMPLATE
+    scoring_tokenizer.save_pretrained(tmp_path)
+    for filename, data in {
+        "config_sentence_transformers.json": {"model_type": "CrossEncoder"},
+        "modules.json": [
+            {"type": "sentence_transformers.models.Transformer", "path": ""}
+        ],
+        "sentence_bert_config.json": {
+            "transformer_task": "sequence-classification",
+            "modality_config": {"message": {"format": "flat"}},
+        },
+    }.items():
+        (tmp_path / filename).write_text(json.dumps(data))
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            runner="pooling",
+            convert="classify",
+            max_model_len=64,
+            enforce_eager=True,
+        )
+    )
+    renderer = HfRenderer(config, TokenizersBackend.from_pretrained(tmp_path))
+    try:
+        yield CrossEncoderIOProcessor(
+            config,
+            renderer,
+            ChatTemplateConfig(chat_template_content_format="openai"),
+        )
+    finally:
+        renderer.shutdown()
+
+
+@pytest.mark.parametrize(
+    "multimodal_reranker_processor", ["mistral3", "qwen3_vl"], indirect=True
+)
+def test_scoring_template_keeps_images_distinct_from_literal_placeholder_text(
+    multimodal_reranker_processor,
+):
+    """Image identity must survive models with and without text placeholders."""
+    processor = multimodal_reranker_processor
+    document = [
+        {"type": "text", "text": "literal [IMG]"},
+        {
+            "type": "image_url",
+            "image_url": {"url": encode_image_url(Image.new("RGB", (2, 2), "red"))},
+            "uuid": "document-image",
+        },
+    ]
+    prompt, inputs = processor.get_score_prompt(
+        "a", document, {}, chat_template=_BLOCK_TEMPLATE
+    )
+    expected = "query:adocument:literal [literal IMG][IMG]"
+    assert prompt == expected
+    assert inputs["prompt_token_ids"] == processor.tokenizer.encode(expected)
+    assert inputs["multi_modal_data"]["image"][0].getpixel((0, 0)) == (255, 0, 0)
+    assert inputs["multi_modal_uuids"] == {"image": ["document-image"]}
+
+
+@pytest.mark.parametrize(
+    ("doc_limit", "expected_document"),
+    [(1, "a[IMG]"), (3, "a bc[IMG]bc")],
+)
+def test_scoring_text_limits_share_budget_across_blocks_and_keep_images(
+    multimodal_reranker_processor,
+    doc_limit,
+    expected_document,
+):
+    processor = multimodal_reranker_processor
+    last_text = {"type": "text", "text": "bc a"}
+    document = [
+        {"type": "text", "text": "a bc"},
+        {
+            "type": "image_url",
+            "image_url": {"url": encode_image_url(Image.new("RGB", (2, 2)))},
+        },
+        last_text,
+    ]
+    prompt, inputs = processor.get_score_prompt(
+        "a bc",
+        document,
+        {},
+        chat_template=_BLOCK_TEMPLATE,
+        max_tokens_per_query=1,
+        max_tokens_per_doc=doc_limit,
+    )
+    assert prompt == "query:adocument:" + expected_document
+    assert len(inputs["multi_modal_data"]["image"]) == 1
+    assert last_text["text"] == "bc a"
+
+
+def test_scoring_text_limit_is_independent_of_adjacent_block_boundaries(
+    multimodal_reranker_processor,
+):
+    # This tokenizer splits "abc" into three tokens, but "a" and "bc" into one each.
+    for document in (
+        "abc",
+        [{"type": "text", "text": "a"}, {"type": "text", "text": "bc"}],
+    ):
+        prompt, _ = multimodal_reranker_processor.get_score_prompt(
+            "a", document, {}, chat_template=_BLOCK_TEMPLATE, max_tokens_per_doc=2
+        )
+        assert prompt == "query:adocument:ab"
+
+
+@pytest.mark.parametrize("multimodal_reranker_processor", ["qwen3_vl"], indirect=True)
+def test_string_scoring_templates_keep_model_placeholders(
+    multimodal_reranker_processor,
+):
+    processor = multimodal_reranker_processor
+    prompt, _ = processor.get_score_prompt(
+        "a",
+        [
+            {
+                "type": "image_url",
+                "image_url": {"url": encode_image_url(Image.new("RGB", (2, 2)))},
+            }
+        ],
+        {},
+        chat_template="{{ messages[0].content + messages[1].content }}",
+        chat_template_content_format="string",
+    )
+    assert prompt == "a<|vision_start|><|image_pad|><|vision_end|>"
+
+
+def test_scoring_detects_structured_content_with_saved_template(
+    multimodal_reranker_processor,
+):
+    prompt, _ = multimodal_reranker_processor.get_score_prompt(
+        "a", "bc", {}, chat_template_content_format="auto"
+    )
+    assert prompt == "query:adocument:bc"
