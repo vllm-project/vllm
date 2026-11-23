@@ -118,6 +118,12 @@ share objects. Different layouts use different keys. Use `key_namespace` to
 separate weight versions that share a model path. There is no per-engine quota; engines can evict each
 other's objects.
 
+Mamba speculative block reservations do not change the stored checkpoint layout.
+The derived namespace normalizes `num_speculative_blocks` to zero, so engines
+with different reservations can share committed states. Shapes, dtypes, cache
+policy and checkpoint alignment still distinguish incompatible checkpoints.
+Existing zero-reservation namespaces are unchanged.
+
 | Event | Behavior |
 | --- | --- |
 | Server not reachable at engine startup | Engine startup fails. |

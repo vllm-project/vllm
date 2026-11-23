@@ -21,7 +21,13 @@ from tests.v1.kv_connector.umbp_test_utils import (
     make_scheduler_output,
     mori_has_umbp,
 )
-from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    KVTransferConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp import (
     scheduler as umbp_scheduler,
 )
@@ -63,6 +69,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheGroup,
+    KVCacheLayerConfig,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
@@ -76,6 +83,62 @@ pytestmark = pytest.mark.skipif(
     not (current_platform.is_rocm() and mori_available),
     reason="UMBP is only available on ROCm with the mori package installed",
 )
+
+
+@pytest.mark.parametrize(
+    ("spec_changes", "manager_changes", "compatible"),
+    [
+        ({}, {"num_speculative_blocks": 0}, True),
+        ({"shapes": ((2, 8), (4, 4, 8))}, {}, False),
+        ({"dtypes": (torch.float32, torch.float32)}, {}, False),
+        ({"block_size": 32}, {}, False),
+        ({}, {"enable_prefix_caching": False}, False),
+        ({}, {"prefill_checkpoint_alignment": 16}, False),
+    ],
+    ids=[
+        "reservations",
+        "same-byte-size-shape",
+        "dtype",
+        "boundary",
+        "cache-policy",
+        "checkpoint-alignment",
+    ],
+)
+def test_mamba_checkpoint_identity_ignores_only_reservations(
+    spec_changes, manager_changes, compatible
+):
+    config = VllmConfig(
+        device_config=DeviceConfig("cpu"),
+        cache_config=CacheConfig(block_size=16),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="UMBPStoreConnector", kv_role="kv_both"
+        ),
+    )
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((2, 8), (2, 8, 8)),
+        dtypes=(torch.bfloat16, torch.float32),
+    )
+    manager = MambaManager.config(enable_prefix_caching=True, num_speculative_blocks=3)
+
+    def key(state_spec, state_manager):
+        cache = KVCacheConfig(
+            num_blocks=8,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroup.from_layers(
+                    {"state": KVCacheLayerConfig(state_manager, state_spec)}
+                )
+            ],
+            kv_cache_layout="BLHNC",
+        )
+        namespace = UMBPNamespace.from_vllm_config(config, cache)
+        return BlockIdentityCodec(namespace).key(b"same-prefix", group_id=0)
+
+    assert (
+        key(spec, manager)
+        == key(replace(spec, **spec_changes), manager.replace_params(**manager_changes))
+    ) is compatible
 
 
 def test_mamba_align_states_store_only_from_boundary_handoffs():
