@@ -7,6 +7,7 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
+import math
 from typing import Any
 
 import torch
@@ -16,14 +17,12 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
-    align_kv_strides,
     apply_alibi_to_score,
     apply_softcap,
     compute_kv_seq_mask,
     compute_tile_loop_bounds,
     find_seq_idx,
     init_softmax_M,
-    kv_tile_alignment,
     load_qq_bias_tile,
     resolve_seq_and_query_len,
     softmax_step,
@@ -412,32 +411,22 @@ def kernel_unified_attention(
     # window. Enabled by the launcher for plain causal sliding windows only;
     # ``reduce_segments`` must be launched with the same value.
     WINDOW_SEGMENTS: tl.constexpr = False,
-    # K/V stride alignment and the V offset from K (see kv_tile_alignment).
+    # Per-token-head K/V alignment and offset of V from K (kv_tile_alignment).
     v_cache_delta: tl.int64 = 0,
     K_ALIGN: tl.constexpr = 1,
     V_ALIGN: tl.constexpr = 1,
 ):
-    (
-        value_cache_ptr,
-        stride_k_cache_0,
-        stride_k_cache_1,
-        stride_k_cache_2,
-        stride_v_cache_0,
-        stride_v_cache_1,
-        stride_v_cache_2,
-    ) = align_kv_strides(
-        key_cache_ptr,
-        value_cache_ptr,
-        v_cache_delta,
-        stride_k_cache_0,
-        stride_k_cache_1,
-        stride_k_cache_2,
-        stride_v_cache_0,
-        stride_v_cache_1,
-        stride_v_cache_2,
-        K_ALIGN,
-        V_ALIGN,
-    )
+    # Strides as visible multiples of the alignment found by kv_tile_alignment,
+    # and V addressed from K, let the K/V tile loads compile to vector loads.
+    if K_ALIGN > 1:
+        stride_k_cache_0 = stride_k_cache_0 // K_ALIGN * K_ALIGN
+        stride_k_cache_1 = stride_k_cache_1 // K_ALIGN * K_ALIGN
+        stride_k_cache_2 = stride_k_cache_2 // K_ALIGN * K_ALIGN
+    if V_ALIGN > 1:
+        value_cache_ptr = key_cache_ptr + v_cache_delta // V_ALIGN * V_ALIGN
+        stride_v_cache_0 = stride_v_cache_0 // V_ALIGN * V_ALIGN
+        stride_v_cache_1 = stride_v_cache_1 // V_ALIGN * V_ALIGN
+        stride_v_cache_2 = stride_v_cache_2 // V_ALIGN * V_ALIGN
 
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
@@ -950,6 +939,24 @@ def reduce_segments(
         + tl.arange(0, HEAD_SIZE_PADDED)
     )
     tl.store(output_ptr + output_offset, acc, mask=dim_mask)
+
+
+def kv_tile_alignment(k: torch.Tensor, v: torch.Tensor) -> tuple[int, int, int]:
+    """Alignment of per-token-head K/V tile loads, which Triton cannot infer.
+
+    Returns:
+        `(k_align, v_align, v_delta)`: the powers of two, at most 16, dividing
+        the K strides and the V strides and `v_delta`, the offset of `v` from
+        `k`. `v_align` is 1 unless `v` starts inside `k`.
+
+    """
+    if k.element_size() != 1:
+        return 1, 1, 0
+    k_align = math.gcd(16, *k.stride()[:3])
+    v_delta = v.data_ptr() - k.data_ptr()
+    if not 0 < v_delta < k.stride(0) * k.shape[0]:
+        return k_align, 1, 0
+    return k_align, math.gcd(16, v_delta, *v.stride()[:3]), v_delta
 
 
 def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:

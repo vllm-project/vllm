@@ -20,20 +20,21 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.v1.attention.ops.triton_attention_helpers import (
-    align_kv_strides,
     apply_alibi_to_score,
     apply_softcap,
     cdiv_fn,
     compute_kv_seq_mask,
     compute_tile_loop_bounds,
     init_softmax_M,
-    kv_tile_alignment,
     load_qq_bias_tile,
     resolve_seq_and_query_len,
     softmax_step,
     store_segm_reduce_scalars,
 )
-from vllm.v1.attention.ops.triton_unified_attention import reduce_segments
+from vllm.v1.attention.ops.triton_unified_attention import (
+    kv_tile_alignment,
+    reduce_segments,
+)
 
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
@@ -386,34 +387,24 @@ def _attn_packed(
     # 2 → INT4 nibble pair (asymmetric + zp).  The packed KV cache stores
     # one byte per ``packed_offs``, holding PACKING_FACTOR values.
     PACKING_FACTOR: tl.constexpr,
-    # K/V stride alignment and the V offset from K (see kv_tile_alignment).
+    # K/V alignment and offset of V from K (kv_tile_alignment).
     v_cache_delta: tl.int64,
     K_ALIGN: tl.constexpr,
     V_ALIGN: tl.constexpr,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
-    (
-        value_cache_ptr,
-        stride_k_cache_0,
-        stride_k_cache_1,
-        stride_k_cache_2,
-        stride_v_cache_0,
-        stride_v_cache_1,
-        stride_v_cache_2,
-    ) = align_kv_strides(
-        key_cache_ptr,
-        value_cache_ptr,
-        v_cache_delta,
-        stride_k_cache_0,
-        stride_k_cache_1,
-        stride_k_cache_2,
-        stride_v_cache_0,
-        stride_v_cache_1,
-        stride_v_cache_2,
-        K_ALIGN,
-        V_ALIGN,
-    )
+    # Strides as visible multiples of the alignment found by kv_tile_alignment,
+    # and V addressed from K, let the K/V tile loads compile to vector loads.
+    if K_ALIGN > 1:
+        stride_k_cache_0 = stride_k_cache_0 // K_ALIGN * K_ALIGN
+        stride_k_cache_1 = stride_k_cache_1 // K_ALIGN * K_ALIGN
+        stride_k_cache_2 = stride_k_cache_2 // K_ALIGN * K_ALIGN
+    if V_ALIGN > 1:
+        value_cache_ptr = key_cache_ptr + v_cache_delta // V_ALIGN * V_ALIGN
+        stride_v_cache_0 = stride_v_cache_0 // V_ALIGN * V_ALIGN
+        stride_v_cache_1 = stride_v_cache_1 // V_ALIGN * V_ALIGN
+        stride_v_cache_2 = stride_v_cache_2 // V_ALIGN * V_ALIGN
 
     # Shared prologue: sequence lookup, q-block bounds, early returns.
     q_block_global_idx = tl.program_id(0)

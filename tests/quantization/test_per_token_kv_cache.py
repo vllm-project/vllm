@@ -542,6 +542,7 @@ def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
 @pytest.mark.parametrize("num_heads", [(4, 4)])
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("interleaved", [False, True])
 @torch.inference_mode()
 def test_triton_unified_attention_per_token_head_scale(
     qcfg: QuantConfig,
@@ -549,6 +550,7 @@ def test_triton_unified_attention_per_token_head_scale(
     num_heads: tuple[int, int],
     head_size: int,
     block_size: int,
+    interleaved: bool,
 ):
     """End-to-end: quantized KV with per-token-head scale caches."""
     from vllm.utils.math_utils import next_power_of_2
@@ -658,6 +660,15 @@ def test_triton_unified_attention_per_token_head_scale(
             qcfg.cache_dtype
         )
 
+    if interleaved:
+        # Engine layout: K and V share one buffer, an fp32 scale after each, so
+        # the kernel loads tiles with the alignment from kv_tile_alignment.
+        hs = key_cache_q.shape[-1]
+        kv = torch.zeros(*key_cache_q.shape[:3], 2 * hs + 8, dtype=key_cache_q.dtype)
+        kv[..., :hs] = key_cache_q
+        kv[..., hs + 4 : 2 * hs + 4] = value_cache_q
+        key_cache_q, value_cache_q = kv[..., :hs], kv[..., hs + 4 : 2 * hs + 4]
+
     cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
         dim=0, dtype=torch.int32
     )
@@ -711,45 +722,6 @@ def test_triton_unified_attention_per_token_head_scale(
         k_scale_cache=k_scale_cache,
         v_scale_cache=v_scale_cache,
     )
-
-    # The engine interleaves K and V in one buffer with an inline fp32 scale
-    # after each, so a cell is not a multiple of 16 bytes and the kernel is
-    # told the alignment the cell does have.  That must not change the result.
-    hs = key_cache_q.shape[-1]
-    v_off = hs + 4
-    kv_packed = torch.zeros(
-        num_blocks, block_size, num_kv_heads, 2 * v_off, dtype=key_cache_q.dtype
-    )
-    kv_packed[..., :hs] = key_cache_q
-    kv_packed[..., v_off : v_off + hs] = value_cache_q
-    output_packed = torch.empty_like(query)
-    unified_attention(
-        q=query,
-        k=kv_packed[..., :hs],
-        v=kv_packed[..., v_off : v_off + hs],
-        out=output_packed,
-        cu_seqlens_q=cu_query_lens,
-        seqused_k=kv_lens_t,
-        max_seqlen_q=max_query_len,
-        max_seqlen_k=max_kv_len,
-        softmax_scale=scale,
-        causal=True,
-        window_size=(-1, -1),
-        block_table=block_tables,
-        softcap=0,
-        q_descale=None,
-        k_descale=None,
-        v_descale=None,
-        seq_threshold_3D=seq_threshold_3D,
-        num_par_softmax_segments=num_par_softmax_segments,
-        softmax_segm_output=softmax_segm_output,
-        softmax_segm_max=softmax_segm_max,
-        softmax_segm_expsum=softmax_segm_expsum,
-        kv_quant_mode=qcfg.kv_quant_mode,
-        k_scale_cache=k_scale_cache,
-        v_scale_cache=v_scale_cache,
-    )
-    assert torch.equal(output_packed, output_q)
 
     output_ref = torch.empty_like(query)
     unified_attention(
