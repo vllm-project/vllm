@@ -148,7 +148,11 @@ __launch_bounds__(kWave * RowWaves * (ChunkOnly ? 2 : 1)) void dense_prefill(
       (ChunkOnly ? q * query.token_stride + q_head * query.head_stride
                  : row_offset);
 
-  __shared__ alignas(16) _Float16 key_tile[kKeyTile][kHead];
+  // Pad expanded K rows by one vector to distribute reads across LDS banks.
+  // Each unrolled WMMA step then uses a constant offset from one lane address.
+  constexpr int KeyStride = kHead + (ChunkOnly ? 0 : 8);
+  constexpr int KeyXorMask = ChunkOnly ? 7 : 0;
+  __shared__ alignas(16) _Float16 key_tile[kKeyTile][KeyStride];
   __shared__ alignas(16) _Float16 value_tile[Keys][kHead][kFragment];
 
   __shared__ alignas(16)
@@ -205,29 +209,24 @@ __launch_bounds__(kWave * RowWaves * (ChunkOnly ? 2 : 1)) void dense_prefill(
                          kv_heads +
                      kv_head) *
                         kKeyTile * kHead
-                  : head_offset;
-    // Swizzle the 16-byte vector addresses to distribute the LDS reads
-    // across banks. Expansion has already zeroed the last partial tile.
+                  : head_offset + int64_t(key_start) * kHead;
+    const auto* k_src = reinterpret_cast<const Half8*>(
+        static_cast<const _Float16*>(keys.data) + tile_offset);
+    const auto* v_src = reinterpret_cast<const Half8*>(
+        static_cast<const _Float16*>(values.data) + tile_offset);
+    // Both inputs use contiguous 16-byte vectors within the staged tile.
+    // Expansion has already zeroed the last partial tile.
 #pragma unroll
     for (int unit = tid; unit < kKeyTile * Vectors; unit += kThreads) {
       const int token = unit / Vectors;
       const int col = unit % Vectors;
-      const auto* key_base =
-          static_cast<const _Float16*>(keys.data) + tile_offset;
-      const auto* value_base =
-          static_cast<const _Float16*>(values.data) + tile_offset;
-      const int pos = ChunkOnly ? token : key_start + token;
-      const auto* k_src = reinterpret_cast<const Half8*>(key_base + pos * kHead + col * 8);
-      *reinterpret_cast<Half8*>(&key_tile[token][(col ^ (token & 7)) * 8]) = *k_src;
+      const int k_col = col ^ (token & KeyXorMask);
+      *reinterpret_cast<Half8*>(&key_tile[token][k_col * 8]) = k_src[unit];
       const int sub_tile = unit / (2 * kHead);
       const int v_dim = unit / 2 % kHead;
       const int key = unit % 2;
-      const auto* v_src = reinterpret_cast<const Half8*>(
-          value_base +
-          ((ChunkOnly ? 0 : key_start) + sub_tile * kFragment) * kHead +
-          v_dim * kFragment + key * 8);
       const int swizzled_key = key ^ ((v_dim >> 2) & 1);
-      *reinterpret_cast<Half8*>(&value_tile[sub_tile][v_dim][swizzled_key * 8]) = *v_src;
+      *reinterpret_cast<Half8*>(&value_tile[sub_tile][v_dim][swizzled_key * 8]) = v_src[unit];
     }
     prefill_lds_barrier();
 
@@ -238,8 +237,9 @@ __launch_bounds__(kWave * RowWaves * (ChunkOnly ? 2 : 1)) void dense_prefill(
     for (int d = 0; d < Steps; ++d) {
 #pragma unroll
       for (int k = 0; k < Keys; ++k) {
+        const int k_col = ((part * Steps + d) * 2 + half) ^ (column & KeyXorMask);
         const Half8 key = *reinterpret_cast<const Half8*>(
-            &key_tile[k * kFragment + column][(((part * Steps + d) * 2 + half) ^ (column & 7)) * 8]);
+            &key_tile[k * kFragment + column][k_col * 8]);
         scores[k] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(
             key, q_fragment[d], scores[k]);
       }

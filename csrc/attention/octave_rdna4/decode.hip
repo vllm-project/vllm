@@ -209,11 +209,13 @@ __device__ __forceinline__ void hadamard(float (&x)[kLaneValues], int lane) {
   for (int i = 0; i < kLaneValues; ++i) x[i] *= WholeHead ? 1.f / 16 : 1.f / 8;
 }
 
+// Use HIP lane shuffles for reductions and packing. ROCm 7.2.3 produces
+// incorrect scales and packed codes with raw permlane instructions here.
 template <int Width>
 __device__ __forceinline__ float sum_lanes(float x) {
 #pragma unroll
   for (int delta = Width / 2; delta > 0; delta /= 2) {
-    x += octave_xor<false>(x, delta, kWave);
+    x += __shfl_xor(x, delta, kWave);
   }
   return x;
 }
@@ -247,17 +249,17 @@ __device__ __forceinline__ void pack_four(uint8_t* dst, int dims, int group,
                                           uint32_t codes) {
   auto* words = reinterpret_cast<uint32_t*>(dst);
   if constexpr (Bits == 4) {
-    uint32_t upper = octave_xor<false>(codes, 1, kWave);
+    uint32_t upper = __shfl_xor(codes, 1, kWave);
     if (group % 2 == 0) words[group / 2] = codes | (upper << 4);
   } else {
     uint32_t low = (codes & 0x03030303u) << (2 * (group % 4));
-    low |= octave_xor<false>(low, 1, kWave);
-    low |= octave_xor<false>(low, 2, kWave);
+    low |= __shfl_xor(low, 1, kWave);
+    low |= __shfl_xor(low, 2, kWave);
     if (group % 4 == 0) words[group / 4] = low;
     uint32_t high = ((codes >> 2) & 0x01010101u) << (group % 8);
-    high |= octave_xor<false>(high, 1, kWave);
-    high |= octave_xor<false>(high, 2, kWave);
-    high |= octave_xor<false>(high, 4, kWave);
+    high |= __shfl_xor(high, 1, kWave);
+    high |= __shfl_xor(high, 2, kWave);
+    high |= __shfl_xor(high, 4, kWave);
     if (group % 8 == 0) words[dims / 16 + group / 8] = high;
   }
 }
@@ -560,14 +562,6 @@ __device__ __forceinline__ float packed_qk(const float* query,
   }
 }
 
-template <int Width>
-__device__ __forceinline__ float sum_lanes_legacy(float x) {
-#pragma unroll
-  for (int delta = Width / 2; delta > 0; delta /= 2)
-    x += __shfl_xor(x, delta, kWave);
-  return x;
-}
-
 template <bool WholeHead>
 __device__ __forceinline__ void hadamard_legacy(float (&x)[kLaneValues],
                                                 int lane) {
@@ -677,10 +671,7 @@ __device__ __forceinline__ void attention_row(
               for (int i = 0; i < kLaneValues; ++i)
                 logit = fmaf(raw_q[i], raw_k[i], logit);
             }
-            if constexpr (Path == DecodePath::Dot4)
-              logit = sum_lanes_legacy<kWave>(logit) * scale;
-            else
-              logit = sum_lanes<kWave>(logit) * scale;
+            logit = sum_lanes<kWave>(logit) * scale;
           }
           slots[t] = slot;
           logits[t] = logit;
@@ -743,10 +734,7 @@ __device__ __forceinline__ void attention_row(
           for (int i = 0; i < kLaneValues; ++i)
             logit = fmaf(raw_q[i], raw_k[i], logit);
         }
-        if constexpr (Path == DecodePath::Dot4)
-          logit = sum_lanes_legacy<kWave>(logit) * scale;
-        else
-          logit = sum_lanes<kWave>(logit) * scale;
+        logit = sum_lanes<kWave>(logit) * scale;
         float next_max = fmaxf(running_max, logit);
         float rescale = __expf(running_max - next_max);
         float weight = __expf(logit - next_max);
