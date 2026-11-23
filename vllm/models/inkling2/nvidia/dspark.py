@@ -6,12 +6,13 @@ recurrent (`rnn_hidden`) Markov head. Numerics follow the reference
 implementation's draft (flashinfer RMSNorms, bf16 logits)."""
 
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import cast
 
 import torch
 from torch import nn
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
@@ -115,6 +116,22 @@ def all_reduce_add_rmsnorm(
     return x
 
 
+def _draft_cache_config(cache_config: CacheConfig) -> CacheConfig | None:
+    """Cache config for the draft's `Attention` layers.
+
+    The draft's caches are BF16 unless its cache dtype is FP8 (the target's
+    `--kv-cache-dtype`, or `kv_cache_dtype` in the speculative config). With an
+    FP8 target, an FP8 draft keeps its full-attention layer in the same KV
+    cache group as the target's full-attention layers; a BF16 draft layer
+    matches none of them and the planner falls back to one group per layer.
+    """
+    if cache_config.cache_dtype not in ("fp8", "fp8_e4m3"):
+        return None
+    # `Attention` takes a model-level window from the cache config when the
+    # layer has none of its own, and the draft's full layer has none.
+    return replace(cache_config, sliding_window=None)
+
+
 class Inkling2DraftSelfAttention(nn.Module):
     """Bidirectional block attention over context K/V (from target features)
     and the block itself; local layers see `sliding_window_size` positions
@@ -160,18 +177,19 @@ class Inkling2DraftSelfAttention(nn.Module):
         # Owns the paged KV cache only; the same spec as the target's layers
         # (the scheduler keeps the last sliding_window_size positions before
         # the block, which is what the draft reads).
+        vllm_config = get_current_vllm_config()
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.head_dim**-0.5,
             num_kv_heads=self.num_kv_heads,
+            cache_config=_draft_cache_config(vllm_config.cache_config),
             per_layer_sliding_window=config.sliding_window_size if is_local else None,
             prefix=f"{prefix}.attn",
             attn_backend=FlashAttentionBackend,
         )
         # Keys a block sees: itself and, if local, the window before it.
         self.window = config.sliding_window_size + self.block if is_local else 0
-        vllm_config = get_current_vllm_config()
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self.register_buffer(
             "cu_seqlens_q",
