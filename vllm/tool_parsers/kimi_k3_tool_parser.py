@@ -76,6 +76,7 @@ class _StreamingCall:
     index: int | None
     arg_count: int = 0
     arg_type: str | None = None
+    arg_prefix: str = ""
     value_start: int = 0
     value_sent: int = 0
 
@@ -416,18 +417,46 @@ class KimiK3ToolParser(ToolParser):
                 prefix += json.dumps(attrs.get("key", ""), ensure_ascii=False) + ": "
                 if call.arg_type == "string":
                     prefix += '"'
-                self._append_arguments(deltas, call.index, prefix)
-                call.arg_count += 1
+                    self._append_arguments(deltas, call.index, prefix)
+                    call.arg_count += 1
+                else:
+                    call.arg_prefix = prefix
                 continue
 
             m_value_close = self._arg_close_re.search(text, pos, partial=True)
-            value_end = len(text) if m_value_close is None else m_value_close.start()
+            m_call_close = self._call_close_re.search(text, pos, partial=True)
+            value_end = min(
+                (
+                    match.start()
+                    for match in (m_value_close, m_call_close)
+                    if match is not None
+                ),
+                default=len(text),
+            )
             if call.arg_type == "string":
                 value = text[call.value_sent : value_end]
                 self._append_arguments(
                     deltas, call.index, json.dumps(value, ensure_ascii=False)[1:-1]
                 )
                 call.value_sent = value_end
+            if (
+                m_call_close is not None
+                and not m_call_close.partial
+                and m_call_close.start() == value_end
+                and (
+                    m_value_close is None
+                    or m_value_close.partial
+                    or m_call_close.start() < m_value_close.start()
+                )
+            ):
+                # The call closed before this argument closed. Typed values have
+                # not been emitted yet, so drop them like the non-streaming path.
+                # String text was already streamed, so close it as valid JSON.
+                suffix = '"}' if call.arg_type == "string" else "}"
+                self._append_arguments(deltas, call.index, suffix)
+                self._stream_call = None
+                pos = m_call_close.end()
+                continue
             if m_value_close is None or m_value_close.partial:
                 pos = value_end
                 break
@@ -440,8 +469,12 @@ class KimiK3ToolParser(ToolParser):
                 except json.JSONDecodeError:
                     value = raw_value
                 self._append_arguments(
-                    deltas, call.index, json.dumps(value, ensure_ascii=False)
+                    deltas,
+                    call.index,
+                    call.arg_prefix + json.dumps(value, ensure_ascii=False),
                 )
+                call.arg_count += 1
+                call.arg_prefix = ""
             call.arg_type = None
             pos = m_value_close.end()
 

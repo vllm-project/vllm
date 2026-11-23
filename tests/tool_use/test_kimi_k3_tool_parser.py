@@ -509,13 +509,52 @@ def test_streaming_does_not_emit_partial_typed_arguments():
         )
         previous_text = current_text
 
-    arguments = []
-    for message in messages[1:]:
-        assert message is not None
-        function = message.tool_calls[0].function
-        assert function is not None
-        arguments.append(function.arguments)
-    assert arguments == ['"opts": ', '{"a": 1}']
+    assert messages[1] is None
+    message = messages[2]
+    assert message is not None
+    function = message.tool_calls[0].function
+    assert function is not None
+    assert function.arguments == '"opts": {"a": 1}'
+
+
+@pytest.mark.parametrize("value_type", ["string", "number"])
+def test_streaming_unclosed_argument_respects_call_boundary(value_type):
+    value = "unterminated" if value_type == "string" else "1"
+    output = _tools(
+        f'{OPEN}call tool="calc" index="1"{SEP}'
+        f'{OPEN}argument key="value" type="{value_type}"{SEP}{value}'
+        f"{CLOSE}call{SEP}",
+        _call("calc", 2, _arg("x", "number", "2")),
+    )
+    split_close = len(output.split(f"{CLOSE}call{SEP}", 1)[0]) + len(CLOSE)
+    chunks = [
+        output[:split_close],
+        output[split_close : split_close + len("call")],
+        output[split_close + len("call") :],
+    ]
+    request = _request()
+    parser = KimiK3ToolParser(_dummy_tokenizer())
+    previous_text = ""
+    messages = []
+    for delta_text in chunks:
+        current_text = previous_text + delta_text
+        message = parser.extract_tool_calls_streaming(
+            previous_text, current_text, delta_text, [], [], [], request
+        )
+        if message is not None:
+            messages.append(message)
+        previous_text = current_text
+
+    expected = KimiK3ToolParser(_dummy_tokenizer()).extract_tool_calls(output, request)
+    streamed = _streamed_functions(messages)
+    assert [call["name"] for call in streamed] == ["calc", "calc"]
+    assert [call.function.name for call in expected.tool_calls] == ["calc", "calc"]
+    assert streamed[1]["arguments"] == expected.tool_calls[1].function.arguments
+    if value_type == "string":
+        # String text is streamed before its closing marker arrives.
+        assert json.loads(streamed[0]["arguments"]) == {"value": value}
+    else:
+        assert streamed[0]["arguments"] == expected.tool_calls[0].function.arguments
 
 
 def test_chat_stream_processor_streams_kimi_k3_tool_arguments():
