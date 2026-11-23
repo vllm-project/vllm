@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""PrefixLMScheduler on a full attention + Mamba ("align" cache mode) model."""
+"""PrefixLMScheduler on full attention + Mamba ("align" cache mode) and on full
+attention + sliding window models."""
 
 import pytest
 import torch
@@ -18,11 +19,11 @@ from vllm.v1.core.sched.prefix_lm_scheduler import (
 )
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig, MambaSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 
-from .utils import EOS_TOKEN_ID, create_scheduler
+from .utils import EOS_TOKEN_ID, create_scheduler, sliding_window_layer
 
 pytestmark = pytest.mark.cpu_test
 
@@ -35,15 +36,22 @@ MAMBA = MambaManager.layer_config(
 )
 
 
-def make_scheduler(budget: int = 256, cls: type[Scheduler] = PrefixLMScheduler):
+def make_scheduler(
+    budget: int = 256,
+    cls: type[Scheduler] = PrefixLMScheduler,
+    layer: KVCacheLayerConfig = MAMBA,
+    retention: int | None = None,
+):
+    """A scheduler for a full attention group and a group of `layer`."""
     return create_scheduler(
         max_num_batched_tokens=budget,
         enable_chunked_prefill=False,
         max_model_len=budget,
         enable_prefix_caching=True,
         skip_tokenizer_init=True,
-        mamba_layer_config=MAMBA,
+        mamba_layer_config=layer,
         scheduler_cls=cls,
+        prefix_cache_retention_interval=retention,
     )
 
 
@@ -105,6 +113,28 @@ def test_hits_stop_at_the_prefix_and_prompts_prefill_whole(cls):
     assert step(
         scheduler, make_request("p48", q1, 48), make_request("causal", q1, None)
     ) == {"p48": (0, 70), "causal": (0, 70)}
+
+
+def test_hits_stop_at_the_prefix_with_sliding_window_layers():
+    """As above, with a sliding window shorter than the prompts and the sparse
+    prefix-cache retention vLLM serves with."""
+    sliding = sliding_window_layer(
+        AttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
+        sliding_window=32,
+    )
+    scheduler = make_scheduler(layer=sliding, retention=0)
+    managers = [
+        group.manager_config.manager_cls.__name__
+        for group in scheduler.kv_cache_config.kv_cache_groups
+    ]
+    assert managers == ["FullAttentionManager", "SlidingWindowManager"]
+    prefix = list(range(100, 140))
+    # The questions share their first 24 tokens: blocks [0, 64) match.
+    q1, q2 = (prefix + list(range(200, 224)) + [i] * 6 for i in (1, 2))
+
+    assert step(scheduler, make_request("q1", q1, 40)) == {"q1": (0, 70)}
+    # The hit stops at the last full block of the prefix, not at 64.
+    assert step(scheduler, make_request("q2", q2, 40)) == {"q2": (32, 38)}
 
 
 def test_waiting_prompt_holds_the_queue():

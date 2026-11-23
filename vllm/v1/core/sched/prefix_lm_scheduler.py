@@ -117,9 +117,10 @@ class PrefixLMScheduler(Scheduler):
         blocks, num_tokens, _, diverged = super()._get_local_prefix_cache_hit(
             request, cap
         )
-        # No shared-prefix junction: Mamba alignment would end a step there,
-        # inside the prefix.
-        return blocks, num_tokens, 0, diverged
+        # Pin the prefix end, where hits stop, so sparse retention keeps the
+        # sliding-window blocks before it; Mamba alignment would end a step there.
+        junction = 0 if self.has_mamba_layers else prefix_len
+        return blocks, num_tokens, junction, diverged
 
 
 class PrefixLMAsyncScheduler(PrefixLMScheduler, AsyncScheduler): ...
