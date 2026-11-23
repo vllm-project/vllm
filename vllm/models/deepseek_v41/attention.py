@@ -298,12 +298,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     # path to pre-reserve that workspace.
     PREFILL_CHUNK_SIZE: ClassVar[int] = 4
 
-    def _wo_a_keeps_checkpoint_quant(self) -> bool:
-        """True when the subclass computes wo_a from its checkpoint weights
-        itself, so online quantization (`--quantization-config`) must leave
-        it alone."""
-        return False
-
     # ---- attention-interface contract, declared by the platform subclass ----
 
     @property
@@ -380,6 +374,27 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """The index K cache layer, which names the indexer metadata
         backend. A platform subclass returns one with its own builder."""
         return DeepseekV4IndexerCache
+
+    def _wo_a_keeps_checkpoint_quant(self) -> bool:
+        """True when the subclass computes wo_a from its checkpoint weights
+        itself, so online quantization (`--quantization-config`) must leave
+        it alone."""
+        return False
+
+    def _wo_a_quant_config(
+        self, quant_config: QuantizationConfig | None
+    ) -> QuantizationConfig | None:
+        """`quant_config` without its online quantization when
+        `_wo_a_keeps_checkpoint_quant`, else `quant_config` itself."""
+        if (
+            quant_config is None
+            or quant_config.online_quantization_config is None
+            or not self._wo_a_keeps_checkpoint_quant()
+        ):
+            return quant_config
+        wo_a_quant_config = copy.copy(quant_config)
+        wo_a_quant_config.online_quantization_config = None
+        return wo_a_quant_config
 
     def __init__(
         self,
@@ -489,20 +504,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
 
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
-        wo_a_quant_config = quant_config
-        if (
-            quant_config is not None
-            and quant_config.online_quantization_config is not None
-            and self._wo_a_keeps_checkpoint_quant()
-        ):
-            wo_a_quant_config = copy.copy(quant_config)
-            wo_a_quant_config.online_quantization_config = None
         self.wo_a = DeepseekV4GroupedWoA(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * self.o_lora_rank,
             n_groups=self.n_groups,
             bias=False,
-            quant_config=wo_a_quant_config,
+            quant_config=self._wo_a_quant_config(quant_config),
             return_bias=False,
             prefix=f"{prefix}.wo_a",
         )
