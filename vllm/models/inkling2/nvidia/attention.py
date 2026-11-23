@@ -26,7 +26,11 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.inkling.nvidia.ops.fa4_rel_attention import bucket_max_seqlen_q
 from vllm.models.inkling.nvidia.sconv_swa_attn import InklingConvState
-from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import (
+    canonicalize_singleton_dim_strides,
+    kv_cache_dtype_str_to_dtype,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     CommonAttentionMetadata,
@@ -56,6 +60,7 @@ from .ops.attention import (
 )
 from .ops.attention_sm90 import MODE_OUT_LSE, rel_attention
 from .ops.linear import linear
+from .ops.ll_gemm_sm120 import qkv_bmm, use_qkv_bmm
 from .ops.sconv import attention_prologue, shift_rel_proj
 from .sconv import K_STREAM, V_STREAM, Inkling2ShortConv, conv_metadata
 
@@ -106,12 +111,73 @@ class Inkling2AttentionBackend(FlashAttentionBackend):
         return Inkling2AttentionMetadataBuilder
 
 
+def _kv_cache_layer_config(
+    vllm_config: VllmConfig,
+    num_kv_heads: int,
+    head_dim: int,
+    sliding_window: int | None,
+) -> KVCacheLayerConfig:
+    spec = AttentionSpec(
+        block_size=vllm_config.cache_config.block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_dim,
+        dtype=kv_cache_dtype_str_to_dtype(
+            vllm_config.cache_config.cache_dtype, vllm_config.model_config
+        ),
+    )
+    if sliding_window is not None:
+        return SlidingWindowManager.layer_config(spec, sliding_window=sliding_window)
+    return FullAttentionManager.layer_config(spec)
+
+
+class Inkling2AttentionPassCache(nn.Module, AttentionLayerBase):
+    """The KV cache of one extra loop pass of a looped `Inkling2Attention`
+    (each pass of the loop core attends over its own keys and values)."""
+
+    def __init__(
+        self,
+        prefix: str,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        sliding_window: int | None,
+    ) -> None:
+        super().__init__()
+        self.prefix = prefix
+        # Read by the metadata builders of the layer's attention group.
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.sliding_window = sliding_window
+        self.kv_cache = torch.tensor([])
+        forward_context = get_current_vllm_config().compilation_config
+        if prefix in forward_context.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        forward_context.static_forward_context[prefix] = self
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return Inkling2AttentionBackend
+
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        return _kv_cache_layer_config(
+            vllm_config, self.num_kv_heads, self.head_dim, self.sliding_window
+        )
+
+
 class Inkling2Attention(nn.Module, AttentionLayerBase):
     """Inkling2 attention for one decoder layer.
 
     Local layers project all of q/k/v from one input; full layers project the
     query side (q, r, gate, sink) from `x_q`, k from `x_k` and v from
-    `x_v`, and use dynamic K/V convolutions and log-scaled q/r.
+    `x_v`, and use dynamic K/V convolutions and log-scaled q/r. Local layers
+    given separate `x_k` / `x_v` (loop passes after the first) project them
+    as full layers do.
+
+    A loop core layer runs once per loop pass, each pass with its own KV and
+    conv-state caches: `conv_states[p]` and pass `p`'s KV cache (this layer's
+    for pass 0, `pass_caches[p - 1]` after). With `loop_share_cache`, every
+    pass reads and writes this layer's KV cache (later tokens see the last
+    pass's K/V).
     """
 
     def __init__(
@@ -120,6 +186,7 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         is_local: bool,
         conv_state: InklingConvState,
         prefix: str,
+        pass_conv_states: tuple[InklingConvState, ...] = (),
     ) -> None:
         super().__init__()
         self.prefix = prefix
@@ -198,6 +265,17 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
             )
 
         self.conv_state = conv_state
+        self.conv_states = (conv_state, *pass_conv_states)
+        self.pass_caches = nn.ModuleList(
+            Inkling2AttentionPassCache(
+                f"{prefix}.pass{p}",
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.sliding_window if is_local else None,
+            )
+            for p in range(1, 1 if config.loop_share_cache else len(self.conv_states))
+        )
         self.k_sconv, self.v_sconv = (
             Inkling2ShortConv(
                 kv_size,
@@ -212,7 +290,15 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
 
         vllm_config = get_current_vllm_config()
         self.max_decode_query_len = max_decode_query_len(vllm_config)
-        assert vllm_config.cache_config.cache_dtype in ("auto", "bfloat16")
+        cache_dtype = vllm_config.cache_config.cache_dtype
+        supported: tuple[str, ...] = ("auto", "bfloat16")
+        if current_platform.is_device_capability_family(120):
+            supported += ("float16", "fp8", "fp8_e4m3")
+        if cache_dtype not in supported:
+            raise ValueError(f"Inkling2 KV cache dtype must be one of {supported}")
+        self.fp8_kv = cache_dtype in ("fp8", "fp8_e4m3")
+        if cache_dtype == "float16" and vllm_config.speculative_config is not None:
+            raise ValueError("Inkling2 FP16 KV requires speculative decoding disabled")
         self.kv_cache = torch.tensor([])
         forward_context = vllm_config.compilation_config.static_forward_context
         if prefix in forward_context:
@@ -228,17 +314,19 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         return Inkling2AttentionBackend
 
     def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
-        spec = AttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
-            num_kv_heads=self.num_kv_heads,
-            head_size=self.head_dim,
-            dtype=vllm_config.model_config.dtype,
+        return _kv_cache_layer_config(
+            vllm_config,
+            self.num_kv_heads,
+            self.head_dim,
+            self.sliding_window if self.is_local else None,
         )
-        if self.is_local:
-            return SlidingWindowManager.layer_config(
-                spec, sliding_window=self.sliding_window
-            )
-        return FullAttentionManager.layer_config(spec)
+
+    def _pass_cache(self, pass_idx: int) -> tuple[str, torch.Tensor]:
+        """The attention metadata key and KV cache of loop pass `pass_idx`."""
+        if pass_idx == 0 or not self.pass_caches:
+            return self.prefix, self.kv_cache
+        cache = self.pass_caches[pass_idx - 1]
+        return cache.prefix, cache.kv_cache
 
     def _project(
         self, x_q: torch.Tensor, x_k: torch.Tensor, x_v: torch.Tensor
@@ -246,12 +334,19 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         # ``linear`` on the weight bypasses the layer (and a LoRA wrapper's
         # forward), so the LoRA deltas are added here (no-op without LoRA).
         weight = self.qkvr.weight
-        if self.is_local:
+        if x_k is x_q and x_v is x_q:
             projected = linear(x_q, weight)
             add_linear_lora(self.qkvr, projected, x_q, range(6))
             return list(projected.split(self.split_sizes, dim=-1)[:6])
         q_side, kv_size = sum(self.split_sizes[:4]), self.split_sizes[4]
         k_end = q_side + kv_size
+        if use_qkv_bmm(x_q, x_k, x_v, weight):
+            projected = qkv_bmm(x_q, x_k, x_v, weight, q_side, k_end)
+            splits = projected.split(self.split_sizes, dim=-1)
+            add_linear_lora(self.qkvr, projected, x_q, range(4))
+            add_linear_lora(self.qkvr, splits[4], x_k, [4])
+            add_linear_lora(self.qkvr, splits[5], x_v, [5])
+            return list(splits[:6])
         projected = linear(x_q, weight[: sum(self.q_side_splits)])
         k = linear(x_k, weight[q_side:k_end])
         v = linear(x_v, weight[k_end : k_end + kv_size])
@@ -260,10 +355,13 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         add_linear_lora(self.qkvr, v, x_v, [5])
         return [*projected.split(self.q_side_splits, dim=-1)[:4], k, v]
 
-    def _split_kv_cache(self) -> tuple[torch.Tensor, torch.Tensor]:
-        key_cache, value_cache = self.kv_cache.transpose(1, 2).split(
-            self.head_dim, dim=-1
-        )
+    def _split_kv_cache(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.fp8_kv:
+            # Every loop pass owns byte storage containing unit-scale E4M3 KV.
+            kv_cache = kv_cache.view(torch.float8_e4m3fn)
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_dim, dim=-1)
         return (
             canonicalize_singleton_dim_strides(key_cache),
             canonicalize_singleton_dim_strides(value_cache),
@@ -277,14 +375,16 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         x_v: torch.Tensor | None = None,
         tau: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
+        pass_idx: int = 0,
     ) -> torch.Tensor:
         """Return this rank's bf16 `(T, hidden)` partial output (to be
         all-reduced over TP), written to `out` if given.
 
-        Local layers read q/k/v from `x_q`; full layers take `x_k`, `x_v` and
-        the fp32 log-scaling `tau` for q/r.
+        Local layers read q/k/v from `x_q` (or `x_k` / `x_v` if given); full
+        layers take `x_k`, `x_v` and the fp32 log-scaling `tau` for q/r.
+        `pass_idx` picks the loop pass's caches.
         """
-        if self.is_local:
+        if self.is_local and x_k is None:
             x_k = x_v = x_q
         assert x_k is not None and x_v is not None
         q, r, gate, sinks, k, v = self._project(x_q, x_k, x_v)
@@ -301,6 +401,7 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
             self.v_sconv.dynamic_taps(x_v),
             tau,
             output,
+            pass_idx,
         )
         out = linear(output, self.wo_ud.weight, out)
         add_linear_lora(self.wo_ud, out, output)
@@ -320,6 +421,7 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         v_dynamic: torch.Tensor | None,
         tau: torch.Tensor | None,
         output: torch.Tensor,
+        pass_idx: int = 0,
     ) -> None:
         """Write the gated attention output to `output`.
 
@@ -331,9 +433,11 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         num_tokens = q.shape[0]
         q = q.view(num_tokens, self.num_heads, self.head_dim)
         attn_metadata = get_forward_context().attn_metadata
+        layer_name, kv_cache = self._pass_cache(pass_idx)
+        conv_state = self.conv_states[pass_idx]
         md = None
-        if isinstance(attn_metadata, dict) and self.kv_cache.numel() > 0:
-            md = cast(Inkling2AttentionMetadata, attn_metadata[self.prefix])
+        if isinstance(attn_metadata, dict) and kv_cache.numel() > 0:
+            md = cast(Inkling2AttentionMetadata, attn_metadata[layer_name])
         num_decodes, num_decode_tokens, decode_splits = 0, 0, 0
         if md is not None:
             num_decodes, num_decode_tokens, decode_splits = self._plan_decode(
@@ -346,9 +450,9 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
             (num_tokens + 128, self.num_heads, self.rel_extent + 256)
         )
         if md is not None:
-            conv_md = conv_metadata(self.conv_state)
+            conv_md = conv_metadata(conv_state)
             assert conv_md is not None
-            key_cache, value_cache = self._split_kv_cache()
+            key_cache, value_cache = self._split_kv_cache(kv_cache)
             attention_prologue(
                 q,
                 r.view(num_tokens, self.num_heads, self.d_rel),
@@ -362,7 +466,7 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
                 self.v_sconv.conv_weight,
                 k_dynamic,
                 v_dynamic,
-                self.conv_state.kv_cache,
+                conv_state.kv_cache,
                 positions,
                 conv_md.block_table,
                 conv_md.seq_idx,
@@ -383,6 +487,7 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
             assert md is not None
             self._decode_attention(
                 md,
+                kv_cache,
                 clipped_q[:num_decode_tokens],
                 rel_logits,
                 gate[:num_decode_tokens],
@@ -407,6 +512,7 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
                 )
                 self._fa4_attention(
                     md,
+                    kv_cache,
                     clipped_q[num_decode_tokens:],
                     rel_logits[num_decode_tokens:],
                     out,
@@ -457,6 +563,7 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
     def _decode_attention(
         self,
         md: FlashAttentionMetadata,
+        kv_cache: torch.Tensor,
         q: torch.Tensor,
         rel_logits: torch.Tensor,
         gate: torch.Tensor,
@@ -465,7 +572,7 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         num_splits: int,
         num_reqs: int,
     ) -> None:
-        key_cache, value_cache = self._split_kv_cache()
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
         mixed = num_reqs < md.seq_lens.shape[0]
         num_tokens = md.num_decode_tokens if mixed else md.num_actual_tokens
         max_query_len = md.max_query_len
@@ -492,6 +599,7 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
     def _fa4_attention(
         self,
         md: FlashAttentionMetadata,
+        kv_cache: torch.Tensor,
         q: torch.Tensor,
         rel_logits: torch.Tensor,
         out: torch.Tensor,
@@ -506,7 +614,7 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         cu_seqlens_q = md.query_start_loc[num_decodes:]
         if num_decodes:
             cu_seqlens_q = cu_seqlens_q - num_decode_tokens
-        key_cache, value_cache = self._split_kv_cache()
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
         if not use_sm100_kernels():
             rel_attention(
                 q[:nt],
