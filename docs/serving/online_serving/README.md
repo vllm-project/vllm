@@ -112,8 +112,10 @@ vllm serve NousResearch/Meta-Llama-3-8B-Instruct --enable-offline-docs
 
 LoRA dynamic loading & unloading is enabled in the API server. This should ONLY be used for local development!
 
-- `/v1/load_lora_adapter` - LoRA dynamic loading
+- `/v1/load_lora_adapter` - LoRA dynamic loading (supports optional `pinned: true`)
 - `/v1/unload_lora_adapter` - LoRA dynamic unloading
+- `/v1/pin_lora_adapter` - LoRA dynamic pinning
+- `/v1/unpin_lora_adapter` - LoRA dynamic unpinning
 
 ### Profiling APIs
 

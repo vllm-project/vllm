@@ -156,3 +156,27 @@ def test_lru_cache_put_if_fits():
 
     with pytest.raises(ValueError, match="value too large"):
         cache.put("big", 11)
+
+
+def test_lru_cache_pin_and_unpin():
+    cache = LRUCache[str, int](2)
+    cache.put("a", 1)
+    cache.put("b", 2)
+
+    cache.pin("a")
+    # "a" is oldest, but pinned, so inserting "c" must evict "b" instead.
+    cache.put("c", 3)
+    assert "a" in cache
+    assert "b" not in cache
+    assert "c" in cache
+
+    # Unpinning "a" allows it to be evicted in LRU order again.
+    cache.unpin("a")
+    # Unpinning an already-unpinned present key is idempotent.
+    cache.unpin("a")
+    cache.put("d", 4)
+    assert "a" not in cache
+    assert set(cache.cache) == {"c", "d"}
+
+    with pytest.raises(ValueError, match="Cannot unpin key"):
+        cache.unpin("missing")

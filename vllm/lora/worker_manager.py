@@ -223,6 +223,9 @@ class WorkerLoRAManager:
     def pin_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.pin_adapter(adapter_id)
 
+    def unpin_adapter(self, adapter_id: int) -> bool:
+        return self._adapter_manager.unpin_adapter(adapter_id)
+
     def set_active_adapters(self, requests: set[Any], mapping: Any | None) -> None:
         self._apply_adapters(requests)
         if mapping is not None:

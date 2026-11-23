@@ -430,6 +430,13 @@ class LoRAModelManager:
             "Use LRUCacheLoRAModelManager for pinning"
         )  # type: ignore
 
+    def unpin_adapter(self, lora_id: int) -> bool:
+        """Unpin a LoRAModel in the manager cache."""
+        raise NotImplementedError(
+            "Unpinning is not supported in LoRAModelManager. "
+            "Use LRUCacheLoRAModelManager for unpinning"
+        )  # type: ignore
+
     def _set_adapter_mapping(self, mapping: LoRAMapping) -> None:
         # Default to the main language model wrapper
         if not (self.supports_mm and self.supports_tower_connector_lora):
@@ -1481,8 +1488,20 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
     def pin_adapter(self, lora_id: int) -> bool:
         """Pin a LoRAModel in the manager cache."""
+        was_pinned_cpu = lora_id in self._registered_adapters.pinned_items
         self._pin_lora_in_cpu_cache(lora_id)
-        self._pin_lora_in_gpu_cache(lora_id)
+        try:
+            self._pin_lora_in_gpu_cache(lora_id)
+        except Exception:
+            if not was_pinned_cpu and lora_id in self._registered_adapters:
+                self._registered_adapters.unpin(lora_id)
+            raise
+        return True
+
+    def unpin_adapter(self, lora_id: int) -> bool:
+        """Unpin a LoRAModel in the manager cache."""
+        self._unpin_lora_in_cpu_cache(lora_id)
+        self._unpin_lora_in_gpu_cache(lora_id)
         return True
 
     def _pin_lora_in_cpu_cache(self, lora_id: int):
@@ -1499,6 +1518,18 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
             self.activate_adapter(lora_id)
 
         self._active_adapters.pin(lora_id)
+
+    def _unpin_lora_in_cpu_cache(self, lora_id: int):
+        try:
+            self._registered_adapters.unpin(lora_id)
+        except ValueError as err:
+            raise ValueError(
+                f"Unpinning failed. LoRA {lora_id} is not registered."
+            ) from err
+
+    def _unpin_lora_in_gpu_cache(self, lora_id: int):
+        if lora_id in self._active_adapters:
+            self._active_adapters.unpin(lora_id)
 
 
 def create_lora_manager(

@@ -422,6 +422,10 @@ class Executor(ABC):
         assert lora_id > 0, "lora_id must be greater than 0."
         return all(self.collective_rpc("pin_lora", args=(lora_id,)))
 
+    def unpin_lora(self, lora_id: int) -> bool:
+        assert lora_id > 0, "lora_id must be greater than 0."
+        return all(self.collective_rpc("unpin_lora", args=(lora_id,)))
+
     def list_loras(self) -> set[int]:
         sets: list[set[int]] = self.collective_rpc("list_loras")
         for s in sets:

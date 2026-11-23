@@ -9,8 +9,17 @@ class LoadLoRAAdapterRequest(BaseModel):
     lora_path: str
     load_inplace: bool = False
     is_3d_lora_weight: bool = False
+    pinned: bool = False
 
 
 class UnloadLoRAAdapterRequest(BaseModel):
     lora_name: str
     lora_int_id: int | None = Field(default=None)
+
+
+class PinLoRAAdapterRequest(BaseModel):
+    lora_name: str
+
+
+class UnpinLoRAAdapterRequest(BaseModel):
+    lora_name: str

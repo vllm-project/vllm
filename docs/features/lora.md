@@ -137,6 +137,33 @@ curl -X POST http://localhost:8000/v1/load_lora_adapter \
 Upon a successful request, the API will respond with a `200 OK` status code from `vllm serve`, and `curl` returns the response body: `Success: LoRA adapter 'sql_adapter' added successfully`. If an error occurs, such as if the adapter
 cannot be found or loaded, an appropriate error message will be returned.
 
+You can also pass `"pinned": true` in the `/v1/load_lora_adapter` payload to pin the adapter in the LRU cache immediately after loading (requires `--max-cpu-loras` to be configured).
+
+Pinning and Unpinning a LoRA Adapter:
+
+To prevent an already-loaded LoRA adapter from being evicted from the GPU and CPU LRU caches, send a POST request to `/v1/pin_lora_adapter`:
+
+```bash
+curl -X POST http://localhost:8000/v1/pin_lora_adapter \
+-H "Content-Type: application/json" \
+-d '{
+    "lora_name": "sql_adapter"
+}'
+```
+
+To allow a previously pinned adapter to be evicted again, send a POST request to `/v1/unpin_lora_adapter`:
+
+```bash
+curl -X POST http://localhost:8000/v1/unpin_lora_adapter \
+-H "Content-Type: application/json" \
+-d '{
+    "lora_name": "sql_adapter"
+}'
+```
+
+!!! note
+    Pinning and unpinning require LRU caching (`--max-cpu-loras`). Because each pinned adapter permanently occupies a GPU LoRA slot, pinning all `--max-loras` slots will reject additional pinning requests with HTTP `400` until an adapter is unpinned or unloaded.
+
 Unloading a LoRA Adapter:
 
 To unload a LoRA adapter that has been previously loaded, send a POST request to the `/v1/unload_lora_adapter` endpoint

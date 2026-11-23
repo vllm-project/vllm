@@ -184,6 +184,8 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/v1/systemone` - Structured decisions API
 - `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
+- `/v1/pin_lora_adapter` - Pin a loaded LoRA adapter in the LRU cache (can pin GPU/CPU LoRA slots; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
+- `/v1/unpin_lora_adapter` - Unpin a loaded LoRA adapter from the LRU cache (only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/inference/v1/generate` - Generate completions (available when `--enable-scale-out` is set, or with `--tokens-only`; otherwise returns HTTP 403 with instructions to enable it)
 - `/cohere/v2/chat/render` - Render Cohere Chat v2 requests (requires `VLLM_ENABLE_COHERE_API=1` and either `--enable-scale-out` or `--tokens-only`)
 - `/v2/embed` - Cohere Embed API
@@ -392,9 +394,9 @@ To disable the Python code interpreter specifically, omit `code_interpreter` fro
 
 ## Dynamic LoRA Loading
 
-vLLM supports dynamically loading and unloading LoRA adapters at runtime via the `/v1/load_lora_adapter` and `/v1/unload_lora_adapter` API endpoints. This functionality is **not enabled by default** — it requires both `--enable-lora` and the environment variable `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True` to be set.
+vLLM supports dynamically loading, unloading, pinning, and unpinning LoRA adapters at runtime via the `/v1/load_lora_adapter`, `/v1/unload_lora_adapter`, `/v1/pin_lora_adapter`, and `/v1/unpin_lora_adapter` API endpoints. This functionality is **not enabled by default** — it requires both `--enable-lora` and the environment variable `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True` to be set.
 
-**Warning:** Dynamic LoRA loading is not a secure operation and should not be enabled in deployments exposed to untrusted clients. If you must enable dynamic LoRA loading, restrict access to the `/v1/load_lora_adapter` and `/v1/unload_lora_adapter` endpoints to trusted administrators only, using a reverse proxy or network-level access controls. Do not expose these endpoints to end users. For details on configuring LoRA adapters, see the [LoRA Adapters documentation](../features/lora.md).
+**Warning:** Dynamic LoRA loading and pinning are not secure operations and should not be enabled in deployments exposed to untrusted clients (untrusted callers could alter model behavior or exhaust GPU LoRA slots by pinning adapters). If you must enable dynamic LoRA loading, restrict access to the `/v1/load_lora_adapter`, `/v1/unload_lora_adapter`, `/v1/pin_lora_adapter`, and `/v1/unpin_lora_adapter` endpoints to trusted administrators only, using a reverse proxy or network-level access controls. Do not expose these endpoints to end users. For details on configuring LoRA adapters, see the [LoRA Adapters documentation](../features/lora.md).
 
 ## Endpoint Plugins
 

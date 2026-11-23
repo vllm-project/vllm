@@ -238,6 +238,9 @@ class WorkerBase:
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
+    def unpin_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
     def list_loras(self) -> set[int]:
         raise NotImplementedError
 
