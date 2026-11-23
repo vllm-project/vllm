@@ -604,6 +604,21 @@ class ParallelConfig:
     acts in eager mode and under piecewise/breakable CUDA graphs, falling back
     to the serial all-gather whenever a step is not eligible."""
 
+    pcp_dcp_indexer_k_replica: bool = False
+    """Under PCP + DCP prefill for DeepSeek V3.2-style sparse attention, keep
+    each indexer layer's whole-context FP8 K (values and scales) resident on
+    every rank in token order and append each chunk's new K rows directly,
+    avoiding the per-chunk DCP K all-gather and de-interleave before top-k.
+    Requests whose earlier rows are missing from the replica (prefix cache hit
+    or resumed request) rebuild it once via the serial gather.
+
+    Allocates `(max_model_len + 4096) * (index_head_dim + 4)` bytes per indexer
+    layer on every rank at model load time (taken from KV cache capacity). Acts
+    in eager mode and under a breakable CUDA graph; disabled automatically when
+    a KV connector is configured. Requires both
+    `prefill_context_parallel_size > 1` and `decode_context_parallel_size > 1`.
+    """
+
     cp_kv_cache_interleave_size: int = 1
     """Interleave size of kv_cache storage while using DCP.
     Store interleave_size tokens on dcp_rank i, then store next
@@ -795,6 +810,12 @@ class ParallelConfig:
             raise ValueError(
                 "dcp_kv_prefetch requires decode_context_parallel_size > 1, "
                 f"got DCP={dcp}."
+            )
+        if self.pcp_dcp_indexer_k_replica and (pcp == 1 or dcp == 1):
+            raise ValueError(
+                "pcp_dcp_indexer_k_replica requires both "
+                "prefill_context_parallel_size > 1 and "
+                f"decode_context_parallel_size > 1, got PCP={pcp}, DCP={dcp}."
             )
 
         return self

@@ -69,6 +69,23 @@ vllm serve <sparse-mla-model> -tp 1 -pcp 4 -dcp 4 --enable-expert-parallel \
     --dcp-kv-prefetch
 ```
 
+For DeepSeek V3.2-style sparse attention under PCP + DCP,
+`--pcp-dcp-indexer-k-replica` avoids repeated per-chunk DCP all-gathers and
+de-interleaves of historical indexer K: every rank keeps a resident
+whole-context FP8 K replica per indexer layer in token order and appends each
+chunk's new K rows directly. The replica costs
+`(max_model_len + 4096) * (index_head_dim + 4)` bytes per indexer layer on
+every rank, taken from KV cache capacity. A request whose earlier rows are not
+in the replica (such as a prefix cache hit or resumed request) rebuilds it once
+from the sharded cache via the serial gather. It acts in eager mode and under
+the default breakable CUDA graph, is disabled automatically when a KV connector
+is configured, and combines independently with `--dcp-kv-prefetch`:
+
+```bash
+vllm serve <model> -tp 1 -pcp 4 -dcp 4 --enable-expert-parallel \
+    --dcp-kv-prefetch --pcp-dcp-indexer-k-replica
+```
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

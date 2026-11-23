@@ -16,6 +16,20 @@ import torch
 from vllm.triton_utils import triton
 from vllm.v1.attention.ops import kv_ce_rows, kv_ce_topup
 from vllm.v1.attention.ops import kv_ce_sel_union as su
+from vllm.v1.attention.ops import pcp_dcp_k_replica as kr
+
+
+def token_slots(restore_idx: torch.Tensor, slots: torch.Tensor, start: int) -> None:
+    """Enqueue `_token_slots_kernel` on the current stream for the tokens
+    `restore_idx` covers. `slots` (int64) holds -1 where no token may map."""
+    rows = restore_idx.shape[0]
+    assert restore_idx.dtype == slots.dtype == torch.int64
+    assert restore_idx.is_contiguous() and slots.is_contiguous()
+    if rows == 0:
+        return
+    kr._token_slots_kernel[(triton.cdiv(rows, kr.SLOT_BLOCK),)](
+        restore_idx, slots, start, rows, BLOCK=kr.SLOT_BLOCK
+    )
 
 
 def stage_slots(
