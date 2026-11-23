@@ -7,6 +7,7 @@ from PIL import Image
 
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.image import convert_image_mode
+from vllm.multimodal.media.base import MediaDecodedBudget, MediaWithBytes
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageProcessorItems,
@@ -15,6 +16,21 @@ from vllm.multimodal.parse import (
 )
 
 H, W = 480, 640
+
+
+@pytest.mark.skip_global_cleanup
+def test_video_parser_keeps_request_decode_budget():
+    budget = MediaDecodedBudget()
+    wrapped = MediaWithBytes(
+        (np.zeros((4, 8, 8, 3), dtype=np.uint8), {"fps": 1.0}),
+        b"video-bytes",
+        decoded_budget=budget,
+    )
+
+    items = MultiModalDataParser().parse_mm_data({"video": [wrapped]})["video"]
+
+    assert isinstance(items.data[0], MediaWithBytes)
+    assert items.data[0].decoded_budget is budget
 
 
 class AudioMetadataParser(MultiModalDataParser):

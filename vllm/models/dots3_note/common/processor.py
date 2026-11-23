@@ -259,6 +259,10 @@ class Dots3NoteProcessor:
             raise ValueError("This NOTE checkpoint has no vision encoder")
         if not self.video_audio_enabled:
             audio_cap = 0.0
+        decoded_budget = None
+        if isinstance(video, MediaWithBytes):
+            decoded_budget = video.decoded_budget
+            video = video.original_bytes
         parts = preprocess_dots3_note_video(
             video,
             tokenizer=self.tokenizer,
@@ -269,6 +273,7 @@ class Dots3NoteProcessor:
             audio_sample_rate=audio_sample_rate,
             k_mode=k_mode,
             max_new_tokens=max_new_tokens,
+            decoded_budget=decoded_budget,
         )
 
         fragments: list[str] = []
@@ -646,7 +651,7 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
             raw_videos: list[object] = []
             for index, item in enumerate(videos.data):
                 if isinstance(item, MediaWithBytes):
-                    raw_videos.append(item.original_bytes)
+                    raw_videos.append(item)
                 else:
                     raw_videos.append(videos.get(index))
 

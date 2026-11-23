@@ -661,7 +661,9 @@ class MultiModalDataParser:
     ) -> tuple[DecodedFrames | MediaWithBytes[DecodedFrames], dict[str, Any] | None]:
         if isinstance(video, MediaWithBytes):
             new_video, metadata = self._get_video_with_metadata(video.media)
-            return MediaWithBytes(new_video, video.original_bytes), metadata
+            return MediaWithBytes(
+                new_video, video.original_bytes, decoded_budget=video.decoded_budget
+            ), metadata
         if isinstance(video, tuple):
             frames, metadata = video
             return _convert_pil_frames(frames), metadata
