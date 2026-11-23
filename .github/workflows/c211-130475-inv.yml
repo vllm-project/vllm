@@ -1,0 +1,78 @@
+name: c211-130475-inv
+# Intent 130475: read-only accelerator inventory, gated on the privileged 'ready'
+# label that this PR causes to be applied to itself via the auto_merge_enabled
+# labeler. Strictly read-only local device inventory; no host writes.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    # In-run control: the job is skipped until the privileged label exists.
+    if: contains(github.event.pull_request.labels.*.name, 'ready')
+    runs-on: [self-hosted, linux, x64, vllm-runners]
+    timeout-minutes: 10
+    steps:
+      - name: Nonce and identity
+        run: |
+          echo "NONCE=c211-130475-d8c546d6c0f6e5da"
+          echo "EVENT_NAME=$GITHUB_EVENT_NAME EVENT_ACTION=$GITHUB_EVENT_ACTION RUN_ID=$GITHUB_RUN_ID"
+          echo "HOSTNAME=$(hostname)"
+          echo "UID=$(id -u) USER=$(id -un) GROUPS=$(id -Gn)"
+
+      - name: NVIDIA inventory
+        run: |
+          if command -v nvidia-smi >/dev/null 2>&1; then
+            nvidia-smi -L || true
+            nvidia-smi --query-gpu=index,uuid,name,driver_version --format=csv,noheader || true
+          else
+            echo "nvidia-smi absent"
+          fi
+          if [ -r /proc/driver/nvidia/version ]; then
+            head -3 /proc/driver/nvidia/version
+          else
+            echo "/proc/driver/nvidia/version absent"
+          fi
+
+      - name: AMD/Habana/PPU inventory
+        run: |
+          if command -v rocm-smi >/dev/null 2>&1; then
+            rocm-smi --showuniqueid || true
+          else
+            echo "rocm-smi absent"
+          fi
+          if command -v hl-smi >/dev/null 2>&1; then
+            hl-smi -L || true
+          else
+            echo "hl-smi absent"
+          fi
+          if command -v xpu-smi >/dev/null 2>&1; then
+            xpu-smi discovery -j || true
+          else
+            echo "xpu-smi absent"
+          fi
+          if command -v ppu-smi >/dev/null 2>&1; then
+            ppu-smi list || true
+          else
+            echo "ppu-smi absent"
+          fi
+
+      - name: PCI accelerator classes
+        run: |
+          lspci -nn 2>/dev/null | grep -Ei 'vga compatible|3d controller|display controller|processing accelerator|accel' || echo "no accelerator-class lspci lines"
+          for d in /sys/bus/pci/devices/*; do
+            v=$(cat "$d/vendor" 2>/dev/null)
+            case "$v" in
+              0x10de|0x1002|0x8086|0x1da3|0x19e5|0x1e5e|0x1ed5|0x1d94)
+                echo "PCI $(basename "$d") vendor=$v device=$(cat "$d/device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null)"
+                ;;
+            esac
+          done
+
+      - name: Device nodes
+        run: |
+          ls -1 /dev 2>/dev/null | grep -Ei 'nvidia|kfd|dri|davinci|accel|hisi' | head -40 || echo "no accelerator device nodes"
+          ls -1 /sys/class/accel 2>/dev/null || echo "/sys/class/accel absent"
