@@ -102,6 +102,9 @@ denial of service:
 | `VLLM_MAX_AUDIO_DECODE_BYTES` | `268435456` (256 MiB) | Maximum float32 PCM bytes that audio decoding may allocate. Guards against sample-rate forgery where an inflated header sample rate bypasses the duration guard while the actual frame count causes a multi-GiB allocation. |
 | `VLLM_MAX_EMBED_DECODE_BYTES` | `2147483648` (2 GiB) | Maximum bytes a client-supplied embedding payload (`prompt_embeds`, `image_embeds`, `audio_embeds`, `video_embeds`) may allocate once densified. A sparse tensor carries its own declared shape, so a payload of a few hundred bytes can expand into hundreds of GiB, and a `torch.save` archive can deflate-compress its storages. The uncompressed archive size is checked before `torch.load` and the dense size before `to_dense()`, so the memory is never allocated. Set to `0` to disable. |
 
+The request-wide media download and decode limits cover the entire batch in
+online pooling, scoring, reranking, embedding, and batched chat requests.
+
 Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
 protection against resource-exhaustion attacks.
@@ -297,6 +300,11 @@ To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter 
 On the Python frontend, `/v1/responses` and `/v1/responses/render` stop validating
 the `input` list at the first invalid item and return HTTP 400. The error may
 include several details for that item.
+
+Generation requests also enforce `VLLM_MAX_STOP_STRINGS` (4),
+`VLLM_MAX_STOP_TOKEN_IDS` (128), and `VLLM_MAX_NUM_BAD_WORDS` (128).
+`VLLM_MAX_BAD_WORDS_TOTAL_TOKENS` (1024) bounds the combined length of the
+tokenized bad-word sequences.
 
 ### Recommendations
 
