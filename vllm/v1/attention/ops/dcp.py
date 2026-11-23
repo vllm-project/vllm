@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import functools
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
@@ -29,7 +30,9 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_kernel_dispatcher_with_warmup,
     triton_scalar_specialization_rep,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.ops.cp_common import (
     DirectCPWorkspace,
@@ -1219,6 +1222,10 @@ def reserve_query_head_storage(
 
 
 _A2A_SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
+# XPU loses stores when different devices write the same cache line, so each
+# signal slot and each source rank's receive partition is line-aligned.
+_XPU_A2A_CACHE_LINE_BYTES = 64
+_XPU_A2A_SIGNAL_STRIDE = 32
 
 
 class DirectDCPA2AWorkspace(DirectCPWorkspace):
@@ -1241,6 +1248,13 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
                 f"Direct DCP A2A requires at least one ubatch slot, got {num_ubatches}"
             )
         super().__init__(group, device, num_ubatches)
+        if current_platform.is_xpu():
+            lse_row_bytes = heads_per_rank * torch.float32.itemsize
+            max_num_tokens = round_up(
+                max_num_tokens,
+                _XPU_A2A_CACHE_LINE_BYTES
+                // math.gcd(lse_row_bytes, _XPU_A2A_CACHE_LINE_BYTES),
+            )
         self.max_num_tokens = max_num_tokens
         self.heads_per_rank = heads_per_rank
         self.head_dim = head_dim
@@ -1260,7 +1274,9 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
             max_num_tokens,
             heads_per_rank,
         )
-        signal_shape = (num_ubatches, 2, self.world_size)
+        signal_shape: tuple[int, ...] = (num_ubatches, 2, self.world_size)
+        if current_platform.is_xpu():
+            signal_shape += (_XPU_A2A_SIGNAL_STRIDE,)
         self.received_output, self.peer_output_ptrs = self._allocate(
             output_shape, dtype
         )
@@ -1316,6 +1332,15 @@ def get_direct_dcp_a2a_workspace(
     if not direct_cp_enabled(
         group, dtype, envs.VLLM_USE_DIRECT_DCP_A2A, _A2A_SUPPORTED_DTYPES
     ):
+        return None
+    # XPU kernels ship in vllm-xpu-kernels; older releases lack this op.
+    if current_platform.is_xpu() and not hasattr(
+        torch.ops._C, "direct_dcp_a2a_lse_reduce"
+    ):
+        logger.warning_once(
+            "Direct DCP A2A is disabled because the installed kernels do not "
+            "provide direct_dcp_a2a_lse_reduce."
+        )
         return None
     return DirectDCPA2AWorkspace(
         group.device_group,

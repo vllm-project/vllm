@@ -12,6 +12,7 @@ import torch.distributed as dist
 
 import vllm.v1.attention.ops.cp_common as cp_common
 import vllm.v1.attention.ops.dcp as dcp
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
@@ -28,6 +29,12 @@ def _has_multicast_support() -> bool:
         return _SymmetricMemory.has_multicast_support(DeviceType.CUDA, 0)
     except Exception:
         return False
+
+
+def _graph_api():
+    if current_platform.is_xpu():
+        return torch.xpu.XPUGraph, torch.xpu.graph
+    return torch.cuda.CUDAGraph, torch.cuda.graph
 
 
 def _dtype_from_name(dtype_name: str) -> torch.dtype:
@@ -345,7 +352,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
 
     group = MagicMock(world_size=2)
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: group)
-    direct_a2a = MagicMock()
+    direct_a2a = MagicMock(max_num_tokens=16)
     direct_query = MagicMock()
     direct_kv = MagicMock()
     monkeypatch.setattr(
@@ -377,7 +384,9 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     workspace = torch.empty(96, 8)
 
     assert manager.v_up_proj_combine is None
-    assert manager.query_gather == direct_query.gather
+    assert isinstance(manager.query_gather, functools.partial)
+    assert manager.query_gather.func == manager._direct_workspace_query_gather
+    assert manager.query_gather.args == (direct_query,)
     manager.init_kv_gather(workspace, 64)
     gathered_kv, local_kv = torch.empty(4, 8), torch.empty(2, 8)
     manager.kv_gather(gathered_kv, local_kv)
@@ -392,11 +401,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
         query_start_loc=query_start_loc,
     )
     direct_a2a.lse_reduce.assert_called_once_with(
-        output,
-        lse,
-        seq_lens=seq_lens,
-        query_start_loc=query_start_loc,
-        is_lse_base_on_e=False,
+        output, lse, False, seq_lens, query_start_loc
     )
 
 
@@ -477,7 +482,9 @@ def test_dcp_workspace_covers_decode_width(with_spec_config):
     config.scheduler_config.max_num_batched_tokens = 128
     config.num_speculative_tokens = 3
     if with_spec_config:
-        config.speculative_config = MagicMock(num_speculative_tokens=3)
+        config.speculative_config = MagicMock(
+            num_speculative_tokens=3, max_num_new_slots_for_drafting=0
+        )
 
     assert dcp.get_dcp_workspace_max_num_tokens(config) == 16
 
@@ -547,7 +554,7 @@ def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch):
     config = MagicMock()
     config.model_config.dtype = torch.bfloat16
     config.model_config.max_model_len = 64
-    config.model_config.hf_config.index_topk = 8
+    config.model_config.hf_text_config.index_topk = 8
     config.scheduler_config.max_num_batched_tokens = 64
     config.scheduler_config.max_num_seqs = 2
     config.cache_config.block_size = 4
@@ -577,7 +584,7 @@ def test_sparse_mla_workspace_preserves_non_dcp_size():
 
     config = MagicMock()
     config.model_config.max_model_len = 1
-    config.model_config.hf_config.index_topk = 7
+    config.model_config.hf_text_config.index_topk = 7
     config.scheduler_config.max_num_seqs = 3
     config.cache_config.block_size = 4
     config.parallel_config.decode_context_parallel_size = 1
@@ -834,9 +841,9 @@ def test_distributed_direct_kv_gather_matches_reference(world_size: int):
 def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
     update_environment_variables(env)
     local_rank = int(env["LOCAL_RANK"])
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(current_platform.device_type, local_rank)
     torch.accelerator.set_device_index(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend=current_platform.dist_backend)
     try:
         from vllm.v1.attention.ops.dcp import _lse_weighted_combine
 
@@ -1063,8 +1070,9 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         partial_lse = lse_layout(partial_lse)
         torch.accelerator.synchronize()
         active_ubatch[0] = 1
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
+        graph_cls, graph_ctx = _graph_api()
+        graph = graph_cls()
+        with graph_ctx(graph):
             actual = workspace.lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
         for _ in range(3):
             graph.replay()
