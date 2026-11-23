@@ -510,23 +510,23 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   int32_t* s_row_valid = s_chunk_off;
   int32_t* s_first_invalid = s_evict_off;
   const int num_positions = (end_row - first_row) * top_k;
-  // With top_k a multiple of the warp size, a warp's positions share a row.
+  // With top_k a multiple of the warp size, a warp's positions share a row,
+  // so one lane can record the lowest invalid column among the lanes that
+  // reach this together. A partial mask is still correct: max combines.
   const bool warp_in_one_row = top_k % kWarpSize == 0;
-  const auto record_first_invalid = [&](const unsigned int active, const int r,
-                                        const int col, const bool valid) {
+  const auto record_invalid = [&](const int r, const int col) {
     if (warp_in_one_row) {
-      const unsigned int invalid_bits = __ballot_sync(active, !valid);
-      if (invalid_bits != 0 && lane_id == __ffs(active) - 1) {
-        atomicMax(&s_first_invalid[r],
-                  top_k - (col - lane_id + __ffs(invalid_bits) - 1));
+      const unsigned int lanes = __activemask();
+      const int leader = __ffs(lanes) - 1;
+      if (lane_id == leader) {
+        atomicMax(&s_first_invalid[r], top_k - (col - lane_id + leader));
       }
-    } else if (!valid) {
+    } else {
       atomicMax(&s_first_invalid[r], top_k - col);
     }
   };
   const auto resolve_position = [&](const int position,
-                                    const int32_t token_index,
-                                    const unsigned int active) {
+                                    const int32_t token_index) {
     const int row = first_row + position / top_k;
     const int i = position % top_k;
     int32_t* row_out = hot_indices + static_cast<int64_t>(row) * top_k;
@@ -542,11 +542,10 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
         source_num_blocks, source_block_size, resident_bt_stride,
         resident_num_reqs, resident_num_blocks, resident_block_size,
         resident_row);
-    if (resident_row >= 0 || g >= 0)
+    if (resident_row >= 0 || g >= 0) {
       atomicAdd(&s_row_valid[row - first_row], 1);
-    if (pack_attention) {
-      record_first_invalid(active, row - first_row, i,
-                           resident_row >= 0 || g >= 0);
+    } else if (pack_attention) {
+      record_invalid(row - first_row, i);
     }
     if (resident_row >= 0) {
       store_hot_index(row_out, row_attention, i, resident_row, hot_block_size,
@@ -563,8 +562,6 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
 #pragma unroll
   for (int k = 0; k < kPrefetchedTopK; ++k) {
     const int position = tid + k * blockDim.x;
-    const unsigned int active =
-        __ballot_sync(0xFFFFFFFF, position < num_positions);
     if (position < num_positions) {
       resolve_position(position,
                        position < top_k
@@ -572,23 +569,16 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
                            : global_indices[static_cast<int64_t>(
                                                 first_row + position / top_k) *
                                                 input_row_stride +
-                                            position % top_k],
-                       active);
+                                            position % top_k]);
     }
   }
-  for (int warp_position = tid - lane_id + kPrefetchedTopK * blockDim.x;
-       warp_position < num_positions; warp_position += blockDim.x) {
-    const int position = warp_position + lane_id;
-    const unsigned int active =
-        __ballot_sync(0xFFFFFFFF, position < num_positions);
-    if (position < num_positions) {
-      resolve_position(
-          position,
-          global_indices[static_cast<int64_t>(first_row + position / top_k) *
-                             input_row_stride +
-                         position % top_k],
-          active);
-    }
+  for (int position = tid + kPrefetchedTopK * blockDim.x;
+       position < num_positions; position += blockDim.x) {
+    resolve_position(
+        position,
+        global_indices[static_cast<int64_t>(first_row + position / top_k) *
+                           input_row_stride +
+                       position % top_k]);
   }
   __syncthreads();
   int needs_compaction = 0;
