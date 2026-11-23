@@ -108,7 +108,6 @@ def _build_layer(
 ):
     layer = types.SimpleNamespace(
         beta_scale=1.0,
-        use_unfused_math=False,
         prefix=PREFIX,
         enable_packed_recurrent_decode=False,
         disable_tp_for_ba_proj=False,

@@ -55,7 +55,6 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     BETA_SCALE: tl.constexpr,
-    USE_UNFUSED_MATH: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
@@ -140,12 +139,8 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             b_beta *= BETA_SCALE
 
         if USE_QK_L2NORM_IN_KERNEL:
-            if USE_UNFUSED_MATH:
-                b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
-                b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
-            else:
-                b_q = b_q * tl.rsqrt(tl.sum(b_q * b_q) + 1e-6)
-                b_k = b_k * tl.rsqrt(tl.sum(b_k * b_k) + 1e-6)
+            b_q = b_q * tl.rsqrt(tl.sum(b_q * b_q) + 1e-6)
+            b_k = b_k * tl.rsqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
         # [BV, BK]
         if not IS_KDA:
@@ -205,7 +200,6 @@ def fused_sigmoid_gating_delta_rule_update(
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
     beta_scale: float = 1.0,
-    use_unfused_math: bool = False,
 ):
     """
     Fused triton implementation of sigmoid gating delta rule update.
@@ -282,7 +276,6 @@ def fused_sigmoid_gating_delta_rule_update(
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         BETA_SCALE=beta_scale,
-        USE_UNFUSED_MATH=use_unfused_math,
         IS_KDA=is_kda,
         num_warps=num_warps,
         num_stages=num_stages,

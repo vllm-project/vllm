@@ -21,7 +21,6 @@ from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp 
 from vllm.third_party.flash_linear_attention.ops.fused_gdn_prefill_post_conv import (
     fused_post_conv_prep,
 )
-from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
     rmsnorm_fn,
 )
@@ -127,7 +126,6 @@ def test_fused_post_conv_correctness(
         apply_l2norm=apply_l2norm,
         output_g_exp=output_g_exp,
         beta_scale=beta_scale,
-        use_unfused_math=beta_scale != 1.0,
     )
 
     # Check shapes
@@ -158,13 +156,6 @@ def test_fused_post_conv_correctness(
     torch.testing.assert_close(fused_v, ref_v, atol=1e-3, rtol=1e-3)
     torch.testing.assert_close(fused_g, ref_g, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(fused_beta, ref_beta, atol=1e-4, rtol=1e-4)
-
-    if apply_l2norm and beta_scale != 1.0:
-        # Fusing preparation must preserve the unfused FLA normalization.
-        q_raw, k_raw, _ = conv_output.split([H * K, H * K, HV * V], dim=-1)
-        for actual, raw in ((fused_q, q_raw), (fused_k, k_raw)):
-            expected = l2norm_fwd(raw.reshape(L, H, K).contiguous())
-            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("L", [1, 64, 256])

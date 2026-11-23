@@ -29,8 +29,6 @@ class _SeparateBAProjection(nn.ModuleDict):
 
 @PluggableLayer.register("olmo_hybrid_gated_delta_net_attention")
 class OlmoHybridGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
-    use_unfused_math = True
-
     def __init__(self, config, vllm_config: VllmConfig, prefix: str = "") -> None:
         assert getattr(config, "linear_use_gate", True), (
             "OlmoHybridGatedDeltaNet requires linear_use_gate=True"

@@ -48,7 +48,6 @@ def _fused_post_conv_kernel(
     L2NORM_EPS: tl.constexpr,
     OUTPUT_G_EXP: tl.constexpr,
     BETA_SCALE: tl.constexpr,
-    USE_UNFUSED_MATH: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
     BLOCK_T: tl.constexpr,
     BK: tl.constexpr,
@@ -97,17 +96,11 @@ def _fused_post_conv_kernel(
 
         if APPLY_L2NORM:
             q_sq_sum = tl.sum(q_f32 * q_f32, axis=1)  # [BLOCK_T]
-            if USE_UNFUSED_MATH:
-                q_inv = tl.rsqrt(q_sq_sum + L2NORM_EPS)
-            else:
-                q_inv = 1.0 / tl.sqrt(q_sq_sum + L2NORM_EPS)
+            q_inv = 1.0 / tl.sqrt(q_sq_sum + L2NORM_EPS)
             q_f32 = q_f32 * q_inv[:, None]
 
             k_sq_sum = tl.sum(k_f32 * k_f32, axis=1)
-            if USE_UNFUSED_MATH:
-                k_inv = tl.rsqrt(k_sq_sum + L2NORM_EPS)
-            else:
-                k_inv = 1.0 / tl.sqrt(k_sq_sum + L2NORM_EPS)
+            k_inv = 1.0 / tl.sqrt(k_sq_sum + L2NORM_EPS)
             k_f32 = k_f32 * k_inv[:, None]
 
         # Store Q
@@ -155,13 +148,8 @@ def _fused_post_conv_kernel(
 
         # g = -exp(A_log) * softplus(a + dt_bias)
         x = a_vals + dt_bias_val
-        if USE_UNFUSED_MATH:
-            sp = tl.where(x <= SOFTPLUS_THRESHOLD, tl.log(1.0 + tl.exp(x)), x)
-        else:
-            sp = tl.where(
-                x > 0, x + tl.log(1.0 + tl.exp(-x)), tl.log(1.0 + tl.exp(x))
-            )
-            sp = tl.where(x <= SOFTPLUS_THRESHOLD, sp, x)
+        sp = tl.where(x > 0, x + tl.log(1.0 + tl.exp(-x)), tl.log(1.0 + tl.exp(x)))
+        sp = tl.where(x <= SOFTPLUS_THRESHOLD, sp, x)
         g_vals = -tl.exp(A_log_val) * sp
 
         if OUTPUT_G_EXP:
@@ -188,7 +176,6 @@ def fused_post_conv_prep(
     apply_l2norm: bool = True,
     output_g_exp: bool = False,
     beta_scale: float = 1.0,
-    use_unfused_math: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fused post-conv1d prep: split + l2norm + gating in one kernel.
 
@@ -204,7 +191,6 @@ def fused_post_conv_prep(
         apply_l2norm: whether to L2-normalize q and k
         output_g_exp: if True, output exp(g) instead of g (for FlashInfer)
         beta_scale: multiplier applied to sigmoid(b).
-        use_unfused_math: preserve rounding of the unfused FLA path.
 
     Returns:
         q: [L, H, K] contiguous, optionally l2-normalized
@@ -269,7 +255,6 @@ def fused_post_conv_prep(
         L2NORM_EPS=1e-6,
         OUTPUT_G_EXP=output_g_exp,
         BETA_SCALE=beta_scale,
-        USE_UNFUSED_MATH=use_unfused_math,
         SOFTPLUS_THRESHOLD=20.0,
         BLOCK_T=BLOCK_T,
         BK=BK,
