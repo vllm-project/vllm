@@ -36,7 +36,7 @@ def require_mapping(value: Any, name: str) -> Mapping[str, Any]:
 
 
 def parse_rotation_config(config: Any) -> RotationConfig | None:
-    """Parse and validate ``hf_config.rotation_config``."""
+    """Parse and validate `hf_config.rotation_config`."""
     raw = getattr(config, "rotation_config", None)
     if raw is None and isinstance(config, Mapping):
         raw = config.get("rotation_config")

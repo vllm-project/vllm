@@ -15,7 +15,7 @@ import torch.nn as nn
 
 
 class RotationTransform(nn.Module, ABC):
-    """A shared mathematical rotation owned by ``RotationRegistry``."""
+    """A shared mathematical rotation owned by `RotationRegistry`."""
 
     def __init__(self, hidden_size: int) -> None:
         super().__init__()

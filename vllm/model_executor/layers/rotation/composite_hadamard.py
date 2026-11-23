@@ -25,10 +25,10 @@ from .base import RotationTransform
 
 
 class CompositeHadamardRotation(RotationTransform):
-    r"""Apply ``D(hk \otimes H_P) / sqrt(N)`` or its transpose.
+    r"""Apply `D(hk \otimes H_P) / sqrt(N)` or its transpose.
 
-    Here ``D = diag(sign)``, ``N = K * P``, and ``P`` is a power of two.
-    The checkpoint stores the unnormalized ``hk = H_K.T``.
+    Here `D = diag(sign)`, `N = K * P`, and `P` is a power of two.
+    The checkpoint stores the unnormalized `hk = H_K.T`.
     """
 
     def __init__(
@@ -66,7 +66,7 @@ class CompositeHadamardRotation(RotationTransform):
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> CompositeHadamardRotation:
-        """Build a rotation from one ``rotation_config.rotations`` entry."""
+        """Build a rotation from one `rotation_config.rotations` entry."""
         return cls(
             hidden_size=config["hidden_size"],
             k=config["hadamard_k"],
