@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Implementation of Shared Memory Cache (see docs/configuration/optimization.md)."""
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from multiprocessing.synchronize import Lock as LockType
 from typing import TYPE_CHECKING, TypeAlias
 
@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 ShmHandle: TypeAlias = tuple[int, int, list[int]]
+TrackedShmHandle: TypeAlias = tuple[str, int, int, tuple[int, ...]]
 
 
 def _get_shm_handle(mm_item: MultiModalKwargsItem) -> ShmHandle | None:
@@ -54,6 +55,7 @@ def _get_shm_handle(mm_item: MultiModalKwargsItem) -> ShmHandle | None:
         or type(monotonic_id) is not int
         or not 0 <= monotonic_id < 2**32
         or not isinstance(signature, list)
+        or any(type(byte) is not int or not 0 <= byte <= 255 for byte in signature)
     ):
         raise ValueError("Invalid SHM handle signature for cache key.")
 
@@ -275,6 +277,20 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
             serde_class=MsgpackSerde,
             reader_lock=shared_worker_lock,
         )
+        self._request_feature_handles: dict[str, dict[int, TrackedShmHandle]] = {}
+        self._request_items: dict[
+            str, dict[TrackedShmHandle, MultiModalKwargsItem]
+        ] = {}
+
+    @staticmethod
+    def _get_feature_handle(
+        feature: "MultiModalFeatureSpec",
+    ) -> TrackedShmHandle | None:
+        if feature.data is None or (handle := _get_shm_handle(feature.data)) is None:
+            return None
+        address, monotonic_id, signature = handle
+        cache_key = feature.mm_hash or feature.identifier
+        return cache_key, address, monotonic_id, tuple(signature)
 
     @override
     def get_and_update_features(
@@ -287,6 +303,60 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
         ]
         super().get_and_update_features(features_with_data)
         return mm_features
+
+    def get_and_update_features_for_request(
+        self,
+        request_id: str,
+        mm_features: list["MultiModalFeatureSpec"],
+    ) -> list["MultiModalFeatureSpec"]:
+        """Resolve new SHM references and reuse request-owned values."""
+        feature_handles = self._request_feature_handles.get(request_id)
+        resolved = self._request_items.get(request_id)
+
+        for feature_index, feature in enumerate(mm_features):
+            handle = self._get_feature_handle(feature)
+            if handle is None:
+                continue
+
+            if feature_handles is None:
+                feature_handles = self._request_feature_handles.setdefault(
+                    request_id, {}
+                )
+                resolved = self._request_items.setdefault(request_id, {})
+            assert resolved is not None
+
+            # MP retains old descriptors while uni may replace them in place;
+            # the feature index identifies the same issued reference in both.
+            if feature_handles.get(feature_index) == handle:
+                feature.data = resolved[handle]
+                continue
+
+            key, address, monotonic_id, signature = handle
+            if handle in resolved:
+                self._shm_cache.acknowledge(
+                    key,
+                    address,
+                    monotonic_id,
+                    list(signature),
+                )
+                feature.data = resolved[handle]
+            else:
+                feature.data = self._shm_cache.get(
+                    address,
+                    monotonic_id,
+                    list(signature),
+                    key,
+                )
+                resolved[handle] = feature.data
+            feature_handles[feature_index] = handle
+
+        return mm_features
+
+    def finish_requests(self, request_ids: Iterable[str]) -> None:
+        """Release resolved SHM values owned by finished requests."""
+        for request_id in request_ids:
+            self._request_feature_handles.pop(request_id, None)
+            self._request_items.pop(request_id, None)
 
     @override
     def get_and_update_item(
@@ -320,4 +390,6 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
 
     @override
     def clear_cache(self) -> None:
+        self._request_feature_handles.clear()
+        self._request_items.clear()
         self._shm_cache.clear()

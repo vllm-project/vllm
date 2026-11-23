@@ -755,7 +755,6 @@ class SingleWriterShmObjectStorage:
 
             obj = self.ser_de.deserialize(data_view[self.flag_bytes :])
 
-            # decrease the in-use flag for reader reads
             if self._reader_lock is not None:
                 with self._reader_lock:
                     self.increment_reader_flag(data_view[: self.flag_bytes])
@@ -765,6 +764,21 @@ class SingleWriterShmObjectStorage:
                 assert self.is_writer
 
         return obj
+
+    def acknowledge(
+        self,
+        key: str,
+        address: int,
+        monotonic_id: int,
+        signature: list[int],
+    ) -> None:
+        """Acknowledge one reader reference without deserializing the object."""
+        assert self._reader_lock is not None, "Only readers acknowledge leases."
+        self.verify_signature(key, address, monotonic_id, signature)
+        with self.ring_buffer.access_buf(address) as (data_view, buf_metadata):
+            self._validate_monotonic_id(address, monotonic_id, buf_metadata)
+            with self._reader_lock:
+                self.increment_reader_flag(data_view[: self.flag_bytes])
 
     def touch(
         self,
