@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Script to test add_lora, remove_lora, pin_lora, list_loras functions."""
 
-import time
-
 import pytest
 
 from vllm import LLM, RequestOutput, SamplingParams
@@ -165,32 +163,25 @@ def test_same_lora_name_with_different_ids(
     assert "Woof Woof Woof" in outputs[1].outputs[0].text
 
 
-def test_invalid_lora_does_not_fail_engine(tmp_path):
-    """A failed dynamic LoRA load must only fail that call; the engine must keep
-    serving requests afterwards."""
-    llm = LLM(
-        model=MODEL_PATH,
+def test_invalid_lora_does_not_fail_engine(vllm_runner, tmp_path):
+    """A failed adapter load must not prevent subsequent generation."""
+    with vllm_runner(
+        MODEL_PATH,
         enable_lora=True,
         max_lora_rank=LORA_RANK,
         max_model_len=128,
         gpu_memory_utilization=0.8,
         enforce_eager=True,
+        enable_chunked_prefill=None,
         distributed_executor_backend="mp",
-    )
-    invalid_lora = LoRARequest(
-        lora_name="invalid",
-        lora_int_id=1,
-        lora_path=str(tmp_path / "missing_adapter"),
-    )
+    ) as runner:
+        invalid_lora = LoRARequest("invalid", 1, str(tmp_path / "missing_adapter"))
+        with pytest.raises(Exception, match="add_lora"):
+            runner.llm.llm_engine.add_lora(invalid_lora)
 
-    with pytest.raises(Exception, match="add_lora"):
-        llm.llm_engine.add_lora(invalid_lora)
-    # Give any asynchronous executor failure handling time to kick in.
-    time.sleep(2)
-
-    sampling_params = SamplingParams(temperature=0, max_tokens=16, ignore_eos=True)
-    outputs = llm.generate(["Hello, my name is"] * 4, sampling_params)
-    assert all(len(output.outputs[0].token_ids) == 16 for output in outputs)
+        sampling_params = SamplingParams(temperature=0, max_tokens=16, ignore_eos=True)
+        outputs = runner.llm.generate(["Hello, my name is"] * 4, sampling_params)
+        assert [len(output.outputs[0].token_ids) for output in outputs] == [16] * 4
 
 
 @pytest.mark.parametrize(
