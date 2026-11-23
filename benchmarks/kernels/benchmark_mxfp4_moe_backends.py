@@ -5,16 +5,16 @@
 """Compare MXFP4 MoE backends at GLM-5.3-shaped sizes.
 
 Every MXFP4 backend is built from the same MXFP4 checkpoint weights through the
-MXFP4 oracle (``convert_weight_to_mxfp4_moe_kernel_format``,
-``make_mxfp4_moe_kernel``), so each row times the kernel vLLM serves with. The
+MXFP4 oracle (`convert_weight_to_mxfp4_moe_kernel_format`,
+`make_mxfp4_moe_kernel`), so each row times the kernel vLLM serves with. The
 timed region is FP32 router logits to MoE output with GLM-5.3 routing (sigmoid,
 correction bias, grouped top-k, routed scaling): monolithic backends route inside
-the kernel as ``DeepSeekV3``, modular backends call ``grouped_topk`` first, as
-``FusedMoE`` does. Before timing, each MXFP4 backend's output is compared with an
+the kernel as `DeepSeekV3`, modular backends call `grouped_topk` first, as
+`FusedMoE` does. Before timing, each MXFP4 backend's output is compared with an
 FP32 MoE on the dequantized weights.
 
-Backends: ``CUTLASS_MXFP4_MXFP4`` (W4A4), ``FLASHINFER_TRTLLM_MXFP4_MXFP8`` and
-``FLASHINFER_TRTLLM_MXFP4_BF16``, plus NVFP4 ``FLASHINFER_TRTLLM`` built the way
+Backends: `CUTLASS_MXFP4_MXFP4` (W4A4), `FLASHINFER_TRTLLM_MXFP4_MXFP8` and
+`FLASHINFER_TRTLLM_MXFP4_BF16`, plus NVFP4 `FLASHINFER_TRTLLM` built the way
 the ModelOpt NVFP4 MoE method does, as a timing reference on its own random
 weights. Backends the GPU cannot run are skipped.
 
@@ -235,7 +235,7 @@ def make_backend_invoke(
     weights: MoEWeights,
     routing: Routing,
 ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
-    """Build ``backend`` the way the oracle does and return a forward function."""
+    """Build `backend` the way the oracle does and return a forward function."""
     experts_cls = mxfp4_oracle.backend_to_kernel_cls(backend)[0]
     w13, w2, w13_scale, w2_scale = (w.clone() for w in weights)
     w13, w2, w13_scale, w2_scale, _, _ = (
@@ -267,7 +267,7 @@ def make_backend_invoke(
 
 
 class Nvfp4Layer(torch.nn.Module):
-    """The ``RoutedExperts`` attributes the NVFP4 TRTLLM preparation reads."""
+    """The `RoutedExperts` attributes the NVFP4 TRTLLM preparation reads."""
 
     def __init__(self, moe_config: FusedMoEConfig) -> None:
         super().__init__()
