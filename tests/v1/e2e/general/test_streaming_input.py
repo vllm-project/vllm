@@ -681,6 +681,11 @@ async def test_streaming_input_overflow_chunk_dropped_session_continues(
         and not out.outputs[0].text
     ]
     assert len(empty_turns) == 1, "the dropped chunk must end one empty reply"
+    tokenizer = engine.get_tokenizer()
+    assert outputs[-1].prompt == first_chunk + fitting_chunk
+    assert outputs[-1].prompt_token_ids == (
+        tokenizer.encode(first_chunk) + tokenizer.encode(fitting_chunk)
+    )
     assert not engine.output_processor.has_unfinished_requests()
 
 
