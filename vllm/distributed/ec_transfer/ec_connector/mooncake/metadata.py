@@ -10,9 +10,12 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorWorkerMetadata,
 )
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
+    TensorSpec,
+)
 
 
-@dataclass
+@dataclass(slots=True)
 class ECMooncakeLoadSpec:
     """Describe a remote reservation or resident allocation to load."""
 
@@ -26,7 +29,7 @@ class ECMooncakeLoadSpec:
     local: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class ECMooncakePushSpec:
     """Describe a destination reservation prepared before a tensor is ready."""
 
@@ -46,6 +49,7 @@ class ECMooncakeConnectorMetadata(ECConnectorMetadata):
     loads: list[ECMooncakeLoadSpec] = field(default_factory=list)
     pushes: list[ECMooncakePushSpec] = field(default_factory=list)
     freed: list[str] | None = None
+    store_candidates: dict[str, TensorSpec] = field(default_factory=dict)
 
 
 @dataclass

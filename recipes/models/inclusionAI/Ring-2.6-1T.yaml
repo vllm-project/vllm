@@ -1,0 +1,127 @@
+meta:
+  title: "Ring-2.6-1T"
+  slug: "ring-2.6-1t"
+  provider: "inclusionAI"
+  description: "Ring-2.6-1T (BailingMoeV2_5) FP8 thinking model with 1T total / 50B active params, hybrid linear + MLA attention, 128K context"
+  date_added: 2026-05-14
+  date_updated: 2026-05-15
+  tasks:
+    - text
+  related_recipes:
+    - inclusionAI/Ling-2.6-1T
+    - inclusionAI/Ring-1T-FP8
+
+model:
+  model_id: "inclusionAI/Ring-2.6-1T"
+  min_vllm_version: "0.20.2"
+  architecture: moe
+  parameter_count: "1T"
+  active_parameters: "50B"
+  context_length: 131072
+  base_args:
+    - "--trust-remote-code"
+    - "--tensor-parallel-size"
+    - "8"
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 1200
+    description: "FP8 weights with TP=8 on B300 or 8x MI300X/MI355X-class nodes"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+hardware_overrides:
+  amd:
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+
+strategy_overrides:
+  single_node_tp:
+    tp: 8
+
+guide: |
+  ## Overview
+
+  [Ring-2.6-1T](https://huggingface.co/inclusionAI/Ring-2.6-1T) is inclusionAI's
+  BailingMoeV2_5 FP8 trillion-scale **thinking** model (1T total / 50B active
+  parameters) with hybrid linear + MLA attention and a 128K context window.
+  It is the reasoning-focused counterpart to [Ling-2.6-1T](https://huggingface.co/inclusionAI/Ling-2.6-1T)
+  in the Ring 2.6 series and emits explicit `<think>...</think>` traces; the
+  chat template accepts a `reasoning_effort` field (default `high`).
+
+  vLLM 0.20.1 shipped the BailingMoeV2.5 MLA RoPE fix (vllm-project/vllm#41185)
+  that is load-bearing for this architecture — pin v0.20.2 or newer.
+
+  ## Deployment Configurations
+
+  ### Docker (AMD MI300X / MI325X / MI355X, TP=8)
+
+  TP=8 fits the model-derived 128K context on an MI300X-class node; MI325X
+  and MI355X have larger per-GPU HBM and more headroom.
+
+  ```bash
+  docker run --rm -it \
+    --cap-add=SYS_PTRACE \
+    --ipc=host \
+    --privileged=true \
+    --shm-size=128GB \
+    --network=host \
+    --device=/dev/kfd \
+    --device=/dev/dri \
+    --group-add video \
+    -e VLLM_ROCM_USE_AITER=1 \
+    vllm/vllm-openai-rocm:v0.28.0 \
+      inclusionAI/Ring-2.6-1T \
+      --tensor-parallel-size 8 \
+      --trust-remote-code
+  ```
+
+  ### Pip (NVIDIA B300, TP=8)
+
+  ```bash
+  uv venv && source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+
+  vllm serve inclusionAI/Ring-2.6-1T \
+    --trust-remote-code \
+    --tensor-parallel-size 8
+  ```
+
+  ## Client Usage
+
+  ### Text Generation
+
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  response = client.chat.completions.create(
+      model="inclusionAI/Ring-2.6-1T",
+      messages=[{"role": "user", "content": "Prove there are infinitely many primes."}],
+      max_tokens=4096,
+      temperature=0.6,
+      extra_body={"chat_template_kwargs": {"reasoning_effort": "high"}},
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  Set `reasoning_effort` to `low` / `medium` / `high` to control the depth of
+  thinking. The model wraps its reasoning trace in `<think>...</think>` before
+  emitting the final answer.
+
+  ## References
+
+  - [Ring-2.6-1T on Hugging Face](https://huggingface.co/inclusionAI/Ring-2.6-1T)
+  - [vLLM PR #41185 — BailingMoeV2.5 MLA RoPE fix](https://github.com/vllm-project/vllm/pull/41185)
+  - [vLLM ROCm GPU install docs](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/?device=rocm)

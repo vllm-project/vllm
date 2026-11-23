@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the per_token_group_fp8_quant helion kernel
+"""Tests for the per_token_group_fp8_quant helion kernel.
 
 Run `pytest tests/kernels/helion/test_per_token_group_fp8_quant.py`.
 """
@@ -107,7 +107,7 @@ class TestPerTokenGroupFp8QuantConfigPicker:
         )
 
     def test_config_picker_no_configs(self):
-        config_keys: list[dict] = []
+        config_keys: list[CaseKey] = []
 
         args = _generate_fake_input(16, 4096, 128)
         selected_key = pick_config(args, config_keys)

@@ -6,11 +6,11 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
@@ -19,7 +19,7 @@ from vllm.utils.math_utils import next_power_of_2
 class SavePartialStatesKernel(
     VllmTritonJitKernel["SavePartialStatesKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         head_size: int
         triton_block_size: int
@@ -88,7 +88,7 @@ class SavePartialStatesKernel(
             mask=mask,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         head_size: int,

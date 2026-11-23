@@ -104,6 +104,7 @@ def run_test(
     with vllm_runner(
         model,
         runner="generate",
+        trust_remote_code=True,
         max_model_len=max_model_len,
         max_num_seqs=2,
         dtype=dtype,
@@ -133,7 +134,9 @@ def run_test(
     pytest.skip("HF impl is not compatible with current transformers")
 
     hf_model_kwargs = {"_attn_implementation": "sdpa"}
-    with hf_runner(model, dtype=dtype, model_kwargs=hf_model_kwargs) as hf_model:
+    with hf_runner(
+        model, dtype=dtype, model_kwargs=hf_model_kwargs, trust_remote_code=True
+    ) as hf_model:
         hf_processor = hf_model.processor
         eos_token_id = hf_processor.tokenizer.eos_token_id
 

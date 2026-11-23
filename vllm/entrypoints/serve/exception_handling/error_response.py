@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from http import HTTPStatus
 
-from vllm.exceptions import GenerationError
+from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.logger import init_logger
 
 from ..engine.protocol import ErrorInfo, ErrorResponse
@@ -21,6 +21,7 @@ def create_error_response(
 
     if isinstance(message, Exception):
         exc = message
+        message = str(exc)
         logger.debug(
             "create_error_response called with %s: %s", type(exc).__name__, exc
         )
@@ -33,6 +34,7 @@ def create_error_response(
             VLLMUnprocessableEntityError,
             VLLMValidationError,
         )
+        from vllm.v1.engine.exceptions import EngineDeadError
 
         if isinstance(exc, GracefulHTTPError):
             err_type = HTTPStatus(exc.http_status).phrase
@@ -56,9 +58,18 @@ def create_error_response(
             status_code = HTTPStatus.BAD_REQUEST
             param = None
         elif isinstance(exc, GenerationError):
-            err_type = "InternalServerError"
+            err_type = (
+                "ServiceUnavailableError"
+                if isinstance(exc, RetryableRequestError)
+                else "InternalServerError"
+            )
             status_code = exc.status_code
             param = None
+        elif isinstance(exc, EngineDeadError):
+            err_type = "InternalServerError"
+            status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+            param = None
+            message = exc.CLIENT_MESSAGE
         elif isinstance(exc, VLLMServerError):
             # Any other server-caused error defaults to 500.
             err_type = "InternalServerError"
@@ -83,8 +94,6 @@ def create_error_response(
             err_type = "InternalServerError"
             status_code = HTTPStatus.INTERNAL_SERVER_ERROR
             param = None
-
-        message = str(exc)
 
     return ErrorResponse(
         error=ErrorInfo(

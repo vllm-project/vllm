@@ -18,13 +18,13 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.host_memory import pin_tensor
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
     CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
     BatchMemcpyParams,
     build_params,
     copy_blocks,
-    pin_tensor,
 )
 
 logger = init_logger(__name__)
@@ -99,9 +99,12 @@ class DiskBackend:
             t.stride(0) * t.element_size() for t in gpu_caches.values()
         ]
 
-        assert total_block_bytes % _ALIGNMENT == 0, (
-            f"total_block_bytes={total_block_bytes} not aligned to {_ALIGNMENT}"
-        )
+        # The stride alignment is an O_DIRECT kernel-DMA requirement; buffered
+        # I/O through the page cache has no alignment constraint.
+        if not use_page_cache:
+            assert total_block_bytes % _ALIGNMENT == 0, (
+                f"total_block_bytes={total_block_bytes} not aligned to {_ALIGNMENT}"
+            )
 
         # Separate buffer pools for store and load threads
         self._store_buffer_caches = {}

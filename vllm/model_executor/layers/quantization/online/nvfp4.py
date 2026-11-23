@@ -5,6 +5,7 @@ import torch
 from torch.nn import Module
 
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -16,62 +17,199 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    OnlineLinearBase,
+    _is_tp_sharded,
+)
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    trtllm_nvfp4_hidden_alignment,
+)
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     FLOAT4_E2M1_MAX,
+    ref_nvfp4_quant,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    cutlass_fp4_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     amax_for_moe_weight_quant,
-    kNvfp4Dynamic,
+    amax_for_tp_weight_quant,
+    kNvfp4DynamicToken,
     kNvfp4Static,
     weight_amax,
 )
+from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+from vllm.model_executor.offloader import UVAOffloader, get_offloader
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+NVFP4_BLOCK_SIZE = 16
+
+
+def _quantize_nvfp4(
+    weight: torch.Tensor, amax: torch.Tensor, chunk_rows: int = 8192
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """NVFP4-quantize the rows of `weight`, with the native quant kernel where
+    the GPU has one and a PyTorch reference elsewhere (the W4A16 kernels also
+    run on GPUs without it).
+
+    `amax` sets the global scale. Returns packed E2M1 codes (low nibble first),
+    E4M3 scales per 16 values and the fp32 dequantization global scale, in the
+    checkpoint layout.
+    """
+    global_scale = (
+        amax.float().reshape(()) / (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX)
+    ).clamp(min=1e-12)
+    inv_global_scale = (1.0 / global_scale).reshape(())
+    if weight.dtype in (torch.float16, torch.bfloat16) and cutlass_fp4_supported():
+        packed, scales = scaled_fp4_quant(
+            weight.contiguous(), inv_global_scale, is_sf_swizzled_layout=False
+        )
+        return packed, scales, global_scale
+    # E2M1 magnitudes 0, 0.5, ..., 6 doubled to integers, mapped to their codes.
+    code_of = torch.zeros(13, dtype=torch.uint8, device=weight.device)
+    code_of[torch.tensor([0, 1, 2, 3, 4, 6, 8, 12])] = torch.arange(
+        8, dtype=torch.uint8
+    ).to(weight.device)
+    n, k = weight.shape
+    packed = torch.empty(n, k // 2, dtype=torch.uint8, device=weight.device)
+    scales = torch.empty(
+        n, k // NVFP4_BLOCK_SIZE, dtype=torch.float8_e4m3fn, device=weight.device
+    )
+    for start in range(0, n, chunk_rows):
+        rows = slice(start, start + chunk_rows)
+        values, block_scales = ref_nvfp4_quant(
+            weight[rows], inv_global_scale, NVFP4_BLOCK_SIZE
+        )
+        codes = code_of[(values.abs() * 2).long()] | ((values < 0).to(torch.uint8) << 3)
+        packed[rows] = codes[:, 0::2] | (codes[:, 1::2] << 4)
+        scales[rows] = block_scales.to(torch.float8_e4m3fn)
+    return packed, scales, global_scale
+
+
+class Nvfp4WeightOnlyOnlineLinearMethod(OnlineLinearBase):
+    """Online weight-only NVFP4 (W4A16) linear method.
+
+    Quantizes fp16/bf16 weights to NVFP4 during loading, with one global scale
+    per weight shared across TP ranks, and runs them on the platform's W4A16
+    kernel.
+    Activations stay in the model dtype.
+    """
+
+    activation_quant_key: QuantKey | None = None
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        if input_size_per_partition % NVFP4_BLOCK_SIZE != 0:
+            raise ValueError(
+                f"NVFP4 requires input_size_per_partition "
+                f"({input_size_per_partition}) to be divisible by "
+                f"{NVFP4_BLOCK_SIZE}."
+            )
+
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+
+        self.kernel = init_nvfp4_linear_kernel(use_a16=True, act_dtype=params_dtype)
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        weight = self.get_weight_for_quantization(layer)
+        amax = amax_for_tp_weight_quant(
+            weight_amax(weight).float().reshape(1), _is_tp_sharded(layer)
+        )
+        packed, scales, global_scale = _quantize_nvfp4(weight, amax)
+
+        replace_parameter(layer, "weight", packed)
+        replace_parameter(layer, "weight_scale", scales)
+        replace_parameter(layer, "weight_global_scale", global_scale)
+
+        self.kernel.process_weights_after_loading(layer)
+        self.release_requantization_source_weights(layer)
+
+        layer._already_called_process_weights_after_loading = True
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.kernel.apply_weights(layer, x, bias)
 
 
 def _quantize_moe_weight_to_nvfp4(
     weight: torch.Tensor,
     moe_tp_size: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Quantize stacked MoE expert weights ``(E, N, K)`` to NVFP4.
+    """Quantize stacked MoE expert weights `(E, N, K)` to NVFP4.
 
     One FP32 global scale per expert plus per-block (group-16) FP8 scales,
     matching the ModelOpt NVFP4 checkpoint layout. Returns packed FP4 weights
-    ``(E, N, K // 2)``, block scales ``(E, N, K // 16)``, and the per-expert
-    global scale ``(E,)`` stored as ``amax / (fp4_max * fp8_max)``.
+    `(E, N, K // 2)`, block scales `(E, N, K // 16)`, and the per-expert
+    global scale `(E,)` stored as `amax / (fp4_max * fp8_max)`.
+
+    `weight` may be staged on the CPU: experts then move to the accelerator
+    one at a time, where all outputs are returned.
     """
     assert weight.dim() == 3, f"expected 3D expert weights, got {weight.shape}"
-    k = weight.shape[-1]
+    num_experts, n, k = weight.shape
     assert k % 16 == 0, f"last dim must be a multiple of 16, got {k}"
+    device = (
+        torch.accelerator.current_accelerator()
+        if weight.device.type == "cpu"
+        else weight.device
+    )
 
-    amax = weight_amax(weight.flatten(1), dim=-1).to(torch.float32)
-    amax = amax_for_moe_weight_quant(amax, moe_tp_size).clamp_min(1e-8)
-    global_scale = (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX) / amax
-    weight_scale_2 = (1.0 / global_scale).to(torch.float32)
+    global_scale = None
+    if moe_tp_size > 1:
+        # The TP all-reduce needs every expert's amax before any is quantized.
+        amax = weight_amax(weight.flatten(1), dim=-1).to(device, torch.float32)
+        amax = amax_for_moe_weight_quant(amax, moe_tp_size).clamp_min(1e-8)
+        global_scale = (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX) / amax
 
     # Keep the original BF16/FP16 values as the quantizer input. Folding each
     # expert's FP32 global scale into the weight would add a BF16/FP16 rounding
     # before the group-16 scale and E2M1 values are selected.
-    weight = weight.contiguous()
-    quantized_experts = [
-        scaled_fp4_quant(
-            expert_weight,
-            expert_scale,
-            is_sf_swizzled_layout=False,
+    qweight = torch.empty((num_experts, n, k // 2), dtype=torch.uint8, device=device)
+    block_scale = torch.empty(
+        (num_experts, n, k // 16), dtype=torch.float8_e4m3fn, device=device
+    )
+    weight_scale_2 = torch.empty(num_experts, dtype=torch.float32, device=device)
+    for expert in range(num_experts):
+        expert_weight = weight[expert].to(device).contiguous()
+        if global_scale is None:
+            # On the device, from the copy the quantizer reads anyway.
+            amax = weight_amax(expert_weight).to(torch.float32).clamp_min(1e-8)
+            expert_scale = (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX) / amax
+        else:
+            expert_scale = global_scale[expert]
+        weight_scale_2[expert] = 1.0 / expert_scale
+        qweight[expert], block_scale[expert] = scaled_fp4_quant(
+            expert_weight, expert_scale, is_sf_swizzled_layout=False
         )
-        for expert_weight, expert_scale in zip(
-            weight,
-            global_scale,
-            strict=True,
-        )
-    ]
-    qweight = torch.stack([quantized for quantized, _ in quantized_experts])
-    block_scale = torch.stack([block_scale for _, block_scale in quantized_experts])
     return (
         qweight,
         block_scale,
@@ -87,6 +225,8 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
     (SM100) only.
     """
 
+    activation_quant_key = kNvfp4DynamicToken
+
     def __init__(
         self,
         *,
@@ -100,26 +240,67 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
-            activation_key=kNvfp4Dynamic,
+            activation_key=self.activation_quant_key,
         )
+
+    @property
+    def per_token_activation(self) -> bool:
+        return self.activation_quant_key == kNvfp4DynamicToken
+
+    def create_weights(
+        self,
+        layer: Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        super().create_weights(
+            layer,
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+        # UVA offloading of the experts means device memory is short: stage the
+        # full-precision experts on the CPU and quantize one at a time on the
+        # device.
+        # TODO: move this decision to OnlineMoEMethodBase.create_weights, for
+        # the other online MoE methods, once their quantizers take CPU input.
+        offloader = get_offloader()
+        if (
+            self.requantization_source is None
+            and isinstance(offloader, UVAOffloader)
+            and offloader.targets(f"{layer.layer_name}.w13_weight")
+        ):
+            get_layerwise_info(layer).stage_on_cpu = True
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        self._quantize_weights(layer)
+        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
+        self._quantize_weights(layer, w13_weight, w2_weight)
         self._setup_kernel(layer)
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
 
-    def _quantize_weights(self, layer: Module) -> None:
+    def _quantize_weights(
+        self,
+        layer: Module,
+        w13_weight: torch.Tensor | None = None,
+        w2_weight: torch.Tensor | None = None,
+    ) -> None:
+        w13_weight = layer.w13_weight if w13_weight is None else w13_weight
+        w2_weight = layer.w2_weight if w2_weight is None else w2_weight
         moe_tp_size = self.moe.tp_size
         w13, w13_scale, w13_scale_2 = _quantize_moe_weight_to_nvfp4(
-            layer.w13_weight, moe_tp_size
+            w13_weight, moe_tp_size
         )
-        w2, w2_scale, w2_scale_2 = _quantize_moe_weight_to_nvfp4(
-            layer.w2_weight, moe_tp_size
-        )
+        w2, w2_scale, w2_scale_2 = _quantize_moe_weight_to_nvfp4(w2_weight, moe_tp_size)
 
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
@@ -156,6 +337,10 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
             w2_scale_2=layer.w2_weight_scale_2,
             a2_scale=layer.w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
+            trtllm_hidden_alignment=trtllm_nvfp4_hidden_alignment(
+                per_token_activation=self.per_token_activation,
+                is_act_and_mul=self.moe.is_act_and_mul,
+            ),
         )
 
         replace_parameter(layer, "w13_weight", w13)
@@ -176,8 +361,17 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
                 experts_cls=self.experts_cls,
                 backend=self.nvfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
-                per_token_activation=True,
+                per_token_activation=self.per_token_activation,
             )
+            self.moe_kernel.fused_experts.keep_constants(layer)
+        else:
+            # Reload creates new scale tensors; derived kernel scales must use
+            # their new values before layerwise reload restores captured storage.
+            assert self.moe_quant_config is not None
+            assert self.moe_quant_config.g1_alphas is not None
+            assert self.moe_quant_config.g2_alphas is not None
+            self.moe_quant_config.g1_alphas.copy_(w13_scale_2)
+            self.moe_quant_config.g2_alphas.copy_(w2_scale_2)
 
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 

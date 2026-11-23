@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the MoE grouped topk kernel
+"""Tests for the MoE grouped topk kernel.
 
 Run `pytest tests/kernels/moe/test_grouped_topk.py`.
 """
@@ -9,14 +9,17 @@ import pytest
 import torch
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import (
     CompilationConfig,
     VllmConfig,
     get_cached_compilation_config,
     set_current_vllm_config,
 )
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     GroupedTopk,
+    GroupedTopKRouter,
     fused_grouped_topk,
 )
 from vllm.platforms import current_platform
@@ -68,6 +71,163 @@ def _single_group_reference(
         values /= values.sum(dim=-1, keepdim=True) + 1e-20
     values *= routed_scaling_factor
     return values, indices.to(torch.int32)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA/ROCm platform.",
+)
+@pytest.mark.parametrize("skip_env", ["0", "1"])
+@pytest.mark.parametrize("skip_padding", [False, True])
+@pytest.mark.parametrize("use_fused", [False, True])
+def test_grouped_topk_masks_padding(
+    skip_env: str, skip_padding: bool, use_fused: bool, monkeypatch
+):
+    """Grouped top-k gives padding rows expert id -1 whenever
+    VLLM_MOE_SKIP_PADDING is on, like fused top-k; on ROCm AITER only when the
+    model opts in."""
+    set_random_seed(0)
+    monkeypatch.setenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", str(int(use_fused)))
+    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", skip_env)
+    hidden_states = torch.randn((2, 16), device="cuda")
+    gating_output = torch.randn((2, 896), device="cuda")
+    is_padding = torch.tensor([False, True], device="cuda")
+    router = GroupedTopKRouter(
+        top_k=16,
+        global_num_experts=896,
+        num_expert_group=1,
+        topk_group=1,
+        skip_padding=skip_padding,
+        e_score_correction_bias=torch.randn((896,), device="cuda"),
+    )
+
+    baseline_weights, baseline_ids = router._compute_routing(
+        hidden_states, gating_output, torch.int32
+    )
+    with set_forward_context(None, VllmConfig(), is_padding=is_padding):
+        topk_weights, topk_ids = router._compute_routing(
+            hidden_states, gating_output, torch.int32
+        )
+
+    ids, order = topk_ids[0].sort()
+    baseline_ids_sorted, baseline_order = baseline_ids[0].sort()
+    assert torch.equal(ids, baseline_ids_sorted)
+    torch.testing.assert_close(
+        topk_weights[0][order], baseline_weights[0][baseline_order]
+    )
+    masks = skip_padding or not rocm_aiter_ops.is_fused_moe_enabled()
+    assert router.masks_padding is masks
+    if masks and skip_env == "1":
+        assert torch.all(topk_ids[1] == -1)
+        assert torch.all(topk_weights[1] == 0)
+    else:
+        assert torch.all(topk_ids[1] >= 0)
+        assert torch.all(topk_weights[1] > 0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA/ROCm platform.",
+)
+@pytest.mark.parametrize("use_fused", [False, True])
+def test_grouped_topk_skips_mask_for_rows_gathered_before_routing(
+    use_fused: bool, monkeypatch
+):
+    """Under naive DP dispatch the router sees every rank's rows, which the
+    local padding mask does not describe; route them all instead of failing
+    the kernel's mask size check."""
+    monkeypatch.setenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", str(int(use_fused)))
+    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
+    router = GroupedTopKRouter(
+        top_k=16,
+        global_num_experts=896,
+        num_expert_group=1,
+        topk_group=1,
+        skip_padding=True,
+        e_score_correction_bias=torch.randn((896,), device="cuda"),
+    )
+    is_padding = torch.tensor([False, True], device="cuda")
+    with set_forward_context(None, VllmConfig(), is_padding=is_padding):
+        _, topk_ids = router._compute_routing(
+            torch.randn((4, 16), device="cuda"),
+            torch.randn((4, 896), device="cuda"),
+            torch.int32,
+        )
+    assert torch.all(topk_ids >= 0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+)
+@pytest.mark.parametrize(
+    "num_experts,num_groups,topk_group,topk",
+    [(128, 1, 1, 8), (896, 1, 1, 16), (256, 8, 4, 8), (512, 8, 4, 8)],
+)
+@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+def test_grouped_topk_padding_changes_on_graph_replay(
+    num_experts: int, num_groups: int, topk_group: int, topk: int, scoring_func: str
+):
+    """Every kernel family must read the current mask on each graph replay."""
+    set_random_seed(0)
+    logits = torch.randn((33, num_experts), device="cuda")
+    bias = torch.randn((num_experts,), device="cuda")
+    hidden = torch.empty((33, 0), device="cuda")
+    padding = torch.zeros(33, dtype=torch.bool, device="cuda")
+
+    def route(mask):
+        return fused_grouped_topk(
+            hidden,
+            logits,
+            topk,
+            True,
+            bias,
+            num_groups,
+            topk_group,
+            scoring_func,
+            2.5,
+            is_padding=mask,
+        )
+
+    baseline_weights, baseline_ids = route(None)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        route(padding)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        weights, ids = route(padding)
+    for pattern in (
+        torch.arange(33, device="cuda") % 2 == 0,
+        torch.ones_like(padding),
+        torch.zeros_like(padding),
+    ):
+        padding.copy_(pattern)
+        graph.replay()
+        torch.testing.assert_close(
+            weights, baseline_weights.masked_fill(pattern[:, None], 0), rtol=0, atol=0
+        )
+        assert torch.equal(ids, baseline_ids.masked_fill(pattern[:, None], -1))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+)
+def test_grouped_topk_padding_opcheck():
+    torch.library.opcheck(
+        torch.ops._moe_C.grouped_topk,
+        (
+            torch.randn((4, 256), device="cuda"),
+            8,
+            4,
+            8,
+            True,
+            2.5,
+            torch.randn(256, device="cuda"),
+            1,
+            torch.tensor([False, True, False, True], device="cuda"),
+        ),
+    )
 
 
 @pytest.mark.skipif(

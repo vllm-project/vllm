@@ -5,10 +5,12 @@ from contextlib import AbstractContextManager
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 import torch
 
+import vllm.v1.hisparse.binding as hisparse_binding
 import vllm.v1.worker.gpu.attn_utils as attn_utils
-import vllm.v1.worker.gpu_model_runner as gpu_model_runner
+from vllm.v1.hisparse.backend import CUDAHiSparseBackend
 from vllm.v1.worker.gpu_worker import Worker
 
 
@@ -26,7 +28,8 @@ class _AllocationScope(AbstractContextManager):
         self.active = False
 
 
-def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
+@pytest.mark.parametrize("hisparse", [False, True])
+def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> None:
     scope = _AllocationScope()
     kv_caches = {"layer": torch.empty(0)}
 
@@ -38,56 +41,55 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
         assert not scope.active
 
     monkeypatch.setattr(attn_utils, "allocate_kv_cache", allocate)
-    monkeypatch.setattr(attn_utils, "bind_kv_cache", bind)
+    monkeypatch.setattr(attn_utils, "bind_kv_cache_to_layers", bind)
     monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda config: {})
 
+    hisparse_bindings = []
+    if hisparse:
+        host_pool = SimpleNamespace()
+
+        def bind_hisparse(**kwargs):
+            hisparse_bindings.append(kwargs)
+            assert scope.active
+            assert kwargs["kv_caches"] is kv_caches
+            assert kwargs["host_pool"] is host_pool
+            return [
+                SimpleNamespace(
+                    view=SimpleNamespace(cache=torch.empty(1, 1, 1), block_size=1),
+                    runtime=SimpleNamespace(),
+                )
+            ]
+
+        monkeypatch.setattr(
+            hisparse_binding, "get_hisparse_backend", CUDAHiSparseBackend
+        )
+        monkeypatch.setattr(
+            hisparse_binding,
+            "get_hisparse_host_pool",
+            lambda vllm_config, kv_cache_config: host_pool,
+        )
+        monkeypatch.setattr(hisparse_binding, "allocate_hisparse_kv_caches", allocate)
+        monkeypatch.setattr(hisparse_binding, "bind_hisparse_kv_caches", bind_hisparse)
+
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(
+            hisparse_config=object() if hisparse else None
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=1),
         cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: None),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="test")),
     )
     result = attn_utils.init_kv_cache(
-        [],
         {},
         SimpleNamespace(kv_cache_groups=[]),
         torch.device("cpu"),
         [],
         config,
         kv_cache_allocation_context=scope,
+        block_tables=SimpleNamespace(),
     )
 
-    assert result is kv_caches
-    assert not scope.active
-
-
-def test_mrv1_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
-    scope = _AllocationScope()
-    kv_caches = {"layer": torch.empty(0)}
-
-    def allocate(*args, **kwargs):
-        assert scope.active
-        return kv_caches
-
-    def bind(*args, **kwargs):
-        assert not scope.active
-
-    monkeypatch.setattr(gpu_model_runner, "allocate_kv_cache", allocate)
-    monkeypatch.setattr(gpu_model_runner, "bind_kv_cache", bind)
-
-    runner = SimpleNamespace(
-        device=torch.device("cpu"),
-        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: None),
-        shared_kv_cache_layers={},
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="test")),
-        compilation_config=SimpleNamespace(static_forward_context={}),
-        kv_caches=[],
-    )
-    result = gpu_model_runner.GPUModelRunner.initialize_kv_cache_tensors(
-        runner,
-        SimpleNamespace(kv_cache_groups=[]),
-        [],
-        kv_cache_allocation_context=scope,
-    )
-
+    assert len(hisparse_bindings) == int(hisparse)
     assert result is kv_caches
     assert not scope.active
 
@@ -114,8 +116,6 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
         Worker,
         SimpleNamespace(
             sleep_mode_backend=SimpleNamespace(resume=lambda tags: None),
-            _sleep_saved_buffers={},
-            _sleep_saved_draft_buffers={},
             model_runner=runner,
             synchronize_device=lambda: None,
             vllm_config=SimpleNamespace(

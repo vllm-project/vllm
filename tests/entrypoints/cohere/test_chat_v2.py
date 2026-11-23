@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end integration tests for the Cohere Chat v2 endpoints
-(``POST /cohere/v2/chat`` and ``POST /cohere/v2/chat/render``).
+(`POST /cohere/v2/chat` and `POST /cohere/v2/chat/render`).
 
-These tests spin up a real ``vllm serve`` process via
-:class:`tests.utils.RemoteOpenAIServer` and exercise the Cohere Chat v2
+These tests spin up a real `vllm serve` process via
+`tests.utils.RemoteOpenAIServer` and exercise the Cohere Chat v2
 contract over HTTP. They mirror the pattern used by
-:mod:`tests.entrypoints.anthropic.test_messages`.
+`tests.entrypoints.anthropic.test_messages`.
 
 Two layers of integration are covered:
 
-1. Raw HTTP via :mod:`httpx` — always runs, verifies the wire contract.
-2. Cohere SDK (``pip install cohere``) — auto-skipped when the optional
+1. Raw HTTP via `httpx` — always runs, verifies the wire contract.
+2. Cohere SDK (`pip install cohere`) — auto-skipped when the optional
    dependency isn't installed, verifies SDK-level interop.
 
-We use a tiny generic chat model (``HuggingFaceTB/SmolLM2-135M-Instruct``,
+We use a tiny generic chat model (`HuggingFaceTB/SmolLM2-135M-Instruct`,
 ≈135M params) so the fixture stays runnable on CPU-only laptops. The
 Cohere v2 endpoint is model-agnostic and just performs the v2 ↔ OpenAI
 chat-completion translation, so the choice of model only matters for
@@ -57,6 +57,8 @@ def server():
         # the conversation to surface a thinking block (SmolLM2 doesn't
         # emit Cohere-style reasoning tokens out of the box).
         "--no-cohere-is-reasoning-model",
+        # Registers /cohere/v2/chat/render alongside /cohere/v2/chat.
+        "--enable-scale-out",
     ]
 
     # Cap the CPU KV-cache pool the vLLM CPU backend reserves at
@@ -71,7 +73,6 @@ def server():
     env_dict = {
         "VLLM_CPU_KVCACHE_SPACE": "1",
         "VLLM_ENABLE_COHERE_API": "1",
-        "VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1",
     }
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
@@ -177,12 +178,12 @@ async def test_cohere_v2_chat_validation_error_returns_400(
 
 @pytest.mark.asyncio
 async def test_cohere_v2_chat_render(httpx_client: httpx.AsyncClient):
-    """``/cohere/v2/chat/render`` tokenizes without running the model.
+    """`/cohere/v2/chat/render` tokenizes without running the model.
 
-    Beyond the ``GenerateRequest`` shape, this pins the cross-layer
+    Beyond the `GenerateRequest` shape, this pins the cross-layer
     contract that makes the endpoint useful: v2 sampling fields
-    (``temperature``, ``stop_sequences``) survive the v2 ->
-    ``ChatCompletionRequest`` -> ``SamplingParams`` hop, so a caller can
+    (`temperature`, `stop_sequences`) survive the v2 ->
+    `ChatCompletionRequest` -> `SamplingParams` hop, so a caller can
     render once and generate later without re-deriving them.
     """
     resp = await httpx_client.post(
@@ -219,7 +220,7 @@ async def test_cohere_v2_chat_render_token_ids_decode_to_the_prompt(
 ):
     """The rendered ids are the real templated prompt, not a debug dump.
 
-    Round-tripping them through ``/detokenize`` and finding the user
+    Round-tripping them through `/detokenize` and finding the user
     message back proves the endpoint applied the chat template and
     tokenized it, which is what a caller splitting prompt construction
     from generation depends on.
@@ -260,10 +261,10 @@ async def test_cohere_v2_chat_render_validation_error_returns_400(
 async def test_cohere_v2_chat_documents_field_accepted(
     httpx_client: httpx.AsyncClient,
 ):
-    """The v2 endpoint forwards ``documents`` into chat_template_kwargs.
+    """The v2 endpoint forwards `documents` into chat_template_kwargs.
 
     We only assert the request is accepted and produces a 200 response —
-    the renderer-level effect is covered by ``tests/renderers/test_cohere.py``.
+    the renderer-level effect is covered by `tests/renderers/test_cohere.py`.
     """
     resp = await httpx_client.post(
         "/cohere/v2/chat",

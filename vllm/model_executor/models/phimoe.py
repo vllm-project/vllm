@@ -29,16 +29,18 @@ from itertools import islice
 
 import torch
 from torch import nn
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -60,7 +62,7 @@ from .utils import (
 )
 
 
-class PhiMoEConfig(PretrainedConfig):
+class PhiMoEConfig(PreTrainedConfig):
     model_type = "phimoe"
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -131,44 +133,6 @@ class PhiMoEConfig(PretrainedConfig):
             eos_token_id=eos_token_id,
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
-        )
-
-
-class mp(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx,
-        scores: torch.Tensor,
-        multiplier: torch.Tensor,
-        selected_experts: torch.Tensor,
-        masked_gates: torch.Tensor,
-        mask_for_one: torch.Tensor,
-    ):
-        ctx.save_for_backward(multiplier, selected_experts, masked_gates)
-        return multiplier * mask_for_one
-
-    @staticmethod
-    def backward(
-        ctx,
-        grad_at_output: torch.Tensor,
-    ):
-        multiplier, selected_experts, masked_gates = ctx.saved_tensors
-
-        grad_at_output = grad_at_output * multiplier
-
-        grad_at_scores_expanded = masked_gates * grad_at_output.mul(-1)
-        grad_at_scores_expanded.scatter_add_(
-            dim=-1,
-            index=selected_experts,
-            src=grad_at_output,
-        )
-
-        return (
-            grad_at_scores_expanded,
-            None,
-            None,
-            None,
-            None,
         )
 
 
@@ -262,12 +226,10 @@ class PhiMoE(nn.Module):
         self.hidden_size = hidden_size
 
         # Gate always runs at half / full precision for now.
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             hidden_size,
             num_experts,
-            bias=False,
             params_dtype=params_dtype,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 

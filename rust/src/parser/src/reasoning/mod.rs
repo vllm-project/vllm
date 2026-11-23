@@ -25,12 +25,16 @@ mod glm45;
 mod hy;
 mod kimi;
 mod minimax_m3;
+mod mistral;
 mod qwen3;
 mod seed_oss;
 mod step3p5;
 
 use thiserror::Error;
 use vllm_tokenizer::{DecodedText, DynTokenizer};
+use xgrammar_structural_tag::format::Format;
+
+use crate::output_grammar::{self, OutputGrammarContext};
 
 pub use self::cohere_cmd::CohereCmdReasoningParser;
 pub use self::deepseek_r1::DeepSeekR1ReasoningParser;
@@ -42,6 +46,7 @@ pub use self::glm45::Glm45ReasoningParser;
 pub(crate) use self::hy::HyReasoningParser;
 pub use self::kimi::KimiReasoningParser;
 pub use self::minimax_m3::MiniMaxM3ReasoningParser;
+pub use self::mistral::MistralReasoningParser;
 pub use self::qwen3::Qwen3ReasoningParser;
 pub use self::seed_oss::SeedOssReasoningParser;
 pub use self::step3p5::Step3p5ReasoningParser;
@@ -53,12 +58,16 @@ pub type Step3ReasoningParser = DeepSeekR1ReasoningParser;
 
 /// DeepSeek V4 currently shares the DeepSeek V3 reasoning parser.
 pub type DeepSeekV4ReasoningParser = DeepSeekV3ReasoningParser;
+/// DeepSeek V4.1 uses bare `<think>...</think>` delimiters.
+pub type DeepSeekV41ReasoningParser = DeepSeekV3ReasoningParser;
 /// GLM-4.7 and GLM-5 use bare reasoning delimiters.
 pub type Glm47ReasoningParser = DeepSeekV3ReasoningParser;
 /// Kimi K2 currently shares the DeepSeek V3 reasoning parser.
 // TODO: kimi k2 may implicitly end reasoning by starting a tool call section
 // using <|tool_calls_section_begin|>, we should support that.
 pub type KimiK2ReasoningParser = DeepSeekV3ReasoningParser;
+/// MiMo V2 uses bare `<think>...</think>` delimiters.
+pub type MiMoReasoningParser = DeepSeekV3ReasoningParser;
 /// MiniMax M2 currently shares the Qwen3 reasoning parser.
 pub type MiniMaxM2ReasoningParser = Qwen3ReasoningParser;
 
@@ -131,6 +140,15 @@ pub trait ReasoningParser: Send {
     /// parsers need `skip_special_tokens = false` while parsing is enabled.
     fn preserve_special_tokens(&self) -> bool {
         false
+    }
+
+    /// Prepend the reasoning phase implied by the initialized parser state.
+    fn wrap_visible_format(
+        &self,
+        _ctx: &OutputGrammarContext<'_>,
+        _visible: &Format,
+    ) -> output_grammar::Result<Option<Format>> {
+        Ok(None)
     }
 
     /// Feed one decoded text delta into the parser.

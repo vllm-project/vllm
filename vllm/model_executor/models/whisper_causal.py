@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 import functools
 import logging
 import math
 from dataclasses import replace
 from fractions import Fraction
 from functools import partial
+from typing import ClassVar, Protocol
 
 import torch
 import torch.nn.functional as F
@@ -27,6 +27,7 @@ from vllm.model_executor.models.whisper import WhisperPosEmbedType
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionCGSupport,
     AttentionMetadata,
     AttentionType,
     CommonAttentionMetadata,
@@ -34,21 +35,30 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-
-try:
-    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
-except ImportError:
-    AiterFlashAttentionBackend = None
 from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import AttentionSpec, SlidingWindowSpec
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig
 
 from .utils import make_layers
+
+AiterFlashAttentionBackend: type[AttentionBackend] | None = None
+try:
+    from vllm.v1.attention.backends import rocm_aiter_fa
+
+    AiterFlashAttentionBackend = rocm_aiter_fa.AiterFlashAttentionBackend
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 
 CausalRMSNorm = partial(RMSNorm, eps=1e-5)
+
+
+class _BlockPoolingAttentionMetadata(Protocol):
+    @property
+    def slot_mapping(self) -> torch.Tensor: ...
 
 
 def _pad1d(
@@ -114,15 +124,24 @@ class WhisperCausalConv1d(nn.Conv1d):
 
 @functools.lru_cache
 def create_whisper_attention_backend_with_block_pooling(
-    underlying_attn_backend: AttentionBackend,
+    underlying_attn_backend: type[AttentionBackend],
     block_pool_size: int,
-    sliding_window: int | None = None,
 ) -> type[AttentionBackend]:
     prefix = "WhisperCausalAttentionWithBlockPooling_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
     underlying_impl = underlying_attn_backend.get_impl_cls()
 
     class WhisperCausalAttentionWithBlockPoolingBuilder(underlying_builder):  # type: ignore
+        # Full cudagraphs only for uniform single-token decode: capture bakes in
+        # tensor addresses, so `build` writes metadata into persistent buffers
+        # (below). Prefill/mixed batches fall back to piecewise.
+        _cudagraph_support: ClassVar[AttentionCGSupport] = (
+            AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+        )
+        # Disable the update_block_table fast path: it would bypass block pooling
+        # by splicing the raw slot_mapping/block_table into cached metadata.
+        supports_update_block_table: bool = False
+
         def __init__(
             self,
             kv_cache_spec: AttentionSpec,
@@ -135,13 +154,6 @@ def create_whisper_attention_backend_with_block_pooling(
                 block_size=kv_cache_spec.block_size * block_pool_size,
                 tokens_per_state=1,
             )
-            if isinstance(kv_cache_spec, SlidingWindowSpec):
-                # The manager keeps `sliding_window` in pooled units; the kernel
-                # runs on the expanded sequence, so give it the model's window in
-                # unpooled units (`get_kv_cache_spec` sizes the pooled window so
-                # this window always stays resident).
-                assert sliding_window is not None
-                kv_cache_spec = replace(kv_cache_spec, sliding_window=sliding_window)
             super().__init__(kv_cache_spec, layer_names, vllm_config, device)
             # Override model_config-derived values with the actual
             # encoder values from kv_cache_spec
@@ -150,6 +162,38 @@ def create_whisper_attention_backend_with_block_pooling(
             # num_heads_q for the encoder is the same as num_kv_heads
             # (no GQA in whisper encoder)
             self.num_heads_q = kv_cache_spec.num_kv_heads
+            # Persistent capture-safe buffers for pooled metadata; lazily sized
+            # on first `build` to match the incoming tensors' dtype/device.
+            self._pool_buffers_ready = False
+
+        def _maybe_init_pool_buffers(
+            self, common_attn_metadata: CommonAttentionMetadata
+        ) -> None:
+            if self._pool_buffers_ready:
+                return
+            device = common_attn_metadata.slot_mapping.device
+            sched = self.vllm_config.scheduler_config
+            self._qsl_buf = torch.empty(
+                sched.max_num_seqs + 1,
+                dtype=common_attn_metadata.query_start_loc.dtype,
+                device=device,
+            )
+            self._seq_buf = torch.empty(
+                sched.max_num_seqs,
+                dtype=common_attn_metadata.seq_lens.dtype,
+                device=device,
+            )
+            self._slot_buf = torch.empty(
+                sched.max_num_batched_tokens * block_pool_size,
+                dtype=common_attn_metadata.slot_mapping.dtype,
+                device=device,
+            )
+            self._pool_arange = torch.arange(
+                block_pool_size,
+                dtype=common_attn_metadata.slot_mapping.dtype,
+                device=device,
+            )
+            self._pool_buffers_ready = True
 
         def build(
             self,
@@ -157,34 +201,67 @@ def create_whisper_attention_backend_with_block_pooling(
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
         ) -> AttentionMetadata:
-            new_common_attn_metadata = copy.deepcopy(common_attn_metadata)
-            new_common_attn_metadata.query_start_loc *= block_pool_size
-            new_common_attn_metadata.query_start_loc_cpu *= block_pool_size
-            new_common_attn_metadata.seq_lens *= block_pool_size
-            if new_common_attn_metadata._seq_lens_cpu is not None:
-                new_common_attn_metadata._seq_lens_cpu *= block_pool_size
-            if new_common_attn_metadata._num_computed_tokens_cpu is not None:
-                new_common_attn_metadata._num_computed_tokens_cpu *= block_pool_size
-            new_common_attn_metadata.num_actual_tokens *= block_pool_size
-            new_common_attn_metadata.max_query_len *= block_pool_size
-            new_common_attn_metadata.max_seq_len *= block_pool_size
-            original_slot_mapping = common_attn_metadata.slot_mapping
-            common_prefix_len *= block_pool_size
-            new_common_attn_metadata.slot_mapping = (
-                (
-                    original_slot_mapping.unsqueeze(1) * block_pool_size
-                    + torch.arange(block_pool_size, device=original_slot_mapping.device)
-                )
-                .flatten()
-                .clamp(min=-1)
+            cm = common_attn_metadata
+            self._maybe_init_pool_buffers(cm)
+
+            # Scale query_start_loc / seq_lens into the persistent buffers.
+            n = cm.query_start_loc.numel()
+            assert n <= self._qsl_buf.numel(), (
+                f"{n=} exceeds pooled query_start_loc buffer {self._qsl_buf.numel()}"
+            )
+            qsl_buf = self._qsl_buf[:n]
+            qsl_buf.copy_(cm.query_start_loc)
+            qsl_buf.mul_(block_pool_size)
+
+            r = cm.seq_lens.numel()
+            assert r <= self._seq_buf.numel(), (
+                f"{r=} exceeds pooled seq_lens buffer {self._seq_buf.numel()}"
+            )
+            seq_buf = self._seq_buf[:r]
+            seq_buf.copy_(cm.seq_lens)
+            seq_buf.mul_(block_pool_size)
+
+            # Expand each slot into block_pool_size contiguous slots. Padding
+            # slots (-1) stay -1 after clamp so the KV write is skipped.
+            m = cm.slot_mapping.numel()
+            assert m * block_pool_size <= self._slot_buf.numel(), (
+                f"pooled slot_mapping {m * block_pool_size} exceeds buffer "
+                f"{self._slot_buf.numel()}"
+            )
+            slot_buf = self._slot_buf[: m * block_pool_size]
+            slot_buf.view(m, block_pool_size).copy_(
+                cm.slot_mapping.unsqueeze(1) * block_pool_size + self._pool_arange
+            )
+            slot_buf.clamp_(min=-1)
+
+            # CPU tensors aren't captured; fresh scaled copies avoid mutating
+            # the runner's shared buffers.
+            qsl_cpu = cm.query_start_loc_cpu * block_pool_size
+            seq_lens_cpu_upper_bound = (
+                cm.seq_lens_cpu_upper_bound * block_pool_size
+                if cm.seq_lens_cpu_upper_bound is not None
+                else None
+            )
+
+            new_common_attn_metadata = cm.replace(
+                query_start_loc=qsl_buf,
+                query_start_loc_cpu=qsl_cpu,
+                seq_lens=seq_buf,
+                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                num_actual_tokens=cm.num_actual_tokens * block_pool_size,
+                max_query_len=cm.max_query_len * block_pool_size,
+                max_seq_len=cm.max_seq_len * block_pool_size,
+                slot_mapping=slot_buf,
             )
             return super().build(
-                common_prefix_len, new_common_attn_metadata, fast_build
+                common_prefix_len * block_pool_size,
+                new_common_attn_metadata,
+                fast_build,
             )
 
     # NOTE: We need a custom impl so we can use the transformed slot_mapping
     # computed by `WhisperCausalAttentionWithBlockPoolingBuilder` instead of
-    # the one from `forward_context.slot_mapping` (gpu_model_runner).
+    # the one from `forward_context.slot_mapping` (model runner).
     # This follows the same pattern as CrossAttentionImpl.
     class WhisperCausalAttentionWithBlockPoolingImpl(underlying_impl):  # type: ignore[valid-type,misc]
         def forward(
@@ -194,7 +271,7 @@ def create_whisper_attention_backend_with_block_pooling(
             key: torch.Tensor,
             value: torch.Tensor,
             kv_cache: torch.Tensor,
-            attn_metadata: AttentionMetadata,
+            attn_metadata: _BlockPoolingAttentionMetadata | None,
             output: torch.Tensor,
             output_scale: torch.Tensor | None = None,
             output_block_scale: torch.Tensor | None = None,
@@ -304,7 +381,7 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
             attn_type=attn_type,
         )
         attn_backend = create_whisper_attention_backend_with_block_pooling(
-            underlying_attn_backend, block_pool_size, per_layer_sliding_window
+            underlying_attn_backend, block_pool_size
         )
 
         super().__init__(
@@ -324,22 +401,23 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
             **extra_impl_args,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig):
-        kv_cache_spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(kv_cache_spec, AttentionSpec)
-        kv_cache_spec = replace(
-            kv_cache_spec,
-            tokens_per_state=Fraction(1, self.block_pool_size),
-        )
-        if isinstance(kv_cache_spec, SlidingWindowSpec):
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        config = super().get_kv_cache_config(vllm_config)
+        assert config is not None
+        assert isinstance(config.spec, AttentionSpec)
+        spec = replace(config.spec, tokens_per_state=Fraction(1, self.block_pool_size))
+        config = replace(config, spec=spec)
+        sw_config = config.manager_config
+        if isinstance(sw_config.params, SlidingWindowManager.Params):
             # The manager counts blocks in pooled units, so express the window in
             # pooled units to avoid reserving `block_pool_size`x too many blocks.
             # The `+1` is an eviction margin: block-aligned eviction only keeps
             # `pooled - 1` pooled tokens, so this guarantees the kernel's full
             # (unpooled) window still stays resident.
-            pooled = cdiv(kv_cache_spec.sliding_window, self.block_pool_size) + 1
-            kv_cache_spec = replace(kv_cache_spec, sliding_window=pooled)
-        return kv_cache_spec
+            pooled = cdiv(sw_config.params.sliding_window, self.block_pool_size) + 1
+            sw_config = sw_config.replace_params(sliding_window=pooled)
+            config = replace(config, manager_config=sw_config)
+        return config
 
 
 class WhisperCausalAttention(nn.Module):

@@ -11,7 +11,7 @@ from typing import Generic, TypeVar
 _T = TypeVar("_T")
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class MonitoredValues(Generic[_T]):
     values: list[_T] = dataclasses.field(default_factory=list)
     trace_stacks: list[str] = dataclasses.field(default_factory=list)
@@ -21,8 +21,7 @@ class MonitoredValues(Generic[_T]):
 def monitor(
     measure_func: Callable[[], _T],
 ) -> Generator[MonitoredValues[_T], None, None]:
-    """
-    Trace the function calls to continuously monitor the change of
+    """Trace the function calls to continuously monitor the change of
     a value.
 
     Usage:
