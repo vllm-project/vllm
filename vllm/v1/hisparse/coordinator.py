@@ -500,10 +500,7 @@ class HiSparseCoordinator:
         )
 
     def try_preallocate_hot(
-        self,
-        request_id: str,
-        shortfall: int,
-        available: int,
+        self, request_id: str, shortfall: int, available: int
     ) -> bool:
         """Fund this allocation only if Hot fits and reclaim covers the shortfall."""
         if not self.resident_managers:
