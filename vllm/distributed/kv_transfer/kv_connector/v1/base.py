@@ -59,6 +59,9 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.kv_transfer import KVTransferConfig
     from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
+    from vllm.distributed.kv_transfer.kv_connector.v1.early_recv import (
+        EarlyKVRecvNotifier,
+    )
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -464,20 +467,17 @@ class KVConnectorBase_V1(ABC):
             finished_recving=set(finished_recving or ()),
         )
 
-    def has_pending_recving(self) -> bool:
-        """Whether `poll_finished_recving()` may return anything."""
-        return False
+    def bind_early_recv(self, notifier: "EarlyKVRecvNotifier") -> None:
+        """Bind a thread-safe notifier for reporting completed KV loads ahead
+        of the next model output.
 
-    def poll_finished_recving(self) -> set[str]:
-        """Pop receives that completed successfully since the last poll.
-
-        Called on the worker thread before scheduling, including between RPCs
-        with mp. Returned requests must have all writes to their KV complete,
-        since an aborted request's blocks are freed once it is reported.
-        Report each load at most once, never again through
-        `get_transfer_results()`. Failed receives stay on the regular path.
+        Returned requests must have all writes to their KV complete, since an
+        aborted request's blocks are freed once it is reported. Report each
+        load at most once across `notifier.try_notify()` and
+        `get_transfer_results()`. Failed receives and failed sends stay on the
+        regular path.
         """
-        return set()
+        return
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get the set of block IDs that failed to load.

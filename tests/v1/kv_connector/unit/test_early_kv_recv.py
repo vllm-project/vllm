@@ -1,31 +1,77 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import subprocess
-import sys
+import threading
+import time
+from unittest.mock import MagicMock
 
 import pytest
+import zmq
 
-from vllm.v1.executor.early_kv_recv import EarlyKVOutputAggregator
+from vllm.distributed.kv_transfer.kv_connector.v1.early_recv import (
+    EarlyKVOutputAggregator,
+    EarlyKVRecvNotifier,
+    EarlyKVRecvReceiver,
+)
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 
-def test_poll_failure_exits_worker():
-    # Without a KV connector the poll fails. Exceptions are suppressed so that
-    # only os._exit(1) can produce exit code 1.
-    code = """
-from contextlib import suppress
-with suppress(Exception):
-    from vllm.v1.executor.early_kv_recv import EarlyKVRecvSender
-    from vllm.utils.network_utils import get_open_zmq_ipc_path
-    EarlyKVRecvSender(get_open_zmq_ipc_path()).poll()
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, timeout=300
-    )
-    assert result.returncode == 1
-    assert "Early KV receive poll failed" in result.stdout + result.stderr
+@pytest.mark.cpu_test
+def test_notifier_receiver_round_trip_and_thread_safety():
+    receiver = EarlyKVRecvReceiver()
+    aggregator = EarlyKVOutputAggregator(2, receiver=receiver)
+    notifier = EarlyKVRecvNotifier(aggregator.endpoint)
+    try:
+        errors: list[Exception] = []
+
+        def send_batch(prefix: str) -> None:
+            try:
+                for i in range(10):
+                    assert notifier.try_notify({f"{prefix}-{i}"})
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=send_batch, args=("req",)),
+            threading.Thread(target=send_batch, args=("req",)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+        assert not errors
+
+        finished: set[str] = set()
+        deadline = time.monotonic() + 5.0
+        while len(finished) < 10 and time.monotonic() < deadline:
+            batch = aggregator.take_early_finished_recving()
+            if batch:
+                finished |= batch
+            else:
+                time.sleep(0.001)
+        assert finished == {f"req-{i}" for i in range(10)}
+    finally:
+        notifier.close()
+        notifier.close()  # idempotent
+        aggregator.close()
+        aggregator.close()  # idempotent
 
 
+@pytest.mark.cpu_test
+def test_notifier_falls_back_when_closed_or_would_block():
+    receiver = EarlyKVRecvReceiver()
+    notifier = EarlyKVRecvNotifier(receiver.path)
+    try:
+        assert notifier.try_notify(set()) is True
+        notifier._socket = MagicMock()
+        notifier._socket.send.side_effect = zmq.Again()
+        assert notifier.try_notify({"req-1"}) is False
+    finally:
+        notifier.close()
+        receiver.close()
+    assert notifier.try_notify({"req-2"}) is False
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "ordinary_rank,failed,invalid",
     [(None, False, False)]

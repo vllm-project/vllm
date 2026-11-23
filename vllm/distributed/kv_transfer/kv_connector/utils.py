@@ -292,6 +292,14 @@ class KVOutputAggregator:
                 o.kv_cache_events = None
         self._defer_kv_connector_outputs(kv_connector_outputs)
 
+    def take_early_finished_recving(self) -> set[str] | None:
+        """Return requests reported finished ahead of step outputs, if enabled."""
+        return None
+
+    def close(self) -> None:
+        """Release any resources owned by this aggregator."""
+        return
+
 
 def _make_src_and_dst_indices(
     src_block_ids: list[int],

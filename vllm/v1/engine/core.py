@@ -896,6 +896,8 @@ class EngineCore:
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
+            if kv_agg := getattr(self.model_executor, "kv_output_aggregator", None):
+                kv_agg.close()
         if self.scheduler:
             self.scheduler.shutdown()
 

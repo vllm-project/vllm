@@ -36,6 +36,9 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_transfer.kv_connector.v1.early_recv import (
+        EarlyKVRecvNotifier,
+    )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -449,14 +452,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                         self._extra_async_saves[req_id] = extra_pending - 1
         return results
 
-    def has_pending_recving(self) -> bool:
-        return any(c.has_pending_recving() for c in self._connectors)
-
-    def poll_finished_recving(self) -> set[str]:
-        finished_recving: set[str] = set()
+    def bind_early_recv(self, notifier: "EarlyKVRecvNotifier") -> None:
         for c in self._connectors:
-            finished_recving |= c.poll_finished_recving()
-        return finished_recving
+            c.bind_early_recv(notifier)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         agg_block_ids: set[int] = set()

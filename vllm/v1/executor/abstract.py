@@ -322,7 +322,9 @@ class Executor(ABC):
     def take_early_finished_recving(self) -> set[str] | None:
         """Requests whose remote KV loads finished, reported by the workers
         ahead of the step outputs (see `KVTransferConfig.enable_early_recv`)."""
-        return None
+        if self.kv_output_aggregator is None:
+            return None
+        return self.kv_output_aggregator.take_early_finished_recving()
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
@@ -379,9 +381,21 @@ class Executor(ABC):
 
     def init_kv_output_aggregator(self, connector: "KVConnectorBase") -> None:
         """Init KVOutputAggregator."""
-        self.kv_output_aggregator = KVOutputAggregator.from_connector(
-            connector, self.parallel_config.world_size
-        )
+        kv_config = self.vllm_config.kv_transfer_config
+        if kv_config and kv_config.enable_early_recv:
+            from vllm.distributed.kv_transfer.kv_connector.v1.early_recv import (
+                EarlyKVOutputAggregator,
+            )
+
+            aggregator = EarlyKVOutputAggregator.from_connector(
+                connector, self.parallel_config.world_size
+            )
+            self.kv_output_aggregator = aggregator
+            self.collective_rpc("bind_early_kv_recv", args=(aggregator.endpoint,))
+        else:
+            self.kv_output_aggregator = KVOutputAggregator.from_connector(
+                connector, self.parallel_config.world_size
+            )
 
     def init_ec_output_aggregator(self) -> None:
         self.ec_output_aggregator = ECOutputAggregator()

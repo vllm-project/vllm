@@ -162,6 +162,17 @@ class WorkerBase:
             self.synchronize_device()
             get_kv_transfer_group().on_kv_cache_ready()
 
+    def bind_early_kv_recv(self, endpoint: str) -> None:
+        """Bind a worker-side notifier for early KV receive reporting."""
+        if has_kv_transfer_group():
+            from vllm.distributed.kv_transfer.kv_connector.v1.early_recv import (
+                EarlyKVRecvNotifier,
+            )
+
+            notifier = EarlyKVRecvNotifier(endpoint)
+            self._early_kv_recv_notifier: EarlyKVRecvNotifier | None = notifier
+            get_kv_transfer_group().bind_early_recv(notifier)
+
     def synchronize_device(self) -> None:
         """Block until in-flight device work completes; backends outside
         `torch.accelerator` must override with their own wait."""
@@ -291,6 +302,9 @@ class WorkerWrapperBase:
                     # Don't raise: callers still need to run their own teardown.
                     logger.exception("Worker extension destroy hook failed.")
             self.worker.shutdown()
+            if notifier := getattr(self.worker, "_early_kv_recv_notifier", None):
+                notifier.close()
+                self.worker._early_kv_recv_notifier = None
 
     def update_environment_variables(
         self,
