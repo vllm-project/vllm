@@ -162,14 +162,14 @@ class MonoLayerWeights:
         }
         _check_tensors(self, "MoE", want)
 
-    def check_942(self, experts: int) -> None:
-        """The MoE's tensors on gfx942, TP4, which are the copies that
+    def check_942(self, tp: int, experts: int) -> None:
+        """The MoE's tensors on gfx942, at TP4 or TP8, which are the copies that
         `weights942` makes. The routed experts have their real intermediate
         width without the loader's padding, as FP4 bytes in `fp4_tile_major`
         order and E8M0 codes a row each. The shared expert is FNUZ bytes from
         `linear_copy`, with K padded to a multiple of 128. `experts` is 384
         for the target layers and 128 for the DSpark draft layers."""
-        d, u8 = MoeDims(4), torch.uint8
+        d, u8 = MoeDims(tp), torch.uint8
         inter, kp = d.inter_real, -(-d.sh_inter // 128) * 128
         want = {
             "gate_w": ((experts, HIDDEN), torch.bfloat16),
