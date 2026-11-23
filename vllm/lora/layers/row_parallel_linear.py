@@ -124,15 +124,6 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             dtype=torch.float32,
             device=x.device,
         )
-
-        shrunk_buffer: torch.Tensor | None = self.punica_wrapper.add_shrink(
-            buffer, x, self.lora_a_stacked, 1.0
-        )
-        if not current_platform.can_update_inplace():
-            buffer = shrunk_buffer
-        if self.tp_size > 1:
-            buffer = tensor_model_parallel_all_reduce(buffer)
-
         # following S-LoRA, allows the fusing of all_gather and all_reduce
         # by adding the column partitioned lora output to a slice of output
         # tensor, which is a partial sum due to row parallel. All that
@@ -142,17 +133,31 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         # NOTE offset are based on the rank.
         shard_size = self.lora_b_stacked[0].shape[2]
         offset_start = self.tp_rank * shard_size
-        lora_output: torch.Tensor | None = self.punica_wrapper.add_expand(
-            output,
-            buffer,
-            self.lora_b_stacked,
-            self.output_slices,
-            offset_start=offset_start,
-            add_input=True,
-        )
 
-        if not current_platform.can_update_inplace():
-            output = lora_output
+        for slot_idx in range(self.punica_wrapper.num_active_slots):
+            if slot_idx > 0:
+                buffer.zero_()
+            shrunk_buffer: torch.Tensor | None = self.punica_wrapper.add_shrink(
+                buffer, x, self.lora_a_stacked, 1.0, slot_idx=slot_idx
+            )
+            slot_buffer = (
+                buffer if current_platform.can_update_inplace() else shrunk_buffer
+            )
+            if self.tp_size > 1:
+                slot_buffer = tensor_model_parallel_all_reduce(slot_buffer)
+
+            lora_output: torch.Tensor | None = self.punica_wrapper.add_expand(
+                output,
+                slot_buffer,
+                self.lora_b_stacked,
+                self.output_slices,
+                offset_start=offset_start,
+                add_inputs=True,
+                slot_idx=slot_idx,
+            )
+
+            if not current_platform.can_update_inplace():
+                output = lora_output
 
         output = output.view(*out_orig_shape)
         return output

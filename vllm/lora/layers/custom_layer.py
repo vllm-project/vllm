@@ -267,6 +267,10 @@ class MLAKVBProjWithLoRA(ColumnParallelLinearWithLoRA):
             gather_dcp: Gather LoRA-B heads across decode context parallel ranks.
 
         """
+        if self.punica_wrapper.has_multi_slot or self.punica_wrapper.has_custom_scales:
+            raise NotImplementedError(
+                "Multi-adapter or scaled LoRA is not supported for MLAKVBProjWithLoRA."
+            )
         lora_a = self.lora_a_stacked[0]
         lora_b = self.lora_b_stacked[0]
         if self.lora_config.fully_sharded_loras and self.tp_size > 1:

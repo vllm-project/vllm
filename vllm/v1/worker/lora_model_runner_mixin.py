@@ -42,6 +42,14 @@ class LoRAModelRunnerMixin:
         )
         return self.lora_manager.create_lora_manager(model, vllm_config)
 
+    def _set_active_lora_mapping(
+        self,
+        lora_mapping: LoRAMapping,
+        lora_requests: set[LoRARequest],
+    ) -> None:
+        self._ensure_lora_enabled()
+        self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+
     def _set_active_loras(
         self,
         prompt_lora_mapping: tuple[int, ...],
@@ -49,8 +57,6 @@ class LoRAModelRunnerMixin:
         lora_requests: set[LoRARequest],
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
-        self._ensure_lora_enabled()
-
         # Set is_prefill to True, so we always use the SGMV kernels on
         # non-cuda platforms.
         # On cuda platforms we use the same kernels for prefill and
@@ -61,7 +67,7 @@ class LoRAModelRunnerMixin:
             is_prefill=True,
             type=mapping_type,
         )
-        self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+        self._set_active_lora_mapping(lora_mapping, lora_requests)
 
     def _ensure_lora_enabled(self) -> None:
         if not hasattr(self, "lora_manager"):
@@ -204,12 +210,55 @@ class LoRAModelRunnerMixin:
                 for lora_id in range(1, effective_num_loras + 1)
             }
 
-            self._set_active_loras(
-                tuple(sample_lora_mapping),
-                tuple(token_lora_mapping),
-                lora_requests,
-                mapping_type,
+            num_dummy_slots = (
+                min(lora_config.max_loras_per_request, effective_num_loras)
+                if effective_num_loras > 0
+                else 1
             )
+            if num_dummy_slots > 1:
+                slot_prompt_rows = [prompt_lora_mapping]
+                for slot_idx in range(1, num_dummy_slots):
+                    rotated = np.where(
+                        prompt_lora_mapping > 0,
+                        ((prompt_lora_mapping - 1 + slot_idx) % effective_num_loras)
+                        + 1,
+                        0,
+                    ).astype(np.int32)
+                    slot_prompt_rows.append(rotated)
+                slot_sample_mappings = tuple(
+                    tuple(row.repeat(num_sampled_tokens).tolist())
+                    for row in slot_prompt_rows
+                )
+                slot_token_mappings = tuple(
+                    tuple(row.repeat(num_scheduled_tokens).tolist())
+                    for row in slot_prompt_rows
+                )
+                slot_sample_scales = tuple(
+                    tuple(1.0 if lid > 0 else 0.0 for lid in row)
+                    for row in slot_sample_mappings
+                )
+                slot_token_scales = tuple(
+                    tuple(1.0 if lid > 0 else 0.0 for lid in row)
+                    for row in slot_token_mappings
+                )
+                lora_mapping = LoRAMapping(
+                    index_mapping=slot_token_mappings[0],
+                    prompt_mapping=slot_sample_mappings[0],
+                    is_prefill=True,
+                    type=mapping_type,
+                    slot_index_mappings=slot_token_mappings,
+                    slot_prompt_mappings=slot_sample_mappings,
+                    slot_index_scales=slot_token_scales,
+                    slot_prompt_scales=slot_sample_scales,
+                )
+                self._set_active_lora_mapping(lora_mapping, lora_requests)
+            else:
+                self._set_active_loras(
+                    tuple(sample_lora_mapping),
+                    tuple(token_lora_mapping),
+                    lora_requests,
+                    mapping_type,
+                )
 
             yield
 

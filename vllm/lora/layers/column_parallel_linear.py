@@ -51,30 +51,32 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         dtype=torch.float32,
         device=x.device,
     )
-    buffers.zero_()
 
-    shrunk_buffers: torch.Tensor | None = layer.punica_wrapper.add_shrink(
-        buffers, x, layer.lora_a_stacked, 1.0
-    )
+    for slot_idx in range(layer.punica_wrapper.num_active_slots):
+        buffers.zero_()
+        shrunk_buffers: torch.Tensor | None = layer.punica_wrapper.add_shrink(
+            buffers, x, layer.lora_a_stacked, 1.0, slot_idx=slot_idx
+        )
 
-    if not current_platform.can_update_inplace():
-        buffers = shrunk_buffers
+        slot_buffers = (
+            buffers if current_platform.can_update_inplace() else shrunk_buffers
+        )
+        slot_buffers = tensor_model_parallel_all_gather(slot_buffers)
 
-    buffers = tensor_model_parallel_all_gather(buffers)
+        lora_output: torch.Tensor | None = layer.punica_wrapper.add_expand(
+            output,
+            slot_buffers,
+            layer.lora_b_stacked,
+            layer.output_slices,
+            offset_start=0,
+            add_inputs=True,
+            slot_idx=slot_idx,
+        )
 
-    lora_output: torch.Tensor | None = layer.punica_wrapper.add_expand(
-        output,
-        buffers,
-        layer.lora_b_stacked,
-        layer.output_slices,
-        offset_start=0,
-        add_input=True,
-    )
-
-    if not current_platform.can_update_inplace():
-        if lora_output is None:
-            raise RuntimeError("LoRA expand must return an output tensor.")
-        output = lora_output
+        if not current_platform.can_update_inplace():
+            if lora_output is None:
+                raise RuntimeError("LoRA expand must return an output tensor.")
+            output = lora_output
 
     output = output.view(*out_orig_shape)
     # now have column partitioned and packed output

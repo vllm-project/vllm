@@ -203,7 +203,14 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         self.structured_outputs_worker: CPUStructuredOutputsWorker | None = None
 
         # LoRA-related workers.
-        self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
+        self.lora_state = LoraState(
+            max_num_reqs=self.max_num_reqs,
+            max_loras_per_request=(
+                self.lora_config.max_loras_per_request
+                if self.lora_config is not None
+                else 1
+            ),
+        )
 
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
@@ -1063,14 +1070,14 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
             )
 
             if self.lora_config:
-                lora_inputs = self.lora_state.make_lora_inputs(
+                lora_mapping, active_lora_requests = self.lora_state.make_lora_mapping(
                     input_batch.req_ids,
                     input_batch.idx_mapping_np,
                     input_batch.num_scheduled_tokens,
                     np.diff(input_batch.cu_num_logits_np),
                 )
-                num_active_loras = len(lora_inputs[2])
-                self._set_active_loras(*lora_inputs)
+                num_active_loras = len(active_lora_requests)
+                self._set_active_lora_mapping(lora_mapping, active_lora_requests)
 
         attn_metadata = None
         slot_mappings_by_layer = None

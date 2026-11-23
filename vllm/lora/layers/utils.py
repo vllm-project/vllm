@@ -36,10 +36,88 @@ class LoRAMapping:
     prompt_mapping: tuple[int, ...]
     is_prefill: bool = False
     type: LoRAMappingType = LoRAMappingType.LANGUAGE
+    slot_index_mappings: tuple[tuple[int, ...], ...] | None = None
+    slot_prompt_mappings: tuple[tuple[int, ...], ...] | None = None
+    slot_index_scales: tuple[tuple[float, ...], ...] | None = None
+    slot_prompt_scales: tuple[tuple[float, ...], ...] | None = None
 
     def __post_init__(self):
         self.index_mapping = tuple(self.index_mapping)
         self.prompt_mapping = tuple(self.prompt_mapping)
+
+        if (self.slot_index_mappings is None) != (self.slot_prompt_mappings is None):
+            raise ValueError(
+                "slot_index_mappings and slot_prompt_mappings must be provided together"
+            )
+        if (self.slot_index_scales is None) != (self.slot_prompt_scales is None):
+            raise ValueError(
+                "slot_index_scales and slot_prompt_scales must be provided together"
+            )
+
+        num_slots = 1
+        if self.slot_index_mappings is not None:
+            assert self.slot_prompt_mappings is not None
+            self.slot_index_mappings = tuple(
+                tuple(slot) for slot in self.slot_index_mappings
+            )
+            self.slot_prompt_mappings = tuple(
+                tuple(slot) for slot in self.slot_prompt_mappings
+            )
+            if not self.slot_index_mappings:
+                raise ValueError("slot_index_mappings cannot be empty")
+            num_slots = len(self.slot_index_mappings)
+            if len(self.slot_prompt_mappings) != num_slots:
+                raise ValueError(
+                    "slot_index_mappings and slot_prompt_mappings must have the "
+                    "same number of slots"
+                )
+            for slot in self.slot_index_mappings:
+                if len(slot) != len(self.index_mapping):
+                    raise ValueError(
+                        "Each slot in slot_index_mappings must match len(index_mapping)"
+                    )
+            for slot in self.slot_prompt_mappings:
+                if len(slot) != len(self.prompt_mapping):
+                    raise ValueError(
+                        "Each slot in slot_prompt_mappings must match "
+                        "len(prompt_mapping)"
+                    )
+            if self.slot_index_mappings[0] != self.index_mapping:
+                raise ValueError("slot_index_mappings[0] must match index_mapping")
+            if self.slot_prompt_mappings[0] != self.prompt_mapping:
+                raise ValueError("slot_prompt_mappings[0] must match prompt_mapping")
+
+        if self.slot_index_scales is not None:
+            assert self.slot_prompt_scales is not None
+            self.slot_index_scales = tuple(
+                tuple(float(v) for v in slot) for slot in self.slot_index_scales
+            )
+            self.slot_prompt_scales = tuple(
+                tuple(float(v) for v in slot) for slot in self.slot_prompt_scales
+            )
+            if (
+                len(self.slot_index_scales) != num_slots
+                or len(self.slot_prompt_scales) != num_slots
+            ):
+                raise ValueError(
+                    "slot scale tuples must match the number of LoRA slots"
+                )
+            for scale_slot in self.slot_index_scales:
+                if len(scale_slot) != len(self.index_mapping):
+                    raise ValueError(
+                        "Each slot in slot_index_scales must match len(index_mapping)"
+                    )
+            for scale_slot in self.slot_prompt_scales:
+                if len(scale_slot) != len(self.prompt_mapping):
+                    raise ValueError(
+                        "Each slot in slot_prompt_scales must match len(prompt_mapping)"
+                    )
+
+    @property
+    def num_slots(self) -> int:
+        return (
+            len(self.slot_index_mappings) if self.slot_index_mappings is not None else 1
+        )
 
 
 def _get_lora_device(base_layer: nn.Module) -> torch.device:

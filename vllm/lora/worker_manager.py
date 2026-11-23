@@ -254,6 +254,11 @@ class WorkerLoRAManager:
             self.add_adapter(models_map[adapter_id])
 
     def add_adapter(self, adapter_request: Any) -> bool:
+        if getattr(adapter_request, "is_composite", False):
+            raise ValueError(
+                "Cannot add a composite LoRARequest directly; add each "
+                "constituent adapter individually."
+            )
         if adapter_request.adapter_id in self.list_adapters():
             return False
         # One-time per adapter
@@ -322,6 +327,11 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         # times for the same adapter when using multiple API servers.
         # This is ok because it's currently only called from
         # the single-threaded core engine loop.
+        if lora_request.is_composite:
+            raise ValueError(
+                "Cannot add a composite LoRARequest directly; add each "
+                "constituent adapter individually."
+            )
 
         with gpu_sync_allowed():
             if (

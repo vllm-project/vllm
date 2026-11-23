@@ -146,3 +146,27 @@ def convert_mapping(
         embeddings_indices,
         indices_len,
     )
+
+
+def convert_slot_mapping(
+    index_mapping: tuple[int, ...],
+    prompt_mapping: tuple[int, ...],
+    lora_index_to_id: list[int | None],
+    vocab_size: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Convert one secondary LoRA slot's ID mappings to index tensors."""
+    lora_id_to_index = {
+        lora_id: index
+        for index, lora_id in enumerate(lora_index_to_id)
+        if lora_id is not None
+    }
+    lora_indices = [lora_id_to_index[x] if x > 0 else -1 for x in index_mapping]
+    embedding_indices = [idx if idx >= 0 else 0 for idx in lora_indices]
+    prompt_indices = [lora_id_to_index[x] if x > 0 else -1 for x in prompt_mapping]
+
+    indices = async_tensor_h2d(
+        [lora_indices, embedding_indices], dtype=torch.long, device=device
+    )
+    prompt_tensor = async_tensor_h2d(prompt_indices, dtype=torch.long, device=device)
+    return indices[0], prompt_tensor, indices[1] * vocab_size

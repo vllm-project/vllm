@@ -1054,11 +1054,13 @@ class Scheduler(SchedulerInterface):
         # scheduled in this step, which can join a later batch.
         scheduled_loras: set[int] = set()
         if self.lora_config:
-            scheduled_loras = set(
-                req.lora_request.lora_int_id
+            scheduled_loras = {
+                lora_id
                 for req in self.running
-                if req.lora_request and req.lora_request.lora_int_id > 0
-            )
+                if req.lora_request
+                for lora_id in req.lora_request.get_adapter_ids()
+                if lora_id > 0
+            }
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
@@ -1135,17 +1137,20 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 # Check that adding the request still respects the max_loras constraint.
-                if (
-                    self.lora_config
-                    and request.lora_request
-                    and (
-                        len(scheduled_loras) == self.lora_config.max_loras
-                        and request.lora_request.lora_int_id not in scheduled_loras
+                if self.lora_config and request.lora_request:
+                    req_lora_ids = request.lora_request.get_adapter_ids()
+                    new_lora_count = sum(
+                        1
+                        for lora_id in req_lora_ids
+                        if lora_id > 0 and lora_id not in scheduled_loras
                     )
-                ):
-                    # Scheduling would exceed max_loras, skip.
-                    skip_request(request_queue)
-                    continue
+                    if (
+                        len(scheduled_loras) + new_lora_count
+                        > self.lora_config.max_loras
+                    ):
+                        # Scheduling would exceed max_loras, skip.
+                        skip_request(request_queue)
+                        continue
 
                 num_external_computed_tokens = 0
                 load_kv_async = False
@@ -1637,7 +1642,11 @@ class Scheduler(SchedulerInterface):
                 scheduled_new_reqs.append(request)
 
                 if self.lora_config and request.lora_request:
-                    scheduled_loras.add(request.lora_request.lora_int_id)
+                    scheduled_loras.update(
+                        lora_id
+                        for lora_id in request.lora_request.get_adapter_ids()
+                        if lora_id > 0
+                    )
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(
                     request_id
                 )

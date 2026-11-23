@@ -675,6 +675,7 @@ class EngineArgs:
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
+    max_loras_per_request: int = LoRAConfig.max_loras_per_request
     max_lora_rank: MaxLoRARanks = LoRAConfig.max_lora_rank
     default_mm_loras: dict[str, str] | None = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
@@ -1613,6 +1614,10 @@ class EngineArgs:
             help="If True, enable handling of LoRA adapters.",
         )
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
+        lora_group.add_argument(
+            "--max-loras-per-request",
+            **lora_kwargs["max_loras_per_request"],
+        )
         lora_group.add_argument("--max-lora-rank", **lora_kwargs["max_lora_rank"])
         lora_group.add_argument(
             "--lora-split-k-reduction", **lora_kwargs["split_k_reduction"]
@@ -2726,6 +2731,7 @@ class EngineArgs:
             LoRAConfig(
                 max_lora_rank=self.max_lora_rank,
                 max_loras=self.max_loras,
+                max_loras_per_request=self.max_loras_per_request,
                 default_mm_loras=self.default_mm_loras,
                 fully_sharded_loras=self.fully_sharded_loras,
                 split_k_reduction=self.lora_split_k_reduction,
