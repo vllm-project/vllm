@@ -90,7 +90,7 @@ def _block_fp8_layer(weight, scales, scale_name):
 @pytest.mark.parametrize("zero_input", [False, True])
 @torch.inference_mode()
 def test_sm107_mxfp8_block_linear_matches_quantized_reference(
-    num_tokens, scale_name, zero_input
+    num_tokens, scale_name, zero_input, default_vllm_config
 ):
     """Exercise post-load conversion and both sides of the M=16 dispatch limit.
 
