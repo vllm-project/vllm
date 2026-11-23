@@ -33,6 +33,10 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.chat_utils import ConversationMessage
+from vllm.renderers.chat_utils.item_tracker import (
+    MediaRequestBudgets,
+    use_media_request_budgets,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
@@ -138,7 +142,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         """
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
-        render_result = await self.render_batch_chat_request(request)
+        with use_media_request_budgets(MediaRequestBudgets()):
+            render_result = await self.render_batch_chat_request(request)
         if isinstance(render_result, ErrorResponse):
             return render_result
         single_requests, all_conversations, engine_prompts = render_result

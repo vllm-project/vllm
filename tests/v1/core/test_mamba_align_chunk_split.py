@@ -110,7 +110,7 @@ def _make_hybrid_kv_cache_manager(
                         shapes=((1, 1),),
                         dtypes=(torch.float32,),
                     ),
-                    mamba_cache_mode="align",
+                    enable_prefix_caching=True,
                     num_speculative_blocks=NUM_SPEC,
                     num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
                     prefill_checkpoint_alignment=(
