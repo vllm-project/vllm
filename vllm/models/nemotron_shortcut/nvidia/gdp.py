@@ -90,6 +90,22 @@ def gdp_state_shape(
     return conv_state_shape, temporal_state_shape
 
 
+def gdp_conv_proj_dims(
+    tp_world_size: int,
+    num_k_heads: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    num_householder: int,
+) -> tuple[int, ...]:
+    """This rank's channels of each conv sub-projection, in memory order:
+    `num_householder` values, `num_householder` keys, then the query, each
+    sharded by heads."""
+    value_dim = divide(num_v_heads, tp_world_size) * head_v_dim
+    key_dim = divide(num_k_heads, tp_world_size) * head_k_dim
+    return (value_dim,) * num_householder + (key_dim,) * (num_householder + 1)
+
+
 # FlashInfer's GDP kernels: the module and the function the mixer calls.
 _GDP_KERNELS = (
     ("flashinfer.gdp_prefill", "chunk_gated_delta_product"),
@@ -334,6 +350,16 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
         return MambaAttentionBackendEnum.GDN_ATTN
+
+    def get_conv_proj_dims(self) -> tuple[int, ...]:
+        return gdp_conv_proj_dims(
+            get_tensor_model_parallel_world_size(),
+            self.config.gdp_num_groups,
+            self.config.gdp_num_heads,
+            self.key_head_dim,
+            self.head_dim,
+            self.num_householder,
+        )
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None and self.cache_config is not None

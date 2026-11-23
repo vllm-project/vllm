@@ -66,6 +66,14 @@ class MambaBase(AttentionLayerBase):
     def is_kv_cache_tp_replicated(self) -> bool:
         return False
 
+    def get_conv_proj_dims(self) -> tuple[int, ...] | None:
+        """This rank's channel count of each conv sub-projection, in memory
+        order, for layers whose conv input is several projections that are each
+        sharded across TP ranks. None lets KV transfer derive them from
+        `mamba_type`.
+        """
+        return None
+
     @abstractmethod
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         pass
@@ -97,6 +105,7 @@ class MambaBase(AttentionLayerBase):
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,
             tp_replicated=self.is_kv_cache_tp_replicated,
+            conv_proj_dims=self.get_conv_proj_dims(),
         )
         checkpoint_alignment = self.get_kv_cache_checkpoint_alignment(vllm_config)
         return MambaManager.layer_config(

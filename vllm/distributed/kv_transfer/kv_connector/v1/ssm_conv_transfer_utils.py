@@ -11,6 +11,8 @@ Supported model types:
   - Mamba2: conv = [x, B, C], temporal = (num_heads, head_dim)
   - GDN (Gated Delta Net): conv = [Q, K, V] (dim(Q)==dim(K)),
     temporal = (num_v_heads, v_dim, k_dim)
+  - Any layer that declares `MambaSpec.conv_proj_dims`, e.g. GDP:
+    conv = [V_1..V_n, K_1..K_n, Q]
 """
 
 import math
@@ -38,7 +40,7 @@ class MambaConvSplitInfo:
 
     conv_rows: int  # conv_kernel - 1 (typically 3)
     # Per-rank column counts per sub-projection:
-    # 1 entry for Mamba1, 3 for Mamba2/GDN.
+    # 1 entry for Mamba1, 3 for Mamba2/GDN, or whatever the layer declares.
     local_proj_dims: tuple[int, ...]
     conv_dtype_size: int  # bytes per element (e.g. 2 for float16)
     ssm_sizes: tuple[int, int]  # (conv_state_bytes, ssm_state_bytes)
@@ -132,7 +134,8 @@ def derive_mamba_conv_split(
         MambaAttentionBackendEnum.MAMBA2,
         MambaAttentionBackendEnum.GDN_ATTN,
     )
-    if mamba_spec.mamba_type not in _supported:
+    declared_dims = mamba_spec.conv_proj_dims
+    if declared_dims is None and mamba_spec.mamba_type not in _supported:
         raise NotImplementedError(
             f"Conv transfer only supports Mamba1, Mamba2 and GDN models, "
             f"got mamba_type={mamba_spec.mamba_type!r}."
@@ -161,7 +164,14 @@ def derive_mamba_conv_split(
     ssm_state_bytes = torch.Size(mamba_spec.shapes[1]).numel() * ssm_dtype_size
 
     local_proj_dims: tuple[int, ...]
-    if mamba_spec.mamba_type == MambaAttentionBackendEnum.MAMBA1:
+    if declared_dims is not None:
+        # The layer knows its own sub-projections; nothing to infer.
+        assert declared_dims and sum(declared_dims) == local_conv_dim, (
+            f"Declared conv sub-projections {declared_dims} don't add up to "
+            f"the conv dim ({local_conv_dim})."
+        )
+        local_proj_dims = tuple(declared_dims)
+    elif mamba_spec.mamba_type == MambaAttentionBackendEnum.MAMBA1:
         # Mamba1 conv state holds only x (no B/C), so it's a single
         # contiguous TP shard with no sub-projection decomposition.
         temporal_shape = mamba_spec.shapes[1]

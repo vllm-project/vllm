@@ -35,6 +35,7 @@ def test_replayssm_does_not_reserve_speculative_state_blocks(
         get_state_dtype=lambda: (torch.float32,),
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
         is_kv_cache_tp_replicated=False,
+        get_conv_proj_dims=lambda: None,
         use_flashinfer_replayssm=False,
         state_alignment=1,
         get_kv_cache_checkpoint_alignment=lambda vllm_config: None,
