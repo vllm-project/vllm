@@ -521,8 +521,9 @@ class XpuVmmDriver(VmmDriver):
     def __init__(self) -> None:
         import torch
         import vllm_xpu_kernels._C  # noqa: F401
+        import vllm_xpu_kernels._xpu_C
 
-        self._ops = torch.ops._C
+        self._ops = torch.ops._xpu_C
 
     def error_string(self, code: int) -> str:
         # The ops raise with the SYCL error message instead of returning codes.
@@ -532,7 +533,9 @@ class XpuVmmDriver(VmmDriver):
         # Every device shares PyTorch's SYCL context, which the ops use.
         pass
 
-    def granularity(self, device_index: int) -> int:
+    def granularity(self, device_index: int, export_handle_types: int = 0) -> int:
+        if export_handle_types:
+            raise RuntimeError("XPU VMM does not support exportable handle types.")
         return self._ops.vmm_granularity(device_index)
 
     def reserve(self, size: int) -> int:
