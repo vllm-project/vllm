@@ -94,7 +94,9 @@ ENV MAX_JOBS=${max_jobs}
 # which needs the Launchpad API and fails the build whenever that API is down.
 COPY docker/keys/ubuntu-toolchain-r.asc /etc/apt/keyrings/ubuntu-toolchain-r.asc
 
-# Install minimal dependencies and uv
+# Install minimal dependencies and uv. The PPA is sometimes slow and returns
+# 503s, so gcc-15 is downloaded first and retried: --download-only keeps the
+# files that finished, so a retry fetches only the ones that failed.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
@@ -103,6 +105,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && echo "deb [signed-by=/etc/apt/keyrings/ubuntu-toolchain-r.asc] https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") main" \
         > /etc/apt/sources.list.d/ubuntu-toolchain-r-test.list \
     && apt-get update -y \
+    && for attempt in 1 2 3 4 5 6; do \
+        apt-get install -y --no-install-recommends --download-only -o Acquire::Retries=5 gcc-15 g++-15 && break; \
+        if [ "$attempt" = 6 ]; then exit 1; fi; \
+        echo "PPA download incomplete (attempt $attempt of 6); retrying in 30s"; sleep 30; \
+    done \
     && apt-get install -y --no-install-recommends gcc-15 g++-15 \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 10 --slave /usr/bin/g++ g++ /usr/bin/g++-15 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
