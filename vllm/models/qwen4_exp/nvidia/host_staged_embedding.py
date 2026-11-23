@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Host-side PLE row staging for NVIDIA Qwen4Exp."""
+"""Host-side PLE row staging for NVIDIA Qwen4Exp.
+
+When unified virtual addressing (UVA) is unavailable, CPU offload gathers the
+requested rows from host RAM and copies them to the GPU before each forward.
+Disk offload uses the same staging buffers for rows read from checkpoint files.
+"""
 
 from abc import abstractmethod
 
