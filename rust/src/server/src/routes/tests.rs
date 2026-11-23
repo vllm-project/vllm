@@ -15080,6 +15080,48 @@ async fn anthropic_errors_cover_extraction_and_counting() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn anthropic_rejects_invalid_priority_header() {
+    let (mut app, _engine_task) = test_app().await;
+    for (uri, max_tokens) in [
+        ("/v1/messages", Some(10)),
+        ("/v1/messages/count_tokens", None),
+    ] {
+        let mut body = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        if let Some(max_tokens) = max_tokens {
+            body["max_tokens"] = json!(max_tokens);
+        }
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .header("x-vllm-priority", "invalid")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("Invalid X-Vllm-Priority header")
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn anthropic_reasoning_output_preserves_blocks_and_usage() {
     let mut signatures = BTreeSet::new();
     // The decoder removes the terminal stop token ('!') from visible content.

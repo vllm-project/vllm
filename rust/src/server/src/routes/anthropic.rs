@@ -58,11 +58,12 @@ pub(super) async fn count_tokens(
         Err(error) => return error_response(error.into()),
     };
     let model = state.resolve_model_with_loras(Some(&body.model)).await;
-    let request =
-        match prepare_messages_request(body, &model, resolve_request_context(&headers, None)) {
-            Ok(request) => request,
-            Err(error) => return error_response(error),
-        };
+    let request = match resolve_request_context(&headers, None)
+        .and_then(|ctx| prepare_messages_request(body, &model, ctx))
+    {
+        Ok(request) => request,
+        Err(error) => return error_response(error),
+    };
     let text = match state.chat.request_processor().prepare_for_tokenization(request).await {
         Ok(text) => text,
         Err(error) => return error_response(chat_submit_error("count_tokens failed", error)),
@@ -98,11 +99,12 @@ pub(super) async fn messages(
             "max_tokens is required for generation"
         ));
     }
-    let request =
-        match prepare_messages_request(body, &model, resolve_request_context(&headers, None)) {
-            Ok(request) => request,
-            Err(error) => return error_response(error),
-        };
+    let request = match resolve_request_context(&headers, None)
+        .and_then(|ctx| prepare_messages_request(body, &model, ctx))
+    {
+        Ok(request) => request,
+        Err(error) => return error_response(error),
+    };
     if let Err(error) = validate_max_output_tokens(
         "max_tokens",
         request.sampling_params.max_tokens,
