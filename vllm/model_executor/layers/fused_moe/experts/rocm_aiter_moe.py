@@ -632,6 +632,21 @@ class AiterUnquantizedExperts(AiterExperts):
     _AITER_QUANT_TYPE = AiterQuantType.NO
 
     @staticmethod
+    def is_supported_config(
+        cls, moe_config, weight_key, activation_key, activation_format
+    ):
+        # Only AITER's bf16 a16wmix path applies the clamp; CK has no
+        # clamped epilogue for unquantized fp16.
+        if (
+            moe_config.swiglu_limit is not None
+            and moe_config.in_dtype != torch.bfloat16
+        ):
+            return False, "kernel supports the SwiGLU clamp only with bf16"
+        return AiterExperts.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+
+    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
