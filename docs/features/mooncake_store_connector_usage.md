@@ -306,7 +306,6 @@ object per block fails to start.
 The connector logs a warning and ignores `pp_sizes` when:
 
 - HiSparse is enabled.
-- A KV cache group has no layers on one of the PP stages.
 - Store TP sharing is used with several KV cache groups, Mamba layers, or
   attention layers with different KV cache specs.
 

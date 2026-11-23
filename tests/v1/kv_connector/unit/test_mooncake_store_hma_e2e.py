@@ -50,11 +50,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.worker import (
 )
 from vllm.distributed.utils import get_pp_indices
 from vllm.platforms import current_platform
-from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+from vllm.v1.core.kv_cache_planning import (
+    _project_kv_cache_groups_to_worker,
+    get_kv_cache_config_from_groups,
+)
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheLayerConfig,
     KVCacheTensor,
     MLAAttentionSpec,
 )
@@ -583,6 +587,21 @@ _PP_MODELS = ["dense", "two_specs", "attn_mamba", "longcat"]
 def _pp_groups(model: str, layers: range) -> list:
     """KV cache groups of `model` on the PP stage holding `layers`. Groups are
     formed over the whole model, so every stage has each of them."""
+    if model == "attn_last":
+        # Like Nemotron-H at a large PP size: the attention group has no layers
+        # on the stages that hold only Mamba layers.
+        last = _PP_NUM_LAYERS - 1
+        whole = [
+            make_kv_cache_group([f"layers.{last}.attn"], _ATTN),
+            make_kv_cache_group([f"layers.{i}.mamba" for i in range(last)], _MAMBA),
+        ]
+        stage = {
+            name: KVCacheLayerConfig(group.manager_config, spec)
+            for group in whole
+            for name, spec in group.kv_cache_specs.items()
+            if int(name.split(".")[1]) in layers
+        }
+        return _project_kv_cache_groups_to_worker(whole, stage)
     if model == "dense":
         return [make_kv_cache_group([f"layers.{i}.attn" for i in layers], _ATTN)]
     if model == "longcat":
@@ -700,6 +719,22 @@ def test_pp_sizes_objects_hold_the_same_bytes_at_every_pp_size(
     if stage_layout in block_outermost:
         # A stage stored as one range moves each group's block as one segment.
         assert all(len(segments) == 1 for segments in stages.values())
+
+
+def test_pp_sizes_stage_without_a_group_stores_no_object_for_it():
+    """A stage can hold no layer of a KV cache group, like a Mamba-only stage of
+    Nemotron-H, which holds no attention layer. That stage stores no object for
+    the group, and the PP=2 stages together still store the PP=1 objects."""
+    block = 2
+    whole, stage0, stage1 = (
+        _stored_objects(_pp_stage("attn_last", KVCacheLayout.LBHNC, pp, rank), block)
+        for pp, rank in ((1, 0), (2, 0), (2, 1))
+    )
+
+    assert not any("@group:0@" in key for key in stage0)
+    assert {key: b"".join(value) for key, value in whole.items()} == {
+        key: b"".join(value) for key, value in (stage0 | stage1).items()
+    }
 
 
 def test_pp_sizes_lookup_hits_only_with_every_layer_range():

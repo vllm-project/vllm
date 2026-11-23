@@ -195,15 +195,16 @@ def _group_range_objects(
     draft_layers: frozenset[str],
     range_namespace: Callable[[Sequence[KVCacheSpec]], str] | None = None,
 ) -> LayerRangeObjects | None:
-    """One Store object per layer range holding some of the group's layers,
-    or None without layer ranges or if the group has no layers on this stage.
+    """One Store object per layer range holding some of the group's layers
+    (none if the group has no layers on this stage), or None without layer
+    ranges.
 
     Draft layers belong to the last range. Within an object, layers are
     ordered by KV cache spec in order of first appearance, then in group
     order. `range_namespace` maps a range's layer specs to its namespace; by
     default every range uses `metadata`'s.
     """
-    if layer_ranges is None or not group.layer_names:
+    if layer_ranges is None:
         return None
     specs = group.kv_cache_specs
     last_range = len(layer_ranges) - 1
@@ -2095,11 +2096,6 @@ class MooncakeStoreWorker:
         fallback_reason: str | None = None
         if self._kv_cache_config.hisparse_host_num_blocks is not None:
             fallback_reason = "HiSparse host cache registration is per group"
-        elif any(
-            group.prefix_cacheable and not group.layer_names
-            for group in self._kv_cache_groups
-        ):
-            fallback_reason = "a KV cache group has no layers on this stage"
         elif plans is not None and len(self._kv_cache_groups) != 1:
             fallback_reason = "Store TP sharing has several KV cache groups"
         elif plan is not None and not issubclass(plan.layout_cls, AttentionStoreLayout):
@@ -2441,9 +2437,11 @@ class MooncakeStoreWorker:
                     raise ValueError(
                         f"Missing KV cache tensors for TP-shared cache group {group_id}"
                     )
-                group_tensors = [
-                    cache for _, views in group_views for cache in views
-                ] or cache_tensors
+                group_tensors = [cache for _, views in group_views for cache in views]
+                if not group_tensors and not isinstance(
+                    db.store_layout, LayerRangeStoreLayout
+                ):
+                    group_tensors = cache_tensors
                 if not isinstance(db.store_layout, RankLocalStoreLayout):
                     group_tensors = [
                         group_kernel_blocks(cache, self.num_blocks)

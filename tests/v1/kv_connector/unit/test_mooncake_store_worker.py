@@ -3583,13 +3583,11 @@ def pp_stage_layouts(tmp_path, monkeypatch):
         extra_config: dict[str, object] | None = None,
         *,
         num_layers: int = 2,
-        groups=None,
         draft_layers: tuple[str, ...] = (),
         **config,
     ):
-        """`groups` lists each KV cache group's spec and its layers over the
-        whole model; by default one attention group holds every layer. The
-        draft model's layers run on the last stage, in the first group."""
+        """One attention group holds the stage's layers. The draft model's
+        layers run on the last stage, in that group."""
         monkeypatch.setattr(
             _FakeModelConfig, "get_total_num_hidden_layers", lambda _: num_layers
         )
@@ -3597,13 +3595,11 @@ def pp_stage_layouts(tmp_path, monkeypatch):
             worker, "_draft_layer_names", lambda _: frozenset(draft_layers)
         )
         stage = range(*worker.get_pp_indices(num_layers, rank, pp_size))
-        stage_groups = []
-        for spec, layers in groups or [(_PP_ATTENTION, range(num_layers))]:
-            names = {i: f"model.layers.{i}.self_attn.attn" for i in layers}
-            group = make_kv_cache_group(list(names.values()), spec)
-            for i in names.keys() - set(stage):
-                del group.kv_cache_specs[names[i]]
-            stage_groups.append(group)
+        stage_groups = [
+            make_kv_cache_group(
+                [f"model.layers.{i}.self_attn.attn" for i in stage], _PP_ATTENTION
+            )
+        ]
         if rank == pp_size - 1:
             for name in draft_layers:
                 stage_groups[0].kv_cache_specs[name] = _PP_ATTENTION
@@ -3693,24 +3689,6 @@ def test_pp_sizes_rejects_invalid_entries(pp_sizes):
     the model's layers."""
     with pytest.raises(ValueError, match="pp_sizes"):
         worker._pp_partitions(pp_sizes, 8)
-
-
-@pytest.mark.cpu_test
-def test_pp_sizes_is_ignored_when_a_stage_lacks_a_group(pp_stage_layouts, caplog):
-    """A stage holding no layers of a KV cache group cannot share that group's
-    objects, so it warns and keeps one object per group, as without pp_sizes."""
-    groups = [(_PP_ATTENTION, range(8)), (_PP_ATTENTION, (0, 1))]
-
-    def keys(extra_config: dict[str, object] | None) -> list[str]:
-        (layout, _) = pp_stage_layouts(2, 1, extra_config, num_layers=8, groups=groups)
-        return _layout_keys(layout)
-
-    with caplog.at_level(logging.WARNING, logger=worker.logger.name):
-        ignored = keys({"pp_sizes": [1, 2, 4]})
-
-    assert "ignores pp_sizes" in caplog.text
-    assert ignored == keys(None)
-    assert len(ignored) == 1 and "@pp_rank:1@" in ignored[0]
 
 
 @pytest.mark.cpu_test
