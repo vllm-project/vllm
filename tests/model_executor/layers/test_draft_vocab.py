@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.layers.draft_vocab import DraftVocab
+from vllm.model_executor.layers.draft_vocab import DraftVocab, draft_ids_to_target
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
@@ -44,7 +44,8 @@ def test_pruned_head_maps_draft_ids_to_target_ids(default_vllm_config):
     logits = draft_vocab.compute_logits(head, hidden)
     assert torch.equal(logits[:, DRAFT_IDS], draft_vocab.logits_processor(head, hidden))
     assert torch.isinf(logits).sum() == hidden.shape[0] * (VOCAB - len(DRAFT_IDS))
-    assert torch.equal(draft_vocab.get_top_tokens(head, hidden), logits.argmax(-1))
+    top = draft_vocab.logits_processor.get_top_tokens(head, hidden)
+    assert torch.equal(draft_ids_to_target(top, d2t), logits.argmax(-1))
 
 
 @pytest.mark.cpu_test

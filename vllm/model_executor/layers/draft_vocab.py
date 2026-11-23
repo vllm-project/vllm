@@ -71,14 +71,3 @@ class DraftVocab:
         return draft_logits_to_target(
             logits, self.draft_id_to_target_id, self.vocab_size
         )
-
-    def get_top_tokens(
-        self, lm_head: VocabParallelEmbedding, hidden_states: torch.Tensor
-    ) -> torch.Tensor:
-        """Greedy target token ids without materializing full logits."""
-        top = self.logits_processor.get_top_tokens(lm_head, hidden_states)
-        return self.map_draft_to_target(top)
-
-    def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
-        """Target ids of draft-vocabulary ids from the pruned lm_head."""
-        return draft_ids_to_target(draft_ids, self.draft_id_to_target_id)
