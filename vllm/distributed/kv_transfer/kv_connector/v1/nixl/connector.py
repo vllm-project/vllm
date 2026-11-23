@@ -63,6 +63,9 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.early_recv import (
+        EarlyKVRecvNotifier,
+    )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
         NixlBaseConnectorScheduler,
     )
@@ -413,13 +416,9 @@ class NixlPullConnector(NixlBaseConnector):
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
 
-    def has_pending_recving(self) -> bool:
+    def bind_early_recv(self, notifier: "EarlyKVRecvNotifier") -> None:
         assert self.connector_worker is not None
-        return self.connector_worker.has_pending_recving()
-
-    def poll_finished_recving(self) -> set[str]:
-        assert self.connector_worker is not None
-        return self.connector_worker.poll_finished_recving()
+        self.connector_worker.bind_early_recv(notifier)
 
 
 class NixlPushConnector(NixlBaseConnector):

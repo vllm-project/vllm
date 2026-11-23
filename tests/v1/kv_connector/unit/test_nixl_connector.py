@@ -2571,6 +2571,8 @@ def recv_worker():
     worker.enable_heterogeneous_attn_post_process = False
     worker.tp_rank = 0
     worker._skip_dram_xfer = False
+    worker._mixed_mem_types = False
+    worker._lease_safety_margin = 0.0
     worker._log_failure = MagicMock()  # type: ignore[method-assign]
     worker.xfer_stats = NixlKVConnectorStats()
     worker.nixl_wrapper = MagicMock()
@@ -4662,79 +4664,213 @@ def test_recv_failure_waits_for_sibling_transfer(recv_worker, sibling_state):
     assert worker.get_block_ids_with_load_errors() == set()
 
 
+class _FakeEarlyNotifier:
+    def __init__(self, *, succeed: bool = True) -> None:
+        self.succeed = succeed
+        self.sent: list[set[str]] = []
+
+    def try_notify(self, req_ids) -> bool:
+        if not self.succeed:
+            return False
+        self.sent.append(set(req_ids))
+        return True
+
+
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("collect_in_step", [False, True])
-def test_early_recv_reports_successes_only_through_poll(recv_worker, collect_in_step):
+def test_early_recv_pushes_success_and_records_telemetry_on_main_thread(recv_worker):
     worker = recv_worker
-    worker._early_recved = set()
+    notifier = _FakeEarlyNotifier()
+    worker.bind_early_recv(notifier)
     worker._recving_transfers["request"] = [101]
+    worker._handoff_to_early_recv(
+        "request", worker._recving_metadata["request"], start_thread=False
+    )
+    assert "request" not in worker._recving_transfers
+
     worker.nixl_wrapper.check_xfer_state.return_value = "PROC"
-    assert worker.poll_finished_recving() == set()
+    assert worker._poll_early_once() is True
+    assert notifier.sent == []
+
     worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
-    if collect_in_step:
-        assert worker.get_transfer_results().finished_recving == set()
-    assert worker.poll_finished_recving() == {"request"}
-    assert worker.poll_finished_recving() == set()
-    assert worker.get_transfer_results().finished_recving == set()
+    with patch.object(worker.xfer_stats, "record_transfer") as record_transfer:
+        assert worker._poll_early_once() is False
+        assert notifier.sent == [{"request"}]
+        # Main-thread-only stats and metadata are untouched by the poller.
+        record_transfer.assert_not_called()
+        assert "request" in worker._recving_metadata
+
+        results = worker.get_transfer_results()
+        assert results.finished_recving == set()
+        assert results.failed_recving == set()
+        assert "request" not in worker._recving_metadata
+        record_transfer.assert_called_once()
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("permute,remote_block_size", [(True, 16), (False, 8)])
+@pytest.mark.parametrize(
+    "permute,remote_block_size,mixed_mem,rocm_mamba",
+    [
+        (True, 16, False, False),
+        (False, 8, False, False),
+        (False, 16, True, False),
+        (False, 16, False, True),
+    ],
+)
 def test_early_recv_leaves_post_processing_to_the_step(
-    recv_worker, permute, remote_block_size
+    recv_worker, permute, remote_block_size, mixed_mem, rocm_mamba
 ):
-    """Layout conversion and heterogeneous blocks finish only through step output."""
+    """Layout conversion, heterogeneous blocks, mixed-memory transfers, and
+    ROCm+Mamba syncs finish only through step output."""
     worker = recv_worker
-    worker._early_recved = set()
+    notifier = _FakeEarlyNotifier()
+    worker.bind_early_recv(notifier)
     worker.enable_permute_local_kv = permute
+    worker._mixed_mem_types = mixed_mem
+    worker._has_mamba = rocm_mamba
     worker.transfer_topo.get_engine_info.return_value.remote_block_size = (
         remote_block_size
     )
     worker._recving_transfers["request"] = [101]
     worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
-    assert not worker.has_pending_recving()
-    assert worker.poll_finished_recving() == set()
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker.current_platform.is_rocm",
+        return_value=rocm_mamba,
+    ):
+        assert not worker._can_early_recv("request")
+    assert worker._poll_early_once() is False
+    assert notifier.sent == []
     assert worker.get_transfer_results().finished_recving == {"request"}
-    assert worker.poll_finished_recving() == set()
 
 
 @pytest.mark.cpu_test
 def test_early_recv_leaves_failures_to_the_step(recv_worker):
+    """Poller hands failed handles back without releasing or mutating failure state."""
     worker = recv_worker
-    worker._early_recved = set()
+    notifier = _FakeEarlyNotifier()
+    worker.bind_early_recv(notifier)
     worker._recving_transfers["request"] = [101]
+    worker._handoff_to_early_recv(
+        "request", worker._recving_metadata["request"], start_thread=False
+    )
     worker.nixl_wrapper.check_xfer_state.return_value = "ERR"
     worker.nixl_wrapper.release_xfer_handle.side_effect = [
         RuntimeError("release"),
         None,
     ]
-    assert worker.poll_finished_recving() == set()
-    assert not worker.has_pending_recving()
-    assert worker.poll_finished_recving() == set()
-    assert worker.nixl_wrapper.check_xfer_state.call_count == 1
+
+    assert worker._poll_early_once() is False
+    assert notifier.sent == []
+    assert worker.nixl_wrapper.release_xfer_handle.call_count == 0
+    assert worker._recv_failures == set()
+
+    # First step retries release (fails) and keeps the handle; second succeeds.
+    results = worker.get_transfer_results()
+    assert results.finished_recving == set()
     results = worker.get_transfer_results()
     assert results.finished_recving == results.failed_recving == {"request"}
     assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
 
 
 @pytest.mark.cpu_test
-def test_early_recv_leaves_lease_lapsed_reads_to_the_step(recv_worker):
-    """A read that may have outlived the remote's lease is never reported as
-    loaded early; the step output reports it failed."""
+@pytest.mark.parametrize("renewed_by_heartbeat", [False, True])
+def test_early_recv_leaves_lease_lapsed_reads_to_the_step(
+    recv_worker, renewed_by_heartbeat
+):
+    """Near-expiry reads fall back to the main thread for the authoritative
+    lease check, so lapsed reads fail and heartbeat-renewed reads still succeed."""
     worker = recv_worker
-    worker._early_recved = set()
+    notifier = _FakeEarlyNotifier()
+    worker.bind_early_recv(notifier)
     worker._lease_safety_margin = 0.0
-    remote = worker._recving_metadata["request"].remote
+    meta = worker._recving_metadata["request"]
+    remote = meta.remote
     remote.blocks_expiry_time = 0.0
     worker._engine_clock_offset[remote.engine_id] = 0.0
+    if renewed_by_heartbeat:
+        worker._remote_leases[(remote.engine_id, remote.request_id)] = (
+            time.perf_counter() + 60.0
+        )
     worker._recving_transfers["request"] = [101]
+    worker._handoff_to_early_recv("request", meta, start_thread=False)
     worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+
     with patch.object(worker.xfer_stats, "record_declined_expired_read") as declined:
-        assert worker.poll_finished_recving() == set()
+        assert worker._poll_early_once() is False
+        assert notifier.sent == []
+        declined.assert_not_called()
         results = worker.get_transfer_results()
-    assert results.finished_recving == results.failed_recving == {"request"}
-    assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
-    assert declined.call_count == 1
+
+    assert results.finished_recving == {"request"}
+    if renewed_by_heartbeat:
+        assert results.failed_recving == set()
+        assert worker.get_block_ids_with_load_errors() == set()
+        assert declined.call_count == 0
+    else:
+        assert results.failed_recving == {"request"}
+        assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
+        assert declined.call_count == 1
+
+
+@pytest.mark.cpu_test
+def test_early_recv_falls_back_when_notify_fails(recv_worker):
+    """A failed early notify returns the completed load to ordinary step output."""
+    worker = recv_worker
+    notifier = _FakeEarlyNotifier(succeed=False)
+    worker.bind_early_recv(notifier)
+    worker._recving_transfers["request"] = [101]
+    worker._handoff_to_early_recv(
+        "request", worker._recving_metadata["request"], start_thread=False
+    )
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+
+    with patch.object(worker.xfer_stats, "record_transfer") as record_transfer:
+        assert worker._poll_early_once() is False
+        assert notifier.sent == []
+        results = worker.get_transfer_results()
+        assert results.finished_recving == {"request"}
+        assert results.failed_recving == set()
+        record_transfer.assert_called_once()
+
+
+@pytest.mark.cpu_test
+def test_early_recv_tracks_inflight_engines_and_reclaims_on_unregister(recv_worker):
+    """In-flight early transfers keep their engine busy and are reclaimed when
+    unregister_kv_caches() stops the poller before sleep."""
+    worker = recv_worker
+    notifier = _FakeEarlyNotifier()
+    worker.bind_early_recv(notifier)
+    meta = worker._recving_metadata["request"]
+    meta.remote.engine_id = "remote-engine-1"
+    meta.remote.blocks_expiry_time = None
+    worker._kv_unregistered = True
+    worker._registered_descs = []
+    worker.nixl_wrapper.check_xfer_state.return_value = "PROC"
+    worker._recving_transfers["request"] = [101]
+
+    worker._handoff_to_early_recv("request", meta, start_thread=True)
+    assert worker._early_poller_thread is not None
+    assert worker._early_poller_thread.is_alive()
+    assert "remote-engine-1" in worker._engines_with_inflight_transfers()
+
+    worker.unregister_kv_caches()
+    assert worker._early_poller_thread is None
+    assert worker._recving_transfers["request"] == [101]
+    assert "remote-engine-1" in worker._engines_with_inflight_transfers()
+
+
+@pytest.mark.cpu_test
+def test_early_recv_rejects_missing_nixl_thread_sync():
+    cfg = MagicMock()
+    cfg.kv_transfer_config.enable_early_recv = True
+    cfg.parallel_config.pipeline_parallel_size = 1
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker.nixl_thread_sync_t",
+            None,
+        ),
+        pytest.raises(NotImplementedError, match="nixl_thread_sync_t"),
+    ):
+        NixlConnectorWorker(cfg, "engine-0", MagicMock())
 
 
 def test_recv_failure_waits_for_unpollable_handle_to_be_released(recv_worker):

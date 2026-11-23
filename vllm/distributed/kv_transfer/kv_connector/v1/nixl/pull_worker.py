@@ -3,8 +3,10 @@
 """Pull-specific (READ) worker-side logic for the NIXL connector."""
 
 import math
+import threading
 import time
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -24,21 +26,44 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
     _is_attention_spec,
 )
+from vllm.distributed.nixl_utils import nixl_agent_config, nixl_thread_sync_t
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.early_recv import (
+        EarlyKVRecvNotifier,
+    )
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
+
+# Poller cadence while eligible early-receive transfers are in flight.
+# When idle, the thread blocks on `_early_poll_wake`.
+_EARLY_RECV_POLL_INTERVAL_S = 0.001
+
+
+@dataclass(slots=True)
+class _EarlyRecvEntry:
+    """In-flight eligible receive owned by the early-recv poller thread."""
+
+    handles: list[int]
+    engine_id: EngineId
+    # Rebased initial remote expiry (`remote.blocks_expiry_time - clock_offset`),
+    # or None when no expiry check applies. Heartbeat renewals stay on the main
+    # thread; if this conservative deadline is reached, the request falls back to
+    # the main thread for the authoritative lease check.
+    base_deadline: float | None
+    telemetries: list[Any] = field(default_factory=list)
 
 
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     """Pull-specific (READ) worker logic."""
 
-    # Successful receives held for the next poll.
-    _early_recved: set[str] | None = None
+    _early_recv_notifier: "EarlyKVRecvNotifier | None" = None
+    _early_recv_lock: "threading.Lock | None" = None
 
     def __init__(
         self,
@@ -47,77 +72,269 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         kv_cache_config: "KVCacheConfig",
     ):
         assert vllm_config.kv_transfer_config is not None
-        if (
-            vllm_config.kv_transfer_config.enable_early_recv
-            and vllm_config.parallel_config.pipeline_parallel_size > 1
-        ):
-            raise NotImplementedError(
-                "NixlConnector (pull) does not support enable_early_recv with "
-                "pipeline_parallel_size > 1."
-            )
+        if vllm_config.kv_transfer_config.enable_early_recv:
+            if vllm_config.parallel_config.pipeline_parallel_size > 1:
+                raise NotImplementedError(
+                    "NixlConnector (pull) does not support enable_early_recv with "
+                    "pipeline_parallel_size > 1."
+                )
+            if nixl_agent_config is None or nixl_thread_sync_t is None:
+                raise NotImplementedError(
+                    "NixlConnector (pull) enable_early_recv requires a NIXL "
+                    "version with agent thread synchronization "
+                    "(nixl_thread_sync_t)."
+                )
         super().__init__(vllm_config, engine_id, kv_cache_config)
-        if self.kv_transfer_config.enable_early_recv:
-            self._early_recved = set()
+        self._init_early_recv_state()
         # Registration generation of each remote engine's loaded agent.
         self._remote_registration_generations: dict[EngineId, int] = {}
+
+    def _init_early_recv_state(self) -> None:
+        if self._early_recv_lock is not None:
+            return
+        self._early_recv_lock = threading.Lock()
+        self._early_recving_transfers: dict[ReqId, _EarlyRecvEntry] = {}
+        # Requests already pushed early; main thread pops metadata & logs stats.
+        self._early_done_cleanup: list[tuple[ReqId, list[Any]]] = []
+        # Requests handed back to the main thread for authoritative collection
+        # (transfer errors, exceptions, near-expiry leases, or send fallback).
+        self._early_fallback: list[tuple[ReqId, list[int], list[Any]]] = []
+        self._early_poll_wake = threading.Event()
+        self._early_poll_stop = threading.Event()
+        self._early_poller_thread: threading.Thread | None = None
+
+    def bind_early_recv(self, notifier: "EarlyKVRecvNotifier") -> None:
+        self._init_early_recv_state()
+        self._early_recv_notifier = notifier
 
     def _can_early_recv(self, req_id: str) -> bool:
         if req_id in self._recv_failures:
             return False
-        meta = self._recving_metadata[req_id]
-        assert meta.remote is not None and self.transfer_topo is not None
+        meta = self._recving_metadata.get(req_id)
+        if meta is None or meta.remote is None or self.transfer_topo is None:
+            return False
         remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
-        # Receives that need post-processing are reported by the step.
+        # Receives that need post-processing, deferred split-memory notifs, or
+        # a ROCm+Mamba device sync stay on the ordinary step path.
         return (
             not self.use_host_buffer
             and not self.enable_permute_local_kv
             and not self.enable_heterogeneous_attn_post_process
+            and not getattr(self, "_mixed_mem_types", False)
+            and not (current_platform.is_rocm() and self._has_mamba)
             and self.block_size == remote_info.remote_block_size
             and self._physical_blocks_per_logical_kv_block
             == remote_info.remote_physical_blocks_per_logical
             and not any(meta.region_blocks_to_zero or ())
         )
 
-    def _finish_recved(
-        self, done_recving: set[str], failed_recv_reqs: set[str]
-    ) -> None:
-        early = (
-            {r for r in done_recving - failed_recv_reqs if self._can_early_recv(r)}
-            if self._early_recved is not None
-            else set()
+    def _ensure_early_poller_started(self) -> None:
+        if self._early_poller_thread is not None:
+            return
+        self._early_poll_stop.clear()
+        self._early_poller_thread = threading.Thread(
+            target=self._early_poller_loop,
+            daemon=True,
+            name="nixl-early-recv-poller",
         )
-        super()._finish_recved(done_recving, failed_recv_reqs)
-        if self._early_recved is not None:
-            self._early_recved.update(early)
+        self._early_poller_thread.start()
+
+    def _handoff_to_early_recv(
+        self, req_id: ReqId, meta: ReqMeta, *, start_thread: bool = True
+    ) -> None:
+        """Transfer ownership of a fully posted eligible read to the poller."""
+        assert self._early_recv_lock is not None
+        assert meta.remote is not None
+        remote = meta.remote
+        clock_offset = self._engine_clock_offset.get(remote.engine_id)
+        base_deadline = (
+            None
+            if (
+                not meta.local_physical_block_ids
+                or remote.blocks_expiry_time is None
+                or clock_offset is None
+            )
+            else remote.blocks_expiry_time - clock_offset
+        )
+        handles = self._recving_transfers.pop(req_id)
+        entry = _EarlyRecvEntry(
+            handles=handles,
+            engine_id=remote.engine_id,
+            base_deadline=base_deadline,
+        )
+        with self._early_recv_lock:
+            self._early_recving_transfers[req_id] = entry
+        if start_thread:
+            self._ensure_early_poller_started()
+            self._early_poll_wake.set()
+
+    def _reclaim_all_to_fallback(self) -> None:
+        """Move all poller-owned entries back to the main-thread fallback queue."""
+        if self._early_recv_lock is None:
+            return
+        with self._early_recv_lock:
+            entries = list(self._early_recving_transfers.items())
+            self._early_recving_transfers.clear()
+            for req_id, entry in entries:
+                self._early_fallback.append((req_id, entry.handles, entry.telemetries))
+
+    def _early_poller_loop(self) -> None:
+        while not self._early_poll_stop.is_set():
+            self._early_poll_wake.clear()
+            try:
+                has_pending = self._poll_early_once()
+            except Exception:
+                logger.exception(
+                    "nixl-early-recv-poller hit an unexpected error; "
+                    "falling back to ordinary step collection"
+                )
+                self._reclaim_all_to_fallback()
+                has_pending = False
+            if self._early_poll_stop.is_set():
+                break
+            if has_pending:
+                self._early_poll_stop.wait(timeout=_EARLY_RECV_POLL_INTERVAL_S)
+            else:
+                self._early_poll_wake.wait()
+
+    def _poll_early_once(self) -> bool:
+        """Run one poll pass over poller-owned transfers.
+
+        Returns True if any transfers remain pending. Never mutates
+        main-thread-only state (`_recving_metadata`, `_recv_failures`,
+        `xfer_stats`, remote engine failure sets).
+        """
+        if self._early_recv_lock is None:
+            return False
+        with self._early_recv_lock:
+            items = list(self._early_recving_transfers.items())
+        if not items:
+            return False
+
+        ready: list[tuple[ReqId, _EarlyRecvEntry]] = []
+        fallbacks: list[tuple[ReqId, list[int], list[Any]]] = []
+        updated_handles: list[tuple[_EarlyRecvEntry, list[int]]] = []
+
+        for req_id, entry in items:
+            if self._early_poll_stop.is_set():
+                break
+            in_progress: list[int] = []
+            fallback = False
+            for i, handle in enumerate(entry.handles):
+                try:
+                    xfer_state = self.nixl_wrapper.check_xfer_state(handle)
+                except Exception:
+                    fallback = True
+                    in_progress.extend(entry.handles[i:])
+                    break
+                if xfer_state == "DONE":
+                    try:
+                        res = self.nixl_wrapper.get_xfer_telemetry(handle)
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                    except Exception:
+                        fallback = True
+                        in_progress.extend(entry.handles[i:])
+                        break
+                    entry.telemetries.append(res)
+                elif xfer_state == "PROC":
+                    in_progress.append(handle)
+                else:
+                    fallback = True
+                    in_progress.extend(entry.handles[i:])
+                    break
+
+            if fallback:
+                fallbacks.append((req_id, in_progress, entry.telemetries))
+            elif in_progress:
+                updated_handles.append((entry, in_progress))
+            elif (
+                entry.base_deadline is not None
+                and time.perf_counter() + self._lease_safety_margin
+                >= entry.base_deadline
+            ):
+                # Main thread owns authoritative `_remote_leases` renewals.
+                fallbacks.append((req_id, [], entry.telemetries))
+            else:
+                ready.append((req_id, entry))
+
+        with self._early_recv_lock:
+            for entry, in_progress in updated_handles:
+                entry.handles = in_progress
+            for req_id, handles, telemetries in fallbacks:
+                self._early_recving_transfers.pop(req_id, None)
+                self._early_fallback.append((req_id, handles, telemetries))
+            # Remove ready entries before notifying so they cannot be reclaimed
+            # onto the ordinary path while try_notify() runs.
+            notifying = [
+                (req_id, entry)
+                for req_id, entry in ready
+                if self._early_recving_transfers.pop(req_id, None) is not None
+            ]
+
+        if notifying:
+            notifier = self._early_recv_notifier
+            req_ids = [req_id for req_id, _ in notifying]
+            sent = notifier is not None and notifier.try_notify(req_ids)
+            with self._early_recv_lock:
+                if sent:
+                    for req_id, entry in notifying:
+                        self._early_done_cleanup.append((req_id, entry.telemetries))
+                else:
+                    for req_id, entry in notifying:
+                        self._early_fallback.append((req_id, [], entry.telemetries))
+
+        with self._early_recv_lock:
+            return bool(self._early_recving_transfers)
+
+    def _drain_early_recv_state(self) -> None:
+        """Apply poller completions and fallbacks on the main thread."""
+        if self._early_recv_lock is None:
+            return
+        with self._early_recv_lock:
+            done_cleanup, self._early_done_cleanup = self._early_done_cleanup, []
+            fallback, self._early_fallback = self._early_fallback, []
+        for req_id, telemetries in done_cleanup:
+            for res in telemetries:
+                self.xfer_stats.record_transfer(res)
+            self._recving_metadata.pop(req_id, None)
+        for req_id, handles, telemetries in fallback:
+            for res in telemetries:
+                self.xfer_stats.record_transfer(res)
+            self._recving_transfers.setdefault(req_id, []).extend(handles)
+
+    def _stop_early_poller(self) -> None:
+        """Stop the background poller and reclaim all transfers to the main thread."""
+        if self._early_recv_lock is None:
+            return
+        self._early_poll_stop.set()
+        self._early_poll_wake.set()
+        if self._early_poller_thread is not None:
+            self._early_poller_thread.join()
+            self._early_poller_thread = None
+        self._reclaim_all_to_fallback()
+        self._drain_early_recv_state()
+        self._early_poll_stop.clear()
+
+    def _engines_with_inflight_transfers(self) -> set[EngineId]:
+        engines = super()._engines_with_inflight_transfers()
+        if self._early_recv_lock is not None:
+            with self._early_recv_lock:
+                engines.update(
+                    entry.engine_id for entry in self._early_recving_transfers.values()
+                )
+        return engines
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
-        results = super().get_transfer_results()
-        if self._early_recved is not None:
-            results.finished_recving.difference_update(self._early_recved)
-        return results
+        self._drain_early_recv_state()
+        return super().get_transfer_results()
 
-    def has_pending_recving(self) -> bool:
-        return self._early_recved is not None and (
-            bool(self._early_recved)
-            or any(self._can_early_recv(r) for r in self._recving_transfers)
-        )
+    def unregister_kv_caches(self) -> None:
+        self._stop_early_poller()
+        super().unregister_kv_caches()
 
-    def poll_finished_recving(self) -> set[str]:
-        assert self._early_recved is not None
-        # Ineligible and failed requests stay untouched for ordinary collection.
-        eligible = [r for r in self._recving_transfers if self._can_early_recv(r)]
-        transfers = {r: self._recving_transfers.pop(r) for r in eligible}
-        done, failed = self._pop_done_transfers(transfers)
-        self._recving_transfers.update(transfers)
-        # Reads that may have overlapped the remote's lease expiry fail through
-        # the step output, like transfer failures.
-        failed |= self._get_lease_lapsed_recvs(done - failed)
-        self._recv_failures.update(failed)
-        if done := done - failed:
-            self._finish_recved(done, set())
-        finished = self._early_recved
-        self._early_recved = set()
-        return finished
+    def shutdown(self) -> None:
+        self._stop_early_poller()
+        super().shutdown()
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.
@@ -606,6 +823,13 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                             remote_agent_name=agent,
                         )
                         self.xfer_stats.record_failed_notification()
+
+        if (
+            self._early_recv_notifier is not None
+            and req_id in self._recving_transfers
+            and self._can_early_recv(req_id)
+        ):
+            self._handoff_to_early_recv(req_id, meta)
 
     def _read_blocks(
         self,
