@@ -25,6 +25,9 @@ The factors considered include:
 
 With all these factors taken into consideration, usually we can guarantee that the cache is safe to use, and will not cause any unexpected behavior. Therefore, the cache is enabled by default. If you want to debug the compilation process, or if you suspect the cache is causing some issues, you can disable it by setting the environment variable `VLLM_DISABLE_COMPILE_CACHE=1`.
 
+On TorchTPU, `VLLM_XLA_CHECK_RECOMPILATION=1` reports runtime compilation statistics.
+The diagnostic setting can change between runs that share an AOT or piecewise compilation cache.
+
 A unique aspect of vLLM's `torch.compile` integration, is that we guarantee all the compilation finishes before we serve any requests. No requests will trigger new compilations. Otherwise, the engine would be blocked on that request, and the response time will have unexpected spikes.
 
 An explicit `TRITON_CACHE_DIR` is preserved, allowing processes and model
