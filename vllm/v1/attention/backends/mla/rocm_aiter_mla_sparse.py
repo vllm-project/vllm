@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, cast
 
@@ -1056,6 +1057,8 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
     supports_dcp = True
     can_return_lse_for_decode = True
     use_aiter_sparse_mla = False
+    # Kimi-K3.1 DSA post-load hook (VLLM_K3_DSA_PACKED_PROJ), set per layer.
+    _dsa_post_load: Callable[[], None] | None = None
 
     def __init__(
         self,
@@ -1161,6 +1164,10 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 rocm_aiter_ops.flydsl_sparse_mla_warmup(
                     self.num_heads * self.dcp_world_size
                 )
+        # Kimi-K3.1 DSA (VLLM_K3_DSA_PACKED_PROJ): the owning layer packs its
+        # input projections once every quant method has processed its weights.
+        if self._dsa_post_load is not None:
+            self._dsa_post_load()
 
     def _aiter_sparse_mla_unsupported_reason(
         self, vllm_config: VllmConfig

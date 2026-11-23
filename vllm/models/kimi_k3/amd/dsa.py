@@ -11,6 +11,7 @@ indexer kernels take the native head count.
 
 import functools
 import math
+import os
 from typing import cast
 
 import torch
@@ -31,10 +32,12 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.mla import (
     MLAModules,
     MultiHeadLatentAttentionWrapper,
+    mla_output_gate,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -44,6 +47,8 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
     _merge_dcp_topk_global,
 )
+from vllm.model_executor.offloader.base import NoopOffloader, get_offloader
+from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerCache
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.triton_utils import tl, triton
@@ -402,7 +407,9 @@ def _fp4_indexer(
         assert m.prefill is not None
         prefill_chunks(
             q,
-            weights,
+            # A row-strided view under VLLM_K3_DSA_PACKED_PROJ; the FlyDSL
+            # prefill scorer takes dense rows (a no-op when already dense).
+            weights.contiguous(),
             cache,
             out,
             m.prefill,
@@ -680,7 +687,12 @@ class KimiK3DSAIndexer(nn.Module):
         index_q_input: torch.Tensor | None,
         positions: torch.Tensor | None = None,
         rotary_emb: nn.Module | None = None,
+        index_k: torch.Tensor | None = None,
+        index_v: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """``index_k``/``index_v``: the wk/wv outputs (possibly row-strided
+        views) when the caller already ran them in its packed input projection
+        (VLLM_K3_DSA_PACKED_PROJ); None runs wk/wv here."""
         if index_q_input is None:
             # q_lora_rank is None: MultiHeadLatentAttention.forward_native
             # passes q_c=None, so the indexer query reads hidden_states.
@@ -688,8 +700,10 @@ class KimiK3DSAIndexer(nn.Module):
         index_q = self.wq_index(index_q_input)[0].view(
             -1, self.index_num_heads, self.index_head_dim
         )
-        index_k = self.wk_index(hidden_states)[0]
-        index_v = self.wv_index(hidden_states)[0]
+        if index_k is None:
+            index_k = self.wk_index(hidden_states)[0]
+        if index_v is None:
+            index_v = self.wv_index(hidden_states)[0]
         if self.use_fp4:
             # The fused key store applies the LayerNorm itself.
             k_norm = self.k_index_norm
@@ -740,6 +754,310 @@ class KimiK3DSAIndexer(nn.Module):
             )
             return self.topk_indices_buffer
         return indexer_op.forward_hip(hidden_states, q_fp8, index_k, weights)
+
+
+# ---------------------------------------------------------------------------
+# Packed DSA input projection (VLLM_K3_DSA_PACKED_PROJ=1, default off).
+#
+# The bf16 projections that read the attention input (fused_qkv_a, this
+# rank's g_proj shard, the indexer's wk and wv) run as one GEMM over a
+# [rows, hidden] weight packed after loading, and the output is split by
+# views (TokenSpeed's ``pack_decode_projection``). Each part's parameter
+# becomes a row view of the packed weight: memory is unchanged, in-place
+# weight reloads keep it current, and every path that still calls a part on
+# its own (the specialized decode, the multi-stream gate) reads the same
+# values. Quantized or otherwise non-dense parts keep the separate GEMMs.
+#
+# The multi-stream wrapper packs only with VLLM_K3_DSA_PACKED_PROJ_MS=1 as
+# well: there the aux stream forks after the one GEMM instead of running
+# wk/wv alongside fused_qkv_a, which needs its own GPU A/B.
+# ---------------------------------------------------------------------------
+
+_PACKED_PROJ_ENV = "VLLM_K3_DSA_PACKED_PROJ"
+_PACKED_PROJ_MS_ENV = "VLLM_K3_DSA_PACKED_PROJ_MS"
+
+# Per-rank post-load outcome of every layer that installed the hook, in
+# construction (= load) order: None until it ran, then "" when packed or
+# the reason it kept the separate GEMMs.
+_PACKED_PROJ_LAYERS: dict[str, str | None] = {}
+
+
+def packed_proj_requested() -> bool:
+    """Read when each DSA layer is built (in every worker)."""
+    return os.getenv(_PACKED_PROJ_ENV, "0") == "1"
+
+
+def packed_proj_ms_requested() -> bool:
+    """Also pack the multi-stream wrapper (on top of VLLM_K3_DSA_PACKED_PROJ)."""
+    return os.getenv(_PACKED_PROJ_MS_ENV, "0") == "1"
+
+
+def packed_proj_unsupported_reason(layers: list[nn.Module]) -> str | None:
+    """Why ``layers`` cannot share one packed GEMM; None when they can.
+
+    Every part must be a bias-free unquantized linear with a dense 2-D bf16
+    weight over the same input width and device.
+    """
+    if envs.VLLM_BATCH_INVARIANT:
+        return "VLLM_BATCH_INVARIANT is set"
+    if not isinstance(get_offloader(), NoopOffloader):
+        # Offloaders move or re-point the parts' storage after loading.
+        return f"weights are offloaded ({type(get_offloader()).__name__})"
+    first: torch.Tensor | None = None
+    for layer in layers:
+        name = getattr(layer, "prefix", "") or type(layer).__name__
+        quant_method = getattr(layer, "quant_method", None)
+        # Exact type: subclasses may change the GEMM or the weight layout.
+        if type(quant_method) is not UnquantizedLinearMethod:
+            return f"{name} uses {type(quant_method).__name__}"
+        if getattr(layer, "bias", None) is not None:
+            return f"{name} has a bias"
+        weight = getattr(layer, "weight", None)
+        if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+            return f"{name} has no dense 2-D weight"
+        if weight.dtype != torch.bfloat16:
+            return f"{name}'s weight is {weight.dtype}, not bfloat16"
+        if not weight.is_contiguous():
+            return f"{name}'s weight is not contiguous"
+        if getattr(weight, "_vllm_is_uva_offloaded", False):
+            return f"{name}'s weight is offloaded"
+        if first is None:
+            first = weight
+        elif weight.shape[1] != first.shape[1] or weight.device != first.device:
+            return f"{name}'s weight does not match the first part's input/device"
+    return None
+
+
+def _are_row_views(weights: list[torch.Tensor], packed: torch.Tensor) -> bool:
+    """Whether ``weights`` are ``packed``'s consecutive row slices, in order."""
+    if sum(w.shape[0] for w in weights) != packed.shape[0]:
+        return False
+    base = packed.untyped_storage().data_ptr()
+    offset = packed.storage_offset()
+    for w in weights:
+        if (
+            w.untyped_storage().data_ptr() != base
+            or w.storage_offset() != offset
+            or w.shape[1:] != packed.shape[1:]
+            or (w.shape[0] > 1 and w.stride() != packed.stride())
+        ):
+            return False
+        offset += w.shape[0] * packed.stride(0)
+    return True
+
+
+@torch.no_grad()
+def pack_linear_weights(
+    layers: list[nn.Module], packed: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Stack ``layers``' weights row-wise; each weight becomes a row view.
+
+    Returns ``packed`` as is when the weights already are its row views (a
+    repeated post-load call), else a new packed tensor. The caller checks
+    ``packed_proj_unsupported_reason`` first.
+    """
+    weights = [layer.weight for layer in layers]
+    if packed is not None and _are_row_views(weights, packed):
+        return packed
+    packed = torch.cat([w.data for w in weights])
+    offset = 0
+    for w in weights:
+        rows = w.shape[0]
+        w.data = packed[offset : offset + rows]
+        offset += rows
+    return packed
+
+
+class _PackedProjMixin:
+    """Packed input projection state shared by the DSA MLA wrappers.
+
+    ``_packed_parts`` is a plain list (the modules stay registered where they
+    are); ``_packed_w`` stays None until ``pack_projections`` succeeds, and the
+    wrappers' forwards take their unpacked path while it is None.
+    """
+
+    def _init_packed_proj(self, include_gate: bool) -> None:
+        parts = [self.fused_qkv_a_proj]
+        if include_gate and self.g_proj is not None:
+            parts.append(self.g_proj)
+        parts += [self.indexer.wk_index, self.indexer.wv_index]
+        self._packed_parts: list[nn.Module] = parts
+        self._packed_has_gate = include_gate and self.g_proj is not None
+        self._packed_w: torch.Tensor | None = None
+        self._packed_gemm = None
+        # Key in _PACKED_PROJ_LAYERS once install_packed_proj_hook ran.
+        self._packed_key: str | None = None
+        # Output split: q_a, kv_a (+ rope), [gate], wk, wv.
+        self._packed_split: list[int] = []
+
+    def pack_projections(self) -> None:
+        """Post-load hook (the sparse MLA impl's process_weights_after_loading);
+        runs before any graph capture records the weights' addresses."""
+        parts = self._packed_parts
+        reason = packed_proj_unsupported_reason(parts)
+        if reason is not None:
+            logger.info_once(
+                "%s=1: keeping the separate DSA input projections (%s).",
+                _PACKED_PROJ_ENV,
+                reason,
+            )
+            self._packed_w = None
+            self._record_packed_outcome(reason)
+            return
+        old = self._packed_w
+        self._packed_w = pack_linear_weights(parts, old)
+        if old is not None and self._packed_w is not old:
+            # Same as swapping any weight's storage: earlier graphs are stale.
+            logger.warning_once(
+                "%s=1: re-packed the DSA input projections after a weight "
+                "storage swap; CUDA graphs captured before must be recaptured.",
+                _PACKED_PROJ_ENV,
+            )
+        # The parts' own GEMM dispatch (all UnquantizedLinearMethod).
+        self._packed_gemm = parts[0].quant_method._gemm_impl
+        rows = [p.weight.shape[0] for p in parts]
+        qkv = self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim
+        assert rows[0] == qkv, (rows, qkv)
+        self._packed_split = [self.q_lora_rank, qkv - self.q_lora_rank, *rows[1:]]
+        logger.info_once(
+            "%s=1: DSA input projections run as one [%d, %d] GEMM (%s).",
+            _PACKED_PROJ_ENV,
+            self._packed_w.shape[0],
+            self._packed_w.shape[1],
+            "q_a | kv_a | gate | wk | wv"
+            if self._packed_has_gate
+            else "q_a | kv_a | wk | wv",
+        )
+        self._record_packed_outcome("")
+
+    def _record_packed_outcome(self, reason: str) -> None:
+        """Log a per-rank summary once the last hooked layer has run."""
+        key = self._packed_key
+        if key is None:
+            return
+        _PACKED_PROJ_LAYERS[key] = reason
+        if key != next(reversed(_PACKED_PROJ_LAYERS)):
+            return
+        outcomes = list(_PACKED_PROJ_LAYERS.values())
+        logger.info(
+            "%s=1: packed the DSA input projections of %d/%d layers "
+            "(%d not processed).",
+            _PACKED_PROJ_ENV,
+            outcomes.count(""),
+            len(outcomes),
+            outcomes.count(None),
+        )
+
+    def _packed_proj(self, x: torch.Tensor) -> torch.Tensor:
+        assert self._packed_w is not None and self._packed_gemm is not None
+        return self._packed_gemm(self._packed_parts[0], x, self._packed_w, None)
+
+
+class KimiK3DSAPackedMLAWrapper(_PackedProjMixin, MultiHeadLatentAttentionWrapper):
+    """The plain DSA wrapper with the packed input projection.
+
+    Until ``pack_projections`` packs (or when a part is quantized) it is the
+    plain wrapper. Packed, it is ``MultiHeadLatentAttentionWrapper.forward``
+    with q_a/kv_a, the gate and the indexer's wk/wv read from one GEMM.
+
+    The gate is a view of the GEMM output, so the whole output (the gate and
+    wk/wv columns too: 1728 more bf16 per token at K3.1-Pro TP8 than the
+    unpacked q_a/kv_a output that k_pe already keeps alive) lives through
+    attention. The profile run takes this path, so it only trims the KV
+    cache (~56 MB per 16K-token chunk); a token-count branch would be
+    specialized away by torch.compile.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        assert self.q_lora_rank is not None and self.indexer is not None
+        assert self.rotary_emb is None and not self.skip_topk
+        self._init_packed_proj(include_gate=True)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+        skip_o_proj: bool = False,
+    ) -> torch.Tensor:
+        if self._packed_w is None:
+            return super().forward(
+                positions, hidden_states, llama_4_scaling, skip_o_proj
+            )
+        assert self.q_a_layernorm is not None and self.q_b_proj is not None
+        parts = self._packed_proj(hidden_states).split(self._packed_split, dim=-1)
+        gate = None
+        if self._packed_has_gate:
+            q_c, kv_lora, gate, index_k, index_v = parts
+        else:
+            q_c, kv_lora, index_k, index_v = parts
+        if not self.fuse_qkv_rmsnorm:
+            q_c = self.q_a_layernorm(q_c)
+        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        if self.fuse_qkv_rmsnorm:
+            # Fuse q_a + kv_a RMSNorm into one kernel launch (q_c is still the
+            # pre-norm projection output here).
+            if self.fuse_qkv_rmsnorm_max_tokens is None:
+                q_c, kv_c_normed = fused_q_kv_rmsnorm(
+                    q_c,
+                    kv_c,
+                    self.q_a_layernorm.weight.data,
+                    self.kv_a_layernorm.weight.data,
+                    self.q_a_layernorm.variance_epsilon,
+                )
+            else:
+                q_c, kv_c_normed = torch.ops.vllm.mla_bounded_q_kv_rmsnorm(
+                    q_c,
+                    kv_c,
+                    self.q_a_layernorm.weight.data,
+                    self.kv_a_layernorm.weight.data,
+                    self.q_a_layernorm.variance_epsilon,
+                    self.fuse_qkv_rmsnorm_max_tokens,
+                )
+        else:
+            kv_c_normed = self.kv_a_layernorm(kv_c)
+        # Add head dim of 1 to k_pe
+        k_pe = k_pe.unsqueeze(1)
+
+        q = self.q_b_proj(q_c)[0]
+        heads = self.num_heads
+        if self.dcp_q_replicate:
+            heads *= self.q_b_proj.group_size
+        q = q.view(-1, heads, self.qk_head_dim)
+
+        if self.is_sparse:
+            self.indexer(
+                hidden_states,
+                q_c,
+                positions,
+                self.indexer_rope_emb,
+                index_k=index_k,
+                index_v=index_v,
+            )
+            self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
+
+        if llama_4_scaling is not None:
+            q *= llama_4_scaling
+
+        q_dcp_replicated = None
+        if self.dcp_q_replicate:
+            q_dcp_replicated, q = q, self.q_b_proj._local_view(q)
+
+        attn_out = self.mla_attn(
+            q,
+            kv_c_normed,
+            k_pe,
+            output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+            q_dcp_replicated=q_dcp_replicated,
+        )
+
+        if gate is not None:
+            attn_out = mla_output_gate(attn_out, gate, self.fuse_output_gate)
+
+        if skip_o_proj:
+            return attn_out
+        return self.o_proj(attn_out)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -831,6 +1149,9 @@ class _MSState:
         self.kv: tuple[torch.Tensor, torch.Tensor] | None = None
         self.pending: tuple[torch.Tensor, torch.Tensor, int] | None = None
         self.joined = True
+        # Packed projection only: the raw wk/wv output views for the serial
+        # indexer path (the fork does not run them).
+        self.raw_kv: tuple[torch.Tensor, torch.Tensor] | None = None
 
     def take_pending(self, rows: int) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Called by the sparse MLA backend: hand over the merged CSR slots.
@@ -913,6 +1234,41 @@ def _ms_fork_fake(x: torch.Tensor, layer_name: str) -> torch.Tensor:
     return x.new_empty(0)
 
 
+def _ms_fork_packed(
+    x: torch.Tensor, proj: torch.Tensor, layer_name: str
+) -> torch.Tensor:
+    """``_ms_fork`` after the packed projection: wk/wv already ran on main
+    (``proj``'s last columns), so the aux stream only applies the key norm.
+    ``proj`` is the whole GEMM output; ``kimi_dsa_ms_join_packed`` keeps it
+    alive until the aux reads are joined."""
+    layer = _MS_LAYERS[layer_name]
+    st = layer.ms_state
+    st.stage = 0
+    st.pending = None
+    st.kv = None
+    ind = layer.indexer
+    width = ind.index_head_dim + ind.index_num_heads
+    raw_k, raw_v = proj[:, proj.shape[1] - width :].split(
+        [ind.index_head_dim, ind.index_num_heads], dim=-1
+    )
+    st.raw_kv = (raw_k, raw_v)
+    if _ms_active(layer):
+        aux = layer.aux_stream
+        st.ev_fork.record()
+        with torch.cuda.stream(aux):
+            aux.wait_event(st.ev_fork)
+            ik = ind.k_index_norm(raw_k)
+        st.kv = (ik, raw_v)
+        st.stage = 1
+    return x.new_empty(0)
+
+
+def _ms_fork_packed_fake(
+    x: torch.Tensor, proj: torch.Tensor, layer_name: str
+) -> torch.Tensor:
+    return x.new_empty(0)
+
+
 def _ms_indexer(
     x: torch.Tensor, q_c: torch.Tensor, token: torch.Tensor, layer_name: str
 ) -> torch.Tensor:
@@ -921,9 +1277,14 @@ def _ms_indexer(
     ind = layer.indexer
     if st.stage != 1:
         # Serial reference path (prefill, mixed, PIECEWISE, profile runs).
-        ind(x, q_c)
+        raw_kv, st.raw_kv = st.raw_kv, None
+        if raw_kv is None:
+            ind(x, q_c)
+        else:
+            ind(x, q_c, index_k=raw_kv[0], index_v=raw_kv[1])
         st.joined = True
         return layer.g_proj(x)[0]
+    st.raw_kv = None
     from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as be
 
     assert st.kv is not None
@@ -1059,12 +1420,52 @@ direct_register_custom_op(
 )
 
 
-class KimiK3DSAMultiStreamMLAWrapper(MultiHeadLatentAttentionWrapper):
+def _ms_join_packed(
+    attn_out: torch.Tensor,
+    gate: torch.Tensor,
+    x: torch.Tensor,
+    q_c: torch.Tensor,
+    proj: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    # proj: the packed projection output the aux key norm reads.
+    return _ms_join(attn_out, gate, x, q_c, layer_name)
+
+
+def _ms_join_packed_fake(
+    attn_out: torch.Tensor,
+    gate: torch.Tensor,
+    x: torch.Tensor,
+    q_c: torch.Tensor,
+    proj: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    return torch.empty_like(attn_out)
+
+
+direct_register_custom_op(
+    op_name="kimi_dsa_ms_fork_packed",
+    op_func=_ms_fork_packed,
+    fake_impl=_ms_fork_packed_fake,
+)
+direct_register_custom_op(
+    op_name="kimi_dsa_ms_join_packed",
+    op_func=_ms_join_packed,
+    fake_impl=_ms_join_packed_fake,
+)
+
+
+class KimiK3DSAMultiStreamMLAWrapper(_PackedProjMixin, MultiHeadLatentAttentionWrapper):
     """MLA wrapper whose decode runs the DSA indexer chain on the aux stream.
 
     Same modules and weights as the plain wrapper. Outside multi-stream decode
     the indexer op runs the serial chain; only the gate multiply differs (one
     fused fp32 kernel, as Inductor emits it).
+
+    With the packed projection (``pack_projections``, only with
+    VLLM_K3_DSA_PACKED_PROJ_MS=1) main runs [q_a | kv_a | wk | wv] as one
+    GEMM and forks after it; the gate stays a separate GEMM on the aux
+    stream, after the merge.
     """
 
     def __init__(self, *args, ms_comm=None, **kwargs) -> None:
@@ -1078,6 +1479,7 @@ class KimiK3DSAMultiStreamMLAWrapper(MultiHeadLatentAttentionWrapper):
         name = self.mla_attn.layer_name
         _MS_LAYERS[name] = self
         self.ms_name = name
+        self._init_packed_proj(include_gate=False)
 
     @property
     def aux_stream(self) -> torch.cuda.Stream:
@@ -1096,11 +1498,18 @@ class KimiK3DSAMultiStreamMLAWrapper(MultiHeadLatentAttentionWrapper):
     ) -> torch.Tensor:
         assert llama_4_scaling is None
         name = self.ms_name
-        token = torch.ops.vllm.kimi_dsa_ms_fork(hidden_states, name)
-        qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-        q_c, kv_lora = qkv_lora.split(
-            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
-        )
+        proj = None
+        if self._packed_w is not None:
+            proj = self._packed_proj(hidden_states)
+            token = torch.ops.vllm.kimi_dsa_ms_fork_packed(hidden_states, proj, name)
+            q_c, kv_lora = proj.split(self._packed_split, dim=-1)[:2]
+        else:
+            token = torch.ops.vllm.kimi_dsa_ms_fork(hidden_states, name)
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c, kv_lora = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
         q_c = self.q_a_layernorm(q_c)
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c)
@@ -1114,12 +1523,52 @@ class KimiK3DSAMultiStreamMLAWrapper(MultiHeadLatentAttentionWrapper):
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
         )
-        attn_out = torch.ops.vllm.kimi_dsa_ms_join(
-            attn_out, gate, hidden_states, q_c, name
-        )
+        if proj is not None:
+            attn_out = torch.ops.vllm.kimi_dsa_ms_join_packed(
+                attn_out, gate, hidden_states, q_c, proj, name
+            )
+        else:
+            attn_out = torch.ops.vllm.kimi_dsa_ms_join(
+                attn_out, gate, hidden_states, q_c, name
+            )
         if skip_o_proj:
             return attn_out
         return self.o_proj(attn_out)[0]
+
+
+def install_packed_proj_hook(mla: MultiHeadLatentAttentionWrapper) -> bool:
+    """Make ``mla``'s sparse MLA impl pack its input projections after loading.
+
+    Returns whether the hook was installed: the multi-stream wrapper also
+    needs VLLM_K3_DSA_PACKED_PROJ_MS=1, and only ROCM_AITER_MLA_SPARSE runs
+    the hook (any other backend keeps the separate GEMMs, with a warning).
+    """
+    if not isinstance(mla, _PackedProjMixin):
+        return False
+    if isinstance(mla, KimiK3DSAMultiStreamMLAWrapper) and not (
+        packed_proj_ms_requested()
+    ):
+        logger.info_once(
+            "%s=1: the multi-stream DSA layers keep the separate input "
+            "projections (set %s=1 to pack them too).",
+            _PACKED_PROJ_ENV,
+            _PACKED_PROJ_MS_ENV,
+        )
+        return False
+    impl = mla.mla_attn.impl
+    if not hasattr(impl, "_dsa_post_load"):
+        logger.warning_once(
+            "%s=1 has no effect: the %s attention backend does not run the "
+            "DSA post-load hook.",
+            _PACKED_PROJ_ENV,
+            type(impl).__name__,
+        )
+        return False
+    # Runs after the quant methods' own post-load processing.
+    impl._dsa_post_load = mla.pack_projections
+    mla._packed_key = mla.mla_attn.layer_name
+    _PACKED_PROJ_LAYERS[mla._packed_key] = None
+    return True
 
 
 class KimiK3DSAAttention(nn.Module):
@@ -1345,6 +1794,12 @@ class KimiK3DSAAttention(nn.Module):
             fuse_output_gate=fuse_norm_gate,
             fuse_qkv_rmsnorm_max_tokens=_FUSED_QKV_NORM_MAX_TOKENS,
         )
+        # VLLM_K3_DSA_PACKED_PROJ: the wrappers pack after loading (the
+        # sparse MLA impl's post-load hook) when every part is dense bf16;
+        # the multi-stream one only with VLLM_K3_DSA_PACKED_PROJ_MS=1 too.
+        packed_proj = packed_proj_requested() and self.q_lora_rank is not None
+        if packed_proj:
+            wrapper_cls = KimiK3DSAPackedMLAWrapper
         if (
             envs.VLLM_ROCM_DSA_MULTISTREAM
             and self.dsa_indexer.use_fp4
@@ -1374,6 +1829,8 @@ class KimiK3DSAAttention(nn.Module):
         if isinstance(self.mla_attn, KimiK3DSAMultiStreamMLAWrapper):
             # The sparse MLA backend takes the aux-stream merge from here.
             self.mla_attn.mla_attn.impl._dsa_ms_state = self.mla_attn.ms_state
+        if packed_proj:
+            install_packed_proj_hook(self.mla_attn)
 
     def get_input_quant_key(self) -> None:
         # The generic MLA wrapper also feeds these activations to the gate.
