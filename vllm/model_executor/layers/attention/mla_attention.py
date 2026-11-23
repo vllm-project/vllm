@@ -858,6 +858,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and self.kv_cache_dtype in ("fp8", "fp8_e4m3")
             and not self.impl.is_sparse
             and not self.use_pcp
+            and not self.use_shardq
             and self.hisparse_cache is None
             and rocm_aiter_ops.is_fused_bf16_bmm_rope_cat_quant_pad_cache_mla_tuned(
                 self.num_heads, self.kv_lora_rank, self.qk_nope_head_dim
@@ -1847,7 +1848,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         Only when both ops run their host code in this forward: eager, or a FULL
         cudagraph capture. A piecewise or breakable capture bakes the cache
         update into the graph but runs attention eagerly at each replay."""
-        if not self.is_aiter_fused_rope_kv_cache_decode_query_enabled:
+        # The fused query kernel cannot add kv_b_proj adapters.
+        if not self.is_aiter_fused_rope_kv_cache_decode_query_enabled or hasattr(
+            self.kv_b_proj, "apply_mla_absorbed_kv_b_lora"
+        ):
             return False
         forward_context = get_forward_context()
         if not (
