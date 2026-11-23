@@ -18,17 +18,20 @@ from pydantic import (
     model_validator,
 )
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
     PRIORITY_MAX,
     PRIORITY_MIN,
     AnyResponseFormat,
+    BadWordsParam,
     DeltaMessage,
     FunctionCall,
     FunctionDefinition,
     MMPayload,
     PerRequestMetrics,
     StopParam,
+    StopTokenIdsParam,
     StreamOptions,
     ToolCall,
     TopLogprobsParam,
@@ -293,7 +296,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     repetition_penalty: float | None = None
     watermarking: bool | None = None
     length_penalty: float = 1.0
-    stop_token_ids: list[int] | None = []
+    stop_token_ids: StopTokenIdsParam = []
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
@@ -322,7 +325,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     allowed_token_ids: list[int] | None = None
-    bad_words: list[str] = Field(default_factory=list)
+    bad_words: BadWordsParam = Field(default_factory=list)
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]
@@ -1156,7 +1159,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     """
 
     messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
-        Field(..., min_length=1)
+        Field(..., min_length=1, max_length=envs.VLLM_MAX_COMPLETION_PROMPTS)
     )
     model: str | None = None
 
