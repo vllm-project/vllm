@@ -20,23 +20,15 @@ This endpoint is automatically available when the server is started with a gener
 
 ### Tokenization and special tokens
 
-Query and item strings are tokenized separately. With `add_special_tokens=true`
-(the default), the tokenizer adds its special tokens only to the first component
-in prompt order: the query by default (`item_first=false`), or the item when
-`item_first=true`.
+Queries and items are tokenized separately. `add_special_tokens=true` (the
+default) enables automatic special tokens for a text query. For item-first
+requests with two text inputs, a tokenizer-added beginning-of-sequence token
+(BOS) goes before the item when it can be identified unambiguously. A
+tokenizer-added suffix remains after the query.
 
-For a tokenizer that prepends a beginning-of-sequence (BOS) token, text inputs
-produce:
-
-```text
-item_first=false: BOS + query tokens + item tokens
-item_first=true:  BOS + item tokens + query tokens
-```
-
-Token-ID inputs are used as provided, including any special tokens. If the first
-component is supplied as token IDs, no special tokens are automatically added to
-the following text component. Set `add_special_tokens=false` to disable automatic
-special tokens for all text inputs.
+Supplying an empty token-ID item (`items=[[]]`) scores the query alone with its
+usual tokenization. Set `add_special_tokens=false` to disable automatic special
+tokens.
 
 ## Finding Token IDs
 
