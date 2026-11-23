@@ -491,8 +491,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
         wo_a_quant_config = quant_config
         if (
-            self._wo_a_keeps_checkpoint_quant()
-            and getattr(quant_config, "online_quantization_config", None) is not None
+            quant_config is not None
+            and quant_config.online_quantization_config is not None
+            and self._wo_a_keeps_checkpoint_quant()
         ):
             wo_a_quant_config = copy.copy(quant_config)
             wo_a_quant_config.online_quantization_config = None
