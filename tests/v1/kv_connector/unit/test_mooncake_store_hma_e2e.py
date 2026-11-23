@@ -1683,6 +1683,8 @@ def test_lookup_reports_failed_probe():
                 store._data[key] = b"x"
     assert worker.lookup(65, hs).hit_length == 64
 
-    store.batch_is_exist = lambda keys: [-1] + [1] * (len(keys) - 1)
-    assert worker.lookup(65, hs) is None
+    with patch.object(
+        store, "batch_is_exist", lambda keys: [-1] + [1] * (len(keys) - 1)
+    ):
+        assert worker.lookup(65, hs) is None
     assert worker.lookup(65, []) == MooncakeLookupResult(0)
