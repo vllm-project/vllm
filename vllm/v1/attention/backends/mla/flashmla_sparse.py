@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, ClassVar
+from weakref import WeakValueDictionary
 
 import numpy as np
 import torch
@@ -103,18 +104,24 @@ def use_fp8_mixed_batch(
     )
 
 
-_fp8_q_padded_buffers: dict[tuple[int, int, int], torch.Tensor] = {}
+_fp8_q_padded_buffers: WeakValueDictionary[
+    tuple[torch.device, int, int, int], torch.Tensor
+] = WeakValueDictionary()
 
 
 def _shared_fp8_q_padded(
     max_tokens: int, num_heads: int, head_size: int
 ) -> torch.Tensor:
-    key = (max_tokens, num_heads, head_size)
-    if key not in _fp8_q_padded_buffers:
-        _fp8_q_padded_buffers[key] = torch.zeros(
-            key, dtype=torch.bfloat16, device=current_platform.device_type
-        )
-    return _fp8_q_padded_buffers[key]
+    device = torch.device(
+        current_platform.device_type, torch.accelerator.current_device_index()
+    )
+    shape = (max_tokens, num_heads, head_size)
+    key = (device, *shape)
+    buffer = _fp8_q_padded_buffers.get(key)
+    if buffer is None:
+        buffer = torch.zeros(shape, dtype=torch.bfloat16, device=device)
+        _fp8_q_padded_buffers[key] = buffer
+    return buffer
 
 
 # Under DCP each rank owns ~1/dcp of the top-k slots. From this many tokens on,
@@ -909,11 +916,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             max_tokens,
             vllm_config.compilation_config.max_cudagraph_capture_size or 0,
             vllm_config.scheduler_config.max_num_seqs * tokens_per_request,
+            fp8_mixed_batch_chunk_tokens(num_heads),
         )
         if (
             max_decode_tokens > 0
             and kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
             and num_heads < MIN_HEADS_FOR_BF16_PREFILL
+            and self.qk_rope_head_dim == 64
             and vllm_config.attention_config.hisparse_config is None
             and self.dcp_world_size == 1
             and not vllm_config.parallel_config.use_ubatching

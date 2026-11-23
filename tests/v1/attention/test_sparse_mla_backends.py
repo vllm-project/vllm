@@ -6266,3 +6266,23 @@ def test_flashinfer_sparse_mla_absorbed_query_dimensions(qk_nope_head_dim):
             ).endswith(
                 (".FlashInferMLASparseTRTLLMBackend", ".FlashAttnMLASparseFA4Backend")
             )
+
+
+def test_flashmla_padded_query_buffer_has_model_lifetime():
+    """Layers share one buffer, but its cache must not retain unloaded models."""
+    import gc
+    import weakref
+
+    from vllm.v1.attention.backends.mla.flashmla_sparse import _shared_fp8_q_padded
+
+    first = _shared_fp8_q_padded(7, 64, 576)
+    second = _shared_fp8_q_padded(7, 64, 576)
+    assert first is second
+    assert first.device == torch.device("cuda", torch.cuda.current_device())
+    assert torch.count_nonzero(first).item() == 0
+    reference = weakref.ref(first)
+    del first, second
+    gc.collect()
+    assert reference() is None
+    reloaded = _shared_fp8_q_padded(7, 64, 576)
+    assert torch.count_nonzero(reloaded).item() == 0
