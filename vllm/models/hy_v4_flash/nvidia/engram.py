@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Flash frozen n-gram embeddings with TP head sharding and V2 lookback."""
 
+from collections.abc import Iterable
+
 import numpy as np
 import torch
 from torch import nn
@@ -15,6 +17,7 @@ from vllm.distributed import (
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v41.common.engram import NgramHashState
 from vllm.models.qwen4_exp.common.ngram_embedding import (
@@ -250,16 +253,23 @@ class FlashEmbedding(nn.Module):
             cpu_offload,
         )
 
-    def load_weight(self, leaf, value):
-        if leaf == "weight_scale_inv" and self.embedding.weight_scale_inv is None:
-            self.embedding.weight_scale_inv = nn.Parameter(
-                self.embedding.weight.new_empty(0, dtype=torch.bfloat16),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                self.embedding.weight_scale_inv, {"weight_loader": self._load_shard}
-            )
-        self._load_shard(getattr(self.embedding, leaf), value)
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loaded = set()
+        for name, value in weights:
+            if name not in ("embedding.weight", "embedding.weight_scale_inv"):
+                raise ValueError(f"Unknown Flash Engram embedding weight: {name}")
+            leaf = name.removeprefix("embedding.")
+            if leaf == "weight_scale_inv" and self.embedding.weight_scale_inv is None:
+                self.embedding.weight_scale_inv = nn.Parameter(
+                    self.embedding.weight.new_empty(0, dtype=torch.bfloat16),
+                    requires_grad=False,
+                )
+                set_weight_attrs(
+                    self.embedding.weight_scale_inv, {"weight_loader": self._load_shard}
+                )
+            self._load_shard(getattr(self.embedding, leaf), value)
+            loaded.add(name)
+        return loaded
 
     def _load_shard(self, parameter, value):
         is_weight = parameter is self.embedding.weight
@@ -399,6 +409,31 @@ class FlashEngram(nn.Module):
                 projection.weight, {"weight_loader": self._load_projection}
             )
             set_weight_attrs(projection.bias, {"weight_loader": self._load_bias})
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        parameters = dict(self.named_parameters())
+        embedding = self.multi_head_embedding
+
+        def local_weights():
+            for name, value in weights:
+                if name.startswith("lookup_per_head_norms."):
+                    _, head, leaf = name.split(".", 2)
+                    if not head.isdigit() or not 0 <= int(head) < embedding.n_hash_cols:
+                        raise ValueError(f"Invalid Engram hash head weight: {name}")
+                    if not embedding.head_start <= int(head) < embedding.head_end:
+                        continue
+                    local_head = int(head) - embedding.head_start
+                    name = f"lookup_per_head_norms.{local_head}.{leaf}"
+                # Embedding scales can materialize during loading; other parameters
+                # must already exist, including biases AutoWeightsLoader may ignore.
+                if (
+                    not name.startswith("multi_head_embedding.")
+                    and name not in parameters
+                ):
+                    raise ValueError(f"Unknown Flash Engram checkpoint weight: {name}")
+                yield name, value
+
+        return AutoWeightsLoader(self).load_weights(local_weights())
 
     def _load_projection(self, parameter, value):
         if value.shape != (self.hidden_size, self.total_width):

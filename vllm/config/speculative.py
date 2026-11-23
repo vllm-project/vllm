@@ -28,6 +28,7 @@ from vllm.transformers_utils.repo_utils import get_subfolder_path
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+    DraftModelSpeculatorConfig,
     SpeculatorConfig,
     get_custom_speculator_config_class,
     get_method_config_class,
@@ -68,7 +69,6 @@ _NESTED_HF_CONFIG_KEYS = frozenset(
         "text_config",
         "language_config",
         "llm_config",
-        "thinker_config",
     }
 )
 
@@ -83,6 +83,7 @@ MTPModelTypes = Literal[
     "ernie_mtp",
     "nemotron_h_mtp",
     "nemotron3_5_transcribe_mtp",
+    "nemotron_shortcut_mtp",
     "exaone_moe_mtp",
     "exaone4_5_mtp",
     "qwen3_next_mtp",
@@ -121,12 +122,6 @@ SpeculativeMethod = Literal[
 RejectionSampleMethod = Literal["standard", "synthetic", "block", "fly"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
-_QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
-    {
-        "Qwen3OmniMoeForConditionalGeneration",
-        "Qwen3OmniMoeThinkerForConditionalGeneration",
-    }
-)
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
@@ -198,23 +193,6 @@ def _get_minimax_m3_dspark_draft(
     return draft
 
 
-def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
-    hf_config = model_config.hf_config
-    architectures = set(getattr(model_config, "architectures", ()) or ())
-    architectures.update(getattr(hf_config, "architectures", ()) or ())
-    return getattr(hf_config, "model_type", None) == "qwen3_omni_moe" or bool(
-        architectures & _QWEN3_OMNI_TARGET_ARCHITECTURES
-    )
-
-
-def _get_qwen3_omni_text_config(model_config: ModelConfig) -> Any:
-    thinker_config = getattr(model_config.hf_config, "thinker_config", None)
-    text_config = getattr(thinker_config, "text_config", None)
-    if text_config is None:
-        text_config = getattr(model_config, "hf_text_config", None)
-    return text_config
-
-
 def _get_attention_head_dim(config: Any) -> int | None:
     head_dim = getattr(config, "head_dim", None)
     if head_dim is not None:
@@ -255,7 +233,8 @@ def _validate_qwen3_omni_dspark(
     num_speculative_tokens: int,
 ) -> None:
     """Validate the standalone Qwen3-Omni DSpark checkpoint contract."""
-    if not _is_qwen3_omni_target(target_model_config):
+    model_type = getattr(target_model_config.hf_config, "model_type", None)
+    if model_type != "qwen3_omni_moe_thinker":
         return
 
     draft_hf_config = draft_model_config.hf_config
@@ -286,11 +265,7 @@ def _validate_qwen3_omni_dspark(
             f"trained block_size ({block_size}); got {num_speculative_tokens}."
         )
 
-    target_text_config = _get_qwen3_omni_text_config(target_model_config)
-    if target_text_config is None:
-        raise ValueError(
-            "Qwen3-Omni DSpark could not resolve the target thinker text_config."
-        )
+    target_text_config = target_model_config.hf_text_config
     target_hidden_size = getattr(
         target_text_config,
         "hidden_size",
@@ -570,17 +545,6 @@ class SpeculativeConfig:
     If `None`, use the value from the draft model's Hugging Face config."""
 
     # Advanced control
-    disable_eagle_block_drop: bool = False
-    """Disable dropping the trailing prefix-cache block for EAGLE-like
-    speculative methods. This is an experimental option for measuring the
-    acceptance-rate impact of reusing that block. It does not disable the
-    speculative drafter itself."""
-    disable_lookahead_block_hashes: bool = False
-    """Disable lookahead block hashes for EAGLE-like speculative methods and
-    fall back to dropping the trailing prefix-cache block. Lookahead hashes
-    also cover the tokens the drafter reads after each block, so engines
-    sharing a KV store and external consumers of KV cache events must use the
-    same setting."""
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE, MTP
     and DeepSeek-V4/V4.1 DSpark). "fp8" uses per-row weight and per-token
@@ -785,8 +749,6 @@ class SpeculativeConfig:
             "revision",
             "code_revision",
             "index_share_for_mtp_iteration",
-            "disable_eagle_block_drop",
-            "disable_lookahead_block_hashes",
             "draft_lm_head_quantization",
             "use_local_argmax_reduction",
             "prompt_lookup_max",
@@ -1042,6 +1004,36 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
             )
 
+        if (
+            hf_config.model_type == "nemotron4"
+            and getattr(hf_config.get_text_config(), "num_nextn_predict_layers", 0) > 0
+        ):
+            # The MTP head reads the language model's fields; the quant config
+            # lives only at the top level of the VL checkpoint.
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = hf_config.get_text_config()
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.quantization_config = copy.deepcopy(quantization_config)
+        if (
+            hf_config.model_type == "nemotron4_text"
+            and getattr(hf_config, "num_nextn_predict_layers", 0) > 0
+        ):
+            hf_config.model_type = "nemotron_shortcut_mtp"
+        if hf_config.model_type == "nemotron_shortcut_mtp":
+            # With mtp_use_repeated_layer one physical block serves every draft
+            # step, so the drafter sees a single module and any draft length.
+            n_predict = (
+                1
+                if getattr(hf_config, "mtp_use_repeated_layer", False)
+                else getattr(hf_config, "num_nextn_predict_layers", 1)
+            )
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["NemotronShortcutMTPModel"]}
+            )
+
         if hf_config.architectures[0] in (
             "NemotronH_Super_Omni_Reasoning_V3",
             "NemotronH_Omni_Reasoning_V3",
@@ -1260,7 +1252,7 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["HYV4MTPModel"]}
             )
 
-        if hf_config.model_type in ("inkling_mm_model", "inkling_model"):
+        if hf_config.model_type in ("inkling_mm_model", "inkling_text"):
             mtp_config = getattr(hf_config, "mtp_config", None) or {}
             hf_config = getattr(hf_config, "text_config", hf_config)
             checkpoint_depths = mtp_config.get("num_nextn_predict_layers", 0)
@@ -1279,7 +1271,7 @@ class SpeculativeConfig:
                 }
             )
 
-        if hf_config.model_type == "inkling2":
+        if hf_config.model_type in ("inkling2", "inkling2_loop"):
             from vllm.models.inkling2.configs import Inkling2DSparkConfig
 
             hf_config = Inkling2DSparkConfig.from_target(hf_config)
@@ -1505,12 +1497,11 @@ class SpeculativeConfig:
             self.method = "ngram"
 
         config_cls = get_method_config_class(self)
-        # These drafts carry their own width, so resolve their default model
-        # even without num_speculative_tokens.
+        # A draft checkpoint may give num_speculative_tokens, so resolve its
+        # default model even without it.
         if self.model is None and (
             self.num_speculative_tokens is not None
-            or self.use_dspark()
-            or self.method == "dfly"
+            or issubclass(config_cls, DraftModelSpeculatorConfig)
         ):
             self.model = config_cls.default_model(self)
         config_cls.configure(self)
@@ -1529,7 +1520,7 @@ class SpeculativeConfig:
         config_cls.apply_options(self)
 
         if self.prefill_context_kv_only:
-            if not config_cls.supports_prefill_context_kv_only:
+            if not config_cls.projects_context_kv:
                 raise ValueError(
                     "prefill_context_kv_only is not supported with speculative "
                     f"method {self.custom_method or self.method!r}."
@@ -1773,91 +1764,35 @@ class SpeculativeConfig:
                 )
             return
 
-        if requested_redundant_experts is not None:
-            if target_parallel_config is None or not target_parallel_config.enable_eplb:
-                raise ValueError(
-                    "eplb_config.draft_num_redundant_experts requires target "
-                    "EPLB to be "
-                    "enabled and speculative_config.draft_enable_eplb=true."
-                )
-            if not self.use_eagle():
-                raise ValueError(
-                    "eplb_config.draft_num_redundant_experts is only supported for MoE "
-                    "draft methods that use EPLB."
-                )
+        if requested_redundant_experts is not None and (
+            target_parallel_config is None or not target_parallel_config.enable_eplb
+        ):
+            raise ValueError(
+                "eplb_config.draft_num_redundant_experts requires target "
+                "EPLB to be "
+                "enabled and speculative_config.draft_enable_eplb=true."
+            )
 
-        if draft_model_config is None or target_parallel_config is None:
+        if (
+            draft_model_config is None
+            or target_parallel_config is None
+            or not target_parallel_config.enable_eplb
+        ):
             return
 
-        if self.method == "dspark":
-            if not target_parallel_config.enable_eplb:
-                return
-
-            from vllm.v1.worker.gpu.spec_decode.dspark.config import (
-                dspark_draft_supports_eplb,
-            )
-
-            supports_eplb = dspark_draft_supports_eplb(draft_model_config)
-            if requested_redundant_experts is not None and not supports_eplb:
+        config_cls = type(self.speculator_config)
+        if not config_cls.supports_draft_eplb(draft_model_config):
+            if requested_redundant_experts is not None:
                 raise ValueError(
-                    "eplb_config.draft_num_redundant_experts is only supported for "
-                    "DeepSeek V4 or V4.1 DSpark drafts that support EPLB. To "
-                    "disable draft EPLB, remove "
-                    "eplb_config.draft_num_redundant_experts "
-                    "and set speculative_config.draft_enable_eplb=false."
+                    "eplb_config.draft_num_redundant_experts requires a MoE draft "
+                    f"that supports EPLB, which the {self.method!r} draft "
+                    f"{draft_model_config.model!r} doesn't. To disable draft "
+                    "EPLB, remove eplb_config.draft_num_redundant_experts and "
+                    "set speculative_config.draft_enable_eplb=false."
                 )
-            if not supports_eplb:
-                return
-
-            if target_parallel_config.enable_elastic_ep:
-                raise ValueError(
-                    "EPLB for a DSpark draft is not supported with Elastic EP. "
-                    "Set speculative_config.draft_enable_eplb=false to disable "
-                    "draft EPLB."
-                )
-
-            assert self.draft_parallel_config is not None
-            if (
-                self.draft_parallel_config.tensor_parallel_size == 1
-                and target_parallel_config.prefill_context_parallel_size == 1
-                and target_parallel_config.data_parallel_size == 1
-            ):
-                remediation = (
-                    " If you want to disable draft EPLB, remove "
-                    "eplb_config.draft_num_redundant_experts and set "
-                    "speculative_config.draft_enable_eplb=false."
-                    if requested_redundant_experts is not None
-                    else " To disable draft EPLB, set "
-                    "speculative_config.draft_enable_eplb=false."
-                )
-                raise ValueError(
-                    "EPLB for a DSpark draft requires its tensor parallel size, "
-                    "prefill context parallel size, or data parallel size to "
-                    "be greater than 1."
-                    f"{remediation}"
-                )
-            draft_parallel_config = target_parallel_config
-            draft_num_experts = (
-                getattr(draft_model_config.hf_config, "dspark_n_routed_experts", 0)
-                or getattr(
-                    draft_model_config.hf_text_config,
-                    "dspark_n_routed_experts",
-                    0,
-                )
-                or None
-            )
-        else:
-            if not self.use_eagle() or not target_parallel_config.enable_eplb:
-                return
-            if not draft_model_config.is_moe:
-                if requested_redundant_experts is not None:
-                    raise ValueError(
-                        "eplb_config.draft_num_redundant_experts requires a MoE "
-                        "draft model."
-                    )
-                return
-            draft_parallel_config = target_parallel_config
-            draft_num_experts = None
+            return
+        draft_num_experts = config_cls.verify_draft_eplb(self)
+        draft_parallel_config = target_parallel_config
 
         ep_size = (
             draft_parallel_config.tensor_parallel_size
@@ -2037,15 +1972,14 @@ class SpeculativeConfig:
         self._verify_draft_eplb_config()
 
         if self.parallel_drafting is not None:
-            if self.parallel_drafting and self.method not in ("dflash", "dspark"):
+            if self.parallel_drafting and not self.speculator_config.parallel_drafting:
                 raise ValueError(
-                    "parallel_drafting is only supported by the dflash and dspark "
-                    f"methods, not {self.method!r}."
+                    f"parallel_drafting is not supported by method {self.method!r}."
                 )
             logger.warning_once(
-                "parallel_drafting is deprecated and has no effect: dflash and "
-                "dspark always draft in parallel, and no other method supports "
-                "it. It will be removed in a future release."
+                "parallel_drafting is deprecated and has no effect: methods that "
+                "support it always draft in parallel. It will be removed in a "
+                "future release."
             )
 
         if self.rejection_sample_method == "fly":
@@ -2089,6 +2023,18 @@ class SpeculativeConfig:
                 "entropy is computed but never used to defer rejections."
             )
 
+        if (
+            self.rejection_sample_method in ("synthetic", "fly")
+            and self.target_model_config is not None
+            and self.target_model_config.masked_token_ids
+        ):
+            # Only the target logits are masked, and these methods can accept
+            # draft tokens regardless of them.
+            raise ValueError(
+                "masked_token_ids is not supported with "
+                f"rejection_sample_method={self.rejection_sample_method!r}."
+            )
+
         self.verify_equal_vocab_size_if_draft_model()
         return self
 
@@ -2120,63 +2066,11 @@ class SpeculativeConfig:
         """
         return self.speculator_config.max_num_new_slots_for_drafting
 
-    def use_gemma4_mtp(self) -> bool:
-        return (
-            self.method == "mtp"
-            and self.draft_model_config is not None
-            and getattr(self.draft_model_config.hf_config, "model_type", None)
-            == "gemma4_mtp"
-        )
-
-    def use_eagle(self) -> bool:
-        # NOTE: This method is usually a stand-in for "speculative decoding using
-        # target model hidden states"
-        # TODO(ben): Refactor this so the naming is clearer
-        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
-
-    def needs_eagle_block_drop(self) -> bool:
-        """Whether draft KV at a position depends on the next token.
-
-        EAGLE-style drafters build a position's draft KV from its hidden state
-        and the next token. DFlash/DSpark build it from the target hidden state
-        alone, and the Gemma-4 MTP drafter writes no KV (it reads the target's),
-        so only the remaining EAGLE/EAGLE3/MTP drafters require the drop.
-        """
-        return self.use_eagle() and not (
-            self.use_dflash() or self.use_dspark() or self.use_gemma4_mtp()
-        )
-
-    def use_eagle_block_drop(self) -> bool:
-        """Whether the volatile trailing prefix-cache block should be dropped."""
-        return self.needs_eagle_block_drop() and not self.disable_eagle_block_drop
-
-    def use_dflash(self) -> bool:
-        return self.method == "dflash"
-
     def use_dspark(self) -> bool:
         return self.method == "dspark"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
-
-    def uses_draft_model(self) -> bool:
-        return self.method == "draft_model"
-
-    def uses_draft_kv_cache(self) -> bool:
-        return (
-            self.use_eagle()
-            or self.uses_draft_model()
-            or self.uses_extract_hidden_states()
-        )
-
-    def uses_extract_hidden_states(self) -> bool:
-        return self.method == "extract_hidden_states"
-
-    def use_ngram_gpu(self) -> bool:
-        return self.method == "ngram_gpu"
-
-    def use_ngram(self) -> bool:
-        return self.method in ("ngram", "ngram_gpu")
 
     def num_mtp_modules(self) -> int:
         """Number of MTP modules the drafter selects among by draft step."""

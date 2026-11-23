@@ -13,7 +13,7 @@ workers to pull.
 All serve-side state lives on the server actor, so trainer processes need no
 mixin, no named actors and no special actor options.
 
-See docs/training/weight_transfer/sharded_rdt.md for the publish -> serve ->
+See docs/training/weight_updates/engines/sharded_rdt.md for the publish -> serve ->
 free_group -> release lifecycle and the ownership model.
 """
 
