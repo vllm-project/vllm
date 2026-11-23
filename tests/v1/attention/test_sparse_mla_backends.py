@@ -6382,3 +6382,67 @@ def test_flashmla_persistent_query_cuda_graph_matches_per_call_padding(
         if previous is not None:
             assert not torch.equal(actual, previous)
         previous = actual.clone()
+
+
+@pytest.mark.parametrize(
+    ("rope_dim", "capacity", "expected_tokens"),
+    [(64, 8, 8), (64, 16384, 8192), (0, 8, None)],
+    ids=["decode", "chunk-bound", "nope-fallback"],
+)
+def test_flashmla_persistent_query_allocation_guards(
+    dist_init, workspace_init, rope_dim, capacity, expected_tokens
+):
+    """Persistent scratch respects graph capacity, chunk bounds and query geometry."""
+    from vllm.config import (
+        CompilationConfig,
+        ModelConfig,
+        ParallelConfig,
+        SchedulerConfig,
+        VllmConfig,
+    )
+
+    config = VllmConfig(
+        model_config=ModelConfig(
+            "deepseek-ai/DeepSeek-V2-Lite-Chat", max_model_len=1024
+        ),
+        cache_config=CacheConfig(block_size=64, cache_dtype="fp8_ds_mla"),
+        parallel_config=ParallelConfig(distributed_executor_backend="mp"),
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=capacity,
+            max_num_batched_tokens=capacity,
+            max_model_len=1024,
+            is_encoder_decoder=False,
+        ),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+            cudagraph_capture_sizes=[1, capacity],
+            max_cudagraph_capture_size=capacity,
+        ),
+    )
+    num_heads = 16
+    with set_current_vllm_config(config):
+        impl = FlashMLASparseImpl(
+            num_heads=num_heads,
+            head_size=512 + rope_dim,
+            scale=(128 + rope_dim) ** -0.5,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="fp8_ds_mla",
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=rope_dim,
+            qk_head_dim=128 + rope_dim,
+            v_head_dim=128,
+            kv_b_proj=ColumnParallelLinear(512, num_heads * 256, bias=False),
+        )
+    if expected_tokens is None:
+        assert impl.fp8_q_padded is None
+    else:
+        assert impl.fp8_q_padded is not None
+        assert impl.fp8_q_padded.shape == (expected_tokens, 64, 576)
+        assert torch.count_nonzero(impl.fp8_q_padded).item() == 0
