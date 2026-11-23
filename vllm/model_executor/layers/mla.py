@@ -221,11 +221,15 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        q = q_proj_layer(q_proj_input)[0]
-        heads = self.num_heads
-        if self.dcp_q_replicate:
-            heads *= q_proj_layer.group_size
-        q = q.view(-1, heads, self.qk_head_dim)
+        q_latent = self.mla_attn.wuk_fold_weight is not None
+        if q_latent:
+            q = q_proj_input
+        else:
+            q = q_proj_layer(q_proj_input)[0]
+            heads = self.num_heads
+            if self.dcp_q_replicate:
+                heads *= q_proj_layer.group_size
+            q = q.view(-1, heads, self.qk_head_dim)
 
         if self.rotary_emb is not None:
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
@@ -250,6 +254,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
             q_dcp_replicated=q_dcp_replicated,
+            q_latent=q_latent,
         )
 
         if self.g_proj is not None:
