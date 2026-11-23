@@ -218,17 +218,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
-        elif current_platform.is_xpu():
-            # Opt-in: F.linear on XPU is faster with an N-contiguous (N, K) weight
-            # when K > N, but oneDNN's ab-weights matmul is not run-to-run bitwise
-            # bitwise reproducible. Off by default.
-            weight = layer.weight.data
-            if (
-                envs.VLLM_XPU_FORCE_N_CONTIG_WEIGHT
-                and weight.ndim == 2
-                and weight.stride(0) != 1
-            ):
-                layer.weight.data = weight.t().contiguous().t()
         elif current_platform.is_rocm():
             layer.weight.data = maybe_pad_weight_avoid_cache_aliasing(layer.weight.data)
         elif self._gemm_impl is cuda_unquantized_gemm:
@@ -827,17 +816,17 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
-        for name in self.padding_fill_params():
-            param = getattr(self, name)
-            self._zero_output_padding(param)
-            set_weight_attrs(
-                param, {"weight_loader_numel": param[:-padding_size].numel()}
-            )
-
-    def padding_fill_params(self) -> list[str]:
-        if not self.padding_size:
-            return []
-        return ["weight"] + (["bias"] if self.bias is not None else [])
+        if padding_size:
+            for param in (self.weight, self.bias):
+                if param is None:
+                    continue
+                self._zero_output_padding(param)
+                set_weight_attrs(
+                    param, {"weight_loader_numel": param[:-padding_size].numel()}
+                )
+                # The loader zeroes the padding too, but a load plan skips loader
+                # fills: direct reload zero-fills it at begin instead.
+                param.fill_on_reload = True
 
     def _zero_output_padding(self, param: torch.Tensor) -> None:
         if self.padding_size and (param is self.weight or param is self.bias):
