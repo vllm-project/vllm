@@ -1163,9 +1163,8 @@ Images with transparency, CMYK or 16-bit images, animated images and
 
 !!! note
     The `torchcodec` backend requires torchcodec >= 0.16 and falls back to
-    Pillow when it is unavailable. Some processors only accept PIL images
-    (e.g. InternVL, DeepSeek-VL2, DeepSeek-OCR, Step3-VL and Kimi-VL) and do
-    not support this backend yet.
+    Pillow when it is unavailable. Some processors still only accept PIL
+    images (e.g. Kimi-VL) and do not support this backend yet.
 
 ### Audio Inputs
 

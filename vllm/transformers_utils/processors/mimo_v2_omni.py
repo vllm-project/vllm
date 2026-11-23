@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from transformers import BatchFeature, TensorType
+from transformers.image_transforms import to_pil_image
 from transformers.processing_utils import ProcessorMixin
 
 try:
@@ -190,6 +191,8 @@ def _transform_single(
     max_px: int,
     device: torch.device | None = None,
 ) -> tuple[torch.Tensor, int, int]:
+    if isinstance(img, np.ndarray):
+        img = to_pil_image(img)
     if isinstance(img, torch.Tensor):
         t = img.float()
         _, h, w = t.shape

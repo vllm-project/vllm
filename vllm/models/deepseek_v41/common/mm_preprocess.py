@@ -25,6 +25,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageOps
 from transformers import BatchFeature
+from transformers.image_transforms import to_pil_image
 
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
@@ -148,7 +149,7 @@ def load_image(
     decoded (vLLM supplies PIL images instead of a record dict).
     """
     p = patch_size
-    image = image.convert("RGB")
+    image = to_pil_image(image).convert("RGB")
     width, height = image.size
     if max_wh_ratio is not None and width > height * max_wh_ratio:
         width = height * max_wh_ratio

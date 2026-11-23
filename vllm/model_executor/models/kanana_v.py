@@ -8,12 +8,12 @@ import numpy as np
 import regex as re
 import torch
 from einops import rearrange
-from PIL import Image
 from timm.layers import LayerNorm2d
 from timm.layers.pos_embed import resample_abs_pos_embed
 from timm.models.regnet import RegStage
 from torch import nn
 from transformers import BatchFeature
+from transformers.image_transforms import to_pil_image
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLVisionConfig
 
@@ -482,8 +482,7 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
         # Images
         image_inputs = cast(list[Any], hf_data.get("images", []))
         pixel_sizes = []
-        if not isinstance(image_inputs[0], Image.Image):
-            image_inputs = [Image.fromarray(image) for image in image_inputs]
+        image_inputs = [to_pil_image(image) for image in image_inputs]
 
         image_processor = self.info.get_hf_processor().image_processor
         processor_output = [image_processor(image) for image in image_inputs]

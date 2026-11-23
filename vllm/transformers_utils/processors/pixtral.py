@@ -5,6 +5,7 @@ from mistral_common.protocol.instruct.chunk import ImageChunk
 from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
 from PIL import Image
 from transformers import BatchFeature, ImageProcessingMixin, ProcessorMixin, TensorType
+from transformers.image_transforms import to_pil_image
 from transformers.image_utils import ImageInput
 
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -29,7 +30,7 @@ class MistralCommonImageProcessor(ImageProcessingMixin):
         images_processed = list[torch.Tensor]()
 
         for image in images_lst:
-            image_inputs = self.mm_encoder(ImageChunk(image=image))
+            image_inputs = self.mm_encoder(ImageChunk(image=to_pil_image(image)))
             image_processed = torch.tensor(image_inputs.image)
 
             images_processed.append(image_processed)

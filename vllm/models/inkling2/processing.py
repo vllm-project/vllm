@@ -19,6 +19,7 @@ import numpy as np
 import torch
 from PIL import Image
 from transformers.feature_extraction_utils import BatchFeature
+from transformers.image_transforms import to_pil_image
 
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
@@ -84,8 +85,14 @@ def decode_image(image: ImageInput) -> np.ndarray:
         with Image.open(io.BytesIO(data)) as pil:
             pil.load()
             return _pil_to_rgb(pil)
-    if isinstance(image, np.ndarray):
+    if (
+        isinstance(image, np.ndarray)
+        and image.dtype == np.uint8
+        and image.shape[-1] in (3, 4)
+    ):
         image = Image.fromarray(image)
+    elif not isinstance(image, Image.Image):
+        image = to_pil_image(image)
     return _pil_to_rgb(image)
 
 
