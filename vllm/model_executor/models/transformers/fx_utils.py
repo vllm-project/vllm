@@ -40,6 +40,9 @@ _MODULE_GETATTR = nn.Module.__getattr__
 `get_attr` nodes; reading one while inferring a `get_attr`'s own value would
 recurse until the stack runs out, truncating the graph."""
 
+_ALWAYS_NONE = frozenset({"past_key_values", "cache"})
+"""Cache arguments vLLM never passes, made concrete `None` to simplify tracing."""
+
 
 @contextlib.contextmanager
 def _unpatched_modules():
@@ -124,6 +127,13 @@ class _AllLeafTracer(fx.Tracer):
 
     def is_leaf_module(self, m: nn.Module, module_qualified_name: str) -> bool:
         return True
+
+    def create_args_for_root(self, root_fn, is_module, concrete_args=None):
+        # Trace the undecorated forward. fx can't trace a `(*args, **kwargs)` wrapper
+        # such as Transformers' `deprecate_kwarg`.
+        return super().create_args_for_root(
+            inspect.unwrap(root_fn), is_module, concrete_args
+        )
 
     def proxy(self, node: fx.Node) -> fx.Proxy:
         return _MetaProxy(node, self)
@@ -249,11 +259,7 @@ def _leaf_attention_interfaces():
 def trace(module: nn.Module) -> fx.Graph | None:
     """Trace `module.forward`, returning the partial graph on failure."""
     parameters = forward_parameters(type(module))
-    # vLLM never passes `past_key_values` so it is always the default value of `None`.
-    # Make this concrete to simplify tracing.
-    concrete_args = None
-    if "past_key_values" in parameters:
-        concrete_args = {"past_key_values": None}
+    concrete_args = {name: None for name in _ALWAYS_NONE & parameters.keys()} or None
     # Get the name of the kwargs parameter passed to module.forward (usually "kwargs")
     tracer = _AllLeafTracer()
     tracer.varkw = next(

@@ -15,5 +15,5 @@ setuptools-rust>=1.9.0
 wheel
 jinja2>=3.1.6
 amdsmi==7.0.2
-timm>=1.0.17
+timm>=1.0.30
 tilelang==0.1.10

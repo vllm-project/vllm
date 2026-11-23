@@ -136,7 +136,7 @@ def merge_media_io_kwargs(
     """Merge config-level and per-request media_io_kwargs per modality.
 
     Each modality key is merged using the corresponding MediaIO subclass's
-    ``merge_kwargs``, which may apply modality-specific logic (e.g.
+    `merge_kwargs`, which may apply modality-specific logic (e.g.
     VideoMediaIO clears cross-dependent fps/num_frames fields).
     """
     if not defaults and not overrides:
@@ -259,7 +259,7 @@ class MediaConnector:
             return None
         # Touch mtime for LRU ordering
         try:
-            cache_path.touch()
+            os.utime(cache_path, None)
             return cache_path.read_bytes()
         except OSError:
             return None
@@ -352,7 +352,7 @@ class MediaConnector:
     ) -> _M:  # type: ignore[type-var]
         allowed_local_media_path = self.allowed_local_media_path
         if allowed_local_media_path is None:
-            raise RuntimeError(
+            raise VLLMValidationError(
                 "Cannot load local files without `--allowed-local-media-path`."
             )
 
@@ -575,10 +575,14 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
+        video_io_defaults: dict[str, Any] | None = None,
     ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         """Load video from an HTTP or base64 data URL."""
         image_io = self._image_io(image_mode)
-        video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
+        video_io_kwargs = {
+            **(video_io_defaults or {}),
+            **self.media_io_kwargs.get("video", {}),
+        }
         if "video_backend" not in video_io_kwargs and (
             video_backend := get_video_loader_backend_for_processor(video_processor)
         ):
@@ -597,6 +601,7 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
+        video_io_defaults: dict[str, Any] | None = None,
     ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         """Asynchronously load video from an HTTP or base64 data URL.
 
@@ -605,7 +610,10 @@ class MediaConnector:
         original image mode (e.g. preserving the alpha channel).
         """
         image_io = self._image_io(image_mode)
-        video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
+        video_io_kwargs = {
+            **(video_io_defaults or {}),
+            **self.media_io_kwargs.get("video", {}),
+        }
         if "video_backend" not in video_io_kwargs and (
             video_backend := get_video_loader_backend_for_processor(video_processor)
         ):

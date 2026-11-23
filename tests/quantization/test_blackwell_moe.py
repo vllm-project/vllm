@@ -49,7 +49,6 @@ def can_initialize(
         "256",
         "--load-format",
         "dummy",
-        "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"image": 0}),
         *extra_args,
@@ -88,7 +87,7 @@ def test_llama4_fp8_tensor_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatc
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
         hf_overrides=HF_OVERRIDE_MM,
-        extra_args=["--moe-backend=flashinfer_cutlass"],
+        extra_args=["--moe-backend=flashinfer_cutlass", "--trust-remote-code"],
     )
 
 
@@ -96,7 +95,7 @@ def test_llama4_fp8_tensor_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
         hf_overrides=HF_OVERRIDE_MM,
-        extra_args=["--moe-backend=flashinfer_trtllm"],
+        extra_args=["--moe-backend=flashinfer_trtllm", "--trust-remote-code"],
     )
 
 
@@ -104,7 +103,7 @@ def test_llama4_nvfp4_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
         hf_overrides=HF_OVERRIDE_MM,
-        extra_args=["--moe-backend=flashinfer_cutlass"],
+        extra_args=["--moe-backend=flashinfer_cutlass", "--trust-remote-code"],
     )
 
 
@@ -112,7 +111,7 @@ def test_llama4_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
         hf_overrides=HF_OVERRIDE_MM,
-        extra_args=["--moe-backend=flashinfer_trtllm"],
+        extra_args=["--moe-backend=flashinfer_trtllm", "--trust-remote-code"],
     )
 
 
@@ -382,6 +381,90 @@ def test_modelopt_nvfp4_dummy_scales(tmp_path, monkeypatch, vllm_runner):
         completion = outputs[0].outputs[0]
         assert len(completion.token_ids) == 2
         assert len(completion.logprobs) == 2
+        assert all(
+            math.isfinite(value.logprob)
+            for step in completion.logprobs
+            for value in step.values()
+        )
+
+
+@pytest.mark.parametrize("nvfp4", [False, True])
+def test_muse_megamoe_dummy_loading(tmp_path, monkeypatch, vllm_runner, nvfp4):
+    """Dummy-loaded Muse experts generate finite outputs in both weight formats."""
+    import math
+
+    from vllm import SamplingParams
+    from vllm.model_executor.models import ModelRegistry
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    ModelRegistry.register_model(
+        "MuseSparkForCausalLM",
+        "vllm.models.muse_spark.nvidia.model:MuseSparkForCausalLM",
+    )
+    config = dict(
+        architectures=["MuseSparkForCausalLM"],
+        model_type="muse_spark_text",
+        vocab_size=128,
+        hidden_size=512,
+        intermediate_size=512,
+        moe_hidden_size=512,
+        moe_intermediate_size=512,
+        num_hidden_layers=1,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        head_dim=64,
+        num_local_experts=8,
+        num_experts_per_tok=2,
+        num_shared_experts=0,
+        max_position_embeddings=64,
+        hidden_act="silu",
+        attention_bias=False,
+        layer_types=["full_attention"],
+        mlp_layer_types=["sparse"],
+        layer_rope_theta=[10000.0],
+        rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+        rms_norm_eps=1e-5,
+        post_norm_eps=1e-8,
+        residual_gate_temperature=0.3,
+        final_logit_softcapping=None,
+        output_multiplier=0.5,
+        routed_scaling_factor=1.0,
+        qk_scale_factor=1.0,
+        tie_word_embeddings=False,
+        torch_dtype="bfloat16",
+    )
+    if nvfp4:
+        config["quantization_config"] = {
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+            "group_size": 16,
+            "kv_cache_quant_algo": None,
+            "exclude_modules": ["lm_head", "model.layers.*.self_attn.*"],
+        }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+
+    with vllm_runner(
+        str(tmp_path),
+        dtype="bfloat16",
+        load_format="dummy",
+        moe_backend="deep_gemm_mega_moe",
+        enable_expert_parallel=True,
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+        enable_flashinfer_autotune=False,
+        kernel_config={"enable_jit_warmup": False, "enable_cutedsl_warmup": False},
+        max_model_len=32,
+        max_num_seqs=1,
+        max_num_batched_tokens=32,
+        kv_cache_memory_bytes=16 << 20,
+    ) as llm:
+        outputs = llm.get_llm().generate(
+            [{"prompt_token_ids": [1, 2, 3]}],
+            SamplingParams(temperature=0, max_tokens=2, ignore_eos=True, logprobs=1),
+        )
+        completion = outputs[0].outputs[0]
+        assert len(completion.token_ids) == 2
         assert all(
             math.isfinite(value.logprob)
             for step in completion.logprobs

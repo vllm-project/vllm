@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CuTeDSL fused QK-norm for MuseSpark1x attention."""
+"""CuTeDSL fused QK-norm for Muse Spark attention."""
 
 import operator
 from typing import Any
@@ -36,7 +36,7 @@ COPY_BITS = 128
 if HAS_CUTEDSL:
 
     def _cross_warp_sum(warp_sum, reduction_buffer, warps_per_row, row_idx):
-        """Reduce ``warps_per_row`` warp partials through shared memory."""
+        """Reduce `warps_per_row` warp partials through shared memory."""
         lane_idx = cute.arch.lane_idx()
         warp_idx = cute.arch.warp_idx()
         if lane_idx == 0:
@@ -87,7 +87,7 @@ if HAS_CUTEDSL:
             return self.rows_per_block * self.warps_per_row * 4
 
     class QKNormDirectKernel:
-        """RMS-norm each ``head_dim`` group, reading a strided input directly.
+        """RMS-norm each `head_dim` group, reading a strided input directly.
 
         Direct indexing avoids a tiled copy's alignment checks on strided input.
         """
@@ -212,7 +212,7 @@ def qk_norm(
     eps: float = 1e-5,
     scale: float = 1.0,
 ) -> torch.Tensor:
-    """Unweighted RMSNorm over each ``head_dim`` group, plus an output scale."""
+    """Unweighted RMSNorm over each `head_dim` group, plus an output scale."""
     assert HAS_CUTEDSL, "fused QK-norm requires nvidia-cutlass-dsl"
     assert x.dim() == 2, "x must be [num_tokens, num_heads * head_dim]"
     assert x.stride(1) == 1, "x must be contiguous along its last dim"
