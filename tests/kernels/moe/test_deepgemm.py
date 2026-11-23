@@ -6,6 +6,7 @@ Compare DeepGEMM path against the Triton fallback inside vLLM's fused_experts.
 
 import importlib
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -495,6 +496,95 @@ def make_mxfp4_weights(
         )
 
     return w1, w2, w1_s, w2_s, w1_bf16, w2_bf16
+
+
+@pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires DeepGEMM kernels")
+def test_grouped_fp4_warmup_covers_runtime_jit(monkeypatch, tmp_path, workspace_init):
+    from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+        compute_aligned_M_and_alignment,
+    )
+    from vllm.model_executor.warmup import deep_gemm_warmup
+    from vllm.platforms import current_platform
+    from vllm.utils.deep_gemm import (
+        DeepGemmQuantScaleFMT,
+        get_mk_alignment_for_contiguous_layout,
+        m_grouped_fp8_fp4_gemm_nt_contiguous,
+        mk_alignment_scope,
+    )
+    from vllm.utils.math_utils import cdiv
+
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("Prefix-sum FP4 warmup regression requires SM100 family")
+
+    monkeypatch.setenv("DG_JIT_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        deep_gemm_warmup,
+        "get_dp_group",
+        lambda: SimpleNamespace(world_size=1),
+    )
+    e, n, k = 4, 256, 128
+    w1 = torch.zeros((e, 2 * n, k // 2), device="cuda", dtype=torch.uint8)
+    w2 = torch.zeros((e, k, n // 2), device="cuda", dtype=torch.uint8)
+    w1_scale = torch.zeros((e, 2 * n, k // 32), device="cuda", dtype=torch.float32)
+    w2_scale = torch.zeros((e, k, n // 32), device="cuda", dtype=torch.float32)
+
+    deep_gemm_warmup.GROUPED_FP8_FP4_GEMM_NT_CONTIGUOUS_WARMUP_CACHE.clear()
+    deep_gemm_warmup._deepgemm_grouped_fp8_fp4_gemm_nt_contiguous_warmup(
+        w1,
+        w2,
+        w1_scale,
+        w2_scale,
+        num_topk=2,
+        max_tokens=64,
+        output_dtype=torch.bfloat16,
+    )
+    torch.cuda.synchronize()
+    warmed_files = {path.relative_to(tmp_path) for path in tmp_path.rglob("*")}
+
+    assert DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0
+    for weight, weight_scale in ((w1, w1_scale), (w2, w2_scale)):
+        _, output_size, packed_k = weight.shape
+        input_size = packed_k * 2
+        for request_m in range(1, 65):
+            num_tokens, align_used = compute_aligned_M_and_alignment(
+                M=request_m,
+                num_topk=2,
+                local_num_experts=e,
+                alignment=get_mk_alignment_for_contiguous_layout()[0],
+                expert_tokens_meta=None,
+            )
+            activation = torch.zeros(
+                (num_tokens, input_size),
+                device="cuda",
+                dtype=torch.float8_e4m3fn,
+            )
+            packed_scale_k = cdiv(input_size // 128, 4)
+            aligned_m = deep_gemm_warmup.get_tma_aligned_size(num_tokens, 4)
+            activation_scale = torch.zeros(
+                aligned_m * packed_scale_k, device="cuda", dtype=torch.int32
+            ).as_strided((num_tokens, packed_scale_k), (1, aligned_m))
+            output = torch.empty(
+                (num_tokens, output_size),
+                device="cuda",
+                dtype=torch.bfloat16,
+            )
+            expert_ends = torch.full((e,), num_tokens, device="cuda", dtype=torch.int32)
+            with mk_alignment_scope(align_used):
+                m_grouped_fp8_fp4_gemm_nt_contiguous(
+                    (
+                        activation,
+                        activation_scale,
+                    ),
+                    (weight.view(torch.int8), weight_scale),
+                    output,
+                    expert_ends,
+                    use_psum_layout=True,
+                    recipe_a=(1, 128),
+                    recipe_b=(1, 32),
+                )
+    torch.cuda.synchronize()
+
+    assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*")} == warmed_files
 
 
 def _fp4_supported() -> bool:

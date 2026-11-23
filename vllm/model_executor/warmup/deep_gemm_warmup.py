@@ -24,17 +24,23 @@ from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     compute_aligned_M_and_alignment,
 )
-from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import DeepGemmExperts
+from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+    DeepGemmExperts,
+    DeepGemmFP4Experts,
+)
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
+from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
+    DeepGemmQuantScaleFMT,
     _import_deep_gemm,
     fp8_einsum,
     fp8_gemm_nt,
     get_mk_alignment_for_contiguous_layout,
     get_tma_aligned_size,
+    m_grouped_fp8_fp4_gemm_nt_contiguous,
     m_grouped_fp8_gemm_nt_contiguous,
     mk_alignment_scope,
 )
@@ -166,6 +172,18 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
 
     fused_experts = moe_kernel.impl.fused_experts
     return isinstance(fused_experts, (DeepGemmExperts, TritonOrDeepGemmExperts))
+
+
+def _fused_moe_grouped_fp4_gemm_uses_deep_gemm(module: torch.nn.Module) -> bool:
+    if not (envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM):
+        return False
+    if not isinstance(module, MoERunner):
+        return False
+
+    moe_kernel = getattr(module._quant_method, "moe_kernel", None)
+    return moe_kernel is not None and isinstance(
+        moe_kernel.impl.fused_experts, DeepGemmFP4Experts
+    )
 
 
 # Model construction already imports the model modules. Avoid importing them here.
@@ -395,6 +413,7 @@ def _deepgemm_fp8_einsum_warmup(
 
 
 GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE: set[torch.Size] = set()
+GROUPED_FP8_FP4_GEMM_NT_CONTIGUOUS_WARMUP_CACHE: set[tuple] = set()
 
 
 def _get_grouped_gemm_params(
@@ -500,6 +519,81 @@ def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
         if w.size() not in GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE:
             _warmup(w, ws)
             GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE.add(w.size())
+
+
+def _deepgemm_grouped_fp8_fp4_gemm_nt_contiguous_warmup(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    num_topk: int,
+    max_tokens: int,
+    output_dtype: torch.dtype,
+    pbar: tqdm | None = None,
+) -> None:
+    max_m, _, warmup_cases = _get_grouped_gemm_params(w1, w2, num_topk, max_tokens)
+    if not warmup_cases:
+        return
+
+    scale_fmt = DeepGemmQuantScaleFMT.from_oracle()
+    use_psum_layout = current_platform.is_device_capability_family(100)
+
+    def _warmup(w: torch.Tensor, w_scale: torch.Tensor) -> None:
+        key = (w.size(), scale_fmt, use_psum_layout, output_dtype)
+        if key in GROUPED_FP8_FP4_GEMM_NT_CONTIGUOUS_WARMUP_CACHE:
+            return
+
+        num_experts, n, packed_k = w.shape
+        k = packed_k * 2
+        activation, out = current_workspace_manager().get_simultaneous(
+            ((max_m, k), torch.float8_e4m3fn),
+            ((max_m, n), output_dtype),
+        )
+        for num_tokens, align_used, expert_ids in warmup_cases:
+            if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
+                packed_scale_k = cdiv(k // DeepGemmFP4Experts._ACT_BLOCK_K, 4)
+                tma_aligned_m = get_tma_aligned_size(num_tokens, 4)
+                activation_scale = torch.zeros(
+                    tma_aligned_m * packed_scale_k,
+                    device=w.device,
+                    dtype=torch.int32,
+                ).as_strided(
+                    (num_tokens, packed_scale_k),
+                    (1, tma_aligned_m),
+                )
+            else:
+                activation_scale = torch.zeros(
+                    (num_tokens, k // DeepGemmFP4Experts._ACT_BLOCK_K),
+                    device=w.device,
+                    dtype=torch.float32,
+                )
+            grouped_layout = (
+                torch.full(
+                    (num_experts,),
+                    num_tokens,
+                    device=w.device,
+                    dtype=torch.int32,
+                )
+                if use_psum_layout
+                else expert_ids
+            )
+            with mk_alignment_scope(align_used):
+                m_grouped_fp8_fp4_gemm_nt_contiguous(
+                    (activation[:num_tokens], activation_scale),
+                    (w.view(torch.int8), w_scale),
+                    out[:num_tokens],
+                    grouped_layout,
+                    use_psum_layout=use_psum_layout,
+                    recipe_a=(1, DeepGemmFP4Experts._ACT_BLOCK_K),
+                    recipe_b=(1, DeepGemmFP4Experts._WEIGHT_BLOCK_K),
+                )
+            if pbar is not None:
+                pbar.update(1)
+
+        GROUPED_FP8_FP4_GEMM_NT_CONTIGUOUS_WARMUP_CACHE.add(key)
+
+    _warmup(w1, w1_scale)
+    _warmup(w2, w2_scale)
 
 
 FP8_FP4_MEGA_MOE_WARMUP_CACHE: set[tuple] = set()
@@ -630,6 +724,28 @@ def deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
         )
 
 
+def deepgemm_grouped_fp8_fp4_gemm_nt_contiguous_warmup(
+    model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
+) -> None:
+    for module in model.modules():
+        if _fused_moe_grouped_fp4_gemm_uses_deep_gemm(module):
+            experts = module._quant_method.moe_kernel.impl.fused_experts
+            assert isinstance(experts, DeepGemmFP4Experts)
+            w13, w13_scale, w2, w2_scale, num_topk = (
+                _extract_data_from_fused_moe_module(module)
+            )
+            _deepgemm_grouped_fp8_fp4_gemm_nt_contiguous_warmup(
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+                num_topk,
+                max_tokens,
+                experts.moe_config.in_dtype,
+                pbar=pbar,
+            )
+
+
 def deepgemm_fp8_einsum_warmup(
     model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
 ):
@@ -651,6 +767,9 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
     seen_fp8_sizes: set[torch.Size] = set(FP8_GEMM_NT_WARMUP_CACHE)
     seen_grouped_sizes: set[torch.Size] = set(
         GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
+    )
+    seen_grouped_fp4_keys: set[tuple] = set(
+        GROUPED_FP8_FP4_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
     )
     seen_mega_moe_keys: set[tuple] = set(FP8_FP4_MEGA_MOE_WARMUP_CACHE)
     seen_einsum_keys: set[tuple] = set(FP8_EINSUM_WARMUP_CACHE)
@@ -680,6 +799,23 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
             if w2.size() not in seen_grouped_sizes:
                 total += n_values
                 seen_grouped_sizes.add(w2.size())
+        elif _fused_moe_grouped_fp4_gemm_uses_deep_gemm(m):
+            experts = m._quant_method.moe_kernel.impl.fused_experts
+            assert isinstance(experts, DeepGemmFP4Experts)
+            w13, _, w2, _, num_topk = _extract_data_from_fused_moe_module(m)
+            _, _, warmup_cases = _get_grouped_gemm_params(w13, w2, num_topk, max_tokens)
+            scale_fmt = DeepGemmQuantScaleFMT.from_oracle()
+            use_psum_layout = current_platform.is_device_capability_family(100)
+            for weight in (w13, w2):
+                key = (
+                    weight.size(),
+                    scale_fmt,
+                    use_psum_layout,
+                    experts.moe_config.in_dtype,
+                )
+                if key not in seen_grouped_fp4_keys:
+                    total += len(warmup_cases)
+                    seen_grouped_fp4_keys.add(key)
         elif _mega_moe_may_use_deep_gemm(m):
             key = _get_fp8_fp4_mega_moe_warmup_key(m)
             if key not in seen_mega_moe_keys:
@@ -700,9 +836,11 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
             deepgemm_fp8_gemm_nt_warmup(model, max_tokens, pbar)
             deepgemm_fp8_einsum_warmup(model, max_tokens, pbar)
             deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
+            deepgemm_grouped_fp8_fp4_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
             deepgemm_fp8_fp4_mega_moe_warmup(model, max_tokens, pbar)
     else:
         deepgemm_fp8_gemm_nt_warmup(model, max_tokens, None)
         deepgemm_fp8_einsum_warmup(model, max_tokens, None)
         deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, None)
+        deepgemm_grouped_fp8_fp4_gemm_nt_contiguous_warmup(model, max_tokens, None)
         deepgemm_fp8_fp4_mega_moe_warmup(model, max_tokens, None)
