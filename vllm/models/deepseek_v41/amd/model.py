@@ -735,7 +735,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
         if engram is not None:
             # Shared host tables and GPU peer reads look up only local tokens.
-            self.engram_dp_shared_memory = engram.embedding_shard.dp_size == 1
+            self.engram_dp_shared_memory = engram.embed_tokens.dp_size == 1
 
         # Config flag is the switch. On ROCm, attention forces
         # swa_cache_layer.bounded_replay off unless the CDNA version

@@ -293,10 +293,8 @@ class PerTokenEngram(RocmEngram):
             get_tensor_model_parallel_world_size(),
             get_tensor_model_parallel_rank(),
         )
-
-    @property
-    def embedding_shard(self) -> PerTokenTable:
-        return self.per_token_table
+        # Expose the table without registering duplicate checkpoint keys.
+        object.__setattr__(self, "embed_tokens", self.per_token_table)
 
     def prepare_embeddings(self, comp_ids: torch.Tensor) -> None:
         rows = self.staged_rows[: comp_ids.shape[0]]
