@@ -335,19 +335,34 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
 
 
 @requires_gpu
-@pytest.mark.parametrize("post_step", [False, True], ids=["v1", "v2"])
-def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_step):
-    """Skip prefill self-copies, reset trackers, and preserve in-place MTP replay."""
+@pytest.mark.parametrize(
+    "post_step,ring_slots,executed_width,query_len,committed,flush_count,ring_start",
+    [
+        # Mamba2: 2 + 4 fits the window, so replay 2 old + 4 accepted tokens.
+        pytest.param(False, 20, 0, 4, 2, 6, 3, id="mamba2-pre-step"),
+        pytest.param(True, 20, 0, 4, 2, 6, 3, id="mamba2-post-step"),
+        # GDN standard decoding: 16 + 1 > 16 folds; publish only the new token.
+        pytest.param(True, 32, 1, 1, 16, 1, 19, id="gdn-stp-fold"),
+        # A 4-token row in a width-8 GDN launch folds at 10 + 8 > 16, although
+        # 10 + 4 would fit.
+        pytest.param(True, 32, 8, 4, 10, 4, 13, id="gdn-mtp-fold"),
+        pytest.param(True, 32, 8, 4, 8, 12, 3, id="gdn-mtp-append"),
+    ],
+)
+def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(
+    post_step, ring_slots, executed_width, query_len, committed, flush_count, ring_start
+):
+    """Skip prefill self-copies, reset trackers, and preserve in-place replay."""
     mixer = _replayssm_mixer(
         kv_cache=(
             torch.empty(0, device=DEVICE),
             torch.empty(6, 1, 1, 1, device=DEVICE),
-            torch.empty(6, 1, 20, 1, device=DEVICE),
-            torch.empty(6, 1, 20, device=DEVICE),
-            torch.empty(6, 1, 20, 1, device=DEVICE),
+            torch.empty(6, 1, ring_slots, 1, device=DEVICE),
+            torch.empty(6, 1, ring_slots, device=DEVICE),
+            torch.empty(6, 1, ring_slots, 1, device=DEVICE),
         ),
         ring_start=_device_ints([3] * 6),
-        committed=_device_ints([2] * 6),
+        committed=_device_ints([2, 2, 2, 2, committed, 2]),
         A=torch.empty(1, device=DEVICE),
     )
     spec = MambaSpec(
@@ -366,15 +381,18 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_st
     context = ReplaySSMModelContext.create(
         [([mixer], spec, table)], max_num_reqs=4, materialize_prefixes=True
     )
-    # Reordered rows: canonical prefill in slot 2; in-place MTP replay in slot 4;
-    # padded slot; padded request.
+    # Reordered rows: canonical prefill in slot 2; in-place replay in slot 4
+    # that accepts every token and reaches the block boundary at 32; padded
+    # slot; padded request.
     _postprocess_replayssm_kernel[(4, 1)](
         _device_ints([1, 2, 0, -1]),
-        _device_ints([0, 48, 52, 68, 68])
+        _device_ints([0, 48, 48 + query_len, 64 + query_len, 64 + query_len])
         if post_step
-        else _device_ints([48, 4, 16, 0]),
-        _device_ints([16, 48, 32]) if post_step else _device_ints([0, 0, 28]),
-        _device_ints([1, 1, 4]),
+        else _device_ints([48, query_len, 16, 0]),
+        _device_ints([16, 48, 32])
+        if post_step
+        else _device_ints([0, 0, 32 - query_len]),
+        _device_ints([1, 1, query_len]),
         torch.tensor([True, False, True, True], device=DEVICE),
         _device_ints([0, 2, 1]),
         context.block_table_ptrs,
@@ -386,26 +404,29 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_st
         context.plan_flush_count,
         context.block_table_strides,
         context.num_layers,
-        MAX_NUM_REQS=4,
+        SLOT_ROW_STRIDE=4,
         MAMBA_BLOCK_SIZE=16,
         LOGICAL_WINDOW=16,
-        RING_BUFFER_LEN=20,
+        RING_BUFFER_LEN=ring_slots,
         PAD_SLOT_ID=NULL_BLOCK_ID,
         QUERY_METADATA_IS_CUMULATIVE=post_step,
         NUM_COMPUTED_IS_POST_STEP=post_step,
         HAS_IDX_MAPPING=True,
         MATERIALIZE_PREFIXES=True,
         LIVE_COL_IS_ZERO=False,
+        EXECUTED_QUERY_WIDTH=executed_width,
     )
     _compact_replayssm_requests_kernel[(1,)](
         context.plan_flush_count,
         context.active_request_indices,
+        context.num_active,
         4,
         MAX_NUM_REQS=4,
         BLOCK_SIZE=4,
     )
 
-    assert context.plan_flush_count.tolist() == [-1, 6, -1, -1]
+    assert context.plan_flush_count.tolist() == [-1, flush_count, -1, -1]
+    assert context.plan_ring_start[1].item() == ring_start
     assert context.active_request_indices.tolist() == [1, -1, -1, -1]
     assert context.src_slots[0, 1].item() == 4
     assert context.dst_slots[0, 1].item() == 4

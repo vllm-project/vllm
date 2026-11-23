@@ -554,27 +554,100 @@ def _make_gpu_ctx(
     )
 
 
-def test_replayssm_gpu_copy_layout_preserves_canonical_cpu_copies():
+@pytest.mark.parametrize(
+    "mamba_type,baseline_type",
+    [
+        (MambaAttentionBackendEnum.MAMBA2, None),
+        (MambaAttentionBackendEnum.GDN_ATTN, None),
+        (MambaAttentionBackendEnum.GDN_ATTN, MambaAttentionBackendEnum.SHORT_CONV),
+        (MambaAttentionBackendEnum.GDN_ATTN, MambaAttentionBackendEnum.MAMBA2),
+    ],
+)
+def test_replayssm_gpu_copy_layout_preserves_canonical_cpu_copies(
+    mamba_type, baseline_type
+):
     mixer = _TestReplaySSMMixer()
+    mixer.replayssm_buffer_len = 16
+    mixer.replayssm_executed_width = 8
+    mixer.A = torch.ones(2)
+    is_gdn = mamba_type == MambaAttentionBackendEnum.GDN_ATTN
+    ring_len = 32 if is_gdn else 20
+    shapes = (
+        (2, 2),
+        (2, 2, 2),
+        (2, ring_len, 2),
+        (1, ring_len, 2) if is_gdn else (2, ring_len),
+        (2, ring_len) if is_gdn else (1, ring_len, 2),
+    )
+    mixer.kv_cache = tuple(torch.zeros(3, *shape) for shape in shapes)
+    layer_name = "layers.0.mixer"
+    forward_context = {layer_name: mixer}
     spec = MambaSpec(
         block_size=16,
-        shapes=mixer.get_state_shape(),
+        shapes=shapes,
         dtypes=mixer.get_state_dtype(),
+        mamba_type=mamba_type,
     )
     kv_config = KVCacheConfig(
         num_blocks=3,
         kv_cache_tensors=[],
-        kv_cache_groups=[new_kv_cache_group(["mixer"], spec)],
+        kv_cache_groups=[new_kv_cache_group([layer_name], spec)],
     )
+    states = list(mixer.kv_cache)
+    conv_widths = [2, 0, 0, 0, 0]
+    canonical_states = 2
+    if baseline_type is not None:
+        baseline = _TestReplaySSMMixer()
+        baseline.use_replayssm = False
+        baseline.use_flashinfer_replayssm = False
+        baseline.use_replayssm_trackers = False
+        baseline_shapes = shapes[: len(_COPY_FUNCS[baseline_type])]
+        baseline.kv_cache = tuple(torch.zeros(3, *shape) for shape in baseline_shapes)
+        forward_context["layers.1.baseline"] = baseline
+        kv_config.kv_cache_groups.append(
+            new_kv_cache_group(
+                ["layers.1.baseline"],
+                MambaSpec(
+                    block_size=16,
+                    shapes=baseline_shapes,
+                    dtypes=(torch.float32,) * len(baseline_shapes),
+                    mamba_type=baseline_type,
+                    tp_replicated=baseline_type == MambaAttentionBackendEnum.SHORT_CONV,
+                ),
+            )
+        )
+        states.extend(baseline.kv_cache)
+        conv_widths.extend([2] if len(baseline_shapes) == 1 else [2, 0])
+        canonical_states += len(baseline_shapes)
     cfg = _TestConfig(num_layers=1, max_num_reqs=2)
     device = torch.device("cpu")
     canonical = _make_copy_bufs(cfg, kv_config, device)
-    replay = _make_gpu_ctx(cfg, kv_config, device, {"mixer": mixer})
+    replay = _make_gpu_ctx(cfg, kv_config, device, forward_context)
+    initialize_replayssm_ring_trackers(kv_config, forward_context)
+    block_tables = [
+        torch.zeros(cfg.max_num_reqs, 2, dtype=torch.int32)
+        for _ in kv_config.kv_cache_groups
+    ]
+    if baseline_type == MambaAttentionBackendEnum.MAMBA2:
+        with pytest.raises(ValueError, match="baseline Mamba"):
+            replay.initialize_from_forward_context(
+                kv_config, forward_context, _COPY_FUNCS, block_tables
+            )
+        return
+    replay.initialize_from_forward_context(
+        kv_config,
+        forward_context,
+        _COPY_FUNCS,
+        block_tables,
+    )
 
-    assert canonical.src_ptrs.cpu.numel() == cfg.max_num_reqs * 2
-    assert replay.num_states == 5
-    assert replay.state_base_addrs.numel() == 5
-    assert _COPY_FUNCS[MambaAttentionBackendEnum.MAMBA2] == _DEFAULT_COPY_FUNCS
+    assert canonical.src_ptrs.cpu.numel() == cfg.max_num_reqs * canonical_states
+    assert replay.num_states == len(states)
+    assert replay.state_base_addrs.tolist() == [s.data_ptr() for s in states]
+    assert replay.state_conv_widths.tolist() == conv_widths
+    assert replay.replayssm is not None
+    assert replay.replayssm.mamba_type == mamba_type
+    assert _COPY_FUNCS[mamba_type] == _DEFAULT_COPY_FUNCS
 
 
 def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
@@ -606,6 +679,43 @@ def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
             max_num_reqs=1,
             materialize_prefixes=False,
         )
+
+
+def test_gdn_replayssm_slot_rows_stay_16_byte_aligned() -> None:
+    """FlashInfer's GDN materializer rejects unaligned per-layer slot rows."""
+    max_num_reqs = 3
+    kv_cache = [
+        torch.empty(4, 1),
+        torch.empty(4, 1, 128, 128, dtype=torch.float16),
+        torch.empty(4, 1, 32, 128, dtype=torch.bfloat16),
+        torch.empty(4, 1, 32, 128, dtype=torch.bfloat16),
+        torch.empty(4, 1, 32),
+    ]
+    trackers = torch.zeros(4, dtype=torch.int32)
+    mixers = [
+        SimpleNamespace(
+            kv_cache=kv_cache,
+            replayssm_buffer_len=16,
+            replayssm_executed_width=1,
+            _replayssm_ring_start=trackers,
+            _replayssm_prev_num_accepted=trackers,
+        )
+        for _ in range(2)
+    ]
+    spec = MambaSpec(
+        block_size=16,
+        shapes=tuple(tensor.shape[1:] for tensor in kv_cache),
+        dtypes=tuple(tensor.dtype for tensor in kv_cache),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+    context = ReplaySSMModelContext.create(
+        [(mixers, spec, torch.zeros((max_num_reqs, 1), dtype=torch.int32))],
+        max_num_reqs=max_num_reqs,
+        materialize_prefixes=True,
+    )
+    for slots in (context.src_slots, context.dst_slots):
+        for layer_idx in range(len(mixers)):
+            assert slots[layer_idx, :max_num_reqs].data_ptr() % 16 == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
@@ -1031,7 +1141,7 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(
         replay.plan_flush_count,
         replay.block_table_strides,
         replay.num_layers,
-        MAX_NUM_REQS=1,
+        SLOT_ROW_STRIDE=1,
         MAMBA_BLOCK_SIZE=128,
         LOGICAL_WINDOW=16,
         RING_BUFFER_LEN=ring_len,
@@ -1041,6 +1151,7 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(
         HAS_IDX_MAPPING=False,
         MATERIALIZE_PREFIXES=enable_prefix_caching,
         LIVE_COL_IS_ZERO=True,
+        EXECUTED_QUERY_WIDTH=0,
     )
     assert starts.tolist() == [7, 0, 7]
     assert committed.tolist() == [3, 0, 3]

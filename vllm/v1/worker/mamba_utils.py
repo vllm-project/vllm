@@ -717,13 +717,17 @@ def _get_mamba_gpu_state_copy_funcs(
     state_copy_funcs = copy_funcs[spec.mamba_type]
     if isinstance(layer, MambaBase) and layer.use_replayssm_trackers:
         if (
-            spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
+            spec.mamba_type
+            not in (
+                MambaAttentionBackendEnum.MAMBA2,
+                MambaAttentionBackendEnum.GDN_ATTN,
+            )
             or len(spec.shapes) != 5
             or len(spec.dtypes) != 5
             or state_copy_funcs != (get_conv_copy_spec, get_temporal_copy_spec)
         ):
             raise ValueError(
-                "ReplaySSM trackers require two canonical Mamba2 "
+                "ReplaySSM trackers require two canonical Mamba2 or GDN "
                 "states and three ring states"
             )
         state_copy_funcs += (get_temporal_copy_spec,) * 3
@@ -939,7 +943,7 @@ class MambaSpecDecodeGPUContext:
             f"expected {self.num_groups} block tables, got {len(block_tables)}"
         )
         replayssm_groups: list[tuple[list[Any], MambaSpec, torch.Tensor]] = []
-        has_baseline_layer = False
+        has_baseline_temporal_state = False
         for group_local_idx, mamba_group_id in enumerate(self.mamba_group_ids):
             kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
             mixers: list[Any] = []
@@ -955,11 +959,14 @@ class MambaSpecDecodeGPUContext:
                     isinstance(attention, MambaBase)
                     and attention.use_replayssm_trackers
                 )
-                has_baseline_layer |= not uses_replayssm_trackers
+                has_baseline_temporal_state |= (
+                    not uses_replayssm_trackers
+                    and get_temporal_copy_spec in state_copy_funcs
+                )
                 if uses_replayssm_trackers:
                     if len(kv_caches) != len(state_copy_funcs):
                         raise ValueError(
-                            "ReplaySSM trackers require five bound Mamba2 states"
+                            "ReplaySSM trackers require five bound Mamba2 or GDN states"
                         )
                     mixers.append(attention)
                 if len(kv_caches) < len(state_copy_funcs):
@@ -1047,18 +1054,20 @@ class MambaSpecDecodeGPUContext:
                     idx += 1
 
             if mixers:
+                spec = _get_mamba_spec_for_layer(kv_cache_group, layer_names[0])
+                assert all(
+                    _get_mamba_spec_for_layer(kv_cache_group, name) == spec
+                    for name in layer_names
+                ), "ReplaySSM trackers require equal Mamba cache specs"
                 replayssm_groups.append(
-                    (
-                        mixers,
-                        _get_mamba_spec_for_layer(kv_cache_group, layer_names[0]),
-                        aligned_index_block_tables[group_local_idx],
-                    )
+                    (mixers, spec, aligned_index_block_tables[group_local_idx])
                 )
 
         assert idx == self.num_states
-        if replayssm_groups and has_baseline_layer:
+        if replayssm_groups and has_baseline_temporal_state:
             raise ValueError(
-                "mixed ReplaySSM tracker and baseline Mamba layers are unsupported"
+                "mixed ReplaySSM tracker and baseline Mamba temporal states "
+                "are unsupported"
             )
 
         # Cache per-group block-table base addresses and per-request stride.

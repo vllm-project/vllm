@@ -45,6 +45,7 @@ def _autotune_runner(
             use_flashinfer_replayssm=(
                 use_replayssm and backend == MambaBackendEnum.FLASHINFER
             ),
+            is_gdn_replayssm_enabled=lambda: False,
         ),
         uniform_decode_query_len=query_len,
         decode_query_len=query_len,
@@ -165,7 +166,7 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(layout):
         mixer = MambaMixer2.__new__(MambaMixer2)
         torch.nn.Module.__init__(mixer)
         mixer.use_replayssm = True
-        mixer.use_flashinfer_replayssm = True
+        mixer.use_flashinfer_replayssm = mixer.use_replayssm_trackers = True
         mixer.replayssm_buffer_len = 16
         mixer.get_state_shape = lambda: spec.shapes
         mixer.get_state_dtype = lambda: spec.dtypes

@@ -153,12 +153,14 @@ def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
     adaptive_verification: bool = False,
+    use_replayssm: bool = False,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
     )
+    vllm_config.cache_config.use_replayssm = use_replayssm
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
@@ -207,6 +209,11 @@ def _build(
 ) -> GDNAttentionMetadata:
     """Build GDN attention metadata, optionally with spec-decode kwargs."""
     common = _common_attn_metadata(builder, batch_spec)
+    if builder.use_gdn_replayssm:
+        common = common.replace(
+            is_prefilling=torch.zeros(batch_spec.batch_size, dtype=torch.bool),
+            is_last_prefill=torch.zeros(batch_spec.batch_size, dtype=torch.bool),
+        )
     if block_table is not None:
         common = common.replace(block_table_tensor=block_table)
     kwargs: dict = {}
@@ -301,6 +308,45 @@ def test_has_initial_state_after_reclassification():
     assert meta.has_initial_state is not None
     # req0 has context_lens = 65 - 1 = 64 > 0, so has_initial_state[0] = True
     assert meta.has_initial_state[0].item() is True
+
+
+def test_replayssm_captured_indices_remain_valid_after_ragged_batch():
+    """A smaller FULL graph must not read stale indices from a ragged step."""
+    builder = _create_gdn_builder(
+        num_speculative_tokens=3, full_cuda_graph=True, use_replayssm=True
+    )
+    captured = _build(builder, BatchSpec(seq_lens=[80] * 32, query_lens=[4] * 32))
+    indices = captured.replayssm_output_indices
+    assert indices is not None
+    _build(builder, BatchSpec(seq_lens=[80] * 33, query_lens=[1] + [4] * 32))
+    _build(builder, BatchSpec(seq_lens=[80] * 32, query_lens=[4] * 30 + [0] * 2))
+    # The graph retains its captured 128-entry view, not the new shorter view.
+    output = torch.arange(128)
+    selected = output.index_select(0, indices.long())
+    torch.testing.assert_close(selected[:120], output[:120])
+    assert selected[120:].eq(0).all()
+
+
+def test_replayssm_cursors_stay_per_group():
+    """Each cache group plans its replay cursors into its own buffer, so one
+    group's first layer cannot overwrite another group's state indices."""
+    src, dst = (
+        _create_gdn_builder(
+            num_speculative_tokens=3, full_cuda_graph=True, use_replayssm=True
+        )
+        for _ in range(2)
+    )
+    batch = BatchSpec(seq_lens=[80] * 4, query_lens=[4] * 4)
+    source = _build(src, batch)
+    common = _common_attn_metadata(dst, batch)
+    # MRV2 precomputes these each step; their values do not matter here.
+    dst.mamba_aligned_state_indices = common.block_table_tensor
+    meta = dst.update_block_table(
+        source, common.block_table_tensor, common.slot_mapping
+    )
+    assert source.replayssm_cursors is src.replayssm_cursors
+    assert meta.replayssm_cursors is dst.replayssm_cursors
+    assert dst.replayssm_cursors is not src.replayssm_cursors
 
 
 def test_full_cudagraph_spec_metadata_uses_request_count():

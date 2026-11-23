@@ -254,7 +254,11 @@ steps:
       VLLM_TEST_REQUIRE_REPLAYSSM=1 VLLM_TEST_REPLAYSSM_NUM_GPUS=1
       pytest -v -s v1/e2e/test_replayssm_decode.py
       -k "matches_baseline and not prefix_cache and not tp2"
-    - VLLM_TEST_REQUIRE_REPLAYSSM=1 VLLM_TEST_REPLAYSSM_NUM_GPUS=1 pytest -v kernels/mamba/test_ssu_dispatch.py::test_replayssm_materializes_only_accepted_boundary_with_compacted_rows kernels/mamba/test_ssu_dispatch.py::test_replayssm_postprocess_commits_staged_transition
+    - >-
+      VLLM_TEST_REQUIRE_REPLAYSSM=1 VLLM_TEST_REPLAYSSM_NUM_GPUS=1 pytest -v
+      kernels/mamba/test_ssu_dispatch.py::test_replayssm_materializes_only_accepted_boundary_with_compacted_rows
+      kernels/mamba/test_ssu_dispatch.py::test_replayssm_postprocess_commits_staged_transition
+      kernels/mamba/test_ssu_dispatch.py::test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers
   mirror:
     amd:
       automatic_shard: true

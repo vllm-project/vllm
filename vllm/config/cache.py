@@ -317,16 +317,18 @@ class CacheConfig:
     prompt tail. Off by default; only takes effect with prefix caching enabled
     and a prefix match unit smaller than the Mamba block size."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
-    """ReplaySSM logical history length B for Mamba2. Triton standard decode
-    uses B physical rows; FlashInfer and Triton speculative decoding use B+T,
-    where T is the target verification length. Kimi-K3 speculative decode does
-    not use B. Default 16."""
+    """ReplaySSM logical history length B. Mamba2 Triton standard decode uses B
+    physical rows; Mamba2 FlashInfer and Triton speculative decoding use B+T,
+    where T is the target verification length. Qwen3.5 and Qwen4Exp Gated
+    DeltaNet require B=16 and use 32 physical rows. Kimi-K3 speculative decode
+    does not use B. Default 16."""
     use_replayssm: bool = False
-    """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
-    the per-step full-state store, writing the checkpoint back only on flush.
-    Triton and FlashInfer support Mamba prefix caching on and off.
-    Mamba2 speculative decoding supports both backends. Pipeline parallelism is not
-    supported. Flushes are most efficient when mamba_block_size is a
+    """Use a supported ReplaySSM decode kernel: cache recent recurrent inputs
+    and skip the per-step full-state store, writing the checkpoint only on flush.
+    Mamba2 supports Triton and FlashInfer with prefix caching on and off,
+    including speculative decoding. Qwen3.5 and Qwen4Exp Gated DeltaNet require
+    FlashInfer. Qwen4Exp ReplaySSM does not support ROCm. Pipeline parallelism
+    is not supported. Flushes are most efficient when mamba_block_size is a
     multiple of replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
