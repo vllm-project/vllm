@@ -9,6 +9,7 @@ pytest-cov
 pytest-forked
 pytest-rerunfailures
 pytest-shard
+genai_perf>=0.0.8
 
 # --- Core Tools & Bindings ---
 
