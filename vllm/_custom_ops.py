@@ -3450,6 +3450,14 @@ def register_graph_buffers(
 
 
 def allocate_shared_buffer_and_handle(size: int) -> tuple[int, torch.Tensor]:
+    if current_platform.is_rocm():
+        # The buffer is an uncached allocation (hipExtMallocWithFlags with
+        # hipDeviceMallocUncached) that is shared with hipIpcGetMemHandle. Some
+        # GPUs reject that for sizes that are not a multiple of the 4 KiB page,
+        # and meta_size() + max_size is not one.
+        from vllm.utils.math_utils import round_up
+
+        size = round_up(size, 4096)
     return torch.ops._C_custom_ar.allocate_shared_buffer_and_handle(size)
 
 
