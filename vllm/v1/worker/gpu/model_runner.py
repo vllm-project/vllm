@@ -390,20 +390,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def update_max_model_len(self, max_model_len: int) -> None:
         # Set by initialize_kv_cache, after the auto-fit before warmup.
-        kv_cache = getattr(self, "extensible_kv_cache", None)
-        if kv_cache is not None and kv_cache.torch_memory_limit is not None:
+        if (kv_cache := getattr(self, "extensible_kv_cache", None)) is not None:
             # After warmup, torch's cap kept room for the prompt_embeds rows of
             # the provisional context. The final context is shorter and needs
-            # fewer rows; the engine gave the rest to the KV cache, so lower
-            # the cap by that much.
-            freed_bytes = prompt_embeds_freed_bytes(
-                self.vllm_config, self.max_model_len, max_model_len
-            )
-            if freed_bytes > 0:
-                # Give the freed rows to the KV cache.
-                kv_cache.set_torch_memory_limit(
-                    kv_cache.torch_memory_limit - freed_bytes
+            # fewer rows so lower the cap by that much.
+            kv_cache.lower_torch_memory_limit(
+                prompt_embeds_freed_bytes(
+                    self.vllm_config, self.max_model_len, max_model_len
                 )
+            )
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
         self.model_state.update_max_model_len(max_model_len)

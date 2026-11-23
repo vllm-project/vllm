@@ -536,6 +536,29 @@ def test_freeing_the_cache_lifts_the_torch_memory_cap(monkeypatch):
     assert kv_cache.torch_memory_limit is None
 
 
+def test_lowering_the_torch_memory_cap_needs_a_cap_and_positive_bytes(monkeypatch):
+    """Lowering applies only to a set cap and a positive amount: before warmup
+    there is no cap to lower, and a longer context frees nothing."""
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda *args: (0, 100 << 30)
+    )
+    monkeypatch.setattr(
+        torch.cuda, "set_per_process_memory_fraction", lambda fraction, device: None
+    )
+    kv_cache = object.__new__(ExtensibleKVCache)
+    kv_cache.buffer = SimpleNamespace(device=torch.device("cpu"))
+    kv_cache.torch_memory_limit = None
+
+    kv_cache.lower_torch_memory_limit(1 << 30)
+    assert kv_cache.torch_memory_limit is None
+
+    kv_cache.set_torch_memory_limit(25 << 30)
+    kv_cache.lower_torch_memory_limit(0)
+    assert kv_cache.torch_memory_limit == 25 << 30
+    kv_cache.lower_torch_memory_limit(1 << 30)
+    assert kv_cache.torch_memory_limit == 24 << 30
+
+
 def _make_mixed_config(num_blocks: int = NUM_BLOCKS):
     """One group whose layers differ in head size, so their block strides differ."""
     specs = {

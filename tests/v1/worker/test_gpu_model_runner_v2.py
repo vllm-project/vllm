@@ -845,14 +845,14 @@ def test_auto_fit_after_warmup_lowers_torch_cap_by_freed_prompt_embeds_rows(
     runner = gpu_model_runner_for_requests
     runner.vllm_config.model_config.enable_prompt_embeds = True
     row_bytes = prompt_embeds_row_bytes(runner.vllm_config)
-    caps: list[int | None] = []
+    lowered: list[int] = []
     runner.extensible_kv_cache = SimpleNamespace(
-        torch_memory_limit=1 << 30, set_torch_memory_limit=caps.append
+        lower_torch_memory_limit=lowered.append
     )
 
     runner.update_max_model_len(runner.max_model_len - 256)
 
-    assert caps == [(1 << 30) - 256 * row_bytes]
+    assert lowered == [256 * row_bytes]
 
 
 def test_speculator_request_hooks(gpu_model_runner_for_requests):
