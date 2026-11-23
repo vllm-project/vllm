@@ -36,6 +36,9 @@ is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
 # Longest per-request query (e.g. 1 + num_speculative_tokens) run by split-K.
 MAX_3D_QUERY_LEN = 8
+# Cap on the lower bound of tiles per split-K segment for non-causal
+# multi-query rows (see unified_attention).
+NON_CAUSAL_MAX_MIN_TILES_PER_SEGMENT = 8
 
 # RDNA launch tuning: TRITON_ATTN's launch configs for gfx1201 (RDNA4) and gfx1100
 # (RDNA3).
@@ -408,13 +411,16 @@ def kernel_unified_attention(
     MM_PREFIX_CLAMP_SW: tl.constexpr = False,
     # 3D only: split the sliding window's tiles, not the whole sequence, into
     # segments so every segment does useful work once seq_len exceeds the
-    # window. Enabled by the launcher for plain causal sliding windows only;
-    # ``reduce_segments`` must be launched with the same value.
+    # window. Enabled by the launcher for plain (causal or non-causal) sliding
+    # windows; ``reduce_segments`` must be launched with the same value.
     WINDOW_SEGMENTS: tl.constexpr = False,
     # Per-token-head K/V alignment and offset of V from K (kv_tile_alignment).
     v_cache_delta: tl.int64 = 0,
     K_ALIGN: tl.constexpr = 1,
     V_ALIGN: tl.constexpr = 1,
+    # 3D only: lower bound on tiles per segment (see unified_attention).
+    # ``reduce_segments`` must be launched with the same value.
+    MIN_TILES_PER_SEGMENT: tl.constexpr = 1,
 ):
     # Strides as visible multiples of the alignment found by kv_tile_alignment,
     # and V addressed from K, let the K/V tile loads compile to vector loads.
@@ -459,7 +465,13 @@ def kernel_unified_attention(
 
     if IS_3D:
         segm_base_tile, tiles_per_segment, num_active_segments = split_k_segment_layout(
-            seq_len, NUM_SEGMENTS_PER_SEQ, SLIDING_WINDOW, TILE_SIZE, WINDOW_SEGMENTS
+            seq_len,
+            NUM_SEGMENTS_PER_SEQ,
+            SLIDING_WINDOW,
+            TILE_SIZE,
+            WINDOW_SEGMENTS,
+            cur_batch_query_len,
+            MIN_TILES_PER_SEGMENT,
         )
         if segm_idx >= num_active_segments:
             return
@@ -859,10 +871,11 @@ def reduce_segments(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
-    # Must match the WINDOW_SEGMENTS / SLIDING_WINDOW the segments were
-    # produced with (see kernel_unified_attention).
+    # Must match the WINDOW_SEGMENTS / SLIDING_WINDOW / MIN_TILES_PER_SEGMENT
+    # the segments were produced with (see kernel_unified_attention).
     WINDOW_SEGMENTS: tl.constexpr = False,
     SLIDING_WINDOW: tl.constexpr = 0,
+    MIN_TILES_PER_SEGMENT: tl.constexpr = 1,
 ):
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
@@ -881,8 +894,19 @@ def reduce_segments(
         return
 
     # number of segments for this particular sequence
+    query_len = 1
+    if WINDOW_SEGMENTS:
+        query_len = tl.load(query_start_len_ptr + seq_idx + 1) - tl.load(
+            query_start_len_ptr + seq_idx
+        )
     _, _, act_num_segments = split_k_segment_layout(
-        seq_len, NUM_SEGMENTS_PER_SEQ, SLIDING_WINDOW, TILE_SIZE, WINDOW_SEGMENTS
+        seq_len,
+        NUM_SEGMENTS_PER_SEQ,
+        SLIDING_WINDOW,
+        TILE_SIZE,
+        WINDOW_SEGMENTS,
+        query_len,
+        MIN_TILES_PER_SEGMENT,
     )
 
     # create masks for subsequent loads
@@ -1036,7 +1060,7 @@ def unified_attention(
     # Default False keeps the original behavior for every other model.
     mm_prefix_clamp_sliding_window: bool = False,
     # Split only the sliding window's tiles into the 3D segments (see
-    # WINDOW_SEGMENTS). Takes effect only for plain causal sliding windows;
+    # WINDOW_SEGMENTS). Takes effect only for plain sliding windows;
     # False forces the whole-sequence split (for testing and A/B runs).
     window_aware_segments: bool = True,
 ):
@@ -1275,8 +1299,8 @@ def unified_attention(
     # 1. No split-K threshold or scratch buffers, or the scratch has fewer
     #    rows than query tokens, or
     # 2. max_seqlen_q > 1 and either it exceeds MAX_3D_QUERY_LEN, masking is
-    #    non-causal, per-sequence causal, or mm-prefix, or the tuned
-    #    large-head path applies, or
+    #    per-sequence causal or mm-prefix, or the tuned large-head path
+    #    applies, or
     # 3. The number of Q blocks exceeds seq_threshold_3D, or
     # 4. Batch invariance is enabled
     use_3d = not (
@@ -1289,7 +1313,6 @@ def unified_attention(
             max_seqlen_q > 1
             and (
                 max_seqlen_q > MAX_3D_QUERY_LEN
-                or not use_causal
                 or use_per_seq_causal
                 or use_mm_prefix
                 or tuned_large_head
@@ -1417,20 +1440,29 @@ def unified_attention(
 
     # With a sliding window, splitting the whole sequence into segments leaves
     # most of them outside the window once seq_len exceeds it. For a plain
-    # causal window and one query token per sequence (what
-    # split_k_segment_layout assumes), split only the window's tiles
-    # instead. Every other case keeps the whole-sequence split.
+    # (causal or non-causal) window, split only the window's tiles instead.
+    # Every other case keeps the whole-sequence split.
     window_segments = (
         use_3d
         and window_aware_segments
-        and max_seqlen_q == 1
         and sliding_window_val > 0
         and chunk_lookback < 0
-        and use_causal
         and not use_per_seq_causal
         and not use_mm_prefix
         and not use_rswa
     )
+
+    # Non-causal multi-query programs (the DFlash draft block) carry a whole
+    # query block, so at short context a one-tile segment is mostly fixed
+    # cost (Q load, partial store, reduction). With more sequences there is
+    # parallelism to spare, so require fuller segments: at least
+    # next_power_of_2(num_seqs) tiles, capped. This depends only on num_seqs,
+    # so a captured graph keeps its choice.
+    min_tiles_per_segment = 1
+    if use_3d and not use_causal:
+        min_tiles_per_segment = min(
+            triton.next_power_of_2(num_seqs), NON_CAUSAL_MAX_MIN_TILES_PER_SEGMENT
+        )
 
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
@@ -1554,6 +1586,7 @@ def unified_attention(
         v_cache_delta=v_cache_delta,
         K_ALIGN=k_align,
         V_ALIGN=v_align,
+        MIN_TILES_PER_SEGMENT=min_tiles_per_segment,
         **launch_kwargs,
     )
 
@@ -1578,5 +1611,6 @@ def unified_attention(
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             WINDOW_SEGMENTS=window_segments,
             SLIDING_WINDOW=sliding_window_val if window_segments else 0,
+            MIN_TILES_PER_SEGMENT=min_tiles_per_segment,
             USE_FP8=output_scale is not None,
         )
