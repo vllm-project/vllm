@@ -86,6 +86,7 @@ class Feature(enum.Enum):
     CPU_WEIGHT_OFFLOAD = "CPU weight offload"
     WEIGHT_UPDATES = "weight updates"
     PROMPT_EMBEDS = "prompt embeds"
+    ONLINE_QUANTIZATION = "online quantization (--quantization-config)"
 
 
 @dataclass(frozen=True)
@@ -146,6 +147,11 @@ def features_in_use(vllm_config: VllmConfig) -> list[Feature]:
         ),
         Feature.WEIGHT_UPDATES: vllm_config.weight_transfer_config is not None,
         Feature.PROMPT_EMBEDS: mc.enable_prompt_embeds,
+        # The KDA decode reads its projection weights directly as BF16.
+        Feature.ONLINE_QUANTIZATION: getattr(
+            vllm_config.quant_config, "online_quantization_config", None
+        )
+        is not None,
     }
     return [f for f, on in used.items() if on]
 

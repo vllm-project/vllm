@@ -60,6 +60,7 @@ def make_vllm_config(**overrides: Any) -> SimpleNamespace:
         additional_config={},
         speculative_config=None,
         lora_config=None,
+        quant_config=None,
         kv_transfer_config=None,
         weight_transfer_config=None,
     )

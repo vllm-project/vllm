@@ -25,7 +25,7 @@ from tests.utils import (
 )
 from vllm.models.glm5next.amd.specialized_decode.runtime.spec import WIDTHS
 
-from ._ffn import POLL_TIMEOUT_US, _dequant, _rel, _vllm_seam
+from ._ffn import POLL_TIMEOUT_US, _dequant, _mxfp8, _rel, _vllm_seam
 
 MODEL = "amd/GLM-5.3-Flash-Quark-MXFP4"
 PREFIX = "language_model.model.layers.7.mlp"
@@ -60,20 +60,6 @@ def _random_moe(moe, gd, gr) -> None:
     bias.data.copy_(
         (torch.rand(bias.shape, generator=gr, device=gr.device) - 0.5) * 0.2
     )
-
-
-def _mxfp8(v: torch.Tensor) -> torch.Tensor:
-    """`v` rounded as the kernel rounds expert inputs (AITER's W4A8): per 32
-    values an E8M0 scale, amax / 448 rounded up to a power of two, and the
-    values to E4M3."""
-    from vllm.models.glm5next.amd.specialized_decode.mono.config import FP8_MAX
-
-    b = v.float().reshape(-1, 32)
-    bits = (b.abs().amax(-1, keepdim=True) * (1.0 / FP8_MAX)).view(torch.int32)
-    e = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).int()
-    scale = (e.clamp(1, 254) << 23).view(torch.float32)
-    q = (b / scale).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn).float()
-    return (q * scale).reshape(v.shape)
 
 
 def _exact_moe(x, gate, bias, w13, s13, w2, s2, shared, act=None):

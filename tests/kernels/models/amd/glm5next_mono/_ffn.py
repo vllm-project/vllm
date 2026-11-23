@@ -48,7 +48,8 @@ def _dequant(q, s):
 
 
 def _mxfp8(a):
-    """The kernel's activation quant: per 32, e8m0 scale ceil(amax / 448), e4m3."""
+    """The kernel's expert-input rounding (AITER's W4A8): per 32 values an E8M0
+    scale, amax / 448 rounded up to a power of two, and the values to E4M3."""
     shp, a = a.shape, a.float().reshape(-1, 32)
     bits = (a.abs().amax(-1, keepdim=True) / 448.0).view(torch.int32)
     e = (((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).int()).clamp(1, 254)

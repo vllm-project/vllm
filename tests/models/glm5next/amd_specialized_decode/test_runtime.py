@@ -3,6 +3,8 @@
 """CPU tests of the GLM-5.3-Flash specialized decode: config refusals, the per-step
 plan, cache binding and the fail-stop. The layer builders are the kit's fakes."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -75,6 +77,7 @@ def test_every_reason_is_reported_at_once():
         hf=dict(hidden_size=2048, hc_mult=2),
         lora_config=object(),
         speculative_config=object(),
+        quant_config=SimpleNamespace(online_quantization_config=object()),
     )
     reasons = _reasons(cfg)
     for expected in (
@@ -82,6 +85,7 @@ def test_every_reason_is_reported_at_once():
         "EPLB",
         "LoRA",
         "speculative decoding",
+        "online quantization",
         "capture sizes [3]",
         "needs hidden_size 4096",
         "needs hc_mult 4",
