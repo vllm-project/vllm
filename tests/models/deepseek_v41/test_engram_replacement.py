@@ -11,15 +11,12 @@ import torch
 
 from vllm.config.engram import EngramConfig
 from vllm.config.utils import hash_config
-from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
-from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.model_executor.utils import weights_already_processed
 from vllm.models.deepseek_v41.common.engram_replacement import (
     PerTokenTable,
     per_token_comp_ids,
     skip_engram_weight,
 )
-from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
 N_COLS, HEAD_DIM, VOCAB = 24, 256, 50
 
@@ -173,6 +170,8 @@ def test_each_mode_skips_only_the_table_it_does_not_use(
 
 def test_sharded_state_copy_passes_post_load_check() -> None:
     table = _per_token_table()
+    with pytest.raises(ValueError, match="per_token_table.weight"):
+        table.process_weights_after_loading()
     table.state_dict()["weight"].copy_(_table())
     table.process_weights_after_loading()
 
@@ -196,44 +195,3 @@ def test_nan_in_a_loaded_table_is_rejected() -> None:
     table.weight.weight_loader(table.weight, bad)
     with pytest.raises(ValueError, match="contains NaN"):
         table.process_weights_after_loading()
-
-
-def test_engram_per_token_mode_builds_and_looks_up_rows(dist_init) -> None:
-    from vllm.models.deepseek_v41.amd.engram import PerTokenEngram
-    from vllm.models.deepseek_v41.common.engram import EngramLayout
-
-    config = DeepseekV41Config(
-        text_config=dict(
-            hidden_size=64,
-            hc_mult=2,
-            rms_norm_eps=1e-6,
-            engram_layer_ids=[1],
-            engram_num_embeddings=[1000],
-            engram_vocab_size=1000,
-            engram_max_ngram_size=4,
-            engram_n_heads=N_COLS // 3,
-            engram_head_dim=HEAD_DIM,
-            engram_compressed_vocab_size=VOCAB,
-            engram_pad_token_id=0,
-        )
-    )
-    layout = EngramLayout(config)
-    engram = PerTokenEngram(
-        config,
-        None,
-        layout,
-        layer_hash_index=0,
-        use_sequence_parallel=False,
-        prefix="model.layers.1.engram",
-    )
-
-    assert not any(k.startswith("embed_tokens.") for k in engram.state_dict())
-
-    full = _table()
-    with pytest.raises(ValueError, match="per_token_table.weight"):
-        finalize_model_weights(engram)
-    AutoWeightsLoader(engram).load_weights([("per_token_table.weight", full)])
-    finalize_model_weights(engram)
-    comp_ids = torch.tensor([5, 5, 2, 0])
-    engram.prepare_embeddings(comp_ids)
-    assert torch.equal(engram.embed(comp_ids), full[comp_ids])

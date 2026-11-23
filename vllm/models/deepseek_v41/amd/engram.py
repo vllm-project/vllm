@@ -16,13 +16,12 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v41.common.engram import Engram, EngramLayout
 from vllm.models.deepseek_v41.common.engram_replacement import PerTokenTable
+from vllm.platforms.rocm import get_cdna_version
 from vllm.triton_utils import tl, triton
 
 
 def _shards_engram_gate() -> bool:
     """Whether TP ranks keep a dim slice of `wkv` and exchange gate partial sums."""
-    from vllm.platforms.rocm import get_cdna_version
-
     return get_cdna_version() in (3, 4)
 
 
@@ -191,7 +190,7 @@ class RocmEngram(Engram):
         self, input_size: int, quant_config: QuantizationConfig | None, prefix: str
     ) -> ColumnParallelLinear:
         tp_size = get_tensor_model_parallel_world_size()
-        if tp_size == 1 or self.use_sequence_parallel or not _shards_engram_gate():
+        if not _shards_engram_gate() or tp_size == 1 or self.use_sequence_parallel:
             return super()._create_wkv(input_size, quant_config, prefix)
         self.kv_shards = tp_size
         return MergedColumnParallelLinear(
