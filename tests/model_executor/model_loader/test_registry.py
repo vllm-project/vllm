@@ -170,3 +170,52 @@ def test_moe_runner_reports_registered_expert_names():
     weights = [("experts.w13_weight", torch.zeros(2, 8, 4))]
     loaded = AutoWeightsLoader(model).load_weights(weights)
     assert loaded == {"experts.routed_experts.w13_weight"}
+
+
+def test_custom_loader_reload_reaches_the_loader_that_loaded_the_model(monkeypatch):
+    """`BaseModelLoader.load_model` records the loader, so a loader overriding
+    `reload_model` gets the reload of the model it loaded, keeping any state
+    it holds across sleep and wake-up."""
+    from types import SimpleNamespace
+
+    import vllm.model_executor.model_loader as model_loader_module
+    import vllm.model_executor.model_loader.base_loader as base_loader_module
+    import vllm.model_executor.model_loader.reload.inplace as reload_inplace_module
+
+    class ReloadingModelLoader(CustomModelLoader):
+        reloaded: nn.Module | None = None
+
+        def create_model(self, vllm_config, model_config, prefix=""):
+            return nn.Linear(2, 2)
+
+        def reload_model(self, vllm_config, model_config, model, **kwargs):
+            self.reloaded = model
+
+    monkeypatch.setitem(
+        model_loader_module._LOAD_FORMAT_TO_MODEL_LOADER,
+        "reloading_load_format",
+        ReloadingModelLoader,
+    )
+    monkeypatch.setattr(
+        base_loader_module, "process_weights_after_loading", lambda *args: None
+    )
+    load_config = LoadConfig(load_format="reloading_load_format")
+    vllm_config = SimpleNamespace(
+        device_config=SimpleNamespace(device="cpu"),
+        load_config=load_config,
+        model_config=SimpleNamespace(dtype=torch.float32),
+        quant_config=None,
+    )
+    loader = get_model_loader(load_config)
+    assert isinstance(loader, ReloadingModelLoader)
+    model = loader.load_model(vllm_config, vllm_config.model_config)
+
+    reload_inplace_module.reload_weights(
+        vllm_config,
+        model,
+        weights_iterator=None,
+        weights_path=None,
+        is_checkpoint_format=True,
+    )
+
+    assert loader.reloaded is model
