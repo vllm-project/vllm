@@ -1,7 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import multiprocessing
+import os
+import socket
+import sys
+import threading
+import time
+from contextlib import closing
 from dataclasses import dataclass
+from datetime import timedelta
 
 import pytest
 import torch
@@ -15,7 +23,11 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.distributed.eplb.async_worker import run_rebalance_experts
+from vllm.distributed.eplb.async_worker import (
+    _transfer_cycle,
+    run_rebalance_experts,
+    transfer_run_periodically,
+)
 from vllm.distributed.eplb.eplb_communicator import TorchDistGlooStagedEplbCommunicator
 from vllm.distributed.eplb.eplb_state import (
     EplbModelState,
@@ -25,8 +37,12 @@ from vllm.distributed.eplb.eplb_state import (
 )
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.distributed.eplb.policy import DefaultEplbPolicy
+from vllm.distributed.eplb.policy_process import (
+    EplbPolicyProcess,
+    EplbPolicyProcessError,
+)
 from vllm.distributed.eplb.rebalance_execute import AsyncEplbLayerResult, transfer_layer
-from vllm.distributed.parallel_state import get_ep_group
+from vllm.distributed.parallel_state import get_ep_group, get_eplb_group
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform, PlatformEnum
 
@@ -165,7 +181,9 @@ def test_balancedness_interval_must_be_positive(interval):
 
 @pytest.fixture
 def cpu_group(tmp_path):
-    with set_current_vllm_config(VllmConfig()):
+    config = VllmConfig()
+    config.parallel_config.enable_eplb = True
+    with set_current_vllm_config(config):
         init_distributed_environment(
             world_size=1,
             rank=0,
@@ -224,10 +242,8 @@ class _State(EplbState):
         return self.selected_policy
 
 
-@pytest.fixture
-def model_state(cpu_group):
+def _make_model_state(cpu_group, mapping):
     model = _ExpertModel()
-    mapping = torch.arange(4).reshape(1, 4)
     logical, replicas = compute_logical_maps(mapping, 4)
     loads = torch.zeros(1, 4, dtype=torch.int64)
     return _State.model_state_cls(
@@ -249,15 +265,23 @@ def model_state(cpu_group):
     )
 
 
+@pytest.fixture
+def model_state(cpu_group):
+    return _make_model_state(cpu_group, torch.arange(4).reshape(1, 4))
+
+
 @pytest.mark.parametrize("use_async", [False, True])
 def test_policy_receives_extended_stats_without_losing_inputs(model_state, use_async):
+    """Custom inputs survive direct calls and async subprocess planning."""
+    worker_pid = os.getpid()
+
     @dataclass
     class Stats(EplbStats):
         metadata: tuple[int, ...] = ()
 
     class Policy(DefaultEplbPolicy):
         def rebalance_experts(self, stats, old_global_expert_indices=None):
-            assert stats is published_stats
+            assert (os.getpid() != worker_pid) is use_async
             assert isinstance(stats, Stats)
             assert stats.metadata == (3, 7)
             assert stats.global_expert_load_window.device.type == "cpu"
@@ -273,7 +297,8 @@ def test_policy_receives_extended_stats_without_losing_inputs(model_state, use_a
     state = _State(Policy())
     if use_async:
         model_state.eplb_stats = published_stats
-        result = run_rebalance_experts(model_state, state, current, None)
+        with closing(EplbPolicyProcess(state.policy)) as state.policy_process:
+            result = run_rebalance_experts(model_state, state, current, None)
     else:
         result = state.policy.rebalance_experts(published_stats, current)
     default_state = EplbState(ParallelConfig(), torch.device("cpu"))
@@ -328,3 +353,231 @@ def test_sync_commit_updates_maps_before_device_work(model_state):
     torch.testing.assert_close(
         model_state.logical_to_physical_map[0, :, 0], torch.tensor([1, 0, 3, 2])
     )
+
+
+class _GatedPolicy(DefaultEplbPolicy):
+    def __init__(self, endpoint, fail):
+        self.endpoint = endpoint
+        self.fail = fail
+
+    def rebalance_experts(self, stats, old_global_expert_indices=None):
+        if self.endpoint is not None:
+            with socket.create_connection(self.endpoint, timeout=20) as connection:
+                connection.sendall(b"r")
+                assert connection.recv(1) == b"g"
+        if self.fail:
+            raise ValueError("test planner failed")
+        return super().rebalance_experts(stats, old_global_expert_indices)
+
+
+def _run_coordinated_stop(rank, store, reason, entered_collective, reports):
+    torch.set_num_threads(1)
+    parallel = ParallelConfig(cpu_distributed_timeout_seconds=10)
+    config = VllmConfig(parallel_config=parallel)
+    # Create the real control-plane groups without requiring accelerator transfers.
+    parallel.enable_eplb = True
+    parallel.tensor_parallel_size = 2
+    with set_current_vllm_config(config), socket.socket() as listener:
+        init_distributed_environment(
+            world_size=2,
+            rank=rank,
+            local_rank=rank,
+            distributed_init_method=f"file://{store}",
+            backend="gloo",
+            timeout=timedelta(seconds=30),
+        )
+        initialize_model_parallel(tensor_model_parallel_size=2, backend="gloo")
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.settimeout(20)
+        policy = _GatedPolicy(
+            listener.getsockname() if rank == 1 else None,
+            fail=rank == 1 and reason == "planner_error",
+        )
+        state = _State(policy)
+        state.is_async = True
+        mapping = torch.arange(4).repeat(2).reshape(1, 8)
+        model = _make_model_state(get_eplb_group().cpu_group, mapping)
+        model.rebalanced = True
+        model.eplb_stats = EplbStats(torch.tensor([[13, 3, 4, 3]]), 8, 1, 1, 2)
+        state.model_states["test"] = model
+        if reason == "reset":
+            draft = _make_model_state(get_eplb_group().cpu_group, mapping)
+            draft.rebalanced = True
+            draft.eplb_stats = model.eplb_stats
+            state.model_states["draft"] = draft
+        original_mapping = model.physical_to_logical_map.clone()
+        weights = model.model.weight.detach().clone()
+        completed = threading.Event()
+        errors = []
+
+        def transfer():
+            try:
+                _transfer_cycle(state, None, False)
+            except Exception as error:
+                errors.append(error)
+            finally:
+                completed.set()
+
+        try:
+            with closing(EplbPolicyProcess(policy)) as state.policy_process:
+                torch.distributed.barrier(group=get_eplb_group().cpu_group)
+                worker = threading.Thread(target=transfer, daemon=True)
+                worker.start()
+                if rank == 0:
+                    deadline = time.monotonic() + 20
+                    while not entered_collective.is_set():
+                        frame = sys._current_frames().get(worker.ident)
+                        while frame is not None:
+                            if frame.f_code.co_name == "all_reduce":
+                                entered_collective.set()
+                                break
+                            frame = frame.f_back
+                        if entered_collective.is_set():
+                            break
+                        assert not completed.wait(0.001)
+                        assert time.monotonic() < deadline
+                else:
+                    with listener.accept()[0] as connection:
+                        assert connection.recv(1) == b"r"
+                        assert entered_collective.wait(20)
+                        if reason == "reset":
+                            state.ft_reset_epoch += 1
+                            for cancelled_model in state.model_states.values():
+                                cancelled_model.rebalanced = False
+                            connection.sendall(b"g")
+                        elif reason == "shutdown":
+                            state.async_worker_stop.set()
+                            state.policy_process.close()
+                        else:
+                            connection.sendall(b"g")
+                assert completed.wait(20)
+                worker.join(timeout=1)
+                assert not worker.is_alive()
+                torch.testing.assert_close(
+                    model.physical_to_logical_map, original_mapping
+                )
+                torch.testing.assert_close(model.model.weight, weights)
+                assert model.pending_result is None
+                assert model.num_committed_layers == 0
+                if reason == "planner_error":
+                    assert len(errors) == 1, errors
+                    assert isinstance(errors[0], EplbPolicyProcessError), errors
+                    assert model.rebalanced
+                    state.async_worker_error = errors[0]
+                    state.expert_rearrangement_step_interval = 3000
+                    with pytest.raises(RuntimeError, match="Async EPLB worker failed"):
+                        state.step(is_dummy=True)
+                else:
+                    assert not errors, errors
+                    assert not model.rebalanced
+                    assert all(
+                        not cancelled_model.rebalanced
+                        for cancelled_model in state.model_states.values()
+                    )
+                reports.put(rank)
+        finally:
+            cleanup_dist_env_and_memory()
+
+
+@pytest.mark.parametrize("reason", ["reset", "planner_error", "shutdown"])
+def test_async_policy_cancellation_is_coordinated_across_ranks(
+    tmp_path, monkeypatch, reason
+):
+    """A slow or failed planner still joins a peer already waiting in Gloo."""
+    monkeypatch.setenv("VLLM_TARGET_DEVICE", "cpu")
+    context = multiprocessing.get_context("spawn")
+    entered_collective = context.Event()
+    reports = context.Queue()
+    workers = [
+        context.Process(
+            target=_run_coordinated_stop,
+            args=(rank, str(tmp_path / "store"), reason, entered_collective, reports),
+        )
+        for rank in range(2)
+    ]
+    for worker in workers:
+        worker.start()
+    try:
+        for worker in workers:
+            worker.join(timeout=60)
+            assert worker.exitcode == 0
+        assert sorted(reports.get(timeout=5) for _ in workers) == [0, 1]
+    finally:
+        for worker in workers:
+            if worker.is_alive():
+                worker.kill()
+                worker.join(timeout=5)
+
+
+@pytest.mark.parametrize("in_flight", [False, True])
+def test_shutdown_cancels_inflight_and_idle_rebalance(cpu_group, in_flight):
+    """Stopping an in-process worker cancels further transfers and reaps the child."""
+    state = _State()
+    state.is_async = True
+    model = _make_model_state(cpu_group, torch.arange(4).reshape(1, 4))
+    state.model_states["test"] = model
+    process = EplbPolicyProcess(state.policy)
+    state.policy_process = process
+    worker = threading.Thread(target=transfer_run_periodically, args=(state, None))
+    state.async_worker = worker
+    worker.start()
+    try:
+        if in_flight:
+            model.rebalanced = True
+            model.eplb_stats = EplbStats(torch.tensor([[9, 1, 2, 1]]), 4, 1, 1, 1)
+            state.rearrange_event.record()
+            deadline = time.monotonic() + 10
+            while model.pending_result is None:
+                assert time.monotonic() < deadline
+                time.sleep(0.005)
+        state.stop_async_loop(timeout=5)
+        state.stop_async_loop(timeout=5)
+        assert not worker.is_alive()
+        assert process._process.poll() is not None
+        assert state.async_worker is None
+        assert state.policy_process is None
+        assert not model.rebalanced
+        assert model.pending_result is None
+    finally:
+        state.async_worker_stop.set()
+        process.close()
+        worker.join(timeout=5)
+
+
+def test_ft_reset_skips_subsequent_model_planning_and_retired_group(
+    cpu_group, monkeypatch
+):
+    """An epoch bump on model 1 skips model 2 IPC and retired Gloo collectives."""
+    calls: list[int] = []
+
+    class Policy(DefaultEplbPolicy):
+        def rebalance_experts(self, stats, old_global_expert_indices=None):
+            calls.append(int(stats.global_expert_load_window.sum().item()))
+            return super().rebalance_experts(stats, old_global_expert_indices)
+
+    state = _State(Policy())
+    state.is_async = True
+    draft = _make_model_state(cpu_group, torch.arange(4).reshape(1, 4))
+    target = _make_model_state(cpu_group, torch.arange(4).reshape(1, 4))
+    draft.rebalanced = True
+    target.rebalanced = True
+    draft.eplb_stats = EplbStats(torch.tensor([[5, 1, 1, 1]]), 4, 1, 1, 1)
+    target.eplb_stats = EplbStats(torch.tensor([[9, 2, 2, 2]]), 4, 1, 1, 1)
+    state.model_states["draft"] = draft
+    state.model_states["target"] = target
+
+    original_transfer = draft.communicator.execute
+
+    def reset_mid_transfer():
+        original_transfer()
+        state.ft_reset_epoch += 1
+        draft.rebalanced = False
+        target.rebalanced = False
+        monkeypatch.setattr(get_eplb_group(), "cpu_group", object())
+
+    draft.communicator.execute = reset_mid_transfer
+    _transfer_cycle(state, None, False)
+    assert calls == [8]
+    assert draft.pending_result is None
+    assert target.pending_result is None
