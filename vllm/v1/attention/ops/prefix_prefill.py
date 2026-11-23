@@ -188,9 +188,10 @@ def _fwd_kernel(
     # sequence with query only (e.g. IQuest LoopCoder's `attn(q, None, None)`).
     KV_FROM_CACHE: tl.constexpr = False,
 ):
-    cur_batch = tl.program_id(0)
-    cur_head = tl.program_id(1)
-    start_m = tl.program_id(2)
+    # Heads vary fastest across programs (see context_attention_fwd).
+    cur_head = tl.program_id(0)
+    start_m = tl.program_id(1)
+    cur_batch = tl.program_id(2)
 
     cur_kv_head = cur_head // num_queries_per_kv
 
@@ -206,6 +207,11 @@ def _fwd_kernel(
     # start position inside of the query
     # generally, N goes over kv, while M goes over query_len
     block_start_loc = BLOCK_M * start_m
+
+    # Blocks past the end of a short query (e.g. a spec decode batched with a
+    # long prefill) have no rows to compute.
+    if block_start_loc >= cur_batch_query_len:
+        return
 
     # initialize offsets
     # [BLOCK_SIZE]; starts at 0
@@ -585,9 +591,10 @@ def _fwd_kernel_alibi(
     INTERLEAVED_V_PACK_FACTOR: tl.constexpr,
 ):
     # attn_bias[]
-    cur_batch = tl.program_id(0)
-    cur_head = tl.program_id(1)
-    start_m = tl.program_id(2)
+    # Heads vary fastest across programs (see context_attention_fwd).
+    cur_head = tl.program_id(0)
+    start_m = tl.program_id(1)
+    cur_batch = tl.program_id(2)
 
     cur_kv_head = cur_head // num_queries_per_kv
 
@@ -604,6 +611,11 @@ def _fwd_kernel_alibi(
         return
 
     block_start_loc = BLOCK_M * start_m
+
+    # Blocks past the end of a short query (e.g. a spec decode batched with a
+    # long prefill) have no rows to compute.
+    if block_start_loc >= cur_batch_query_len:
+        return
 
     # initialize offsets
     offs_n = tl.arange(0, BLOCK_N)
@@ -945,8 +957,8 @@ def context_attention_fwd(
         # due to increased use of GPU shared memory
         # if q.dtype is torch.float32:
         BLOCK = BASE_BLOCK // 2 if q_dtype_is_f32 else BASE_BLOCK
-        # batch, head,
-        grid = (batch, head, triton.cdiv(max_input_len, BLOCK))
+        # head, query block, batch
+        grid = (head, triton.cdiv(max_input_len, BLOCK), batch)
         _fwd_kernel_alibi[grid](
             q,
             k,
@@ -1020,7 +1032,11 @@ def context_attention_fwd(
         if get_cdna_version() == 3 and within_2gb:
             num_unroll_cache = 1
 
-    grid_fn = lambda META: (batch, head, triton.cdiv(max_input_len, META["BLOCK_M"]))
+    # Put the batch on the slowest grid axis. With it on the fastest one, all
+    # programs of a request share one residue of the linear program id, and on
+    # GPUs that deal workgroups round-robin across dies (MI300/MI355 XCDs) a
+    # long prefill mixed with decodes (which return at once) runs on one die.
+    grid_fn = lambda META: (head, triton.cdiv(max_input_len, META["BLOCK_M"]), batch)
     _fwd_kernel[grid_fn](
         q,
         k,
