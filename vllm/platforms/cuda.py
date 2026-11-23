@@ -32,6 +32,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
+    from vllm.config.compilation import CUDAGraphCaptureDefaults
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -635,6 +636,20 @@ class CudaPlatformBase(Platform):
     @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
+
+    def get_cudagraph_capture_defaults(
+        self, vllm_config: VllmConfig
+    ) -> CUDAGraphCaptureDefaults:
+        from vllm.config.compilation import CUDAGraphCaptureDefaults
+
+        if self.is_device_capability_family(100):
+            return CUDAGraphCaptureDefaults(
+                legacy_max_tokens=1024,
+                max_prefill_tokens=8192,
+                max_decode_requests=vllm_config.scheduler_config.max_num_seqs,
+                max_decode_tokens=8192,
+            )
+        return super().get_cudagraph_capture_defaults(vllm_config)
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:

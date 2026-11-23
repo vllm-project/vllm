@@ -75,13 +75,29 @@ steps:
       source_file_dependencies:
       - vllm/platforms/rocm.py
       commands:
-      - pytest -v -s v1/engine/test_preprocess_error_handling.py
       - >-
         pytest -v -s
         v1/engine
         --ignore v1/engine/test_preprocess_error_handling.py
       - pytest -v -s v1/test_tensor_ipc_queue.py
       - pytest -v -s config/test_mp_reducer.py
+
+# Split from the engine-1-gpu AMD mirror: this test needs a forked EngineCore,
+# which the ROCm kernel recorder flags, so the recorder can skip it by key.
+- label: ":amd: (MI250) V1 Engine Preprocess Error Handling"
+  key: engine-preprocess-error-handling
+  dind: false
+  device: mi250_1
+  timeout_in_minutes: 45
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/v1/engine/
+  - tests/v1/engine/
+  - vllm/platforms/rocm.py
+  - docker/Dockerfile.rocm_base
+  commands:
+  - pytest -v -s v1/engine/test_preprocess_error_handling.py
 
 - label: ":nvidia: (H200 MIG 18GB) E2E Scheduling"
   key: e2e-scheduling-1-gpu
@@ -261,6 +277,7 @@ steps:
   device: h100
   num_devices: 2
   key: replayssm-e2e-tp2
+  automatic_shard: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -289,6 +306,7 @@ steps:
       -k "decode_matches_baseline_tp2"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) ReplaySSM E2E TP2"
       dind: false
       device: mi355_2

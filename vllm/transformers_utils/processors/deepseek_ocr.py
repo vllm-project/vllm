@@ -9,6 +9,7 @@ import torch
 import torchvision.transforms as T
 from PIL import Image, ImageOps
 from transformers import BatchFeature, LlamaTokenizerFast
+from transformers.image_transforms import to_pil_image
 from transformers.processing_utils import ProcessorMixin
 
 # TODO(Isotr0py): change modes for variants
@@ -333,7 +334,7 @@ class DeepseekOCRProcessor(ProcessorMixin):
         image_shapes = []
         num_image_tokens = []
         tokenized_str = []
-        for text_sep, image in zip(text_splits, images):
+        for text_sep, image in zip(text_splits, map(to_pil_image, images)):
             tokenized_sep = self.encode(text_sep, bos=False, eos=False)
             tokenized_str += tokenized_sep
             images_seq_mask += [False] * len(tokenized_sep)

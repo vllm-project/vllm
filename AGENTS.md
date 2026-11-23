@@ -53,7 +53,7 @@ If work is duplicate/trivial busywork, **do not proceed**. Return a short explan
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Always use `uv` for Python environment management:
-uv venv --python 3.12
+uv venv --python 3.14
 source .venv/bin/activate
 
 # Always make sure `pre-commit` and its hooks are installed:
