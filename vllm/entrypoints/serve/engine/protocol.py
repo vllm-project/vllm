@@ -4,6 +4,8 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
+from collections import Counter
+from collections.abc import Sequence
 from typing import ClassVar
 
 from pydantic import (
@@ -126,6 +128,36 @@ class PromptTokenUsageInfo(OpenAIBaseModel):
     (e.g. `image`, `audio`, `video`). A breakdown of the multimodal
     placeholder tokens already counted in `prompt_tokens`; `None` when the
     request has no multimodal input."""
+
+
+def sum_prompt_tokens_details(
+    details: Sequence[PromptTokenUsageInfo | None],
+) -> PromptTokenUsageInfo | None:
+    """Sum per-prompt `prompt_tokens_details` into one.
+
+    A cache count is `None` unless every prompt reported one, and
+    `multimodal_tokens` is summed per modality. Returns `None` when the
+    result has no count at all.
+    """
+
+    def sum_or_none(counts: list[int | None]) -> int | None:
+        return None if None in counts else sum(count or 0 for count in counts)
+
+    cached_tokens = sum_or_none([d.cached_tokens if d else None for d in details])
+    created_cache_tokens = sum_or_none(
+        [d.created_cache_tokens if d else None for d in details]
+    )
+    multimodal_tokens: Counter[str] = Counter()
+    for d in details:
+        if d is not None and d.multimodal_tokens:
+            multimodal_tokens.update(d.multimodal_tokens)
+    if cached_tokens is None and created_cache_tokens is None and not multimodal_tokens:
+        return None
+    return PromptTokenUsageInfo(
+        cached_tokens=cached_tokens,
+        created_cache_tokens=created_cache_tokens,
+        multimodal_tokens=dict(multimodal_tokens) or None,
+    )
 
 
 class CompletionTokenUsageInfo(OpenAIBaseModel):
