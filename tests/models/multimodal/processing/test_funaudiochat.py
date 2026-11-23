@@ -197,6 +197,19 @@ def test_audio_items_fit_the_preprocessing_budget(
         items = info.parse_mm_data({"audio": [audio]}, validate=validate)
         processor._apply_hf_processor_main(items, {})
 
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 1_200_000)
+    accepted = info.parse_mm_data({"audio": [audio, audio]}, validate=validate)
+    assert processor._apply_hf_processor_main(accepted, {})["input_features"].shape == (
+        2,
+        80,
+        100,
+    )
+
+    long_audio = np.zeros(16000, dtype=np.float32)
+    with pytest.raises(VLLMValidationError, match="waveform preprocessing exceeds"):
+        items = info.parse_mm_data({"audio": [audio, long_audio]}, validate=validate)
+        processor._apply_hf_processor_main(items, {})
+
 
 def test_precomputed_audio_embeds_ignore_waveform_budget(
     local_funaudiochat_model, monkeypatch
@@ -242,15 +255,24 @@ def test_precomputed_audio_embeds_ignore_waveform_budget(
         )
 
 
-@pytest.mark.parametrize(("budget", "max_audios"), [(500_000, 0), (800_000, 1)])
+@pytest.mark.parametrize(
+    ("budget", "accepted", "rejected", "error_message"),
+    [
+        (500_000, [], [1600], "At most 0 audio"),
+        (800_000, [[1600]], [1600, 1600], "At most 1 audio"),
+        (
+            1_200_000,
+            [[1600, 1600], [16000]],
+            [1600, 16000],
+            "waveform preprocessing exceeds",
+        ),
+    ],
+    ids=["none-fit", "one-fits", "depends-on-waveform-length"],
+)
 def test_render_respects_the_audio_preprocessing_budget(
-    local_funaudiochat_model, budget, max_audios
+    local_funaudiochat_model, budget, accepted, rejected, error_message
 ):
     model, _ = local_funaudiochat_model
-    audio = {
-        "type": "audio_url",
-        "audio_url": {"url": encode_audio_url(np.zeros(1600, dtype=np.float32), 16000)},
-    }
     with RemoteLaunchRenderServer(
         model,
         [
@@ -266,17 +288,30 @@ def test_render_respects_the_audio_preprocessing_budget(
         env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": str(budget)},
     ) as server:
         url = server.url_for("v1/chat/completions/render")
-        for count in range(1, max_audios + 2):
+        for lengths, expected_status in [
+            *((lengths, 200) for lengths in accepted),
+            (rejected, 400),
+        ]:
+            content = [
+                {
+                    "type": "audio_url",
+                    "audio_url": {
+                        "url": encode_audio_url(
+                            np.zeros(samples, dtype=np.float32), 16000
+                        )
+                    },
+                }
+                for samples in lengths
+            ]
             response = httpx.post(
                 url,
                 json={
                     "model": model,
-                    "messages": [{"role": "user", "content": [audio] * count}],
+                    "messages": [{"role": "user", "content": content}],
                 },
             )
-            expected_status = 200 if count <= max_audios else 400
             assert response.status_code == expected_status, response.text[:512]
-        assert f"At most {max_audios} audio" in response.json()["error"]["message"]
+        assert error_message in response.json()["error"]["message"]
 
 
 def test_render_audio_embeds_ignore_waveform_budget(local_funaudiochat_model):

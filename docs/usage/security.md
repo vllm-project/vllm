@@ -118,9 +118,10 @@ request. Cached items skip preprocessing, so a warm cache can admit a prompt
 that a cold cache rejects. FunAudioChat's waveform item cap runs before cache
 lookup.
 
-- FunAudioChat estimates peak live buffers for waveform padding, FFT, and
-  log-Mel feature extraction. The byte-derived item cap applies to waveforms.
-  The configured multimodal item limit applies to waveforms and `audio_embeds`.
+- FunAudioChat derives a waveform item cap from peak buffers for padding, FFT,
+  and log-Mel feature extraction. After decoding, it also counts waveform
+  copies using each clip's sample count. The configured multimodal item limit
+  applies to waveforms and `audio_embeds`.
 - Nano Nemotron VL estimates host-side image preprocessing. The CPU resize
   path accounts for resized tiles, resize temporaries, and concatenation. It
   includes the largest full-resolution float32 source buffer when CPU

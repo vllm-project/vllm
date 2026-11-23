@@ -268,6 +268,7 @@ def _make_processor(
     )
 
 
+@pytest.mark.core_model
 @pytest.mark.parametrize("do_cpu_normalize", [False, True])
 @pytest.mark.parametrize("single_image", [False, True])
 def test_static_image_preprocessing_budget(

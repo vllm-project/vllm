@@ -552,11 +552,8 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
 
-    def get_max_waveform_items(self) -> int | None:
-        budget = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
-        if budget <= 0:
-            return None
-
+    @cached_property
+    def _waveform_preprocessing_costs(self) -> tuple[int, int]:
         extractor = self.get_feature_extractor()
         float_bytes = np.dtype(np.float32).itemsize
         complex_bytes = np.dtype(np.complex64).itemsize
@@ -564,10 +561,6 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
         fft_frames = extractor.nb_max_frames + 1
         frequency_bins = n_fft // 2 + 1
         padded_bytes = extractor.n_samples * (float_bytes + np.dtype(np.int32).itemsize)
-        raw_samples = max(n_fft, self.get_max_audio_samples(extractor.sampling_rate))
-        # The float32 conversion and Whisper's batch preparation can each copy
-        # the raw waveform before padding or truncating it.
-        waveform_copy_bytes = 2 * raw_samples * float_bytes
         speech_token_bytes = (
             2 * self.get_max_speech_frames() * np.dtype(np.int64).itemsize
         )
@@ -589,26 +582,61 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
 
         # Padding holds the per-item arrays while it assembles the batch.
         bytes_per_item = (
-            waveform_copy_bytes
-            + speech_token_bytes
-            + padded_bytes
-            + max(padded_bytes, extraction_peak_bytes)
+            speech_token_bytes + padded_bytes + max(padded_bytes, extraction_peak_bytes)
         )
         fixed_bytes = (n_fft + frequency_bins * extractor.feature_size) * float_bytes
-        return max(0, budget - fixed_bytes) // bytes_per_item
+        return fixed_bytes, bytes_per_item
+
+    def validate_waveform_budget(
+        self, num_items: int, *, audio_items: AudioProcessorItems | None = None
+    ) -> None:
+        """Check fixed preprocessing costs and any available source waveforms."""
+        budget = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
+        if budget <= 0 or is_profiling_media() or not num_items:
+            return
+
+        fixed_bytes, bytes_per_item = self._waveform_preprocessing_costs
+        available_bytes = max(0, budget - fixed_bytes)
+        max_items = available_bytes // bytes_per_item
+        if num_items > max_items:
+            raise VLLMValidationError(
+                f"At most {max_items} audio(s) fit the FunAudioChat "
+                "preprocessing budget.",
+                parameter="audio",
+            )
+
+        if audio_items is None:
+            return
+
+        min_samples = self.get_feature_extractor().n_fft
+        # Float32 conversion and Whisper's batch preparation can each copy
+        # the waveform. A UUID-only item has no source samples to copy.
+        waveform_copy_samples = sum(
+            max(min_samples, len(audio)) for audio in audio_items if audio is not None
+        )
+        waveform_copy_bytes = 2 * waveform_copy_samples * np.dtype(np.float32).itemsize
+        if num_items * bytes_per_item + waveform_copy_bytes > available_bytes:
+            raise VLLMValidationError(
+                "FunAudioChat waveform preprocessing exceeds "
+                f"VLLM_MAX_MEDIA_PREPROCESSING_BYTES={budget}.",
+                parameter="audio",
+            )
 
     def validate_num_input_items(
         self, modality: str, num_items: int, *, is_embedding: bool
     ) -> None:
         super().validate_num_input_items(modality, num_items, is_embedding=is_embedding)
-        if not is_embedding and not is_profiling_media():
-            max_items = self.get_max_waveform_items()
-            if max_items is not None and num_items > max_items:
-                raise VLLMValidationError(
-                    f"At most {max_items} audio(s) fit the FunAudioChat "
-                    "preprocessing budget.",
-                    parameter="audio",
-                )
+        if not is_embedding:
+            self.validate_waveform_budget(num_items)
+
+    def parse_mm_data(
+        self, mm_data: MultiModalDataDict, *, validate: bool = True
+    ) -> MultiModalDataItems:
+        mm_items = super().parse_mm_data(mm_data, validate=validate)
+        audio_items = mm_items.get("audio")
+        if validate and isinstance(audio_items, AudioProcessorItems):
+            self.validate_waveform_budget(len(audio_items), audio_items=audio_items)
+        return mm_items
 
     def get_target_channels(self) -> int:
         return 1
@@ -708,17 +736,8 @@ class FunAudioChatMultiModalProcessor(
             )
         assert isinstance(audios, Sequence)
 
-        max_audio_items = self.info.get_max_waveform_items()
-        if (
-            not is_profiling_media()
-            and max_audio_items is not None
-            and len(audios) > max_audio_items
-        ):
-            raise VLLMValidationError(
-                f"At most {max_audio_items} audio(s) fit the FunAudioChat "
-                "preprocessing budget.",
-                parameter="audio",
-            )
+        audio_items = mm_items.get_items("audio", AudioProcessorItems)
+        self.info.validate_waveform_budget(len(audio_items), audio_items=audio_items)
 
         feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
         sr = int(feature_extractor.sampling_rate)
