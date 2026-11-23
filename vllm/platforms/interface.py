@@ -398,14 +398,11 @@ class Platform:
         return
 
     @classmethod
-    def get_fp8_moe_experts_cls(cls) -> list[type["FusedMoEExperts"]]:
-        """Candidate FP8 MoE experts classes for out-of-tree platforms, in
-        priority order. The FP8 MoE oracle selects the first one whose
-        `is_supported_config` accepts the deployment. Weights are passed to
-        the experts unchanged; layout changes belong in the experts'
-        `process_weights_after_loading`.
-        """
-        return []
+    def get_moe_backends(cls) -> dict[str, type["FusedMoEExperts"]]:
+        """Out-of-tree MoE backends by `--moe-backend` name, in the priority
+        order used by `auto`. Names are lowercase with underscores and must not
+        reuse an in-tree backend's."""
+        return {}
 
     @classmethod
     def get_attn_backend_cls(
