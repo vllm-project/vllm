@@ -176,6 +176,17 @@ Now the CLI is directly using the uppercase string of cudagraph_mode for compila
 vllm serve --model meta-llama/Llama-3.1-8B-Instruct --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
 ```
 
+For native Whisper on NVIDIA GPUs, `FULL` can replay the decoder graph on
+batches that admit new audio alongside ongoing transcriptions. The encoder and
+cross-attention key/value projections run before graph replay. This requires an
+attention backend that supports full graphs for mixed batches and separate KV
+cache writes, such as FlashAttention 3 on Hopper. Use this mode without LoRA
+or CPU weight offloading. Whisper defaults to `FULL_DECODE_ONLY`.
+
+```bash
+vllm serve openai/whisper-large-v3-turbo --compilation-config '{"cudagraph_mode": "FULL"}'
+```
+
 ### Python examples
 
 ```python

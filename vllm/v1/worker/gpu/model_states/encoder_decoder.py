@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.layers.attention import CrossAttention
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup
@@ -69,6 +70,20 @@ class EncoderDecoderModelState(ModelState):
         )
 
         self.encoder_outputs: list[torch.Tensor] = []
+        self._precompute_encoder_kv = getattr(model, "precompute_encoder_kv", None)
+        if self._precompute_encoder_kv is not None and any(
+            isinstance(layer, CrossAttention)
+            and not layer.attn_backend.supports_kv_cache_update_bypass
+            for layer in model.modules()
+        ):
+            self._precompute_encoder_kv = None
+
+    @property
+    def precomputes_encoder_kv(self) -> bool:
+        return (
+            self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+            and self._precompute_encoder_kv is not None
+        )
 
     def prepare_inputs_embeds(
         self,
@@ -95,6 +110,12 @@ class EncoderDecoderModelState(ModelState):
             # Decode steps: encoder K/V are in cross-attention KV cache.
             self.encoder_outputs = []
         return None
+
+    def prepare_encoder_kv_cache(self, attn_metadata: dict[str, Any]) -> None:
+        if self.encoder_outputs:
+            assert self._precompute_encoder_kv is not None
+            self._precompute_encoder_kv(self.encoder_outputs, attn_metadata)
+            self.encoder_outputs = []
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
@@ -134,12 +155,21 @@ class EncoderDecoderModelState(ModelState):
         )
 
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
-        if for_capture:
-            max_seq_len = self.max_model_len
+        mixed_full_graph = self.precomputes_encoder_kv and (
+            for_capture or cudagraph_mode == CUDAGraphMode.FULL
+        )
+        if mixed_full_graph:
+            # FA3 chooses its scheduler metadata layout from these bounds.
+            # Use the graph's bounds even when replaying a decode-only batch.
+            max_query_len = min(num_tokens, self.max_model_len)
         else:
-            max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max())
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
+        max_seq_len = (
+            self.max_model_len
+            if for_capture or mixed_full_graph
+            else int(seq_lens_cpu_upper_bound[:num_reqs].max())
+        )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,

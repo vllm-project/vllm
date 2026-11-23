@@ -69,6 +69,7 @@ from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backend import (
+    AttentionMetadata,
     AttentionType,
 )
 
@@ -326,6 +327,13 @@ class WhisperCrossAttention(WhisperAttention):
             prefix=f"{prefix}.kv_proj",
         )
 
+    def project_kv(
+        self, encoder_hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        kv, _ = self.kv_proj(encoder_hidden_states)
+        k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
+        return k, v
+
     def forward(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
@@ -336,8 +344,7 @@ class WhisperCrossAttention(WhisperAttention):
         # Encoder hidden states are only computed once during prefill phase.
         # Afterwards, the keys and values should be available in the kv-cache.
         if encoder_hidden_states is not None:
-            kv, _ = self.kv_proj(encoder_hidden_states)
-            k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
+            k, v = self.project_kv(encoder_hidden_states)
         else:
             k = v = None
 
@@ -1003,6 +1010,20 @@ class WhisperForConditionalGeneration(
         self.proj_out = self.proj_out.tie_weights(self.model.decoder.embed_tokens)
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
+
+    def precompute_encoder_kv(
+        self,
+        encoder_outputs: list[torch.Tensor],
+        attn_metadata: dict[str, AttentionMetadata],
+    ) -> None:
+        encoder_hidden_states = torch.cat(encoder_outputs, dim=0)
+        for layer in self.model.decoder.layers:
+            cross_attn = layer.encoder_attn
+            attn = cross_attn.attn
+            assert isinstance(attn, CrossAttention)
+            key, value = cross_attn.project_kv(encoder_hidden_states)
+            metadata = attn_metadata[attn.layer_name]
+            attn.cache_encoder_kv(key, value, metadata.slot_mapping)  # type: ignore[attr-defined]
 
     def forward(
         self,

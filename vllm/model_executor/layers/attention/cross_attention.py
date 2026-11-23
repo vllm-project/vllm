@@ -228,6 +228,20 @@ class CrossAttention(Attention):
             **kwargs,
         )
 
+    def cache_encoder_kv(
+        self, key: torch.Tensor, value: torch.Tensor, slot_mapping: torch.Tensor
+    ) -> None:
+        """Populate the cross-attention cache before the decoder forward."""
+        assert self.attn_backend.supports_kv_cache_update_bypass
+        assert key.shape[0] == slot_mapping.numel()
+        self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+            self,
+            key.view(-1, self.num_kv_heads, self.head_size),
+            value.view(-1, self.num_kv_heads, self.head_size_v),
+            self.kv_cache,
+            slot_mapping,
+        )
+
     def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         spec = AttentionSpec(
             block_size=vllm_config.cache_config.block_size,

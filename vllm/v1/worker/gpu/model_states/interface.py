@@ -131,6 +131,10 @@ class ModelState(ABC):
         model does not use M-RoPE."""
         return None
 
+    @property
+    def precomputes_encoder_kv(self) -> bool:
+        return False
+
     def remove_request(self, req_id: str) -> None:
         return None
 
@@ -202,6 +206,10 @@ class ModelState(ABC):
         Holds the embeddings of `input_ids` when given; otherwise the contents
         are unused.
         """
+        return None
+
+    def prepare_encoder_kv_cache(self, attn_metadata: dict[str, Any]) -> None:
+        """Write newly encoded cross-attention KV before the decoder runs."""
         return None
 
     def execute_mm_encoder(

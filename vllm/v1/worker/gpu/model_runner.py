@@ -82,6 +82,7 @@ from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.conf_compute_utils import install as install_conf_compute_copy_patches
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
@@ -758,6 +759,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
+        if (
+            self.is_encoder_decoder
+            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+            and (
+                not self.model_state.precomputes_encoder_kv
+                or attn_cg_support.min_cg_support != AttentionCGSupport.ALWAYS
+            )
+        ):
+            logger.info_once(
+                "Mixed CUDA graphs are unavailable for this encoder-decoder model "
+                "and attention backend. Using FULL_DECODE_ONLY."
+            )
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         # The speculator clears the flag at load time when the checkpoint has
         # no confidence head, so it holds the effective value.
         self.adaptive_verification = maybe_create_adaptive_verification_manager(
@@ -1923,13 +1937,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.lora_config, self.lora_state, req_ids, dummy_run
             )
 
-        skip_compiled = False
-        if self.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
-            # Encoder-decoder models such as Whisper should run eager/non-compiled
-            # when encoder inputs are scheduled, because this step updates
-            # cross-attention cache with dynamic encoder outputs.
-            skip_compiled = True
-
+        encoder_admission = self.is_encoder_decoder and bool(
+            scheduler_output.scheduled_encoder_inputs
+        )
         batch_desc, dp_sync_state = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,
@@ -1938,7 +1948,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.dp_size,
             self.dp_rank,
             max_query_len=max_query_len,
-            need_eager=is_profile or skip_compiled,
+            need_eager=is_profile
+            or (encoder_admission and not self.model_state.precomputes_encoder_kv),
             num_active_loras=num_active_loras,
             parallel_config=self.parallel_config,
             allow_ubatching=(
@@ -1947,6 +1958,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             uniform_decode=uniform_tok_count == self.decode_query_len,
             allow_skip_drafts=scheduler_output.skip_drafts,
         )
+        # Outside a full graph, the eager decoder projects and caches encoder K/V.
+        skip_compiled = encoder_admission and batch_desc.cg_mode != CUDAGraphMode.FULL
 
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
@@ -2120,6 +2133,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     inputs_embeds = self.model_state.prepare_inputs_embeds(
                         scheduled_encoder_inputs, input_batch, self.req_states
                     )
+                if encoder_admission and not skip_compiled:
+                    assert attn_metadata is not None
+                    self.model_state.prepare_encoder_kv_cache(attn_metadata)
             if inputs_embeds is not None and not requires_raw_input_tokens(self.model):
                 input_ids = None
 
