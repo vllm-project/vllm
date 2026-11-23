@@ -246,15 +246,14 @@ def test_moe_permute_empty_routing(use_scratch: bool) -> None:
     permuted, _, offsets, inverse, permuted_idx = moe_permute(
         hidden_states, None, topk_ids, 8, expert_map=expert_map, scratch=scratch
     )
+    out = torch.empty_like(hidden_states)
+    topk_weights = torch.empty((0, 2), dtype=torch.float32, device="cuda")
+    moe_unpermute(out, permuted, topk_weights, inverse, offsets)
 
     assert permuted.shape == (0, 128)
     torch.testing.assert_close(offsets, torch.zeros_like(offsets))
     assert inverse.numel() == 0
     assert permuted_idx.numel() == 0
-
-    out = torch.empty_like(hidden_states)
-    topk_weights = torch.empty((0, 2), dtype=torch.float32, device="cuda")
-    moe_unpermute(out, permuted, topk_weights, inverse, offsets)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
