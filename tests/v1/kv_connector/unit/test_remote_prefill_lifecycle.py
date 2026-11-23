@@ -382,6 +382,67 @@ def test_basic_lifecycle():
     assert_scheduler_empty(scheduler)
 
 
+def _scheduler_with_remote_load():
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    request = create_request(
+        block_size=block_size, num_tokens=block_size * 2, do_remote_prefill=True
+    )
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    return scheduler, request, scheduler_output
+
+
+def test_early_kv_output_schedules_before_step_output():
+    """A finished load from a step's execute_model() reply lets the request run
+    in the next schedule(), before that step's model output is processed."""
+    scheduler, request, scheduler_output = _scheduler_with_remote_load()
+
+    kv_output = KVConnectorOutput(finished_recving={request.request_id})
+    scheduler.update_from_early_kv_output(kv_output)
+    assert kv_output.finished_recving is None
+    assert scheduler.schedule().num_scheduled_tokens == {request.request_id: 1}
+    assert request.status == RequestStatus.RUNNING
+
+    # The step's model output carries what remains of the KV output.
+    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    model_runner_output.kv_connector_output = kv_output
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert request.status == RequestStatus.RUNNING
+    assert not scheduler.finished_recving_kv_req_ids
+
+
+@pytest.mark.parametrize("failure", ["failed_recving", "invalid_block_ids"])
+def test_early_kv_output_leaves_failures(failure):
+    """Failed loads are left for update_from_output() with the step's output."""
+    scheduler, request, _ = _scheduler_with_remote_load()
+    other = create_request(
+        block_size=scheduler.block_size,
+        num_tokens=scheduler.block_size * 2,
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(other)
+    scheduler.schedule()
+    finished = {request.request_id, other.request_id}
+    if failure == "failed_recving":
+        kv_output = KVConnectorOutput(
+            finished_recving=set(finished), failed_recving={request.request_id}
+        )
+        expected_applied = {other.request_id}
+    else:
+        # Block-level failures aren't attributed to requests yet: keep them all.
+        kv_output = KVConnectorOutput(
+            finished_recving=set(finished), invalid_block_ids={1}
+        )
+        expected_applied = set()
+
+    scheduler.update_from_early_kv_output(kv_output)
+    assert finished - (kv_output.finished_recving or set()) == expected_applied
+    assert scheduler.finished_recving_kv_req_ids == expected_applied
+
+
 def test_interleaved_lifecycle():
     """Test Remote Prefills Work Well With Other Requests."""
     vllm_config = create_vllm_config()

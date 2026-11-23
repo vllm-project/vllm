@@ -46,6 +46,7 @@ from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
 )
+from vllm.distributed.kv_transfer.kv_connector.utils import kv_output_in_execute_model
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -341,6 +342,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
         self.pooling_runner: PoolingRunner | None = None
+
+        self.kv_output_in_execute_model = kv_output_in_execute_model(vllm_config)
 
         self.step_timing = StepTimingCollector()
         self.adaptive_verification: AdaptiveVerificationManager | None = None
@@ -2272,6 +2275,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return self.pp_handler.send_positions(
                 output_intermediate_tensors, model_inputs["positions"]
             )[: input_batch.num_tokens]
+        if self.kv_output_in_execute_model and not dummy_run:
+            # Saves are finalized in sample_tokens().
+            kv_connector_output = self.kv_connector.post_forward(
+                finished_req_ids, defer_finalize=True
+            )
+            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
         return None
 
     @torch.inference_mode()
@@ -2386,11 +2395,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_verified_tokens_per_req=num_verified_tokens_per_req,
         )
 
-        # Collect KV transfer results now; finalize saves after the drafter runs.
+        # Finalize saves after the drafter runs.
         defer_kv_finalize = self.speculator is not None
-        model_runner_output.kv_connector_output = self.kv_connector.post_forward(
-            finished_req_ids, defer_finalize=defer_kv_finalize
-        )
+        if self.kv_output_in_execute_model:
+            # Transfer results were returned by execute_model().
+            if not defer_kv_finalize:
+                self.kv_connector.finalize_step()
+        else:
+            model_runner_output.kv_connector_output = self.kv_connector.post_forward(
+                finished_req_ids, defer_finalize=defer_kv_finalize
+            )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
         # The encoder runner exists only on the first PP rank, so later ranks

@@ -3762,6 +3762,21 @@ class Scheduler(SchedulerInterface):
 
         return True
 
+    def update_from_early_kv_output(
+        self, kv_connector_output: KVConnectorOutput
+    ) -> None:
+        # Only successful loads are applied early, so requests can be scheduled
+        # in the next step. Failures are handled with the step's model output.
+        finished_recving = kv_connector_output.finished_recving
+        if not finished_recving or kv_connector_output.invalid_block_ids:
+            return
+        failed = kv_connector_output.failed_recving
+        kv_connector_output.finished_recving = (finished_recving & failed) or None
+        if finished_recving := finished_recving - failed:
+            self._update_from_kv_xfer_finished(
+                KVConnectorOutput(finished_recving=finished_recving)
+            )
+
     def _update_from_kv_xfer_finished(self, kv_connector_output: KVConnectorOutput):
         """KV Connector: update the scheduler state based on the output.
 

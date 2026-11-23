@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.metrics.stats import SchedulerStats
-    from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+    from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
     from vllm.v1.request import Request, RequestStatus
     from vllm.v1.structured_output import StructuredOutputManager
 
@@ -109,6 +109,16 @@ class SchedulerInterface(ABC):
 
         """
         raise NotImplementedError
+
+    def update_from_early_kv_output(
+        self, kv_connector_output: "KVConnectorOutput"
+    ) -> None:
+        """Apply KV transfer results of a step whose model output is pending.
+
+        Whatever is applied is removed from `kv_connector_output`, which is
+        later passed to `update_from_output()` with the step's model output.
+        """
+        return
 
     @abstractmethod
     def update_draft_token_ids(self, draft_token_ids: "DraftTokenIds") -> None:

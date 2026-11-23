@@ -10,6 +10,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Generator, Sequence, Sized
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
+from copy import copy
 from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
@@ -33,6 +34,7 @@ from vllm.distributed import (
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
+from vllm.distributed.kv_transfer.kv_connector.utils import kv_output_in_execute_model
 from vllm.envs import enable_envs_cache
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
@@ -114,7 +116,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
 )
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 from vllm.v1.structured_output import StructuredOutputManager
@@ -238,6 +240,9 @@ class EngineCore:
             self.batch_queue = deque(maxlen=self.batch_queue_size)
         # Step awaiting prior outputs before sampling (see step_with_batch_queue).
         self.deferred_step: tuple[SchedulerOutput, Future[Any]] | None = None
+        # Whether a step's KV connector output comes with its execute_model()
+        # reply rather than with its sampled output.
+        self.kv_output_in_execute_model = kv_output_in_execute_model(vllm_config)
 
         self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
@@ -770,6 +775,8 @@ class EngineCore:
         model_executed = False
         # Workers need a deferred step's sample_tokens() before the next step.
         if self.deferred_step is None and self.scheduler.has_requests():
+            if self.kv_output_in_execute_model:
+                self._apply_early_kv_outputs()
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
@@ -829,6 +836,8 @@ class EngineCore:
                 # call failed - raise that exception.
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
+            if self.kv_output_in_execute_model and exec_model_fut is not future:
+                model_output = self._add_exec_kv_output(model_output, exec_model_fut)
         iteration_details = self._untimed_iteration_details(scheduler_output)
 
         # Before processing the model output, process any aborts that happened
@@ -869,6 +878,38 @@ class EngineCore:
             batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
 
         return engine_core_outputs, model_executed
+
+    def _apply_early_kv_outputs(self) -> None:
+        """Pass finished KV loads of in-flight steps to the scheduler ahead of
+        those steps' model outputs, so the loaded requests can be scheduled now.
+        """
+        assert self.batch_queue is not None
+        # Oldest first. Responses arrive in order, so stop at the first that
+        # isn't ready.
+        for _, _, exec_future in reversed(self.batch_queue):
+            poll = getattr(exec_future, "poll", None)
+            if not (poll() if poll is not None else exec_future.done()):
+                return
+            if exec_future.exception() is not None:
+                return
+            output = exec_future.result()
+            if isinstance(output, ModelRunnerOutput) and output.kv_connector_output:
+                self.scheduler.update_from_early_kv_output(output.kv_connector_output)
+
+    @staticmethod
+    def _add_exec_kv_output(
+        model_output: ModelRunnerOutput, exec_future: Future[Any]
+    ) -> ModelRunnerOutput:
+        """Attach the KV connector output that came with execute_model()."""
+        # Already done: the execute_model() reply precedes the sampled output.
+        exec_output = exec_future.result()
+        if not isinstance(exec_output, ModelRunnerOutput):
+            return model_output
+        assert model_output.kv_connector_output is None
+        if model_output is EMPTY_MODEL_RUNNER_OUTPUT:
+            model_output = copy(model_output)
+        model_output.kv_connector_output = exec_output.kv_connector_output
+        return model_output
 
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():

@@ -30,7 +30,10 @@ from vllm.config import VllmConfig
 from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    KVOutputAggregator,
+    kv_output_in_execute_model,
+)
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_dp_group,
@@ -450,7 +453,12 @@ class MultiprocExecutor(Executor):
             unique_reply_rank=self.output_rank,
             non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
-            kv_output_aggregator=self.kv_output_aggregator,
+            # KV connector output came with the execute_model() reply.
+            kv_output_aggregator=(
+                None
+                if kv_output_in_execute_model(self.vllm_config)
+                else self.kv_output_aggregator
+            ),
             ec_output_aggregator=self.ec_output_aggregator,
         )
 
