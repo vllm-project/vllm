@@ -23,6 +23,9 @@ class Qwen4ExpQSAMetadata(AttentionMetadata):
     max_query_len: int
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
+    # Every row's selection is its whole causal prefix, so the attention may
+    # run dense; set only by a platform builder that has a dense path.
+    use_dense_attention: bool = False
 
 
 class Qwen4ExpQSAMetadataBuilder(AttentionMetadataBuilder[Qwen4ExpQSAMetadata]):

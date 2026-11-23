@@ -11,6 +11,7 @@ from torch import nn
 from transformers import Qwen4ExpTextConfig
 
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -38,6 +39,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImplBase,
     AttentionType,
+    CommonAttentionMetadata,
     MultipleOf,
 )
 from vllm.v1.attention.ops import rocm_octave
@@ -45,6 +47,7 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayerConfig,
+    KVQuantMode,
     get_kv_quant_mode,
 )
 from vllm.v1.worker.workspace import (
@@ -76,7 +79,8 @@ _OCTAVE_SINK_ENTRIES = 2048
 
 
 class Qwen4ExpROCmQSAMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
-    """Reserve the Octave workspace for ROCm QSA."""
+    """Reserve the Octave workspace for ROCm QSA, and mark the steps whose
+    attention may run dense."""
 
     def __init__(
         self,
@@ -86,6 +90,9 @@ class Qwen4ExpROCmQSAMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.dense_max_seq_len = _dense_attention_max_seq_len(
+            kv_cache_spec, vllm_config
+        )
         # Layers run one after another, so they share one set of Octave
         # split-KV partials; reserve it before the workspace is locked.
         if kv_cache_spec.kv_quant_mode.is_octave and is_workspace_manager_initialized():
@@ -98,6 +105,22 @@ class Qwen4ExpROCmQSAMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
                 * (kv_cache_spec.head_size + 2)
             )
             current_workspace_manager().get_simultaneous(((numel,), torch.float32))
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> Qwen4ExpQSAMetadata:
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        # Without speculative decoding, full CUDA graphs capture only
+        # single-token decode batches for this backend, so a step with a
+        # longer query runs its attention eagerly.
+        metadata.use_dense_attention = (
+            common_attn_metadata.max_query_len > 1
+            and common_attn_metadata.max_seq_len <= self.dense_max_seq_len
+        )
+        return metadata
 
 
 _OCTAVE_CACHE_DTYPES: tuple[CacheDType, ...] = (
@@ -112,6 +135,39 @@ _QSA_CACHE_DTYPES: tuple[CacheDType, ...] = (
     "fp8_e4m3",
     *_OCTAVE_CACHE_DTYPES,
 )
+
+
+# Main caches AITER's unified attention reads; only the Octave kernels read
+# Octave slots.
+_DENSE_ATTENTION_KV_QUANT_MODES = (KVQuantMode.NONE, KVQuantMode.FP8_PER_TENSOR)
+
+
+def _dense_attention_max_seq_len(
+    kv_cache_spec: AttentionSpec, vllm_config: VllmConfig
+) -> int:
+    """Longest sequence of a step whose QSA attention may run dense, or 0.
+
+    A row at position `p` sees `(p + 1) // compress_ratio` complete groups.
+    While `p + 1 <= indexer_budget + compress_ratio - 1` (the indexer's
+    `output_width`) they all fit the block top-k, so the selection keeps every
+    one of them plus the open group's tail: exactly the tokens `[0, p]`, which
+    dense causal attention reads.
+    """
+    from vllm.platforms.rocm import on_gfx950
+
+    if (
+        # With speculative decoding, full CUDA graphs also capture verify
+        # steps of several tokens per request, which keep the path chosen at
+        # capture; and MTP draft steps after the first reuse the first step's
+        # selection from the top-k buffer, which a dense step leaves unwritten.
+        vllm_config.speculative_config is not None
+        or kv_cache_spec.kv_quant_mode not in _DENSE_ATTENTION_KV_QUANT_MODES
+        # Validated on gfx950 only.
+        or not (rocm_aiter_ops.is_enabled() and on_gfx950())
+    ):
+        return 0
+    config = vllm_config.model_config.hf_text_config
+    return int(config.indexer_budget) + int(config.indexer_compress_ratio) - 1
 
 
 class Qwen4ExpQSABackend(AttentionBackend):
@@ -297,6 +353,67 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
             self._slocks,
         )
 
+    def kv_cache_views(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """K and V of a bf16 or fp8 cache as `[pages, page_size, kv_heads,
+        head_size]` views: the two halves of each token's K|V record."""
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache = canonicalize_singleton_dim_strides(key_cache)
+        value_cache = canonicalize_singleton_dim_strides(value_cache)
+        if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            assert key_cache.dtype == torch.uint8, (
+                "fp8 KV cache must be uint8 storage; a config mismatch would "
+                "silently double the view's shape"
+            )
+            fp8_dtype = current_platform.fp8_dtype()
+            key_cache = key_cache.view(fp8_dtype)
+            value_cache = value_cache.view(fp8_dtype)
+        return key_cache, value_cache
+
+    def forward_dense(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: Qwen4ExpQSAMetadata,
+        output: torch.Tensor,
+        *,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        max_seq_len: int,
+    ) -> torch.Tensor:
+        """Run causal attention over each row's whole prefix with AITER.
+
+        On a step the builder marks `use_dense_attention` every row selects its
+        whole prefix, so this gives `forward`'s result up to rounding.
+        """
+        num_tokens = attn_metadata.num_actual_tokens
+        # forward zero-fills every row; the kernel writes the real ones.
+        output[num_tokens:].zero_()
+        key_cache, value_cache = self.kv_cache_views(kv_cache)
+        from aiter.ops.triton.unified_attention import unified_attention
+
+        unified_attention(
+            q=query[:num_tokens],
+            k=key_cache,
+            v=value_cache,
+            out=output[:num_tokens],
+            cu_seqlens_q=query_start_loc,
+            max_seqlen_q=attn_metadata.max_query_len,
+            seqused_k=seq_lens,
+            max_seqlen_k=max_seq_len,
+            softmax_scale=self.scale,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=attn_metadata.block_table,
+            softcap=0.0,
+            q_descale=None,
+            k_descale=layer._k_scale,
+            v_descale=layer._v_scale,
+        )
+        return output
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -341,17 +458,7 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
                 self._stags,
             )
             return output
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
-        key_cache = canonicalize_singleton_dim_strides(key_cache)
-        value_cache = canonicalize_singleton_dim_strides(value_cache)
-        if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            assert key_cache.dtype == torch.uint8, (
-                "fp8 KV cache must be uint8 storage; a config mismatch would "
-                "silently double the view's shape"
-            )
-            fp8_dtype = current_platform.fp8_dtype()
-            key_cache = key_cache.view(fp8_dtype)
-            value_cache = value_cache.view(fp8_dtype)
+        key_cache, value_cache = self.kv_cache_views(kv_cache)
         if query.dtype != torch.bfloat16:
             raise NotImplementedError("Qwen4Exp QSA requires BF16 queries")
         if key_cache.dtype != torch.bfloat16 and (
@@ -579,6 +686,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             QSAIndexerMetadata,
             metadata[self.indexer.raw_key_cache.prefix],
         )
+        use_dense = main_metadata.use_dense_attention
         selected, main_outputs = self.indexer(
             hidden_states,
             positions,
@@ -587,6 +695,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             qkv=qkv,
             slot_mapping=main_metadata.slot_mapping,
             gate_out=gate,
+            skip_scoring=use_dense,
         )
         if selected.shape != (
             num_tokens,
@@ -613,6 +722,18 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             assert gate is not None
             gate[num_tokens:].zero_()
         assert query is not None
+        if use_dense:
+            impl.forward_dense(
+                self,
+                query,
+                self.kv_cache,
+                main_metadata,
+                output,
+                query_start_loc=indexer_metadata.query_start_loc,
+                seq_lens=indexer_metadata.seq_lens,
+                max_seq_len=indexer_metadata.max_seq_len,
+            )
+            return
         impl.forward(
             self,
             query,
