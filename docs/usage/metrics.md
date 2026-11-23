@@ -4,6 +4,24 @@ vLLM exposes a number of metrics that can be used to monitor the health of the
 system. These metrics are exposed via the `/metrics` endpoint on the vLLM
 OpenAI compatible API server.
 
+### Prometheus multiprocess storage
+
+The Prometheus Python client stores per-process metric data in files under
+`PROMETHEUS_MULTIPROC_DIR`. By default, vLLM creates a temporary directory
+under the system temporary-directory location. If that location is backed by
+a network filesystem or a managed object-storage mount, collecting metrics
+may fail even when inference requests succeed.
+
+For such deployments, set `PROMETHEUS_MULTIPROC_DIR` to a **writable, local**
+filesystem that is shared by the API-server processes, for example a properly
+sized `/dev/shm` tmpfs. Clear the directory between server runs as required
+by the Prometheus multiprocess collector. Check that your container's
+`/dev/shm` allocation is large enough before using it.
+
+If the multiprocess collector encounters an I/O error or a truncated
+metrics database it cannot decode, vLLM logs the traceback and returns HTTP
+503 with troubleshooting instructions.
+
 You can start the server using Python, or using [Docker](../deployment/docker.md):
 
 ```bash
