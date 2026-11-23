@@ -1158,8 +1158,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 num_mqa_tokens = q.size(0)
                 num_mha_tokens = 0
 
-        shardq = attn_metadata.shardq
-        gathered_context = attn_metadata.dcp_gathered_context
+        shardq = getattr(attn_metadata, "shardq", None)
+        gathered_context = None if shardq is None else shardq.gathered_context
         if gathered_context is not None:
             # A DCP ShardQ step's prefill tokens attend a gathered copy of
             # their context, which still lacks the step's new tokens; every
@@ -1401,7 +1401,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if q.shape[0] > self.dcp_manager.direct_query_gather_max_tokens:
                 return None
             # DCP ShardQ steps do not gather the query.
-            if attn_metadata.dcp_gathered_context is not None:
+            if getattr(attn_metadata, "dcp_gathered_context", None) is not None:
                 return None
         if self.kv_sharing_target_layer_name is None:
             torch.ops.vllm.unified_mla_kv_cache_update(
