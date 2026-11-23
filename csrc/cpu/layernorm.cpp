@@ -99,6 +99,8 @@ void fused_add_rms_norm_impl(scalar_t* __restrict__ input,
 void rms_norm(torch::Tensor& out, torch::Tensor& input,
               std::optional<torch::Tensor> weight, double epsilon) {
   int hidden_size = input.size(-1);
+  TORCH_CHECK(hidden_size > 0,
+              "rms_norm: hidden size (last dim) must be > 0, got ", hidden_size);
   int num_tokens = input.numel() / hidden_size;
   const bool has_weight = weight.has_value();
   if (has_weight) {
@@ -117,6 +119,9 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         std::optional<torch::Tensor> weight, double epsilon) {
   int hidden_size = input.size(-1);
+  TORCH_CHECK(hidden_size > 0,
+              "fused_add_rms_norm: hidden size (last dim) must be > 0, got ",
+              hidden_size);
   int num_tokens = input.numel() / hidden_size;
   const bool has_weight = weight.has_value();
   if (has_weight) {

@@ -85,6 +85,8 @@ FORCE_INLINE vec_op::FP32Vec8 gelu_tanh_act(const vec_op::FP32Vec8& x) {
 };  // namespace
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input) {
+  TORCH_CHECK(input.size(-1) > 0, "input must have non-empty last dim, got ",
+              input.size(-1));
   int num_tokens = input.numel() / input.size(-1);
   int d = input.size(-1) / 2;
 
@@ -99,6 +101,8 @@ void silu_and_mul(torch::Tensor& out, torch::Tensor& input) {
 void gelu_and_mul(torch::Tensor& out,    // [..., d]
                   torch::Tensor& input)  // [..., 2 * d]
 {
+  TORCH_CHECK(input.size(-1) > 0, "input must have non-empty last dim, got ",
+              input.size(-1));
   int num_tokens = input.numel() / input.size(-1);
   int d = input.size(-1) / 2;
 
@@ -113,6 +117,8 @@ void gelu_and_mul(torch::Tensor& out,    // [..., d]
 void gelu_tanh_and_mul(torch::Tensor& out,    // [..., d]
                        torch::Tensor& input)  // [..., 2 * d]
 {
+  TORCH_CHECK(input.size(-1) > 0, "input must have non-empty last dim, got ",
+              input.size(-1));
   int num_tokens = input.numel() / input.size(-1);
   int d = input.size(-1) / 2;
 
@@ -127,6 +133,8 @@ void gelu_tanh_and_mul(torch::Tensor& out,    // [..., d]
 }
 
 void gelu_tanh(torch::Tensor& out, torch::Tensor& input) {
+  TORCH_CHECK(input.size(-1) > 0, "input must have non-empty last dim, got ",
+              input.size(-1));
   int num_tokens = input.numel() / input.size(-1);
   int d = input.size(-1);
 
@@ -139,6 +147,8 @@ void gelu_tanh(torch::Tensor& out, torch::Tensor& input) {
 }
 
 void gelu_new(torch::Tensor& out, torch::Tensor& input) {
+  TORCH_CHECK(input.size(-1) > 0, "input must have non-empty last dim, got ",
+              input.size(-1));
   int num_tokens = input.numel() / input.size(-1);
   int d = input.size(-1);
 
@@ -151,6 +161,8 @@ void gelu_new(torch::Tensor& out, torch::Tensor& input) {
 }
 
 void gelu_fast(torch::Tensor& out, torch::Tensor& input) {
+  TORCH_CHECK(input.size(-1) > 0, "input must have non-empty last dim, got ",
+              input.size(-1));
   int num_tokens = input.numel() / input.size(-1);
   int d = input.size(-1);
 
@@ -163,6 +175,8 @@ void gelu_fast(torch::Tensor& out, torch::Tensor& input) {
 }
 
 void gelu_quick(torch::Tensor& out, torch::Tensor& input) {
+  TORCH_CHECK(input.size(-1) > 0, "input must have non-empty last dim, got ",
+              input.size(-1));
   int num_tokens = input.numel() / input.size(-1);
   int d = input.size(-1);
 
