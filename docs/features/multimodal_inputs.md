@@ -1322,10 +1322,16 @@ pass a tensor of shape `(..., hidden_size of LM)` for each item to the correspon
     in order for placeholder tokens to be applied correctly by the chat template.
 
 You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
+To reject embeddings of a single modality, set `"allow_embeds": false` for it in `--limit-mm-per-prompt`,
+e.g. `--limit-mm-per-prompt '{"video": {"count": 0, "allow_embeds": false}}'`.
 
 !!! warning
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
+
+Embedding payloads that cannot be decoded in a supported format are rejected
+as client input errors with HTTP status 400. Memory exhaustion while loading an
+otherwise valid payload remains a server error.
 
 NumPy image and video embeddings serialized as `.npy` data are accepted in either native or non-native byte order. The embedding readers convert non-native arrays to native byte order while preserving their numeric values and element precision. For example, `numpy2base64` from `vllm.utils.serial_utils` can encode a big-endian floating-point NumPy array for the image or video embedding fields. The array must still have the shape required by the model; object arrays are not supported.
 
