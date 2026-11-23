@@ -605,7 +605,8 @@ def test_qsa_select_bounds_columns_to_max_seq_len(
         # four warps), and from 2048 programs one split writes the output
         # directly. FP8 pads the same way and runs FP8 dots: 32-wide tiles
         # under 32 programs, then 64-wide on CDNA3, and on CDNA4 32-wide up
-        # to 128 programs and 64-wide past them.
+        # to 128 programs and 64-wide past them. CDNA3 widens K/V instead for
+        # a full head group under 32 programs (tp1_p2, tp2_p16).
         pytest.param(1, 24, 2, 1792, id="tp1_p2"),
         pytest.param(257, 24, 2, 1792, id="tp1_p514"),
         pytest.param(16, 12, 1, 1792, id="tp2_p16"),
@@ -629,6 +630,7 @@ def test_qsa_sparse_paged_attention_matches_reference(
     num_kv_heads: int,
     page_size: int,
     use_fp8: bool,
+    query_gain: float = 1.0,
 ) -> None:
     # Every CDNA version's launch profile runs on any ROCm GPU.
     monkeypatch.setattr(qsa_ops, "get_cdna_version", lambda: cdna_version)
@@ -641,9 +643,9 @@ def test_qsa_sparse_paged_attention_matches_reference(
     indexer_budget = 2048
     indexer_compress_ratio = 4
     selection_width = indexer_budget + indexer_compress_ratio - 1
-    q = torch.randn(
-        num_rows, num_query_heads, head_dim, device="cuda", dtype=torch.bfloat16
-    )
+    q = (
+        torch.randn(num_rows, num_query_heads, head_dim, device="cuda") * query_gain
+    ).bfloat16()
     kv_cache = torch.randn(
         num_cache_blocks,
         page_size,
@@ -652,6 +654,7 @@ def test_qsa_sparse_paged_attention_matches_reference(
         device="cuda",
         dtype=torch.bfloat16,
     )
+    kv_cache[..., :head_dim] /= query_gain
     if use_fp8:
         fp8_dtype = current_platform.fp8_dtype()
         # The kernel's contract is that the cache already holds values in
@@ -725,6 +728,38 @@ def test_qsa_sparse_paged_attention_matches_reference(
     )
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("cdna_version", [3, 4])
+@pytest.mark.parametrize(
+    "num_rows,num_query_heads,num_kv_heads,page_size",
+    [
+        pytest.param(8, 6, 1, 1024, id="tp4_p8"),
+        pytest.param(513, 6, 1, 1024, id="tp4_p513"),
+    ],
+)
+def test_qsa_sparse_paged_attention_fp8_large_queries(
+    monkeypatch: pytest.MonkeyPatch,
+    cdna_version: int,
+    num_rows: int,
+    num_query_heads: int,
+    num_kv_heads: int,
+    page_size: int,
+) -> None:
+    # Query row maxima of about 900 exceed both e4m3 maxima (240 fnuz, 448 fn);
+    # the keys shrink by the same gain, so the scores are as at gain 1. Fails
+    # if the query is cast to e4m3 unscaled.
+    test_qsa_sparse_paged_attention_matches_reference(
+        monkeypatch,
+        cdna_version,
+        num_rows,
+        num_query_heads,
+        num_kv_heads,
+        page_size,
+        use_fp8=True,
+        query_gain=256.0,
+    )
 
 
 @requires_qsa_kernels

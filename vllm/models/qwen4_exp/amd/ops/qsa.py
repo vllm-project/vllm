@@ -356,6 +356,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     BLOCK_N: tl.constexpr,
     IS_FP8: tl.constexpr,
     FP8_DOTS: tl.constexpr,
+    FP8_PV: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    P_SCALE: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
@@ -375,15 +378,24 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         mask=head_offsets[:, None] < GROUP_SIZE,
         other=0.0,
     )
+    softmax_scale_log2: tl.constexpr = (HEAD_DIM**-0.5) * 1.4426950408889634
+    score_scale = tl.full((BLOCK_M,), softmax_scale_log2, dtype=tl.float32)
+    fp8_dtype: tl.constexpr = k_cache_ptr.dtype.element_ty
+    query_lo = query
     if FP8_DOTS:
-        # Unit K/V scales: the query goes to the cache's e4m3 as is, so both
-        # dots are FP8 MFMA and K/V are never widened.
-        query = query.to(k_cache_ptr.dtype.element_ty)
+        # e4m3 keeps 3 mantissa bits. Scale each query row to the e4m3 max and
+        # split it into hi + lo parts: about 7 bits, and it cannot overflow.
+        query_f32 = query.to(tl.float32)
+        query_scale = tl.max(tl.abs(query_f32), axis=1) / FP8_MAX
+        query_scale = tl.maximum(query_scale, 1.0e-30)
+        query_f32 = query_f32 / query_scale[:, None]
+        query = query_f32.to(fp8_dtype)
+        query_lo = (query_f32 - query.to(tl.float32)).to(fp8_dtype)
+        score_scale = query_scale * softmax_scale_log2
 
     max_value = tl.full((BLOCK_M,), -1.0e20, dtype=tl.float32)
     normalizer = tl.zeros((BLOCK_M,), dtype=tl.float32)
     accumulator = tl.zeros((BLOCK_M, HEAD_DIM), dtype=tl.float32)
-    softmax_scale_log2: tl.constexpr = (HEAD_DIM**-0.5) * 1.4426950408889634
 
     # Dynamic bounds avoid padded main-loop iterations for uneven splits.
     split_tile_start = split_id * NUM_TILES // NUM_SPLITS
@@ -436,27 +448,41 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             # e4m3 -> Q dtype is exact; keep the QK dot in Q's dtype (an fp8
             # QK dot measured slower and less accurate on the NVIDIA port).
             keys = keys.to(query.dtype)
+        if IS_FP8 and not FP8_PV:
             # Dequant V to fp16 for the PV dot: P <= 1 (online softmax) so
             # fp16 has the range, its wider mantissa is more accurate, and
             # the fp8->fp16 upcast with an fp16 PV dot is faster.
             values = values.to(tl.float16)
         scores = tl.dot(query, keys)
+        if FP8_DOTS:
+            scores = tl.dot(query_lo, keys, acc=scores)
         # Scaling scores avoids re-quantizing a scaled query to BF16.
-        scores *= softmax_scale_log2
+        scores *= score_scale[:, None]
         scores = tl.where(valid[None, :], scores, -1.0e20)
         next_max = tl.maximum(max_value, tl.max(scores, axis=1))
         alpha = tl.math.exp2(max_value - next_max)
         probabilities = tl.where(
             valid[None, :], tl.math.exp2(scores - next_max[:, None]), 0.0
         )
-        accumulator = tl.dot(
-            probabilities.to(values.dtype),
-            values,
-            acc=accumulator * alpha[:, None],
-        )
+        if FP8_PV:
+            # The same hi + lo split for P; P_SCALE keeps small P out of the
+            # e4m3 subnormals and is divided out after the loop.
+            p_scaled = probabilities * P_SCALE
+            p_hi = p_scaled.to(fp8_dtype)
+            p_lo = ((p_scaled - p_hi.to(tl.float32)) * 16.0).to(fp8_dtype)
+            accumulator = tl.dot(p_hi, values, acc=accumulator * alpha[:, None])
+            accumulator += tl.dot(p_lo, values) * 0.0625
+        else:
+            accumulator = tl.dot(
+                probabilities.to(values.dtype),
+                values,
+                acc=accumulator * alpha[:, None],
+            )
         normalizer = normalizer * alpha + tl.sum(probabilities, axis=1)
         max_value = next_max
 
+    if FP8_PV:
+        accumulator = accumulator * (1.0 / P_SCALE)
     has_values = normalizer > 0
     normalized_output = tl.where(
         has_values[:, None],
@@ -1085,9 +1111,16 @@ def qsa_sparse_paged_attention(
     base_programs = q.shape[0] * k_cache.shape[2]
     cdna_version = get_cdna_version()
     cdna_bf16 = cdna_version in (3, 4) and k_cache.dtype == torch.bfloat16
-    # With FP8 K/V on CDNA3/4 both dots run as FP8 MFMA: the query is cast to
-    # the cache's e4m3 and K/V are never widened.
-    fp8_dots = cdna_version in (3, 4) and is_fp8
+    # With FP8 K/V on CDNA3/4 the QK dot runs as FP8 MFMA on hi + lo e4m3
+    # parts of the query, and K is never widened. On CDNA4 the PV dot does the
+    # same with P; on CDNA3 those two dots cost more than widening V to FP16.
+    # A full head group under 32 programs runs faster on CDNA3 with K/V widened.
+    fp8_dots = (
+        cdna_version in (3, 4)
+        and is_fp8
+        and not (cdna_version == 3 and base_programs < 32 and block_m >= 16)
+    )
+    fp8_pv = fp8_dots and cdna_version == 4
     if cdna_bf16 or fp8_dots:
         # tl.dot with fewer than 16 rows is slow on CDNA3/4; pad the head group.
         block_m = max(block_m, 16)
@@ -1191,6 +1224,9 @@ def qsa_sparse_paged_attention(
         BLOCK_N=block_n,
         IS_FP8=is_fp8,
         FP8_DOTS=fp8_dots,
+        FP8_PV=fp8_pv,
+        FP8_MAX=torch.finfo(k_cache.dtype).max if fp8_dots else 1.0,
+        P_SCALE=128.0 if fp8_pv else 1.0,
         num_warps=partial_warps,
         num_stages=partial_stages,
     )
