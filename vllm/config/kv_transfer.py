@@ -207,9 +207,13 @@ class KVTransferConfig:
 
     def has_connector(self, connector_name: str) -> bool:
         """Whether a connector is configured directly or in nested MultiConnectors."""
+        nixl_pull_names = ("NixlConnector", "NixlPullConnector")
+        connector_names = (
+            nixl_pull_names if connector_name in nixl_pull_names else (connector_name,)
+        )
 
         def contains(name: str | None, extra_config: dict[str, Any]) -> bool:
-            if name == connector_name:
+            if name in connector_names:
                 return True
             if name != "MultiConnector":
                 return False

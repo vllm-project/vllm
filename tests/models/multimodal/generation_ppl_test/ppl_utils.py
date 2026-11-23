@@ -121,6 +121,7 @@ def vqa_ppl_test(
         with hf_runner(
             model_info.name,
             dtype=ci_envs.VLLM_CI_HF_DTYPE or model_info.hf_dtype,
+            trust_remote_code=model_info.trust_remote_code,
             auto_cls=AutoModelForImageTextToText,
         ) as hf_model:
             nll_sum = torch.tensor(0.0, dtype=torch.float32, device="cpu")
