@@ -74,8 +74,13 @@ def test_transformers_omni_generation(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
     model_id: str,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Every modality the model takes in one request, against the same model on HF."""
+    # TODO: Remove once huggingface/transformers#51077 is released
+    gemma3n_syncs = Version(transformers.__version__) < Version("5.25.0.dev0")
+    if model_id == "google/gemma-3n-E2B-it" and gemma3n_syncs:
+        monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "warn")
     settings = OMNI_MODEL_SETTINGS[model_id]
     modalities = settings.get("modalities", ("audio", "image", "video"))
     assets = {
