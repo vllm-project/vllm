@@ -99,6 +99,15 @@ pub enum RampUpStrategy {
     Exponential,
 }
 
+impl RampUpStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::Exponential => "exponential",
+        }
+    }
+}
+
 /// Strategy for assigning LoRA modules to requests.
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoraAssignment {
@@ -200,7 +209,8 @@ pub struct BenchServeArgs {
     #[arg(long)]
     pub input_len: Option<usize>,
 
-    /// General output length for datasets.
+    /// General output length for datasets. Maps to the dataset-specific output
+    /// length flags (e.g. --random-output-len, --sharegpt-output-len, --hf-output-len).
     #[arg(long)]
     pub output_len: Option<usize>,
 
@@ -406,10 +416,11 @@ pub struct BenchServeArgs {
     #[arg(long, default_value_t = false)]
     pub profile: bool,
 
-    /// Minimum server batch size (num_requests_running) before starting the
-    /// profiler. When set, profiling is deferred until the /metrics endpoint
-    /// reports at least this many running requests, then captures for
-    /// --profile-duration seconds. Requires --profile.
+    /// Minimum total running requests across engines reported by /metrics
+    /// before starting the profiler. When set, profiling is deferred until
+    /// this threshold is reached, then captures for --profile-duration seconds.
+    /// Only engines exposed by the /metrics endpoint at --base-url are counted.
+    /// Requires --profile.
     #[arg(long)]
     pub profile_batch_threshold: Option<usize>,
 
@@ -430,7 +441,9 @@ pub struct BenchServeArgs {
     #[arg(long)]
     pub result_dir: Option<String>,
 
-    /// Filename to save benchmark JSON results.
+    /// Filename to save benchmark JSON results. Sweeps and --num-runs add a
+    /// per-point suffix (`out-concurrency8.json`, `out-run2.json`) unless
+    /// --append-result is set.
     #[arg(long)]
     pub result_filename: Option<String>,
 
@@ -545,7 +558,9 @@ pub struct BenchServeArgs {
     pub append_result: bool,
 
     // --- ShareGPT dataset ---
-    /// Path to dataset file (required for sharegpt dataset).
+    /// Path to the dataset file, or the HuggingFace dataset ID for `hf`.
+    /// Rejected with synthetic datasets (random, random-mm, random-rerank,
+    /// prefix_repetition), which generate their own prompts.
     #[arg(long)]
     pub dataset_path: Option<String>,
 
@@ -629,7 +644,8 @@ pub struct BenchServeArgs {
     pub reset_prefix_cache: bool,
 
     // --- Multi-run ---
-    /// Number of benchmark runs for statistical aggregation.
+    /// Number of benchmark runs for statistical aggregation. With
+    /// --save-result, each run is saved to its own `-run<N>` file.
     #[arg(long, default_value_t = 1)]
     pub num_runs: usize,
 

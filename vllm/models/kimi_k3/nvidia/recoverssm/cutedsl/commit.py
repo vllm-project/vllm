@@ -6,18 +6,18 @@ Folds the n accepted tokens of a verify window into the checkpoint:
 
     S_n = S_0 * e^{L_n} + sum_{t<n} u_t (k_t * e^{L_n - L_t})
 
-(columns scale per key channel; ``u_t`` are the verify's corrections, ``k_t`` the
-normalized recorded keys and ``L_t`` the log decay of tokens 0..t inclusive). With
-prefix caching (``align``), a window that crosses a block boundary after its first
+(columns scale per key channel; `u_t` are the verify's corrections, `k_t` the
+normalized recorded keys and `L_t` the log decay of tokens 0..t inclusive). With
+prefix caching (`align`), a window that crosses a block boundary after its first
 m tokens also stores S_m to the boundary block's slot.
 
-Each CTA walks up to ``MAX_HEADS_PER_CTA`` heads of one (request, layer). A head's
+Each CTA walks up to `MAX_HEADS_PER_CTA` heads of one (request, layer). A head's
 32 KB state page streams in with one bulk copy into a double-buffered shared tile
 (the next head's page loads while this head is folded); thread c rebuilds key
 channel c's decays and scaled keys; 16 lanes per state row (8 keys each) fold the
 tile in place, and one bulk store writes it to the destination slot (the boundary
-state of ``align`` is stored row by row from registers). Layer tensors are addressed
-through the per-layer base-address tables of ``KDARecoverSSMCommitContext``.
+state of `align` is stored row by row from registers). Layer tensors are addressed
+through the per-layer base-address tables of `KDARecoverSSMCommitContext`.
 """
 
 import math
@@ -54,7 +54,7 @@ MAX_HEADS_PER_CTA = 8
 
 @asm()
 def store_bulk(dst, src, size):
-    """Bulk store of ``size`` bytes from shared memory, in this thread's bulk group."""
+    """Bulk store of `size` bytes from shared memory, in this thread's bulk group."""
     code = "cp.async.bulk.global.shared::cta.bulk_group [$0], [$1], $2; "
     code += "cp.async.bulk.commit_group;"
     return code, "l,r,r,~{memory}", (dst, src, Int32(size))
@@ -82,7 +82,7 @@ class KdaCommit:
     """Args: state / correction / key-gate base addresses [L], their slot / row
     strides [L] (elements), a_log [L, H], dt_bias [L, H, K], source slots [B],
     commit lengths [B], destination slots [B], boundary slots [B] and lengths [B]
-    (read with ``align``), lower bound, null slot, stream. Per slot the state is
+    (read with `align`), lower bound, null slot, stream. Per slot the state is
     [H, V, K] BF16; request b's records are row b of the corrections
     [rows, H, Q, V] FP32 and key / gate records [rows, H, Q, 2K] BF16, all
     contiguous."""

@@ -9,6 +9,7 @@ import torch
 import torchvision.transforms as T
 from PIL import Image, ImageOps
 from transformers import BatchFeature, LlamaTokenizerFast
+from transformers.image_transforms import to_pil_image
 from transformers.processing_utils import ProcessorMixin
 
 # TODO(Isotr0py): change modes for variants
@@ -298,6 +299,15 @@ class DeepseekOCRProcessor(ProcessorMixin):
 
         return prepare
 
+    def _prepare_global_view(self, image: Image.Image, cropping: bool) -> Image.Image:
+        if not cropping:
+            image = image.resize((self.image_size, self.image_size))
+        return ImageOps.pad(
+            image,
+            (self.base_size, self.base_size),
+            color=tuple(int(x * 255) for x in self.image_transform.mean),
+        )
+
     def tokenize_with_images(
         self,
         conversation: str,
@@ -324,7 +334,7 @@ class DeepseekOCRProcessor(ProcessorMixin):
         image_shapes = []
         num_image_tokens = []
         tokenized_str = []
-        for text_sep, image in zip(text_splits, images):
+        for text_sep, image in zip(text_splits, map(to_pil_image, images)):
             tokenized_sep = self.encode(text_sep, bos=False, eos=False)
             tokenized_str += tokenized_sep
             images_seq_mask += [False] * len(tokenized_sep)
@@ -341,14 +351,7 @@ class DeepseekOCRProcessor(ProcessorMixin):
             else:
                 crop_ratio = [1, 1]
 
-            if not cropping:
-                image = image.resize((self.image_size, self.image_size))
-
-            global_view = ImageOps.pad(
-                image,
-                (self.base_size, self.base_size),
-                color=tuple(int(x * 255) for x in self.image_transform.mean),
-            )
+            global_view = self._prepare_global_view(image, cropping)
             images_list.append(self.image_transform(global_view))
 
             num_width_tiles, num_height_tiles = crop_ratio

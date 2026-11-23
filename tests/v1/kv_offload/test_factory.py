@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for native offloading specs and their factory."""
 
+import logging
 import os
 import uuid
 from typing import Any
@@ -88,13 +89,19 @@ def test_create_cpu_offloading_spec():
     assert spec.num_chunks > 0
 
 
-def test_cpu_spec_sizes_normalized_worker_layout():
-    # The CPU spec now rounds the offloaded row up to the mmap page size
-    # (matching the shared region), so kv_bytes_per_chunk picks up padding
-    # while cpu_page_size_per_worker stays the un-padded per-worker slot.
+@pytest.mark.parametrize("shared_region", [False, True])
+def test_cpu_spec_sizes_normalized_worker_layout(monkeypatch, shared_region):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    monkeypatch.setattr(
+        CPUOffloadingSpec, "_uses_shared_region", lambda _: shared_region
+    )
+    log_info = MagicMock()
+    monkeypatch.setattr(cpu_spec_module.logger, "info", log_info)
     alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    budget = alignment * 18
     spec = _create_spec(
-        cpu_bytes_to_use=alignment * 3,
+        cpu_bytes_to_use=budget,
         worker_kv_bytes_per_block=16,
         blocks_per_chunk=2,
         world_size=6,
@@ -104,8 +111,13 @@ def test_cpu_spec_sizes_normalized_worker_layout():
 
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.cpu_page_size_per_worker == 32
-    assert spec.kv_bytes_per_chunk == alignment
-    assert spec.num_chunks == 3
+    assert spec.kv_bytes_per_chunk == alignment * (6 if shared_region else 1)
+    assert spec.num_chunks == (3 if shared_region else 18)
+    assert spec.num_chunks * spec.kv_bytes_per_chunk <= budget
+    # The chunks lost to per-rank padding are reported.
+    assert log_info.called is shared_region
+    if shared_region:
+        assert log_info.call_args.args[1:] == (3, 15)
 
 
 def test_cpu_spec_zero_worker_bytes_produces_empty_cache():
@@ -370,6 +382,7 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
         spec_name="TieringOffloadingSpec",
         cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        rank=1,
         world_size=4,
         replicated_layout=True,
     )
@@ -395,6 +408,8 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     spec.create_worker(kv_caches)
 
     assert region_calls[0]["rank"] == 0
+    # Workers share the slot, so each pre-faults only its share of the region.
+    assert region_calls[0]["populate_shard"] == (1, 4)
     assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
@@ -428,6 +443,54 @@ def test_tiering_spec_create_worker_uses_worker_rank_for_sharded_layout(monkeypa
     spec.create_worker(MagicMock())
 
     assert region_calls[0]["rank"] == 1
+    assert region_calls[0]["populate_shard"] is None
+
+
+@pytest.mark.parametrize(
+    "secondary_tiers,canonical_layout,is_parallelism_agnostic,replicated_layout,warns",
+    [
+        ([{"type": "example"}], False, True, False, True),
+        ([{"type": "example"}], False, False, False, True),
+        ([{"type": "example"}], True, False, False, True),
+        ([{"type": "example"}], True, True, False, False),
+        ([{"type": "example"}], False, False, True, False),
+        ([], False, False, False, False),
+    ],
+)
+def test_tiering_spec_warns_when_secondary_tiers_are_topology_bound(
+    caplog_vllm,
+    monkeypatch,
+    secondary_tiers,
+    canonical_layout,
+    is_parallelism_agnostic,
+    replicated_layout,
+    warns,
+):
+    """Direct-layout KV warns even when it is flagged parallelism-agnostic,
+    unless it is replicated MLA, which FileMapper shares across TP sizes."""
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    for name in ("SharedOffloadRegion", "CPUPrimaryTierOffloadingManager"):
+        monkeypatch.setattr(tiering_spec_module, name, MagicMock())
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        worker_kv_bytes_per_block=4096,
+        world_size=2 if replicated_layout else 1,
+        is_parallelism_agnostic=is_parallelism_agnostic,
+        replicated_layout=replicated_layout,
+        canonical_layout=canonical_layout,
+        extra_config={"secondary_tiers": secondary_tiers},
+    )
+
+    spec.get_manager().shutdown()
+
+    warnings = [
+        record
+        for record in caplog_vllm.records
+        if record.name == tiering_spec_module.__name__
+        and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == int(warns)
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
@@ -543,13 +606,17 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda(monkeypatch):
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
     monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
+    monkeypatch.setattr(cpu_spec_module, "check_shm_free_space", MagicMock())
+    monkeypatch.setattr(cpu_spec_module, "_all_workers_barrier", MagicMock())
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 5)
 
     kv_caches = MagicMock()
     spec.create_worker(kv_caches)
 
-    assert region_calls[0]["engine_id"] == "test-engine"
-    assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block * 4
+    # The logical rank keys its private region, regardless of the CUDA device.
+    assert region_calls[0]["engine_id"] == "test-engine_0"
+    assert region_calls[0]["rank"] == 0
+    assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
 
@@ -619,16 +686,35 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("replicated_layout", "rank", "device_index", "world_size", "expected_rank"),
+    (
+        "replicated_layout",
+        "rank",
+        "device_index",
+        "world_size",
+        "local_world_size",
+        "expected_engine_id",
+        "capacity_error",
+    ),
     [
-        (True, 1, 5, 4, 0),
-        (True, 0, 0, 4, 0),
-        (False, 1, 5, 4, 1),
-        (False, 3, 6, 4, 3),
+        (True, 1, 5, 4, 4, "test-engine", False),
+        (True, 0, 0, 4, 4, "test-engine", False),
+        (False, 1, 5, 4, 4, "test-engine_1", False),
+        (False, 0, 5, 4, 4, "test-engine_0", False),
+        (False, 3, 6, 4, 4, "test-engine_3", False),
+        # Ranks on other nodes do not allocate in this node's /dev/shm.
+        (False, 3, 1, 4, 2, "test-engine_3", False),
+        (False, 0, 5, 4, 4, "test-engine_0", True),
     ],
 )
-def test_cpu_spec_create_worker_rank_assignment(
-    monkeypatch, replicated_layout, rank, device_index, world_size, expected_rank
+def test_cpu_spec_create_worker_region_assignment(
+    monkeypatch,
+    replicated_layout,
+    rank,
+    device_index,
+    world_size,
+    local_world_size,
+    expected_engine_id,
+    capacity_error,
 ):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
@@ -640,11 +726,14 @@ def test_cpu_spec_create_worker_rank_assignment(
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
         rank=rank,
         world_size=world_size,
+        local_world_size=local_world_size,
         replicated_layout=replicated_layout,
     )
     assert isinstance(spec, CPUOffloadingSpec)
 
     region_calls: list[dict[str, Any]] = []
+    memory_check = MagicMock()
+    barrier = MagicMock()
 
     def fake_region_ctor(**kwargs):
         region_calls.append(kwargs)
@@ -652,11 +741,39 @@ def test_cpu_spec_create_worker_rank_assignment(
 
     monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", MagicMock())
+    monkeypatch.setattr(cpu_spec_module, "check_shm_free_space", memory_check)
+    monkeypatch.setattr(cpu_spec_module, "_all_workers_barrier", barrier)
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: device_index)
+
+    if capacity_error:
+        memory_check.side_effect = RuntimeError("Insufficient space in /dev/shm")
+        with pytest.raises(RuntimeError, match="Insufficient space"):
+            spec.create_worker(MagicMock())
+        # Peers waiting at the barrier are released even when the check fails.
+        barrier.assert_called_once_with()
+        assert region_calls == []
+        return
 
     spec.create_worker(MagicMock())
 
-    assert region_calls[0]["rank"] == expected_rank
+    assert region_calls[0]["engine_id"] == expected_engine_id
+    assert region_calls[0]["rank"] == 0
+    assert region_calls[0]["populate_shard"] == (
+        (rank, world_size) if replicated_layout else None
+    )
+    assert region_calls[0]["private"] is not replicated_layout
+    if replicated_layout:
+        assert region_calls[0]["barrier"] is barrier
+        memory_check.assert_not_called()
+        barrier.assert_not_called()
+    else:
+        assert region_calls[0]["barrier"] is None
+        region_bytes = spec.num_chunks * region_calls[0]["kv_bytes_per_chunk"]
+        memory_check.assert_called_once_with(
+            region_bytes * local_world_size,
+            allocation_name="CPU KV offload regions in /dev/shm",
+        )
+        barrier.assert_called_once_with()
 
 
 def test_offloading_spec_has_replicated_layout_default():
@@ -765,3 +882,64 @@ def test_build_metric_definitions_returns_counter_at_threshold():
     metrics = spec_cls.build_metric_definitions(extra_config)
 
     assert CPUOffloadingMetrics.STORES_SKIPPED in metrics
+
+
+@pytest.mark.parametrize(
+    ("secondary_tiers", "spanning_group", "rejected"),
+    [
+        ([], "tp", False),
+        ([{"type": "example"}], None, False),
+        ([{"type": "example"}], "tp", True),
+        ([{"type": "example"}], "pp", True),
+        ([{"type": "example"}], "pcp", True),
+    ],
+)
+def test_tiering_spec_rejects_secondary_tiers_across_nodes(
+    monkeypatch, secondary_tiers, spanning_group, rejected
+):
+    import vllm.distributed.parallel_state as parallel_state
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        worker_kv_bytes_per_block=4096,
+        rank=1,
+        world_size=4,
+        tp_size=2,
+        pp_size=2,
+        extra_config={"secondary_tiers": secondary_tiers},
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+
+    groups = {
+        name: MagicMock(world_size=2, cpu_group=name) for name in ("tp", "pp", "pcp")
+    }
+    monkeypatch.setattr(parallel_state, "get_tp_group", lambda: groups["tp"])
+    monkeypatch.setattr(parallel_state, "get_pp_group", lambda: groups["pp"])
+    monkeypatch.setattr(parallel_state, "get_pcp_group", lambda: groups["pcp"])
+    queried: list[str] = []
+
+    def same_node_as(group, source_rank):
+        queried.append(group)
+        return [True, group != spanning_group]
+
+    monkeypatch.setattr(parallel_state, "in_the_same_node_as", same_node_as)
+    region_ctor = MagicMock()
+    worker_ctor = MagicMock()
+    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", region_ctor)
+    monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", worker_ctor)
+
+    if rejected:
+        with pytest.raises(NotImplementedError, match="span several nodes"):
+            spec.create_worker(MagicMock())
+        # Rejected before any CPU memory is allocated.
+        region_ctor.assert_not_called()
+        worker_ctor.assert_not_called()
+    else:
+        spec.create_worker(MagicMock())
+        region_ctor.assert_called_once()
+        worker_ctor.assert_called_once()
+    # Without secondary tiers each node's region serves its own workers. With
+    # them every group is queried, even after one spans nodes, since each
+    # query is a collective that the group's other ranks also join.
+    assert sorted(queried) == (["pcp", "pp", "tp"] if secondary_tiers else [])

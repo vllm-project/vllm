@@ -34,3 +34,6 @@ docker manifest create vllm/vllm-openai:"$TAG_NAME" vllm/vllm-openai:"$TAG_NAME"
 docker manifest create vllm/vllm-openai:"$TAG_NAME"-"$BUILDKITE_COMMIT" vllm/vllm-openai:"$TAG_NAME"-x86_64 vllm/vllm-openai:"$TAG_NAME"-aarch64 --amend
 docker manifest push vllm/vllm-openai:"$TAG_NAME"
 docker manifest push vllm/vllm-openai:"$TAG_NAME"-"$BUILDKITE_COMMIT"
+# mirror the mutable tag to the vllm/vllm alias, e.g. vllm/vllm:nightly or vllm/vllm:nightly-cu134
+# (registry-side copy of a manifest list, so the digest is kept)
+docker buildx imagetools create -t vllm/vllm:nightly"$ORIG_TAG_SUFFIX" vllm/vllm-openai:"$TAG_NAME"
