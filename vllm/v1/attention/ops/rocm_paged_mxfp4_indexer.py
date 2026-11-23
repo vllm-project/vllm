@@ -180,7 +180,6 @@ ROCM_MXFP4_Q_PROJECT_MAX_ROWS = 128
 def rocm_mxfp4_indexer_q_projects_weights(
     hidden_states: torch.Tensor, weights_proj: torch.Tensor
 ) -> bool:
-    """Whether `rocm_mxfp4_indexer_q_quant` should project these rows' weights."""
     return (
         not envs.VLLM_BATCH_INVARIANT
         and hidden_states.shape[0] <= ROCM_MXFP4_Q_PROJECT_MAX_ROWS

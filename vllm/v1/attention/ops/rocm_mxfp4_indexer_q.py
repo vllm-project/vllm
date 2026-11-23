@@ -200,7 +200,6 @@ def q_rope_mxfp4_quant(
     hidden_states: torch.Tensor | None = None,
     weights_proj: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """GPT-J RoPE on the last rope_dim dims -> MXFP4 query, plus scaled weights."""
     if q.ndim != 3 or q.stride(2) != 1:
         raise ValueError(
             f"q must be [T, H, D] with unit last stride, got "
@@ -293,7 +292,6 @@ def q_rope_mxfp4_quant(
 def can_project_weights(
     hidden_states: torch.Tensor, weights_proj: torch.Tensor, num_heads: int
 ) -> bool:
-    """Whether `q_rope_mxfp4_quant` can project `num_heads` weights from these."""
     return (
         hidden_states.dim() == 2
         and weights_proj.dim() == 2

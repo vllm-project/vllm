@@ -1112,7 +1112,6 @@ def test_dspark_draft_model_samples_with_fused_markov(
 
 @pytest.mark.parametrize("gate, lora", [(False, False), (True, False), (True, True)])
 def test_select_skips_weights_proj_when_the_quant_projects(monkeypatch, gate, lora):
-    """_select runs weights_proj only when the indexer's Q quant cannot project."""
     from vllm.lora.layers.base import BaseLayerWithLoRA
     from vllm.models.deepseek_v41.amd import rocm
 

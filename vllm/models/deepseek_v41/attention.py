@@ -1633,7 +1633,6 @@ class DeepseekV4Indexer(nn.Module):
         )
 
     def projects_weights(self, hidden_states: torch.Tensor) -> bool:
-        """Whether `forward_q` projects the per-head weights from `hidden_states`."""
         return False
 
     def forward_q(

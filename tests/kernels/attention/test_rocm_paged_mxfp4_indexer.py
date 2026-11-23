@@ -793,7 +793,6 @@ def test_decode_row_shard_matches_replicated(monkeypatch, world, query_lens):
 
 @pytest.mark.parametrize("rows, heads", [(128, HEADS), (512, HEADS), (4097, 64)])
 def test_q_quant_matches_aiter_and_projects_weights(rows, heads):
-    """The Q quant writes aiter's bytes and can project rounded-once weights."""
     from aiter.ops.triton.rope.q_rope_mxfp4_quant import q_rope_mxfp4_quant
 
     g = torch.Generator(device=DEVICE).manual_seed(rows)
