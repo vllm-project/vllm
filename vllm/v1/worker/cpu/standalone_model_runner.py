@@ -141,6 +141,12 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         self.kv_block_zeroer: CPUKVBlockZeroer | None = None
 
         self.vocab_size = self.model_config.get_vocab_size()
+        masked = self.model_config.masked_token_ids
+        self.masked_token_ids = (
+            torch.tensor(masked, dtype=torch.int64, device=self.device)
+            if masked
+            else None
+        )
         self.max_model_len = self.model_config.max_model_len
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
@@ -928,6 +934,9 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states)
+
+        if self.masked_token_ids is not None:
+            logits.index_fill_(-1, self.masked_token_ids, float("-inf"))
 
         if grammar_output is not None and logits.shape[0] > 0:
             assert self.structured_outputs_worker is not None
