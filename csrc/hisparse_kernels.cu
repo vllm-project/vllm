@@ -504,33 +504,23 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
 
   // Phase 1: translate every row's request-relative positions in one pass,
   // resolve resident rows directly, and count the host-backed positions.
-  // Until phase 2, s_chunk_off holds per-row valid counts, or when packing,
-  // top_k - (first invalid column), with s_evict_off holding
-  // 1 + (last valid column). A row needs compaction iff an invalid column
-  // precedes a valid one.
+  // Until phase 2, s_chunk_off holds per-row valid counts and, when packing,
+  // s_evict_off holds top_k - (first invalid column). A row needs compaction
+  // iff it has more valid columns than precede its first invalid one.
   int32_t* s_row_valid = s_chunk_off;
-  int32_t* s_first_invalid = s_chunk_off;
-  int32_t* s_last_valid = s_evict_off;
+  int32_t* s_first_invalid = s_evict_off;
   const int num_positions = (end_row - first_row) * top_k;
-  const auto record_validity = [&](const unsigned int active, const int r,
-                                   const int col, const bool valid) {
-    const int leader = __ffs(active) - 1;
-    if (__all_sync(active, r == __shfl_sync(active, r, leader))) {
-      const unsigned int valid_bits = __ballot_sync(active, valid);
-      const unsigned int invalid_bits = active & ~valid_bits;
-      if (lane_id == leader) {
-        const int base_col = col - lane_id;
-        if (valid_bits != 0) {
-          atomicMax(&s_last_valid[r], base_col + kWarpSize - __clz(valid_bits));
-        }
-        if (invalid_bits != 0) {
-          atomicMax(&s_first_invalid[r],
-                    top_k - (base_col + __ffs(invalid_bits) - 1));
-        }
+  // With top_k a multiple of the warp size, a warp's positions share a row.
+  const bool warp_in_one_row = top_k % kWarpSize == 0;
+  const auto record_first_invalid = [&](const unsigned int active, const int r,
+                                        const int col, const bool valid) {
+    if (warp_in_one_row) {
+      const unsigned int invalid_bits = __ballot_sync(active, !valid);
+      if (invalid_bits != 0 && lane_id == __ffs(active) - 1) {
+        atomicMax(&s_first_invalid[r],
+                  top_k - (col - lane_id + __ffs(invalid_bits) - 1));
       }
-    } else if (valid) {
-      atomicMax(&s_last_valid[r], col + 1);
-    } else {
+    } else if (!valid) {
       atomicMax(&s_first_invalid[r], top_k - col);
     }
   };
@@ -552,10 +542,11 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
         source_num_blocks, source_block_size, resident_bt_stride,
         resident_num_reqs, resident_num_blocks, resident_block_size,
         resident_row);
-    if (pack_attention) {
-      record_validity(active, row - first_row, i, resident_row >= 0 || g >= 0);
-    } else if (resident_row >= 0 || g >= 0) {
+    if (resident_row >= 0 || g >= 0)
       atomicAdd(&s_row_valid[row - first_row], 1);
+    if (pack_attention) {
+      record_first_invalid(active, row - first_row, i,
+                           resident_row >= 0 || g >= 0);
     }
     if (resident_row >= 0) {
       store_hot_index(row_out, row_attention, i, resident_row, hot_block_size,
@@ -604,13 +595,12 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   for (int row = first_row + tid; row < end_row; row += blockDim.x) {
     const int r = row - first_row;
     if (pack_attention) {
-      const int last_valid = s_last_valid[r] - 1;
-      const bool compact = top_k - s_first_invalid[r] < last_valid;
+      const bool compact = s_row_valid[r] > top_k - s_first_invalid[r];
       needs_compaction |= compact;
       // -1 marks rows that pack_valid_to_front must compact.
       valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
-          compact ? -1 : last_valid + 1;
-      s_last_valid[r] = 0;
+          compact ? -1 : s_row_valid[r];
+      s_first_invalid[r] = 0;
     } else if (valid_counts != nullptr) {
       valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
           s_row_valid[r];
