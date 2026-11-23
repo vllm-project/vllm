@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the Model Runner V2 prompt-embeds overlay (PromptEmbedsState).
 
-The overlay kernel reads each request's GPU-resident prompt embeddings through
-a per-request pointer table and writes the rows scheduled this step into
+Each step copies the rows it computes from pinned host memory into a GPU
+staging buffer and points a per-request pointer table at them; the overlay
+kernel writes them into
 `inputs_embeds`, honoring chunked prefill (`num_computed_tokens` offset), the
 prompt/decode boundary (rows past the embeds length untouched), and the
 mixed-mode `prompt_is_token_ids` mask (token-id rows keep the base embedding).
@@ -107,7 +108,6 @@ def test_overlay_chunked_prefill_and_decode():
     state.add_request(0, _NewReqData("a", embeds_a))
     state.add_request(1, _NewReqData("b", embeds_b))
     state.add_request(2, _NewReqData("c", None))
-    state.apply_staged_writes()
 
     # a: chunk [2, 6) of its embeds; b: fully decoded; c: no embeds.
     batch = _batch(
@@ -125,7 +125,6 @@ def test_overlay_clamps_to_embeds_length():
     state = _make_state()
     embeds = torch.randn(4, HIDDEN, dtype=torch.float32)
     state.add_request(3, _NewReqData("a", embeds))
-    state.apply_staged_writes()
 
     batch = _batch(num_scheduled=[3], idx_mapping=[3], req_ids=["a"])
     out, base = _apply(state, batch, num_computed=[2], num_tokens=3)
@@ -141,7 +140,6 @@ def test_overlay_respects_is_token_ids_mask():
     embeds = torch.randn(5, HIDDEN, dtype=torch.float32)
     is_token_ids = [True, False, False, True, False]
     state.add_request(0, _NewReqData("a", embeds, is_token_ids))
-    state.apply_staged_writes()
 
     batch = _batch(num_scheduled=[5], idx_mapping=[0], req_ids=["a"])
     out, base = _apply(state, batch, num_computed=[0], num_tokens=5)
@@ -161,10 +159,8 @@ def test_index_reuse_clears_stale_entry():
     # overlay is skipped entirely when no request holds embeds).
     other = torch.randn(2, HIDDEN, dtype=torch.float32)
     state.add_request(1, _NewReqData("other", other))
-    state.apply_staged_writes()
     state.remove_request("a")
     state.add_request(0, _NewReqData("b", None))
-    state.apply_staged_writes()
 
     batch = _batch(num_scheduled=[2, 2], idx_mapping=[0, 1], req_ids=["b", "other"])
     out, base = _apply(state, batch, num_computed=[0, 0], num_tokens=4)
@@ -174,34 +170,20 @@ def test_index_reuse_clears_stale_entry():
 
 
 def test_drops_embeds_after_last_prompt_step():
-    """A request's GPU embeddings are freed after the step that computes its
-    last prompt position, and only then; the scheduler counts them against
-    the max_model_len budget until that step."""
+    """A request's embeddings are freed after the step that computes its
+    last prompt position, and only then; the scheduler counts them as sent
+    until that step."""
     state = _make_state()
     embeds = torch.randn(6, HIDDEN, dtype=torch.float32)
     state.add_request(0, _NewReqData("a", embeds))
-    state.apply_staged_writes()
 
     out, _ = _apply(state, _batch([4], [0], ["a"]), num_computed=[0], num_tokens=4)
     torch.testing.assert_close(out, embeds[0:4].to(DEVICE))
-    assert "a" in state.gpu_tensors
+    assert "a" in state.host_tensors
 
     out, _ = _apply(state, _batch([2], [0], ["a"]), num_computed=[4], num_tokens=2)
     torch.testing.assert_close(out, embeds[4:6].to(DEVICE))
-    assert "a" not in state.gpu_tensors
-
-
-def test_rows_over_budget_fail_loudly():
-    """Rows held on the GPU must stay within the budget KV cache planning sets
-    aside. Adding past it means the scheduler and workers disagree on when rows
-    are freed, so it fails with an error that names the request."""
-    state = _make_state()
-    state.add_request(0, _NewReqData("a", torch.randn(10, HIDDEN)))
-    with pytest.raises(RuntimeError, match="request b exceed the prompt_embeds budget"):
-        state.add_request(1, _NewReqData("b", torch.randn(7, HIDDEN)))
-
-    state.remove_request("a")
-    state.add_request(1, _NewReqData("b", torch.randn(7, HIDDEN)))
+    assert "a" not in state.host_tensors
 
 
 def test_overlay_reads_rows_past_the_offset():
@@ -213,9 +195,20 @@ def test_overlay_reads_rows_past_the_offset():
         0,
         _NewReqData("a", embeds[6:], prompt_embeds_offset=6, num_computed_tokens=6),
     )
-    state.apply_staged_writes()
 
     out, _ = _apply(state, _batch([4], [0], ["a"]), num_computed=[6], num_tokens=4)
 
     torch.testing.assert_close(out, embeds[6:10].to(DEVICE))
-    assert "a" not in state.gpu_tensors
+    assert "a" not in state.host_tensors
+
+
+def test_staging_buffer_is_allocated_on_first_use():
+    """The staging buffer is allocated only when a step stages rows: after KV
+    cache sizing, which sets its memory aside, and never by dummy runs."""
+    state = _make_state()
+    state.add_request(0, _NewReqData("a", torch.randn(4, HIDDEN)))
+    assert state._staged is None
+
+    _apply(state, _batch([4], [0], ["a"]), num_computed=[0], num_tokens=4)
+
+    assert state._staged is not None

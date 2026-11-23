@@ -57,7 +57,7 @@ class DefaultModelState(ModelState):
             )
             self.prompt_embeds_state = PromptEmbedsState(
                 self.max_num_reqs,
-                prompt_embeds_budget_rows(self.max_model_len, self.scheduler_config),
+                prompt_embeds_budget_rows(self.scheduler_config),
                 self.inputs_embeds_size,
                 self.dtype,
                 self.device,
@@ -135,12 +135,6 @@ class DefaultModelState(ModelState):
             return None
         return self.rope_state.get_prefill_delta(req_index)
 
-    def update_max_model_len(self, max_model_len: int) -> None:
-        if self.prompt_embeds_state is not None:
-            self.prompt_embeds_state.max_num_rows = prompt_embeds_budget_rows(
-                max_model_len, self.scheduler_config
-            )
-
     def remove_request(self, req_id: str) -> None:
         if self.mm_prefix_ranges is not None:
             self.mm_prefix_ranges.pop(req_id, None)
@@ -150,8 +144,6 @@ class DefaultModelState(ModelState):
     def apply_staged_writes(self) -> None:
         if self.rope_state is not None:
             self.rope_state.apply_staged_writes()
-        if self.prompt_embeds_state is not None:
-            self.prompt_embeds_state.apply_staged_writes()
 
     def dummy_inputs_embeds(
         self, num_tokens: int, input_ids: torch.Tensor | None = None

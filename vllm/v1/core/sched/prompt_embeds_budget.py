@@ -11,17 +11,10 @@ if TYPE_CHECKING:
     from vllm.config import SchedulerConfig, VllmConfig
 
 
-def prompt_embeds_budget_rows(
-    max_model_len: int, scheduler_config: "SchedulerConfig"
-) -> int:
-    """`prompt_embeds` rows the workers may hold at once, summed over the
-    requests whose prompts are not computed yet: one max-length prompt still
-    being prefilled plus a full step of new prompts."""
-    # TODO(LuisRobaina): Shrink this worst case by copying each step's
-    # rows from pinned host memory, or by capping prompt_embeds length. Then
-    # it no longer depends on max_model_len, and an auto-fit shortened after
-    # warmup no longer leaves the rows of the difference unused.
-    return max_model_len + scheduler_config.max_num_batched_tokens
+def prompt_embeds_budget_rows(scheduler_config: "SchedulerConfig") -> int:
+    """`prompt_embeds` rows each worker holds on the GPU: one step's rows, which
+    it stages there while the rest stay in host memory."""
+    return scheduler_config.max_num_batched_tokens
 
 
 def prompt_embeds_row_bytes(vllm_config: "VllmConfig") -> int:
@@ -36,58 +29,39 @@ def prompt_embeds_row_bytes(vllm_config: "VllmConfig") -> int:
     return model_config.get_inputs_embeds_size() * model_config.dtype.itemsize
 
 
-def prompt_embeds_budget_bytes(
-    vllm_config: "VllmConfig", max_model_len: int | None = None
-) -> int:
-    """GPU memory of the `prompt_embeds` rows the workers may hold, for
-    `max_model_len` (the configured one by default), or 0 without prompt
-    embeds."""
+def prompt_embeds_budget_bytes(vllm_config: "VllmConfig") -> int:
+    """GPU memory of the `prompt_embeds` rows a worker stages per step, or 0
+    without prompt embeds."""
     row_bytes = prompt_embeds_row_bytes(vllm_config)
     if not row_bytes:
         return 0
-    if max_model_len is None:
-        max_model_len = vllm_config.model_config.max_model_len
-    rows = prompt_embeds_budget_rows(max_model_len, vllm_config.scheduler_config)
-    return rows * row_bytes
+    return prompt_embeds_budget_rows(vllm_config.scheduler_config) * row_bytes
 
 
-class PromptEmbedsBudget:
-    """The `prompt_embeds` rows the workers hold on the GPU, against the
-    `max_num_rows` that KV cache planning sets memory aside for.
-
-    A request reserves the rows it is sent, those of positions not computed
-    yet, and releases them once its prompt is computed, preempted or freed.
-
-    Attributes:
-        max_num_rows: Rows the workers may hold at once, summed over requests.
-        num_rows: Rows reserved now, summed over requests.
-
+class SentPromptEmbeds:
+    """The `prompt_embeds` rows sent to the workers, per request: those of
+    positions not computed yet when the request was sent. The workers hold them
+    until its prompt is computed, preempted or freed.
     """
 
-    def __init__(self, max_num_rows: int) -> None:
-        self.max_num_rows = max_num_rows
-        self.num_rows = 0
-        # req_id -> rows reserved by the request, for requests holding rows.
+    def __init__(self) -> None:
+        # req_id -> rows sent, for requests whose workers hold rows.
         self._rows: dict[str, int] = {}
 
-    def fits(self, request: Request, num_computed_tokens: int) -> bool:
-        num_rows = num_prompt_embeds_to_send(request, num_computed_tokens)
-        return self.num_rows + num_rows <= self.max_num_rows
-
-    def reserve(self, request: Request, num_computed_tokens: int) -> None:
+    def add(self, request: Request, num_computed_tokens: int) -> None:
         if request.prompt_embeds is None:
             return
         if request.request_id in self._rows:
             raise RuntimeError(
                 f"prompt_embeds rows of request {request.request_id} are already "
-                "reserved; reserving again would leak them."
+                "sent; sending them again would leak them."
             )
-        num_rows = num_prompt_embeds_to_send(request, num_computed_tokens)
-        self._rows[request.request_id] = num_rows
-        self.num_rows += num_rows
+        self._rows[request.request_id] = num_prompt_embeds_to_send(
+            request, num_computed_tokens
+        )
 
     def release(self, req_id: str) -> None:
-        self.num_rows -= self._rows.pop(req_id, 0)
+        self._rows.pop(req_id, None)
 
     def offset(self, request: Request) -> int:
         """Prompt position of the first row the workers hold: rows below it

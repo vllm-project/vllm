@@ -682,8 +682,8 @@ def measure_kv_cache_blocks(
                 format_gib(requested_memory),
                 format_gib(withheld),
             )
-    # Leave room for the prompt_embeds rows workers may hold: they are
-    # allocated per request, after this measurement.
+    # Leave room for the prompt_embeds staging buffer: it is allocated on first
+    # use, after this measurement.
     available = max(available - prompt_embeds_budget_bytes(vllm_config), 0)
     kv_cache_bytes = reserve_mm_ipc_gpu_memory(
         available,

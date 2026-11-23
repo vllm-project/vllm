@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import NamedTuple
+
 import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -12,19 +14,26 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 TOKEN_BLOCK = 16
 
 
-class PromptEmbedsState:
-    """GPU-side state for user-provided prompt embeddings.
+class _HostRows(NamedTuple):
+    """A request's uncomputed prompt_embeds rows, in pinned host memory."""
 
-    Each request's embeddings are copied to the GPU once at `add_request`,
-    off the per-step hot path. A per-request pointer table (UVA) then lets a
-    single triton kernel overlay all scheduled prompt-embeds rows onto
-    `inputs_embeds` each step, with no python loops or per-request H2D copies.
+    embeds: torch.Tensor
+    is_token_id: torch.Tensor | None
+    """uint8 flags of a mixed prompt's token-id rows, or None."""
+
+
+class PromptEmbedsState:
+    """User-provided prompt embeddings, kept in pinned host memory.
+
+    Each step copies only the rows it computes into a GPU staging buffer of
+    `max_num_rows` rows, and points a per-request pointer table (UVA) at them,
+    so a single triton kernel overlays all of them onto `inputs_embeds`.
+    The staging buffer is allocated on first use, after KV cache sizing, which
+    sets its memory aside.
 
     A request is sent only the embeddings of positions not computed yet, and
     they are dropped after the step that computes its last prompt position; a
-    request rolled back below them is re-sent. The scheduler admits requests so
-    that the rows held here stay within `max_num_rows`, which KV cache planning
-    sets memory aside for.
+    request rolled back below them is re-sent.
     """
 
     def __init__(
@@ -38,69 +47,73 @@ class PromptEmbedsState:
         self.hidden_size = hidden_size
         self.dtype = dtype
         self.device = device
+        self.pin_memory = is_pin_memory_available()
 
-        # req_id -> (embeds, is_token_ids mask or None). Holds the references
-        # that keep the pointer table below valid.
-        self.gpu_tensors: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
-        # Rows held in gpu_tensors, bounded by the scheduler's budget.
+        # req_id -> the request's rows in host memory.
+        self.host_tensors: dict[str, _HostRows] = {}
+        # Indexed by req_state index: prompt position of the first host row
+        # (rows below it were computed before the request was sent) and the end
+        # prompt position, 0 once the request's rows are dropped.
+        self.host_offsets = np.zeros(max_num_reqs, dtype=np.int32)
+        self.host_ends = np.zeros(max_num_reqs, dtype=np.int32)
+
+        # The most rows held on the GPU at once, which KV cache planning sets
+        # aside: one step's rows, staged.
         self.max_num_rows = max_num_rows
-        self.num_rows = 0
+        # GPU staging buffers for one step's rows and their token-id flags,
+        # allocated together by _get_staged_rows on first use.
+        self._staged: tuple[torch.Tensor, torch.Tensor] | None = None
 
-        # Indexed by req_state index. Stale entries after removal are
-        # harmless: add_request rewrites all fields for every index it claims.
+        # Indexed by req_state index and rewritten each step for the requests in
+        # the batch: the kernel reads staged row `num_computed + t - offset`
+        # from `embeds_ptrs` up to prompt position `embeds_lens`.
         self.embeds_ptrs = UvaBackedTensor(max_num_reqs, dtype=torch.uint64)
         self.mask_ptrs = UvaBackedTensor(max_num_reqs, dtype=torch.uint64)
-        # Row 0 holds prompt position `offset`, rows below it were computed
-        # before the request was sent. `embeds_lens` is the end position.
         self.embeds_offsets = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.embeds_lens = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
-        self._release(new_req_data.req_id)
+        self.host_tensors.pop(new_req_data.req_id, None)
         prompt_embeds = new_req_data.prompt_embeds
         if prompt_embeds is None:
-            self.embeds_lens.np[req_index] = 0
+            self.host_ends[req_index] = 0
             return
 
-        # The scheduler releases rows when it schedules the step that drops
-        # them, this holds only while steps run in order and each removes
-        # requests before adding new ones.
-        num_rows = prompt_embeds.shape[0]
-        if self.num_rows + num_rows > self.max_num_rows:
-            raise RuntimeError(
-                f"prompt_embeds rows of request {new_req_data.req_id} exceed the "
-                f"prompt_embeds budget ({self.num_rows} held + {num_rows} > "
-                f"{self.max_num_rows})"
-            )
-        self.num_rows += num_rows
-        embeds = async_tensor_h2d(prompt_embeds, device=self.device, dtype=self.dtype)
-        embeds = embeds.contiguous()
+        # Pinned, so the per-step copies are DMA transfers.
+        embeds = torch.empty(
+            prompt_embeds.shape, dtype=self.dtype, pin_memory=self.pin_memory
+        ).copy_(prompt_embeds)
         is_token_ids = new_req_data.prompt_is_token_ids
         mask = None
         if is_token_ids is not None:
-            mask = async_tensor_h2d(is_token_ids, device=self.device, dtype=torch.uint8)
-        self.gpu_tensors[new_req_data.req_id] = (embeds, mask)
-        self.embeds_ptrs.np[req_index] = embeds.data_ptr()
-        self.mask_ptrs.np[req_index] = 0 if mask is None else mask.data_ptr()
+            mask = torch.tensor(
+                is_token_ids, dtype=torch.uint8, pin_memory=self.pin_memory
+            )
+        self.host_tensors[new_req_data.req_id] = _HostRows(embeds, mask)
         offset = new_req_data.prompt_embeds_offset
         assert offset <= new_req_data.num_computed_tokens
-        self.embeds_offsets.np[req_index] = offset
-        self.embeds_lens.np[req_index] = offset + embeds.shape[0]
+        self.host_offsets[req_index] = offset
+        self.host_ends[req_index] = offset + embeds.shape[0]
 
     def remove_request(self, req_id: str) -> None:
-        self._release(req_id)
+        # Pinned memory read by an in-flight copy is not reused before the copy
+        # completes, so this is safe right after issuing it.
+        self.host_tensors.pop(req_id, None)
 
-    def _release(self, req_id: str) -> None:
-        tensors = self.gpu_tensors.pop(req_id, None)
-        if tensors is not None:
-            embeds, _ = tensors
-            self.num_rows -= embeds.shape[0]
-
-    def apply_staged_writes(self) -> None:
-        self.embeds_ptrs.copy_to_uva()
-        self.mask_ptrs.copy_to_uva()
-        self.embeds_offsets.copy_to_uva()
-        self.embeds_lens.copy_to_uva()
+    def _get_staged_rows(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """The GPU staging buffers for one step's rows and their token-id
+        flags, copied there from pinned host memory."""
+        if self._staged is None:
+            self._staged = (
+                torch.empty(
+                    self.max_num_rows,
+                    self.hidden_size,
+                    dtype=self.dtype,
+                    device=self.device,
+                ),
+                torch.empty(self.max_num_rows, dtype=torch.uint8, device=self.device),
+            )
+        return self._staged
 
     def apply(
         self,
@@ -109,13 +122,21 @@ class PromptEmbedsState:
         inputs_embeds: torch.Tensor,
     ) -> None:
         """Overlay prompt embeddings onto `inputs_embeds` for the batch."""
-        if not self.gpu_tensors:
+        if not self.host_tensors:
+            # No request holds prompt embeddings left to compute.
             return
-        # The kernel reinterprets raw source pointers as inputs_embeds' dtype.
+        start, end = self._prompt_embeds_positions(input_batch)
+        staged = np.flatnonzero(end > start)
+        if len(staged) == 0:
+            # No request in this batch computes a position with a prompt
+            # embedding.
+            return
+        self._stage_rows(input_batch, start, end, staged)
+
+        # The kernel reads the staged rows as inputs_embeds' dtype.
         assert inputs_embeds.dtype == self.dtype
-        num_reqs = input_batch.num_reqs
         max_query_len = int(input_batch.num_scheduled_tokens.max())
-        grid = (num_reqs, triton.cdiv(max_query_len, TOKEN_BLOCK))
+        grid = (input_batch.num_reqs, triton.cdiv(max_query_len, TOKEN_BLOCK))
         _apply_prompt_embeds_kernel[grid](
             inputs_embeds,
             inputs_embeds.stride(0),
@@ -130,22 +151,70 @@ class PromptEmbedsState:
             TOKEN_BLOCK=TOKEN_BLOCK,
             BLOCK_SIZE=1024,
         )
-        self._drop_computed(input_batch)
+        self._drop_computed(input_batch, end)
 
-    def _drop_computed(self, input_batch: InputBatch) -> None:
-        # Freeing is stream-ordered after the kernel above, which reads them.
-        # The stale UVA length is harmless: once its rows are computed, the
-        # kernel skips a request before reading its pointer.
+    def _drop_computed(self, input_batch: InputBatch, end: np.ndarray) -> None:
         num_reqs = input_batch.num_reqs
         idx_mapping = input_batch.idx_mapping_np[:num_reqs]
-        embeds_lens = self.embeds_lens.np[idx_mapping]
-        end = (
-            input_batch.num_computed_tokens_np[:num_reqs]
-            + input_batch.num_scheduled_tokens[:num_reqs]
+        host_ends = self.host_ends[idx_mapping]
+        for i in np.flatnonzero((host_ends > 0) & (end >= host_ends)).tolist():
+            self.remove_request(input_batch.req_ids[i])
+            self.host_ends[idx_mapping[i]] = 0
+
+    def _prompt_embeds_positions(
+        self, input_batch: InputBatch
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """The prompt positions `[start, end)` each request in the batch
+        computes this step that have a prompt embedding; empty for the others."""
+        num_reqs = input_batch.num_reqs
+        idx_mapping = input_batch.idx_mapping_np[:num_reqs]
+        start = input_batch.num_computed_tokens_np[:num_reqs]
+        end = np.minimum(
+            start + input_batch.num_scheduled_tokens[:num_reqs],
+            self.host_ends[idx_mapping],
         )
-        for i in np.flatnonzero((embeds_lens > 0) & (end >= embeds_lens)).tolist():
-            self._release(input_batch.req_ids[i])
-            self.embeds_lens.np[idx_mapping[i]] = 0
+        return start, end
+
+    def _stage_rows(
+        self,
+        input_batch: InputBatch,
+        start: np.ndarray,
+        end: np.ndarray,
+        staged: np.ndarray,
+    ) -> None:
+        """Copy the prompt positions `[start, end)` of the `staged` requests from
+        host memory into the staging buffer, and point their table entries at
+        them. The other requests in the batch get no rows this step."""
+        idx_mapping = input_batch.idx_mapping_np[: input_batch.num_reqs]
+        assert int((end - start)[staged].sum()) <= self.max_num_rows
+        # On the compute stream, so the previous step's overlay has read the
+        # staging buffer before this copy overwrites it.
+        staged_rows, staged_is_token_id = self._get_staged_rows()
+        row_bytes = staged_rows.stride(0) * staged_rows.element_size()
+        self.embeds_lens.np[idx_mapping] = 0
+        dst = 0
+        for i in staged.tolist():
+            req_index = idx_mapping[i]
+            embeds, mask = self.host_tensors[input_batch.req_ids[i]]
+            num_rows = int(end[i] - start[i])
+            src = int(start[i] - self.host_offsets[req_index])
+            staged_rows[dst : dst + num_rows].copy_(
+                embeds[src : src + num_rows], non_blocking=True
+            )
+            self.embeds_ptrs.np[req_index] = staged_rows.data_ptr() + dst * row_bytes
+            self.mask_ptrs.np[req_index] = 0
+            if mask is not None:
+                staged_is_token_id[dst : dst + num_rows].copy_(
+                    mask[src : src + num_rows], non_blocking=True
+                )
+                self.mask_ptrs.np[req_index] = staged_is_token_id.data_ptr() + dst
+            self.embeds_offsets.np[req_index] = start[i]
+            self.embeds_lens.np[req_index] = end[i]
+            dst += num_rows
+        self.embeds_ptrs.copy_to_uva()
+        self.mask_ptrs.copy_to_uva()
+        self.embeds_offsets.copy_to_uva()
+        self.embeds_lens.copy_to_uva()
 
 
 @triton.jit

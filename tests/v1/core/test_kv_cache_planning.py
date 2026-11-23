@@ -1886,8 +1886,8 @@ def test_auto_fit_max_model_len():
 
 @pytest.mark.parametrize("max_num_batched_tokens", [512, 4096])
 def test_prompt_embeds_rows_are_set_aside_from_kv_cache(max_num_batched_tokens):
-    """Workers hold up to max_model_len + max_num_batched_tokens prompt_embeds
-    rows, so the KV cache is sized without that memory."""
+    """Workers stage one step's prompt_embeds rows on the GPU, so the KV cache
+    is sized without max_num_batched_tokens rows, whatever max_model_len is."""
     mem_per_block = 16 * 2 * 64 * 4 * 2 * 2  # 2 layers, 16KB per block each
     available_memory = mem_per_block * 1024
     kv_cache_specs = {
@@ -1912,15 +1912,14 @@ def test_prompt_embeds_rows_are_set_aside_from_kv_cache(max_num_batched_tokens):
         )
         num_blocks[enable_prompt_embeds] = config.num_blocks
 
-    rows = 1024 + max_num_batched_tokens
-    rows_bytes = rows * prompt_embeds_row_bytes(vllm_config)
+    rows_bytes = max_num_batched_tokens * prompt_embeds_row_bytes(vllm_config)
     assert num_blocks[False] == available_memory // mem_per_block
     assert num_blocks[True] == (available_memory - rows_bytes) // mem_per_block
 
 
-def test_auto_fit_max_model_len_counts_prompt_embeds_rows():
-    """Auto-fit must leave room for the prompt_embeds rows of the length it
-    picks, not of the model's full context."""
+def test_auto_fit_max_model_len_leaves_room_for_prompt_embeds_staging():
+    """Auto-fit plans against the memory left after the prompt_embeds staging
+    buffer, which does not grow with the length it picks."""
     mem_per_block = 16 * 2 * 64 * 4 * 2 * 2  # 2 layers, 16KB per block each
     limited_memory = mem_per_block * 32  # 512 tokens of KV cache alone
     kv_cache_specs = {
@@ -1948,7 +1947,7 @@ def test_auto_fit_max_model_len_counts_prompt_embeds_rows():
         fitted[enable_prompt_embeds] = (model_config.max_model_len, config)
 
     max_len, config = fitted[True]
-    rows = prompt_embeds_budget_rows(max_len, vllm_config.scheduler_config)
+    rows = prompt_embeds_budget_rows(vllm_config.scheduler_config)
     rows_bytes = rows * prompt_embeds_row_bytes(vllm_config)
     assert 0 < max_len < fitted[False][0]
     assert config.num_blocks * mem_per_block + rows_bytes <= limited_memory
@@ -2609,10 +2608,10 @@ def test_finalize_extensible_kv_cache_refits_auto_max_model_len():
 def test_finalize_extensible_kv_cache_refit_stays_within_measured_blocks(
     num_kv_blocks,
 ):
-    """Workers measure after keeping the prompt_embeds rows of the provisional
-    max_model_len free, so the re-fit after warmup uses only the measured
-    blocks: it never plans with rows a worker could not keep free. When only
-    the null block fits, startup fails rather than fitting a context."""
+    """Workers measure after keeping the prompt_embeds staging buffer free,
+    whose size does not depend on max_model_len, so the re-fit after warmup
+    uses only the measured blocks. When only the null block fits, startup fails
+    rather than fitting a context."""
     from vllm.v1.worker.worker_base import CompilationTimes
 
     spec = new_kv_cache_spec()

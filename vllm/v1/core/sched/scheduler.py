@@ -54,10 +54,7 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from vllm.v1.core.sched.prompt_embeds_budget import (
-    PromptEmbedsBudget,
-    prompt_embeds_budget_rows,
-)
+from vllm.v1.core.sched.prompt_embeds_budget import SentPromptEmbeds
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
     SchedulingPolicy,
@@ -224,9 +221,7 @@ class Scheduler(SchedulerInterface):
                 config=self.vllm_config, role=ECConnectorRole.SCHEDULER
             )
 
-        self.prompt_embeds_budget = PromptEmbedsBudget(
-            prompt_embeds_budget_rows(self.max_model_len, self.scheduler_config)
-        )
+        self.sent_prompt_embeds = SentPromptEmbeds()
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
@@ -1055,8 +1050,6 @@ class Scheduler(SchedulerInterface):
             step_skipped_async_kv: deque[Request] = deque()
             # Async loads started this step: newer than any block-holder.
             step_started_kv_loads: list[Request] = []
-            # Set once a prompt_embeds request does not fit the budget.
-            prompt_embeds_blocked = False
 
             def skip_request(from_queue: RequestQueue) -> None:
                 request_to_skip = from_queue.pop_request()
@@ -1130,10 +1123,6 @@ class Scheduler(SchedulerInterface):
                     )
                 ):
                     # Scheduling would exceed max_loras, skip.
-                    skip_request(request_queue)
-                    continue
-
-                if request.prompt_embeds is not None and prompt_embeds_blocked:
                     skip_request(request_queue)
                     continue
 
@@ -1355,15 +1344,6 @@ class Scheduler(SchedulerInterface):
                             request, num_computed_tokens, window_loaded
                         )
                         num_computed_tokens -= num_replay_tokens
-                    if request.prompt_embeds is not None and not (
-                        self.prompt_embeds_budget.fits(request, num_computed_tokens)
-                    ):
-                        # Admit no later prompt_embeds request this step, so the
-                        # budget drains for the first one that does not fit and
-                        # is waiting.
-                        prompt_embeds_blocked = True
-                        skip_request(request_queue)
-                        continue
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
@@ -1634,7 +1614,7 @@ class Scheduler(SchedulerInterface):
                 ):
                     raise RuntimeError(f"Invalid request status: {request.status}")
                 scheduled_new_reqs.append(request)
-                self.prompt_embeds_budget.reserve(request, num_computed_tokens)
+                self.sent_prompt_embeds.add(request, num_computed_tokens)
                 # Only the admission right after a failed load skips external KV.
                 request.kv_load_failed = False
 
@@ -1875,7 +1855,7 @@ class Scheduler(SchedulerInterface):
         self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
         self._pending_encoder_input_ids.pop(request.request_id, None)
-        self.prompt_embeds_budget.release(request.request_id)
+        self.sent_prompt_embeds.release(request.request_id)
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
@@ -1924,7 +1904,7 @@ class Scheduler(SchedulerInterface):
         num_lost_tokens = 0
         timestamp = time.monotonic()
         for request in list(self.running):
-            offset = self.prompt_embeds_budget.offset(request)
+            offset = self.sent_prompt_embeds.offset(request)
             if not offset:
                 # No prompt embeds, or the workers hold them from position 0:
                 # no rollback goes below them.
@@ -1993,7 +1973,7 @@ class Scheduler(SchedulerInterface):
                 and request.num_computed_tokens >= request.num_prompt_tokens
             ):
                 # The workers drop the rows after this step reads them.
-                self.prompt_embeds_budget.release(req_id)
+                self.sent_prompt_embeds.release(req_id)
 
         # Clear the finished and preempted request IDs.
         # NOTE: We shouldn't just clear() here because it will also affect
@@ -3326,7 +3306,7 @@ class Scheduler(SchedulerInterface):
 
         self.encoder_cache_manager.free(request)
         self._pending_encoder_input_ids.pop(request.request_id, None)
-        self.prompt_embeds_budget.release(request.request_id)
+        self.sent_prompt_embeds.release(request.request_id)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:

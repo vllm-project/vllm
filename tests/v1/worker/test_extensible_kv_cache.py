@@ -324,9 +324,9 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     assert limits == [2 * gib + left_free]
 
 
-def test_measured_sizing_leaves_room_for_prompt_embeds_rows(monkeypatch):
-    """Workers hold up to max_model_len prompt_embeds rows, allocated per
-    request after the measurement, so the KV cache leaves them free."""
+def test_measured_sizing_leaves_room_for_prompt_embeds_staging(monkeypatch):
+    """Workers allocate a staging buffer of max_num_batched_tokens prompt_embeds
+    rows after the measurement, so the KV cache leaves it free."""
     gib = 1 << 30
     kv_cache = SimpleNamespace(
         reserved_headroom_bytes=gib,
@@ -355,17 +355,16 @@ def test_measured_sizing_leaves_room_for_prompt_embeds_rows(monkeypatch):
         "reserve_mm_ipc_gpu_memory",
         lambda available, *args: available,
     )
-    # max_model_len + max_num_batched_tokens = 512Ki rows of 1024 bf16 values:
-    # 1 GiB of prompt_embeds.
+    # max_num_batched_tokens = 512Ki rows of 1024 bf16 values: 1 GiB staged.
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             multimodal_config=None,
             enable_prompt_embeds=True,
-            max_model_len=512 * 1024 - 8192,
+            max_model_len=4096,
             dtype=torch.bfloat16,
             get_inputs_embeds_size=lambda: 1024,
         ),
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=8192),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=512 * 1024),
         parallel_config=SimpleNamespace(),
         cache_config=SimpleNamespace(gpu_memory_utilization=None),
         kv_transfer_config=None,
