@@ -134,3 +134,10 @@ enabled.
 Note: when metrics are deprecated in version `X.Y`, they are hidden in version `X.Y+1`
 but can be re-enabled using the `--show-hidden-metrics-for-version=X.Y` escape hatch,
 and are then removed in version `X.Y+2`.
+
+Currently deprecated:
+
+- `vllm:kv_offload_tiering_lookup_sync_delay_seconds` (tiered KV offloading),
+  deprecated in v0.35.0. For the mean blocking lookup time per key, divide
+  `vllm:kv_offload_tiering_lookup_sync_time_seconds` by
+  `vllm:kv_offload_tiering_lookup_keys_queried`, both labeled by tier.
