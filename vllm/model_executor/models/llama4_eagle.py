@@ -179,9 +179,7 @@ class EagleLlama4ForCausalLM(_EagleLlama4ForCausalLMBase, SupportsMultiModalEmbe
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
         self.config = speculative_config.draft_model_config.hf_config
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
         # draft model quantization config may differ from target model
         quant_config = VllmConfig.get_quantization_config(
             speculative_config.draft_model_config, vllm_config.load_config

@@ -40,16 +40,18 @@ if os.environ.get("VLLM_TEST_REQUIRE_REPLAYSSM") == "1":
             "Dedicated ReplaySSM CI requires FlashInfer 0.7.0 checkpointing and "
             "materialization APIs, including active_request_indices"
         )
+    required_gpus = int(os.environ.get("VLLM_TEST_REPLAYSSM_NUM_GPUS", "2"))
     if (
         not current_platform.is_cuda()
-        or current_platform.device_count() < 2
+        or current_platform.device_count() < required_gpus
         or any(
             current_platform.get_device_total_memory(device) < 40_000_000_000
-            for device in range(2)
+            for device in range(required_gpus)
         )
     ):
         raise RuntimeError(
-            "Dedicated ReplaySSM CI requires two CUDA GPUs with at least 40 GB each"
+            f"Dedicated ReplaySSM CI requires {required_gpus} CUDA GPU(s) "
+            "with at least 40 GB each"
         )
 
 # Mamba2 (Nemotron-3) hybrid.
@@ -92,16 +94,18 @@ def _check_replayssm_parity(
     mamba_backend: str = "triton",
     prompts: list[str] = PROMPTS,
     name_1: str = "replayssm",
+    speculative_config: dict | None = None,
 ):
     # Compare logprobs, not greedy ids: ReplaySSM's fp arithmetic can flip a
     # near-tie. Baseline and ReplaySSM run at the same TP, so TP numerics are
     # common-mode and only ReplaySSM varies.
     common = dict(
         max_model_len=1024,
-        trust_remote_code=True,
         enable_prefix_caching=False,
         tensor_parallel_size=tensor_parallel_size,
         mamba_backend=mamba_backend,
+        speculative_config=speculative_config,
+        disable_log_stats=speculative_config is None,
     )
     with vllm_runner(model_name, **common) as llm:
         baseline = llm.generate_greedy_logprobs(prompts, max_tokens=32, num_logprobs=5)
@@ -109,6 +113,9 @@ def _check_replayssm_parity(
         model_name, use_replayssm=True, replayssm_buffer_len=16, **common
     ) as llm:
         replay = llm.generate_greedy_logprobs(prompts, max_tokens=32, num_logprobs=5)
+        if speculative_config is not None:
+            accepted = _metric_counts(llm.llm)["vllm:spec_decode_num_accepted_tokens"]
+            assert accepted > 0
 
     check_logprobs_close(
         outputs_0_lst=baseline,
@@ -119,8 +126,24 @@ def _check_replayssm_parity(
 
 
 @pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_decode_matches_baseline(vllm_runner, model_name):
-    _check_replayssm_parity(vllm_runner, model_name)
+@pytest.mark.parametrize(
+    ("speculative_config", "prompts"),
+    [
+        pytest.param(None, PROMPTS, id="stp"),
+        pytest.param(
+            {"method": "ngram", "num_speculative_tokens": 3, "prompt_lookup_max": 3},
+            # The repetitive prompt gets some ngram drafts accepted.
+            [PROMPTS[0], "a b c d e f g a b c d e f g a b c d e f g a b c"],
+            id="ngram",
+        ),
+    ],
+)
+def test_replayssm_decode_matches_baseline(
+    vllm_runner, model_name, speculative_config, prompts
+):
+    _check_replayssm_parity(
+        vllm_runner, model_name, prompts=prompts, speculative_config=speculative_config
+    )
 
 
 @multi_gpu_test(num_gpus=2)
@@ -164,9 +187,7 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(
         speculative_config["prompt_lookup_max"] = 3
     common = dict(
         max_model_len=1024,
-        trust_remote_code=True,
         enable_prefix_caching=False,
-        mamba_cache_mode="none",
         mamba_backend="flashinfer",
         tensor_parallel_size=tensor_parallel_size,
         speculative_config=speculative_config,
@@ -226,8 +247,8 @@ PREFIX_CACHING_PROMPTS = [
     _PC_PREFIX + "Surprisingly, the experiments showed that",
     _PC_PREFIX + "The most important conclusion was that",
 ]
-# MTP prefix caching must retain at least two full state blocks: the drafter drops
-# the volatile trailing block before resuming from the preceding boundary.
+# MTP prefix caching uses a longer prefix so a hit still spans at least two full
+# state blocks.
 _PC_MTP_PREFIX = _PC_SENTENCE * 240
 MTP_PREFIX_CACHING_PROMPTS = [
     _PC_MTP_PREFIX + prompt.removeprefix(_PC_PREFIX)
@@ -253,9 +274,7 @@ def _check_replayssm_prefix_caching(
 ):
     common = dict(
         max_model_len=8192,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
-        mamba_cache_mode="align",
         mamba_backend=mamba_backend,
         disable_log_stats=False,  # required for llm.get_metrics()
         tensor_parallel_size=tensor_parallel_size,
@@ -369,10 +388,14 @@ def test_flashinfer_replayssm_prefix_cache_tp2(vllm_runner, model_name, monkeypa
 
 
 @pytest.mark.parametrize("model_name", MODELS)
-def test_triton_replayssm_align_prefix_cache_matches_baseline(vllm_runner, model_name):
+@pytest.mark.parametrize("speculative_method", [None, "ngram"], ids=["stp", "ngram"])
+def test_triton_replayssm_align_prefix_cache_matches_baseline(
+    vllm_runner, model_name, speculative_method: str | None
+):
     _check_replayssm_prefix_caching(
         vllm_runner,
         model_name,
+        speculative_method=speculative_method,
         mamba_backend="triton",
     )
 
@@ -397,13 +420,12 @@ def _metric_counts(llm) -> dict[str, int]:
 
 
 def _stress_mamba_block_size(worker) -> int:
-    from vllm.v1.kv_cache_interface import MambaSpec, iter_layer_specs
+    from vllm.v1.core.kv_cache_utils import is_mamba_group
 
     sizes = {
-        spec.block_size
+        group.block_size
         for group in worker.model_runner.kv_cache_config.kv_cache_groups
-        for spec in iter_layer_specs(group.kv_cache_spec)
-        if isinstance(spec, MambaSpec)
+        if is_mamba_group(group)
     }
     assert len(sizes) == 1, sizes
     return sizes.pop()
@@ -412,8 +434,7 @@ def _stress_mamba_block_size(worker) -> int:
 def _generate_with_preemption(llm, block_size: int):
     """Preempt active requests, then complete decode across three cache blocks."""
     engine = llm.llm_engine
-    # MTP excludes one trailing block from prefix hits. Keep three reusable
-    # blocks, plus that proof block and a decode margin.
+    # Cross at least three block boundaries during decode, with a margin.
     max_tokens = 4 * block_size + 64
     requests = {
         "short": ("The capital of France is", 256),
@@ -497,7 +518,6 @@ def test_flashinfer_replayssm_mtp_preemption_and_boundary_reuse(vllm_runner):
     for use_replayssm in (True, False):
         with vllm_runner(
             MAMBA2_MTP_MODEL,
-            trust_remote_code=True,
             max_model_len=32_768,
             max_num_seqs=4,
             max_num_batched_tokens=2048,
@@ -505,7 +525,6 @@ def test_flashinfer_replayssm_mtp_preemption_and_boundary_reuse(vllm_runner):
             dtype="bfloat16",
             mamba_backend="flashinfer",
             mamba_ssm_cache_dtype="float16",
-            mamba_cache_mode="align",
             enable_prefix_caching=True,
             # Retain decode checkpoints for the same-history probe.
             prefix_cache_retention_interval=None,
