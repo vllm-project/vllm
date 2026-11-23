@@ -3306,6 +3306,21 @@ class Scheduler(SchedulerInterface):
 
         return valid_requests
 
+    def release_unread_mm_features(
+        self, mm_features: list[MultiModalFeatureSpec] | None
+    ) -> None:
+        """Hand multimodal features that no worker will read to the workers.
+
+        Used for requests that finish, or are rejected, before being dispatched.
+        Only shared memory cache handles need releasing; payloads of other caches
+        would be needlessly sent to the workers.
+        """
+        self._unread_mm_features.extend(
+            feature
+            for feature in mm_features or ()
+            if feature.data is not None and "address" in feature.data
+        )
+
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -3331,13 +3346,7 @@ class Scheduler(SchedulerInterface):
         self._pending_encoder_input_ids.pop(request.request_id, None)
         request_id = request.request_id
         if not request.mm_features_dispatched:
-            # Only shared memory cache handles need releasing; payloads of
-            # other caches would be needlessly sent to the workers.
-            self._unread_mm_features.extend(
-                feature
-                for feature in request.mm_features
-                if feature.data is not None and "address" in feature.data
-            )
+            self.release_unread_mm_features(request.mm_features)
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
@@ -3442,7 +3451,7 @@ class Scheduler(SchedulerInterface):
         return num_waiting + num_running
 
     def has_finished_requests(self) -> bool:
-        if self.finished_req_ids:
+        if self.finished_req_ids or self._unread_mm_features:
             return True
         if self.connector is None:
             return False

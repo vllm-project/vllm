@@ -453,6 +453,36 @@ class TestShmObjectStorageReferenceCounting(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.writer.release_unread(address, monotonic_id, signature, key)
 
+    def test_release_unsent_makes_never_read_item_evictable(self):
+        self._reference("image")  # a hand-out that is never sent to a reader
+        self.assertFalse(self._is_evictable("image"))
+
+        self.assertTrue(self.writer.release_unsent("image"))
+        self.assertTrue(self._is_evictable("image"))
+
+    def test_release_unsent_cancels_exactly_one_hand_out(self):
+        sent = self._reference("image")
+        self._reference("image")  # a second hand-out that is never sent
+
+        self.assertTrue(self.writer.release_unsent("image"))
+        # The hand-out that was sent is still owed its reads.
+        self.assertFalse(self._is_evictable("image"))
+        for reader in self.readers:
+            reader.get(*sent)
+        self.assertTrue(self._is_evictable("image"))
+
+    def test_release_unsent_ignores_unknown_keys_readers_and_extra_calls(self):
+        self.assertFalse(self.writer.release_unsent("missing"))
+
+        self._reference("image")
+        # Readers do not own hand-outs.
+        self.assertFalse(self.readers[0].release_unsent("image"))
+        self.assertFalse(self._is_evictable("image"))
+
+        self.assertTrue(self.writer.release_unsent("image"))
+        # More releases than hand-outs cannot drive the count negative.
+        self.assertFalse(self.writer.release_unsent("image"))
+
 
 # Reader process function
 def reader_process(process_id, storage_handle, items_to_read):

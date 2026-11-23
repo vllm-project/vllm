@@ -766,6 +766,28 @@ class SingleWriterShmObjectStorage:
 
         return obj
 
+    def release_unsent(self, key: str) -> bool:
+        """Cancel one hand-out of `key` that was never sent to any reader.
+
+        `put` and `get_cached` each count as a hand-out that expects every
+        reader to fetch the item. When the request holding that hand-out is
+        dropped before it reaches the engine, no reader will ever fetch it.
+        Only call this for a hand-out that was not sent; releasing one that
+        was sent lets the slot be reused before a worker reads it.
+
+        Returns:
+            True if a hand-out was cancelled.
+
+        """
+        if self._reader_lock is not None or key not in self.key_index:
+            return False
+        monotonic_id = self.key_index[key][1]
+        writer_count = self.writer_flag.get(monotonic_id, 0)
+        if writer_count <= 0:
+            return False
+        self.writer_flag[monotonic_id] = writer_count - 1
+        return True
+
     def release_unread(
         self,
         address: int,

@@ -180,6 +180,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._mm_processor_cache: BaseMultiModalProcessorCache | None = None
         self._pending_mm_cache_invalidations: set[str] = set()
+        # One entry per hand-out of a request rejected before being sent.
+        self._pending_mm_cache_releases: list[str] = []
         self._mm_cache_invalidation_lock = Lock()
 
         # A second processor with its own processor-only cache.
@@ -428,6 +430,27 @@ class BaseRenderer(ABC, Generic[_T]):
             return
         with self._mm_cache_invalidation_lock:
             self._pending_mm_cache_invalidations.update(pending)
+
+    def queue_mm_cache_releases(self, mm_hashes: Sequence[str]) -> None:
+        """Queue hand-outs of a request rejected before it was sent to the engine.
+
+        Applied at the next render, like invalidations, so they never race with
+        concurrent processing on the sender cache.
+        """
+        if self.mm_processor_cache is None or not mm_hashes:
+            return
+        with self._mm_cache_invalidation_lock:
+            self._pending_mm_cache_releases.extend(mm_hashes)
+
+    def _drain_mm_cache_releases(self) -> None:
+        cache = self.mm_processor_cache
+        if cache is None:
+            return
+        with self._mm_cache_invalidation_lock:
+            pending = self._pending_mm_cache_releases
+            self._pending_mm_cache_releases = []
+        if pending:
+            cache.release_unsent_items(pending)
 
     def _drain_mm_cache_invalidations(self) -> None:
         cache = self.mm_processor_cache
@@ -977,6 +1000,7 @@ class BaseRenderer(ABC, Generic[_T]):
         skip_mm_cache: bool = False,
     ) -> "MultiModalInput":
         self._drain_mm_cache_invalidations()
+        self._drain_mm_cache_releases()
         mm_processor = self.get_mm_processor()
 
         mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"

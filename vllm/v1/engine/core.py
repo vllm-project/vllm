@@ -42,6 +42,7 @@ from vllm.multimodal.cache import (
     MultiModalCacheMissError,
     engine_receiver_cache_from_config,
 )
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.outputs import RequestError
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
@@ -280,6 +281,9 @@ class EngineCore:
         self.num_executed_steps = 0
 
         self.aborts_queue = queue.Queue[list[str]]()
+        # Multimodal features of requests dropped on the input thread before they
+        # reach the scheduler; flushed by the busy loop thread on a wakeup.
+        self._dropped_mm_features = queue.SimpleQueue[list[MultiModalFeatureSpec]]()
 
         self._idle_state_callbacks: list[Callable] = []
 
@@ -2010,6 +2014,7 @@ class EngineCoreProc(EngineCore):
     ) -> None:
         """Dispatch request from client."""
         if request_type == EngineCoreRequestType.WAKEUP:
+            self._flush_dropped_mm_features()
             return
         elif request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
@@ -2039,6 +2044,22 @@ class EngineCoreProc(EngineCore):
                 "Unrecognized input request type encountered: %s", request_type
             )
 
+    def _flush_dropped_mm_features(self) -> None:
+        """Pass multimodal features of dropped requests on to the scheduler."""
+        while True:
+            try:
+                features = self._dropped_mm_features.get_nowait()
+            except queue.Empty:
+                return
+            self.scheduler.release_unread_mm_features(features)
+
+    def _drop_mm_features_from_input_thread(self, request: EngineCoreRequest) -> None:
+        """A request failed preprocessing on the input thread and will never be
+        scheduled, so no worker will read its shared memory cache items."""
+        if request.mm_features:
+            self._dropped_mm_features.put(request.mm_features)
+            self.input_queue.put_nowait((EngineCoreRequestType.WAKEUP, None))
+
     def _reject_add_in_shutdown(self, request: Request) -> bool:
         if self.shutdown_state == EngineShutdownState.RUNNING:
             return False
@@ -2067,9 +2088,12 @@ class EngineCoreProc(EngineCore):
             [request.request_id], request.client_index, FinishReason.ERROR, error
         )
         if request.kv_transfer_params:
-            # Let the KV connector free any remote blocks held for it.
+            # Let the KV connector free any remote blocks held for it. The
+            # scheduler then finishes the request, which releases its items.
             request.abort_immediately = True
             self.add_request(request)
+        else:
+            self.scheduler.release_unread_mm_features(request.mm_features)
         return True
 
     def _reject_utility_in_shutdown(
@@ -2452,12 +2476,14 @@ class EngineCoreProc(EngineCore):
         logger.exception(
             "Unexpected error pre-processing request %s", request.request_id
         )
+        self._drop_mm_features_from_input_thread(request)
         self._send_error_outputs_to_client([request.request_id], request.client_index)
 
     def _handle_request_validation_error(
         self, request: EngineCoreRequest, error: VLLMValidationError
     ) -> None:
         logger.info("Request %s failed validation: %s", request.request_id, error)
+        self._drop_mm_features_from_input_thread(request)
         self._send_finish_outputs_to_client(
             [request.request_id],
             request.client_index,

@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from vllm.config.kv_events import KVEventsConfig
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+    from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -201,6 +202,17 @@ class SchedulerInterface(ABC):
         non-empty. This information is useful for DP attention.
         """
         raise NotImplementedError
+
+    def release_unread_mm_features(
+        self, mm_features: "list[MultiModalFeatureSpec] | None"
+    ) -> None:
+        """Hand multimodal features that no worker will read to the workers.
+
+        Called for a request rejected before it was scheduled, so the shared
+        memory multimodal cache can reclaim the items the frontend wrote for it.
+        Schedulers that never hand multimodal items to workers can ignore it.
+        """
+        return None
 
     def has_requests(self) -> bool:
         """Returns True if there are unfinished requests, or finished requests

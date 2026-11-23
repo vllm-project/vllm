@@ -464,6 +464,21 @@ class InputProcessor:
                     for mm_hash in mm_hashes
                 ]
             )
+            # Shared memory cache: the items were written to the ring (or
+            # re-referenced) for a request that is never sent, so no worker
+            # will read them.
+            self.renderer.queue_mm_cache_releases(
+                [
+                    mm_hash
+                    for singleton in (encoder_input, decoder_input)
+                    if singleton is not None and singleton["type"] == "multimodal"
+                    for modality, mm_hashes in singleton["mm_hashes"].items()
+                    for mm_hash, item in zip(
+                        mm_hashes, singleton["mm_kwargs"][modality]
+                    )
+                    if item is not None and "address" in item
+                ]
+            )
             raise
 
         # Mypy can be conservative for TypedDict unions; normalize access.

@@ -168,6 +168,11 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
             return mm_item
 
     @override
+    def release_unsent_items(self, mm_hashes: Sequence[str]) -> None:
+        for mm_hash in mm_hashes:
+            self._shm_cache.release_unsent(mm_hash)
+
+    @override
     def touch_sender_cache_item(self, mm_hash: str) -> None:
         """Touch the item in shared memory cache to prevent eviction."""
         self._shm_cache.touch(mm_hash)
