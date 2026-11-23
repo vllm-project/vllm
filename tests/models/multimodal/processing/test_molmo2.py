@@ -3,17 +3,22 @@
 
 from types import SimpleNamespace
 
+import httpx
 import pytest
 import torch
 from PIL import Image
 
+from tests.utils import RemoteLaunchRenderServer
+from vllm import envs
 from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.molmo2 import (
     Molmo2DummyInputsBuilder,
     Molmo2VisionBackbone,
     build_flat_image_bool_length,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.utils import encode_image_url
 
 from ...utils import build_model_context
 
@@ -193,3 +198,69 @@ def test_crop_kwargs_match_processed_image_tokens(max_crops, prompt_as_tokens):
                 assert pixels.shape[0] <= max_crops + 1
         results.append(result["prompt_token_ids"])
     assert results[0] == results[1]
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+def test_molmo2_rejects_cumulative_image_crops_before_processing(monkeypatch):
+    ctx = build_model_context(
+        "allenai/Molmo2-8B",
+        limit_mm_per_prompt={"image": 2},
+        mm_processor_cache_gb=0,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [Image.new("RGB", (400, 400), color) for color in ("red", "blue")]
+    kwargs = {"max_crops": 4}
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 25_000_000)
+    prompt = processor.dummy_inputs.get_dummy_text({"image": 2})
+    with pytest.raises(VLLMValidationError, match="Image preprocessing exceeds"):
+        processor(
+            prompt,
+            mm_items=processor.info.parse_mm_data({"image": images}),
+            hf_processor_mm_kwargs=kwargs,
+        )
+
+    one_image = processor(
+        processor.dummy_inputs.get_dummy_text({"image": 1}),
+        mm_items=processor.info.parse_mm_data({"image": images[:1]}),
+        hf_processor_mm_kwargs=kwargs,
+    )
+    assert len(one_image["mm_kwargs"]["image"]) == 1
+
+
+def test_molmo2_render_rejects_over_budget_image_crops():
+    model = "allenai/Molmo2-8B"
+    content = [
+        {
+            "type": "image_url",
+            "image_url": {"url": encode_image_url(Image.new("RGB", (400, 400), color))},
+        }
+        for color in ("red", "blue")
+    ]
+    with RemoteLaunchRenderServer(
+        model,
+        [
+            "--host",
+            "127.0.0.1",
+            "--dtype",
+            "float32",
+            "--max-model-len",
+            "4096",
+            "--mm-processor-cache-gb",
+            "0",
+            "--trust-remote-code",
+        ],
+        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": "25000000"},
+    ) as server:
+        for images, status in ((content, 400), (content[:1], 200)):
+            response = httpx.post(
+                server.url_for("v1/chat/completions/render"),
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": images}],
+                },
+                timeout=120,
+            )
+            assert response.status_code == status, response.text[:512]
+            if status == 400:
+                assert "Image preprocessing exceeds" in response.text

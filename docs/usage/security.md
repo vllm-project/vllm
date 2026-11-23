@@ -115,8 +115,8 @@ protection against resource-exhaustion attacks.
 Supported processors account for their allocations as follows.
 
 - FunAudioChat estimates padded audio, spectrum buffers, and feature tensors.
-- Nano Nemotron VL and DeepSeek-VL2 account for image tiles and temporary
-  tensors before materializing them.
+- Nano Nemotron VL, DeepSeek-VL2, and Molmo2 account for image tiles and
+  temporary tensors before materializing them.
 - DeepSeek-OCR and Unlimited-OCR account for all global views and local tiles
   in the document plus temporary buffers for one view. Size the limit for the
   page count and crop settings when serving long multi-page scans.
