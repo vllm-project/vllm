@@ -1739,7 +1739,8 @@ presets:
       **Running it.** The preset renders the prefill engine and one decode engine. Start the
       second decode engine on the same node with the same command and environment, with
       `CUDA_VISIBLE_DEVICES=4,5,6,7` and `--port 8003`, and list it with a second `--decode`.
-      Pin each engine to its GPUs' NUMA node (GPUs 0-3 on node 0, 4-7 on node 1). Start
+      For NUMA locality, pin each engine to its GPUs' NUMA node (GPUs 0-3 on node 0,
+      4-7 on node 1). Tuning used this binding; the SA validation below did not enforce it. Start
       vllm-router 0.1.16 only after every engine answers `/health`: it reads each prefill's
       Mooncake bootstrap server once, at startup, and without the prefill's engine ID there it
       sends requests without KV transfer parameters, so decode recomputes every prompt. Run it
