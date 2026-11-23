@@ -27,7 +27,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
 from vllm.model_executor.model_loader.weight_cache.protocol import (
-    TensorKind,
     check_ipc_quant_support,
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (
@@ -438,7 +437,7 @@ def build_model_from_processed_weights(
     model_config: ModelConfig,
     prefix: str,
     tensors: dict[str, torch.Tensor],
-    kinds: dict[str, TensorKind],
+    manifest: dict[str, Any],
     aliases: dict[str, str],
     attrs: dict[str, Any],
     load_config: LoadConfig,
@@ -453,7 +452,7 @@ def build_model_from_processed_weights(
                 prefix=prefix,
             )
         check_ipc_quant_support(model)
-        _register_processed_tensors(model, tensors, kinds, aliases)
+        _register_processed_tensors(model, tensors, manifest, aliases)
         # Flags that load_weights would have set (e.g. EAGLE ownership of
         # embed_tokens / lm_head); the source ran it, this process did not.
         for name, value in attrs.items():
@@ -485,7 +484,7 @@ def _load_device(
 def _register_processed_tensors(
     model: nn.Module,
     tensors: dict[str, torch.Tensor],
-    kinds: dict[str, TensorKind],
+    manifest: dict[str, Any],
     aliases: dict[str, str],
 ) -> None:
     """Replace the meta model's parameters and buffers, keeping ties."""
@@ -515,7 +514,7 @@ def _register_processed_tensors(
         registered[name] = obj
 
     for name, tensor in tensors.items():
-        _register(name, tensor, kinds[name] == "param")
+        _register(name, tensor, manifest["tensors"][name]["is_param"])
 
     for alias_name, canonical_name in aliases.items():
         obj = registered.get(canonical_name)

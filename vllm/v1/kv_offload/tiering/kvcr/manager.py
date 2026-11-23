@@ -74,6 +74,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     get_offload_block_hash,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.cpu.policies.base import order_request_keys
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
@@ -314,9 +315,14 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         local_dram_backend: str = "UCX",
         remote_fw_dram_backend: str = "UCX",
         backpressure_detector: "BackpressureDetector | None" = None,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
     ) -> None:
         super().__init__(
-            offloading_spec, primary_kv_view, tier_type, backpressure_detector
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+            backpressure_detector,
+            access_mode=access_mode,
         )
         selected_policy = _resolve_policy(policy)
         if (kvcr_service_socket_path is None) != (compatibility_digest is None):

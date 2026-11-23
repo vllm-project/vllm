@@ -322,6 +322,7 @@ def resolve_quant_method(
         LinearBase,
         UnquantizedLinearMethod,
     )
+    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
     from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
     from vllm.model_executor.layers.quantization.online.moe_base import (
         OnlineMoEMethodBase,
@@ -333,6 +334,7 @@ def resolve_quant_method(
         ParallelLMHead,
         UnquantizedEmbeddingMethod,
     )
+    from vllm.platforms import current_platform
 
     online_config = quant_config.online_quantization_config
     # Online quantization supports LinearBase, RoutedExperts, and a
@@ -348,6 +350,9 @@ def resolve_quant_method(
         online_config.packed_modules_mapping = quant_config.packed_modules_mapping
         online_target = online_config.resolve_quant_method_cls(type(layer), prefix)
         target_spec = layer_target_spec(layer, quant_config, prefix)
+
+    if online_target is not None:
+        current_platform.verify_quantization("online")
 
     # With an online target, the checkpoint method is never used for compute: it
     # is either a dequantization source or discarded in favour of the online
@@ -367,18 +372,25 @@ def resolve_quant_method(
     if online_config is None:
         # No online configuration: retain the checkpoint method.
         return base_quant_method
-    if not is_online_supported_layer:
+
+    # KV-cache scale loading does not require the checkpoint's weight kernels.
+    checkpoint_is_quantized = base_quant_method is not None and not isinstance(
+        base_quant_method,
+        (
+            UnquantizedLinearMethod,
+            UnquantizedFusedMoEMethod,
+            UnquantizedEmbeddingMethod,
+            BaseKVCacheMethod,
+        ),
+    )
+    if online_target is None:
+        # Untargeted quantized layers still execute the native checkpoint method.
+        if checkpoint_is_quantized:
+            current_platform.verify_quantization(quant_config.get_name())
         return base_quant_method
 
-    checkpoint_is_quantized = base_quant_method is not None and not isinstance(
-        base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
-    )
-
-    if isinstance(layer, ParallelLMHead) and online_target is not None:
-        unquantized = (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
-        if base_quant_method is not None and not isinstance(
-            base_quant_method, unquantized
-        ):
+    if isinstance(layer, ParallelLMHead):
+        if checkpoint_is_quantized:
             # TODO: online re-quantization of a checkpoint-quantized lm_head,
             # like the linear layers in #59062.
             raise NotImplementedError(
@@ -399,9 +411,6 @@ def resolve_quant_method(
         return online_config.get_quant_method(layer, prefix)
 
     if checkpoint_is_quantized:
-        if online_target is None:
-            # The checkpoint quant method is applied as there is no online override.
-            return base_quant_method
         if online_target[3].hadamard_size is not None:
             raise NotImplementedError(
                 f"{prefix}: online hadamard_size on an already quantized layer "
@@ -419,10 +428,6 @@ def resolve_quant_method(
 
         # The online method dequantizes the checkpoint method before requantizing.
         return online_quant_method
-
-    if online_target is None:
-        # The layer is unquantized and no online target applies.
-        return base_quant_method
 
     # Quantize an unquantized layer with the online method.
     return online_config.get_quant_method(layer, prefix)
