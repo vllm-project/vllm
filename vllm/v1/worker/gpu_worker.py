@@ -1873,6 +1873,10 @@ class Worker(WorkerBase):
         self._incomplete_weight_updates.discard(self._weight_update_is_draft)
 
     def shutdown(self) -> None:
+        model_runner = getattr(self, "model_runner", None)
+        if model_runner is not None and model_runner.eplb_state is not None:
+            model_runner.eplb_state.stop_async_loop()
+
         gc.unfreeze()
 
         # has_kv_transfer_group can be None during interpreter shutdown.
