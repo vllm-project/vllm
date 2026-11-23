@@ -80,22 +80,17 @@ def get_transformers_model_class(
     architecture: str, model_config: "ModelConfig"
 ) -> type["PreTrainedModel"] | None:
     """The Transformers class for `architecture`, from Transformers itself or from
-    the model's remote code, honouring the model's revisions and `trust_remote_code`.
+    the model's remote code. As with `AutoModel`, trusted remote code takes precedence.
     """
-    if (model_cls := getattr(transformers, architecture, None)) is not None:
-        return model_cls
-    auto_map = getattr(model_config.hf_config, "auto_map", None) or {}
-    for name, class_reference in auto_map.items():
-        if (
-            name.startswith("AutoModel")
-            and isinstance(class_reference, str)
-            and class_reference.rsplit(".", 1)[-1] == architecture
-        ):
-            return try_get_class_from_dynamic_module(
-                class_reference,
-                model_config.model,
-                trust_remote_code=model_config.trust_remote_code,
-                revision=model_config.revision,
-                code_revision=model_config.code_revision,
-            )
-    return None
+    if model_config.trust_remote_code:
+        auto_map = getattr(model_config.hf_config, "auto_map", None) or {}
+        for name, ref in auto_map.items():
+            if name.startswith("AutoModel") and ref.endswith(f".{architecture}"):
+                return try_get_class_from_dynamic_module(
+                    ref,
+                    model_config.model,
+                    trust_remote_code=model_config.trust_remote_code,
+                    revision=model_config.revision,
+                    code_revision=model_config.code_revision,
+                )
+    return getattr(transformers, architecture, None)
