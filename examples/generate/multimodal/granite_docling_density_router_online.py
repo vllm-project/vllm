@@ -14,8 +14,6 @@ python granite_docling_density_router_online.py page1.png page2.png
 """
 
 import argparse
-import base64
-import mimetypes
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -23,6 +21,8 @@ import torch
 from openai import OpenAI
 from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor
+
+from vllm.multimodal.utils import encode_image_url
 
 
 class DensityRouter:
@@ -56,21 +56,19 @@ class DensityRouter:
         return bool(fine_route.item())
 
 
-def encode_image_url(path: str) -> str:
-    mime_type = mimetypes.guess_type(path)[0] or "image/png"
-    with open(path, "rb") as f:
-        return f"data:{mime_type};base64,{base64.b64encode(f.read()).decode()}"
-
-
 def convert_page(client: OpenAI, model: str, router: DensityRouter, path: str) -> str:
-    fine_route = router(Image.open(path).convert("RGB"))
+    image = Image.open(path).convert("RGB")
+    fine_route = router(image)
     chat_completion = client.chat.completions.create(
         model=model,
         messages=[
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": encode_image_url(path)}},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": encode_image_url(image)},
+                    },
                     {"type": "text", "text": "<doclang>"},
                 ],
             }
