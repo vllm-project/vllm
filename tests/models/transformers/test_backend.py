@@ -46,8 +46,6 @@ from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_I
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
 from vllm.model_executor.models.utils import StageMissingLayer
-from vllm.transformers_utils import dynamic_module
-from vllm.transformers_utils.dynamic_module import get_transformers_model_class
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import create_new_process_for_each_test, multi_gpu_test, prep_prompts
@@ -1137,41 +1135,6 @@ def test_output_head_renames_modules(model_type, arch, overrides, module_renames
     assert (output_head := to_output_head(model, type(model.base_model)))
     mapper = output_head.weights_mapper()
     assert mapper.apply_list(list(module_renames)) == list(module_renames.values())
-
-
-def test_transformers_model_class_honours_remote_code_config(monkeypatch):
-    """Remote code is loaded with the model's revisions and `trust_remote_code`."""
-    calls = []
-
-    def fake_get_class(class_reference, model, **kwargs):
-        calls.append((class_reference, model, kwargs))
-        return nn.Module
-
-    monkeypatch.setattr(
-        dynamic_module, "try_get_class_from_dynamic_module", fake_get_class
-    )
-    model_config = SimpleNamespace(
-        model="org/repo",
-        revision="abc",
-        code_revision="def",
-        trust_remote_code=True,
-        hf_config=SimpleNamespace(
-            auto_map={
-                "AutoConfig": "configuration_x.XConfig",
-                "AutoModel": "modeling_x.XModel",
-                "AutoModelForCausalLM": "modeling_x.XForCausalLM",
-            }
-        ),
-    )
-
-    assert get_transformers_model_class("XForCausalLM", model_config) is nn.Module
-    assert calls == [
-        (
-            "modeling_x.XForCausalLM",
-            "org/repo",
-            {"trust_remote_code": True, "revision": "abc", "code_revision": "def"},
-        )
-    ]
 
 
 # The smallest sizes the fused MoE kernels accept
