@@ -11,6 +11,8 @@ from .ops.attention_gate import headwise_sigmoid_gate
 
 MIN_DECODE_BATCH_SIZE = 32
 _SPARSE_BLOCK_SIZE = 8
+# Uniform batches up to this query length use the paged decode plan.
+_MIN_SWA_DECODE_QUERY_LEN = 4
 
 
 def uses_prims_ts_attention(metadata, num_speculative_tokens, kv_cache_dtype):
@@ -335,8 +337,13 @@ class Step5PrimsTSPrefill:
 class Step5PrimsTSSWA:
     """Reuse dense PrimTS plans and apply Step5's existing separate gate."""
 
-    def __init__(self, model_len, window):
+    def __init__(self, model_len, window, num_speculative_tokens=0):
         self.model_len, self.window = model_len, window
+        # The decode plan is several times faster on uniform batches; keep
+        # speculative verify batches of every draft length on it.
+        self.max_decode_query_len = max(
+            _MIN_SWA_DECODE_QUERY_LEN, num_speculative_tokens + 1
+        )
         self.plans = {}
 
     def run(self, query, cache, metadata, output, gate, scale, v_scale=1.0):
@@ -352,7 +359,7 @@ class Step5PrimsTSSWA:
         if not n:
             return output
         requests, qlen = metadata.seq_lens.shape[0], metadata.max_query_len
-        decode = n == requests * qlen and qlen <= 4
+        decode = n == requests * qlen and qlen <= self.max_decode_query_len
         request_capacity = requests
         q_capacity = qlen if decode else 1 << (qlen - 1).bit_length()
         table = metadata.block_table[:requests]

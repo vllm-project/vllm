@@ -15,6 +15,7 @@ from vllm import envs
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
+from vllm.multimodal.utils import get_load_audio_from_video
 from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds,
     safe_load_prompt_embeds_async,
@@ -52,6 +53,17 @@ def make_prompt_embeds_placeholder(index: int) -> str:
 _ENABLE_PROMPT_EMBEDS_ERROR: Final[str] = (
     "You must set `--enable-prompt-embeds` to input `prompt_embeds`"
 )
+
+
+def _loads_audio_from_video(
+    model_config: ModelConfig, mm_processor_kwargs: dict[str, Any] | None
+) -> bool:
+    """Whether to add each video's audio track as an audio item, with the request's
+    setting taking precedence over the server's."""
+    kwargs = mm_processor_kwargs or {}
+    if (mm_config := model_config.multimodal_config) is not None:
+        kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
+    return bool(get_load_audio_from_video(kwargs))
 
 
 class BaseMultiModalContentParser(ABC):
@@ -175,7 +187,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
                 _ENABLE_PROMPT_EMBEDS_ERROR, parameter="prompt_embeds"
             )
 
-        tensor = safe_load_prompt_embeds(self.model_config, data.encode())
+        tensor = safe_load_prompt_embeds(self.model_config, data)
         self._tracker.add("prompt_embeds", (tensor, None))
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
@@ -276,6 +288,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             self._connector.fetch_video(
                 video_url=video_url,
                 video_processor=self._tracker.video_processor_name,
+                video_io_defaults=self._tracker.video_io_defaults,
             )
             if video_url
             else None
@@ -284,11 +297,9 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         placeholder = self._tracker.add("video", (video, uuid))
         self._add_placeholder("video", placeholder)
 
-        # Extract audio from video if use_audio_in_video is True
-        if (
-            video_url
-            and self._mm_processor_kwargs
-            and self._mm_processor_kwargs.get("use_audio_in_video", False)
+        # `load_audio_from_video` is replacing `use_audio_in_video` in Transformers
+        if video_url and _loads_audio_from_video(
+            self._tracker.model_config, self._mm_processor_kwargs
         ):
             audio = self._connector.fetch_audio(video_url) if video_url else None
             audio_placeholder = self._tracker.add("audio", (audio, uuid))
@@ -369,16 +380,14 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             )
 
         self._tracker.add(
-            "prompt_embeds", partial(self._load_prompt_embeds_async, data.encode())
+            "prompt_embeds", partial(self._load_prompt_embeds_async, data)
         )
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
-    async def _load_prompt_embeds_async(
-        self, data_bytes: bytes
-    ) -> tuple[torch.Tensor, None]:
+    async def _load_prompt_embeds_async(self, data: str) -> tuple[torch.Tensor, None]:
         # Second tuple slot fills the tracker's generic `(item, uuid | None)`
         # contract. prompt_embeds has no UUID concept, so it's always `None`.
-        tensor = await safe_load_prompt_embeds_async(self.model_config, data_bytes)
+        tensor = await safe_load_prompt_embeds_async(self.model_config, data)
         return tensor, None
 
     async def _image_with_uuid_async(self, image_url: str | None, uuid: str | None):
@@ -506,6 +515,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             await self._connector.fetch_video_async(
                 video_url,
                 video_processor=self._tracker.video_processor_name,
+                video_io_defaults=self._tracker.video_io_defaults,
             )
             if video_url
             else None
@@ -518,11 +528,9 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         )
         self._add_placeholder("video", placeholder)
 
-        # Extract audio from video if use_audio_in_video is True
-        if (
-            video_url
-            and self._mm_processor_kwargs
-            and self._mm_processor_kwargs.get("use_audio_in_video", False)
+        # `load_audio_from_video` is replacing `use_audio_in_video` in Transformers
+        if video_url and _loads_audio_from_video(
+            self._tracker.model_config, self._mm_processor_kwargs
         ):
             audio_placeholder = self._tracker.add(
                 "audio", partial(self._audio_with_uuid_async, video_url, uuid)
