@@ -140,6 +140,7 @@ class XPUPlatform(Platform):
         "online",
         "gpt_oss_mxfp4",
         "modelopt",
+        "modelopt_mxfp8",
         "compressed-tensors",
     ]
 
