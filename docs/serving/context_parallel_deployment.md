@@ -86,6 +86,19 @@ vllm serve <model> -tp 1 -pcp 4 -dcp 4 --enable-expert-parallel \
     --dcp-kv-prefetch --pcp-dcp-indexer-k-replica
 ```
 
+Finally, `--pcp-new-row-overlap` moves each layer's PCP all-gather of newly
+computed MLA KV (`kv_c`/`k_pe`) and indexer K rows off the main stream: the
+fused norm/rope writes each rank's slice directly into a peer-mapped symmetric
+buffer across the PCP group, and peer segments are pulled on an auxiliary stream
+beside the projections that follow (via batched copy-engine calls in eager mode,
+or one pull kernel recorded as a branch under a breakable CUDA graph). All three
+options are independent and can be combined:
+
+```bash
+vllm serve <model> -tp 1 -pcp 4 -dcp 4 --enable-expert-parallel \
+    --dcp-kv-prefetch --pcp-dcp-indexer-k-replica --pcp-new-row-overlap
+```
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

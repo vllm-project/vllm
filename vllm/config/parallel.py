@@ -619,6 +619,19 @@ class ParallelConfig:
     `prefill_context_parallel_size > 1` and `decode_context_parallel_size > 1`.
     """
 
+    pcp_new_row_overlap: bool = False
+    """Under PCP prefill for DeepSeek V3.2-style sparse attention, overlap the
+    PCP all-gather of each layer's newly computed MLA KV (`kv_c`/`k_pe`) and
+    indexer K rows with the projections that follow the fused norm/rope.
+    Writes each rank's new rows directly into a peer-mapped symmetric buffer
+    across the PCP group and pulls peer segments on an auxiliary stream (using
+    batched copy-engine calls in eager mode, or a single pull kernel recorded
+    as a graph branch under a breakable CUDA graph).
+
+    Allocates one per-rank symmetric buffer sized for `max_num_batched_tokens`
+    at model load time. Works with both TP=1 and TP>1 across the PCP group;
+    requires `prefill_context_parallel_size > 1`."""
+
     cp_kv_cache_interleave_size: int = 1
     """Interleave size of kv_cache storage while using DCP.
     Store interleave_size tokens on dcp_rank i, then store next
@@ -816,6 +829,11 @@ class ParallelConfig:
                 "pcp_dcp_indexer_k_replica requires both "
                 "prefill_context_parallel_size > 1 and "
                 f"decode_context_parallel_size > 1, got PCP={pcp}, DCP={dcp}."
+            )
+        if self.pcp_new_row_overlap and pcp == 1:
+            raise ValueError(
+                "pcp_new_row_overlap requires prefill_context_parallel_size > 1, "
+                f"got PCP={pcp}."
             )
 
         return self

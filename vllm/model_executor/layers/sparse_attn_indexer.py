@@ -87,6 +87,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.attention.ops.pcp_dcp_k_replica import pop_indexer_k_replica
+from vllm.v1.attention.ops.pcp_dcp_overlap import pop_indexer_new_rows
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -635,6 +636,7 @@ def sparse_attn_indexer(
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
     k_replica = pop_indexer_k_replica()
+    new_rows = pop_indexer_new_rows()
     attn_metadata = forward_context.attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
@@ -790,12 +792,21 @@ def sparse_attn_indexer(
 
     if not skip_k_cache_insert:
         assert k is not None
-        k, slot_mapping_for_cache = maybe_gather_indexer_k(
-            k,
-            slot_mapping,
-            num_decode_tokens,
-            use_pcp,
-            pcp_shard_decode_requests=pcp_shard_decode_requests,
+        gathered_new_k = (
+            new_rows.gathered_index_k(slot_mapping, num_decode_tokens)
+            if new_rows is not None
+            else None
+        )
+        k, slot_mapping_for_cache = (
+            gathered_new_k
+            if gathered_new_k is not None
+            else maybe_gather_indexer_k(
+                k,
+                slot_mapping,
+                num_decode_tokens,
+                use_pcp,
+                pcp_shard_decode_requests=pcp_shard_decode_requests,
+            )
         )
         # scale_fmt can be None, but the function expects str
         assert scale_fmt is not None

@@ -524,6 +524,7 @@ class EngineArgs:
     dcp_q_replicate: bool | None = ParallelConfig.dcp_q_replicate
     dcp_kv_prefetch: bool = ParallelConfig.dcp_kv_prefetch
     pcp_dcp_indexer_k_replica: bool = ParallelConfig.pcp_dcp_indexer_k_replica
+    pcp_new_row_overlap: bool = ParallelConfig.pcp_new_row_overlap
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
     cp_kv_cache_interleave_size: int | None = None
     data_parallel_size: int = ParallelConfig.data_parallel_size
@@ -1226,6 +1227,10 @@ class EngineArgs:
         parallel_group.add_argument(
             "--pcp-dcp-indexer-k-replica",
             **parallel_kwargs["pcp_dcp_indexer_k_replica"],
+        )
+        parallel_group.add_argument(
+            "--pcp-new-row-overlap",
+            **parallel_kwargs["pcp_new_row_overlap"],
         )
         parallel_group.add_argument(
             "--dcp-kv-cache-interleave-size",
@@ -2632,6 +2637,7 @@ class EngineArgs:
             dcp_q_replicate=self.dcp_q_replicate,
             dcp_kv_prefetch=self.dcp_kv_prefetch,
             pcp_dcp_indexer_k_replica=self.pcp_dcp_indexer_k_replica,
+            pcp_new_row_overlap=self.pcp_new_row_overlap,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             cp_kv_cache_interleave_size=(
                 self.cp_kv_cache_interleave_size
