@@ -6278,7 +6278,9 @@ def test_flashmla_padded_query_buffer_has_model_lifetime():
     first = _shared_fp8_q_padded(7, 64, 576)
     second = _shared_fp8_q_padded(7, 64, 576)
     assert first is second
-    assert first.device == torch.device("cuda", torch.cuda.current_device())
+    assert first.device == torch.device(
+        "cuda", torch.accelerator.current_device_index()
+    )
     assert torch.count_nonzero(first).item() == 0
     reference = weakref.ref(first)
     del first, second
