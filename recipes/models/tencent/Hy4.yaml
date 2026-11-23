@@ -108,12 +108,6 @@ notes:
     body: |
       The BF16 checkpoint is 1,549 GB across 245 shards. Provision host RAM and
       page cache for loading it; the evaluation host had 2 TiB.
-  - title: "BF16 on AMD"
-    when: { hardware: [amd], variants: [bf16] }
-    body: |
-      Only the FP8 checkpoint has been run on MI355X. The BF16 checkpoint fits
-      in 8x MI355X or MI350X memory but has not been validated there.
-
 guide: |
   ## Overview
 
