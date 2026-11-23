@@ -269,6 +269,34 @@ class SchedulerConfig:
     decode-only steps after a prefill. None (the default) leaves only the
     delayer's step-count bounds."""
 
+    prefill_hold_ttft_target: float | None = Field(default=None, gt=0)
+    """Hold prefills across data parallel MoE ranks, with this TTFT target in
+    seconds (5 is a reasonable start). None (the default) disables it.
+
+    With DP attention + EP all ranks step in lockstep, so a prefill on any rank
+    slows the step for all of them. With this set, all ranks hold or release
+    prefills together each step using an online non-negative 3-parameter step
+    cost model (`F + a * M + b * S`) and Online Ski-Rental against the
+    amortizable waste. A request is held only while it can still meet the
+    target given the releases it needs; a waiting request that has already
+    missed the target is held at most this long at a time.
+
+    Every request weighs the same: with the "priority" `policy`, a
+    high-priority request is held as long as any other. Enabling this performs
+    a per-step DP CPU all-reduce (overriding `dp_sync_interval`), which may
+    add latency on high-latency multi-node networks with very short decode
+    steps. The step cost model is calibrated for text prefills; multimodal
+    vision encoder time is not modeled separately. Requires data parallelism on
+    a MoE model, and cannot be combined with `prefill_schedule_interval`. Has
+    no effect on the prefill-only and decode-only instances of disaggregated
+    serving."""
+
+    prefill_hold_ttft_weight: float = Field(default=1.0, gt=0)
+    """Weight of waiting requests' TTFT against running decodes' stall time for
+    `prefill_hold_ttft_target`. At 1.0 (the default), the hold targets
+    end-to-end latency. Higher values hold less (favouring TTFT, including at
+    low arrival rates); lower values hold longer (favouring ITL)."""
+
     cache_aware_admission_window: int = Field(default=0, ge=0)
     """Look-ahead window for cache-aware admission. Within the first N waiting
     requests, those whose prefix is already in the KV cache are admitted ahead
@@ -385,6 +413,8 @@ class SchedulerConfig:
             "prefill_schedule_interval",
             "prefill_schedule_policy",
             "prefill_max_wait_ms",
+            "prefill_hold_ttft_target",
+            "prefill_hold_ttft_weight",
             "async_scheduling",
             "stream_interval",
         }
@@ -423,6 +453,27 @@ class SchedulerConfig:
         ):
             raise ValueError(
                 "prefill_max_wait_ms requires prefill_schedule_policy='delayer'."
+            )
+
+        if (
+            self.prefill_hold_ttft_target is not None
+            and self.prefill_schedule_policy == "delayer"
+        ):
+            raise ValueError(
+                "prefill_schedule_policy='delayer' and prefill_hold_ttft_target "
+                "are two alternative cross-DP prefill policies and cannot be "
+                "enabled together. Use --prefill-schedule-policy delayer "
+                "(with --prefill-schedule-interval / --prefill-max-wait-ms), or "
+                "--prefill-hold-ttft-target, not both."
+            )
+
+        if (
+            self.prefill_hold_ttft_target is not None
+            and self.prefill_schedule_interval > 1
+        ):
+            raise ValueError(
+                "prefill_hold_ttft_target cannot be combined with "
+                "prefill_schedule_interval > 1."
             )
 
         self.verify_max_model_len(max_model_len)

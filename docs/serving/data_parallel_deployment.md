@@ -144,6 +144,21 @@ In the above diagram, each of the dotted boxes corresponds to a separate launch 
 
 ## Prefill Scheduling Across DP Ranks
 
+Two alternative, opt-in policies coordinate prefill across MoE DP ranks: the prefill delayer (`--prefill-schedule-policy delayer`) and the cross-DP prefill hold (`--prefill-hold-ttft-target`). Both are off by default, and enabling both at once is rejected at config validation. To compare them, launch twice:
+
+```bash
+# Prefill delayer: coordinated holds, minimum spacing of 96 steps between prefill steps
+vllm serve $MODEL --data-parallel-size 8 --enable-expert-parallel \
+    --prefill-schedule-policy delayer --prefill-schedule-interval 96 \
+    --prefill-max-wait-ms 5000
+
+# Cross-DP prefill hold: cost-based, default --prefill-schedule-interval (1)
+vllm serve $MODEL --data-parallel-size 8 --enable-expert-parallel \
+    --prefill-hold-ttft-target 5
+```
+
+Both use a per-step DP CPU all-reduce, so each rank reaches it on every step; they share that mechanism but never run together.
+
 With MoE data parallelism the ranks step in lockstep, so a step in which any rank runs prefill is a long step for every rank, and the decodes on all ranks wait for it. Under prefill-heavy traffic (long prompts, multi-turn agentic sessions) some rank prefills on most steps unless the ranks coordinate. `--prefill-schedule-policy` selects how they do:
 
 - `cadence` (default): prefill is admitted only on every `--prefill-schedule-interval`-th step (default 1, i.e. every step). Each rank prefills whatever it has on those steps.
@@ -161,3 +176,24 @@ The delayer trades time to first token for fewer, fuller prefill steps and longe
 Each released step prefills at most `--max-num-batched-tokens` per rank, so the token budget decides how much TTFT the delayer costs. A small budget (e.g. 8192) needs more prefill steps per prompt and can leave prefill behind arrivals; a very large one makes each prefill step long and gives back most of the decode gain. 16384 worked well for multi-turn agentic traffic on DeepSeek-V4.1-Flash.
 
 The `delayer` policy applies only to MoE data parallelism (other engines use `cadence`) and does not support elastic EP, `--enable-fault-tolerance` or a custom `--scheduler-cls`.
+
+## Cross-DP Prefill Hold
+
+In MoE DP attention + EP deployments, all DP ranks execute forward passes in lockstep, so a prefill scheduled on a single rank stalls running decodes across every rank. Cross-DP prefill hold coordinates all ranks to briefly hold prefills and release them together in aligned mixed steps, improving decode interactivity (ITL) while bounding TTFT.
+
+Disabled by default (`--prefill-hold-ttft-target` is `None`). Enable it by setting a TTFT target in seconds (for example, `5`):
+
+```bash
+vllm serve $MODEL --data-parallel-size 8 --enable-expert-parallel \
+                  --prefill-hold-ttft-target 5
+```
+
+Use `--prefill-hold-ttft-weight` (default `1.0`) to tune the TTFT vs. ITL trade-off: higher values weigh waiting requests' TTFT more heavily (holding less, including at low arrival rates), while lower values hold longer in favour of ITL.
+
+Notes and limitations:
+
+- Requires `--data-parallel-size > 1` on a MoE model and cannot be combined with `--prefill-schedule-interval > 1`.
+- Performs a per-step DP CPU all-reduce (overriding `--dp-sync-interval`), which may add overhead on high-latency multi-node networks with very short decode steps.
+- With `--pipeline-parallel-size > 1`, overlapped pipeline stages add noise to the online step-cost fit (a startup warning is logged).
+- The step-cost model is calibrated for text prefills; multimodal vision encoder time is not modeled separately.
+- Has no effect on prefill-only or decode-only instances of disaggregated serving.

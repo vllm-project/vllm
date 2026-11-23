@@ -2905,8 +2905,10 @@ class DPEngineCoreProc(EngineCoreProc):
         # Sync step 1 too: an idle pause needs one dummy batch, not a full interval.
         self.step_counter += 1
         delayer = self.prefill_delayer
+        row = self.scheduler.dp_row()
         if (
             delayer is None
+            and row is None
             and self.step_counter != 1
             and self.step_counter % self.dp_sync_interval != 0
         ):
@@ -2914,16 +2916,19 @@ class DPEngineCoreProc(EngineCoreProc):
 
         parallel_config = self.vllm_config.parallel_config
         if delayer is None:
-            has_unfinished, pause_consensus = parallel_config.sync_dp_state(
+            has_unfinished, pause_consensus, rows = parallel_config.sync_dp_state(
                 self.dp_group,
                 has_unfinished=local_unfinished,
                 pending_pause=self.pending_pause,
+                row=row,
             )
+            if rows is not None:
+                self.scheduler.update_from_dp_rows(rows, idle=not has_unfinished)
         else:
             # The delayer's per-step exchange rides on this sync, which every
             # rank reaches on every step, so no rank can skip it.
             scheduler = cast("Scheduler", self.scheduler)
-            has_unfinished, pause_consensus = parallel_config.sync_dp_state(
+            has_unfinished, pause_consensus, _ = parallel_config.sync_dp_state(
                 self.dp_group,
                 has_unfinished=local_unfinished,
                 pending_pause=self.pending_pause,

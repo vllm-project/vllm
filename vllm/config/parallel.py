@@ -3,7 +3,7 @@
 
 import os
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import timedelta
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal, Self, overload
@@ -1087,37 +1087,59 @@ class ParallelConfig:
         has_unfinished: bool,
         pending_pause: bool,
         extra: torch.Tensor | None = None,
-    ) -> tuple[bool, bool]:
+        row: Sequence[float] | None = None,
+    ) -> tuple[bool, bool, list[list[float]] | None]:
         """Combined all-reduce for DP state synchronization.
 
         Uses a single SUM all-reduce on a 2-element tensor:
-          [0] = 1 if this rank has unfinished work, else 0.
-                SUM > 0 ≡ logical OR across ranks → any rank has work.
-          [1] = 1 if this rank has a pending pause request, else 0.
+          `[0]` = 1 if this rank has unfinished work, else 0.
+                SUM > 0 ≡ logical OR across ranks -> any rank has work.
+          `[1]` = 1 if this rank has a pending pause request, else 0.
                 SUM == dp_size ≡ all ranks reached pause consensus.
 
-        has_unfinished_global is true if any rank has unfinished work,
+        `has_unfinished_global` is true if any rank has unfinished work,
         or if some ranks are waiting for a pause consensus.
 
         `extra`, a 1-D int32 CPU tensor, is summed in the same all-reduce and
-        overwritten in place with the result.
+        overwritten in place with the result (used by the prefill delayer).
+
+        `row`, if given, is all-gathered in the same all-reduce: each rank
+        writes it into its own slot of a zeroed `[dp_size, len(row)]` block
+        appended to the tensor. Every rank must pass a row of the same length
+        (used by the cross-DP prefill hold). `extra` and `row` are mutually
+        exclusive, as the two policies are.
 
         Returns:
-            (has_unfinished_global, pause_consensus)
+            `(has_unfinished_global, pause_consensus, rows)`, where `rows` holds
+            every rank's `row` in rank order, or is None without `row`.
 
         """
-        tensor = torch.tensor(
-            [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
-        )
-        if extra is not None:
-            tensor = torch.cat((tensor, extra))
+        if extra is not None and row is not None:
+            raise ValueError("sync_dp_state takes either `extra` or `row`, not both.")
+        dp_size = dp_group.size()
+        if row is None:
+            tensor = torch.tensor(
+                [int(has_unfinished), int(pending_pause)],
+                dtype=torch.int32,
+                device="cpu",
+            )
+            if extra is not None:
+                tensor = torch.cat((tensor, extra))
+        else:
+            n = len(row)
+            buf = [0.0] * (2 + dp_size * n)
+            buf[0] = float(has_unfinished)
+            buf[1] = float(pending_pause)
+            start = 2 + dp_group.rank() * n
+            buf[start : start + n] = row
+            tensor = torch.tensor(buf, dtype=torch.float64, device="cpu")
         cpu_all_reduce_(tensor, dp_group, timeout=self.cpu_distributed_timeout)
+        rows = None if row is None else tensor[2:].view(dp_size, n).tolist()
         if extra is not None:
             extra.copy_(tensor[2:])
-        dp_size = dp_group.size()
-        pause_count = tensor[1].item()
+        pause_count = int(tensor[1].item())
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
-        return has_unfinished_global, pause_count == dp_size
+        return has_unfinished_global, pause_count == dp_size, rows
 
     @staticmethod
     def sync_kv_cache_memory_size(dp_group: ProcessGroup, kv_cache_memory: int) -> int:

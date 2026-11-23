@@ -193,6 +193,17 @@ def test_config_rejects_max_wait_without_delayer():
         )
 
 
+def test_config_rejects_delayer_with_prefill_hold():
+    with pytest.raises(ValueError, match="cannot be enabled together"):
+        SchedulerConfig(
+            max_num_batched_tokens=8192,
+            max_model_len=8192,
+            is_encoder_decoder=False,
+            prefill_schedule_policy="delayer",
+            prefill_hold_ttft_target=5,
+        )
+
+
 NUM_STEPS = 300
 
 

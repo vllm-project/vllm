@@ -95,6 +95,7 @@ def create_scheduler(
     cache_aware_admission_threshold: float = 0.5,
     prefill_schedule_policy: PrefillSchedulePolicy = "cadence",
     prefill_max_wait_ms: float | None = None,
+    prefill_hold_ttft_target: float | None = None,
     scheduling_policy: SchedulerPolicy = "fcfs",
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
@@ -151,6 +152,7 @@ def create_scheduler(
         cache_aware_admission_threshold=cache_aware_admission_threshold,
         prefill_schedule_policy=prefill_schedule_policy,
         prefill_max_wait_ms=prefill_max_wait_ms,
+        prefill_hold_ttft_target=prefill_hold_ttft_target,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
         policy=scheduling_policy,
