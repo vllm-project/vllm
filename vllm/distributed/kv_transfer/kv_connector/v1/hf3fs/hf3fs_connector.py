@@ -103,8 +103,7 @@ class _SaveGather:
     def __init__(self) -> None:
         # Set once the gather is enqueued, or when the task ends without one.
         self.enqueued = threading.Event()
-        # Recorded on the save stream after the gather.
-        # None if the task ended before gathering.
+        # Recorded on the save stream after the gather, or when the task fails.
         self.cuda_event: torch.cuda.Event | None = None
 
 
@@ -127,6 +126,10 @@ class AsyncOperationManager:
         self._save_gathers: dict[str, list[_SaveGather]] = {}
         self._load_futures: dict[str, Future] = {}
         self._pending_finished_requests: set[str] = set()
+        # A failure to fence save-stream work; blocks may then still be read.
+        self._fence_error: Exception | None = None
+        # Save buffers that a failed fence leaves possibly in use.
+        self._unfenced_buffers: list[torch.Tensor] = []
 
         # Initialize resources
         self._init_cuda_resources()
@@ -205,6 +208,8 @@ class AsyncOperationManager:
     ) -> tuple[set[str], set[str]]:
         completed_saves = self._check_completed_saves(finished_req_ids)
         completed_loads = self._check_completed_loads()
+        # A failed fence is recorded before its save completes, so check it after.
+        self._raise_if_unfenced()
 
         if completed_saves or completed_loads:
             logger.info(
@@ -263,8 +268,16 @@ class AsyncOperationManager:
         for request_id in request_ids:
             for gather in self._save_gathers.get(request_id, ()):
                 gather.enqueued.wait()
+                self._raise_if_unfenced()
                 if gather.cuda_event is not None:
                     gather.cuda_event.synchronize()
+
+    def _raise_if_unfenced(self) -> None:
+        """Stop before blocks are reused if save-stream reads could not be fenced."""
+        if self._fence_error is not None:
+            raise RuntimeError(
+                "HF3FS could not fence its save stream"
+            ) from self._fence_error
 
     def _save_worker(self) -> None:
         """Background worker for handling save operations."""
@@ -279,8 +292,22 @@ class AsyncOperationManager:
             except Exception as e:
                 logger.error("Save worker error: %s", e)
             finally:
-                # A task that ended without gathering must not block its waiters.
-                task[-1].enqueued.set()
+                self._release_gather_waiters(task[-1])
+
+    def _release_gather_waiters(self, gather: _SaveGather) -> None:
+        """Let waiters go once the task can no longer enqueue a gather."""
+        try:
+            if gather.cuda_event is None:
+                # The task may have failed after enqueuing part of a gather.
+                # Fence the save stream so waiters still wait for that work.
+                event = torch.cuda.Event()
+                event.record(self._save_stream)
+                gather.cuda_event = event
+        except Exception as e:
+            logger.error("Failed to fence a save gather: %s", e)
+            self._fence_error = e
+        finally:
+            gather.enqueued.set()
 
     def _load_worker(self) -> None:
         """Background worker for handling load operations."""
@@ -377,7 +404,16 @@ class AsyncOperationManager:
 
         except Exception as e:
             if buffers is not None:
-                self._save_buffer_allocator.free_buffer(buffers)
+                try:
+                    # Gathers enqueued before the error may still write into them.
+                    self._save_stream.synchronize()
+                except Exception as sync_error:
+                    # Keep the buffers alive and out of the pool.
+                    logger.error("Save stream sync failed: %s", sync_error)
+                    self._fence_error = sync_error
+                    self._unfenced_buffers.extend(buffers)
+                else:
+                    self._save_buffer_allocator.free_buffer(buffers)
             return self._fail_task(
                 "Saved", f"Task execution error: {e}", request_id, future
             )

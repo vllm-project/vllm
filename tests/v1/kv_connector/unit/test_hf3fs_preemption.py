@@ -39,7 +39,7 @@ NUM_GPU_BLOCKS = 48
 # The startup check needs one request of this length to fit in the pool.
 MAX_MODEL_LEN = 736
 DECODE_TOKENS = 480
-# The fixed connector blocks the step until the held save finishes.
+# The fixed connector blocks the step until the held save has gathered.
 # The hold then ends on this timeout instead of on the other request finishing.
 HOLD_TIMEOUT_S = 30.0
 
@@ -178,32 +178,44 @@ def _read_pages(worker, metadata, hashes) -> list[torch.Tensor]:
     return out
 
 
+def _hf3fs_llm(tmp_path) -> LLM:
+    transfer_config = KVTransferConfig(
+        kv_connector="HF3FSKVConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "hf3fs_storage_path": str(tmp_path),
+            "hf3fs_file_size": 256 * 1024 * 1024,
+            "hf3fs_client_numjobs": 2,
+        },
+    )
+    gc.collect()
+    torch.accelerator.empty_cache()
+    with patch("signal.signal"):
+        return LLM(
+            model=E2E_MODEL,
+            enforce_eager=True,
+            gpu_memory_utilization=0.3,
+            max_model_len=MAX_MODEL_LEN,
+            block_size=BLOCK_SIZE,
+            num_gpu_blocks_override=NUM_GPU_BLOCKS,
+            enable_prefix_caching=True,
+            kv_transfer_config=transfer_config,
+        )
+
+
+def _shutdown(llm: LLM, connectors: list) -> None:
+    for connector in connectors:
+        atexit.unregister(connector.close)
+    llm.llm_engine.engine_core.shutdown()
+    for connector in connectors:
+        connector.close()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 class TestHF3FSPreemptionEndToEnd:
     def test_preempted_request_saves_its_own_kv(self, tmp_path, in_process_metadata):
         metadata = in_process_metadata
-        transfer_config = KVTransferConfig(
-            kv_connector="HF3FSKVConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={
-                "hf3fs_storage_path": str(tmp_path),
-                "hf3fs_file_size": 256 * 1024 * 1024,
-                "hf3fs_client_numjobs": 2,
-            },
-        )
-        gc.collect()
-        torch.accelerator.empty_cache()
-        with patch("signal.signal"):
-            llm = LLM(
-                model=E2E_MODEL,
-                enforce_eager=True,
-                gpu_memory_utilization=0.3,
-                max_model_len=MAX_MODEL_LEN,
-                block_size=BLOCK_SIZE,
-                num_gpu_blocks_override=NUM_GPU_BLOCKS,
-                enable_prefix_caching=True,
-                kv_transfer_config=transfer_config,
-            )
+        llm = _hf3fs_llm(tmp_path)
         scheduler = llm.llm_engine.engine_core.engine_core.scheduler
         worker = get_kv_transfer_group()
         manager = worker._async_manager
@@ -277,11 +289,7 @@ class TestHF3FSPreemptionEndToEnd:
             stored = _read_pages(worker, metadata, target_hashes)
         finally:
             save_patch.stop()
-            for connector in connectors:
-                atexit.unregister(connector.close)
-            llm.llm_engine.engine_core.shutdown()
-            for connector in connectors:
-                connector.close()
+            _shutdown(llm, connectors)
             del llm, connectors, worker, manager
             gc.collect()
             torch.accelerator.empty_cache()
@@ -311,3 +319,51 @@ class TestHF3FSPreemptionEndToEnd:
         errors = relative_errors(hold.snapshot)
         print(f"held-save page errors: {[round(e, 4) for e in errors]}")
         assert max(errors) < 0.05, errors
+
+    def test_failed_gather_still_fences_its_reads(self, tmp_path, in_process_metadata):
+        llm = _hf3fs_llm(tmp_path)
+        scheduler = llm.llm_engine.engine_core.engine_core.scheduler
+        worker = get_kv_transfer_group()
+        manager = worker._async_manager
+        connectors = [scheduler.connector, worker]
+        gather_or_scatter = worker._gather_or_scatter_kv_caches
+
+        def gather_one_block_then_fail(block_ids, buffers, direction):
+            if direction != "gather":
+                return gather_or_scatter(block_ids, buffers, direction)
+            gather_or_scatter(block_ids[:1], buffers[:1], direction)
+            raise RuntimeError("injected gather failure")
+
+        def sync_fails(stream):
+            raise RuntimeError("injected sync failure")
+
+        fail_gather = patch.object(
+            worker, "_gather_or_scatter_kv_caches", gather_one_block_then_fail
+        )
+        try:
+            with fail_gather:
+                failed = manager.submit_save_operation("failed", [0, 1], ["a", "b"])
+                manager.wait_for_gathers({"failed"})
+            # The wait synchronized an event recorded after the partial gather.
+            [gather] = manager._save_gathers["failed"]
+            assert gather.cuda_event is not None and gather.cuda_event.query()
+            assert failed.result(timeout=60) is False
+            # The save thread survives the failure and serves the next save.
+            assert manager.submit_save_operation("next", [2], ["c"]).result(timeout=60)
+
+            # Without a working sync, the reads can't be fenced, so reuse must stop.
+            fail_sync = patch.object(torch.cuda.Stream, "synchronize", sync_fails)
+            with fail_gather, fail_sync:
+                unfenced = manager.submit_save_operation("unfenced", [3, 4], ["d", "e"])
+                assert unfenced.result(timeout=60) is False
+                with pytest.raises(RuntimeError, match="could not fence"):
+                    manager.wait_for_gathers({"unfenced"})
+            with pytest.raises(RuntimeError, match="could not fence"):
+                manager.get_finished_operations({"unfenced"})
+            # Its buffers stay alive and out of the pool.
+            assert len(manager._unfenced_buffers) == 2
+        finally:
+            _shutdown(llm, connectors)
+            del llm, connectors, worker, manager
+            gc.collect()
+            torch.accelerator.empty_cache()
