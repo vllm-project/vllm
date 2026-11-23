@@ -4,12 +4,17 @@
 // clang-format off
 
 #include "common.h"
+#include "dense_int8_plan.h"
+#include "../utils.hpp"
+#include <cstdint>
+#include <cstdlib>
+#include <vector>
 #include "gemm.h"
 #include "vec.h"
 
 namespace {
 
-template <typename scalar_t, bool has_bias, int BLOCK_N>
+template <typename scalar_t, bool has_bias, int BLOCK_N, bool stream_output = false>
 struct scale_C {
   static inline void apply(
       scalar_t* __restrict__ C,
@@ -23,8 +28,8 @@ struct scale_C {
 };
 
 #if defined(CPU_CAPABILITY_AVX512)
-template <bool has_bias, int BLOCK_N>
-struct scale_C<at::BFloat16, has_bias, BLOCK_N> {
+template <bool has_bias, int BLOCK_N, bool stream_output>
+struct scale_C<at::BFloat16, has_bias, BLOCK_N, stream_output> {
   static inline void apply(
       at::BFloat16* __restrict__ C,
       const int32_t* __restrict__ Ctmp,
@@ -55,8 +60,12 @@ struct scale_C<at::BFloat16, has_bias, BLOCK_N> {
     auto storec = [&](auto col) {
       // for COLS = 2, 4 use 512bit store
       if constexpr (col % 2 == 0) {
-        _mm512_storeu_si512(
-            reinterpret_cast<__m512i*>((C + col * 16)), (__m512i)(_mm512_cvtne2ps_pbh(vc[col + 1], vc[col + 0])));
+        const __m512i result = (__m512i)(_mm512_cvtne2ps_pbh(vc[col + 1], vc[col + 0]));
+        if constexpr (stream_output) {
+          _mm512_stream_si512(reinterpret_cast<__m512i*>(C + col * 16), result);
+        } else {
+          _mm512_storeu_si512(reinterpret_cast<__m512i*>(C + col * 16), result);
+        }
       }
     };
     Unroll<COLS>{}(storec);
@@ -344,6 +353,453 @@ void int8_scaled_mm_kernel_impl(
   });
 }
 
+#if defined(CPU_CAPABILITY_AVX512)
+
+using sgl::dense_int8::DenseCoarsePlan;
+using sgl::dense_int8::DenseSmallGridPlan;
+using sgl::dense_int8::partition_begin;
+
+template <typename T>
+struct AlignedScratch {
+  T* ptr = nullptr;
+  size_t capacity = 0;
+
+  ~AlignedScratch() { std::free(ptr); }
+
+  T* get(size_t elements) {
+    if (elements > capacity) {
+      const size_t bytes = ((elements * sizeof(T) + 63) / 64) * 64;
+      void* mem = nullptr;
+      if (posix_memalign(&mem, 64, bytes) != 0 || mem == nullptr) {
+        return nullptr;
+      }
+      std::free(ptr);
+      ptr = static_cast<T*>(mem);
+      capacity = bytes / sizeof(T);
+    }
+    return ptr;
+  }
+};
+
+template <typename T>
+T* worker_scratch(int64_t elements) {
+  thread_local AlignedScratch<T> scratch;
+  return scratch.get(static_cast<size_t>(elements));
+}
+
+inline void omp_team_barrier() {
+#if defined(_OPENMP)
+  #pragma omp barrier
+#endif
+}
+
+template <typename Func>
+inline void run_omp_team(int64_t team, const Func& fn) {
+#if defined(_OPENMP)
+  if (!at::in_parallel_region() && !omp_in_parallel() && team > 1) {
+  #pragma omp parallel num_threads(team)
+    {
+      fn(omp_get_num_threads(), omp_get_thread_num());
+    }
+  } else
+#endif
+  {
+    fn(1, 0);
+  }
+}
+
+inline bool is_64b_aligned(const void* ptr) {
+  return (reinterpret_cast<uintptr_t>(ptr) % 64) == 0;
+}
+
+struct ActivationBuffer {
+  static constexpr int64_t kMaxCachedBytes = 160LL * 1024 * 1024;
+  static constexpr int kRingDepth = 2;
+
+  struct Cache {
+    // 2-slot alternating ring avoids cross-core L2 RFO snoop storms when
+    // quantize_row_int8 overwrites the buffer right after all threads read it.
+    std::array<at::Tensor, kRingDepth> aq;
+    std::array<at::Tensor, kRingDepth> as;
+    int cursor = 0;
+    bool in_use = false;
+  };
+
+  at::Tensor transient_aq;
+  at::Tensor transient_as;
+  Cache* leased = nullptr;
+  uint8_t* aq = nullptr;
+  float* as = nullptr;
+
+  ActivationBuffer(int64_t m, int64_t a_stride,
+                   const at::TensorOptions& options) {
+    static thread_local Cache cache;
+    const bool use_cache =
+        !cache.in_use && m > 0 && a_stride > 0 &&
+        m <= kMaxCachedBytes / a_stride &&
+        m * a_stride <= kMaxCachedBytes - m * int64_t(sizeof(float));
+    if (!use_cache) {
+      transient_aq = at::empty({m * a_stride}, options.dtype(at::kByte));
+      transient_as = at::empty({m}, options.dtype(at::kFloat));
+      aq = transient_aq.data_ptr<uint8_t>();
+      as = transient_as.data_ptr<float>();
+      return;
+    }
+    const int slot = cache.cursor;
+    cache.cursor = (cache.cursor + 1) % kRingDepth;
+    const int64_t need_aq = m * a_stride;
+    auto& slot_aq = cache.aq[slot];
+    auto& slot_as = cache.as[slot];
+    if (!slot_aq.defined() || slot_aq.numel() < need_aq) {
+      const int64_t cap = std::min(
+          kMaxCachedBytes,
+          std::max(need_aq, slot_aq.defined() ? slot_aq.numel() * 2 : need_aq));
+      slot_aq = at::empty({cap}, options.dtype(at::kByte));
+    }
+    if (!slot_as.defined() || slot_as.numel() < m) {
+      const int64_t cap =
+          std::max(m, slot_as.defined() ? slot_as.numel() * 2 : m);
+      slot_as = at::empty({cap}, options.dtype(at::kFloat));
+    }
+    cache.in_use = true;
+    leased = &cache;
+    aq = slot_aq.data_ptr<uint8_t>();
+    as = slot_as.data_ptr<float>();
+  }
+
+  ~ActivationBuffer() {
+    if (leased) {
+      leased->in_use = false;
+    }
+  }
+  ActivationBuffer(const ActivationBuffer&) = delete;
+  ActivationBuffer& operator=(const ActivationBuffer&) = delete;
+};
+
+template <bool has_bias, bool stream_output>
+void dense_brgemm_tile(
+    const DenseCoarsePlan& plan, at::BFloat16* out, const uint8_t* A,
+    const int8_t* B, const float* As, const float* Bs, const float* bias,
+    int32_t* Ctmp, int64_t tile) {
+  const auto& kernel = plan.kernel;
+  const int64_t cs = kernel.c_stride();
+  const auto bounds = plan.tile_bounds(tile);
+  const int64_t mc = bounds.m, nc = bounds.n;
+  const int64_t rows = bounds.rows, cols = bounds.cols;
+  const int64_t block = kernel.k_block;
+
+  for (int64_t kb = 0; kb < kernel.k; kb += block) {
+    const int64_t depth = std::min(block, kernel.k - kb);
+    const bool add_c = kb > 0;
+    const uint8_t* ap = A + mc * kernel.a_stride + kb;
+    for (int64_t n = 0; n < cols; n += 32) {
+      const int8_t* bp = B + (nc + n) * kernel.b_stride + kb * 32;
+      at::native::cpublas::brgemm(
+          rows, 32, depth, kernel.a_stride, 32, cs, add_c,
+          ap, bp, Ctmp + n);
+    }
+  }
+  for (int64_t n = 0; n < cols; n += 32) {
+    const auto* comp = reinterpret_cast<const int32_t*>(
+        B + (nc + n) * kernel.b_stride + kernel.k * 32);
+    for (int64_t m = 0; m < rows; ++m) {
+      scale_C<at::BFloat16, has_bias, 32, stream_output>::apply(
+          out + (mc + m) * kernel.output_stride + nc + n,
+          Ctmp + m * cs + n, comp,
+          has_bias ? bias + nc + n : nullptr, As[mc + m], Bs + nc + n);
+    }
+  }
+}
+
+enum class SmallGridResult { kNotPreferred, kExecuted, kFallbackToMain };
+
+SmallGridResult dense_small_grid_gemm(
+    at::Tensor& mat1, at::Tensor& packed_w, at::Tensor& scales2,
+    const float* bias, at::Tensor& out,
+    int64_t M, int64_t N, int64_t K, int64_t l2_bytes) {
+  at::internal::lazy_init_num_threads();
+  int64_t team = at::get_num_threads();
+
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    if (!DenseSmallGridPlan::preferred(M, N, K, team, l2_bytes)) {
+      return SmallGridResult::kNotPreferred;
+    }
+    const DenseSmallGridPlan plan =
+        DenseSmallGridPlan::cached_select(M, N, K, team, l2_bytes);
+    if (!plan.valid) {
+      return SmallGridResult::kNotPreferred;
+    }
+
+    const at::BFloat16* src_a = mat1.data_ptr<at::BFloat16>();
+    const int64_t lda = mat1.stride(0);
+    const int8_t* B = packed_w.data_ptr<int8_t>();
+    const float* Bs = scales2.data_ptr<float>();
+
+    ActivationBuffer act_buf(M, plan.a_stride, mat1.options());
+    uint8_t* aq_ptr = act_buf.aq;
+    float* as_ptr = act_buf.as;
+
+    out = at::empty({M, N}, mat1.options());
+    at::BFloat16* out_ptr = out.data_ptr<at::BFloat16>();
+    const bool use_stream_output = plan.stream_output && is_64b_aligned(out_ptr);
+    int32_t* stack_slots[256];
+    std::vector<int32_t*> heap_slots;
+    int32_t** worker_slots = nullptr;
+    if (plan.gk > 1) {
+      if (plan.workers() <= 256) {
+        worker_slots = stack_slots;
+      } else {
+        heap_slots.assign(plan.workers(), nullptr);
+        worker_slots = heap_slots.data();
+      }
+    }
+    std::atomic<bool> scratch_failed{false};
+    int64_t observed_team = 0;
+
+    auto execute = [&](int64_t actual_team, int64_t worker) {
+      if (actual_team != team) {
+        if (worker == 0) {
+          observed_team = actual_team;
+        }
+        return;
+      }
+
+      const int64_t begin = partition_begin(M, actual_team, worker);
+      const int64_t end = partition_begin(M, actual_team, worker + 1);
+      for (int64_t m = begin; m < end; ++m) {
+        quantize_row_int8<at::BFloat16>(
+            aq_ptr + m * plan.a_stride, as_ptr[m], src_a + m * lda, K);
+      }
+      omp_team_barrier();
+
+      if (worker >= plan.workers()) {
+        if (plan.gk > 1) {
+          omp_team_barrier();
+        }
+        return;
+      }
+
+      const auto b = plan.block(worker);
+      const int64_t rows = b.r1 - b.r0;
+      const int64_t panels = b.p1 - b.p0;
+      const uint8_t* A_base = aq_ptr + b.r0 * plan.a_stride;
+      const float* As_base = as_ptr + b.r0;
+
+      at::internal::ThreadIdGuard thread_guard(worker);
+      c10::ParallelGuard parallel_guard(true);
+
+      int32_t* work = worker_scratch<int32_t>(plan.max_slot_elems());
+      if (work == nullptr) {
+        scratch_failed.store(true, std::memory_order_relaxed);
+        if (plan.gk > 1) {
+          omp_team_barrier();
+        }
+        return;
+      }
+      if (plan.gk > 1) {
+        worker_slots[worker] = work;
+      }
+
+      const int64_t panel_stride = plan.panel_elems(rows);
+
+      auto run_brgemm_chunk = [&](int64_t p_begin, int64_t p_end) {
+        for (int64_t kb = b.k0; kb < b.k1; kb += plan.k_block) {
+          const int64_t depth = std::min(plan.k_block, b.k1 - kb);
+          const bool add_c = kb > b.k0;
+          const uint8_t* ap = A_base + kb;
+          for (int64_t p = p_begin; p < p_end; ++p) {
+            const int64_t p_rel = p - p_begin;
+            const int8_t* bp = B + p * 32 * plan.b_stride + kb * 32;
+            at::native::cpublas::brgemm(
+                rows, 32, depth, plan.a_stride, 32, 32, add_c,
+                ap, bp, work + p_rel * panel_stride);
+          }
+        }
+      };
+
+      if (plan.gk == 1) {
+        AT_DISPATCH_BOOL2(bias != nullptr, has_bias, use_stream_output, stream_output, [&] {
+          for (int64_t p0 = b.p0; p0 < b.p1; p0 += plan.n_chunk) {
+            const int64_t p1 = std::min(b.p1, p0 + plan.n_chunk);
+            run_brgemm_chunk(p0, p1);
+            for (int64_t p = p0; p < p1; ++p) {
+              const int64_t p_rel = p - p0;
+              const int64_t n0 = p * 32;
+              const auto* comp = reinterpret_cast<const int32_t*>(
+                  B + n0 * plan.b_stride + K * 32);
+              const int32_t* panel_c = work + p_rel * panel_stride;
+              for (int64_t r = 0; r < rows; ++r) {
+                scale_C<at::BFloat16, has_bias, 32, stream_output>::apply(
+                    out_ptr + (b.r0 + r) * N + n0, panel_c + r * 32, comp,
+                    has_bias ? bias + n0 : nullptr, As_base[r], Bs + n0);
+              }
+            }
+          }
+        });
+        at::native::cpublas::brgemm_release();
+        if (use_stream_output) {
+          _mm_sfence();
+        }
+        return;
+      }
+
+      run_brgemm_chunk(b.p0, b.p1);
+      at::native::cpublas::brgemm_release();
+      omp_team_barrier();
+      if (scratch_failed.load(std::memory_order_relaxed)) {
+        return;
+      }
+
+      const int64_t group_base = worker - b.ik;
+      const int64_t total_out = panels * rows;
+      const int64_t t0 = partition_begin(total_out, plan.gk, b.ik);
+      const int64_t t1 = partition_begin(total_out, plan.gk, b.ik + 1);
+      AT_DISPATCH_BOOL2(bias != nullptr, has_bias, use_stream_output, stream_output, [&] {
+        alignas(64) int32_t sums[32];
+        for (int64_t t = t0; t < t1; ++t) {
+          const int64_t p_rel = t / rows;
+          const int64_t r = t % rows;
+          const int64_t n0 = (b.p0 + p_rel) * 32;
+          const auto* comp = reinterpret_cast<const int32_t*>(
+              B + n0 * plan.b_stride + K * 32);
+          const int64_t elem_off = p_rel * panel_stride + r * 32;
+          __m512i s0 = _mm512_setzero_si512();
+          __m512i s1 = _mm512_setzero_si512();
+          for (int64_t slot = 0; slot < plan.gk; ++slot) {
+            const int32_t* src_c = worker_slots[group_base + slot] + elem_off;
+            s0 = _mm512_add_epi32(s0, _mm512_loadu_si512(src_c + 0));
+            s1 = _mm512_add_epi32(s1, _mm512_loadu_si512(src_c + 16));
+          }
+          _mm512_store_si512(sums + 0, s0);
+          _mm512_store_si512(sums + 16, s1);
+          scale_C<at::BFloat16, has_bias, 32, stream_output>::apply(
+              out_ptr + (b.r0 + r) * N + n0, sums, comp,
+              has_bias ? bias + n0 : nullptr, As_base[r], Bs + n0);
+        }
+      });
+      if (use_stream_output) {
+        _mm_sfence();
+      }
+    };
+
+    run_omp_team(team, execute);
+    if (observed_team > 0) {
+      team = observed_team;
+      continue;
+    }
+    return scratch_failed.load(std::memory_order_relaxed)
+               ? SmallGridResult::kFallbackToMain
+               : SmallGridResult::kExecuted;
+  }
+  return SmallGridResult::kNotPreferred;
+}
+
+bool dense_coarse_gemm(
+    at::Tensor& mat1, at::Tensor& packed_w, at::Tensor& scales2,
+    const std::optional<at::Tensor>& bias_tensor, at::Tensor& out,
+    int64_t M, int64_t N, int64_t K) {
+  const int64_t l2_bytes = 2 * cpu_utils::get_available_l2_size();
+  if (mat1.scalar_type() != at::kBFloat16 ||
+      at::in_parallel_region() ||
+#if defined(_OPENMP)
+      omp_in_parallel() ||
+#endif
+      !DenseCoarsePlan::l2_eligible(l2_bytes)) {
+    return false;
+  }
+  const float* bias = nullptr;
+  if (bias_tensor.has_value()) {
+    CHECK_EQ(bias_tensor.value().size(0), N);
+    bias = bias_tensor.value().data_ptr<float>();
+  }
+  if (brgemm_supported() && DenseSmallGridPlan::shape_eligible(M, N, K)) {
+    const auto small_result = dense_small_grid_gemm(
+        mat1, packed_w, scales2, bias, out, M, N, K, l2_bytes);
+    if (small_result == SmallGridResult::kExecuted) {
+      return true;
+    }
+    if (small_result == SmallGridResult::kFallbackToMain) {
+      return false;
+    }
+  }
+  if (!can_use_brgemm<int8_t>(M) || !DenseCoarsePlan::shape_eligible(M, N, K)) {
+    return false;
+  }
+
+  at::internal::lazy_init_num_threads();
+  int64_t team = at::get_num_threads();
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    const DenseCoarsePlan plan =
+        DenseCoarsePlan::cached_select(M, N, K, team, l2_bytes);
+    if (!plan.valid) {
+      return false;
+    }
+
+    ActivationBuffer act_buf(M, plan.kernel.a_stride, mat1.options());
+    uint8_t* Aq = act_buf.aq;
+    float* As = act_buf.as;
+
+    out = at::empty({M, N}, mat1.options());
+    at::BFloat16* out_ptr = out.data_ptr<at::BFloat16>();
+    const bool use_stream_output =
+        plan.kernel.stream_output && is_64b_aligned(out_ptr);
+    const at::BFloat16* src_a = mat1.data_ptr<at::BFloat16>();
+    const int64_t lda = mat1.stride(0);
+    const int8_t* B = packed_w.data_ptr<int8_t>();
+    const float* Bs = scales2.data_ptr<float>();
+
+    std::atomic<bool> scratch_failed{false};
+    int64_t observed_team = 0;
+
+    auto execute = [&](int64_t actual_team, int64_t worker) {
+      if (actual_team != team) {
+        if (worker == 0) {
+          observed_team = actual_team;
+        }
+        return;
+      }
+      int32_t* work = worker_scratch<int32_t>(plan.kernel.worker_scratch());
+      if (work == nullptr) {
+        scratch_failed.store(true, std::memory_order_relaxed);
+      } else {
+        const int64_t begin = partition_begin(M, actual_team, worker);
+        const int64_t end = partition_begin(M, actual_team, worker + 1);
+        for (int64_t m = begin; m < end; ++m) {
+          quantize_row_int8<at::BFloat16>(
+              Aq + m * plan.kernel.a_stride, As[m], src_a + m * lda, K);
+        }
+      }
+      omp_team_barrier();
+      if (scratch_failed.load(std::memory_order_relaxed)) {
+        return;
+      }
+
+      at::internal::ThreadIdGuard thread_guard(worker);
+      c10::ParallelGuard parallel_guard(true);
+      AT_DISPATCH_BOOL2(bias != nullptr, has_bias, use_stream_output, stream_output, [&] {
+        plan.each_macro_tile(worker, [&](int64_t tile) {
+          dense_brgemm_tile<has_bias, stream_output>(
+              plan, out_ptr, Aq, B, As, Bs, bias, work, tile);
+        });
+      });
+      at::native::cpublas::brgemm_release();
+      if (use_stream_output) {
+        _mm_sfence();
+      }
+    };
+
+    run_omp_team(team, execute);
+    if (observed_team > 0) {
+      team = observed_team;
+      continue;
+    }
+    return !scratch_failed.load(std::memory_order_relaxed);
+  }
+  return false;
+}
+
+#endif
+
 }  // anonymous namespace
 
 // tinygemm interface
@@ -508,6 +964,13 @@ at::Tensor int8_scaled_mm_with_quant(
   TORCH_CHECK(st == out_dtype, "int8_scaled_mm_with_quant: expect A has same dtype with out_dtype.");
   TORCH_CHECK(mat2.scalar_type() == at::kChar, "int8_scaled_mm_with_quant: expect mat2 to be int8.");
   TORCH_CHECK(scales2.scalar_type() == at::kFloat, "int8_scaled_mm_with_quant: expect scales to be float32.");
+
+#if defined(CPU_CAPABILITY_AVX512)
+  at::Tensor coarse_out;
+  if (dense_coarse_gemm(mat1, packed_w, scales2, bias, coarse_out, M, N, K)) {
+    return coarse_out;
+  }
+#endif
 
   const int64_t buffer_size = M * K + M * sizeof(float);
   auto buffer = at::empty({buffer_size}, mat1.options().dtype(at::kByte));
