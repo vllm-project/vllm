@@ -630,6 +630,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.impl = impl  # type: ignore[assignment]
         # ShardQ (see vllm.v1.attention.ops.shardq), if the impl supports it.
         self.use_shardq = shardq_eligible and getattr(impl, "use_shardq", False)
+        # Indexer cache bytes per token, for DCP ShardQ (0: no indexer).
+        self.shardq_index_entry_bytes = 0
         if self.use_shardq:
             vllm_config = get_current_vllm_config()
             dtype = vllm_config.model_config.dtype
@@ -651,6 +653,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 indexer_op.k_cache.use_shardq = True
                 # Under DCP the indexer gathers this layer's context too.
                 indexer_op.k_cache.shardq_layer_name = self.layer_name
+                self.shardq_index_entry_bytes = indexer_op.k_cache.head_dim
         index_group = getattr(impl, "index_group", None)
         self.hisparse_cache = (
             index_group.cache(cast(Any, impl).index_group_index)
@@ -1103,7 +1106,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             self.impl.reserve_workspace()
             if self.use_shardq and self.impl.dcp_world_size > 1:
-                self._reserve_dcp_shardq_workspace(k_c_normed.device)
+                from vllm.v1.attention.ops.dcp_shardq.context import (
+                    reserve_dcp_shardq,
+                )
+
+                reserve_dcp_shardq(self, k_c_normed.device)
 
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
@@ -1203,7 +1210,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         if num_mqa_tokens > 0:
             has_mla_lora = hasattr(self.kv_b_proj, "apply_mla_absorbed_kv_b_lora")
-            use_fused_v_up_proj = self.W_UV_dcp is not None and not has_mla_lora
+            use_fused_v_up_proj = (
+                self.W_UV_dcp is not None
+                and not has_mla_lora
+                and gathered_context is None
+            )
             mqa_output_slice = output[:num_mqa_tokens]
             if mqa_q_prepared is not None:
                 mqa_q = mqa_q_prepared[:num_mqa_tokens]
@@ -1249,7 +1260,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 attn_out = unshard_out(attn_out, shardq, decode_out)
 
             # correct dcp attn_out with lse.
-            merged_v_up = False
             if self.impl.dcp_world_size > 1 and gathered_context is None:
                 assert lse is not None
                 assert self.dcp_manager is not None
@@ -1281,7 +1291,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         seq_lens=seq_lens,
                         query_start_loc=query_start_loc,
                     )
-                    merged_v_up = True
                 elif num_merge_rows == attn_out.shape[0]:
                     attn_out = self.dcp_manager.combine(
                         attn_out,
@@ -1300,7 +1309,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
             # v_up projection, unless the DCP merge already applied it
-            if not merged_v_up:
+            if not use_fused_v_up_proj:
                 self._v_up_proj(attn_out, out=mqa_output_slice)
 
         if quant_key is not None:
@@ -1373,39 +1382,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             lse,
             seq_lens=attn_metadata.seq_lens[:num_decodes],  # type: ignore[attr-defined]
             query_start_loc=attn_metadata.query_start_loc[: num_decodes + 1],
-        )
-
-    def _reserve_dcp_shardq_workspace(self, device: torch.device) -> None:
-        """Reserve the gathered-context workspace of DCP ShardQ steps (see
-        ShardQMetadata.gathered_context) in the memory profile, and warm up
-        the DCP path that their other steps keep."""
-        from vllm.v1.attention.ops.dcp_shardq import context as shardq_context
-        from vllm.v1.attention.ops.dcp_shardq.context import (
-            ContextLayout,
-            reserve_workspace,
-        )
-
-        vllm_config = get_current_vllm_config()
-        # The metadata builder's condition (_init_dcp_shardq).
-        layout = ContextLayout.from_layer(
-            self.get_kv_cache_config(vllm_config).spec, self.indexer
-        )
-        if layout is None:
-            return
-        scheduler_config = vllm_config.scheduler_config
-        reserve_workspace(
-            layout,
-            shardq_context.workspace_max_tokens(vllm_config),
-            scheduler_config.max_num_seqs,
-            device,
-        )
-        # The first DCP-path step may come late, once the KV cache and the
-        # caching allocator hold the memory that its NCCL collectives allocate
-        # on first use. A step whose prefill requests do not fit the workspace
-        # takes the DCP path whole, so reserve a full step.
-        assert self.dcp_manager is not None
-        shardq_context.warm_up_dcp_fallback(
-            self.dcp_manager, scheduler_config.max_num_batched_tokens
         )
 
     def prepare_mqa_query(

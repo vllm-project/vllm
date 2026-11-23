@@ -684,7 +684,9 @@ class KimiK3DSAAttention(nn.Module):
         # its cache follows the MLA layer's split here.
         if self.mla_attn.mla_attn.use_shardq:
             indexer.k_cache.use_shardq = True
+            # Under DCP the indexer gathers the MLA layer's context too.
             indexer.k_cache.shardq_layer_name = self.mla_attn.mla_attn.layer_name
+            self.mla_attn.mla_attn.shardq_index_entry_bytes = indexer.k_cache.head_dim
 
         offload = vllm_config.offload_config
         self.weights_offloaded = (

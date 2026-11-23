@@ -844,13 +844,6 @@ def sparse_attn_indexer(
             prefill_chunks = gathered_context.indexer_chunks
             prefill_dcp_world_size = 1
             indices = gathered_context.gather_indices
-        # Under ShardQ the chunks index the gather indices' tokens. The caller
-        # may have computed the query and weights of just those.
-        prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
-        if indices is not None and q_quant.shape[0] != indices.shape[0]:
-            prefill_q, prefill_weights = q_quant[indices], weights[indices]
-            if q_scale is not None:
-                prefill_q_scale = q_scale[indices]
 
         # Get the shared workspace buffers once, sized for this batch's largest
         # chunk rather than the profiled bound (total_seq_lens), so the scratch
@@ -887,7 +880,14 @@ def sparse_attn_indexer(
             scales_spec,
             *gather_specs,
         )
+        # Under ShardQ the chunks index the shardq_gather_indices tokens. The
+        # caller may have computed the query and weights of just those.
+        prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
         assert indices is None or candidate_blocks is None
+        if indices is not None and q_quant.shape[0] != indices.shape[0]:
+            prefill_q, prefill_weights = q_quant[indices], weights[indices]
+            if q_scale is not None:
+                prefill_q_scale = q_scale[indices]
         for chunk in prefill_chunks:
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke

@@ -1230,17 +1230,17 @@ _A2A_SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
 def _use_cutedsl_direct_a2a(
     world_size: int, heads_per_rank: int, head_dim: int, dtype: torch.dtype
 ) -> bool:
-    if not (
-        current_platform.is_cuda()
+    # The CuTe DSL kernels hold every source in registers (W <= 8), push one
+    # LSE per thread (H / W <= 64) and cover MLA's 512-dim BF16 latent.
+    return (
+        dtype == torch.bfloat16
+        and 1 < world_size <= 8
+        and 0 < heads_per_rank <= 64
+        and head_dim == 512
+        and current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
         and has_cutedsl()
-    ):
-        return False
-    from vllm.v1.attention.ops.dcp_direct_a2a_cutedsl import (
-        direct_dcp_a2a_cutedsl_supported,
     )
-
-    return direct_dcp_a2a_cutedsl_supported(world_size, heads_per_rank, head_dim, dtype)
 
 
 class DirectDCPA2AWorkspace(DirectCPWorkspace):
@@ -1266,7 +1266,6 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
         self.max_num_tokens = max_num_tokens
         self.heads_per_rank = heads_per_rank
         self.head_dim = head_dim
-        self.dtype = dtype
 
         output_shape = (
             num_ubatches,
@@ -1291,33 +1290,14 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
         self.received_signal, self.peer_signal_ptrs = self._allocate(
             signal_shape, torch.int32
         )
-        # On SM100, the per-ubatch CuTe DSL implementation: same buffers and
-        # signal protocol in two launches instead of four, plus [W + 1] int32
-        # counters per ubatch. None selects the CUDA op.
-        self.cutedsl_lse_reduce: list[Callable[..., None]] | None = None
+        # Set on SM100 to select the CuTe DSL kernels (same buffers and
+        # protocol, two launches instead of four): [W + 1] int32 per ubatch.
+        self.cutedsl_counters: torch.Tensor | None = None
         if _use_cutedsl_direct_a2a(self.world_size, heads_per_rank, head_dim, dtype):
-            from vllm.v1.attention.ops import dcp_direct_a2a_cutedsl
-
-            counters = torch.zeros(
+            self.cutedsl_counters = torch.zeros(
                 (num_ubatches, self.world_size + 1),
                 dtype=torch.int32,
                 device=self.device,
-            )
-            self.cutedsl_lse_reduce = [
-                functools.partial(
-                    dcp_direct_a2a_cutedsl.direct_dcp_a2a_lse_reduce_cutedsl,
-                    counters=ubatch_counters,
-                )
-                for ubatch_counters in counters
-            ]
-
-    def register_warmup(self) -> None:
-        """Compile the CuTe DSL kernels, if selected, during JIT warmup."""
-        if self.cutedsl_lse_reduce is not None:
-            from vllm.v1.attention.ops import dcp_direct_a2a_cutedsl
-
-            dcp_direct_a2a_cutedsl.register_warmup(
-                self.world_size, self.heads_per_rank, self.head_dim, self.dtype
             )
 
     def lse_reduce(
@@ -1351,10 +1331,16 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
             self.max_num_tokens,
             is_lse_base_on_e,
         )
-        if self.cutedsl_lse_reduce is None:
+        if self.cutedsl_counters is None:
             torch.ops._C.direct_dcp_a2a_lse_reduce(*args)
         else:
-            self.cutedsl_lse_reduce[ubatch](*args)
+            from vllm.v1.attention.ops.dcp_direct_a2a_cutedsl import (
+                direct_dcp_a2a_lse_reduce_cutedsl,
+            )
+
+            direct_dcp_a2a_lse_reduce_cutedsl(
+                *args, counters=self.cutedsl_counters[ubatch]
+            )
         return output
 
 
@@ -1720,7 +1706,6 @@ class MLADCPManager:
             output_dtype,
             is_lse_base_on_e,
             use_pcp,
-            vllm_config.kernel_config.enable_jit_warmup,
         )
         if vllm_config.kernel_config.enable_jit_warmup and not self.use_a2a:
             _CORRECT_ATTN_CP_OUT_KERNEL.register_warmup(
@@ -1756,6 +1741,14 @@ class MLADCPManager:
                 is_base_e=is_lse_base_on_e,
                 return_lse=False,
             )
+        if (
+            vllm_config.kernel_config.enable_jit_warmup
+            and self.direct_a2a is not None
+            and self.direct_a2a.cutedsl_counters is not None
+        ):
+            from vllm.v1.attention.ops import dcp_direct_a2a_cutedsl
+
+            dcp_direct_a2a_cutedsl.register_warmup(self.group.world_size, num_heads)
         # Largest batch the query gather serves without NCCL; 0 if never.
         self.direct_query_gather_max_tokens = 0
         self.query_gather = (
@@ -1775,7 +1768,6 @@ class MLADCPManager:
         dtype: torch.dtype,
         is_lse_base_on_e: bool,
         use_pcp: bool,
-        enable_jit_warmup: bool,
     ) -> DCPCombine:
         direct_workspace = None
         if self.use_a2a:
@@ -1791,8 +1783,6 @@ class MLADCPManager:
         self.direct_a2a = direct_workspace
         if direct_workspace is not None:
             logger.info_once("Using direct symmetric-memory DCP A2A for MLA.")
-            if enable_jit_warmup:
-                direct_workspace.register_warmup()
             return functools.partial(
                 self._direct_workspace_combine,
                 direct_workspace,

@@ -226,9 +226,7 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         layer: AttentionLayer,
         block_size: int,
         is_decode: bool,
-        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        assert not return_lse, "FlashAttnMLASparseImpl does not return the LSE."
         if not isinstance(q, tuple):
             raise NotImplementedError(
                 "FlashAttnMLASparseImpl expects split (q_nope, q_rope) input."
@@ -370,6 +368,7 @@ def _fa4_varlen_scalars(
 class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
     # FA4 emits a natural-log LSE; prefill converts trtllm-gen's log2 LSE.
     lse_base_on_e: bool = True
+    supports_dcp_shardq: ClassVar[bool] = False
 
     def _forward_mqa_kernel(
         self,
@@ -381,10 +380,7 @@ class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
         layer: AttentionLayer,
         block_size: int,
         is_decode: bool,
-        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if return_lse is None:
-            return_lse = self.need_to_return_lse_for_decode
         if not is_decode:
             out, lse = super()._forward_mqa_kernel(
                 q,
@@ -394,7 +390,6 @@ class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
                 layer=layer,
                 block_size=block_size,
                 is_decode=is_decode,
-                return_lse=return_lse,
             )
             return out, None if lse is None else lse * math.log(2.0)
         if isinstance(q, tuple):
@@ -427,6 +422,6 @@ class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
             # Causality is in the top-k list; causal=True would clamp flat rows.
             causal=False,
             fa_version=4,
-            return_softmax_lse=return_lse,
+            return_softmax_lse=self.need_to_return_lse_for_decode,
         )
-        return kernel_out if return_lse else (kernel_out, None)
+        return kernel_out if self.need_to_return_lse_for_decode else (kernel_out, None)

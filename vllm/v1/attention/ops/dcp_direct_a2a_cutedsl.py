@@ -1,27 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CuTe DSL direct DCP A2A LSE reduce (the DCP decode output combine) on SM100.
+"""CuTe DSL `torch.ops._C.direct_dcp_a2a_lse_reduce` for SM100 (BF16, 512 dims).
 
-Drop-in for `torch.ops._C.direct_dcp_a2a_lse_reduce`, which
-`DirectDCPA2AWorkspace` selects on SM100 for the shapes accepted by
-`direct_dcp_a2a_cutedsl_supported`. It uses the same symmetric buffers and
-the same epoch protocol (`epoch + 1` selects the parity slot; source `r`
-publishes `signal[parity][r] = epoch + 1` with a system-scope release), and
-its output is bit-identical, in two launches instead of four:
+Same symmetric buffers, epoch and signal protocol, and bit-identical output as
+the CUDA op, in two launches instead of four:
 
-`push`: one CTA per (token, destination rank). It copies the token's head
-    slice for that destination (`heads_per_rank x head_dim`) and its LSE into
-    the destination's receive slot, all 16-byte loads in flight before the
-    remote stores. Tokens with an empty KV shard send an LSE of `-inf`; their
-    payload is never read by the combine. The last CTA of each destination (a
-    local ticket) publishes the signal after a system-scope fence.
-`combine`: one warp per (token, local head). It waits for all sources,
-    forms the base-2 LSE weights in source order exactly as the CUDA op does,
-    loads all non-zero-weight partials at once and accumulates in FP32. The last
-    CTA advances the epoch, which replaces the separate epoch launch.
-
-No host synchronization and no host-side state: graph replays only advance the
-device epoch.
+`push`: one CTA per (token, destination) copies the token's head slice and LSE
+    to the destination's receive slot (tokens with an empty KV shard send LSE
+    `-inf`). The last CTA per destination publishes the signal.
+`combine`: one warp per (token, local head) waits for every source and
+    combines in FP32 in the CUDA op's source order. The last CTA advances the
+    epoch.
 """
 
 from dataclasses import dataclass
@@ -30,11 +19,12 @@ from typing import Any
 import cutlass
 import cutlass.cute as cute
 import torch
-from cutlass import Float32, Int32, Int64, Uint32
+from cutlass import Float16, Float32, Int32, Int64, Uint16, Uint32
 from cutlass._mlir.dialects import llvm
-from cutlass.cutlass_dsl import T, dsl_user_op
 
 from vllm.cute_utils import recast_val
+from vllm.cute_utils.cvt import bf16x2_to_fp32x2, fp32x2_to_bf16x2
+from vllm.cute_utils.ptx_mem import ld_global_v4, st_global_v4
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
@@ -45,223 +35,33 @@ from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
 _SPIN_LIMIT = 100_000_000
 # LSE element type, a runtime argument of the push (one compile serves all).
 _LSE_KINDS = {torch.float32: 0, torch.bfloat16: 1, torch.float16: 2}
-_OUTPUT_DTYPES = (torch.bfloat16, torch.float16)
+_HEAD_DIM = 512
 _PUSH_THREADS = 128
 _COMBINE_WARPS = 4
-# The combine holds every source's partials in registers, so the rank count
-# is bounded. The push sends one LSE per thread (heads_per_rank <=
-# _PUSH_THREADS); MLA has at most 128 heads over at least 2 DCP ranks. The
-# output is MLA's 512-dim latent (a combine lane covers 8 of every 256 dims).
-_MAX_WORLD_SIZE = 8
-_MAX_HEADS_PER_RANK = 64
-_HEAD_DIM = 512
 # CUDART_L2E_F, so base-e LSEs scale exactly as in the CUDA op.
 _LOG2_E = float(torch.tensor(1.4426950408889634, dtype=torch.float32))
 
 
-def direct_dcp_a2a_cutedsl_supported(
-    world_size: int, heads_per_rank: int, head_dim: int, dtype: torch.dtype
-) -> bool:
-    """Shapes the CuTe kernels cover; others keep the CUDA implementation."""
-    return (
-        dtype in _OUTPUT_DTYPES
-        and 1 < world_size <= _MAX_WORLD_SIZE
-        and 0 < heads_per_rank <= _MAX_HEADS_PER_RANK
-        and head_dim == _HEAD_DIM
-    )
+@dataclass(frozen=True)
+class _CompileKey:
+    world_size: int
+    heads_per_rank: int
 
 
-def _asm(result_type, operands, asm: str, constraints: str, *, loc, ip):
-    return llvm.inline_asm(
-        result_type,
-        [operand.ir_value(loc=loc, ip=ip) for operand in operands],
-        asm,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        loc=loc,
-        ip=ip,
-    )
+def _ptr(dtype, addr: Int64) -> cute.Pointer:
+    return cute.make_ptr(dtype, addr, cute.AddressSpace.gmem)
 
 
-def _asm_void(operands, asm: str, constraints: str, *, loc, ip) -> None:
-    # A dummy result keeps the side-effecting asm in the DSL's value graph.
-    _asm(
-        T.i32(),
-        operands,
-        "mov.u32 $0, 0;\n\t" + asm,
-        ",".join(("=r", constraints)) if constraints else "=r",
-        loc=loc,
-        ip=ip,
-    )
+def _ld(dtype, addr: Int64, **kwargs):
+    return cute.arch.load(_ptr(dtype, addr), dtype, **kwargs)
 
 
-@dsl_user_op
-def _ld_v4(addr: Int64, *, loc=None, ip=None) -> list[Uint32]:
-    out = _asm(
-        llvm.StructType.get_literal([T.i32()] * 4),
-        [Int64(addr)],
-        "ld.global.v4.u32 {$0, $1, $2, $3}, [$4];",
-        "=r,=r,=r,=r,l",
-        loc=loc,
-        ip=ip,
-    )
-    return [
-        Uint32(llvm.extractvalue(T.i32(), out, [i], loc=loc, ip=ip)) for i in range(4)
-    ]
+def _st(addr: Int64, value, **kwargs) -> None:
+    cute.arch.store(_ptr(type(value), addr), value, **kwargs)
 
 
-@dsl_user_op
-def _st_v4(addr: Int64, v0, v1, v2, v3, *, loc=None, ip=None) -> None:
-    _asm_void(
-        [Int64(addr), *(Uint32(v) for v in (v0, v1, v2, v3))],
-        "st.global.v4.u32 [$1], {$2, $3, $4, $5};",
-        "l,r,r,r,r",
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def _ld_f32(addr: Int64, *, loc=None, ip=None) -> Float32:
-    return Float32(
-        _asm(T.f32(), [Int64(addr)], "ld.global.f32 $0, [$1];", "=f,l", loc=loc, ip=ip)
-    )
-
-
-@dsl_user_op
-def _ld_i32(addr: Int64, *, loc=None, ip=None) -> Int32:
-    return Int32(
-        _asm(T.i32(), [Int64(addr)], "ld.global.u32 $0, [$1];", "=r,l", loc=loc, ip=ip)
-    )
-
-
-@dsl_user_op
-def _ld_i64(addr: Int64, *, loc=None, ip=None) -> Int64:
-    return Int64(
-        _asm(T.i64(), [Int64(addr)], "ld.global.u64 $0, [$1];", "=l,l", loc=loc, ip=ip)
-    )
-
-
-@dsl_user_op
-def _ld_bf16_as_f32(addr: Int64, *, loc=None, ip=None) -> Float32:
-    bits = _asm(
-        T.i32(),
-        [Int64(addr)],
-        "ld.global.u16 $0, [$1];\n\tshl.b32 $0, $0, 16;",
-        "=r,l",
-        loc=loc,
-        ip=ip,
-    )
-    return recast_val(Uint32(bits), Float32)
-
-
-@dsl_user_op
-def _ld_f16_as_f32(addr: Int64, *, loc=None, ip=None) -> Float32:
-    return Float32(
-        _asm(
-            T.f32(),
-            [Int64(addr)],
-            "{\n\t.reg .b16 h;\n\tld.global.b16 h, [$1];\n\tcvt.f32.f16 $0, h;\n\t}",
-            "=f,l",
-            loc=loc,
-            ip=ip,
-        )
-    )
-
-
-@dsl_user_op
-def _st_f32(addr: Int64, value: Float32, *, loc=None, ip=None) -> None:
-    _asm_void(
-        [Int64(addr), Float32(value)], "st.global.f32 [$1], $2;", "l,f", loc=loc, ip=ip
-    )
-
-
-@dsl_user_op
-def _st_zero(addr: Int64, *, loc=None, ip=None) -> None:
-    _asm_void([Int64(addr)], "st.global.u32 [$1], 0;", "l", loc=loc, ip=ip)
-
-
-@dsl_user_op
-def _ld_acquire_sys(addr: Int64, *, loc=None, ip=None) -> Int32:
-    return Int32(
-        _asm(
-            T.i32(),
-            [Int64(addr)],
-            "ld.acquire.sys.global.u32 $0, [$1];",
-            "=r,l",
-            loc=loc,
-            ip=ip,
-        )
-    )
-
-
-@dsl_user_op
-def _st_release_sys(addr: Int64, value: Int32, *, loc=None, ip=None) -> None:
-    _asm_void(
-        [Int64(addr), Int32(value)],
-        "st.release.sys.global.u32 [$1], $2;",
-        "l,r",
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def _fetch_add_gpu(addr: Int64, *, loc=None, ip=None) -> Int32:
-    """Relaxed GPU-scope ticket: returns the previous value."""
-    return Int32(
-        _asm(
-            T.i32(),
-            [Int64(addr)],
-            "atom.relaxed.gpu.global.add.u32 $0, [$1], 1;",
-            "=r,l",
-            loc=loc,
-            ip=ip,
-        )
-    )
-
-
-@dsl_user_op
-def _trap(*, loc=None, ip=None) -> None:
-    _asm_void([], "trap;", "", loc=loc, ip=ip)
-
-
-@dsl_user_op
-def _pack_x2(lo: Float32, hi: Float32, fp16: bool, *, loc=None, ip=None) -> Uint32:
-    """Round two FP32 values to nearest-even bf16 or fp16, `lo` in bits 0-15."""
-    return Uint32(
-        _asm(
-            T.i32(),
-            [Float32(hi), Float32(lo)],
-            f"cvt.rn.{'f16x2' if fp16 else 'bf16x2'}.f32 $0, $1, $2;",
-            "=r,f,f",
-            loc=loc,
-            ip=ip,
-        )
-    )
-
-
-@dsl_user_op
-def _unpack_x2(word: Uint32, fp16: bool, *, loc=None, ip=None) -> list[Float32]:
-    """Widen the two bf16 or fp16 halves of `word` (low first) to FP32."""
-    if not fp16:
-        return [
-            recast_val(word << Uint32(16), Float32, loc=loc, ip=ip),
-            recast_val(word & Uint32(0xFFFF0000), Float32, loc=loc, ip=ip),
-        ]
-    out = _asm(
-        llvm.StructType.get_literal([T.f32()] * 2),
-        [Uint32(word)],
-        "{\n\t.reg .b16 lo, hi;\n\tmov.b32 {lo, hi}, $2;\n\t"
-        "cvt.f32.f16 $0, lo;\n\tcvt.f32.f16 $1, hi;\n\t}",
-        "=f,=f,r",
-        loc=loc,
-        ip=ip,
-    )
-    return [
-        Float32(llvm.extractvalue(T.f32(), out, [i], loc=loc, ip=ip)) for i in range(2)
-    ]
+def _take_ticket(addr: Int64) -> Int32:
+    return cute.arch.atomic_add(_ptr(Int32, addr), Int32(1), sem="relaxed", scope="gpu")
 
 
 def _epoch_tensor() -> Any:
@@ -270,25 +70,17 @@ def _epoch_tensor() -> Any:
     return cute.runtime.make_fake_tensor(Int64, (1,), stride=(1,), assumed_align=8)
 
 
-class DirectDCPA2APushKernel(VllmCuTeDSLJitKernel["DirectDCPA2APushKernel.CompileKey"]):
+class DirectDCPA2APushKernel(VllmCuTeDSLJitKernel[_CompileKey]):
     """Send each destination's head slice and LSE into its receive slot."""
 
-    @dataclass(frozen=True)
-    class CompileKey:
-        world_size: int
-        heads_per_rank: int
-        head_dim: int
-
     @staticmethod
-    def kernel(compile_key: CompileKey) -> Any:
+    def kernel(compile_key: _CompileKey) -> Any:
         world_size = compile_key.world_size
         heads_per_rank = compile_key.heads_per_rank
-        head_dim = compile_key.head_dim
         threads = _PUSH_THREADS
-        # 16-byte vectors of one token's 16-bit partials for one destination.
-        token_vectors = heads_per_rank * head_dim // 8
+        # 16-byte vectors of one token's BF16 partials for one destination.
+        token_vectors = heads_per_rank * _HEAD_DIM // 8
         vectors_per_thread = (token_vectors + threads - 1) // threads
-        source_head_bytes = heads_per_rank * head_dim * 2
 
         @cute.kernel
         def push_kernel(
@@ -326,16 +118,17 @@ class DirectDCPA2APushKernel(VllmCuTeDSLJitKernel["DirectDCPA2APushKernel.Compil
             source = (
                 partial_output
                 + Int64(token) * output_token_stride_bytes
-                + Int64(destination) * Int64(source_head_bytes)
+                + Int64(destination) * Int64(heads_per_rank * _HEAD_DIM * 2)
             )
-            target = _ld_i64(
-                peer_output_ptrs + Int64(destination) * Int64(8)
-            ) + item * Int64(head_dim * 2)
+            target = _ld(
+                Int64, peer_output_ptrs + Int64(destination) * Int64(8)
+            ) + item * Int64(_HEAD_DIM * 2)
+            # All loads in flight before the remote stores.
             payload = cute.make_rmem_tensor((vectors_per_thread * 4,), Uint32)
             for j in cutlass.range_constexpr(vectors_per_thread):
                 vector_idx = tid + Int32(j * threads)
                 if vector_idx < Int32(token_vectors):
-                    words = _ld_v4(source + Int64(vector_idx) * Int64(16))
+                    words = ld_global_v4(source + Int64(vector_idx) * Int64(16))
                     for k in cutlass.range_constexpr(4):
                         payload[j * 4 + k] = words[k]
 
@@ -347,12 +140,12 @@ class DirectDCPA2APushKernel(VllmCuTeDSLJitKernel["DirectDCPA2APushKernel.Compil
                     right = num_seqs
                     while left < right:
                         mid = (left + right) >> 1
-                        if _ld_i32(query_start_loc + Int64(mid) * Int64(4)) <= token:
+                        if _ld(Int32, query_start_loc + Int64(mid) * Int64(4)) <= token:
                             left = mid + Int32(1)
                         else:
                             right = mid
-                    empty_kv = _ld_i32(
-                        seq_lens + Int64(left - Int32(1)) * Int64(4)
+                    empty_kv = _ld(
+                        Int32, seq_lens + Int64(left - Int32(1)) * Int64(4)
                     ) == Int32(0)
                 if not empty_kv:
                     lse_offset = (
@@ -361,16 +154,18 @@ class DirectDCPA2APushKernel(VllmCuTeDSLJitKernel["DirectDCPA2APushKernel.Compil
                         * lse_head_stride
                     )
                     if lse_kind == Int32(0):
-                        lse = _ld_f32(partial_lse + lse_offset * Int64(4))
-                    elif lse_kind == Int32(1):
-                        lse = _ld_bf16_as_f32(partial_lse + lse_offset * Int64(2))
+                        lse = _ld(Float32, partial_lse + lse_offset * Int64(4))
                     else:
-                        lse = _ld_f16_as_f32(partial_lse + lse_offset * Int64(2))
+                        bits = _ld(Uint16, partial_lse + lse_offset * Int64(2))
+                        if lse_kind == Int32(1):
+                            lse = recast_val(Uint32(bits) << Uint32(16), Float32)
+                        else:
+                            lse = recast_val(bits, Float16).to(Float32)
 
             for j in cutlass.range_constexpr(vectors_per_thread):
                 vector_idx = tid + Int32(j * threads)
                 if vector_idx < Int32(token_vectors):
-                    _st_v4(
+                    st_global_v4(
                         target + Int64(vector_idx) * Int64(16),
                         payload[j * 4],
                         payload[j * 4 + 1],
@@ -378,8 +173,8 @@ class DirectDCPA2APushKernel(VllmCuTeDSLJitKernel["DirectDCPA2APushKernel.Compil
                         payload[j * 4 + 3],
                     )
             if tid < Int32(heads_per_rank):
-                _st_f32(
-                    _ld_i64(peer_lse_ptrs + Int64(destination) * Int64(8))
+                _st(
+                    _ld(Int64, peer_lse_ptrs + Int64(destination) * Int64(8))
                     + (item + Int64(tid)) * Int64(4),
                     lse,
                 )
@@ -390,13 +185,15 @@ class DirectDCPA2APushKernel(VllmCuTeDSLJitKernel["DirectDCPA2APushKernel.Compil
             if tid == Int32(0):
                 cute.arch.fence_acq_rel_sys()
                 ticket_addr = tickets + Int64(destination) * Int64(4)
-                if _fetch_add_gpu(ticket_addr) == num_tokens - Int32(1):
-                    _st_zero(ticket_addr)
+                if _take_ticket(ticket_addr) == num_tokens - Int32(1):
+                    _st(ticket_addr, Int32(0))
                     cute.arch.fence_acq_rel_sys()
-                    _st_release_sys(
-                        _ld_i64(peer_signal_ptrs + Int64(destination) * Int64(8))
+                    _st(
+                        _ld(Int64, peer_signal_ptrs + Int64(destination) * Int64(8))
                         + (parity * Int64(world_size) + Int64(rank)) * Int64(4),
                         Int32(next_epoch),
+                        sem="release",
+                        scope="sys",
                     )
 
         @cute.jit
@@ -446,33 +243,12 @@ class DirectDCPA2APushKernel(VllmCuTeDSLJitKernel["DirectDCPA2APushKernel.Compil
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
-        self,
-        *,
-        world_size: int,
-        heads_per_rank: int,
-        head_dim: int,
-    ) -> CompileKey:
-        return self.CompileKey(
-            world_size=world_size,
-            heads_per_rank=heads_per_rank,
-            head_dim=head_dim,
-        )
-
     def get_warmup_keys(
-        self,
-        *,
-        world_size: int,
-        heads_per_rank: int,
-        head_dim: int,
-    ) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            world_size=world_size,
-            heads_per_rank=heads_per_rank,
-            head_dim=head_dim,
-        )
+        self, *, world_size: int, heads_per_rank: int
+    ) -> list[_CompileKey]:
+        return [_CompileKey(world_size, heads_per_rank)]
 
-    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
+    def warmup_inputs(self, compile_key: _CompileKey) -> tuple[Any, ...]:
         return (
             Int64(0),
             Int64(0),
@@ -510,12 +286,8 @@ class DirectDCPA2APushKernel(VllmCuTeDSLJitKernel["DirectDCPA2APushKernel.Compil
         world_size: int,
         rank: int,
         max_num_tokens: int,
-    ) -> CuTeDSLLaunchSpec[CompileKey]:
-        compile_key = self.dispatch(
-            world_size=world_size,
-            heads_per_rank=partial_output.shape[1] // world_size,
-            head_dim=partial_output.shape[2],
-        )
+    ) -> CuTeDSLLaunchSpec[_CompileKey]:
+        compile_key = _CompileKey(world_size, partial_output.shape[1] // world_size)
         return compile_key, (
             partial_output.data_ptr(),
             partial_output.stride(0) * partial_output.element_size(),
@@ -537,28 +309,17 @@ class DirectDCPA2APushKernel(VllmCuTeDSLJitKernel["DirectDCPA2APushKernel.Compil
         )
 
 
-class DirectDCPA2ACombineKernel(
-    VllmCuTeDSLJitKernel["DirectDCPA2ACombineKernel.CompileKey"]
-):
+class DirectDCPA2ACombineKernel(VllmCuTeDSLJitKernel[_CompileKey]):
     """Wait for every source, then LSE-combine this rank's heads in FP32."""
 
-    @dataclass(frozen=True)
-    class CompileKey:
-        world_size: int
-        heads_per_rank: int
-        head_dim: int
-        dtype: torch.dtype
-
     @staticmethod
-    def kernel(compile_key: CompileKey) -> Any:
+    def kernel(compile_key: _CompileKey) -> Any:
         world_size = compile_key.world_size
         heads_per_rank = compile_key.heads_per_rank
-        head_dim = compile_key.head_dim
-        fp16 = compile_key.dtype == torch.float16
         warps = _COMBINE_WARPS
-        # Lane l owns dims [32 * 8 * j + 8 * l, +8): each warp-wide 16-byte
+        # Lane l owns dims [256 * j + 8 * l, +8): each warp-wide 16-byte
         # access covers 512 contiguous bytes.
-        vectors_per_lane = head_dim // 256
+        vectors_per_lane = _HEAD_DIM // 256
         neg_inf = -float("inf")
 
         @cute.kernel
@@ -586,7 +347,7 @@ class DirectDCPA2ACombineKernel(
                 signal_addr = received_signal + (slot + Int64(lane)) * Int64(4)
                 expected = Int32(next_epoch)
                 spins = Int32(0)
-                while _ld_acquire_sys(signal_addr) != expected:
+                while _ld(Int32, signal_addr, sem="acquire", scope="sys") != expected:
                     spins += Int32(1)
                     if spins > Int32(_SPIN_LIMIT):
                         cute.printf(
@@ -594,7 +355,7 @@ class DirectDCPA2ACombineKernel(
                             lane,
                             expected,
                         )
-                        _trap()
+                        llvm.intr_trap()
             cute.arch.sync_threads()
 
             token_head = cta * Int32(warps) + warp
@@ -608,7 +369,7 @@ class DirectDCPA2ACombineKernel(
                     source_item = (
                         (slot + Int64(source)) * Int64(max_num_tokens) + Int64(token)
                     ) * Int64(heads_per_rank) + Int64(head)
-                    value = _ld_f32(received_lse + source_item * Int64(4))
+                    value = _ld(Float32, received_lse + source_item * Int64(4))
                     # NaN and +inf mark undefined partials (bit test: NaN-safe).
                     bits = recast_val(value, Int32)
                     magnitude = bits & Int32(0x7FFFFFFF)
@@ -639,13 +400,13 @@ class DirectDCPA2ACombineKernel(
                     source_item = (
                         (slot + Int64(source)) * Int64(max_num_tokens) + Int64(token)
                     ) * Int64(heads_per_rank) + Int64(head)
-                    base = received_output + source_item * Int64(head_dim * 2)
+                    base = received_output + source_item * Int64(_HEAD_DIM * 2)
                     for j in cutlass.range_constexpr(vectors_per_lane):
                         idx = (source * vectors_per_lane + j) * 4
                         for k in cutlass.range_constexpr(4):
                             payload[idx + k] = Uint32(0)
                         if weights[source] != Float32(0.0):
-                            words = _ld_v4(base + Int64((j * 32 + lane) * 16))
+                            words = ld_global_v4(base + Int64((j * 32 + lane) * 16))
                             for k in cutlass.range_constexpr(4):
                                 payload[idx + k] = words[k]
 
@@ -657,31 +418,30 @@ class DirectDCPA2ACombineKernel(
                     if weight != Float32(0.0):
                         for j in cutlass.range_constexpr(vectors_per_lane):
                             for k in cutlass.range_constexpr(4):
-                                lo, hi = _unpack_x2(
-                                    payload[(source * vectors_per_lane + j) * 4 + k],
-                                    fp16,
+                                lo, hi = bf16x2_to_fp32x2(
+                                    payload[(source * vectors_per_lane + j) * 4 + k]
                                 )
                                 e = j * 8 + k * 2
                                 accumulator[e] += lo * weight
                                 accumulator[e + 1] += hi * weight
 
-                out_base = combined_output + Int64(token_head) * Int64(head_dim * 2)
+                out_base = combined_output + Int64(token_head) * Int64(_HEAD_DIM * 2)
                 for j in cutlass.range_constexpr(vectors_per_lane):
                     e = j * 8
-                    _st_v4(
+                    st_global_v4(
                         out_base + Int64((j * 32 + lane) * 16),
-                        _pack_x2(accumulator[e], accumulator[e + 1], fp16),
-                        _pack_x2(accumulator[e + 2], accumulator[e + 3], fp16),
-                        _pack_x2(accumulator[e + 4], accumulator[e + 5], fp16),
-                        _pack_x2(accumulator[e + 6], accumulator[e + 7], fp16),
+                        fp32x2_to_bf16x2(accumulator[e], accumulator[e + 1]),
+                        fp32x2_to_bf16x2(accumulator[e + 2], accumulator[e + 3]),
+                        fp32x2_to_bf16x2(accumulator[e + 4], accumulator[e + 5]),
+                        fp32x2_to_bf16x2(accumulator[e + 6], accumulator[e + 7]),
                     )
 
             # The last CTA advances the epoch once every CTA has read it.
             cute.arch.sync_threads()
             # Nested: the ticket must be taken by one thread only.
             if tid == Int32(0):  # noqa: SIM102
-                if _fetch_add_gpu(done) == num_ctas - Int32(1):
-                    _st_zero(done)
+                if _take_ticket(done) == num_ctas - Int32(1):
+                    _st(done, Int32(0))
                     epoch[0] = next_epoch
 
         @cute.jit
@@ -716,37 +476,12 @@ class DirectDCPA2ACombineKernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
-        self,
-        *,
-        world_size: int,
-        heads_per_rank: int,
-        head_dim: int,
-        dtype: torch.dtype,
-    ) -> CompileKey:
-        return self.CompileKey(
-            world_size=world_size,
-            heads_per_rank=heads_per_rank,
-            head_dim=head_dim,
-            dtype=dtype,
-        )
-
     def get_warmup_keys(
-        self,
-        *,
-        world_size: int,
-        heads_per_rank: int,
-        head_dim: int,
-        dtype: torch.dtype,
-    ) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            world_size=world_size,
-            heads_per_rank=heads_per_rank,
-            head_dim=head_dim,
-            dtype=dtype,
-        )
+        self, *, world_size: int, heads_per_rank: int
+    ) -> list[_CompileKey]:
+        return [_CompileKey(world_size, heads_per_rank)]
 
-    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
+    def warmup_inputs(self, compile_key: _CompileKey) -> tuple[Any, ...]:
         return (
             Int64(0),
             Int64(0),
@@ -772,13 +507,8 @@ class DirectDCPA2ACombineKernel(
         world_size: int,
         max_num_tokens: int,
         lse_scale: float,
-    ) -> CuTeDSLLaunchSpec[CompileKey]:
-        compile_key = self.dispatch(
-            world_size=world_size,
-            heads_per_rank=combined_output.shape[1],
-            head_dim=combined_output.shape[2],
-            dtype=combined_output.dtype,
-        )
+    ) -> CuTeDSLLaunchSpec[_CompileKey]:
+        compile_key = _CompileKey(world_size, combined_output.shape[1])
         return compile_key, (
             received_output.data_ptr(),
             received_lse.data_ptr(),
@@ -796,6 +526,16 @@ DIRECT_DCP_A2A_PUSH_KERNEL = DirectDCPA2APushKernel()
 DIRECT_DCP_A2A_COMBINE_KERNEL = DirectDCPA2ACombineKernel()
 
 
+def register_warmup(world_size: int, heads_per_rank: int) -> None:
+    """Compile both kernels during JIT warmup (their only compile keys)."""
+    DIRECT_DCP_A2A_PUSH_KERNEL.register_warmup(
+        world_size=world_size, heads_per_rank=heads_per_rank
+    )
+    DIRECT_DCP_A2A_COMBINE_KERNEL.register_warmup(
+        world_size=world_size, heads_per_rank=heads_per_rank
+    )
+
+
 def _check(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(f"CuTe DSL direct DCP A2A: {message}")
@@ -803,25 +543,6 @@ def _check(condition: bool, message: str) -> None:
 
 def _is_int32_vector(tensor: torch.Tensor) -> bool:
     return tensor.dim() == 1 and tensor.stride(0) == 1 and tensor.dtype == torch.int32
-
-
-def register_warmup(
-    world_size: int, heads_per_rank: int, head_dim: int, dtype: torch.dtype
-) -> None:
-    """Compile both kernels during JIT warmup.
-
-    These are the only compile keys a workspace can hit: the LSE dtype, LSE
-    strides, token count and epoch are runtime arguments.
-    """
-    DIRECT_DCP_A2A_PUSH_KERNEL.register_warmup(
-        world_size=world_size, heads_per_rank=heads_per_rank, head_dim=head_dim
-    )
-    DIRECT_DCP_A2A_COMBINE_KERNEL.register_warmup(
-        world_size=world_size,
-        heads_per_rank=heads_per_rank,
-        head_dim=head_dim,
-        dtype=dtype,
-    )
 
 
 def direct_dcp_a2a_lse_reduce_cutedsl(
@@ -848,52 +569,24 @@ def direct_dcp_a2a_lse_reduce_cutedsl(
 
     `counters` is a zero-initialized int32 `[world_size + 1]` tensor (push
     tickets per destination, then the combine's CTA count) that the kernels
-    leave at zero. The checks mirror the CUDA op's (metadata only, no sync): a
-    shape mismatch would otherwise write out of bounds into peer memory.
+    leave at zero. The workspace owns every other buffer; the caller's inputs
+    are checked (metadata only), as a bad shape would write into peer memory.
     """
+    num_tokens, heads_per_rank, _ = combined_output.shape
+    total_heads = world_size * heads_per_rank
     _check(
-        partial_output.dim() == 3 and partial_lse.dim() == 2,
-        "expected output [T, H, D] and LSE [T, H]",
-    )
-    num_tokens, total_heads, head_dim = partial_output.shape
-    _check(0 <= rank < world_size, "invalid rank")
-    _check(total_heads % world_size == 0, "heads must divide across DCP ranks")
-    heads_per_rank = total_heads // world_size
-    _check(
-        direct_dcp_a2a_cutedsl_supported(
-            world_size, heads_per_rank, head_dim, partial_output.dtype
-        ),
-        "unsupported shape or dtype",
-    )
-    _check(0 < num_tokens <= max_num_tokens, "token count exceeds the workspace")
-    _check(
-        partial_output.stride(2) == 1
-        and partial_output.stride(1) == head_dim
-        and partial_output.stride(0) >= total_heads * head_dim
+        0 < num_tokens <= max_num_tokens
+        and partial_output.dtype == torch.bfloat16
+        and partial_output.shape[1:] == (total_heads, _HEAD_DIM)
+        and partial_output.stride()[1:] == (_HEAD_DIM, 1)
         and partial_output.stride(0) % 8 == 0,
-        "partial output must have packed heads and an aligned token stride",
+        "partial output must be BF16 [T, H, 512] with packed heads and a 16-byte "
+        "aligned token stride",
     )
     _check(
         partial_lse.shape == (num_tokens, total_heads)
         and partial_lse.dtype in _LSE_KINDS,
         "LSE must be FP32, FP16 or BF16 [T, H]",
-    )
-    _check(
-        combined_output.shape == (num_tokens, heads_per_rank, head_dim)
-        and combined_output.dtype == partial_output.dtype
-        and combined_output.is_contiguous(),
-        "combined output must be a contiguous [T, H / W, D] tensor",
-    )
-    _check(
-        received_output.dtype == partial_output.dtype
-        and received_lse.dtype == torch.float32
-        and received_signal.dtype == torch.int32
-        and peer_output_ptrs.dtype == torch.int64
-        and peer_lse_ptrs.dtype == torch.int64
-        and peer_signal_ptrs.dtype == torch.int64
-        and counters.shape == (world_size + 1,)
-        and counters.dtype == torch.int32,
-        "invalid symmetric buffer or counter dtypes",
     )
     _check(
         (seq_lens is None) == (query_start_loc is None),
@@ -905,11 +598,8 @@ def direct_dcp_a2a_lse_reduce_cutedsl(
     else:
         num_seqs = seq_lens.shape[0]
         _check(
-            _is_int32_vector(seq_lens)
-            and _is_int32_vector(query_start_loc)
-            and num_seqs > 0
-            and query_start_loc.shape[0] == num_seqs + 1,
-            "seq_lens [N] and query_start_loc [N + 1] must be contiguous int32",
+            _is_int32_vector(seq_lens) and _is_int32_vector(query_start_loc),
+            "seq_lens and query_start_loc must be contiguous int32",
         )
     DIRECT_DCP_A2A_PUSH_KERNEL(
         partial_output,

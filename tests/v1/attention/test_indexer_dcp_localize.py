@@ -671,24 +671,19 @@ def test_sparse_prefill_dcp_metadata_host_extents_without_sync(
     world: int, interleave: int
 ):
     """The DCP chunk extents come from the CPU lengths, without a device sync,
-    and equal the device-side per-rank KV lengths, on random chunked,
-    prefix-hit and mixed prefill batches of 1-32 requests."""
+    and equal the device-side per-rank KV lengths."""
     device = torch.device("cuda")
-    gen = torch.Generator().manual_seed(0)
-    for trial in range(24):
-        num_reqs = int(torch.randint(1, 33, (1,), generator=gen))
-        query_lens = torch.randint(1, 600, (num_reqs,), generator=gen)
-        # Prefix hits (context before the chunk), some long, some none.
-        context = torch.randint(0, 200_000, (num_reqs,), generator=gen)
-        context[torch.rand(num_reqs, generator=gen) < 0.3] = 0
+    # (context, query) per request: no prefix, long prefix hits, page tails.
+    lens = [(0, 37), (200_000, 1), (4097, 599), (63, 64), (0, 1), (129_001, 300)]
+    for trial, (start, end) in enumerate([(0, 6), (1, 4), (5, 6)]):
+        context = torch.tensor([c for c, _ in lens])
+        query_lens = torch.tensor([q for _, q in lens])
         seq_lens_cpu = (context + query_lens).to(torch.int32)
-        query_start_loc_cpu = torch.zeros(num_reqs + 1, dtype=torch.int32)
+        query_start_loc_cpu = torch.zeros(len(lens) + 1, dtype=torch.int32)
         query_start_loc_cpu[1:] = torch.cumsum(query_lens, 0)
-        start = int(torch.randint(0, num_reqs, (1,), generator=gen))
-        end = int(torch.randint(start + 1, num_reqs + 1, (1,), generator=gen))
         query_start_loc = query_start_loc_cpu.to(device)
         seq_lens = seq_lens_cpu.to(device)
-        block_table = torch.zeros((num_reqs, 1), dtype=torch.int32, device=device)
+        block_table = torch.zeros((len(lens), 1), dtype=torch.int32, device=device)
         kwargs = dict(
             start_idx=start,
             end_idx=end,

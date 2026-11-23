@@ -2,15 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Push a DCP rank's KV shard into every rank's gathered context workspace.
 
-Under DCP (interleave 1) rank `r` of `W` stores the KV of global token `t` iff
-`t % W == r`, at local position `t // W` of its paged caches: a DSA layer's
-MLA cache and its indexer cache (64-token pages of fp8 keys, then their
-scales). This kernel copies the rank's tokens, byte for byte, to their global
-positions in every rank's workspace (peer addresses, e.g. symmetric memory),
-which holds each request's tokens in order in dense pages of the same two
-formats. The work comes from the step's device metadata: CTAs with `blockIdx.y = r`
-serve request `r`, and each CTA moves eight tokens of one of its local pages
-(CTAs past the request's local tokens exit).
+Under DCP (interleave 1) rank `r` of `W` stores global token `t` iff
+`t % W == r`, at local position `t // W` of its MLA and indexer caches. This
+kernel copies the rank's tokens byte for byte to their global positions in
+every rank's workspace, which holds each request's tokens in order in dense
+64-token pages of the same formats. CTA (x, y) moves eight local tokens of
+request y.
 """
 
 from dataclasses import dataclass
@@ -113,8 +110,8 @@ class DcpContextPushKernel(VllmCuTeDSLJitKernel["DcpContextPushKernel.CompileKey
     class CompileKey:
         world: int
         mla_token_bytes: int
+        # Indexer cache entry: values, then a 4-byte scale.
         index_token_bytes: int
-        index_scale_bytes: int
 
     @staticmethod
     def kernel(compile_key: CompileKey) -> Any:
@@ -123,11 +120,10 @@ class DcpContextPushKernel(VllmCuTeDSLJitKernel["DcpContextPushKernel.CompileKey
         ctas_per_page = PAGE_TOKENS // tokens_per_cta
         world = compile_key.world
         mla_bytes = compile_key.mla_token_bytes
-        index_bytes = compile_key.index_token_bytes
-        scale_bytes = compile_key.index_scale_bytes
-        assert mla_bytes % 16 == 0 and index_bytes % 16 == 0 and scale_bytes == 4
+        index_bytes = compile_key.index_token_bytes - 4
+        assert mla_bytes % 16 == 0 and index_bytes % 16 == 0
         mla_page = PAGE_TOKENS * mla_bytes
-        index_page = PAGE_TOKENS * (index_bytes + scale_bytes)
+        index_page = PAGE_TOKENS * compile_key.index_token_bytes
         # An indexer page holds its tokens' values, then their scales.
         scale_offset = PAGE_TOKENS * index_bytes
 
@@ -143,38 +139,31 @@ class DcpContextPushKernel(VllmCuTeDSLJitKernel["DcpContextPushKernel.CompileKey
             section: int,
             token_bytes: int,
         ):
-            # Vector v: local token local0 + v // vecs, 16 B chunk v % vecs.
-            # Local token i is global token world * i + rank.
-            vecs = token_bytes // 16
+            # Vector v: local token local0 + v // vecs, chunk v % vecs of 16 B
+            # (4 B for the scales). Local token i is global token world * i + rank.
+            width = 4 if token_bytes == 4 else 16
+            vecs = token_bytes // width
             v = Int32(cute.arch.thread_idx()[0])
             while v < num_tokens * vecs:
                 i = local0 + v // vecs
-                col = Int64((v % vecs) * 16)
+                col = Int64((v % vecs) * width)
                 token = i * world + rank
-                w0, w1, w2, w3 = _ld_v4(src + section + Int64(i) * token_bytes + col)
+                src_addr = src + section + Int64(i) * token_bytes + col
                 dst_offset = (
                     (dst_page + Int64(token // PAGE_TOKENS)) * page_bytes
                     + section
                     + Int64(token % PAGE_TOKENS) * token_bytes
                     + col
                 )
-                for d in cutlass.range_constexpr(world):
-                    _st_v4(dst[d] + dst_offset, w0, w1, w2, w3)
+                if cutlass.const_expr(width == 4):
+                    word = _ld_u32(src_addr)
+                    for d in cutlass.range_constexpr(world):
+                        _st_u32(dst[d] + dst_offset, word)
+                else:
+                    w0, w1, w2, w3 = _ld_v4(src_addr)
+                    for d in cutlass.range_constexpr(world):
+                        _st_v4(dst[d] + dst_offset, w0, w1, w2, w3)
                 v += num_threads
-
-        @cute.jit
-        def page_address(
-            base: Int64,
-            block_stride: Int64,
-            pages_per_block: Int32,
-            block_table: cute.Tensor,
-            req: Int32,
-            page: Int32,
-            page_bytes: int,
-        ) -> Int64:
-            block = Int64(block_table[req, page // pages_per_block])
-            in_block = Int64((page % pages_per_block) * page_bytes)
-            return base + block * block_stride + in_block
 
         @cute.kernel
         def device_kernel(
@@ -192,7 +181,6 @@ class DcpContextPushKernel(VllmCuTeDSLJitKernel["DcpContextPushKernel.CompileKey
             dst_index_offset: Int64,
             rank: Int32,
         ):
-            tidx, _, _ = cute.arch.thread_idx()
             bidx, req, _ = cute.arch.block_idx()
             page = bidx // ctas_per_page
             local0 = (bidx % ctas_per_page) * tokens_per_cta
@@ -218,14 +206,12 @@ class DcpContextPushKernel(VllmCuTeDSLJitKernel["DcpContextPushKernel.CompileKey
                     Int64(dst_addrs[d]) + dst_index_offset for d in range(world)
                 ]
 
-                mla_src = page_address(
-                    mla_base,
-                    mla_block_stride,
-                    mla_pages_per_block,
-                    mla_block_table,
-                    req,
-                    page,
-                    mla_page,
+                # MLA blocks may span several pages.
+                mla_src = (
+                    mla_base
+                    + Int64(mla_block_table[req, page // mla_pages_per_block])
+                    * mla_block_stride
+                    + Int64((page % mla_pages_per_block) * mla_page)
                 )
                 copy_tokens(
                     mla_src,
@@ -242,28 +228,19 @@ class DcpContextPushKernel(VllmCuTeDSLJitKernel["DcpContextPushKernel.CompileKey
                     index_base
                     + Int64(index_block_table[req, page]) * index_block_stride
                 )
-                copy_tokens(
-                    index_src,
-                    index_dst,
-                    dst_page,
-                    rank,
-                    local0,
-                    num_index,
-                    index_page,
-                    0,
-                    index_bytes,
-                )
-                if tidx < num_index:
-                    i = local0 + tidx
-                    token = i * world + rank
-                    scale = _ld_u32(index_src + scale_offset + Int64(i) * scale_bytes)
-                    dst_offset = (
-                        (dst_page + Int64(token // PAGE_TOKENS)) * index_page
-                        + scale_offset
-                        + Int64(token % PAGE_TOKENS) * scale_bytes
+                # Values, then scales (a static loop: not over a range).
+                for section, token_bytes in ((0, index_bytes), (scale_offset, 4)):
+                    copy_tokens(
+                        index_src,
+                        index_dst,
+                        dst_page,
+                        rank,
+                        local0,
+                        num_index,
+                        index_page,
+                        section,
+                        token_bytes,
                     )
-                    for d in cutlass.range_constexpr(world):
-                        _st_u32(index_dst[d] + dst_offset, scale)
 
         @cute.jit
         def host_entrypoint(
@@ -305,39 +282,8 @@ class DcpContextPushKernel(VllmCuTeDSLJitKernel["DcpContextPushKernel.CompileKey
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
-        self,
-        *,
-        world: int,
-        mla_token_bytes: int,
-        index_token_bytes: int,
-        index_scale_bytes: int,
-    ) -> CompileKey:
-        return self.CompileKey(
-            world=world,
-            mla_token_bytes=mla_token_bytes,
-            index_token_bytes=index_token_bytes,
-            index_scale_bytes=index_scale_bytes,
-        )
-
-    # The JIT warmup registry passes a registration's keywords through as is
-    # (vllm_config only to a registration without arguments).
-    def get_warmup_keys(  # type: ignore[override]
-        self,
-        *,
-        world: int,
-        mla_token_bytes: int,
-        index_token_bytes: int,
-        index_scale_bytes: int,
-    ) -> list[CompileKey]:
-        return [
-            self.dispatch(
-                world=world,
-                mla_token_bytes=mla_token_bytes,
-                index_token_bytes=index_token_bytes,
-                index_scale_bytes=index_scale_bytes,
-            )
-        ]
+    def get_warmup_keys(self, **key: int) -> list[CompileKey]:  # type: ignore[override]
+        return [self.CompileKey(**key)]
 
     def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         def table():
@@ -384,28 +330,22 @@ class DcpContextPushKernel(VllmCuTeDSLJitKernel["DcpContextPushKernel.CompileKey
         dst_addrs: torch.Tensor,
         dst_index_offset: int,
         rank: int,
-        index_token_bytes: int,
     ) -> CuTeDSLLaunchSpec[CompileKey]:
-        """Push this rank's KV of the first `seq_lens` tokens of each
-        request (MLA entries of its context only; `query_start_loc` bounds its
-        new tokens) to the workspace pages from `dst_block_table[:, 0]` on.
-
-        `mla_cache` is a [blocks, block_size, token_bytes] byte view of the MLA
-        cache (blocks of whole pages, densely packed tokens) and `index_cache`
-        one of the indexer cache in pages; `max_local_pages` bounds any
-        request's local pages. `dst_addrs` holds every rank's workspace, MLA
-        pages first, indexer pages `dst_index_offset` bytes in."""
+        """Push this rank's KV of each request's `seq_lens` tokens (MLA entries
+        of its context only) to the workspace pages from `dst_block_table[:, 0]`
+        on. The caches are [blocks, block_size, token_bytes] byte views (MLA
+        blocks of whole pages, indexer blocks of one page). `dst_addrs` holds
+        every rank's workspace: MLA pages, then indexer pages at
+        `dst_index_offset`."""
         assert mla_cache.shape[1] % PAGE_TOKENS == 0 and index_cache.shape[1] == (
             PAGE_TOKENS
         )
         for cache in (mla_cache, index_cache):
             assert cache.element_size() == 1 and cache.stride(1) == cache.shape[2]
-        index_scale_bytes = index_cache.shape[-1] - index_token_bytes
-        compile_key = self.dispatch(
+        compile_key = self.CompileKey(
             world=dst_addrs.shape[0],
             mla_token_bytes=mla_cache.shape[-1],
-            index_token_bytes=index_token_bytes,
-            index_scale_bytes=index_scale_bytes,
+            index_token_bytes=index_cache.shape[-1],
         )
         return compile_key, (
             mla_cache.data_ptr(),

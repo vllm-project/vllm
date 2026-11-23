@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 import numpy as np
 import torch
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import (
@@ -433,54 +432,17 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         # Under DCP, ShardQ steps attend a gathered copy of their context.
         self.dcp_shardq: DcpShardQPlanner | None = None
         if self.use_shardq and self.dcp_world_size > 1:
+            from vllm.v1.attention.ops.dcp_shardq.context import (
+                make_dcp_shardq_planner,
+            )
+
             # Only MLAAttention layers set use_shardq.
             mla_layer = layers[layer_names[0]]
             assert isinstance(mla_layer, MLAAttention)
-            self.use_shardq = self._init_dcp_shardq(
-                kv_cache_spec, vllm_config, mla_layer
+            self.dcp_shardq = make_dcp_shardq_planner(
+                kv_cache_spec, mla_layer, self.device
             )
-
-    def _init_dcp_shardq(
-        self,
-        kv_cache_spec: "AttentionSpec",
-        vllm_config: "VllmConfig",
-        attention_layer: MLAAttention,
-    ) -> bool:
-        """Whether DCP ShardQ steps can gather this layer's caches
-        (vllm.v1.attention.ops.dcp_shardq)."""
-        from vllm.v1.attention.ops.dcp_shardq import context as shardq_context
-        from vllm.v1.attention.ops.dcp_shardq.context import (
-            ContextLayout,
-            DcpShardQPlanner,
-            capacity_pages,
-            register_warmup,
-        )
-
-        layout = ContextLayout.from_layer(kv_cache_spec, attention_layer.indexer)
-        if layout is None:
-            logger.warning_once(
-                "DCP ShardQ needs a packed MLA cache format in blocks of "
-                "whole 64-token pages and an fp8 indexer key cache; DCP "
-                "prefill steps keep the DCP path."
-            )
-            return False
-        from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
-
-        # DCP spans the TP group, so DCP ranks also index the workspace peers.
-        self.dcp_shardq = DcpShardQPlanner(
-            layout,
-            capacity_pages(
-                shardq_context.workspace_max_tokens(vllm_config),
-                vllm_config.scheduler_config.max_num_seqs,
-            ),
-            get_max_prefill_buffer_size(vllm_config),
-            envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
-            self.dcp_world_size,
-            get_dcp_group().rank_in_group,
-            self.device,
-        )
-        register_warmup(layout, self.dcp_world_size, self.topk_tokens)
-        return True
+            self.use_shardq = self.dcp_shardq is not None
 
     def _init_reorder_batch_threshold(
         self,
@@ -594,10 +556,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             else None
         )
         gathered_context = None
-        if self.dcp_shardq is not None:
+        if self.dcp_shardq is not None and shardq_split is not None:
             # Under DCP, a step whose prefill requests do not fit the gathered
             # context workspace keeps the DCP path whole.
-            gathered_context = self.dcp_shardq.plan(common_attn_metadata, shardq_split)
+            gathered_context = self.dcp_shardq(common_attn_metadata, shardq_split)
             if gathered_context is None:
                 shardq_split = None
         prefill_max_seq_len = 0
@@ -1165,9 +1127,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                 layer=layer,
                 block_size=block_size,
                 is_decode=num_decode_tokens >= num_tokens,
-                # A gathered-context step's output goes straight back to the
-                # head shards: no DCP combine reads its LSE.
-                return_lse=False if attn_metadata.kv_gathered else None,
             )
 
         assert self.dcp_world_size == 1
@@ -1263,9 +1222,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         layer: AttentionLayer,
         block_size: int,
         is_decode: bool,
-        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """`return_lse` None means `need_to_return_lse_for_decode`."""
         raise NotImplementedError
 
     @staticmethod
