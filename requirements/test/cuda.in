@@ -1,7 +1,7 @@
 -r ../common.txt
 
 # testing
-pytest
+pytest >= 9.2.0 # monkeypatch.setattr undo must not shadow class attributes (pytest-dev/pytest#10644)
 tensorizer==2.12.1
 pytest-forked
 pytest-asyncio
@@ -13,7 +13,7 @@ pytest-cov
 # testing utils
 albumentations # required for Nemotron Parse in test_common.py
 av  # required for audio_in_video tests
-torchcodec >= 0.14 # required for torchcodec video backend tests
+torchcodec >= 0.16 # required for torchcodec video and image backend tests
 backoff # required for phi4mm test
 blobfile # required for kimi-vl test
 httpx
@@ -41,7 +41,7 @@ nltk>=3.10.4 # pin transitive rouge-score/lm-eval dep for known GHSAs
 lm-eval[api]>=0.4.12 # required for model evaluation test
 mteb[bm25s]>=2, <3 # required for mteb test
 transformers==5.23.0
-schemathesis>=4.0.0 # Required for openai schema test.
+schemathesis>=4.26.2 # Required for openai schema test; 4.26.2 supports pytest 9.2.
 # quantization
 buildkite-test-collector==0.1.9
 torch-abi-audit # CI check for PyTorch stable ABI compliance
@@ -73,9 +73,8 @@ kaldi-native-fbank >= 1.18.7 # required for fireredasr2 test
 cohere_melody>=0.11.1 # required for cohere command reasoning/tool parser tests
 cohere>=7.0.0 # required for cohere chat v2 api tests (protocol/serving import cohere.types)
 
-# Newer versions of datasets require torchcoded, that makes the tests fail in CI because of a missing library.
-# Older versions are in conflict with teerratorch requirements.
-datasets>=3.3.0,<=3.6.0
+# datasets < 5 caps dill below 0.4.1, which cannot pickle on Python 3.14.
+datasets>=5.0.0
 
 openpyxl # required for perf comparison excel report
 plotly # required for perf comparison html report

@@ -630,6 +630,61 @@ async def test_streaming_input_validation_errors(engine: AsyncLLM):
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_streaming_input_overflow_chunk_dropped_session_continues(
+    engine: AsyncLLM,
+):
+    """A chunk that would overflow max_model_len gets an empty "length" turn
+    and a later chunk that fits continues the session (#62707)."""
+    request_id = "test_overflow_dropped"
+    sampling_params = get_sampling_params(max_tokens=10)
+
+    # max_model_len is 2048: the second chunk overflows, the third fits.
+    first_chunk = "hello " * 1500
+    overflow_chunk = "world " * 700
+    fitting_chunk = " The end is near and"
+
+    first_turn_done = asyncio.Event()
+    finish_count = 0
+
+    async def input_generator() -> AsyncGenerator[StreamingInput, None]:
+        yield StreamingInput(prompt=first_chunk)
+        yield StreamingInput(prompt=overflow_chunk)
+        await first_turn_done.wait()
+        yield StreamingInput(prompt=fitting_chunk)
+
+    outputs: list[RequestOutput] = []
+    full_text = ""
+
+    async def consume() -> None:
+        nonlocal finish_count, full_text
+        async for output in engine.generate(
+            input_generator(), sampling_params, request_id
+        ):
+            outputs.append(output)
+            if output.outputs and output.outputs[0].text:
+                full_text += output.outputs[0].text
+            if output.outputs and output.outputs[0].finish_reason is not None:
+                finish_count += 1
+                if finish_count == 1:
+                    first_turn_done.set()
+
+    await asyncio.wait_for(consume(), timeout=180)
+
+    assert finish_count == 3
+    assert outputs[-1].finished
+    assert len(full_text) > 0
+    empty_turns = [
+        out
+        for out in outputs
+        if out.outputs
+        and out.outputs[0].finish_reason == "length"
+        and not out.outputs[0].text
+    ]
+    assert len(empty_turns) == 1, "the dropped chunk must end one empty reply"
+    assert not engine.output_processor.has_unfinished_requests()
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_streaming_input_delayed_generator_exit(engine: AsyncLLM):
     """Test that output generator exits when input generator closes after outputs.
 

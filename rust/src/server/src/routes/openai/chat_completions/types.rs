@@ -160,9 +160,9 @@ pub struct ChatCompletionRequest {
     /// Minimum number of tokens to generate
     pub min_tokens: Option<u32>,
 
-    /// Skip special tokens during detokenization
-    #[serde(default = "default_true")]
-    pub skip_special_tokens: bool,
+    /// Skip special tokens during detokenization; unset takes the model's
+    /// generation-config default
+    pub skip_special_tokens: Option<bool>,
 
     /// Add spaces between special tokens during detokenization. Accepted as a
     /// no-op: the detokenizers of the served tokenizers already emit adjacent
@@ -334,7 +334,7 @@ impl Default for ChatCompletionRequest {
             include_stop_str_in_output: false,
             ignore_eos: false,
             min_tokens: None,
-            skip_special_tokens: true,
+            skip_special_tokens: None,
             spaces_between_special_tokens: true,
             truncate_prompt_tokens: None,
             truncation_side: None,
@@ -514,6 +514,8 @@ pub(super) struct ChatCompletionStreamChoice {
     pub index: u32,
     pub delta: ChatMessageDelta,
     pub logprobs: Option<ChatLogProbs>,
+    /// Sent as `null` until the choice finishes, as Python and OpenAI do.
+    #[serialize_always]
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
@@ -551,22 +553,15 @@ fn validate_chat_cross_parameters(
         return Err(e);
     }
 
-    // 3. Validate token limits - min <= max
+    // 3. Validate token limits - min <= max. `normalize` has already moved a
+    // lone `max_tokens` into `max_completion_tokens`, so this is the effective
+    // limit; a `max_tokens` left beside it is overridden, as in Python.
     if let (Some(min_tokens), Some(max_completion_tokens)) =
         (req.min_tokens, req.max_completion_tokens)
         && min_tokens > max_completion_tokens
     {
         let mut e = validator::ValidationError::new("min_tokens_exceeds_max_completion_tokens");
         e.message = Some("min_tokens cannot be greater than max_completion_tokens".into());
-        return Err(e);
-    }
-
-    #[expect(deprecated, reason = "Local type still mirrors legacy upstream field")]
-    if let (Some(min_tokens), Some(max_tokens)) = (req.min_tokens, req.max_tokens)
-        && min_tokens > max_tokens
-    {
-        let mut e = validator::ValidationError::new("min_tokens_exceeds_max_tokens");
-        e.message = Some("min_tokens cannot be greater than max_tokens".into());
         return Err(e);
     }
 
