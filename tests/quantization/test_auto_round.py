@@ -1497,6 +1497,9 @@ def test_inc_mxfp8_linear_scheme_delegates_to_kernel(monkeypatch) -> None:
         def __init__(self) -> None:
             self.calls: list[tuple] = []
 
+        def input_quant_key(self):
+            return None
+
         def process_weights_after_loading(self, layer) -> None:
             self.calls.append(("process", layer))
 
