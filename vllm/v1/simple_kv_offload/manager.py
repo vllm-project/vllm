@@ -484,11 +484,15 @@ class SimpleCPUOffloadScheduler:
 
         if num_external_tokens == 0:
             if pending is not None:
-                logger.warning(
+                # Benign: the scheduler can allocate a request with no external
+                # tokens after a CPU hit was recorded (e.g. the partial-tail
+                # path), so the pin is just released. Debug-level because it
+                # fires thousands of times per hour under load.
+                logger.debug(
                     "SimpleCPUOffloadScheduler: update_state_after_alloc "
                     "called for req_id=%s with no external tokens but "
-                    "get_num_new_matched_tokens() unexpectedly recorded "
-                    "a pending CPU hit; releasing the stale pin.",
+                    "get_num_new_matched_tokens() recorded a pending CPU "
+                    "hit that was not used; releasing the pin.",
                     req_id,
                 )
                 self._free_pending_cpu_hit(pending)

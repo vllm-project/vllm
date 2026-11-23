@@ -3,6 +3,7 @@
 """A GPU worker class."""
 
 import gc
+import math
 import os
 import time
 from collections.abc import Callable
@@ -153,6 +154,67 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
         format_gib(torch_reserved),
     )
     return torch_reserved
+
+
+def cudagraph_estimate_scale() -> float:
+    """VLLM_CUDAGRAPH_ESTIMATE_SCALE=X (default 1.0): multiply the profiled
+    CUDA graph memory estimate by X before it is taken from the KV cache budget.
+    The profiler can over-estimate the graph pool (e.g. 14.5 GiB estimated vs
+    ~10 GiB captured on MI355X with ~77 capture sizes), which costs KV cache.
+    Calibrate X from the "CUDA graph pool memory" log after capture; values
+    below 1.0 risk OOM if the actual pool exceeds the scaled reservation.
+    Read locally (not registered in vllm.envs), so setting it triggers the
+    "Unknown vLLM environment variable" startup warning and is rejected by
+    --fail-on-environ-validation."""
+    raw = os.environ.get("VLLM_CUDAGRAPH_ESTIMATE_SCALE")
+    if raw is None or raw.strip() == "":
+        return 1.0
+    try:
+        scale = float(raw)
+    except ValueError:
+        raise ValueError(
+            f"VLLM_CUDAGRAPH_ESTIMATE_SCALE must be a float, got {raw!r}"
+        ) from None
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError(
+            f"VLLM_CUDAGRAPH_ESTIMATE_SCALE must be finite and > 0, got {raw!r}"
+        )
+    return scale
+
+
+def scale_cudagraph_estimate(estimate: int, scale: float) -> int:
+    """The CUDA graph memory estimate in bytes after applying `scale`."""
+    if scale == 1.0:
+        return estimate
+    return int(estimate * scale)
+
+
+def log_cudagraph_estimate_scale(
+    actual: int, estimate: int, applied: int, scale: float
+) -> None:
+    """After capture, compare the scaled CUDA graph reservation with the actual
+    pool so VLLM_CUDAGRAPH_ESTIMATE_SCALE can be calibrated. `applied` is 0 when
+    VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0 (nothing was reserved)."""
+    fitted_scale = actual / estimate if estimate > 0 else float("nan")
+    logger.info(
+        "CUDA graph estimate scale %.4f: reserved %s GiB for an actual pool of "
+        "%s GiB (unscaled estimate %s GiB, fitted scale %.4f).",
+        scale,
+        format_gib(applied),
+        format_gib(actual),
+        format_gib(estimate),
+        fitted_scale,
+    )
+    if 0 < applied < actual:
+        logger.warning(
+            "CUDA graph pool (%s GiB) exceeds the scaled reservation (%s GiB) by "
+            "%s GiB; the KV cache was sized too large and may OOM. Raise "
+            "VLLM_CUDAGRAPH_ESTIMATE_SCALE to at least %.4f.",
+            format_gib(actual),
+            format_gib(applied),
+            format_gib(actual - applied),
+            fitted_scale,
+        )
 
 
 if TYPE_CHECKING:
@@ -719,9 +781,23 @@ class Worker(WorkerBase):
         ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
+        # Opt-in VLLM_CUDAGRAPH_ESTIMATE_SCALE corrects a known over-estimate.
+        cudagraph_estimate_scale_factor = cudagraph_estimate_scale()
+        cudagraph_memory_estimate_scaled = scale_cudagraph_estimate(
+            cudagraph_memory_estimate, cudagraph_estimate_scale_factor
+        )
+        if cudagraph_estimate_scale_factor != 1.0 and cudagraph_memory_estimate > 0:
+            logger.info(
+                "Scaling CUDA graph memory estimate by "
+                "VLLM_CUDAGRAPH_ESTIMATE_SCALE=%.4f: %s GiB -> %s GiB.",
+                cudagraph_estimate_scale_factor,
+                format_gib(cudagraph_memory_estimate),
+                format_gib(cudagraph_memory_estimate_scaled),
+            )
+
         # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
-            cudagraph_memory_estimate
+            cudagraph_memory_estimate_scaled
             if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
             else 0
         )
@@ -752,6 +828,8 @@ class Worker(WorkerBase):
             profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
+        self.cudagraph_memory_estimate_applied = cudagraph_memory_estimate_applied
+        self.cudagraph_estimate_scale = cudagraph_estimate_scale_factor
 
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
@@ -780,7 +858,7 @@ class Worker(WorkerBase):
         if cudagraph_memory_estimate > 0:
             total_mem = self.init_snapshot.total_memory
             current_util = self.cache_config.gpu_memory_utilization
-            cg_util_delta = cudagraph_memory_estimate / total_mem
+            cg_util_delta = cudagraph_memory_estimate_scaled / total_mem
             if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
                 equiv_util = round(current_util - cg_util_delta, 4)
                 suggested_util = min(
@@ -1011,6 +1089,13 @@ class Worker(WorkerBase):
                 GiB(diff),
                 100 * diff / max(cuda_graph_memory_bytes, 1),
             )
+            if getattr(self, "cudagraph_estimate_scale", 1.0) != 1.0:
+                log_cudagraph_estimate_scale(
+                    cuda_graph_memory_bytes,
+                    self.cudagraph_memory_estimate,
+                    self.cudagraph_memory_estimate_applied,
+                    self.cudagraph_estimate_scale,
+                )
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
