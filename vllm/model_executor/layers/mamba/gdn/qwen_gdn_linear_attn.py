@@ -213,12 +213,16 @@ def _resolve_gdn_prefill_backend(
     * one of the following:
       - Hopper (SM90);
       - Blackwell (SM10.x) with `head_k_dim == 128`, `cuda_runtime >= 13`;
-      - Blackwell (SM12.x) with `head_k_dim == 128`, `cuda_runtime >= 13`.
+      - Blackwell (SM12.x) with `head_k_dim == 128`, `cuda_runtime >= 13`;
+      - SM8.x, only when "flashinfer" is requested; "auto" keeps Triton there.
 
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
     * Blackwell (SM10.x or SM11.x) with `head_k_dim == 128`,
       `cuda_runtime >= 13`;
+
+    A "flashinfer" or "cutedsl" request that the conditions above do not cover
+    raises ValueError instead of falling back to Triton.
 
     AITER FlyDSL GDN prefill kernels are chosen when:
     * "aiter_flydsl" is requested, or "auto" is requested on gfx942/gfx950;
@@ -241,6 +245,8 @@ def _resolve_gdn_prefill_backend(
 
     if backend == "sycl" and not current_platform.is_xpu():
         raise ValueError("GDN prefill backend 'sycl' is only supported on XPU.")
+    if backend in ("flashinfer", "cutedsl") and not current_platform.is_cuda():
+        raise ValueError(f"GDN prefill backend '{backend}' is only supported on CUDA.")
 
     if current_platform.is_xpu():
         if getattr(
@@ -523,8 +529,8 @@ class ChunkGatedDeltaRule(CustomOp):
         # a slow first inference.
         self.gdn_prefill_backend_requested = backend
 
-        # A named backend now either runs or raises in the resolver, so there
-        # is no quiet substitution left to report here.
+        # An explicit FlashInfer or CuteDSL request now either runs or raises in
+        # the resolver, so there is no quiet substitution left to report here.
         _log_gdn_backend_decision(vllm_config, backend, active_backend)
 
         # On XPU "sycl" bypasses this module entirely (fused whole-layer op),

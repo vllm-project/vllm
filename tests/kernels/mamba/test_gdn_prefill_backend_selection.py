@@ -103,20 +103,23 @@ def test_blackwell_offers_cutedsl(
     assert _resolve_gdn_prefill_backend(_config("auto"))[1] == auto
 
 
-def test_a_non_cuda_platform_resolves_to_triton(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("platform", ["cpu", "rocm", "xpu"])
+@pytest.mark.parametrize("requested", ["flashinfer", "cutedsl"])
+def test_a_non_cuda_platform_refuses_the_cuda_kernels(
+    monkeypatch: pytest.MonkeyPatch, platform: str, requested: str
 ) -> None:
     monkeypatch.setattr(
         gdn_module,
         "current_platform",
         SimpleNamespace(
             is_cuda=lambda: False,
-            is_cpu=lambda: True,
-            is_rocm=lambda: False,
-            is_xpu=lambda: False,
+            is_cpu=lambda: platform == "cpu",
+            is_rocm=lambda: platform == "rocm",
+            is_xpu=lambda: platform == "xpu",
         ),
     )
-    assert _resolve_gdn_prefill_backend(_config("flashinfer"))[1] == "triton"
+    with pytest.raises(ValueError, match=f"'{requested}' is only supported on CUDA"):
+        _resolve_gdn_prefill_backend(_config(requested))
 
 
 # --- what the prefill adapter hands FlashInfer -------------------------------
