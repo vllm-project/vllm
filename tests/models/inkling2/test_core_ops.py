@@ -660,8 +660,6 @@ def test_sm12x_linear_large_batch_fallback():
 
 
 def test_attention_prologue_reuses_jit_across_prefill_lengths(monkeypatch):
-    """Token counts of any %16 alignment share one variant of the K/V conv
-    and q/r launches."""
     monkeypatch.setattr(sconv_ops, "_PROLOGUE_SPLIT_MIN_TOKENS", 0)
     heads, kv_heads, dim, d_rel, extent = 12, 2, 128, 16, 1024
     device = torch.accelerator.current_device_index()
@@ -673,7 +671,6 @@ def test_attention_prologue_reuses_jit_across_prefill_lengths(monkeypatch):
         cache.clear()
 
     cache_sizes = []
-    # Only `T` changes %16 class; the block-table width (17, 19) stays unaligned.
     for tokens in (64, 72):
         q = torch.randn(tokens, heads, dim, device=DEVICE).bfloat16()
         r = torch.randn(tokens, heads, d_rel, device=DEVICE).bfloat16()

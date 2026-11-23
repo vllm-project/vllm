@@ -529,8 +529,6 @@ def test_gate_sink(num_tokens):
 @requires_sm90
 @torch.inference_mode()
 def test_inkling2_rel_attention_reuses_jit_across_prefill_lengths():
-    """Token counts and `seq_lens` slices of any %16 alignment share one
-    variant, so prefill after warmup does not compile on the engine thread."""
     from vllm.models.inkling2.nvidia.ops.attention_sm90 import (
         MODE_OUT_LSE,
         _rel_attention_kernel,
@@ -548,8 +546,6 @@ def test_inkling2_rel_attention_reuses_jit_across_prefill_lengths():
     kernel_cache.clear()
 
     cache_sizes = []
-    # 64 -> 72 tokens changes the %16 class of `num_tokens` and the LSE head
-    # stride; the 4-byte offset that of `SeqLens`, like `seq_lens[num_decodes:]`.
     for num_tokens, offset in ((64, 0), (72, 1)):
         q = torch.zeros(
             num_tokens, heads, HEAD_DIM, device="cuda", dtype=torch.bfloat16
