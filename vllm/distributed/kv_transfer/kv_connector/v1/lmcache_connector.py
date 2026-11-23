@@ -105,9 +105,21 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         else:
             logger.info("Initializing latest dev LMCache connector")
             # lazy import
-            from lmcache.integration.vllm.vllm_v1_adapter import (
-                LMCacheConnectorV1Impl as LMCacheConnectorLatestImpl,
-            )
+            try:
+                from lmcache.integration.vllm.vllm_v1_adapter import (
+                    LMCacheConnectorV1Impl as LMCacheConnectorLatestImpl,
+                )
+            except ImportError as e:
+                raise ImportError(
+                    "LMCacheConnectorV1 requires the LMCache v1 adapter "
+                    "(`lmcache.integration.vllm.vllm_v1_adapter`), which "
+                    f"could not be imported: {e}. The adapter was removed "
+                    "in lmcache 0.5.8, so LMCacheConnectorV1 is only "
+                    "supported with the lmcache version pinned in "
+                    "requirements/kv_connectors.txt "
+                    '(`pip install "lmcache==0.5.7.post1"`). To use a '
+                    "newer lmcache release, switch to `LMCacheMPConnector`."
+                ) from e
 
             cls = LMCacheConnectorLatestImpl
 

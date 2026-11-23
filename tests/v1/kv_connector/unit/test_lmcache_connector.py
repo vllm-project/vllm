@@ -1,20 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import sys
 import threading
+import types
 from collections.abc import Iterator
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from vllm import LLM
-from vllm.config import KVTransferConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
     LMCacheConnectorV1,
     LMCacheKVEvents,
 )
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
+
+from .utils import create_vllm_config
 
 
 @pytest.fixture
@@ -849,3 +855,85 @@ def test_engine_shutdown_stops_lmcache_threads(monkeypatch):
         if not t.daemon and t not in threads_before
     ]
     assert leftover == []
+
+
+@pytest.fixture(scope="module")
+def lmcache_vllm_config() -> VllmConfig:
+    """A minimal VllmConfig with a KVTransferConfig attached.
+
+    Module-scoped on purpose: building a second VllmConfig in the same
+    process fails with "Duplicate op name: vocab_parallel_embedding"
+    (the model-arch import re-runs `PluggableLayer.register`). Neither
+    test mutates the config; the connector only reads it.
+    """
+    vllm_config = create_vllm_config(block_size=16, max_num_batched_tokens=512)
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="LMCacheConnectorV1",
+        kv_role="kv_both",
+    )
+    return vllm_config
+
+
+def _make_kv_cache_config() -> KVCacheConfig:
+    return MagicMock(spec=KVCacheConfig)
+
+
+def _make_lmcache_module(
+    impl_mock: MagicMock,
+) -> dict[str, types.ModuleType]:
+    """Build a fake `lmcache` package hierarchy that returns *impl_mock*
+    when `LMCacheConnectorV1Impl` is instantiated."""
+    lmcache_mod = types.ModuleType("lmcache")
+    integration_mod = types.ModuleType("lmcache.integration")
+    vllm_mod = types.ModuleType("lmcache.integration.vllm")
+    adapter_mod = types.ModuleType("lmcache.integration.vllm.vllm_v1_adapter")
+
+    adapter_mod.LMCacheConnectorV1Impl = MagicMock(  # type: ignore[attr-defined]
+        return_value=impl_mock
+    )
+
+    lmcache_mod.integration = integration_mod  # type: ignore[attr-defined]
+    integration_mod.vllm = vllm_mod  # type: ignore[attr-defined]
+    vllm_mod.vllm_v1_adapter = adapter_mod  # type: ignore[attr-defined]
+
+    return {
+        "lmcache": lmcache_mod,
+        "lmcache.integration": integration_mod,
+        "lmcache.integration.vllm": vllm_mod,
+        "lmcache.integration.vllm.vllm_v1_adapter": adapter_mod,
+    }
+
+
+class TestLMCacheConnectorV1ImportError:
+    """LMCacheConnectorV1 must fail with an actionable error when the
+    lmcache v1 adapter cannot be imported (e.g. lmcache >= 0.5.8, which
+    removed `lmcache.integration.vllm.vllm_v1_adapter`)."""
+
+    def test_missing_adapter_raises_helpful_error(self, lmcache_vllm_config):
+        # Block the adapter import the way lmcache >= 0.5.8 does by not
+        # shipping the module at all (None in sys.modules makes the
+        # import raise ImportError).
+        blocked = {"lmcache.integration.vllm.vllm_v1_adapter": None}
+        with patch.dict(sys.modules, blocked):
+            with pytest.raises(ImportError, match="LMCacheMPConnector") as exc_info:
+                LMCacheConnectorV1(
+                    vllm_config=lmcache_vllm_config,
+                    role=KVConnectorRole.WORKER,
+                    kv_cache_config=_make_kv_cache_config(),
+                )
+
+        message = str(exc_info.value)
+        assert "lmcache==0.5.7.post1" in message
+        assert "0.5.8" in message
+        assert "vllm_v1_adapter" in message
+
+    def test_stubbed_adapter_constructs_connector(self, lmcache_vllm_config):
+        impl = MagicMock()
+        with patch.dict(sys.modules, _make_lmcache_module(impl)):
+            connector = LMCacheConnectorV1(
+                vllm_config=lmcache_vllm_config,
+                role=KVConnectorRole.WORKER,
+                kv_cache_config=_make_kv_cache_config(),
+            )
+
+        assert connector._lmcache_engine is impl
