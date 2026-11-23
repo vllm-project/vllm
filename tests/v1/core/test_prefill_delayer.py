@@ -231,7 +231,7 @@ def _lockstep_worker(rank: int, world_size: int, port: int):
     expected_delayer = PrefillDelayer(world_size, BUDGET, 3)
     all_states = [_rank_states(r) for r in range(world_size)]
     for step in range(NUM_STEPS):
-        has_unfinished, pause = parallel_config.sync_dp_state(
+        has_unfinished, pause, _ = parallel_config.sync_dp_state(
             group,
             has_unfinished=rank == step % world_size,
             pending_pause=False,
@@ -279,10 +279,10 @@ def test_engine_core_syncs_every_step_with_delayer(monkeypatch):
     core.scheduler = MagicMock(prefill_delayer_state=MagicMock(return_value=local))
     synced: list[list[int]] = []
 
-    def scripted_sync(dp_group, has_unfinished, pending_pause, extra):
+    def scripted_sync(dp_group, has_unfinished, pending_pause, extra=None, row=None):
         synced.append(extra.tolist())
         extra.mul_(DP_SIZE)  # every rank reports the same state
-        return True, False
+        return True, False, None
 
     monkeypatch.setattr(ParallelConfig, "sync_dp_state", staticmethod(scripted_sync))
     for _ in range(3):

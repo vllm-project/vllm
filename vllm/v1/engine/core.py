@@ -2905,7 +2905,8 @@ class DPEngineCoreProc(EngineCoreProc):
         # Sync step 1 too: an idle pause needs one dummy batch, not a full interval.
         self.step_counter += 1
         delayer = self.prefill_delayer
-        row = self.scheduler.dp_row()
+        # The delayer and the cross-DP hold are alternatives (see SchedulerConfig).
+        row = None if delayer is not None else self.scheduler.dp_row()
         if (
             delayer is None
             and row is None
