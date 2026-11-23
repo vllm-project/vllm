@@ -16,6 +16,70 @@ runners are not yet hardware validated in all TP/DP configurations.
 To avoid a busy port 8000, run the generated scripts with
 `VLLM_RECIPE_SWEEP_PORT=8001`.
 
+### B70 hardware-validation workflow
+
+Run the following commands from the vLLM repository root, inside an XPU-enabled
+environment or container where `vllm serve` and `vllm bench` work. The model
+must have an available B70 recipe and be accessible from the test environment.
+
+Generate a B70 full sweep (set `--max-model-len` to a tested context limit if
+needed):
+
+```bash
+python3 tools/recipes/recipe_json_to_vllm_config.py \
+  --model Qwen/Qwen3.5-4B --hardware arc_pro_b70 --detect-hardware \
+  --input-tokens 128 --output-tokens 128 --concurrency 32 \
+  --ttft-sla-ms 3000 --tpot-sla-ms 100 \
+  --config-out config.yml --env-out env.sh \
+  --generate-full-sweep --sweep-out-dir sweep_b70
+```
+
+Inspect generated candidates and dry-run the parallel-layout stage before
+running hardware measurements:
+
+```bash
+bash tools/recipes/sweep/validate_b70_sweep.sh sweep_b70 dry-run
+bash tools/recipes/sweep/validate_b70_sweep.sh sweep_b70 run
+```
+
+The `run` mode executes TP/DP, concurrency and scheduler stages. Inspect
+`sweep_b70/results`, `sweep_b70/*recommendation.json` and
+`sweep_b70/sweep-report.html`. The validation helper does not hide sweep
+failures; use benchmark artifacts and server logs to diagnose them.
+
+#### Optional B70 context-length capacity stage
+
+To select context capacity **between** parallel-layout tuning and concurrency
+tuning, execute the stages individually rather than using the `run` mode above:
+
+```bash
+./sweep_b70/run_full_sweep.sh --stages parallel-layout
+
+python3 tools/recipes/sweep/context_length_sweep.py \
+  --config sweep_b70/parallel-layout-config.yml \
+  --env env.sh --output-dir sweep_b70/context-length \
+  --candidates 4096,8192,16384,32768 \
+  --input-tokens 128 --output-tokens 128 \
+  --concurrency 32 --num-prompts 100 \
+  --ttft-sla-ms 3000 --tpot-sla-ms 100 \
+  --port 8001 --apply
+
+./sweep_b70/run_full_sweep.sh --stages concurrency,scheduler
+```
+
+Keep the same input/output workload shape throughout all stages. Context-length
+candidates are examples; choose values within the model's supported context and
+appropriate to available B70 memory. The runner saves per-candidate YAML,
+server and benchmark logs, `context-length-results.json` and
+`context-length-config.yml`. With `--apply`, it updates
+`parallel-layout-config.yml` and creates a `.before-context-sweep` backup;
+without `--apply`, it leaves the selected layout configuration unchanged.
+
+The selection objective is the **largest measured context length** satisfying
+P99 TTFT/TPOT thresholds, not maximum throughput. Failed starts and missing
+P99 metrics cannot qualify as passing results. This stage is optional and
+does not alter the default full-sweep workflow.
+
 Sweep tuning is optional. The converter always creates an initial `config.yml`
 that can be deployed directly. Scheduler calculation is disabled by default:
 TP/DP and concurrency stages remove explicit `max-num-seqs` and

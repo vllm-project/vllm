@@ -178,6 +178,8 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
 
 See [SWEEP_TUNING.md](SWEEP_TUNING.md) for targeted sweep modes, NUMA binding,
 failure handling, recommendations, reporting, and visualization.
+For Arc Pro B70, see the [XPU hardware-validation workflow](SWEEP_TUNING.md#b70-hardware-validation-workflow),
+including the sweep validation helper under `sweep/`.
 
 ### 5. Start vLLM
 
