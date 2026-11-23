@@ -28,6 +28,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine import (
     CheckpointState,
     EngineCoreRequest,
@@ -43,7 +44,7 @@ from vllm.v1.engine.core import (
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
@@ -1049,3 +1050,147 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     else:
         assert result is None
     assert order == ["synchronize_device", "reset_caches"]
+
+
+@pytest.mark.parametrize(
+    (
+        "cls",
+        "has_requests",
+        "has_unfinished",
+        "engines_running",
+        "is_sleeping",
+        "should_sleep",
+    ),
+    [
+        # Non-DP always yields when requests remain in the scheduler.
+        (EngineCoreProc, True, True, True, False, True),
+        (EngineCoreProc, False, False, False, False, False),
+        # DP skips sleep when a dummy batch will run immediately.
+        (DPEngineCoreProc, True, True, True, False, False),
+        (DPEngineCoreProc, True, True, False, False, False),
+        (DPEngineCoreProc, True, False, True, False, False),
+        # DP keeps sleep when sleeping or idle-draining finished-req cleanup.
+        (DPEngineCoreProc, True, True, True, True, True),
+        (DPEngineCoreProc, True, False, False, False, True),
+        (DPEngineCoreProc, False, False, True, False, False),
+    ],
+)
+def test_empty_step_sleep_policy(
+    monkeypatch,
+    cls,
+    has_requests: bool,
+    has_unfinished: bool,
+    engines_running: bool,
+    is_sleeping: bool,
+    should_sleep: bool,
+):
+    """DPEngineCoreProc must not sleep 1 ms before dispatching a dummy batch,
+    while keeping the sleep when sleeping or when no dummy batch will run."""
+    core = object.__new__(cls)
+    core.step_fn = lambda: (None, False)
+    core.output_queue = MagicMock()
+    core.post_step = MagicMock()
+    core.scheduler = MagicMock()
+    core.scheduler.has_requests.return_value = has_requests
+    core.scheduler.has_unfinished_requests.return_value = has_unfinished
+    core.engines_running = engines_running
+    core.model_executor = MagicMock(is_sleeping=is_sleeping)
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("vllm.v1.engine.core.time.sleep", sleeps.append)
+
+    assert core._process_engine_step() is False
+    assert bool(sleeps) is should_sleep
+
+
+@pytest.mark.parametrize("use_batch_queue", [False, True])
+def test_noop_empty_step_skips_execute_model_rpc(use_batch_queue: bool):
+    """A pure 0-token SchedulerOutput with no worker-side state updates or
+    connectors skips the redundant execute_model RPC."""
+    core = object.__new__(EngineCore)
+    core.is_mm_encoder_only = False
+    core.is_pooling_model = False
+    core.prefill_schedule_interval = 1
+    core.num_executed_steps = 0
+    core.deferred_step = None
+    core.batch_queue_size = 2 if use_batch_queue else 1
+    core.batch_queue = deque() if use_batch_queue else None
+    core.vllm_config = MagicMock(
+        kv_transfer_config=None,
+        ec_transfer_config=None,
+        aux_output_config=MagicMock(enabled=False),
+        parallel_config=MagicMock(pipeline_parallel_size=1),
+    )
+    core.scheduler = MagicMock()
+    core.scheduler.has_requests.return_value = True
+    core.scheduler.update_from_output.return_value = {}
+    core.model_executor = MagicMock()
+    core._process_aborts_queue = MagicMock()
+    core._untimed_iteration_details = MagicMock(return_value=None)
+    core._attach_iteration_details = MagicMock()
+    core._attach_weight_version = MagicMock()
+
+    empty_out = SchedulerOutput.make_empty()
+    core.scheduler.schedule.return_value = empty_out
+
+    step_fn = core.step_with_batch_queue if use_batch_queue else core.step
+    outputs, executed = step_fn()
+    assert not executed
+    assert outputs == {}
+    core.model_executor.execute_model.assert_not_called()
+    core.scheduler.update_from_output.assert_called_once_with(
+        empty_out, EMPTY_MODEL_RUNNER_OUTPUT
+    )
+
+    # With finished_req_ids set, the worker must still be notified.
+    cleanup_out = SchedulerOutput.make_empty()
+    cleanup_out.finished_req_ids = {"req-1"}
+    core.scheduler.schedule.return_value = cleanup_out
+    exec_fut: Future[ModelRunnerOutput] = Future()
+    exec_fut.set_result(EMPTY_MODEL_RUNNER_OUTPUT)
+    core.model_executor.execute_model.return_value = exec_fut
+    step_fn()
+    core.model_executor.execute_model.assert_called_once_with(
+        cleanup_out, non_block=True
+    )
+
+
+def test_noop_empty_step_drains_inflight_batch_queue():
+    """With an in-flight batch queued, a no-op empty step skips execute_model
+    and drains the queued batch instead of enqueuing a no-op RPC."""
+    core = object.__new__(EngineCore)
+    core.is_mm_encoder_only = False
+    core.is_pooling_model = False
+    core.prefill_schedule_interval = 1
+    core.num_executed_steps = 1
+    core.deferred_step = None
+    core.batch_queue_size = 2
+    core.vllm_config = MagicMock(
+        kv_transfer_config=None,
+        ec_transfer_config=None,
+        aux_output_config=MagicMock(enabled=False),
+        parallel_config=MagicMock(pipeline_parallel_size=1),
+    )
+    prior_so = SchedulerOutput.make_empty()
+    prior_so.total_num_scheduled_tokens = 4
+    prior_out = ModelRunnerOutput(req_ids=["r0"])
+    prior_fut: Future[ModelRunnerOutput] = Future()
+    prior_fut.set_result(prior_out)
+    core.batch_queue = deque([(prior_fut, prior_so, prior_fut)])
+
+    core.scheduler = MagicMock()
+    core.scheduler.has_requests.return_value = True
+    core.scheduler.schedule.return_value = SchedulerOutput.make_empty()
+    core.scheduler.update_from_output.return_value = {0: MagicMock()}
+    core.model_executor = MagicMock()
+    core._process_aborts_queue = MagicMock()
+    core._untimed_iteration_details = MagicMock(return_value=None)
+    core._attach_iteration_details = MagicMock()
+    core._attach_weight_version = MagicMock()
+
+    outputs, executed = core.step_with_batch_queue()
+    assert not executed
+    assert outputs is not None
+    assert not core.batch_queue
+    core.model_executor.execute_model.assert_not_called()
+    core.scheduler.update_from_output.assert_called_once_with(prior_so, prior_out)
