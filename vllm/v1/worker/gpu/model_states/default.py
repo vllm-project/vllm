@@ -48,16 +48,16 @@ class DefaultModelState(ModelState):
         self.stores_prompt_embeds = False
         if self.model_config.enable_prompt_embeds:
             # Only the first PP rank reads prompt_embeds (later ranks receive
-            # hidden states), so only it holds them. KV cache planning still
-            # sets their memory aside on every rank, which only costs KV cache
-            # when a later rank is the most memory-constrained one.
+            # hidden states), so only it holds them and stages them.
             self.stores_prompt_embeds = (
                 self.vllm_config.parallel_config.pipeline_parallel_size == 1
                 or get_pp_group().is_first_rank
             )
             self.prompt_embeds_state = PromptEmbedsState(
                 self.max_num_reqs,
-                prompt_embeds_budget_rows(self.scheduler_config),
+                prompt_embeds_budget_rows(self.scheduler_config)
+                if self.stores_prompt_embeds
+                else 0,
                 self.inputs_embeds_size,
                 self.dtype,
                 self.device,

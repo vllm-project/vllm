@@ -22,7 +22,6 @@ from vllm.v1.core.kv_cache_utils import (
     _kv_cache_device_name,
     update_kv_cache_capacity,
 )
-from vllm.v1.core.sched.prompt_embeds_budget import prompt_embeds_budget_bytes
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,
@@ -1544,15 +1543,6 @@ def get_kv_cache_configs(
             )
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
-
-    # Workers stage one step's prompt_embeds rows on the GPU, in a buffer they
-    # allocate after the KV cache.
-    if override is None and vllm_config.cache_config.kv_cache_memory_bytes is None:
-        prompt_embeds_bytes = prompt_embeds_budget_bytes(vllm_config)
-        available_memory = [
-            avail_mem - prompt_embeds_bytes if groups else avail_mem
-            for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
-        ]
 
     # Reserve the null block BlockPool permanently holds back, so auto-fit and
     # the capacity check both plan against usable blocks. Allocation below

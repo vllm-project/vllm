@@ -39,7 +39,7 @@ else:
 
 def num_prompt_embeds_to_send(request: Request, num_computed_tokens: int) -> int:
     """Rows of `request.prompt_embeds` at prompt positions not computed yet,
-    the only ones workers need. The scheduler budgets the rows sent, so both
+    the only ones workers need. The scheduler tracks the rows sent, so both
     use this count.
 
     Counts up to `num_prompt_tokens`: KV connectors that shorten a P/D prefill

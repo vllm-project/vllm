@@ -47,10 +47,6 @@ from vllm.v1.core.kv_cache_planning import (
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
 )
-from vllm.v1.core.sched.prompt_embeds_budget import (
-    prompt_embeds_budget_rows,
-    prompt_embeds_row_bytes,
-)
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
     DFlashSlidingWindowManager,
@@ -1884,75 +1880,6 @@ def test_auto_fit_max_model_len():
     assert vllm_config.model_config.max_model_len > 0
 
 
-@pytest.mark.parametrize("max_num_batched_tokens", [512, 4096])
-def test_prompt_embeds_rows_are_set_aside_from_kv_cache(max_num_batched_tokens):
-    """Workers stage one step's prompt_embeds rows on the GPU, so the KV cache
-    is sized without max_num_batched_tokens rows, whatever max_model_len is."""
-    mem_per_block = 16 * 2 * 64 * 4 * 2 * 2  # 2 layers, 16KB per block each
-    available_memory = mem_per_block * 1024
-    kv_cache_specs = {
-        "layer_1": new_kv_cache_layer(),
-        "layer_2": new_kv_cache_layer(),
-    }
-    num_blocks = {}
-    for enable_prompt_embeds in (False, True):
-        vllm_config = VllmConfig(
-            model_config=ModelConfig(
-                max_model_len=1024, enable_prompt_embeds=enable_prompt_embeds
-            ),
-            scheduler_config=SchedulerConfig(
-                max_model_len=1024,
-                is_encoder_decoder=False,
-                max_num_batched_tokens=max_num_batched_tokens,
-            ),
-        )
-        vllm_config.cache_config.kv_cache_layout = "LBNHC"
-        (config,) = get_kv_cache_configs(
-            vllm_config, [kv_cache_specs], [available_memory]
-        )
-        num_blocks[enable_prompt_embeds] = config.num_blocks
-
-    rows_bytes = max_num_batched_tokens * prompt_embeds_row_bytes(vllm_config)
-    assert num_blocks[False] == available_memory // mem_per_block
-    assert num_blocks[True] == (available_memory - rows_bytes) // mem_per_block
-
-
-def test_auto_fit_max_model_len_leaves_room_for_prompt_embeds_staging():
-    """Auto-fit plans against the memory left after the prompt_embeds staging
-    buffer, which does not grow with the length it picks."""
-    mem_per_block = 16 * 2 * 64 * 4 * 2 * 2  # 2 layers, 16KB per block each
-    limited_memory = mem_per_block * 32  # 512 tokens of KV cache alone
-    kv_cache_specs = {
-        "layer_1": new_kv_cache_layer(),
-        "layer_2": new_kv_cache_layer(),
-    }
-    fitted = {}
-    for enable_prompt_embeds in (False, True):
-        model_config = ModelConfig(
-            max_model_len=1024, enable_prompt_embeds=enable_prompt_embeds
-        )
-        model_config.original_max_model_len = -1
-        vllm_config = VllmConfig(
-            model_config=model_config,
-            scheduler_config=SchedulerConfig(
-                max_model_len=1024,
-                is_encoder_decoder=False,
-                max_num_batched_tokens=128,
-            ),
-        )
-        vllm_config.cache_config.kv_cache_layout = "LBNHC"
-        (config,) = get_kv_cache_configs(
-            vllm_config, [kv_cache_specs], [limited_memory]
-        )
-        fitted[enable_prompt_embeds] = (model_config.max_model_len, config)
-
-    max_len, config = fitted[True]
-    rows = prompt_embeds_budget_rows(vllm_config.scheduler_config)
-    rows_bytes = rows * prompt_embeds_row_bytes(vllm_config)
-    assert 0 < max_len < fitted[False][0]
-    assert config.num_blocks * mem_per_block + rows_bytes <= limited_memory
-
-
 def test_auto_fit_max_model_len_with_hybrid():
     """Test that auto-fit works with hybrid KV cache specs."""
     # Create config with original_max_model_len=-1 to trigger auto-fit
@@ -2600,44 +2527,6 @@ def test_finalize_extensible_kv_cache_refits_auto_max_model_len():
         vllm_config, [config], scheduler_config, measured
     )
     # 8 usable blocks besides the null block.
-    assert vllm_config.model_config.max_model_len == spec.block_size * 8
-    assert config.num_blocks == 9
-
-
-@pytest.mark.parametrize("num_kv_blocks", [9, 1])
-def test_finalize_extensible_kv_cache_refit_stays_within_measured_blocks(
-    num_kv_blocks,
-):
-    """Workers measure after keeping the prompt_embeds staging buffer free,
-    whose size does not depend on max_model_len, so the re-fit after warmup
-    uses only the measured blocks. When only the null block fits, startup fails
-    rather than fitting a context."""
-    from vllm.v1.worker.worker_base import CompilationTimes
-
-    spec = new_kv_cache_spec()
-    model_config = ModelConfig(
-        max_model_len=spec.block_size * 16, enable_prompt_embeds=True
-    )
-    model_config.original_max_model_len = -1
-    vllm_config = VllmConfig(model_config=model_config)
-    vllm_config.cache_config.kv_cache_layout = "LBNHC"
-    groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
-    config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 32
-    )
-    scheduler_config = generate_scheduler_kv_cache_config([config])
-    measured = [CompilationTimes(0.0, 0.0, num_kv_blocks=num_kv_blocks)]
-
-    if num_kv_blocks == 1:
-        with pytest.raises(ValueError, match="gpu_memory_utilization"):
-            kv_cache_planning.finalize_extensible_kv_cache(
-                vllm_config, [config], scheduler_config, measured
-            )
-        return
-    kv_cache_planning.finalize_extensible_kv_cache(
-        vllm_config, [config], scheduler_config, measured
-    )
-    # 8 usable blocks besides the null block, and no more.
     assert vllm_config.model_config.max_model_len == spec.block_size * 8
     assert config.num_blocks == 9
 

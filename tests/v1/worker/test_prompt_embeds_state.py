@@ -30,7 +30,7 @@ from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 
 HIDDEN = 24
 MAX_NUM_REQS = 8
-MAX_NUM_ROWS = 16
+MAX_NUM_EMBEDS = 16
 DEVICE = torch.device(current_platform.device_type)
 
 
@@ -57,7 +57,7 @@ class _Batch:
 def _make_state() -> PromptEmbedsState:
     return PromptEmbedsState(
         MAX_NUM_REQS,
-        MAX_NUM_ROWS,
+        MAX_NUM_EMBEDS,
         HIDDEN,
         torch.float32,
         DEVICE,
@@ -150,6 +150,30 @@ def test_overlay_respects_is_token_ids_mask():
         torch.testing.assert_close(out[pos], expected)
 
 
+def test_overlay_stages_several_requests_in_one_step():
+    """Requests staged in the same step share the staging buffer: each reads its
+    own embeddings, including one sent from a non-zero offset and a mixed
+    prompt whose token-id flags start partway into the buffer."""
+    state = _make_state()
+    embeds_a = torch.randn(8, HIDDEN, dtype=torch.float32)
+    state.add_request(
+        0,
+        _NewReqData("a", embeds_a[3:], prompt_embeds_offset=3, num_computed_tokens=3),
+    )
+    embeds_b = torch.randn(5, HIDDEN, dtype=torch.float32)
+    is_token_ids = [True, False, False, True, False]
+    state.add_request(1, _NewReqData("b", embeds_b, is_token_ids))
+
+    batch = _batch(num_scheduled=[5, 5], idx_mapping=[0, 1], req_ids=["a", "b"])
+    out, base = _apply(state, batch, num_computed=[3, 0], num_tokens=10)
+
+    torch.testing.assert_close(out[0:5], embeds_a[3:8].to(DEVICE))
+    embeds_b_gpu = embeds_b.to(DEVICE)
+    for pos, is_token in enumerate(is_token_ids):
+        expected = base[5 + pos] if is_token else embeds_b_gpu[pos]
+        torch.testing.assert_close(out[5 + pos], expected)
+
+
 def test_index_reuse_clears_stale_entry():
     """A request added at a previously-used index without embeds must not
     inherit the prior occupant's pointer-table entry."""
@@ -200,15 +224,3 @@ def test_overlay_reads_rows_past_the_offset():
 
     torch.testing.assert_close(out, embeds[6:10].to(DEVICE))
     assert "a" not in state.host_tensors
-
-
-def test_staging_buffer_is_allocated_on_first_use():
-    """The staging buffer is allocated only when a step stages rows: after KV
-    cache sizing, which sets its memory aside, and never by dummy runs."""
-    state = _make_state()
-    state.add_request(0, _NewReqData("a", torch.randn(4, HIDDEN)))
-    assert state._staged is None
-
-    _apply(state, _batch([4], [0], ["a"]), num_computed=[0], num_tokens=4)
-
-    assert state._staged is not None
