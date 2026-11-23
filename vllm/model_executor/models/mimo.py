@@ -38,9 +38,9 @@ from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM, Qwen2Model
 from vllm.sequence import IntermediateTensors
 
+from .qwen3 import Qwen3ForCausalLM, Qwen3Model, use_qwen2_attention
 from .utils import AutoWeightsLoader, PPMissingLayer, WeightsMapper, maybe_prefix
 
 logger = init_logger(__name__)
@@ -54,7 +54,7 @@ logger = init_logger(__name__)
         "inputs_embeds": 0,
     }
 )
-class MiMoModel(Qwen2Model):
+class MiMoModel(Qwen3Model):
     supports_aux_hidden_states_over_pp = False
 
     def forward(
@@ -88,13 +88,14 @@ class MiMoModel(Qwen2Model):
         return hidden_states
 
 
-class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
+class MiMoForCausalLM(Qwen3ForCausalLM, nn.Module):
     # MTP layers are loaded by the draft model, not the main model.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.mtp_layers.": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
+        use_qwen2_attention(config)
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -134,3 +135,6 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
         hidden_states = self.model.norm(hidden_states)
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return super().compute_logits_local(self.model.norm(hidden_states))
