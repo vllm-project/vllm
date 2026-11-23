@@ -196,11 +196,7 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
-        # Optional `reclaim_blocks(request_id, deficit, budget)`, called when an
-        # allocation is `deficit` blocks short. It may free blocks, and may
-        # allocate up to `budget` free blocks to the request that its managers
-        # report in this allocation. It returns True only if the allocation can
-        # now proceed, and changes nothing otherwise.
+        # Called when an allocation is short; returns True only if it can now proceed.
         self.reclaim_blocks: Callable[[str, int, int], bool] | None = None
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
