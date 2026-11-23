@@ -3,6 +3,7 @@
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import torch
@@ -23,6 +24,45 @@ from ...utils import (
     get_test_prompts,
 )
 from .._correctness import check_mtp_correctness
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+
+class MTPInputRecorder:
+    """Worker extension that observes draft inputs without changing them."""
+
+    model_runner: "GPUModelRunner"
+
+    def start_mtp_input_recording(self) -> None:
+        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+        from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
+            MultiModuleMTPSpeculator,
+        )
+
+        speculator = self.model_runner.speculator
+        assert isinstance(speculator, MultiModuleMTPSpeculator)
+        last_token_indices = speculator.last_token_indices
+        self.mtp_inputs: list[tuple[list[int], list[int]]] = []
+
+        def record_inputs(_module, _args, kwargs):
+            if kwargs["spec_step_idx"] == 0:
+                with gpu_sync_allowed():
+                    count = int(last_token_indices[0].item()) + 1
+                    ids = kwargs["input_ids"][:count].tolist()
+                    positions = kwargs["positions"][:count].tolist()
+                assert all(p >= 0 for p in positions), (
+                    f"Invalid MTP replay inputs: ids={ids}, positions={positions}"
+                )
+                self.mtp_inputs.append((ids, positions))
+
+        self.mtp_input_hook = speculator.model.register_forward_pre_hook(
+            record_inputs, with_kwargs=True
+        )
+
+    def read_mtp_inputs(self) -> list[tuple[list[int], list[int]]]:
+        self.mtp_input_hook.remove()
+        return self.mtp_inputs
 
 
 def _add_random_mtp_module(model_name: str, path: Path) -> Path:
@@ -88,6 +128,57 @@ def test_mtp_draft_steps_use_their_own_module(
     step_1, step_2 = (accepted / num_drafts for accepted in accepted_per_pos)
     assert step_1 > 0.3, f"module 0 acceptance {step_1:.3f}"
     assert step_2 < 0.05, f"module 1 acceptance {step_2:.3f}: module 0 was reused"
+
+
+@single_gpu_only
+def test_multi_module_mtp_reused_slot_has_only_current_request_inputs(
+    tmp_path: Path,
+    vllm_runner,
+):
+    """A short request must not re-prefill its slot's previous occupant."""
+    model = _add_random_mtp_module("Qwen/Qwen3.5-0.8B-Base", tmp_path)
+    with vllm_runner(
+        str(model),
+        block_size=None,
+        max_model_len=256,
+        max_num_seqs=1,
+        enable_prefix_caching=False,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        worker_extension_cls=f"{__name__}.MTPInputRecorder",
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 4,
+            "rejection_sample_method": "synthetic",
+            "synthetic_acceptance_rates": [0.0] * 4,
+        },
+    ) as runner:
+        llm = runner.llm
+        llm.generate(
+            [TokensPrompt(prompt_token_ids=list(range(9001, 9007)))],
+            SamplingParams(
+                temperature=0,
+                max_tokens=8,
+                ignore_eos=True,
+                allowed_token_ids=[9007],
+            ),
+        )
+        llm.collective_rpc("start_mtp_input_recording")
+        output = llm.generate(
+            [TokensPrompt(prompt_token_ids=[5000, 5001])],
+            SamplingParams(
+                temperature=0,
+                max_tokens=8,
+                ignore_eos=True,
+                allowed_token_ids=[42],
+            ),
+        )[0]
+        (draft_inputs,) = llm.collective_rpc("read_mtp_inputs")
+        assert [tuple(item) for item in draft_inputs[:2]] == [
+            ([5001, 42], [0, 1]),
+            ([5001, 42, 42], [0, 1, 2]),
+        ]
+        assert list(output.outputs[0].token_ids) == [42] * 8
 
 
 @pytest.mark.parametrize(
@@ -178,7 +269,7 @@ def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
 
         assert cold_output.num_cached_tokens == 0
         max_safe_hit = 2 * block_size
-        # An unconditional EAGLE drop would report only one block.
+        # The hash lookahead holds back only the last prompt token.
         assert warm_output.num_cached_tokens == max_safe_hit
 
         cold_completion = cold_output.outputs[0]

@@ -471,6 +471,18 @@ class BaseProcessingInfo:
         """
         return self.ctx.get_hf_processor(**kwargs)
 
+    def get_video_frame_limits(self) -> dict[str, int]:
+        """The `max_frames`/`min_frames` of the HF video processor, which the
+        video loader samples to; empty for models without one."""
+        if "video" not in self.supported_mm_limits:
+            return {}
+        video_processor = getattr(self.get_hf_processor(), "video_processor", None)
+        return {
+            k: v
+            for k in ("max_frames", "min_frames")
+            if (v := getattr(video_processor, k, None)) is not None
+        }
+
     def get_supported_mm_processor_kwargs(self) -> dict[str, set[str]]:
         """Return supported kwarg names for each HF processor kwargs scope."""
         processor = self.get_hf_processor()
@@ -647,6 +659,11 @@ class BaseProcessingInfo:
                         raise ValueError(
                             f"You must set `--enable-mm-embeds` to input "
                             f"`{modality}_embeds`"
+                        )
+                    if not mm_config.is_mm_embeds_enabled(modality):
+                        raise ValueError(
+                            f"`{modality}_embeds` inputs are disabled via "
+                            f"`--limit-mm-per-prompt`"
                         )
                     if mm_config.get_limit_per_prompt(modality) == 0:
                         logger.debug(

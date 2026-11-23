@@ -188,7 +188,6 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(
     common = dict(
         max_model_len=1024,
         enable_prefix_caching=False,
-        mamba_cache_mode="none",
         mamba_backend="flashinfer",
         tensor_parallel_size=tensor_parallel_size,
         speculative_config=speculative_config,
@@ -248,8 +247,8 @@ PREFIX_CACHING_PROMPTS = [
     _PC_PREFIX + "Surprisingly, the experiments showed that",
     _PC_PREFIX + "The most important conclusion was that",
 ]
-# MTP prefix caching must retain at least two full state blocks: the drafter drops
-# the volatile trailing block before resuming from the preceding boundary.
+# MTP prefix caching uses a longer prefix so a hit still spans at least two full
+# state blocks.
 _PC_MTP_PREFIX = _PC_SENTENCE * 240
 MTP_PREFIX_CACHING_PROMPTS = [
     _PC_MTP_PREFIX + prompt.removeprefix(_PC_PREFIX)
@@ -276,7 +275,6 @@ def _check_replayssm_prefix_caching(
     common = dict(
         max_model_len=8192,
         enable_chunked_prefill=True,
-        mamba_cache_mode="align",
         mamba_backend=mamba_backend,
         disable_log_stats=False,  # required for llm.get_metrics()
         tensor_parallel_size=tensor_parallel_size,
@@ -436,8 +434,7 @@ def _stress_mamba_block_size(worker) -> int:
 def _generate_with_preemption(llm, block_size: int):
     """Preempt active requests, then complete decode across three cache blocks."""
     engine = llm.llm_engine
-    # MTP excludes one trailing block from prefix hits. Keep three reusable
-    # blocks, plus that proof block and a decode margin.
+    # Cross at least three block boundaries during decode, with a margin.
     max_tokens = 4 * block_size + 64
     requests = {
         "short": ("The capital of France is", 256),
@@ -528,7 +525,6 @@ def test_flashinfer_replayssm_mtp_preemption_and_boundary_reuse(vllm_runner):
             dtype="bfloat16",
             mamba_backend="flashinfer",
             mamba_ssm_cache_dtype="float16",
-            mamba_cache_mode="align",
             enable_prefix_caching=True,
             # Retain decode checkpoints for the same-history probe.
             prefix_cache_retention_interval=None,

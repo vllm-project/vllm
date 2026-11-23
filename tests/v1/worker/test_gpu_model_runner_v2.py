@@ -307,7 +307,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner.parallel_config = parallel_config
     runner.vllm_config = SimpleNamespace(
         parallel_config=parallel_config,
-        cache_config=SimpleNamespace(mamba_cache_mode="none"),
+        cache_config=SimpleNamespace(enable_prefix_caching=False),
     )
     runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.model_state = SimpleNamespace(
@@ -376,15 +376,15 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("mamba_cache_mode", "num_speculative_blocks", "expected"),
+    ("enable_prefix_caching", "num_speculative_blocks", "expected"),
     [
-        pytest.param("align", 0, 65_536, id="align-prefix-cache"),
-        pytest.param("none", 7, 8, id="no-prefix-cache-with-speculation"),
+        pytest.param(True, 0, 65_536, id="prefix-cache"),
+        pytest.param(False, 7, 8, id="no-prefix-cache-with-speculation"),
     ],
 )
 def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     monkeypatch,
-    mamba_cache_mode: str,
+    enable_prefix_caching: bool,
     num_speculative_blocks: int,
     expected: int,
 ):
@@ -405,7 +405,7 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
         block_size=mamba_block_size,
     )
     mamba_config = MambaManager.config(
-        mamba_cache_mode=mamba_cache_mode,
+        enable_prefix_caching=enable_prefix_caching,
         num_speculative_blocks=num_speculative_blocks,
     )
     kv_cache_config = KVCacheConfig(
@@ -422,7 +422,7 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     )
     vllm_config = SimpleNamespace(
         parallel_config=parallel_config,
-        cache_config=SimpleNamespace(mamba_cache_mode=mamba_cache_mode),
+        cache_config=SimpleNamespace(enable_prefix_caching=enable_prefix_caching),
     )
     runner = SimpleNamespace(
         max_model_len=max_model_len,
@@ -761,9 +761,9 @@ def test_dummy_inputs_embeds_holds_random_input_id_embeddings(multimodal):
     torch.testing.assert_close(state.dummy_inputs_embeds(5), expected)
 
 
-def test_speculator_request_hooks():
-    noop = lambda *args, **kwargs: None
-    slots: dict[str, int] = {}
+def test_speculator_request_hooks(gpu_model_runner_for_requests):
+    runner = gpu_model_runner_for_requests
+    slots = runner.req_states.req_id_to_index
     events: list[tuple[str, str]] = []
 
     class RecordingSpeculator:
@@ -774,23 +774,7 @@ def test_speculator_request_hooks():
         def on_requests_finished(self, req_ids):
             events.extend(("finished", r) for r in req_ids if r in slots)
 
-    runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.speculator = RecordingSpeculator()
-    runner.req_states = SimpleNamespace(
-        req_id_to_index=slots,
-        add_request=lambda req_id, **_: slots.setdefault(req_id, len(slots)),
-        remove_request=lambda req_id: slots.pop(req_id, None),
-        apply_staged_writes=noop,
-    )
-    runner.model_state = SimpleNamespace(
-        add_request=noop, remove_request=noop, apply_staged_writes=noop
-    )
-    runner.draft_tokens_handler = SimpleNamespace(discard=noop)
-    runner.block_tables = SimpleNamespace(append_block_ids=noop)
-    runner.lora_state = SimpleNamespace(add_request=noop, remove_request=noop)
-    runner.adaptive_verification = runner.pooling_runner = runner.pp_handler = None
-    runner.encoder_cache = runner.prompt_logprobs_worker = runner.sampler = None
-    runner.is_last_pp_rank = False
 
     scheduler_output = SchedulerOutput.make_empty()
     scheduler_output.scheduled_new_reqs = [
