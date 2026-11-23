@@ -497,6 +497,14 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._failed_req_ids.add(source.kv_request_id)
         dest = req_context.get_state(P2PDestInfo)
         if dest is not None and dest.kv_request_id:
+            if not self.access_mode.can_write:
+                logger.warning_once(
+                    "P2P %s: access_mode=%s cannot stage KV for remote decoders; "
+                    "their fetches fail and they recompute the prompt. Use "
+                    "'write' or 'readwrite' on a PD prefiller.",
+                    self._local_id,
+                    self.access_mode.value,
+                )
             return RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
         return RequestOffloadingContext()
 
@@ -512,9 +520,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         Prefiller side (`remote_decoder` set): looks up via kv_request_id
         because peer_id is no longer carried on store-time
         kv_transfer_params; if a session has bound the id, finish it. If
-        no session has bound the id yet, this is a no-op: parked batches
-        in `_unbound_stores` are left in place and cleaned up only by
-        `_reap_unbound_stores` after `_unbound_store_timeout_s`.
+        no session has bound the id yet, parked batches in
+        `_unbound_stores` are left in place and cleaned up only by
+        `_reap_unbound_stores` after `_unbound_store_timeout_s`. A tier
+        that cannot write never staged any, so the id is recorded as
+        reaped and a later fetch for it fails at once.
 
         A PD prefiller request may carry both roles: `remote_kv_source`
         (pull cached blocks from a P2P source) and `remote_decoder` (serve
@@ -551,6 +561,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 dest_session is source_session and dest_id == source_id
             ):
                 dest_session.finish_request(dest_id)
+            elif dest_session is None and not self.access_mode.can_write:
+                self._reaped_stores[dest_id] = time.monotonic()
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:

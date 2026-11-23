@@ -758,6 +758,90 @@ def test_pd_partial_promotion_does_not_refetch_tail():
     assert sent_fetch_rounds() == [0]
 
 
+@pytest.mark.parametrize(
+    ("access_mode", "fetch_first"),
+    [("readwrite", False), ("read", False), ("read", True)],
+)
+def test_pd_prefiller_access_mode_answers_fetch(access_mode, fetch_first):
+    """A PD prefiller that cannot write answers the decoder's fetch at once."""
+    from tests.v1.kv_offload.tiering.p2p.test_sessions import (
+        FakeConnection,
+        FakeDataTransport,
+        _activate,
+    )
+    from vllm.v1.kv_offload.config import OffloadAccessMode
+    from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+    from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
+        FetchMsg,
+        TransferDoneMsg,
+    )
+
+    peer = "10.0.0.2:9000"
+    p2p_tier = _make_manager()
+    p2p_tier.locality = None
+    p2p_tier.access_mode = OffloadAccessMode.from_config(access_mode)
+    _attach_fake_transports(p2p_tier)
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=4, mmap_region=_mock_mmap_region(4)
+    )
+    tiering = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[p2p_tier],
+        tier_poll_interval_s=0.0,
+    )
+    conn = FakeConnection(peer_id=peer)
+    transport = FakeDataTransport()
+    session = P2PSession(
+        peer_id=peer,
+        local_id=p2p_tier._local_id,
+        transport=transport,
+        local_block_len=4096,
+        local_hash_seed="0",
+        conn=conn,
+    )
+    _activate(session, conn, peer_id=peer)
+    p2p_tier._sessions[peer] = session
+
+    keys = [OffloadKey(b"k0"), OffloadKey(b"k1")]
+    ctx = ReqContext(req_id="pd", kv_transfer_params=_remote_decoder_kv_params())
+
+    def fetch():
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.KEYS: list(keys),
+                FetchMsg.BLOCK_INDEXES: [0, 1],
+                FetchMsg.ROUND_SEQ: 0,
+            }
+        )
+        tiering._process_finished_jobs()
+
+    def transfer_done():
+        return [
+            msg[TransferDoneMsg.SUCCESS]
+            for msg in conn._sent
+            if msg[TYPE_KEY] == TransferDoneMsg.TYPE
+        ]
+
+    tiering.on_new_request(ctx)
+    if fetch_first:
+        fetch()
+    assert tiering.prepare_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
+    tiering.complete_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
+    tiering.on_request_finished(ctx)
+    if not fetch_first:
+        fetch()
+
+    if access_mode == "readwrite":
+        assert len(transport._transfers) == 1
+        assert transfer_done() == []
+    else:
+        assert transport._transfers == {}
+        assert transfer_done() == [False]
+        assert "req-1" not in session._server._requests
+
+
 def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch):
     """A timed-out P2P load fails at once but keeps its primary chunk out of
     the free pool: the peer may still be writing it. The AbortAck frees it."""
