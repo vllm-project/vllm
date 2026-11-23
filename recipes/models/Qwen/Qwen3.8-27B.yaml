@@ -50,8 +50,8 @@ model:
   default_frontend: rust
   # NVIDIA only. The rocm tag with the same name is an AMD build of the 2.4T *text* model
   # (no `ai.vllm.build.commit` label) and has never been exercised on the 27B; naming it
-  # here would imply a tested AMD path that does not exist. Non-NVIDIA hardware falls back
-  # to the generic nightly image.
+  # here would imply a tested AMD path that does not exist. AMD falls back to
+  # `vllm-openai-rocm:latest`; only the MI300X/MI325X FP8 overrides pin `:nightly`.
   docker_image: "vllm/vllm-openai:qwen38"
   architecture: dense
   parameter_count: "27B"
