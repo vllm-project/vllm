@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
+
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
@@ -73,6 +75,7 @@ def moe_fused_mul_sum_kernel(
         tl.store(out_row + offs_k, acc.to(outputs_ptr.dtype.element_ty), mask=kmask)
 
 
+@functools.cache
 def _heuristic_config(
     hidden_size: int,
     element_size: int,
