@@ -1598,7 +1598,12 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         action="store_true",
         help="Trust remote code from huggingface",
     )
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed for dataset sampling and shuffling.",
+    )
     parser.add_argument(
         "--num-prompts",
         type=int,
@@ -2087,7 +2092,13 @@ def _parse_range_ratio(value: str) -> RangeRatio:
 
 
 # Backends whose endpoint applies the chat template to the prompt it receives.
-CHAT_TEMPLATE_BACKENDS = ("openai-chat", "openai-responses", "vllm-chat")
+CHAT_TEMPLATE_BACKENDS = (
+    "openai-chat",
+    "openai-responses",
+    "vllm-chat",
+    "vllm-systemone",
+    "openai-decisions",
+)
 
 
 def get_samples(
@@ -2336,6 +2347,7 @@ def get_samples(
         )
         dataset_mapping = {
             "spec_bench": lambda: SpecBench(
+                random_seed=args.seed,
                 dataset_path=args.dataset_path,
                 category=args.spec_bench_category,
                 disable_shuffle=args.disable_shuffle,
@@ -2433,6 +2445,7 @@ def get_samples(
                 no_oversample=args.no_oversample,
             ),
             "speed_bench": lambda: SpeedBench(
+                random_seed=args.seed,
                 dataset_path=args.dataset_path,
                 dataset_subset=args.speed_bench_dataset_subset,
                 category=args.speed_bench_category,
