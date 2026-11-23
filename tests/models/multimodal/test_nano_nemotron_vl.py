@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
@@ -17,7 +18,7 @@ from transformers import BatchEncoding, LlavaConfig, TokenizersBackend
 
 from tests.utils import RemoteLaunchRenderServer
 from vllm import envs
-from vllm.config import MultiModalConfig
+from vllm.config import ModelConfig, MultiModalConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
@@ -269,11 +270,8 @@ _NORM_STD = [0.229, 0.224, 0.225]
 
 
 def _make_processor(
-    *, static_tiling: bool = False, use_thumbnail: bool = False,
-    video_in_vision_config: bool = True, **kwargs
+    *, static_tiling: bool = False, use_thumbnail: bool = False, **kwargs
 ) -> NanoNemotronVLProcessor:
-    # As in the Nemotron 3 Nano Omni checkpoints.
-    video = {"video_target_num_patches": 16, "video_maintain_aspect_ratio": True}
     config = SimpleNamespace(
         force_image_size=16,
         patch_size=4,
@@ -284,7 +282,9 @@ def _make_processor(
         dtype=torch.bfloat16,
         vision_config=SimpleNamespace(
             args={} if static_tiling else {"min_num_patches": 4, "max_num_patches": 64},
-            **(video if video_in_vision_config else {}),
+            # As in the Nemotron 3 Nano Omni checkpoints.
+            video_target_num_patches=16,
+            video_maintain_aspect_ratio=True,
         ),
         sound_config=None,
     )
@@ -501,28 +501,66 @@ def test_nemotron_processor_keeps_videos_of_different_sizes_apart():
     assert inputs["video_frame_sizes"].tolist() == [list(size) for size in sizes]
 
 
-def test_nemotron_video_frame_size_falls_back_to_the_image_processor_config():
-    # The vision config's frame size wins.
-    processor = _make_processor(
-        video_target_num_patches=64, video_maintain_aspect_ratio=False
+@pytest.mark.core_model
+@pytest.mark.parametrize(
+    ("vision_fields", "image_processor_values", "expected"),
+    [
+        pytest.param(
+            {},
+            (64, False),
+            {"video_target_num_patches": 64, "video_maintain_aspect_ratio": False},
+            id="explicit-false",
+        ),
+        pytest.param(
+            {"video_target_num_patches": 16, "video_maintain_aspect_ratio": True},
+            (64, False),
+            {"video_target_num_patches": 16, "video_maintain_aspect_ratio": True},
+            id="vision-patch-count",
+        ),
+        pytest.param(
+            {"video_target_img_size": 32, "video_maintain_aspect_ratio": True},
+            (64, False),
+            {"video_maintain_aspect_ratio": True},
+            id="vision-image-size",
+        ),
+        pytest.param({}, (None, None), {}, id="null-values"),
+    ],
+)
+def test_nemotron_video_frame_size_config_precedence(
+    tmp_path, vision_fields, image_processor_values, expected
+):
+    # Use local metadata to control which sizing fields each file provides.
+    hf_config = LlavaConfig(architectures=["NemotronH_Omni_Reasoning_V3"])
+    hf_config.vision_config.update(vision_fields)
+    hf_config.save_pretrained(tmp_path)
+    target_patches, maintain_aspect_ratio = image_processor_values
+    image_processor_config = {
+        "video_target_num_patches": target_patches,
+        "video_maintain_aspect_ratio": maintain_aspect_ratio,
+    }
+    (tmp_path / "preprocessor_config.json").write_text(
+        json.dumps(image_processor_config)
     )
-    assert processor.video_target_num_patches == 16
-    assert processor.video_maintain_aspect_ratio is True
 
-    # A checkpoint in the native Transformers layout (Nemotron 3.5 Super VL)
-    # keeps it in the image processor config only.
-    processor = _make_processor(
-        video_in_vision_config=False,
-        video_target_num_patches=64,
-        video_maintain_aspect_ratio=True,
+    config = ModelConfig(model=str(tmp_path), skip_tokenizer_init=True)
+
+    vision_config = config.hf_config.vision_config
+    assert {
+        key: getattr(vision_config, key)
+        for key in image_processor_config
+        if hasattr(vision_config, key)
+    } == expected
+
+
+@pytest.mark.core_model
+def test_super_vl_video_frame_size_uses_image_processor_config():
+    config = ModelConfig(
+        model="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+        skip_tokenizer_init=True,
     )
-    assert processor.video_target_num_patches == 64
-    assert processor.video_maintain_aspect_ratio is True
 
-    # Neither sets one: frames are `force_image_size` squares.
-    processor = _make_processor(video_in_vision_config=False)
-    assert processor.video_target_num_patches is None
-    assert processor.video_maintain_aspect_ratio is False
+    assert config.hf_config.vision_config.video_target_num_patches == 1024
+    assert config.hf_config.vision_config.video_maintain_aspect_ratio is True
 
 
 @pytest.mark.parametrize(

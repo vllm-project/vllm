@@ -1073,8 +1073,6 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         max_num_tiles: int | None = None,
         video_token: str | None = None,
         video_pruning_rate: float | None = None,
-        video_target_num_patches: int | None = None,
-        video_maintain_aspect_ratio: bool | None = None,
         use_audio_in_video: bool = False,
         do_rescale: bool = True,
         do_normalize: bool = True,
@@ -1098,8 +1096,6 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         self.video_pruning_rate = video_pruning_rate
         self.use_audio_in_video = use_audio_in_video
 
-        # Video params live in vision_config. The keyword arguments carry the
-        # frame size of a checkpoint that keeps it in its image processor config.
         vision_config = getattr(config, "vision_config", config)
         self.video_temporal_patch_size: int = getattr(
             vision_config, "video_temporal_patch_size", 1
@@ -1113,10 +1109,6 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         # DynamicResolutionImageTilingStrategy validation).
         target_num_patches = getattr(vision_config, "video_target_num_patches", None)
         target_img_size = getattr(vision_config, "video_target_img_size", None)
-        if target_num_patches is None and target_img_size is None:
-            target_num_patches = video_target_num_patches
-            if video_maintain_aspect_ratio is not None:
-                self.video_maintain_aspect_ratio = video_maintain_aspect_ratio
         if target_num_patches is not None and target_img_size is not None:
             raise ValueError(
                 "Exactly one of video_target_num_patches or "

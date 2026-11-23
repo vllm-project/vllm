@@ -217,14 +217,6 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
         # Not accepted by NanoNemotronVLProcessor.__init__
         kwargs.pop("truncation", None)
 
-        # The image processor config supplies the video frame size that
-        # `mm_processor_kwargs` does not set.
-        image_processor_config = self.ctx.get_hf_image_processor_config()
-        configured = self.ctx.get_merged_mm_kwargs(kwargs)
-        for key in ("video_target_num_patches", "video_maintain_aspect_ratio"):
-            if key in image_processor_config and key not in configured:
-                kwargs[key] = image_processor_config[key]
-
         return self.ctx.init_processor(
             NanoNemotronVLProcessor,
             config=self.get_hf_config(),
