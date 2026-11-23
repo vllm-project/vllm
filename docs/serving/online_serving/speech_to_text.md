@@ -119,8 +119,9 @@ Keep the list short and relevant to the audio: long or unrelated lists can
 degrade accuracy.
 
 For models with diarization support, `diarized_json` returns OpenAI-compatible
-speaker segments. Currently, this is supported by
-`OpenMOSS-Team/MOSS-Transcribe-Diarize`.
+speaker segments. Supported models include
+`OpenMOSS-Team/MOSS-Transcribe-Diarize`, `microsoft/VibeVoice-ASR-HF`, and
+`hf-audio/MOSS-Transcribe-Diarize-HF` with `--model-impl transformers`.
 
 ```json
 {
@@ -130,7 +131,7 @@ speaker segments. Currently, this is supported by
   "segments": [
     {
       "type": "transcript.text.segment",
-      "id": "segment_0",
+      "id": "seg_0",
       "start": 0.0,
       "end": 2.8,
       "text": "Hello.",
@@ -139,6 +140,33 @@ speaker segments. Currently, this is supported by
   ],
   "usage": {"type": "duration", "seconds": 7}
 }
+```
+
+With `stream=true`, `diarized_json` returns server-sent events. Each finalized
+segment produces a `transcript.text.delta` event with a `segment_id`, followed
+by a `transcript.text.segment` event with the same `id` and speaker information.
+Concatenating the deltas, including their language-dependent separators, gives
+the full text in the final `transcript.text.done` event, which also includes
+token usage.
+These deltas are emitted per segment, not per token.
+`OpenMOSS-Team/MOSS-Transcribe-Diarize` sends each segment once the model starts
+the next one, and the last segment when generation ends. The Transformers
+backend sends the segments once generation completes. If the model produces
+an invalid diarized transcript, the stream
+sends an error after any completed segments.
+
+```text
+data: {"type":"transcript.text.delta","delta":"Hello.","segment_id":"seg_0"}
+
+data: {"type":"transcript.text.segment","id":"seg_0","start":0.0,"end":2.8,"text":"Hello.","speaker":"S01"}
+
+data: {"type":"transcript.text.delta","delta":" Hi, how are you?","segment_id":"seg_1"}
+
+data: {"type":"transcript.text.segment","id":"seg_1","start":3.1,"end":5.9,"text":"Hi, how are you?","speaker":"S02"}
+
+data: {"type":"transcript.text.done","text":"Hello. Hi, how are you?","usage":{"type":"tokens","input_tokens":96,"output_tokens":31,"total_tokens":127}}
+
+data: [DONE]
 ```
 
 ### Extra Parameters

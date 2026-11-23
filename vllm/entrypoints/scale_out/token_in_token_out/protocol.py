@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Annotated, Any, Literal, TypeAlias
+from dataclasses import dataclass
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -19,6 +20,8 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     DeltaMessage,
     PerRequestMetrics,
     StreamOptions,
@@ -261,10 +264,12 @@ class GenerateRequest(BaseModel):
     placeholders. With `features`, these placeholders must follow the
     last `features` range, which is left as is."""
 
+    _metadata_only_requires_ec: ClassVar[bool] = True
+
     @model_validator(mode="after")
     def _require_ec_for_metadata_only(self) -> "GenerateRequest":
         features = self.features
-        if features is None:
+        if features is None or not self._metadata_only_requires_ec:
             return self
         if not _has_serialized_mm_items(features.mm_metadata):
             return self
@@ -343,8 +348,8 @@ class GenerateRequest(BaseModel):
     )
     priority: int = Field(
         default=0,
-        ge=-(2**63),
-        le=2**63 - 1,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -373,6 +378,7 @@ class GenerateRequest(BaseModel):
     _response_mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = (
         PrivateAttr(default=None)
     )
+    _response_mm_hashes: dict[str, list[str]] | None = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -462,6 +468,17 @@ class GenerateRequest(BaseModel):
             max_total_tokens=None,
             max_output_tokens=0,
         )
+
+
+class RenderedGenerateRequest(GenerateRequest):
+    """A `GenerateRequest` produced by `/render`.
+
+    `ec_transfer_params` come from the encode response, so a render with
+    `mm_payload="metadata"` cannot have them yet. `/inference/v1/generate`
+    still validates the request it receives as a `GenerateRequest`.
+    """
+
+    _metadata_only_requires_ec: ClassVar[bool] = False
 
 
 class GenerateLogProb(BaseModel):
@@ -595,6 +612,10 @@ class GenerateStreamResponseBase(BaseModel):
     usage: UsageInfo | None = Field(default=None)
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    mm_hashes: dict[str, list[str]] | None = None
+    """Per-modality processor cache keys, parallel to `mm_placeholders`. Pass
+    back with `mm_placeholders` as `features` to reuse the items without
+    `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
 
 
@@ -638,6 +659,10 @@ class GenerateResponseBase(BaseModel):
     prompt_token_id_logprobs: str | None = None
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    mm_hashes: dict[str, list[str]] | None = None
+    """Per-modality processor cache keys, parallel to `mm_placeholders`. Pass
+    back with `mm_placeholders` as `features` to reuse the items without
+    `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
@@ -665,6 +690,14 @@ class GenerateTextResponse(GenerateResponseBase):
 class GenerateDerenderResponse(GenerateResponseBase):
     output_mode: Literal["derender"] = "derender"
     choices: list[GenerateDerenderChoice]
+
+
+@dataclass
+class RenderedGenerateResponse:
+    """The JSON of a non-streaming `GenerateResponse`, as parts to send
+    without joining them into one copy."""
+
+    parts: list[bytes]
 
 
 def output_mode_or_tokens(value: Any) -> Any:
