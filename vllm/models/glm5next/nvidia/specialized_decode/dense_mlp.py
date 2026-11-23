@@ -80,7 +80,8 @@ class _MmaGemv:
         self.slices = k // SLICE  # warps per tile
         self.warps = self.slices * tiles
         self.threads = 32 * self.warps
-        assert 32 * self.slices >= 16 * tokens and self.threads <= 1024
+        assert self.threads <= 1024
+        assert not swiglu or 32 * self.slices >= 8 * tokens
         self.ctas = rows // (16 * tiles)
         self.staged = STEPS - in_regs
         # Weights, then the quantized slices (reused for the partial sums).
@@ -277,12 +278,15 @@ class _MmaGemv:
                 pointer = out.iterator + t * inter + cta * 8 + g
                 _store_bf16_if(pointer, silu * up, 1)
         else:
-            t, r = tid // 16, tid % 16
-            src = r % 8 * 4 + t // 2
-            if t < tokens:
-                value = self._summed(partial, src, r // 8 * 2 + t % 2)
-                pointer = out.iterator + t * self.rows + cta * 16 + r
-                _store_bf16_if(pointer, value, 1)
+            threads = 32 * self.slices
+            for i in cutlass.range_constexpr((16 * tokens + threads - 1) // threads):
+                output = tid + i * threads
+                t, r = output // 16, output % 16
+                src = r % 8 * 4 + t // 2
+                if t < tokens:
+                    value = self._summed(partial, src, r // 8 * 2 + t % 2)
+                    pointer = out.iterator + t * self.rows + cta * 16 + r
+                    _store_bf16_if(pointer, value, 1)
 
 
 # (16-row tiles per CTA, weight steps held in registers, CTAs per SM). More

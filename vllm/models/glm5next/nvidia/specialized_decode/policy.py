@@ -18,7 +18,7 @@ DEFAULT = {
     # / 12.6 us at 8 / 16 / 32 / 48 / 64 tokens; stock all-reduce + mHC ~25 us
     # at 64).
     "boundary": "1-15:1,16-30:2,31-45:3,46-60:4,61-64:5",
-    # Routed experts: one 16-CTA cluster per route (two CTAs per SM) up to 4
+    # Routed experts: one cluster per route (16 CTAs at TP4, 8 at TP8) up to 4
     # tokens, where TRTLLM-Gen overtakes it (42 vs 49 us at 4 tokens, 73 vs 66
     # at 8). From 8 tokens the persistent expert-grouped kernel ("grouped",
     # with the shared expert) wins or ties: MoE layer 74 vs 76 us at 8 tokens,

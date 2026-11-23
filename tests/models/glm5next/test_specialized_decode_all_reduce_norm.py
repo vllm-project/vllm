@@ -6,9 +6,10 @@ against the gathered embedding and a naive PyTorch `fused_eh_norm`."""
 import pytest
 import torch
 
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.platforms import current_platform
 
-from .tp4 import TP, run_tp4
+from .tp import TP_SIZES, run_tp
 
 HIDDEN, EPS, VOCAB, SHARD = 4096, 1e-5, 1000, 256  # last shard: 232 rows + padding
 
@@ -28,12 +29,15 @@ def _embed_norm(rank, device):
         hidden_size=HIDDEN, max_num_tokens=64, top_k=8, eps=EPS, device=device
     )
     g = torch.Generator(device=device).manual_seed(0)
-    table = torch.randn(TP * SHARD, HIDDEN, generator=g, device=device)
+    tp = get_tp_group().world_size
+    shard = (VOCAB + tp - 1) // tp
+    shard = (shard + 63) // 64 * 64
+    table = torch.randn(tp * shard, HIDDEN, generator=g, device=device)
     table = table.bfloat16()
     table[3, :16] = -0.0  # packed -0 pairs collide with the Lamport sentinel
-    start = rank * SHARD
-    rows = min(SHARD, VOCAB - start)
-    weight = table[start : start + SHARD].clone()
+    start = rank * shard
+    rows = min(shard, VOCAB - start)
+    weight = table[start : start + shard].clone()
     weight[rows:] = float("nan")  # padding rows are never read
     enorm = (1 + 0.1 * torch.randn(HIDDEN, generator=g, device=device)).bfloat16()
     hnorm = (1 + 0.1 * torch.randn(HIDDEN, generator=g, device=device)).bfloat16()
@@ -75,9 +79,9 @@ def _embed_norm(rank, device):
         check(captured, ids, positions, previous)
 
 
-@pytest.mark.distributed(num_gpus=4)
+@pytest.mark.parametrize("tp", TP_SIZES)
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100), reason="Requires SM100"
 )
-def test_embed_norm_matches_reference():
-    run_tp4(_embed_norm)
+def test_embed_norm_matches_reference(tp):
+    run_tp(_embed_norm, tp)

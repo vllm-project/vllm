@@ -179,34 +179,38 @@ def test_kda_gate_matches_linear(tokens):
         ((2048, 4096), 64),
         ((4096, 1536), 16),
         ((4096, 4096), 32),
+        ((2048, 1536), 4),  # TP8 DSA q_b_proj
+        ((2048, 1536), 8),
+        ((4096, 2048), 4),  # TP8 DSA o_proj
+        ((4096, 2048), 8),
         ((4096, 8192), 64),  # MTP eh_proj
         ((38720, 4096), 8),  # LM head shard
     ],
 )
-def test_split_k_projection_matches_linear(shape, tokens):
+def test_split_k_projection_matches_linear(shape, tokens, dist_init):
     """A routed DSA or MTP projection inside a planned step runs the split-K GEMM
     on a strided input (q_b reads q_c out of the q/kv a output) with no larger error
     than cuBLAS's against the FP64 product."""
-    from types import SimpleNamespace
-
+    from vllm.model_executor.layers.linear import ReplicatedLinear
     from vllm.models.glm5next.nvidia.specialized_decode.linear import (
+        _RoutedApply,
         planned_step,
         route,
     )
 
-    class Linear:
-        def apply(self, layer, x, bias=None):
-            return torch.nn.functional.linear(x, layer.weight)
-
     g = torch.Generator(device="cuda").manual_seed(tokens)
     n, k = shape
     weight = torch.randn(n, k, generator=g, device="cuda") * k**-0.5
-    module = SimpleNamespace(weight=weight.bfloat16(), quant_method=Linear())
+    with torch.device("cuda"):
+        module = ReplicatedLinear(k, n, bias=False, params_dtype=torch.bfloat16)
+    with torch.no_grad():
+        module.weight.copy_(weight)
     assert route(module, [tokens])
+    assert isinstance(module.quant_method, _RoutedApply)
     assert tokens in module.quant_method.projection.split_k.kernels
     x = torch.randn(tokens, k + 512, generator=g, device="cuda").bfloat16()[:, :k]
     with planned_step():
-        out = module.quant_method.apply(module, x)
+        out, _ = module(x)
 
     reference = x.double() @ module.weight.double().t()
     stock = torch.nn.functional.linear(x, module.weight)

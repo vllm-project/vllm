@@ -5,11 +5,12 @@
 import pytest
 import torch
 
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.platforms import current_platform
 
-from .tp4 import TP, run_tp4
+from .tp import TP_SIZES, run_tp
 
-COLUMNS = 38720  # GLM-5.3-Flash's vocabulary shard at TP4
+VOCAB = 154880
 
 
 def _gather(rank, device):
@@ -17,15 +18,17 @@ def _gather(rank, device):
         LogitsGather,
     )
 
-    op = LogitsGather(columns=COLUMNS, capacity=64, device=device)
+    tp = get_tp_group().world_size
+    columns = VOCAB // tp
+    op = LogitsGather(columns=columns, capacity=64, device=device)
     g = torch.Generator(device=device).manual_seed(0)
 
     def logits(rows):
-        full = torch.randn(rows, TP * COLUMNS, generator=g, device=device)
+        full = torch.randn(rows, tp * columns, generator=g, device=device)
         full = full.bfloat16()
         # Bit patterns pass through untouched.
         full[0, :4] = torch.tensor([float("nan"), float("-inf"), -0.0, 0.0])
-        shard = full[:, rank * COLUMNS : (rank + 1) * COLUMNS].contiguous()
+        shard = full[:, rank * columns : (rank + 1) * columns].contiguous()
         return full, shard
 
     for rows in (1, 3, 64, 16, 7, 64):
@@ -40,9 +43,9 @@ def _gather(rank, device):
     assert torch.equal(out_b.view(torch.int16), b.view(torch.int16))
 
 
-@pytest.mark.distributed(num_gpus=4)
+@pytest.mark.parametrize("tp", TP_SIZES)
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100), reason="Requires SM100"
 )
-def test_logits_gather_matches_concatenated_shards():
-    run_tp4(_gather)
+def test_logits_gather_matches_concatenated_shards(tp):
+    run_tp(_gather, tp)

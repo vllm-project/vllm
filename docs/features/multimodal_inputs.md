@@ -30,6 +30,11 @@ this checkpoint. For Python text-only inference, set
 `limit_mm_per_prompt={"image": 0, "video": 0}` in `LLM`, or pass
 `--limit-mm-per-prompt '{"image": 0, "video": 0}'` to `vllm serve`.
 
+On SM100-family GPUs, specialized decode supports TP4 and TP8 with native block-FP8
+weights, BF16 activations, FP8 KV cache and FULL decode CUDA graphs. It is enabled
+by default for supported configurations, with or without MTP. Pass
+`--additional-config '{"decode_backend": "stock"}'` to disable it.
+
 ## Offline Inference
 
 To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:

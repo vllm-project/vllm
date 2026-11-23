@@ -200,6 +200,13 @@ def test_model_tensor_schema(model_id: str):
         arch for arch, info in HF_EXAMPLE_MODELS.hf_models.items() if info == model_info
     )
 
+    if model_arch == "HYV4VLForConditionalGeneration" and current_platform.is_xpu():
+        from vllm.models import hy_v4
+
+        with pytest.raises(NotImplementedError, match="hy_v4 does not yet support XPU"):
+            getattr(hy_v4, model_arch)
+        return
+
     hf_overrides_fn = partial(
         dummy_hf_overrides,
         model_arch=model_arch,

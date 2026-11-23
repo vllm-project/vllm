@@ -254,16 +254,19 @@ def _store_rows(values, lane, out, first, n, rows):
 
 class _DownKernel:
     """BF16 [tokens, n] = clamped SwiGLU of the BF16 gate/up rows, FP8-quantized,
-    times the FP8 [n, 512] down weight."""
+    times the FP8 [n, inter] down weight."""
 
     def __init__(
         self, n: int, inter: int, tokens: int, rows: int, limit: float, ue8m0: bool
     ):
-        assert inter == 512 and n % (WARPS * rows) == 0
-        assert GROUP % (WARPS * rows) == 0 and inter // THREADS * 32 == GROUP
+        assert inter in (256, 512)
+        self.warps = inter // GROUP
+        self.threads = 32 * self.warps
+        self.words = inter // (32 * 4)
+        assert n % (self.warps * rows) == 0 and GROUP % (self.warps * rows) == 0
         self.n, self.inter, self.tokens, self.rows = n, inter, tokens, rows
         self.limit, self.ue8m0 = limit, ue8m0
-        self.ctas = n // (WARPS * rows)
+        self.ctas = n // (self.warps * rows)
         self.smem = tokens * (inter + inter // GROUP * 4)
 
     @cute.jit
@@ -272,7 +275,7 @@ class _DownKernel:
         st: cuda.CUstream,
     ):  # fmt: skip
         self.kernel(w, s, gate_up, out).launch(
-            grid=(self.ctas, 1, 1), block=(THREADS, 1, 1), smem=self.smem,
+            grid=(self.ctas, 1, 1), block=(self.threads, 1, 1), smem=self.smem,
             min_blocks_per_mp=CTAS_PER_SM, stream=st, use_pdl=True,
         )  # fmt: skip
 
@@ -290,15 +293,18 @@ class _DownKernel:
         warp = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         lane = cute.arch.lane_idx()
         cta, _, _ = cute.arch.block_idx()
-        first = (cta * WARPS + warp) * rows
-        words = cute.make_rmem_tensor(cute.make_layout((rows, 4)), Uint32)
+        first = (cta * self.warps + warp) * rows
+        words = cute.make_rmem_tensor(cute.make_layout((rows, self.words)), Uint32)
         for r in cutlass.range_constexpr(rows):
-            got = load_vector(
-                w.iterator + Int64(first + r) * inter + lane * 16, cache="weight"
-            )
-            for i in cutlass.range_constexpr(4):
+            pointer = w.iterator + Int64(first + r) * inter + lane * (4 * self.words)
+            if cutlass.const_expr(self.words == 4):
+                got = load_vector(pointer, cache="weight")
+            else:
+                got = load_words(pointer, count=self.words, evict_first=True)
+            for i in cutlass.range_constexpr(self.words):
                 words[r, i] = got[i]
-        w_scale = s[first // GROUP, lane // 8]
+        scale_group = lane // (GROUP // (4 * self.words))
+        w_scale = s[first // GROUP, scale_group]
 
         cute.arch.griddepcontrol_wait()
         cute.arch.griddepcontrol_launch_dependents()
@@ -337,14 +343,16 @@ class _DownKernel:
         activations, combined = [], []
         for t in cutlass.range_constexpr(tokens):
             got = load_words(
-                quantized + t * inter // 4 + lane * 4, count=4, shared=True
+                quantized + t * inter // 4 + lane * self.words,
+                count=self.words,
+                shared=True,
             )
             activations.append([h for word in got for h in _f16x4(word)])
-            index = t * (inter // GROUP) + lane // 8
+            index = t * (inter // GROUP) + scale_group
             combined.append(_load_scale(h_scales, index) * w_scale)
         partials = [[None] * rows for _ in range(tokens)]
         for r in cutlass.range_constexpr(rows):
-            weights = [h for i in range(4) for h in _f16x4(words[r, i])]
+            weights = [h for i in range(self.words) for h in _f16x4(words[r, i])]
             for t in cutlass.range_constexpr(tokens):
                 part = _dot(weights, activations[t], Float32(0.0))
                 partials[t][r] = part * combined[t]
@@ -355,7 +363,7 @@ class _DownKernel:
 
 def block_scales(packed: torch.Tensor, n: int, k: int) -> torch.Tensor:
     """FP32 [n / 128, k / 128] block scales from DeepGEMM's packed UE8M0 layout
-    (int32 [n, k / 512], byte g % 4 of column g // 4 holds K group g)."""
+    (int32 [n, ceil(k / 512)], byte g % 4 of column g // 4 holds K group g)."""
     groups = k // GROUP
     index = torch.arange(groups, device=packed.device)
     exponents = (packed[:, index // 4] >> (index % 4 * 8)) & 0xFF
