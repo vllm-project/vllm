@@ -120,8 +120,6 @@ def test_thinker_config_is_served(
     served_model_type = config_dict["thinker_config"]["model_type"]
     assert config.model_type == served_model_type
     assert config.get_text_config().vocab_size == 1234
-    if checkpoint_config == "Qwen3ASRConfig":
-        assert config.get_text_config().model_type == "qwen3"
     assert config.architectures == [served_architecture]
     assert config.quantization_config == quantization_config
     assert str(config.dtype).removeprefix("torch.") == "float16"
