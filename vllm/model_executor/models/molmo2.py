@@ -1985,7 +1985,8 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             image_processor = hf_processor.image_processor
             resolved_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
             image_kwargs = resolved_kwargs.get("images_kwargs", {})
-            assert isinstance(image_kwargs, Mapping)
+            if not isinstance(image_kwargs, Mapping):
+                raise ValueError("images_kwargs must be a mapping.")
 
             def image_option(name: str) -> Any:
                 return (
@@ -1994,12 +1995,18 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                     or getattr(image_processor, name)
                 )
 
-            size = image_option("size")
+            size = image_kwargs.get("size", resolved_kwargs.get("size"))
+            if size is None:
+                size = image_processor.size
+            if not isinstance(size, Mapping) or not {"height", "width"} <= size.keys():
+                raise ValueError("Image size must contain 'height' and 'width' keys.")
+            crop_height, crop_width = size["height"], size["width"]
+            crop_pixels = crop_height * crop_width
             max_crops = image_option("max_crops")
             overlap_margins = image_option("overlap_margins")
             patch_size = image_option("patch_size")
             margin = patch_size * sum(overlap_margins)
-            crop_window = size["height"] - margin
+            crop_window = crop_height - margin
             output_pixels = 0
             image_items = ImageProcessorItems(images)
             for image_idx in range(len(images)):
@@ -2010,9 +2017,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                     patch_size=crop_window,
                     max_num_patches=max_crops,
                 )
-                output_pixels += (1 + int(tiling_h * tiling_w)) * (
-                    size["height"] * size["width"]
-                )
+                output_pixels += (1 + int(tiling_h * tiling_w)) * crop_pixels
 
             bytes_per_channel = max(4, torch.get_default_dtype().itemsize)
             # The image processor retains individual crops while concatenating them.

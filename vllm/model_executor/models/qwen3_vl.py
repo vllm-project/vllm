@@ -1505,8 +1505,8 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
 
                 hf_processor = self.info.get_hf_processor(**video_mm_kwargs)
                 video_processor = hf_processor.video_processor
-                video_kwargs = self.info.ctx.get_hf_video_processor_kwargs(
-                    hf_processor, video_mm_kwargs
+                video_kwargs = self.info.ctx.get_hf_processor_kwargs(
+                    hf_processor, video_mm_kwargs, scope="videos_kwargs"
                 )
                 patch_size = video_kwargs.get("patch_size", video_processor.patch_size)
                 merge_size = video_kwargs.get("merge_size", video_processor.merge_size)

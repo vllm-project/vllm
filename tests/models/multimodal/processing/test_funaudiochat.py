@@ -148,7 +148,8 @@ def test_profiled_max_audio_is_accepted(funaudiochat_processor):
 @pytest.fixture
 def local_funaudiochat_model(tmp_path):
     FunAudioChatConfig(
-        architectures=["FunAudioChatForConditionalGeneration"]
+        architectures=["FunAudioChatForConditionalGeneration"],
+        audio_config={"max_source_positions": 5},
     ).save_pretrained(tmp_path)
     WhisperFeatureExtractor(chunk_length=1).save_pretrained(tmp_path)
     audio_tokens = ["<|audio_bos|>", "<|AUDIO|>", "<|audio_eos|>"]
@@ -172,7 +173,7 @@ def test_audio_items_fit_the_preprocessing_budget(
     local_funaudiochat_model, monkeypatch, validate
 ):
     monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 0)
-    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 500_000)
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 800_000)
     model, tokenizer = local_funaudiochat_model
     model_config = ModelConfig(model=model, dtype="float32", max_model_len=128)
     info = FunAudioChatProcessingInfo(InputProcessingContext(model_config, tokenizer))
@@ -191,11 +192,16 @@ def test_audio_items_fit_the_preprocessing_budget(
         items = info.parse_mm_data({"audio": [audio, audio]}, validate=validate)
         processor._apply_hf_processor_main(items, {})
 
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 500_000)
+    with pytest.raises(VLLMValidationError, match="At most 0 audio"):
+        items = info.parse_mm_data({"audio": [audio]}, validate=validate)
+        processor._apply_hf_processor_main(items, {})
+
 
 def test_precomputed_audio_embeds_ignore_waveform_budget(
     local_funaudiochat_model, monkeypatch
 ):
-    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 500_000)
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 800_000)
     model, tokenizer = local_funaudiochat_model
     model_config = ModelConfig(
         model=model,
@@ -236,7 +242,10 @@ def test_precomputed_audio_embeds_ignore_waveform_budget(
         )
 
 
-def test_render_respects_the_audio_preprocessing_budget(local_funaudiochat_model):
+@pytest.mark.parametrize(("budget", "max_audios"), [(500_000, 0), (800_000, 1)])
+def test_render_respects_the_audio_preprocessing_budget(
+    local_funaudiochat_model, budget, max_audios
+):
     model, _ = local_funaudiochat_model
     audio = {
         "type": "audio_url",
@@ -254,19 +263,20 @@ def test_render_respects_the_audio_preprocessing_budget(local_funaudiochat_model
             "--limit-mm-per-prompt",
             '{"audio":2}',
         ],
-        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": "500000"},
+        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": str(budget)},
     ) as server:
         url = server.url_for("v1/chat/completions/render")
-        for content, status in [([audio], 200), ([audio, audio], 400)]:
+        for count in range(1, max_audios + 2):
             response = httpx.post(
                 url,
                 json={
                     "model": model,
-                    "messages": [{"role": "user", "content": content}],
+                    "messages": [{"role": "user", "content": [audio] * count}],
                 },
             )
-            assert response.status_code == status, response.text[:512]
-        assert "At most 1 audio" in response.json()["error"]["message"]
+            expected_status = 200 if count <= max_audios else 400
+            assert response.status_code == expected_status, response.text[:512]
+        assert f"At most {max_audios} audio" in response.json()["error"]["message"]
 
 
 def test_render_audio_embeds_ignore_waveform_budget(local_funaudiochat_model):

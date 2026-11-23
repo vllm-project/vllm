@@ -306,10 +306,13 @@ def test_static_image_preprocessing_budget(
     assert output["pixel_values_flat"].dtype == dtype
 
 
-def test_render_rejects_over_budget_static_image_patches(tmp_path):
+@pytest.mark.core_model
+@pytest.mark.parametrize("static_tiling", [True, False], ids=["static", "dynamic"])
+def test_render_rejects_over_budget_image_patches(tmp_path, static_tiling):
+    vision_args = {} if static_tiling else {"min_num_patches": 4, "max_num_patches": 64}
     LlavaConfig(
         architectures=["NemotronH_Nano_VL_V2"],
-        vision_config={"model_type": "clip_vision_model", "args": {}},
+        vision_config={"model_type": "clip_vision_model", "args": vision_args},
         force_image_size=16,
         patch_size=4,
         downsample_ratio=0.5,
@@ -333,10 +336,12 @@ def test_render_rejects_over_budget_static_image_patches(tmp_path):
         for color in ("red", "blue")
     ]
     model = str(tmp_path)
+    # Static tiling resizes each image to 16x16. Dynamic tiling retains 8x8.
+    budget = 8000 if static_tiling else 1000
     with RemoteLaunchRenderServer(
         model,
         ["--host", "127.0.0.1", "--dtype", "float32", "--max-model-len", "128"],
-        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": "8000"},
+        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": str(budget)},
     ) as server:
         url = server.url_for("v1/chat/completions/render")
         for content, status in ((images, 400), (images[:1], 200)):

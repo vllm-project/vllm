@@ -496,15 +496,18 @@ class DynamicResolutionImageTiler:
     def max_num_tokens_available(self, text_prompt_length: int) -> int:
         return self._max_model_len - text_prompt_length - 4
 
-    def _images_to_pixel_values_lst(
+    @dataclass(slots=True)
+    class DynamicResolutionParams:
+        media: Image.Image
+        num_tiles: int
+        num_embeddings: int
+        patch_size: tuple[int, int]
+
+    def get_image_tensors(
         self,
-        text_prompt_length: int,
-        images: list[Image.Image],
+        params_per_image: Sequence[DynamicResolutionParams],
         dtype: torch.dtype = torch.float32,
     ) -> tuple[list[torch.Tensor], list[int]]:
-        num_tokens_available = self.max_num_tokens_available(text_prompt_length)
-        params_per_image = self.compute_params(images, num_tokens_available)
-
         feature_sizes = []
         images = []
         for param in params_per_image:
@@ -513,13 +516,6 @@ class DynamicResolutionImageTiler:
                 images.append(t)
                 feature_sizes.append(param.num_embeddings)
         return images, feature_sizes
-
-    @dataclass(slots=True)
-    class DynamicResolutionParams:
-        media: Image.Image
-        num_tiles: int
-        num_embeddings: int
-        patch_size: tuple[int, int]
 
     def get_target_size(self, params: DynamicResolutionParams) -> tuple[int, int]:
         """Target (height, width) in pixels of the resized image."""
@@ -848,6 +844,18 @@ class BaseNanoNemotronVLProcessor(ABC):
 
         return num_patches * self.num_image_token
 
+    def _validate_image_preprocessing_budget(self, pixels: int, limit: int) -> None:
+        # Account for float32 even when normalization runs on the model device.
+        dtype = self.dtype or torch.float32
+        bytes_per_channel = max(torch.float32.itemsize, dtype.itemsize)
+        size_bytes = pixels * 3 * bytes_per_channel
+        if size_bytes > limit:
+            raise VLLMValidationError(
+                "Image preprocessing exceeds VLLM_MAX_MEDIA_PREPROCESSING_BYTES="
+                f"{limit} (estimated {size_bytes} bytes for patches).",
+                parameter="image",
+            )
+
     def _images_to_pixel_values_lst(
         self,
         images: list[Image.Image],
@@ -866,21 +874,12 @@ class BaseNanoNemotronVLProcessor(ABC):
                 )[0]
                 for image in images
             )
-            # Budget at least float32 per channel even when normalization is
-            # deferred to the model device. Resizing and encoding still scale
-            # with the expanded patch geometry.
-            dtype = self.dtype or torch.float32
-            bytes_per_channel = max(torch.float32.itemsize, dtype.itemsize)
-            patch_bytes = num_patches * 3 * self.image_size**2 * bytes_per_channel
             # Concatenation keeps both the input tiles and the new tensor live.
             if len(images) > 1 or (self.use_thumbnail and num_patches > 1):
-                patch_bytes *= 2
-            if patch_bytes > limit:
-                raise VLLMValidationError(
-                    "Image preprocessing exceeds VLLM_MAX_MEDIA_PREPROCESSING_BYTES="
-                    f"{limit} (estimated {patch_bytes} bytes for patches).",
-                    parameter="image",
-                )
+                num_patches *= 2
+            self._validate_image_preprocessing_budget(
+                num_patches * self.image_size**2, limit
+            )
 
         return [
             dynamic_preprocess(
@@ -912,22 +911,22 @@ class BaseNanoNemotronVLProcessor(ABC):
             text_prompt_length = len(
                 self.tokenizer(sans_images, add_special_tokens=False).input_ids
             )
-            if self.device_resize:
-                params = tiler.compute_params(
-                    images, tiler.max_num_tokens_available(text_prompt_length)
+            params = tiler.compute_params(
+                images, tiler.max_num_tokens_available(text_prompt_length)
+            )
+            imgs_sizes = [tiler.get_target_size(p) for p in params]
+            limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
+            if limit > 0 and not is_profiling_media():
+                self._validate_image_preprocessing_budget(
+                    sum(height * width for height, width in imgs_sizes), limit
                 )
+            if self.device_resize:
                 pixel_values_lst = [_pil_to_nhwc_tensor(p.media)[0] for p in params]
                 num_tokens_per_image = [p.num_embeddings for p in params]
-                imgs_sizes = [tiler.get_target_size(p) for p in params]
             else:
-                pixel_values_lst, num_tokens_per_image = (
-                    tiler._images_to_pixel_values_lst(
-                        text_prompt_length=text_prompt_length,
-                        images=images,
-                        dtype=self.dtype,
-                    )
+                pixel_values_lst, num_tokens_per_image = tiler.get_image_tensors(
+                    params, dtype=self.dtype
                 )
-                imgs_sizes = [(pv.shape[-2], pv.shape[-1]) for pv in pixel_values_lst]
             image_num_patches = torch.tensor([1] * len(num_tokens_per_image))
             pixels_key = (
                 "pixel_values_raw" if self.device_resize else "pixel_values_flat"

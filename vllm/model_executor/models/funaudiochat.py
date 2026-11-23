@@ -38,6 +38,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
+    AudioEmbeddingItems,
     AudioProcessorItems,
     MultiModalDataItems,
     MultiModalDataParser,
@@ -558,17 +559,43 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
 
         extractor = self.get_feature_extractor()
         float_bytes = np.dtype(np.float32).itemsize
-        padded_input_bytes = extractor.n_samples * (
-            float_bytes + np.dtype(np.int32).itemsize
+        complex_bytes = np.dtype(np.complex64).itemsize
+        n_fft = extractor.n_fft
+        fft_frames = extractor.nb_max_frames + 1
+        frequency_bins = n_fft // 2 + 1
+        padded_bytes = extractor.n_samples * (float_bytes + np.dtype(np.int32).itemsize)
+        raw_samples = max(n_fft, self.get_max_audio_samples(extractor.sampling_rate))
+        # The float32 conversion and Whisper's batch preparation can each copy
+        # the raw waveform before padding or truncating it.
+        waveform_copy_bytes = 2 * raw_samples * float_bytes
+        speech_token_bytes = (
+            2 * self.get_max_speech_frames() * np.dtype(np.int64).itemsize
         )
-        # Include the complex STFT and its float32 magnitude and power tensors.
-        spectrum_values = (extractor.n_fft // 2 + 1) * (extractor.nb_max_frames + 1)
-        spectrum_bytes = spectrum_values * (
-            np.dtype(np.complex64).itemsize + 2 * float_bytes
+
+        spectrum_values = frequency_bins * fft_frames
+        spectrum_bytes = spectrum_values * complex_bytes
+        # STFT can hold the reflected waveform and windowed frames alongside
+        # its output. Taking the absolute value can copy the complex spectrum.
+        stft_scratch_samples = extractor.n_samples + n_fft + n_fft * fft_frames
+        stft_scratch_bytes = stft_scratch_samples * float_bytes
+        magnitude_scratch_bytes = spectrum_values * (complex_bytes + float_bytes)
+        # Out-of-place log-Mel scaling can have the Mel values, old log values,
+        # addition and division outputs live alongside the power spectrum.
+        mel_bytes = extractor.feature_size * extractor.nb_max_frames * float_bytes
+        log_mel_scratch_bytes = spectrum_values * float_bytes + 4 * mel_bytes
+        extraction_peak_bytes = spectrum_bytes + max(
+            stft_scratch_bytes, magnitude_scratch_bytes, log_mel_scratch_bytes
         )
-        feature_bytes = extractor.feature_size * extractor.nb_max_frames * float_bytes
-        bytes_per_item = padded_input_bytes + spectrum_bytes + feature_bytes
-        return budget // bytes_per_item
+
+        # Padding holds the per-item arrays while it assembles the batch.
+        bytes_per_item = (
+            waveform_copy_bytes
+            + speech_token_bytes
+            + padded_bytes
+            + max(padded_bytes, extraction_peak_bytes)
+        )
+        fixed_bytes = (n_fft + frequency_bins * extractor.feature_size) * float_bytes
+        return max(0, budget - fixed_bytes) // bytes_per_item
 
     def validate_num_input_items(
         self, modality: str, num_items: int, *, is_embedding: bool
@@ -788,9 +815,15 @@ class FunAudioChatMultiModalProcessor(
         audio_token = "<|AUDIO|>"
         audio_token_id = vocab[audio_token]
 
-        out_mm_data = out_mm_kwargs.get_data()
-        audio_embeds = out_mm_data.get("audio_embeds")
-        speech_attention_mask = out_mm_data.get("speech_attention_mask")
+        audio_items = mm_items.get("audio")
+        audio_embeds = (
+            audio_items if isinstance(audio_items, AudioEmbeddingItems) else None
+        )
+        speech_attention_mask = (
+            out_mm_kwargs.get_data().get("speech_attention_mask")
+            if audio_embeds is None
+            else None
+        )
         if speech_attention_mask is None:
             audio_output_lengths: list[int] = []
         else:
@@ -803,7 +836,7 @@ class FunAudioChatMultiModalProcessor(
 
         def get_replacement_funaudiochat(item_idx: int):
             if audio_embeds is not None:
-                num_features = len(audio_embeds[item_idx])
+                num_features = audio_embeds.get_feature_size(item_idx)
             else:
                 num_features = (
                     int(audio_output_lengths[item_idx]) if audio_output_lengths else 1

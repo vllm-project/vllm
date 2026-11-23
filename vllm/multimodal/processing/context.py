@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, ClassVar, get_type_hints, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, get_type_hints, overload
 
 import torch
 from huggingface_hub.errors import StrictDataclassError
@@ -75,9 +75,6 @@ def validate_video_preprocessing_budget(size_bytes: int) -> None:
 def estimate_video_pixel_element_size(
     video: object, processor: Any, kwargs: Mapping[str, object]
 ) -> int:
-    pixel_kwargs = kwargs.get("videos_kwargs", kwargs.get("images_kwargs"))
-    if isinstance(pixel_kwargs, Mapping):
-        kwargs = {**kwargs, **pixel_kwargs}
     if kwargs.get("do_rescale", processor.do_rescale) or kwargs.get(
         "do_normalize", processor.do_normalize
     ):
@@ -471,16 +468,20 @@ class InputProcessingContext:
             supported_mm_processor_kwargs=supported_mm_processor_kwargs,
         )
 
-    def get_hf_video_processor_kwargs(
-        self, hf_processor: ProcessorMixin, kwargs: Mapping[str, object]
+    def get_hf_processor_kwargs(
+        self,
+        hf_processor: ProcessorMixin,
+        kwargs: Mapping[str, object],
+        *,
+        scope: Literal["images_kwargs", "videos_kwargs"],
     ) -> dict[str, Any]:
-        """Resolve the video kwargs the Hugging Face processor will receive."""
+        """Resolve the kwargs the Hugging Face processor passes to a modality."""
         try:
             return hf_processor._merge_kwargs(
                 hf_processor.valid_processor_kwargs,
                 tokenizer_init_kwargs=hf_processor.tokenizer.init_kwargs,
                 **self.get_merged_mm_kwargs(kwargs),
-            )["videos_kwargs"]
+            )[scope]
         except (AttributeError, TypeError, StrictDataclassError) as exc:
             raise ValueError("Invalid multimodal processor kwargs.") from exc
 

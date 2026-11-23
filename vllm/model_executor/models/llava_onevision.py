@@ -15,6 +15,7 @@ from transformers.models.llava_onevision.modeling_llava_onevision import (
     get_anyres_image_grid_shape,
     unpad_image,
 )
+from transformers.video_utils import make_batched_metadata
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
@@ -399,7 +400,9 @@ class LlavaOnevisionMultiModalProcessor(
         video_tensor_bytes = 0
         processor = self.info.get_hf_processor(**hf_kwargs)
         video_processor = processor.video_processor
-        video_kwargs = self.info.ctx.get_hf_video_processor_kwargs(processor, hf_kwargs)
+        video_kwargs = self.info.ctx.get_hf_processor_kwargs(
+            processor, hf_kwargs, scope="videos_kwargs"
+        )
         size = None
         if video_kwargs.get("do_resize", video_processor.do_resize):
             size = get_size_dict(
@@ -418,6 +421,23 @@ class LlavaOnevisionMultiModalProcessor(
                 raise ValueError(f"Invalid video crop size: {crop_size}")
 
         for video in videos:
+            frame_count = len(video)
+            if video_kwargs.get("do_sample_frames", video_processor.do_sample_frames):
+                try:
+                    metadata = make_batched_metadata(
+                        [video], video_kwargs.get("video_metadata")
+                    )[0]
+                    frame_count = len(
+                        video_processor.sample_frames(
+                            metadata,
+                            num_frames=video_kwargs.get(
+                                "num_frames", video_processor.num_frames
+                            ),
+                            fps=video_kwargs.get("fps", video_processor.fps),
+                        )
+                    )
+                except (ArithmeticError, AttributeError, IndexError, TypeError) as exc:
+                    raise ValueError("Invalid video sampling settings.") from exc
             height, width, channels = get_video_frame_dimensions(video)
             if size is not None:
                 height, width = self._get_video_resize_shape(height, width, size)
@@ -425,7 +445,7 @@ class LlavaOnevisionMultiModalProcessor(
                 height = max(height, crop_size["height"])
                 width = max(width, crop_size["width"])
             estimated_bytes = (
-                len(video)
+                frame_count
                 * height
                 * width
                 * channels

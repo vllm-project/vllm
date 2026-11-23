@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -102,6 +104,65 @@ def test_qwen3_vl_video_preflight_uses_patch_overrides(
     assert isinstance(pixels, torch.Tensor)
     assert actual_grid.tolist() == grid
     assert pixels.nbytes * 2 == budget
+
+
+def test_embedding_gemma2_video_budget_uses_soft_token_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    pytest.importorskip("transformers.models.embedding_gemma2")
+    from transformers import (
+        AutoTokenizer,
+        EmbeddingGemma2Config,
+        EmbeddingGemma2Processor,
+        Gemma4AudioFeatureExtractor,
+        Gemma4ImageProcessor,
+        Gemma4VisionConfig,
+    )
+    from transformers.models.embedding_gemma2.video_processing_embedding_gemma2 import (
+        EmbeddingGemma2VideoProcessor,
+    )
+
+    hf_processor = EmbeddingGemma2Processor(
+        feature_extractor=Gemma4AudioFeatureExtractor(),
+        image_processor=Gemma4ImageProcessor(),
+        tokenizer=AutoTokenizer.from_pretrained("google/gemma-4-E2B-it"),
+        video_processor=EmbeddingGemma2VideoProcessor(max_soft_tokens=140),
+    )
+    hf_processor.save_pretrained(tmp_path)
+    EmbeddingGemma2Config(
+        architectures=["EmbeddingGemma2Model"],
+        vision_config=Gemma4VisionConfig(),
+        image_token_id=hf_processor.image_token_id,
+        video_token_id=hf_processor.video_token_id,
+    ).save_pretrained(tmp_path)
+
+    # Count the output and its concatenated copy. Only the 70-token setting fits.
+    monkeypatch.setenv("VLLM_MAX_MEDIA_PREPROCESSING_BYTES", str(8 * 1024**2))
+    config = ModelConfig(
+        model=str(tmp_path),
+        dtype="float32",
+        max_model_len=4096,
+        limit_mm_per_prompt={"image": 0, "video": 1, "audio": 0},
+        mm_device_do_normalize=False,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(config)
+    frames = np.zeros((2, 64, 64, 3), dtype=np.uint8)
+    metadata = {"fps": 2.0, "total_num_frames": 2, "frames_indices": [0, 1]}
+    inputs = ProcessorInputs(
+        prompt=[hf_processor.video_token_id],
+        mm_data_items=processor.info.parse_mm_data({"video": [(frames, metadata)]}),
+        hf_processor_mm_kwargs={
+            "videos_kwargs": {"max_soft_tokens": 70, "do_sample_frames": False}
+        },
+    )
+
+    (video,) = processor.apply(inputs, TimingContext(enabled=False))["mm_kwargs"][
+        "video"
+    ]
+    assert video is not None
+    pixels = video.get_data()["pixel_values_videos"]
+    assert isinstance(pixels, torch.Tensor)
+    assert pixels.shape == (2, 70 * 3**2, 16**2 * 3)
 
 
 @pytest.mark.parametrize(

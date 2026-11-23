@@ -144,20 +144,32 @@ _VIDEO_MAX_FRAMES = 32  # max sampled frames per video
 
 
 def _video_patch_bytes(
+    video: Any,
     frame_count: int,
-    patch_size: int,
-    pooling_kernel_size: int,
-    max_soft_tokens: int,
-    channels: int,
-    element_size: int,
+    processor: Any,
+    kwargs: Mapping[str, Any],
 ) -> int:
+    height, width, channels = get_video_frame_dimensions(video)
+    patch_size = kwargs.get("patch_size", processor.patch_size)
+    pooling_kernel_size = kwargs.get(
+        "pooling_kernel_size", processor.pooling_kernel_size
+    )
+    max_soft_tokens = kwargs.get("max_soft_tokens", processor.max_soft_tokens)
+    if min(patch_size, pooling_kernel_size, max_soft_tokens) <= 0:
+        raise ValueError(
+            "Video patch, pooling, and soft token limits must be positive."
+        )
+
+    patch_count = max_soft_tokens * pooling_kernel_size**2
+    if not kwargs.get("do_resize", processor.do_resize):
+        patch_count = max(patch_count, (height // patch_size) * (width // patch_size))
+
     return (
         frame_count
-        * max_soft_tokens
-        * pooling_kernel_size**2
+        * patch_count
         * patch_size**2
         * channels
-        * element_size
+        * estimate_video_pixel_element_size(video, processor, kwargs)
     )
 
 
@@ -667,7 +679,14 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         video_outputs: dict[str, Any] = {}
         if videos := hf_data.pop("videos", []):
             assert isinstance(videos, list)
-            processor = self.info.get_hf_processor()
+            # Video frames go through the image processor with a video token cap.
+            video_mm_kwargs = dict(
+                hf_kwargs, images_kwargs={}, max_soft_tokens=_VIDEO_MAX_SOFT_TOKENS
+            )
+            frame_processor = self.info.get_hf_processor(**video_mm_kwargs)
+            image_kwargs = self.info.ctx.get_hf_processor_kwargs(
+                frame_processor, video_mm_kwargs, scope="images_kwargs"
+            )
 
             all_video_pixel_values: list[torch.Tensor] = []
             all_video_position_ids: list[torch.Tensor] = []
@@ -679,19 +698,11 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             for item in videos:
                 video_array, metadata = item
 
-                image_processor = processor.image_processor
-                _, _, channels = get_video_frame_dimensions(video_array)
                 estimated_bytes = _video_patch_bytes(
+                    video_array,
                     len(video_array),
-                    image_processor.patch_size,
-                    image_processor.pooling_kernel_size,
-                    _VIDEO_MAX_SOFT_TOKENS,
-                    channels,
-                    estimate_video_pixel_element_size(
-                        video_array,
-                        image_processor,
-                        self.info.ctx.get_merged_mm_kwargs(hf_kwargs),
-                    ),
+                    frame_processor.image_processor,
+                    image_kwargs,
                 )
                 validate_video_preprocessing_budget(
                     video_tensor_bytes + 2 * estimated_bytes
@@ -711,17 +722,10 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 frame_indices = metadata.get("frames_indices", list(range(len(frames))))
                 timestamps = [idx / fps for idx in frame_indices]
 
-                # Process frames as images with max_soft_tokens=70
-                video_mm_kwargs = dict(hf_kwargs)
-                # Override configured image options too: these inputs are video
-                # frames, whose cache keys exclude images_kwargs.
-                video_mm_kwargs["images_kwargs"] = {}
-                video_mm_kwargs["max_soft_tokens"] = _VIDEO_MAX_SOFT_TOKENS
-
-                dummy_prompt = ("\t" + processor.image_token) * len(frames)
+                dummy_prompt = ("\t" + frame_processor.image_token) * len(frames)
 
                 frame_outputs = self.info.ctx.call_hf_processor(
-                    self.info.get_hf_processor(**video_mm_kwargs),
+                    frame_processor,
                     dict(text=dummy_prompt, **{"images": frames}),
                     video_mm_kwargs,
                 )

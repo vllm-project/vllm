@@ -230,9 +230,8 @@ def test_molmo2_rejects_cumulative_image_crops_before_processing(monkeypatch):
 
 
 @pytest.mark.usefixtures("default_vllm_config")
-@pytest.mark.parametrize("limit", [0, 100_000_000])
 @pytest.mark.parametrize("layout", ["chw", "rgba"])
-def test_molmo2_array_image_uses_hf_validation(monkeypatch, limit, layout):
+def test_molmo2_image_budget_preserves_array_processing(monkeypatch, layout):
     ctx = build_model_context(
         "allenai/Molmo2-8B",
         limit_mm_per_prompt={"image": 1},
@@ -244,17 +243,36 @@ def test_molmo2_array_image_uses_hf_validation(monkeypatch, limit, layout):
         if layout == "chw"
         else np.array(Image.new("RGBA", (64, 80)))
     )
-    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", limit)
+    prompt = processor.dummy_inputs.get_dummy_text({"image": 1})
+    items = processor.info.parse_mm_data({"image": [image]})
 
-    with pytest.raises(ValueError, match="Failed to apply") as exc_info:
-        processor(
-            processor.dummy_inputs.get_dummy_text({"image": 1}),
-            mm_items=processor.info.parse_mm_data({"image": [image]}),
-        )
-    assert isinstance(exc_info.value.__cause__, ValueError)
+    def process_image(limit: int):
+        monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", limit)
+        return processor(prompt, mm_items=items)
+
+    budget = 100_000_000
+    try:
+        expected = process_image(0)
+    except ValueError as exc:
+        assert isinstance(exc.__cause__, ValueError)
+        with pytest.raises(ValueError, match="Failed to apply") as exc_info:
+            process_image(budget)
+        assert isinstance(exc_info.value.__cause__, ValueError)
+        assert str(exc_info.value.__cause__) == str(exc.__cause__)
+    else:
+        actual = process_image(budget)
+        assert actual["prompt_token_ids"] == expected["prompt_token_ids"]
+        (expected_image,) = expected["mm_kwargs"]["image"]
+        (actual_image,) = actual["mm_kwargs"]["image"]
+        assert expected_image is not None and actual_image is not None
+        expected_pixels = expected_image["pixel_values"].data
+        actual_pixels = actual_image["pixel_values"].data
+        assert isinstance(expected_pixels, torch.Tensor)
+        assert isinstance(actual_pixels, torch.Tensor)
+        torch.testing.assert_close(actual_pixels, expected_pixels, rtol=0, atol=0)
 
 
-def test_molmo2_render_rejects_over_budget_image_crops():
+def test_molmo2_render_validates_image_preprocessing():
     model = "allenai/Molmo2-8B"
     content = [
         {
@@ -275,12 +293,26 @@ def test_molmo2_render_rejects_over_budget_image_crops():
             "--mm-processor-cache-gb",
             "0",
             "--trust-remote-code",
+            "--trust-request-mm-kwargs",
         ],
         env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": "25000000"},
     ) as server:
+        url = server.url_for("v1/chat/completions/render")
+        malformed = httpx.post(
+            url,
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": content[:1]}],
+                "mm_processor_kwargs": {"images_kwargs": {"size": {"height": 378}}},
+            },
+            timeout=120,
+        )
+        assert malformed.status_code == 400, malformed.text[:512]
+        assert "size must contain 'height' and 'width' keys" in malformed.text
+
         for images, status in ((content, 400), (content[:1], 200)):
             response = httpx.post(
-                server.url_for("v1/chat/completions/render"),
+                url,
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": images}],

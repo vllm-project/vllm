@@ -89,18 +89,8 @@ def test_chat_render_rejects_over_budget_video_tensors(
             assert response.status_code == 200, response.text[:1000]
 
 
-def test_chat_render_llava_video_budget_uses_resize_overrides():
+def test_chat_render_llava_video_budget_uses_effective_options():
     model = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
-    video_url = encode_video_url(np.zeros((2, 32, 48, 3), dtype=np.uint8))
-    request = {
-        "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [{"type": "video_url", "video_url": {"url": video_url}}],
-            }
-        ],
-    }
     # Two float32 frames fit without resizing, but exceed the budget at 384x384.
     with RemoteLaunchRenderServer(
         model,
@@ -111,21 +101,34 @@ def test_chat_render_llava_video_budget_uses_resize_overrides():
             "float32",
             "--mm-processor-cache-gb",
             "0",
+            "--no-mm-device-do-normalize",
             "--trust-request-mm-kwargs",
         ],
         env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": str(64 * 1024)},
     ) as server:
         url = server.url_for("v1/chat/completions/render")
-        for videos_kwargs, status in (
-            ({"do_resize": False}, 200),
-            ({"size": {"shortest_edge": 24}}, 200),
-            ({}, 400),
-            ({"size": {"height": "invalid", "width": 24}}, 400),
+        for frame_count, videos_kwargs, status in (
+            (2, {"do_resize": False}, 200),
+            (2, {"size": {"shortest_edge": 24}}, 200),
+            (2, {}, 400),
+            (2, {"size": {"height": "invalid", "width": 24}}, 400),
+            (6, {"do_resize": False, "do_sample_frames": True, "num_frames": 2}, 200),
         ):
+            video_url = encode_video_url(
+                np.zeros((frame_count, 32, 48, 3), dtype=np.uint8)
+            )
             response = httpx.post(
                 url,
                 json={
-                    **request,
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "video_url", "video_url": {"url": video_url}}
+                            ],
+                        }
+                    ],
                     "mm_processor_kwargs": {"videos_kwargs": videos_kwargs},
                 },
                 timeout=30,
@@ -134,6 +137,47 @@ def test_chat_render_llava_video_budget_uses_resize_overrides():
             if not videos_kwargs:
                 error = response.json()["error"]["message"]
                 assert "VLLM_MAX_MEDIA_PREPROCESSING_BYTES" in error
+
+
+def test_chat_render_gemma4_video_budget_uses_image_processor_options():
+    model = "google/gemma-4-E2B-it"
+    video_url = encode_video_url(np.zeros((2, 96, 96, 3), dtype=np.uint8))
+    # With device normalization both frames are uint8. Float32 frames would
+    # exceed the same budget because the output is concatenated.
+    with RemoteLaunchRenderServer(
+        model,
+        [
+            "--host",
+            "127.0.0.1",
+            "--dtype",
+            "float32",
+            "--max-model-len",
+            "4096",
+            "--mm-processor-cache-gb",
+            "0",
+            "--mm-device-do-normalize",
+            "--trust-request-mm-kwargs",
+        ],
+        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": str(2 * 1024**2)},
+    ) as server:
+        response = httpx.post(
+            server.url_for("v1/chat/completions/render"),
+            json={
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "video_url", "video_url": {"url": video_url}}
+                        ],
+                    }
+                ],
+                "mm_processor_kwargs": {"videos_kwargs": {"do_normalize": True}},
+            },
+            timeout=30,
+        )
+
+    assert response.status_code == 200, response.text[:1000]
 
 
 def test_chat_render_video_options_keep_default_count_limit():
