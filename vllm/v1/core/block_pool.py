@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
@@ -168,9 +169,17 @@ class BlockPool:
         self.kv_event_queue: list[KVCacheEvent] = []
 
         self.metrics_collector = metrics_collector
+        self.recently_evicted_block_hashes: (
+            OrderedDict[BlockHashWithGroupId, None] | None
+        ) = None
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+
+    def enable_prefix_cache_diagnostics(self) -> None:
+        """Enable bounded eviction history without changing cache decisions."""
+        if self.recently_evicted_block_hashes is None:
+            self.recently_evicted_block_hashes = OrderedDict()
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -768,6 +777,14 @@ class BlockPool:
             # The block doesn't have hash, eviction is not needed
             return False
 
+        history = self.recently_evicted_block_hashes
+        if history is not None:
+            for block_hash in evicted_hashes:
+                history[block_hash] = None
+                history.move_to_end(block_hash)
+                if len(history) > self.num_gpu_blocks:
+                    history.popitem(last=False)
+
         self._emit_block_removed_events(evicted_hashes)
         return True
 
@@ -881,6 +898,8 @@ class BlockPool:
         # new map created after the startup gc.freeze() would not be frozen.
         self.cached_block_hash_to_block.clear()
         self.cached_block_hashes_by_block.clear()
+        if self.recently_evicted_block_hashes is not None:
+            self.recently_evicted_block_hashes.clear()
         if self._reuse_watchers:
             self._notify_reuse(
                 [self.blocks[block_id] for block_id in list(self._reuse_watchers)]

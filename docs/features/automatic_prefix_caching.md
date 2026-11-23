@@ -13,6 +13,46 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 [examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py](../../examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py)
 
+## Diagnosing prefix-cache misses
+
+Prefix-cache diagnostics are disabled by default. For a supported configuration,
+enable request-associated DEBUG logs with:
+
+```bash
+VLLM_PREFIX_CACHE_DIAGNOSTICS=1 VLLM_LOGGING_LEVEL=DEBUG \
+    vllm serve Qwen/Qwen3-0.6B --enable-prefix-caching
+```
+
+Each `prefix_cache_diagnostic` record identifies the request and cache group,
+cached token count, lookup limit, and one of these outcomes:
+
+- `evicted`: the first missing block key was recently evicted by this pool.
+- `no_match`: the lookup missed and the key is not in the bounded eviction
+  history. This includes never-cached prefixes, changed tokens or extra keys,
+  and evictions older than the history. It does not prove the prompt changed.
+- `lookup_limit`: every block actually eligible for lookup hit, or the lookup
+  limit permitted no complete block. The next block was not probed. Recomputing
+  the last prompt token for logits can produce this outcome even if the entire
+  prompt was cached.
+
+The history retains at most `num_gpu_blocks` distinct keys in eviction order.
+A successful prefix-cache reset clears it. Diagnostics do not issue additional
+resident-cache probes or change block allocation. When disabled, no history is
+allocated and no diagnostic records are produced.
+
+The first version supports one full-attention cache group, equal hash and
+physical block sizes, and no context parallelism, EAGLE/MTP prefix-block
+dropping, or lookahead hashing. Unsupported configurations produce a startup warning and
+no diagnostic records. Requests that skip prefix-cache reads are not classified.
+If an eligible block has no computed hash, no miss reason is inferred either.
+
+`request_extra_key_kinds` lists only the presence of request metadata such as
+`cache_salt`, `lora`, `mm`, and `prompt_embeds`; it is not a per-block explanation
+of which metadata caused a miss. Logs do not include token contents, decoded
+prompts, cache-salt values, adapter identifiers, or block hashes. A request
+retried by the scheduler may produce more than one lookup record. These records
+are debug logs, not new fields in the OpenAI response.
+
 ## Hybrid Mamba models
 
 With prefix caching enabled, Mamba state is stored only on the Mamba block grid, so a prefix-cache hit can resume only at a block boundary. `--enable-mamba-shared-prefix-checkpoint` also stores a checkpoint at the shared-prefix junction, the point where an earlier request with the same prefix stopped. Requests whose shared prefix ends inside a block can then reuse it.
