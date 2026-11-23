@@ -265,6 +265,11 @@ class Scheduler(SchedulerInterface):
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
         self.num_waiting_for_streaming_input: int = 0
+        # Sessions that already ran and still hold a model-runner request slot
+        # while they are back in WAITING (a resumed streaming session). They
+        # are neither in `running` nor counted as parked, so admission has to
+        # count them explicitly until they are scheduled or finished.
+        self._slot_holding_waiting: set[Request] = set()
         # Sessions whose streaming update was dropped for exceeding max_model_len.
         self.dropped_streaming_updates: list[Request] = []
 
@@ -1068,9 +1073,14 @@ class Scheduler(SchedulerInterface):
             # Cleared once self.async_kv_waiting's head can't start a load.
             take_async_kv = True
             while True:
-                # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
-                # in `running` but still hold a model-runner request slot.
-                num_running = len(self.running) + self.num_waiting_for_streaming_input
+                # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) and
+                # resumed sessions back in WAITING are not in `running` but
+                # still hold a model-runner request slot.
+                num_running = (
+                    len(self.running)
+                    + self.num_waiting_for_streaming_input
+                    + len(self._slot_holding_waiting)
+                )
                 loads_only = (
                     num_running >= self.max_num_active_reqs or token_budget <= 0
                 )
@@ -1595,6 +1605,8 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.pop_request()
                 self.deferred_waiting.discard(request)
+                # A resumed session now counts through `self.running`.
+                self._slot_holding_waiting.discard(request)
                 self.running.append(request)
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
@@ -1966,9 +1978,17 @@ class Scheduler(SchedulerInterface):
         session.sampling_params = update.sampling_params
         session.prefix_cache_hit_limit = session.get_prefix_cache_hit_limit()
         session.max_tokens = update.max_tokens
+        held_slot = session.status in (
+            RequestStatus.WAITING_FOR_STREAMING_REQ,
+            RequestStatus.RUNNING,
+        )
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
+        if held_slot:
+            # A parked or running session keeps its worker slot until it is
+            # scheduled again; a preempted one already lost it.
+            self._slot_holding_waiting.add(session)
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
@@ -3182,6 +3202,7 @@ class Scheduler(SchedulerInterface):
                 continue
 
             valid_requests.append(request)
+            self._slot_holding_waiting.discard(request)
             if request.status == RequestStatus.RUNNING:
                 running_requests_to_remove.add(request)
             else:
@@ -3222,6 +3243,7 @@ class Scheduler(SchedulerInterface):
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
 
+        self._slot_holding_waiting.discard(request)
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
         self._inflight_prefills.discard(request)
