@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
@@ -204,12 +205,6 @@ class MiniMaxText01LinearAttention(LinearAttention):
         compilation_config.static_forward_context[prefix] = self
 
     @staticmethod
-    def weight_direct_load(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
-        assert param.size() == loaded_weight.size()
-        param.data.copy_(loaded_weight)
-        return
-
-    @staticmethod
     def _build_slope_tensor(n_attention_heads: int):
         def get_slopes(n):
             def get_slopes_power_of_2(n):
@@ -325,6 +320,7 @@ class MiniMaxText01LinearAttention(LinearAttention):
         output[:num_actual_tokens], _ = self.out_proj(hidden)
 
 
+@eager_break_during_capture
 def linear_attention(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
@@ -336,18 +332,8 @@ def linear_attention(
     self._forward(hidden_states=hidden_states, output=output, positions=positions)
 
 
-def linear_attention_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    positions: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="linear_attention",
     op_func=linear_attention,
     mutates_args=["output"],
-    fake_impl=linear_attention_fake,
 )

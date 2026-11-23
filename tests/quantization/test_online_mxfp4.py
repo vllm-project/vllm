@@ -10,6 +10,9 @@ against the pure-torch reference in `reference_mxfp4.py`.
 import pytest
 import torch
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm.config.kernel import MoEBackend
 from vllm.config.model import ModelConfig
 from vllm.model_executor.kernels.linear import _POSSIBLE_MXFP4_KERNELS
 from vllm.model_executor.kernels.linear.mxfp4.aiter import (
@@ -135,8 +138,7 @@ def _skip_reason_if_unavailable(backend: str, dtype: torch.dtype) -> str | None:
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("backend", ["triton", "aiter", "xpu", "quark"])
 def test_mxfp4_quantization_correctness(backend: str, dtype: torch.dtype):
-    """
-    Tests that the different implementations of mxfp4_quantize
+    """Tests that the different implementations of mxfp4_quantize
     in mxfp4_utils.py all match.
     """
     skip_reason = _skip_reason_if_unavailable(backend, dtype)
@@ -282,16 +284,16 @@ def test_online_mxfp4_tp_weight_quant_matches_unsharded(tp_size: int):
         pytest.param(240, 208, id="padding"),
     ],
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_mxfp4_moe_matches_quark(
-    moe_backend: str,
+    moe_backend: MoEBackend,
     unpadded_hidden_size: int,
     unpadded_intermediate_size: int,
     default_vllm_config,
-    dist_init,
     monkeypatch,
 ):
-    """
-    Ensures `Mxfp4OnlineMoEMethod` (online quantization)
+    """Ensures `Mxfp4OnlineMoEMethod` (online quantization)
     and `QuarkOCP_MX_MoEMethod` (AMD Quark checkpoints) produce the same weights,
     with same MOE backend used.
 
@@ -354,7 +356,7 @@ def test_online_mxfp4_moe_matches_quark(
             weight_quant_key=kMxfp4Static,
             activation_quant_key=kMxfp4Dynamic,
         )
-        online_method = Mxfp4OnlineMoEMethod(layer=online_layer)
+        online_method = Mxfp4OnlineMoEMethod(moe=online_layer.moe_config)
 
         # `RoutedExperts.__init__` applies this round-up in production; these
         # layers are built without a quant config, so it is applied explicitly.
@@ -492,11 +494,12 @@ def test_online_mxfp4_moe_matches_quark(
     not current_platform.is_cuda_alike(), reason="Only tested on ROCm/CUDA."
 )
 @pytest.mark.parametrize("linear_backend", ["emulation", "aiter", "marlin"])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_mxfp4_dense_matches_quark(
-    linear_backend: str, default_vllm_config, dist_init, monkeypatch
+    linear_backend: str, default_vllm_config, monkeypatch
 ):
-    """
-    Ensures `Mxfp4OnlineLinearMethod` (online quantization)
+    """Ensures `Mxfp4OnlineLinearMethod` (online quantization)
     and `QuarkOCP_MX` (AMD Quark checkpoints) produce the same weights,
     with same linear backend used.
     """
@@ -629,3 +632,23 @@ def test_quark_ocp_mx_dense_rejects_unaligned_input_partition():
             params_dtype=torch.bfloat16,
             weight_loader=lambda *_: None,
         )
+
+
+@pytest.mark.skipif(
+    not is_aiter_found_and_supported(),
+    reason="rocm_aiter_mxfp4_gemm_dynamic_quant is registered only with AITER.",
+)
+def test_mxfp4_gemm_dynamic_quant_fake_dtype():
+    """torch.compile sizes the op's output from its fake; a fake that reports
+    another dtype than the real op makes the compiled graph read past it."""
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    with FakeTensorMode(), torch.device(current_platform.device_type):
+        x = torch.empty(16, 64, dtype=torch.bfloat16)
+        weight = torch.empty(32, 32, dtype=torch.uint8)
+        weight_scale = torch.empty(32, 2, dtype=torch.uint8)
+        y = rocm_aiter_ops.mxfp4_gemm_dynamic_quant(
+            x, weight, weight_scale, True, torch.bfloat16, hadamard_rotate=True
+        )
+    assert y.dtype == torch.bfloat16
+    assert y.shape == (16, 32)

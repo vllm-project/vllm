@@ -50,11 +50,15 @@ def is_pin_memory_available() -> bool:
 @cache
 def is_uva_available() -> bool:
     """Check if Unified Virtual Addressing (UVA) is available."""
-    # UVA requires pinned memory.
     from vllm.platforms import current_platform
 
-    # TODO: Add more requirements for UVA if needed.
-    return is_pin_memory_available() or current_platform.is_cpu()
+    if current_platform.is_cpu():
+        return True
+    # UVA requires pinned memory. Under NVIDIA Confidential Computing the
+    # device-side view of pinned host memory is not coherent (the GPU reads a
+    # stale snapshot), so treat UVA as unavailable and fall back to explicit
+    # copies (see vllm.v1.conf_compute_utils).
+    return is_pin_memory_available() and not current_platform.is_confidential_compute()
 
 
 @cache
@@ -72,34 +76,3 @@ def get_device_name_as_file_name(device_id: int = 0) -> str:
     name = current_platform.get_device_name(device_id)
     name = re.sub(r"[\s/]+", "_", name)
     return name
-
-
-def verify_uva_coherence() -> None:
-    """Verify that UVA write-after-map coherence works on this platform.
-
-    Allocates a small pinned tensor, obtains a device view via
-    ``get_accelerator_view_from_cpu_tensor``, writes a known pattern on
-    the CPU side, and checks that the GPU view reflects the update.
-
-    Raises:
-        RuntimeError: If the GPU view does not reflect the CPU write,
-            indicating the UVA zero-copy alias is broken (e.g. under GPU
-            Confidential Computing with a stale driver classification).
-    """
-    from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
-
-    probe = torch.zeros(8, dtype=torch.int32, device="cpu", pin_memory=True)
-    gpu_view = get_accelerator_view_from_cpu_tensor(probe)
-
-    pattern = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8], dtype=torch.int32, device="cpu")
-    probe[:] = pattern
-
-    readback = gpu_view.cpu()
-    if not torch.equal(readback, pattern):
-        raise RuntimeError(
-            "UVA coherence check failed: a CPU write to pinned memory is not "
-            "visible through the device view.  This typically occurs under GPU "
-            "Confidential Computing when the CUDA runtime misclassifies the "
-            "host pointer.  As a workaround, set VLLM_USE_V2_MODEL_RUNNER=0.  "
-            f"Expected {pattern.tolist()}, got {readback.tolist()}."
-        )

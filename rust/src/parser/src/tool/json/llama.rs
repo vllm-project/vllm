@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::seq;
 use winnow::error::{ModalResult, StrContext};
@@ -13,7 +14,8 @@ use super::{
 };
 use crate::tool::utils::{JsonObjectScanState, parse_buffered_event};
 use crate::tool::{
-    Result, StructuralTagBuilder, Tool, ToolCallDelta, ToolParser, ToolParserOutput,
+    Result, StructuralTagBuilder, Tool, ToolCallDelta, ToolParser, ToolParserError,
+    ToolParserOutput,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +133,7 @@ impl Llama3JsonToolParser {
 }
 
 impl ToolParser for Llama3JsonToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
@@ -142,8 +144,8 @@ impl ToolParser for Llama3JsonToolParser {
         Some(xgrammar_structural_tag::Model::Llama.builder())
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
 
         if !self.commit_start() {
             return Ok(());
@@ -173,7 +175,9 @@ impl ToolParser for Llama3JsonToolParser {
             }
             LlamaJsonMode::AfterCall if self.buffer.trim().is_empty() => {}
             LlamaJsonMode::Header | LlamaJsonMode::Arguments { .. } => {
-                return Err(parsing_failed!("incomplete Llama JSON tool call"));
+                return Err(ToolParserError::IncompleteToolCall {
+                    parser: "Llama JSON",
+                });
             }
             LlamaJsonMode::AfterCall => {
                 return Err(parsing_failed!("invalid Llama JSON"));
@@ -208,6 +212,7 @@ fn llama_tool_call_header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Ll
     const CONFIG: JsonToolCallConfig = JsonToolCallConfig {
         parser_name: "Llama JSON",
         start_marker: "",
+        framed_start_marker: None,
         end_marker: "",
         marker_whitespace: JsonToolCallWhitespace::Optional,
         delimiter: Some(";"),
@@ -493,8 +498,7 @@ mod tests {
 
         let error = parser.finish().unwrap_err();
 
-        expect!["tool parser parsing failed: incomplete Llama JSON tool call"]
-            .assert_eq(&error.to_report_string());
+        expect!["incomplete Llama JSON tool call"].assert_eq(&error.to_report_string());
     }
 
     #[test]

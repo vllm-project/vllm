@@ -23,8 +23,7 @@ from vllm.model_executor.parameter import SharedWeightParameter
 
 
 class HadamardTransform(torch.nn.Module):
-    """
-    Class which handles weight loading, postprocessing, and application of
+    """Class which handles weight loading, postprocessing, and application of
     transforms. Meant to be used with `CompressedTensorsLinearTransformMethod`
     and attention transforms method (not implemented yet)
     """
@@ -74,7 +73,7 @@ class HadamardTransform(torch.nn.Module):
         self._validate_input_transforms()
 
     def process_weights_after_loading(self):
-        for part_id, partition in self.weight.partitions.items():
+        for partition in self.weight.partitions.values():
             # required by torch.compile
             self.weight.process_weights_after_loading()
 
@@ -96,13 +95,13 @@ class HadamardTransform(torch.nn.Module):
             if self.transforms[part_id].scheme.head_dim is not None:
                 weight_size = self.transforms[part_id].scheme.head_dim
                 value = value.unflatten(-1, (-1, weight_size))
-                value = ops.hadacore_transform(value)
+                value = ops.hadacore_transform(value, inplace=False)
                 value = value.flatten(-2, -1)
 
                 return value
 
             # sylvester transforms are symmetric, inv => transpose => original
-            return ops.hadacore_transform(value)
+            return ops.hadacore_transform(value, inplace=False)
 
         # fall back to dense
         else:

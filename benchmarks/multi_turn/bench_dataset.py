@@ -148,8 +148,7 @@ class LognormalDistribution(Distribution):
     def _generate_lognormal_by_median(
         target_average: int, median_ratio: float
     ) -> tuple[float, float]:
-        """
-        Compute (mu, sigma) for a lognormal distribution given:
+        """Compute (mu, sigma) for a lognormal distribution given:
         - a target average (mean of the distribution)
         - a ratio of median / mean (controls skewness), assume mean > median
 

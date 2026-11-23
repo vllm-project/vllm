@@ -12,7 +12,10 @@ import requests
 import torch
 import torch.nn.functional as F
 
-from tests.models.language.pooling.embed_utils import run_embedding_correctness_test
+from tests.models.language.pooling.embed_utils import (
+    float_embeddings,
+    run_embedding_correctness_test,
+)
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
@@ -23,10 +26,11 @@ from vllm.entrypoints.pooling.utils import (
     decode_pooling_output,
 )
 from vllm.platforms import current_platform
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "vllm-project/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 DTYPE = "bfloat16"
 input_text = "The best thing about vLLM is that it supports many different models"
@@ -145,7 +149,7 @@ async def test_completion_request(
     assert embeddings.usage.prompt_tokens == len(input_tokens)
     assert embeddings.usage.total_tokens == len(input_tokens)
 
-    vllm_outputs = [d.embedding for d in embeddings.data]
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, [input_text], vllm_outputs)
 
     # test input: list[int]
@@ -165,7 +169,7 @@ async def test_completion_request(
     assert embeddings.usage.prompt_tokens == len(input_tokens)
     assert embeddings.usage.total_tokens == len(input_tokens)
 
-    vllm_outputs = [d.embedding for d in embeddings.data]
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, [input_text], vllm_outputs)
 
 
@@ -194,7 +198,7 @@ async def test_completion_request_batched(
     assert embeddings.usage.prompt_tokens == len(input_tokens) * N
     assert embeddings.usage.total_tokens == len(input_tokens) * N
 
-    vllm_outputs = [d.embedding for d in embeddings.data]
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, input_texts, vllm_outputs)
 
     # test list[list[int]]
@@ -214,7 +218,7 @@ async def test_completion_request_batched(
     assert embeddings.usage.prompt_tokens == len(input_tokens) * N
     assert embeddings.usage.total_tokens == len(input_tokens) * N
 
-    vllm_outputs = [d.embedding for d in embeddings.data]
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, input_texts, vllm_outputs)
 
 
@@ -282,17 +286,15 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
         "Como o Brasil pode fomentar o desenvolvimento de modelos de IA?",
     ]
 
-    with pytest.raises(openai.BadRequestError):
-        response = await client.embeddings.create(
+    with pytest.raises(openai.BadRequestError) as err:
+        await client.embeddings.create(
             model=model_name,
             input=input_texts,
             extra_body={"truncate_prompt_tokens": 8193},
         )
-        assert "error" in response.object
-        assert (
-            "truncate_prompt_tokens value is greater than max_model_len. "
-            "Please request a smaller truncation size." in response.message
-        )
+    assert err.value.status_code == 400
+    error_message = err.value.response.json()["error"]["message"]
+    assert "Please request a smaller truncation size." in error_message
 
 
 @pytest.mark.asyncio
@@ -331,7 +333,7 @@ async def test_padding(client: openai.AsyncOpenAI, model_name: str):
 async def test_chat_request(
     server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": "The cat sat on the mat.",
@@ -382,8 +384,8 @@ async def test_chat_request(
     assert chat_embeddings.created <= completion_embeddings.created
     # Use tolerance-based comparison for embeddings
     check_embeddings_close(
-        embeddings_0_lst=[d.embedding for d in chat_embeddings.data],
-        embeddings_1_lst=[d.embedding for d in completion_embeddings.data],
+        embeddings_0_lst=float_embeddings(chat_embeddings),
+        embeddings_1_lst=float_embeddings(completion_embeddings),
         name_0="chat",
         name_1="completion",
     )
@@ -488,7 +490,7 @@ async def test_invocations_completion_request(
 
 @pytest.mark.asyncio
 async def test_invocations_chat_request(server: RemoteOpenAIServer):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": "The cat sat on the mat.",

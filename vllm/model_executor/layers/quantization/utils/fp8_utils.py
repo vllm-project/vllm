@@ -5,7 +5,7 @@
 import functools
 import json
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 import torch
@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     amax_for_moe_activation_quant,
     get_fp8_min_max,
 )
@@ -38,11 +39,31 @@ from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = init_logger(__name__)
 
+# Pre-fill value for scale parameters whose shards load independently. The
+# shards are combined with .max(), so an unloaded shard must never win; the
+# smallest representable float32 guarantees that.
+FP8_SCALE_SENTINEL = torch.finfo(torch.float32).min
+
 
 def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
     if isinstance(x, torch.Tensor):
         x = x.dtype
     return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
+
+
+def get_fp8_block_weight_scale(layer: torch.nn.Module) -> torch.Tensor | None:
+    """Return the block-FP8 weight scale for supported quant methods."""
+    # Local import avoids a circular import: quark_w8a8_fp8 imports this module.
+    from vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_fp8 import (
+        QuarkW8A8Fp8PerBlock,
+    )
+
+    if isinstance(
+        getattr(layer, "scheme", None),
+        QuarkW8A8Fp8PerBlock,
+    ):
+        return getattr(layer, "weight_scale", None)
+    return getattr(layer, "weight_scale_inv", None)
 
 
 def input_to_float8(
@@ -122,6 +143,7 @@ def _silu_mul_quant_fp8_packed_kernel(
     input_ptr,
     output_q_ptr,
     output_scale_ptr,
+    expert_ends_ptr,
     M,
     input_stride_m,
     output_q_stride_m,
@@ -138,6 +160,7 @@ def _silu_mul_quant_fp8_packed_kernel(
     PACKS_PER_CTA: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    EXPERT_ALIGNMENT: tl.constexpr,
 ):
     GROUPS_PER_PACK: tl.constexpr = 4
     hidden_size: tl.constexpr = N // 2
@@ -145,6 +168,13 @@ def _silu_mul_quant_fp8_packed_kernel(
     pack_tile = tl.program_id(0)
     row_start = tl.program_id(1).to(tl.int64) * BLOCK_M
     row_step = tl.num_programs(1).to(tl.int64) * BLOCK_M
+
+    if EXPERT_ALIGNMENT:
+        expert = tl.program_id(2)
+        previous_end = tl.load(expert_ends_ptr + expert - 1, expert > 0, other=0)
+        expert_start = tl.cdiv(previous_end, EXPERT_ALIGNMENT) * EXPERT_ALIGNMENT
+        row_start += expert_start.to(tl.int64)
+        M = tl.load(expert_ends_ptr + expert)
 
     groups_per_cta: tl.constexpr = PACKS_PER_CTA * GROUPS_PER_PACK
     elems_per_cta: tl.constexpr = groups_per_cta * GROUP_SIZE
@@ -234,7 +264,19 @@ def silu_mul_quant_fp8_packed_triton(
     clamp_limit: float | None = None,
     alpha: float = 1.0,
     beta: float = 0.0,
+    *,
+    expert_ends: torch.Tensor | None = None,
+    expert_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fuse activation and FP8 quantization, optionally skipping expert padding.
+
+    `expert_ends` uses DeepGEMM's prefix-sum layout: each entry is the
+    exclusive end of an expert's live rows, including earlier alignment gaps.
+    An expert starts at the preceding end rounded up to `expert_alignment`.
+    Padding outputs are left unwritten and must not be consumed as live rows.
+    Without `expert_ends`, the original dense launch configuration is used
+    and the metadata loads are compiled out.
+    """
     assert input.dim() == 2
     assert input.is_contiguous()
 
@@ -273,13 +315,29 @@ def silu_mul_quant_fp8_packed_triton(
 
     grid_n = triton.cdiv(packs_per_row, packs_per_cta)
     grid_m = min(triton.cdiv(M, BM), 4096)
-    grid = (grid_n, grid_m)
+    grid: tuple[int, ...] = (grid_n, grid_m)
+    if expert_ends is not None:
+        assert expert_ends.ndim == 1 and expert_ends.numel() > 0
+        assert expert_ends.dtype == torch.int32
+        assert expert_ends.device == input.device and expert_ends.is_contiguous()
+        assert expert_alignment > 0
+        num_experts = expert_ends.numel()
+        # Bound empty CTAs while retaining enough parallelism for full experts.
+        max_ctas = 4096 if group_size < 128 else 8192
+        grid_m = min(
+            triton.cdiv(M, BM * num_experts),
+            max(1, triton.cdiv(max_ctas, grid_n * num_experts)),
+        )
+        grid = (grid_n, grid_m, num_experts)
+    else:
+        assert expert_alignment == 0
 
     has_clamp = clamp_limit is not None
     _silu_mul_quant_fp8_packed_kernel[grid](
         input,
         output_q,
         output_scale_packed,
+        expert_ends,
         M,
         input.stride(0),
         output_q.stride(0),
@@ -296,6 +354,7 @@ def silu_mul_quant_fp8_packed_triton(
         PACKS_PER_CTA=packs_per_cta,
         BLOCK_M=BM,
         HAS_CLAMP=has_clamp,
+        EXPERT_ALIGNMENT=expert_alignment,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -308,6 +367,7 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     y_ptr,  # [M, N]
     y_q_ptr,  # [M, N // 2]
     y_s_ptr,  # [M, (N // 2) // GROUP_SIZE]
+    expert_ends_ptr,
     M,  # num tokens
     N,  # intermediate size
     # Stride
@@ -325,70 +385,89 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     GROUP_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    EXPERT_ALIGNMENT: tl.constexpr,
 ):
-    # TODO(varun) : Add expert_ids so we may early-exit no-op thread blocks.
-    """
-    Each thread block (BLOCK_N) computes [BLOCK_M, GROUP_SIZE] act-mul outputs. Then
+    """Each thread block (BLOCK_N) computes [BLOCK_M, GROUP_SIZE] act-mul outputs. Then
     the thread block quantizes the [BLOCK_M, GROUP_SIZE] block of values and fills
     the outputs tensors at the right positions.
     """
-
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
     N_2 = N // 2
 
     m_offset = pid_m.to(tl.int64) * BLOCK_M
     n_offset = pid_n.to(tl.int64) * BLOCK_N
-    if m_offset >= M:
-        return
+    row_step = tl.num_programs(0).to(tl.int64) * BLOCK_M
+    num_iterations = 1
+    if EXPERT_ALIGNMENT:
+        expert = tl.program_id(2)
+        previous_end = tl.load(expert_ends_ptr + expert - 1, expert > 0, other=0)
+        expert_start = tl.cdiv(previous_end, EXPERT_ALIGNMENT) * EXPERT_ALIGNMENT
+        m_offset += expert_start.to(tl.int64)
+        M = tl.load(expert_ends_ptr + expert)
+        num_iterations = tl.cdiv(tl.maximum(M - m_offset, 0), row_step)
 
     offs_n = tl.arange(0, BLOCK_N).to(tl.int64)
     offs_m = tl.arange(0, BLOCK_M).to(tl.int64)
 
-    base_y_ptr = y_ptr + m_offset * N + n_offset
+    for _ in range(num_iterations):
+        base_y_ptr = y_ptr + m_offset * N + n_offset
 
-    act_in_ptrs = base_y_ptr + offs_m[:, None] * N + offs_n[None, :]
+        act_in_ptrs = base_y_ptr + offs_m[:, None] * N + offs_n[None, :]
 
-    act_in = tl.load(act_in_ptrs)
-    mul_in = tl.load(act_in_ptrs + N_2)
+        if EXPERT_ALIGNMENT:
+            live = m_offset + offs_m < M
+            act_in = tl.load(act_in_ptrs, live[:, None], other=0)
+            mul_in = tl.load(act_in_ptrs + N_2, live[:, None], other=0)
+        else:
+            act_in = tl.load(act_in_ptrs)
+            mul_in = tl.load(act_in_ptrs + N_2)
 
-    # silu & mul — match C++ silu_and_mul: clamp in fp32 then store back to the
-    # input dtype, run silu in fp32 then narrow, and do the mul at input
-    # precision so HAS_CLAMP True/False share the same multiplication path.
-    if HAS_CLAMP:
-        act_in = tl.minimum(act_in.to(tl.float32), clamp_limit).to(
-            y_ptr.dtype.element_ty
-        )
-        mul_in = tl.clamp(mul_in.to(tl.float32), -clamp_limit, clamp_limit).to(
-            y_ptr.dtype.element_ty
-        )
-    # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
-    #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
-    # Keep glu/up at input precision (narrow before the mul) so the alpha=1,
-    # beta=0 defaults match the C++ silu_and_mul path bit-for-bit.
-    act_in = act_in.to(tl.float32)
-    glu = (act_in / (1.0 + tl.exp(-act_in * alpha))).to(y_ptr.dtype.element_ty)
-    up = (mul_in.to(tl.float32) + beta).to(y_ptr.dtype.element_ty)
-    y = (glu * up).to(tl.float32)
+        # silu & mul — match C++ silu_and_mul: clamp in fp32 then store back to the
+        # input dtype, run silu in fp32 then narrow, and do the mul at input
+        # precision so HAS_CLAMP True/False share the same multiplication path.
+        if HAS_CLAMP:
+            act_in = tl.minimum(act_in.to(tl.float32), clamp_limit).to(
+                y_ptr.dtype.element_ty
+            )
+            mul_in = tl.clamp(mul_in.to(tl.float32), -clamp_limit, clamp_limit).to(
+                y_ptr.dtype.element_ty
+            )
+        # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
+        #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
+        # Keep glu/up at input precision (narrow before the mul) so the alpha=1,
+        # beta=0 defaults match the C++ silu_and_mul path bit-for-bit.
+        act_in = act_in.to(tl.float32)
+        glu = (act_in / (1.0 + tl.exp(-act_in * alpha))).to(y_ptr.dtype.element_ty)
+        up = (mul_in.to(tl.float32) + beta).to(y_ptr.dtype.element_ty)
+        y = (glu * up).to(tl.float32)
 
-    # quant
-    _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
-    scale_raw = _absmax * (1.0 / fp8_max)
-    y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
-    y_s = tl.reshape(y_s, (BLOCK_M, 1))
-    y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+        # quant
+        _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
+        scale_raw = _absmax * (1.0 / fp8_max)
+        y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
+        y_s = tl.reshape(y_s, (BLOCK_M, 1))
+        y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
-    # store y_q
-    base_y_q_ptr = y_q_ptr + m_offset * N_2 + n_offset
-    y_q_ptrs = base_y_q_ptr + offs_m[:, None] * N_2 + offs_n[None, :]
-    tl.store(y_q_ptrs, y_q)
+        # store y_q
+        base_y_q_ptr = y_q_ptr + m_offset * N_2 + n_offset
+        y_q_ptrs = base_y_q_ptr + offs_m[:, None] * N_2 + offs_n[None, :]
+        if EXPERT_ALIGNMENT:
+            tl.store(y_q_ptrs, y_q, live[:, None])
+        else:
+            tl.store(y_q_ptrs, y_q)
 
-    # store y_s
-    group_id = n_offset // GROUP_SIZE
-    base_y_s_ptr = y_s_ptr + group_id * y_s_col_stride + m_offset
-    y_s_ptrs = base_y_s_ptr + offs_m
-    y_s = tl.reshape(y_s, (BLOCK_M,))
-    tl.store(y_s_ptrs, y_s)
+        # store y_s
+        group_id = n_offset // GROUP_SIZE
+        base_y_s_ptr = y_s_ptr + group_id * y_s_col_stride + m_offset
+        y_s_ptrs = base_y_s_ptr + offs_m
+        y_s = tl.reshape(y_s, (BLOCK_M,))
+        if EXPERT_ALIGNMENT:
+            tl.store(y_s_ptrs, y_s, live)
+        else:
+            tl.store(y_s_ptrs, y_s)
+
+        m_offset += row_step
 
 
 def silu_mul_per_token_group_quant_fp8_colmajor(
@@ -400,10 +479,15 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     group_size: int = 128,
     alpha: float = 1.0,
     beta: float = 0.0,
+    *,
+    expert_ends: torch.Tensor | None = None,
+    expert_alignment: int = 0,
 ):
-    """
-    Gated activation + block-fp8 quant. ``alpha``/``beta`` select the gate
+    """Gated activation + block-fp8 quant. `alpha`/`beta` select the gate
     (silu: alpha=1, beta=0; swigluoai: alpha, beta from config).
+
+    Optional expert endpoints follow DeepGEMM's prefix-sum layout. Padding
+    values and scales are left unwritten and must not be consumed as live rows.
     """
     GROUP_SIZE = group_size
     assert input.ndim == 2
@@ -441,13 +525,27 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     # Force even division so we can avoid edgecases within the kernel.
     assert M % BLOCK_M == 0
     assert N_2 % BLOCK_N == 0
-    grid = (M // BLOCK_M, N_2 // BLOCK_N)
+    grid: tuple[int, ...] = (M // BLOCK_M, N_2 // BLOCK_N)
+    if expert_ends is not None:
+        assert expert_ends.ndim == 1 and expert_ends.numel() > 0
+        assert expert_ends.dtype == torch.int32
+        assert expert_ends.device == input.device and expert_ends.is_contiguous()
+        assert expert_alignment > 0 and expert_alignment % BLOCK_M == 0
+        num_experts = expert_ends.numel()
+        grid_m = min(
+            triton.cdiv(M, BLOCK_M * num_experts),
+            max(1, triton.cdiv(8192, grid[1] * num_experts)),
+        )
+        grid = (grid_m, grid[1], num_experts)
+    else:
+        assert expert_alignment == 0
 
     has_clamp = clamp_limit is not None
     _silu_mul_per_token_group_quant_fp8_colmajor[grid](
         input,
         output,
         output_scales,
+        expert_ends,
         M,
         N,
         output_scales.stride(-1),
@@ -462,6 +560,7 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
         GROUP_SIZE,
         BLOCK_M,
         BLOCK_N,
+        expert_alignment,
     )
 
     return output, output_scales
@@ -544,18 +643,23 @@ def per_token_group_quant_fp8(
     """Function to perform per-token-group quantization on an input tensor `x`.
     It converts the tensor values into signed float8 values and returns the
     quantized tensor along with the scaling factor used for quantization.
+
     Args:
         x: The input tensor with ndim >= 2.
         group_size: The group size used for quantization.
         eps: The minimum to avoid dividing zero.
         dtype: The dtype of output tensor. Note that only `torch.float8_e4m3fn`
-        is supported for now.
+            is supported for now.
         column_major_scales: Outputs scales in column major.
         tma_aligned_scales: Outputs scales in TMA-aligned layout.
         out_q: Optional output tensor. If not provided, function will create.
+        use_ue8m0: If True, round each scale down to a power of two (UE8M0
+            format). None defers to the platform default.
+
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
         scaling factor.
+
     """
     if use_ue8m0 is None:
         use_ue8m0 = is_deep_gemm_e8m0_used()
@@ -675,6 +779,7 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
             x_s_packed: Int32 tensor with logical shape
                         [mn, ceil(num_groups_per_row / 4)], laid out with
                         TMA-aligned stride along the packed-K dimension
+
     """
     if use_ue8m0 is None:
         use_ue8m0 = is_deep_gemm_e8m0_used()
@@ -769,7 +874,6 @@ def _w8a8_triton_block_scaled_mm(
     product) on input tensors `A` and `B` with block-wise quantization, and
     store the result in output tensor `C`.
     """
-
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -822,14 +926,12 @@ def _w8a8_triton_block_scaled_mm(
 def get_w8a8_block_fp8_configs(
     N: int, K: int, block_n: int, block_k: int
 ) -> dict[int, Any] | None:
-    """
-    Return optimized configurations for the w8a8 block fp8 kernel.
+    """Return optimized configurations for the w8a8 block fp8 kernel.
     The return value will be a dictionary that maps an irregular grid of
     batch sizes to configurations of the w8a8 block fp8 kernel. To evaluate the
     kernel on a given batch size bs, the closest batch size in the grid should
     be picked and the associated configuration chosen to invoke the kernel.
     """
-
     # First look up if an optimized configuration is available in the configs
     # directory
     device_name = get_device_name_as_file_name()
@@ -869,18 +971,20 @@ def w8a8_triton_block_scaled_mm(
     quantization.
     It takes two input tensors `A` and `B` with scales `As` and `Bs`.
     The output is returned in the specified `output_dtype`.
+
     Args:
         A: The input tensor, e.g., activation.
         B: The input tensor, e.g., weight.
         As: The per-token-group quantization scale for `A`.
         Bs: The per-block quantization scale for `B`.
         block_size: The block size for per-block quantization. It should
-        be 2-dim, e.g., [128, 128].
-        output_dytpe: The dtype of the returned tensor.
+            be 2-dim, e.g., [128, 128].
+        output_dtype: The dtype of the returned tensor.
+
     Returns:
         torch.Tensor: The result of matmul.
-    """
 
+    """
     _on_gfx1250 = False
     if current_platform.is_rocm():
         from vllm.platforms.rocm import on_gfx1250
@@ -917,14 +1021,13 @@ def w8a8_triton_block_scaled_mm(
     assert len(block_size) == 2
     block_n, block_k = block_size[0], block_size[1]
 
-    # Triton cannot currently bind E8M0 scale tensors directly. On ROCm,
-    # DeepSeek-V4 checkpoints store block scales in exponent-only E8M0 format,
-    # so decode them to fp32 before launching the kernel.
-    if current_platform.is_rocm() or current_platform.is_xpu():
-        if As.dtype == torch.float8_e8m0fnu:
-            As = _upcast_e8m0_to_fp32(As).contiguous()
-        if Bs.dtype == torch.float8_e8m0fnu:
-            Bs = _upcast_e8m0_to_fp32(Bs).contiguous()
+    # Triton cannot currently bind E8M0 scale tensors directly. Checkpoints
+    # with exponent-only UE8M0 scales (e.g. DeepSeek-V4) are decoded to fp32
+    # before launching the kernel.
+    if As.dtype == torch.float8_e8m0fnu:
+        As = _upcast_e8m0_to_fp32(As).contiguous()
+    if Bs.dtype == torch.float8_e8m0fnu:
+        Bs = _upcast_e8m0_to_fp32(Bs).contiguous()
 
     assert A.shape[-1] == B.shape[-1]
     assert A.shape[:-1] == As.shape[:-1] and A.is_contiguous()
@@ -939,7 +1042,10 @@ def w8a8_triton_block_scaled_mm(
     C_shape = A.shape[:-1] + (N,)
     C = A.new_empty(C_shape, dtype=output_dtype)
 
-    configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
+    if envs.VLLM_BATCH_INVARIANT:
+        configs = None  # use the default config
+    else:
+        configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
     if configs:
         # Get the optimal config if there is one
         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
@@ -1003,6 +1109,7 @@ def requant_weight_ue8m0_inplace(
             with shape `(..., M // block_size[0], K // block_size[1])`.
         block_size: 2-element iterable `[block_m, block_k]` describing the
             block quantisation granularity.
+
     """
     if weight.numel() == 0:
         return
@@ -1031,13 +1138,7 @@ def requant_weight_ue8m0_inplace(
         s_old = s_view[idx]
 
         # De-quantise with the *old* scaling factors (float32).
-        m_cur, k_cur = w_q.shape
-        s_float = s_old.to(torch.float32)
-        # Expand scales along rows and cols by block size, then crop.
-        s_exp_r = torch.repeat_interleave(s_float, block_m, dim=0)
-        s_exp = torch.repeat_interleave(s_exp_r, block_k, dim=1)
-        s_exp = s_exp[:m_cur, :k_cur]
-        w_dq = w_q.to(torch.float32) * s_exp
+        w_dq = dequant_block_fp8(w_q, s_old, [block_m, block_k], torch.float32)
         # Re-quantise using power-of-two scaling (UE8M0).
         w_requant, s_requant = per_block_cast_to_fp8(
             w_dq, [block_m, block_k], use_ue8m0=True
@@ -1069,8 +1170,6 @@ def deepgemm_post_process_weight_scale_block(
     is_sfa: bool = False,
 ) -> torch.Tensor:
     if ws.dtype in (torch.float8_e8m0fnu, torch.uint8):
-        # Scales already in E8M0 from checkpoint; upcast to fp32 and let
-        # DeepGEMM pack the layout expected by the target architecture.
         ws = _upcast_e8m0_to_fp32(ws)
     else:
         assert ws.dtype == torch.float32, (
@@ -1101,12 +1200,7 @@ def deepgemm_post_process_fp8_weight_block(
         f"to be torch.float8_e4m3fn, got {wq.dtype} instead."
     )
 
-    if ws.dtype in (torch.float8_e8m0fnu, torch.uint8):
-        # Scales already in E8M0 from checkpoint (float8_e8m0fnu, or raw E8M0
-        # bits as uint8 for MXFP8) - upcast to fp32 and skip requantization
-        # (weights already have power-of-two scales).
-        ws = _upcast_e8m0_to_fp32(ws)
-    else:
+    if ws.dtype not in (torch.float8_e8m0fnu, torch.uint8):
         assert ws.dtype == torch.float32, (
             f"Expected tensor scales dtype to be torch.float32 or "
             f"torch.float8_e8m0fnu or torch.uint8, got {ws.dtype} instead"
@@ -1117,7 +1211,7 @@ def deepgemm_post_process_fp8_weight_block(
     if is_bmm:
         # Reshape 2D weight/scale to 3D for grouped BMM (einsum):
         # wq: (g*r, d) -> (g, r, d)
-        # ws: (g*r/128, d/128) -> (g, r/128, d/128)
+        # Scale dimensions follow quant_block_shape.
         g = bmm_batch_size
         assert wq.ndim == 2 and ws.ndim == 2
         d = wq.size(1)
@@ -1245,6 +1339,35 @@ def validate_fp8_block_shape(
                 )
 
 
+def validate_fp8_block_shape_moe(
+    intermediate_size_per_partition: int,
+    block_size: list[int],
+) -> None:
+    """Validate fused MoE block quantization shapes for tensor parallelism."""
+    from vllm.distributed import get_tensor_model_parallel_world_size
+
+    tp_size = get_tensor_model_parallel_world_size()
+    block_n, block_k = block_size[0], block_size[1]
+
+    # NOTE: To ensure proper alignment of the block-wise quantization
+    # scales, the output_size of the weights for both the gate and up
+    # layers must be divisible by block_n.
+    # Required by column parallel or enabling merged weights
+    if intermediate_size_per_partition % block_n != 0:
+        raise ValueError(
+            f"The output_size of gate's and up's weight = "
+            f"{intermediate_size_per_partition} is not divisible by "
+            f"weight quantization block_n = {block_n}."
+        )
+    if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
+        # Required by row parallel
+        raise ValueError(
+            f"The input_size of down's weight = "
+            f"{intermediate_size_per_partition} is not divisible by "
+            f"weight quantization block_k = {block_k}."
+        )
+
+
 def create_fp8_weight_parameter(
     output_size_per_partition: int,
     input_size_per_partition: int,
@@ -1329,7 +1452,7 @@ def process_fp8_weight_tensor_strategy(
     logical_widths: list[int],
     input_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Process weights for tensor-wise quantization strategy."""
+    """Requantize fused shards to one scale and return `(K, N)` weight."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
         requantize_with_max_scale,
@@ -1347,7 +1470,7 @@ def process_fp8_weight_tensor_strategy(
         logical_widths=logical_widths,
     )
 
-    weight = _maybe_pad_fp8_weight(weight)
+    weight = _maybe_pad_fp8_weight(weight).t()
     return weight, weight_scale, input_scale
 
 
@@ -1356,7 +1479,7 @@ def process_fp8_weight_channel_strategy(
     weight_scale: torch.Tensor,
     input_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Process weights for channel-wise quantization strategy."""
+    """Normalize FNUZ if needed and return `(K, N)` weight."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
     )
@@ -1366,14 +1489,14 @@ def process_fp8_weight_channel_strategy(
             weight=weight, weight_scale=weight_scale, input_scale=input_scale
         )
 
-    return weight, weight_scale, input_scale
+    return weight.t(), weight_scale, input_scale
 
 
 def process_fp8_weight_block_strategy(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Process weights for block-wise quantization strategy."""
+    """Normalize FNUZ if needed and return `(N, K)` weight (no transpose)."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
     )
@@ -1445,7 +1568,6 @@ def process_fp8_input_tensor_strategy_moe(
     enable_eplb: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Process moe input scales for tensor-wise quantization strategy."""
-
     if not all_close_1d(w13_input_scale) or not all_close_1d(w2_input_scale):
         logger.info_once(
             "Found input_scales that are not equal for "
@@ -1457,3 +1579,120 @@ def process_fp8_input_tensor_strategy_moe(
         amax_for_moe_activation_quant(w13_input_scale, enable_eplb),
         amax_for_moe_activation_quant(w2_input_scale, enable_eplb),
     )
+
+
+def dequant_block_fp8(
+    weight: torch.Tensor,
+    scale_inv: torch.Tensor,
+    block_size: Sequence[int],
+    out_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """`[..., N, K]` fp8 x `[..., ceil(N/bn), ceil(K/bk)]` block scales -> `out_dtype`.
+
+    Leading dimensions (e.g. the expert dimension) are batched. The product is
+    computed in fp32, `out_dtype` only controls the final cast.
+    """
+    n, k = weight.shape[-2:]
+    bn, bk = block_size
+    scale = scale_inv.to(torch.float32)
+    scale = scale.repeat_interleave(bn, dim=-2)[..., :n, :]
+    scale = scale.repeat_interleave(bk, dim=-1)[..., :k]
+    return (weight.to(torch.float32) * scale).to(out_dtype)
+
+
+# Bounds the fp32 staging memory of `dequantize_fp8_moe_weights`.
+_DEQUANT_CHUNK_BYTES = 1 << 30
+
+
+def dequantize_fp8_moe_weights(
+    w13_weight: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w2_scale: torch.Tensor,
+    *,
+    weight_key: QuantKey,
+    num_w13_shards: int,
+    weight_block_size: Sequence[int] | None,
+    static_input_scales: bool,
+    out_dtype: torch.dtype,
+) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+    """Dequantize FP8 MoE weights for online requantization.
+
+    Args:
+        w13_weight: `[E, num_w13_shards * I, K]` fp8 weights.
+        w13_scale: Per `weight_key`, `[E, num_w13_shards * ceil(I / bn), ceil(K / bk)]`
+            (block), `[E, num_w13_shards]` (tensor, per expert and shard) or
+            `[E, num_w13_shards * I]` / `[E, num_w13_shards * I, 1]` (channel).
+        w2_weight: `[E, K, I]` fp8 weights.
+        w2_scale: Per `weight_key`, `[E, ceil(K / bn), ceil(I / bk)]` (block), `[E]`
+            (tensor) or `[E, K]` / `[E, K, 1]` (channel).
+        weight_key: The weight quantization key, per-tensor, per-channel or block.
+        num_w13_shards: 2 for gated (w1, w3), else 1. Shards of a fused w13 with a
+            single tensor scale are handled through the scale shape.
+        weight_block_size: The `[bn, bk]` block shape, required for block scales.
+        static_input_scales: Whether the checkpoint has static activation scales,
+            which are not supported: w1 and w3 share one input-scale slot, which
+            the layerwise loader counts twice.
+        out_dtype: The dequantized dtype.
+
+    Returns:
+        An iterator of `(experts, w13, w2)` over groups of experts, bounding the
+        staging memory.
+
+    """
+    if static_input_scales:
+        raise NotImplementedError(
+            "MoE requantization from FP8 checkpoints with static activation scales "
+            "is not supported. Please open an issue."
+        )
+    group_shape = weight_key.scale.group_shape
+    if group_shape.is_per_tensor():
+        strategy = "tensor"
+    elif group_shape.is_per_channel():
+        strategy = "channel"
+    else:
+        strategy = "block"
+        if weight_block_size is None:
+            raise ValueError("Block-scaled FP8 weights need a weight block size.")
+    num_experts = w13_weight.shape[0]
+    # fp32 staging of the scaled weights and of the expanded scales, plus the
+    # `out_dtype` result.
+    expert_bytes = (w13_weight[0].numel() + w2_weight[0].numel()) * (
+        4 + 4 + out_dtype.itemsize
+    )
+    experts_per_chunk = max(1, _DEQUANT_CHUNK_BYTES // expert_bytes)
+
+    def dequant(w: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """`w` is `[B, N, K]`, `scale` is `[B, ...]` broadcastable to it, or the
+        block grid of it."""
+        if strategy != "block":
+            return (w.to(torch.float32) * scale.to(torch.float32)).to(out_dtype)
+        assert weight_block_size is not None
+        n, k = w.shape[-2:]
+        if (-(-n // weight_block_size[0]), -(-k // weight_block_size[1])) != tuple(
+            scale.shape[-2:]
+        ):
+            raise ValueError(
+                f"FP8 scale grid {tuple(scale.shape[-2:])} does not match block "
+                f"shape {list(weight_block_size)} for a {(n, k)} weight."
+            )
+        return dequant_block_fp8(w, scale, weight_block_size, out_dtype)
+
+    for start in range(0, num_experts, experts_per_chunk):
+        experts = slice(start, min(start + experts_per_chunk, num_experts))
+        n_exp = experts.stop - experts.start
+        w13, w13_s = w13_weight[experts], w13_scale[experts]
+        w2, w2_s = w2_weight[experts], w2_scale[experts]
+        # Each w13 shard (w1, w3) has its own scales: dequantize them as separate
+        # batch entries.
+        shards = w13_s.shape[1] if strategy == "tensor" else num_w13_shards
+        w13_b = w13.reshape(n_exp * shards, w13.shape[1] // shards, -1)
+        if strategy == "block":
+            w13_s = w13_s.reshape(n_exp * shards, w13_s.shape[1] // shards, -1)
+        elif strategy == "tensor":
+            w13_s = w13_s.reshape(n_exp * shards, 1, 1)
+            w2_s = w2_s.reshape(n_exp, 1, 1)
+        else:
+            w13_s = w13_s.reshape(n_exp * shards, w13_b.shape[1], 1)
+            w2_s = w2_s.reshape(n_exp, w2.shape[1], 1)
+        yield experts, dequant(w13_b, w13_s).reshape(w13.shape), dequant(w2, w2_s)
