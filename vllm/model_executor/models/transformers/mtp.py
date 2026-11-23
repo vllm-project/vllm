@@ -20,7 +20,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 import torch
-from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+from transformers import AutoModelForCausalLM, AutoModelForMultimodalLM
 from transformers.conversion_mapping import WeightTransform
 
 from vllm.distributed import in_single_pp_stage
@@ -55,7 +55,7 @@ class MTPMixin(CausalMixin):
         # `MtpModel` needs the main model with its LM head, which for a multimodal
         # config is not registered with `AutoModelForCausalLM`
         if self.text_config is not self.config:
-            auto_cls = AutoModelForImageTextToText
+            auto_cls = AutoModelForMultimodalLM
         else:
             auto_cls = AutoModelForCausalLM
         main_model = auto_cls.from_config(**self._from_config_kwargs)
