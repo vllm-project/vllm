@@ -630,6 +630,7 @@ class AiterFlashAttentionMetadataBuilder(
         kv_sharing_shape = None
         self._verify_kv_heads: int | None = None
         swa_tables_needed = False
+        windowed: list[bool] = []
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for name, layer in layers.items():
             if name not in layer_names:
@@ -639,6 +640,7 @@ class AiterFlashAttentionMetadataBuilder(
                 "with Aiter Flash Attention Impl."
             )
             sliding_window_configs.add(layer.impl.sliding_window)
+            windowed.append(layer.impl.sliding_window[0] != -1)
             if vllm_config.kernel_config.enable_jit_warmup:
                 _AITER_FA_EXTEND_KERNEL.register_warmup(
                     dtype=self.model_config.dtype,
@@ -666,6 +668,11 @@ class AiterFlashAttentionMetadataBuilder(
                     "Aiter Flash ATTENTION can only support one valid sliding window!"
                 )
                 self.aot_sliding_window = sliding_window_config
+
+        # Sliding-window layers extend through extend_for_sliding_window, which
+        # reads only swa_metadata. When every layer of this builder has a window,
+        # the chunked-context metadata is never read, so build() skips it.
+        self.all_layers_sliding_window = bool(windowed) and all(windowed)
 
         # Persistent so full CUDA graphs keep reading the same storage. Layers on
         # the `rocm_gqa_verify` kernels apply the window themselves.
@@ -943,7 +950,11 @@ class AiterFlashAttentionMetadataBuilder(
             # Split the workspace only among extends that have context to read.
             num_extends_with_context = max(int((computed_kv_lens > 0).sum()), 1)
             max_context_chunk = _CP_TOKENS_PER_ITER_ROCM // num_extends_with_context
-            num_chunks = cdiv(computed_kv_lens.max().item(), max_context_chunk)
+            num_chunks = (
+                0
+                if self.all_layers_sliding_window
+                else cdiv(computed_kv_lens.max().item(), max_context_chunk)
+            )
 
             chunk_starts = (
                 torch.arange(num_chunks, dtype=torch.int32)

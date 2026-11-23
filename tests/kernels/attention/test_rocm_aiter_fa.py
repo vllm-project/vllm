@@ -1038,6 +1038,125 @@ def test_aiter_fa_chunked_extend_with_sinks_matches_reference(monkeypatch, use_s
     torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
 
 
+@pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
+@pytest.mark.parametrize(
+    "layer_windows,skips_chunks",
+    [((16,), True), ((16, 16), True), ((None,), False), ((16, None), False)],
+    ids=["window", "window-window", "full", "window-full"],
+)
+def test_aiter_fa_sliding_window_builder_skips_chunked_context(
+    monkeypatch, layer_windows, skips_chunks
+):
+    """Only builders whose layers all have a sliding window skip the chunked
+    context metadata, and every layer still matches the reference."""
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_standard_kv_cache_spec,
+        create_vllm_config,
+    )
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends import rocm_aiter_fa
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionBackend,
+        AiterFlashAttentionImpl,
+        AiterFlashAttentionMetadataBuilder,
+    )
+
+    _assert_aiter_supported()
+    monkeypatch.setattr(rocm_aiter_ops, "_SHUFFLE_KV_CACHE_ENABLED", False)
+    # 32 context tokens per request per chunk: 4 chunks unless skipped.
+    monkeypatch.setattr(rocm_aiter_fa, "_CP_TOKENS_PER_ITER_ROCM", 96)
+    set_random_seed(42)
+    batch_spec = BatchSpec(seq_lens=[160, 48, 77], query_lens=[32, 16, 8])
+    num_blocks = 64
+    config = create_vllm_config(
+        model_name="Qwen/Qwen2.5-0.5B-Instruct",
+        dtype="bfloat16",
+        max_num_batched_tokens=1024,
+    )
+    num_heads = config.model_config.get_num_attention_heads(config.parallel_config)
+    num_kv_heads = config.model_config.get_num_kv_heads(config.parallel_config)
+    head_size = config.model_config.get_head_size()
+    scale = head_size**-0.5
+    with set_current_vllm_config(config):
+        layers = [
+            Attention(
+                num_heads,
+                head_size,
+                scale,
+                num_kv_heads,
+                cache_config=config.cache_config,
+                per_layer_sliding_window=window,
+                prefix=f"layer{i}",
+                attn_backend=AiterFlashAttentionBackend,
+            )
+            for i, window in enumerate(layer_windows)
+        ]
+        builder = AiterFlashAttentionMetadataBuilder(
+            create_standard_kv_cache_spec(config),
+            [f"layer{i}" for i in range(len(layer_windows))],
+            config,
+            torch.device("cuda"),
+        )
+        common = create_common_attn_metadata(
+            batch_spec, BLOCK_SIZE, torch.device("cuda"), max_block_idx=num_blocks
+        )
+        with torch.device("cpu"):
+            metadata = builder.build(0, common)
+    assert metadata.num_extends == 3
+    assert metadata.extend_metadata is not None
+    chunk_metadata = metadata.extend_metadata.chunk_context_metadata
+    assert chunk_metadata.num_chunks == (0 if skips_chunks else 4)
+    if skips_chunks:
+        assert chunk_metadata.max_seq_lens == []
+        assert chunk_metadata.total_token_per_batch == []
+        assert chunk_metadata.token_to_batch.numel() == 0
+    has_window = any(window is not None for window in layer_windows)
+    assert (chunk_metadata.swa_metadata is not None) == has_window
+
+    kv_cache = torch.empty(
+        num_blocks, num_kv_heads, BLOCK_SIZE, 2 * head_size, dtype=torch.bfloat16
+    )
+    impl = layers[0].impl
+    assert isinstance(impl, AiterFlashAttentionImpl)
+    key_cache, value_cache = impl._split_kv_cache(kv_cache)
+    key_cache.copy_(torch.randn_like(key_cache))
+    value_cache.copy_(torch.randn_like(value_cache))
+    key_cache, value_cache = key_cache.contiguous(), value_cache.contiguous()
+
+    # The new tokens' K/V must match what the cache holds at their positions.
+    keys, values = [], []
+    for i, (seq_len, query_len) in enumerate(
+        zip(batch_spec.seq_lens, batch_spec.query_lens)
+    ):
+        pos = torch.arange(seq_len - query_len, seq_len)
+        blocks = common.block_table_tensor[i, pos // BLOCK_SIZE]
+        keys.append(key_cache[blocks, pos % BLOCK_SIZE])
+        values.append(value_cache[blocks, pos % BLOCK_SIZE])
+    query = torch.randn(
+        batch_spec.compute_num_tokens(), num_heads, head_size, dtype=torch.bfloat16
+    )
+    for layer, window in zip(layers, layer_windows):
+        output = torch.empty_like(query)
+        layer.impl.forward(
+            layer, query, torch.cat(keys), torch.cat(values), kv_cache, metadata, output
+        )
+        expected = ref_paged_attn(
+            query,
+            key_cache,
+            value_cache,
+            batch_spec.query_lens,
+            batch_spec.seq_lens,
+            common.block_table_tensor,
+            scale,
+            sliding_window=window,
+        )
+        torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+
+
 # Decode path test --------------------------------------------------------
 @pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
 @pytest.mark.parametrize("dtype", DTYPES)
