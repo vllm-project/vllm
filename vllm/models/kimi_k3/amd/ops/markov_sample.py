@@ -34,11 +34,15 @@ value can differ in its last bf16 bit. Graph capturable: fixed launches, slots
 allocated (zeroed) once and cleared by the launches themselves.
 
 Enabled by VLLM_K31_BEAT_MARKOV (default 1) under
-decode_backend=latency_specialized only, for the Kimi-K3.1 DSpark drafts
+decode_backend=latency_specialized, or the stock decode under
+VLLM_K31_STOCK_LEVERS=1, for the Kimi-K3.1 DSpark drafts
 (``MARKOV_DRAFTS``): the preview's MLA draft (K3DSparkForCausalLM) and the
 release's GQA sliding-window draft (Qwen3DSparkForCausalLM, from the speculators
 checkpoint). Both run the same DSparkMarkovHead over the target vocabulary.
-tests/kernels/models/amd/test_k31_fused_markov.py compares it with vLLM's loop.
+One request a rank unless VLLM_K31_MARKOV_ROWS (``MAX_ROWS``) allows more.
+tests/kernels/models/amd/test_k31_fused_markov.py compares it with vLLM's loop
+(its 2 and 5 requests raise ``MAX_ROWS`` only, so they keep the single-row
+kernel's (requests, blocks) grid; ``ROWS_KERNEL`` follows the env knob).
 deepseek_v41/amd/ops/fused_markov.py is the same scheme for DeepSeek-V4.1 on
 gfx942, reached through the draft model's ``sample_sequential``. That hook
 would turn off the batch-sharded draft logits cache
@@ -47,6 +51,7 @@ would turn off the batch-sharded draft logits cache
 them instead (``specialized_decode/levers/dspark.py``).
 """
 
+import os
 from collections.abc import Callable
 
 import torch
@@ -69,8 +74,31 @@ NSUB = 64
 CBLOCK = 2048
 # Requests beyond which the stock loop runs: a request is a grid row that reads
 # markov_w2 again, so from 2 requests on (c1 decode has 1 a rank) the stock
-# loop's one GEMM a step is as fast or faster.
-MAX_ROWS = 1
+# loop's one GEMM a step is as fast or faster. VLLM_K31_MARKOV_ROWS (opt-in,
+# unset = 1) raises it: 2 or more requests then take ``_k31_markov_rows_kernel``,
+# whose programs read their markov_w2 block once for ``ROW_TILE`` requests:
+# beyond ROW_TILE requests markov_w2 is read once a tile, where the stock GEMM
+# is likely faster. UNVALIDATED on GPU (checked on the CPU interpreter only,
+# tests/models/kimi_k3/test_markov_sample_multirow.py).
+ROWS_ENV = "VLLM_K31_MARKOV_ROWS"
+ROW_TILE = 8
+
+
+def _max_rows() -> int:
+    value = os.environ.get(ROWS_ENV, "1")
+    try:
+        rows = int(value)
+    except ValueError:
+        logger.warning("%s=%r is not an integer: 1 request", ROWS_ENV, value)
+        return 1
+    return max(rows, 1)
+
+
+MAX_ROWS = _max_rows()
+# 2 or more requests take ``_k31_markov_rows_kernel`` only when the env knob
+# raised ``MAX_ROWS``; otherwise (a caller raising ``MAX_ROWS`` alone) they keep
+# ``_k31_markov_step_kernel``'s (requests, blocks) grid, as before the knob.
+ROWS_KERNEL = MAX_ROWS > 1
 
 
 @triton.jit
@@ -229,6 +257,108 @@ def _k31_markov_last_kernel(
 
 
 @triton.jit
+def _k31_markov_rows_kernel(
+    slots_ptr,  # [>= rows, NSLOT, NSUB] uint64 packed maxima, zero when unused
+    input_ids_ptr,
+    anchor_idx_ptr,
+    tokens_ptr,
+    tokens_stride,
+    w1_ptr,
+    w2_ptr,
+    base_ptr,
+    base_stride,
+    cache_ptr,
+    cache_stride0,
+    cache_stride1,
+    row_map_ptr,
+    idx_map_ptr,
+    idx_stride,
+    pos_ptr,
+    pos_stride,
+    temp_ptr,
+    seeds_ptr,
+    vocab,
+    num_reqs,
+    GREEDY: tl.constexpr,
+    STEP: tl.constexpr,
+    RANK: tl.constexpr,
+    RANK_P2: tl.constexpr,
+    BLOCK: tl.constexpr,
+    ROW_TILE: tl.constexpr,
+    NSLOT: tl.constexpr,
+    NSUB: tl.constexpr,
+):
+    # ``_k31_markov_step_kernel`` (no TP split) for ``ROW_TILE`` requests a
+    # program: the block's markov_w2 rows are read once, then each request's
+    # step is the single-request one. The bias dot product sums the whole rank
+    # at once (the single-request launch: K_CHUNK columns at a time), so a bias
+    # value can differ in its last bf16 bit, as it can from the GEMV's.
+    t = tl.program_id(0)
+    p = tl.program_id(1)
+    v = p * BLOCK + tl.arange(0, BLOCK)
+    vmask = v < vocab
+    k = tl.arange(0, RANK_P2)
+    kmask = k < RANK
+    w = tl.load(
+        w2_ptr + v[:, None].to(tl.int64) * RANK + k[None, :],
+        mask=vmask[:, None] & kmask[None, :],
+        other=0.0,
+    )
+    for i in range(ROW_TILE):
+        r64 = (t * ROW_TILE + i).to(tl.int64)
+        if r64 < num_reqs:
+            rslots = slots_ptr + r64 * NSLOT * NSUB
+            if STEP == 0:
+                anchor = tl.load(anchor_idx_ptr + r64)
+                prev = tl.load(input_ids_ptr + anchor).to(tl.int64)
+            else:
+                prev = _key_token(rslots + (STEP - 1) * NSUB, NSUB)
+                if p == 0:
+                    tl.store(tokens_ptr + r64 * tokens_stride + (STEP - 1), prev)
+                    if STEP >= 2:
+                        # Nobody reads step STEP - 2's slots any more.
+                        jj = tl.arange(0, NSUB)
+                        zeros = tl.zeros([NSUB], tl.uint64)
+                        tl.store(rslots + (STEP - 2) * NSUB + jj, zeros)
+            e = tl.load(w1_ptr + prev * RANK + k, mask=kmask, other=0.0)
+            acc = tl.sum(w.to(tl.float32) * e.to(tl.float32)[None, :], axis=1)
+            bias = acc.to(tl.bfloat16).to(tl.float32)
+            base = tl.load(base_ptr + r64 * base_stride + v, mask=vmask, other=0.0)
+            logits = (base.to(tl.float32) + bias).to(tl.bfloat16)
+            lf = tl.where(vmask, logits.to(tl.float32), float("-inf"))
+            if GREEDY:
+                value, idx = tl.max(lf, axis=0, return_indices=True)
+            else:
+                req = tl.load(idx_map_ptr + r64 * idx_stride + STEP).to(tl.int64)
+                valid = req >= 0
+                row = draft_logits_row(req, row_map_ptr)
+                tl.store(
+                    cache_ptr + row * cache_stride0 + STEP * cache_stride1 + v,
+                    logits,
+                    mask=vmask & (row >= 0),
+                )
+                temp = tl.load(temp_ptr + req, mask=valid, other=0.0).to(tl.float32)
+                seed = tl.load(seeds_ptr + req, mask=valid, other=0)
+                pos = tl.load(pos_ptr + r64 * pos_stride + STEP) - 1
+                value, idx = gumbel_noised_argmax(
+                    lf,
+                    v,
+                    vmask,
+                    spec_step_seed(seed, STEP),
+                    pos,
+                    temp,
+                    IS_DRAFTING=True,
+                    USE_FP64=False,
+                    APPLY_TEMPERATURE=True,
+                )
+            tl.atomic_max(
+                rslots + STEP * NSUB + p % NSUB,
+                _pack_key(value.to(tl.float32), p * BLOCK + idx),
+                sem="relaxed",
+            )
+
+
+@triton.jit
 def _k31_markov_tp_last_kernel(
     slots_ptr,
     keys_ptr,  # the last step's all-gathered slots [NKEY]
@@ -357,7 +487,8 @@ def tp_split_why_not(num_reqs: int, vocab: int, tp_size: int) -> str | None:
     if tp_size & (tp_size - 1):
         return f"TP {tp_size} (the gathered slots are a power-of-2 block)"
     if num_reqs != 1:
-        return f"{num_reqs} requests"
+        # One reason for every batch size (the caller logs each reason once).
+        return "more than 1 request"
     if vocab % (tp_size * BLOCK):
         return f"vocabulary {vocab} does not split over TP {tp_size}"
     return None
@@ -419,6 +550,10 @@ def run(
         _run_tp(spec, base_logits, w1, w2, greedy, cache, row_mapping, idx_map,
                 sample_pos, tokens, slots, nslot, tp)  # fmt: skip
         return True
+    if num_reqs > 1 and ROWS_KERNEL:
+        _run_rows(spec, num_reqs, base_logits, w1, w2, greedy, cache, row_mapping,
+                  idx_map, sample_pos, tokens, slots, nslot)  # fmt: skip
+        return True
     for step in range(n_spec):
         _k31_markov_step_kernel[(num_reqs, nb)](
             slots,
@@ -463,6 +598,59 @@ def run(
         num_warps=1,
     )
     return True
+
+
+def _run_rows(
+    spec, num_reqs, base_logits, w1, w2, greedy, cache, row_mapping, idx_map,
+    sample_pos, tokens, slots, nslot,
+) -> None:  # fmt: skip
+    """``run``'s launches for 2 or more requests (VLLM_K31_MARKOV_ROWS)."""
+    n_spec = spec.num_speculative_steps
+    vocab = base_logits.shape[-1]
+    rank = w1.shape[1]
+    grid = (triton.cdiv(num_reqs, ROW_TILE), triton.cdiv(vocab, BLOCK))
+    for step in range(n_spec):
+        _k31_markov_rows_kernel[grid](
+            slots,
+            spec.input_buffers.input_ids,
+            spec._anchor_idx,
+            tokens,
+            tokens.stride(0),
+            w1,
+            w2,
+            base_logits[:, step],
+            base_logits.stride(0),
+            cache,
+            cache.stride(0),
+            cache.stride(1),
+            row_mapping,
+            idx_map,
+            idx_map.stride(0),
+            sample_pos,
+            sample_pos.stride(0),
+            spec.temperature,
+            spec.seeds,
+            vocab,
+            num_reqs,
+            GREEDY=greedy,
+            STEP=step,
+            RANK=rank,
+            RANK_P2=triton.next_power_of_2(rank),
+            BLOCK=BLOCK,
+            ROW_TILE=ROW_TILE,
+            NSLOT=nslot,
+            NSUB=NSUB,
+            num_warps=NUM_WARPS,
+        )
+    _k31_markov_last_kernel[(num_reqs,)](
+        slots,
+        tokens,
+        tokens.stride(0),
+        STEP=n_spec - 1,
+        NSLOT=nslot,
+        NSUB=NSUB,
+        num_warps=1,
+    )
 
 
 def _run_tp(

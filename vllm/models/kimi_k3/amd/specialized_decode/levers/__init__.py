@@ -15,9 +15,20 @@ groups), ``mla`` (the bs1 MLA planner, the sparse MLA indptr), ``runner``
 ``tpgather`` (the draft's TP-split fc, the logits all-gather, the Markov
 launches' TP split) and ``ctxkv`` (the draft's context K/V store). The
 Kimi-K3 model state (``model_state``) and the model's own paths read
-``lever_on`` directly."""
+``lever_on`` directly.
+
+``VLLM_K31_STOCK_LEVERS=1`` (default 0) also turns the gate on for the stock
+decode (no ``latency_specialized``, e.g. c16 - c48), with only ``STOCK_SAFE``
+on: the levers whose paths were audited for multi-request, padded CUDA-graph,
+DCP and async-scheduled spec-decode batches (each declines, to stock, what it
+does not serve). Unset, the stock decode keeps the gate off as before."""
+
+import os
 
 import vllm.envs as envs
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 # DSpark's sequential Markov draft steps as one launch each (ops/markov_sample),
 # for the preview's MLA draft and the release's GQA sliding-window draft.
@@ -61,7 +72,27 @@ LEVERS = (
     CTXKV,
 )
 
+# Read in each worker when the model is built (``init_specialized_decode``).
+STOCK_LEVERS = "VLLM_K31_STOCK_LEVERS"
+# The levers ``STOCK_LEVERS`` turns on for the stock decode. Not here: K2SYNC,
+# KDAK1 and PROLOGUE_INDEXER (read only by the specialized runtime, never built
+# by the stock decode) and SAMPLED_TOPK (AITER's per-shape scratch is not safe
+# for concurrent indexers; not audited for the stock batches).
+STOCK_SAFE = frozenset(
+    (
+        MARKOV,
+        DRAFTMETA,
+        EAGERPREP,
+        DRAFTFC,
+        LOGITSAG,
+        MARKOVTP,
+        CTXKV,
+    )
+)
+
 _active = False
+# The gate is on for the stock decode (``activate_stock``): STOCK_SAFE only.
+_stock = False
 _installed = False
 # Set on the functions ``wrap`` installs.
 _MARK = "__sd_lever__"
@@ -71,26 +102,54 @@ def is_active() -> bool:
     return _active
 
 
+def is_stock() -> bool:
+    return _stock
+
+
+def stock_levers_requested() -> bool:
+    """``VLLM_K31_STOCK_LEVERS=1``: the stock decode turns on ``STOCK_SAFE``."""
+    return os.environ.get(STOCK_LEVERS, "0") == "1"
+
+
 def lever_on(name: str) -> bool:
-    """The lever's flag, under an active gate only."""
-    return _active and bool(getattr(envs, name))
+    """The lever's flag, under an active gate only (for the stock decode, only
+    the ``STOCK_SAFE`` levers)."""
+    return _active and (not _stock or name in STOCK_SAFE) and bool(getattr(envs, name))
 
 
 def activate(install_patches: bool = True) -> None:
     """Turns the gate on for this process (the patches first: an install that
     raises leaves the gate as it was). ``install_patches``: False for tests that
     call the levers directly."""
-    global _active
+    global _active, _stock
     if install_patches:
         install()
     _active = True
+    _stock = False
+
+
+def activate_stock(install_patches: bool = True) -> None:
+    """``activate`` for the stock decode (``VLLM_K31_STOCK_LEVERS=1``): only
+    the ``STOCK_SAFE`` levers read as on."""
+    global _active, _stock
+    if install_patches:
+        install()
+    _active = True
+    _stock = True
+    # The only trace of the mode for the levers that log nothing themselves.
+    logger.info_once(
+        "%s=1: stock decode levers on: %s",
+        STOCK_LEVERS,
+        ", ".join(name for name in LEVERS if lever_on(name)) or "none",
+    )
 
 
 def deactivate() -> None:
     """The gate off: a stock model's build. Installed patches stay; off, they
     run stock."""
-    global _active
+    global _active, _stock
     _active = False
+    _stock = False
 
 
 def install() -> None:
