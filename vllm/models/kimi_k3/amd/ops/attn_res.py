@@ -441,3 +441,341 @@ def _launch_attn_res(
         num_stages=2,
         **source_tiling,
     )
+
+
+# Split AttnRes (VLLM_K3_ATTNRES_SPLIT): the bank rows a mix reads are final
+# well before the mix itself, so their online-softmax state (running max, sum
+# and weighted sum) can be computed off the critical path. A combine then folds
+# in only the prefix source, reading 1 fp32 + 2 bf16 rows per token instead of
+# the whole bank. One sweep serves two mixes that read the same bank rows: this
+# layer's pre-MLP mix and the next layer's pre-attention mix.
+
+
+@triton.jit
+def _attn_res_partial_kernel(
+    blocks_ptr,
+    norm_weight_a_ptr,
+    qk_weight_a_ptr,
+    norm_weight_b_ptr,
+    qk_weight_b_ptr,
+    max_a_ptr,
+    sum_a_ptr,
+    acc_a_ptr,
+    max_b_ptr,
+    sum_b_ptr,
+    acc_b_ptr,
+    stride_block_m: tl.constexpr,
+    stride_block_r: tl.constexpr,
+    num_blocks: tl.constexpr,
+    hidden_size: tl.constexpr,
+    eps_a: tl.constexpr,
+    eps_b: tl.constexpr,
+    HAS_B: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    row_idx = tl.program_id(0).to(tl.int64)
+    d_offsets = tl.max_contiguous(tl.arange(0, BLOCK_D), BLOCK_D)
+    d_mask = d_offsets < hidden_size
+
+    qk_a = tl.load(norm_weight_a_ptr + d_offsets, mask=d_mask, other=0.0).to(
+        tl.float32
+    ) * tl.load(qk_weight_a_ptr + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
+    max_a = tl.full((), -float("inf"), tl.float32)
+    sum_a = tl.zeros((), tl.float32)
+    acc_a = tl.zeros((BLOCK_D,), tl.float32)
+    if HAS_B:
+        qk_b = tl.load(norm_weight_b_ptr + d_offsets, mask=d_mask, other=0.0).to(
+            tl.float32
+        ) * tl.load(qk_weight_b_ptr + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
+        max_b = tl.full((), -float("inf"), tl.float32)
+        sum_b = tl.zeros((), tl.float32)
+        acc_b = tl.zeros((BLOCK_D,), tl.float32)
+
+    for source in range(num_blocks):
+        values = tl.load(
+            blocks_ptr + row_idx * stride_block_m + source * stride_block_r + d_offsets,
+            mask=d_mask,
+            other=0.0,
+            eviction_policy="evict_first",
+        ).to(tl.float32)
+        mean_square = tl.sum(values * values, axis=0) * (1.0 / hidden_size)
+
+        logit_a = tl.sum(values * qk_a, axis=0) * tl.rsqrt(mean_square + eps_a)
+        new_max_a = tl.maximum(max_a, logit_a)
+        old_scale_a = tl.exp(max_a - new_max_a)
+        scale_a = tl.exp(logit_a - new_max_a)
+        sum_a = sum_a * old_scale_a + scale_a
+        acc_a = acc_a * old_scale_a + scale_a * values
+        max_a = new_max_a
+        if HAS_B:
+            logit_b = tl.sum(values * qk_b, axis=0) * tl.rsqrt(mean_square + eps_b)
+            new_max_b = tl.maximum(max_b, logit_b)
+            old_scale_b = tl.exp(max_b - new_max_b)
+            scale_b = tl.exp(logit_b - new_max_b)
+            sum_b = sum_b * old_scale_b + scale_b
+            acc_b = acc_b * old_scale_b + scale_b * values
+            max_b = new_max_b
+
+    tl.store(acc_a_ptr + row_idx * hidden_size + d_offsets, acc_a, mask=d_mask)
+    tl.store(max_a_ptr + row_idx, max_a)
+    tl.store(sum_a_ptr + row_idx, sum_a)
+    if HAS_B:
+        tl.store(acc_b_ptr + row_idx * hidden_size + d_offsets, acc_b, mask=d_mask)
+        tl.store(max_b_ptr + row_idx, max_b)
+        tl.store(sum_b_ptr + row_idx, sum_b)
+
+
+@triton.jit
+def _attn_res_combine_kernel(
+    prefix_ptr,
+    delta_ptr,
+    blocks_ptr,
+    norm_weight_ptr,
+    qk_weight_ptr,
+    output_norm_weight_ptr,
+    max_ptr,
+    sum_ptr,
+    acc_ptr,
+    output_ptr,
+    output_scale_ptr,
+    stride_prefix_m: tl.constexpr,
+    stride_delta_m: tl.constexpr,
+    stride_block_m: tl.constexpr,
+    stride_block_r: tl.constexpr,
+    stride_output_m: tl.constexpr,
+    hidden_size: tl.constexpr,
+    block_write_idx: tl.constexpr,
+    eps: tl.constexpr,
+    output_norm_eps: tl.constexpr,
+    HAS_DELTA: tl.constexpr,
+    WRITE_BLOCK: tl.constexpr,
+    APPLY_OUTPUT_NORM: tl.constexpr,
+    QUANT_MAX: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    # Same contract as _attn_res_kernel, with the bank sources replaced by
+    # their precomputed online-softmax state (_attn_res_partial_kernel).
+    row_idx = tl.program_id(0).to(tl.int64)
+    d_offsets = tl.max_contiguous(tl.arange(0, BLOCK_D), BLOCK_D)
+    d_mask = d_offsets < hidden_size
+
+    updated_prefix = tl.load(
+        prefix_ptr + row_idx * stride_prefix_m + d_offsets,
+        mask=d_mask,
+        other=0.0,
+    ).to(tl.float32)
+    if HAS_DELTA:
+        delta = tl.load(
+            delta_ptr + row_idx * stride_delta_m + d_offsets,
+            mask=d_mask,
+            other=0.0,
+        ).to(tl.float32)
+        updated_prefix += delta
+        # Match the BF16 prefix-add result before using it as a residual source.
+        updated_prefix = updated_prefix.to(prefix_ptr.dtype.element_ty).to(tl.float32)
+        tl.store(
+            prefix_ptr + row_idx * stride_prefix_m + d_offsets,
+            updated_prefix,
+            mask=d_mask,
+        )
+    if WRITE_BLOCK:
+        tl.store(
+            blocks_ptr
+            + row_idx * stride_block_m
+            + block_write_idx * stride_block_r
+            + d_offsets,
+            updated_prefix,
+            mask=d_mask,
+        )
+
+    input_qk_weight = tl.load(norm_weight_ptr + d_offsets, mask=d_mask, other=0.0).to(
+        tl.float32
+    ) * tl.load(qk_weight_ptr + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
+    prefix_logit = tl.sum(updated_prefix * input_qk_weight, axis=0) * tl.rsqrt(
+        tl.sum(updated_prefix * updated_prefix, axis=0) * (1.0 / hidden_size) + eps
+    )
+    blocks_max = tl.load(max_ptr + row_idx)
+    max_logit = tl.maximum(blocks_max, prefix_logit)
+    blocks_scale = tl.exp(blocks_max - max_logit)
+    prefix_scale = tl.exp(prefix_logit - max_logit)
+    denominator = tl.load(sum_ptr + row_idx) * blocks_scale + prefix_scale
+    acc = tl.load(acc_ptr + row_idx * hidden_size + d_offsets, mask=d_mask, other=0.0)
+    mixed = (acc * blocks_scale + prefix_scale * updated_prefix) / denominator
+    output = mixed
+
+    if APPLY_OUTPUT_NORM:
+        output_reciprocal_std = tl.rsqrt(
+            tl.sum(tl.where(d_mask, mixed * mixed, 0.0), axis=0) * (1.0 / hidden_size)
+            + output_norm_eps
+        )
+        output_norm_weight = tl.load(
+            output_norm_weight_ptr + d_offsets, mask=d_mask, other=0.0
+        ).to(tl.float32)
+        output = mixed * output_reciprocal_std * output_norm_weight
+    if QUANT_MAX > 0:
+        # Preserve the rounding of the original BF16 output before quantizing.
+        output = output.to(prefix_ptr.dtype.element_ty).to(tl.float32)
+        amax = tl.max(tl.where(d_mask, tl.abs(output), 0.0), axis=0)
+        scale = tl.maximum(amax, 1e-10) * (1.0 / QUANT_MAX)
+        inv_scale = 1.0 / scale
+        output = tl.minimum(tl.maximum(output * inv_scale, -QUANT_MAX), QUANT_MAX)
+        tl.store(output_scale_ptr + row_idx, scale)
+    tl.store(
+        output_ptr + row_idx * stride_output_m + d_offsets,
+        output,
+        mask=d_mask,
+    )
+
+
+# Online-softmax state of a mix over its bank rows: (max [T], sum [T], acc
+# [T, hidden]), all FP32.
+AttnResPartial = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+
+
+def _empty_partial(blocks: torch.Tensor) -> AttnResPartial:
+    num_tokens, _, hidden_size = blocks.shape
+    return (
+        torch.empty(num_tokens, device=blocks.device, dtype=torch.float32),
+        torch.empty(num_tokens, device=blocks.device, dtype=torch.float32),
+        torch.empty(
+            (num_tokens, hidden_size), device=blocks.device, dtype=torch.float32
+        ),
+    )
+
+
+def attn_res_partial_alloc(
+    blocks: torch.Tensor, dual: bool
+) -> tuple[AttnResPartial, AttnResPartial | None]:
+    """Allocate the outputs of attn_res_partial.
+
+    Kept separate so a caller running the partial on a side stream allocates
+    on the consuming stream before the fork: the allocator orders reuse per
+    stream, and the consumer joins the side stream before reading.
+    """
+    return _empty_partial(blocks), _empty_partial(blocks) if dual else None
+
+
+def attn_res_partial(
+    blocks: torch.Tensor,
+    num_blocks: int,
+    norm_weight: torch.Tensor,
+    qk_weight: torch.Tensor,
+    eps: float,
+    out: AttnResPartial,
+    *,
+    next_norm_weight: torch.Tensor | None = None,
+    next_qk_weight: torch.Tensor | None = None,
+    next_eps: float = 0.0,
+    next_out: AttnResPartial | None = None,
+) -> None:
+    """Online-softmax state of bank rows [0, num_blocks) for one or two mixes.
+
+    The second (``next_*``) mix shares the bank sweep; both states feed
+    attn_res_combine.
+    """
+    num_tokens, _, hidden_size = blocks.shape
+    assert blocks.stride(-1) == 1
+    assert norm_weight.stride(-1) == 1 and qk_weight.stride(-1) == 1
+    assert num_blocks > 0
+    dual = next_out is not None
+    if dual:
+        assert next_norm_weight is not None and next_qk_weight is not None
+        assert next_norm_weight.stride(-1) == 1 and next_qk_weight.stride(-1) == 1
+    if num_tokens == 0:
+        return
+    max_a, sum_a, acc_a = out
+    max_b, sum_b, acc_b = next_out if dual else out
+    _attn_res_partial_kernel[(num_tokens,)](
+        blocks,
+        norm_weight,
+        qk_weight,
+        next_norm_weight if dual else norm_weight,
+        next_qk_weight if dual else qk_weight,
+        max_a,
+        sum_a,
+        acc_a,
+        max_b,
+        sum_b,
+        acc_b,
+        blocks.stride(0),
+        blocks.stride(1),
+        num_blocks,
+        hidden_size,
+        eps,
+        next_eps if dual else 0.0,
+        HAS_B=dual,
+        BLOCK_D=triton.next_power_of_2(hidden_size),
+        # Two accumulators of a full hidden row need the extra registers.
+        num_warps=8 if dual else 4,
+        num_stages=2,
+    )
+
+
+def attn_res_combine(
+    prefix: torch.Tensor,
+    delta: torch.Tensor | None,
+    blocks: torch.Tensor,
+    norm_weight: torch.Tensor,
+    qk_weight: torch.Tensor,
+    output_norm_weight: torch.Tensor | None,
+    partial: AttnResPartial,
+    block_write_idx: int,
+    eps: float,
+    output_norm_eps: float,
+    *,
+    quant_dtype: torch.dtype | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """attn_res over a precomputed bank partial; same outputs and side effects
+    (prefix update, block write) as attn_res with the partial's num_blocks."""
+    num_tokens, hidden_size = prefix.shape
+    assert prefix.stride(-1) == 1
+    assert delta is None or delta.stride(-1) == 1
+    assert blocks.stride(-1) == 1
+    assert norm_weight.stride(-1) == 1
+    assert qk_weight.stride(-1) == 1
+    assert output_norm_weight is None or output_norm_weight.stride(-1) == 1
+    max_logit, denominator, acc = partial
+    assert acc.shape == prefix.shape and acc.is_contiguous()
+    if quant_dtype is not None:
+        assert quant_dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+    output = torch.empty_like(
+        prefix, dtype=quant_dtype or prefix.dtype, memory_format=torch.contiguous_format
+    )
+    scale = (
+        torch.empty((num_tokens, 1), device=prefix.device, dtype=torch.float32)
+        if quant_dtype is not None
+        else None
+    )
+    if num_tokens == 0:
+        return output if scale is None else (output, scale)
+
+    _attn_res_combine_kernel[(num_tokens,)](
+        prefix,
+        delta,
+        blocks,
+        norm_weight,
+        qk_weight,
+        output_norm_weight,
+        max_logit,
+        denominator,
+        acc,
+        output,
+        scale,
+        prefix.stride(0),
+        0 if delta is None else delta.stride(0),
+        blocks.stride(0),
+        blocks.stride(1),
+        output.stride(0),
+        hidden_size,
+        block_write_idx,
+        eps,
+        output_norm_eps,
+        HAS_DELTA=delta is not None,
+        WRITE_BLOCK=block_write_idx >= 0,
+        APPLY_OUTPUT_NORM=output_norm_weight is not None,
+        QUANT_MAX=0.0 if quant_dtype is None else get_fp8_min_max()[1],
+        BLOCK_D=triton.next_power_of_2(hidden_size),
+        num_warps=4,
+        num_stages=2,
+    )
+    return output if scale is None else (output, scale)

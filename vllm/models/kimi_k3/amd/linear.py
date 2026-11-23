@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Iterable
 from typing import Any, cast
 
@@ -9,13 +10,21 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm import envs
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+from vllm.config import (
+    CacheConfig,
+    CUDAGraphMode,
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed import (
     get_dcp_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
 from vllm.model_executor.layers.fused_moe import (
@@ -78,7 +87,13 @@ from vllm.models.kimi_k3.amd.dsa import KimiK3DSAAttention
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
-from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+from vllm.models.kimi_k3.amd.ops.attn_res import (
+    AttnResPartial,
+    attn_res,
+    attn_res_combine,
+    attn_res_partial,
+    attn_res_partial_alloc,
+)
 from vllm.models.kimi_k3.amd.specialized_decode.hooks import SpecializedDecodeMixin
 from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
     specialized_decode_config,
@@ -258,23 +273,39 @@ def _apply_attn_res(
     output_norm: RMSNorm | None = None,
     block_write_idx: int = -1,
     quant_key: QuantKey | None = None,
+    partial: AttnResPartial | None = None,
 ) -> torch.Tensor | QuantizedActivation:
     fuse_quant = quant_key == kFp8DynamicTokenSym and not envs.VLLM_BATCH_INVARIANT
-    result = attn_res(
-        prefix_sum,
-        delta,
-        block_residual,
-        norm.weight,
-        proj.weight.squeeze(0),
-        None if output_norm is None else output_norm.weight,
-        num_valid_blocks,
-        block_write_idx,
-        norm.variance_epsilon,
-        0.0 if output_norm is None else output_norm.variance_epsilon,
-        quant_dtype=cast(torch.dtype, kFp8DynamicTokenSym.dtype)
-        if fuse_quant
-        else None,
-    )
+    quant_dtype = cast(torch.dtype, kFp8DynamicTokenSym.dtype) if fuse_quant else None
+    if partial is not None:
+        # The bank rows were already swept by attn_res_partial (AttnRes split).
+        result = attn_res_combine(
+            prefix_sum,
+            delta,
+            block_residual,
+            norm.weight,
+            proj.weight.squeeze(0),
+            None if output_norm is None else output_norm.weight,
+            partial,
+            block_write_idx,
+            norm.variance_epsilon,
+            0.0 if output_norm is None else output_norm.variance_epsilon,
+            quant_dtype=quant_dtype,
+        )
+    else:
+        result = attn_res(
+            prefix_sum,
+            delta,
+            block_residual,
+            norm.weight,
+            proj.weight.squeeze(0),
+            None if output_norm is None else output_norm.weight,
+            num_valid_blocks,
+            block_write_idx,
+            norm.variance_epsilon,
+            0.0 if output_norm is None else output_norm.variance_epsilon,
+            quant_dtype=quant_dtype,
+        )
     if fuse_quant:
         assert isinstance(result, tuple)
         data, scale = result
@@ -283,6 +314,72 @@ def _apply_attn_res(
         )
     assert isinstance(result, torch.Tensor)
     return result
+
+
+# AttnRes split (VLLM_K3_ATTNRES_SPLIT=1, default off). Right after a layer's
+# pre-attention mix, the bank rows read by its pre-MLP mix and by the next
+# layer's pre-attention mix are final, so one side-stream sweep computes both
+# mixes' bank partials while attention runs; the two mixes then only combine
+# the prefix source on the critical path. Batches above
+# VLLM_K3_ATTNRES_SPLIT_MAX_TOKENS keep the single fused kernel.
+_ATTN_RES_SPLIT_STREAM: torch.cuda.Stream | None = None
+
+
+def _attn_res_split_enabled() -> bool:
+    if os.getenv("VLLM_K3_ATTNRES_SPLIT", "0") != "1" or envs.VLLM_BATCH_INVARIANT:
+        return False
+    # The pending partials and fork/join events live on the layer modules,
+    # which DBO ubatch threads share while interleaving layer by layer.
+    config = get_current_vllm_config_or_none()
+    return config is None or not config.parallel_config.use_ubatching
+
+
+def _attn_res_split_stream() -> torch.cuda.Stream:
+    # Not the shared aux stream: the MoE shared experts and the DSA indexer
+    # queue on it, and the sweep must not wait behind them.
+    global _ATTN_RES_SPLIT_STREAM
+    if _ATTN_RES_SPLIT_STREAM is None:
+        _ATTN_RES_SPLIT_STREAM = torch.cuda.Stream(priority=-1)
+    return _ATTN_RES_SPLIT_STREAM
+
+
+def _link_attn_res_split_layers(layers: list) -> None:
+    """Let each layer sweep its successor's pre-attention bank rows too, when
+    they are the rows of its own pre-MLP mix."""
+    for layer, next_layer in zip(layers, layers[1:]):
+        mlp_valid_blocks = layer.prev_valid_blocks + (
+            1 if layer.is_block_write_layer else 0
+        )
+        if next_layer.prev_valid_blocks == mlp_valid_blocks:
+            # Plain attribute: registering it as a submodule would duplicate
+            # the next layer's parameters under this one.
+            object.__setattr__(layer, "attn_res_next", next_layer)
+
+
+def _attn_res_split_allowed(num_tokens: int, max_tokens: int) -> bool:
+    if num_tokens == 0 or num_tokens > max_tokens:
+        return False
+    # A side-stream fork must be joined inside one captured segment; eager
+    # breaks inside attention would split it.
+    if BreakableCUDAGraphCapture.is_active():
+        return False
+    return not (
+        is_forward_context_available()
+        and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+    )
+
+
+def _begin_attn_res_split_step(layers: list, num_tokens: int) -> None:
+    """Decide the split once per forward and drop pending partials."""
+    if not layers:
+        return
+    split = _attn_res_split_allowed(num_tokens, layers[0].attn_res_split_max_tokens)
+    for layer in layers:
+        layer.attn_res_split_step = split
+        # A partial left by a layer whose successor did not run (e.g. a
+        # specialized-decode kernel replaced it) must not leak into a later
+        # step. Its sweep was joined by the producer's pre-MLP mix.
+        layer.attn_res_pending = None
 
 
 class KimiMoE(nn.Module):
@@ -771,6 +868,19 @@ class KimiDecoderLayer(nn.Module):
                 quant_config=None,
                 prefix=f"{prefix}.mlp_res_proj",
             )
+            self.attn_res_split = _attn_res_split_enabled()
+            if self.attn_res_split:
+                self.attn_res_split_max_tokens = int(
+                    os.getenv("VLLM_K3_ATTNRES_SPLIT_MAX_TOKENS", "512")
+                )
+                # Set by KimiLinearModel when the next layer's pre-attention mix
+                # reads the same bank rows as this layer's pre-MLP mix.
+                self.attn_res_next: KimiDecoderLayer | None = None
+                # This layer's pre-attention partial, left by the previous layer.
+                self.attn_res_pending: AttnResPartial | None = None
+                # Set per forward by _begin_attn_res_split_step.
+                self.attn_res_split_step = False
+                self._attn_res_events: tuple[torch.cuda.Event, ...] | None = None
 
     def _run_self_attn(
         self,
@@ -814,6 +924,57 @@ class KimiDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
+    def _fork_attn_res_partials(
+        self, block_residual: torch.Tensor, num_blocks: int
+    ) -> tuple[AttnResPartial, torch.cuda.Event | None]:
+        """Sweep the bank rows of this layer's pre-MLP mix (and the next
+        layer's pre-attention mix) on the side stream. The caller waits on the
+        returned event before the pre-MLP mix."""
+        next_layer = self.attn_res_next
+        mlp_partial, next_partial = attn_res_partial_alloc(
+            block_residual, dual=next_layer is not None
+        )
+
+        def sweep() -> None:
+            attn_res_partial(
+                block_residual,
+                num_blocks,
+                self.mlp_res_norm.weight,
+                self.mlp_res_proj.weight.squeeze(0),
+                self.mlp_res_norm.variance_epsilon,
+                mlp_partial,
+                next_norm_weight=None
+                if next_layer is None
+                else next_layer.self_attention_res_norm.weight,
+                next_qk_weight=None
+                if next_layer is None
+                else next_layer.self_attention_res_proj.weight.squeeze(0),
+                next_eps=0.0
+                if next_layer is None
+                else next_layer.self_attention_res_norm.variance_epsilon,
+                next_out=next_partial,
+            )
+
+        joined = None
+        if block_residual.is_cuda:
+            if self._attn_res_events is None:
+                self._attn_res_events = (torch.cuda.Event(), torch.cuda.Event())
+            forked, joined = self._attn_res_events
+            stream = _attn_res_split_stream()
+            forked.record()
+            with torch.cuda.stream(stream):
+                stream.wait_event(forked)
+                sweep()
+                joined.record()
+        else:
+            sweep()
+        # No record_stream: the caller waits on `joined` before its pre-MLP
+        # mix, i.e. before any later layer runs, so both buffers are joined to
+        # the main stream before they can be consumed or dropped (freed).
+        if next_layer is not None:
+            next_layer.attn_res_pending = next_partial
+        return mlp_partial, joined
+
     def forward_attn_residual(
         self,
         positions: torch.Tensor,
@@ -827,6 +988,15 @@ class KimiDecoderLayer(nn.Module):
             if isinstance(self.self_attn, (KimiK3DeltaAttention, KimiMLAAttention))
             else None
         )
+        split = self.attn_res_split and self.attn_res_split_step
+        attn_partial = None
+        if self.attn_res_split:
+            attn_partial = self.attn_res_pending
+            self.attn_res_pending = None
+            if not split or (
+                attn_partial is not None and attn_partial[2].shape != prefix_sum.shape
+            ):
+                attn_partial = None
         hidden_states = _apply_attn_res(
             prefix_sum,
             block_residual,
@@ -837,10 +1007,20 @@ class KimiDecoderLayer(nn.Module):
             output_norm=self.input_layernorm,
             block_write_idx=(self.block_write_idx if self.is_block_write_layer else -1),
             quant_key=attention_quant_key,
+            partial=attn_partial,
         )
 
         if self.is_block_write_layer:
             prefix_sum = None
+
+        mlp_valid_blocks = self.prev_valid_blocks + (
+            1 if self.is_block_write_layer else 0
+        )
+        mlp_partial, joined = None, None
+        if split:
+            mlp_partial, joined = self._fork_attn_res_partials(
+                block_residual, mlp_valid_blocks
+            )
 
         hidden_states = self._run_self_attn(positions, hidden_states)
 
@@ -850,9 +1030,9 @@ class KimiDecoderLayer(nn.Module):
         else:
             prefix_delta = hidden_states
 
-        mlp_valid_blocks = self.prev_valid_blocks + (
-            1 if self.is_block_write_layer else 0
-        )
+        if joined is not None:
+            # Must stay unconditional on the fork; see _fork_attn_res_partials.
+            torch.cuda.current_stream().wait_event(joined)
         hidden_states = _apply_attn_res(
             prefix_sum,
             block_residual,
@@ -866,6 +1046,7 @@ class KimiDecoderLayer(nn.Module):
                 if isinstance(self.mlp, KimiMLP)
                 else None
             ),
+            partial=mlp_partial,
         )
 
         hidden_states = self.mlp(hidden_states)
@@ -920,6 +1101,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             get_layer,
             prefix=f"{prefix}.layers",
         )
+
+        # Layers taking part in the AttnRes split (VLLM_K3_ATTNRES_SPLIT).
+        self.attn_res_split_layers: list[KimiDecoderLayer] = []
+        if config.attn_res_block_size is not None and _attn_res_split_enabled():
+            self.attn_res_split_layers = list(
+                self.layers[self.start_layer : self.end_layer]
+            )
+            _link_attn_res_split_layers(self.attn_res_split_layers)
 
         if config.dsa_config is not None:
             # A DSA layer silently built as dense MLA would be invisible in
@@ -1067,6 +1256,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
         prefix_delta = None
+        _begin_attn_res_split_step(self.attn_res_split_layers, hidden_states.size(0))
 
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
