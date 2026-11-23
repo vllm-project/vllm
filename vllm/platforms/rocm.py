@@ -946,6 +946,18 @@ class RocmPlatform(Platform):
             logger.debug_once("Using AITER Flash Attention backend for ViT model.")
             return AttentionBackendEnum.ROCM_AITER_FA
 
+        # The Triton encoder attention (split-D head dims, see
+        # triton_prefill_attention.py) is faster than flash_attn's triton_amd
+        # kernel and than torch SDPA on RDNA4 up to head dim 96, and level
+        # with them at 112/128. The kernel does not compile below head dim 16.
+        if (
+            on_rdna4()
+            and 16 <= head_size <= 128
+            and (dtype == torch.float16 or dtype == torch.bfloat16)
+        ):
+            logger.debug_once("Using Triton attention backend for ViT model.")
+            return AttentionBackendEnum.TRITON_ATTN
+
         if (
             (on_cdna() or on_gfx1x())
             and find_spec("flash_attn") is not None

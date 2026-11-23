@@ -54,6 +54,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.processing.context import is_profiling_media
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import _has_module
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (
@@ -261,6 +262,30 @@ class FunAudioChatAudioEncoder(nn.Module):
     def dtype(self) -> torch.dtype:
         return self.conv1.weight.dtype
 
+    def _check_long_audio_attn_backend(self, speech_maxlen: int) -> None:
+        # For max-length audio (300s => ~7500 speech frames at 25Hz), the
+        # Torch SDPA path can be prohibitively memory hungry (~O(n^2) inside the
+        # longest chunks). Require FlashAttention (or the Triton varlen
+        # kernel, which has the same memory profile) for such inputs to avoid
+        # OOM and performance cliffs.
+        attn = self.layers[0].self_attn.attn
+        if int(speech_maxlen) < 7500 or attn.attn_backend == (
+            AttentionBackendEnum.TRITON_ATTN
+        ):
+            return
+        if not _has_module("flash_attn"):
+            raise RuntimeError(
+                "FunAudioChat long audio (~300s) requires FlashAttention-2 "
+                "for the continuous audio tower, but `flash_attn` is not "
+                "installed in the runtime environment."
+            )
+        if not getattr(attn, "is_flash_attn_backend", False):
+            raise RuntimeError(
+                "FunAudioChat long audio (~300s) requires FlashAttention for the "
+                "continuous audio tower, but the selected MM encoder attention "
+                "backend is not FlashAttention."
+            )
+
     def forward(
         self,
         input_features: torch.Tensor,
@@ -269,25 +294,7 @@ class FunAudioChatAudioEncoder(nn.Module):
         speech_maxlen: int,
         **kwargs: object,
     ) -> BaseModelOutput:
-        # For max-length audio (300s => ~7500 speech frames at 25Hz), the
-        # Torch SDPA path can be prohibitively memory hungry (~O(n^2) inside the
-        # longest chunks). Require FlashAttention for such inputs to avoid OOM
-        # and performance cliffs.
-        if int(speech_maxlen) >= 7500:
-            if not _has_module("flash_attn"):
-                raise RuntimeError(
-                    "FunAudioChat long audio (~300s) requires FlashAttention-2 "
-                    "for the continuous audio tower, but `flash_attn` is not "
-                    "installed in the runtime environment."
-                )
-            if not getattr(
-                self.layers[0].self_attn.attn, "is_flash_attn_backend", False
-            ):
-                raise RuntimeError(
-                    "FunAudioChat long audio (~300s) requires FlashAttention for the "
-                    "continuous audio tower, but the selected MM encoder attention "
-                    "backend is not FlashAttention."
-                )
+        self._check_long_audio_attn_backend(speech_maxlen)
 
         # Handle empty / invalid items (feature_lens == 0) without crashing.
         original_batch_size = int(feature_lens.size(0))

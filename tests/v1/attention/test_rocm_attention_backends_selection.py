@@ -553,6 +553,114 @@ def test_rdna_prefers_triton_attn(
     assert backend_path == expected_backend.get_path()
 
 
+@pytest.mark.parametrize(
+    ("rdna4", "head_size", "dtype", "flash_attn", "expected"),
+    [
+        # RDNA4 takes the Triton encoder attention with or without flash_attn.
+        (True, 72, torch.bfloat16, True, AttentionBackendEnum.TRITON_ATTN),
+        (True, 64, torch.float16, True, AttentionBackendEnum.TRITON_ATTN),
+        (True, 128, torch.bfloat16, False, AttentionBackendEnum.TRITON_ATTN),
+        (True, 16, torch.float16, True, AttentionBackendEnum.TRITON_ATTN),
+        # Below 16 the kernel does not compile and past 128 it was not
+        # measured; keep flash_attn / SDPA.
+        (True, 8, torch.bfloat16, True, AttentionBackendEnum.FLASH_ATTN),
+        (True, 8, torch.bfloat16, False, AttentionBackendEnum.TORCH_SDPA),
+        (True, 256, torch.bfloat16, True, AttentionBackendEnum.FLASH_ATTN),
+        (True, 256, torch.bfloat16, False, AttentionBackendEnum.TORCH_SDPA),
+        # So are dtypes the kernel does not take.
+        (True, 72, torch.float32, True, AttentionBackendEnum.TORCH_SDPA),
+        # Every other RDNA part keeps today's choice.
+        (False, 72, torch.bfloat16, True, AttentionBackendEnum.FLASH_ATTN),
+        (False, 72, torch.bfloat16, False, AttentionBackendEnum.TORCH_SDPA),
+    ],
+)
+def test_vit_attn_backend_default_on_rdna4(
+    rdna4, head_size, dtype, flash_attn, expected, monkeypatch
+):
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setattr(rocm, "on_rdna4", lambda: rdna4)
+    monkeypatch.setattr(rocm, "on_cdna", lambda: False)
+    monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda name: object() if (name == "flash_attn" and flash_attn) else None,
+    )
+    monkeypatch.setattr(
+        "vllm._aiter_ops.rocm_aiter_ops.is_mha_enabled", lambda: False, raising=False
+    )
+    assert rocm.RocmPlatform.get_vit_attn_backend(head_size, dtype) == expected
+
+
+def test_vit_attn_backend_override_wins_on_rdna4(monkeypatch):
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setattr(rocm, "on_rdna4", lambda: True)
+    for backend in rocm.RocmPlatform.get_supported_vit_attn_backends():
+        assert (
+            rocm.RocmPlatform.get_vit_attn_backend(72, torch.bfloat16, backend)
+            == backend
+        )
+
+
+@pytest.mark.parametrize(
+    ("aiter_mha", "flash_attn", "expected"),
+    [
+        # CDNA keeps AITER FA, then flash_attn, then SDPA.
+        (True, True, AttentionBackendEnum.ROCM_AITER_FA),
+        (False, True, AttentionBackendEnum.FLASH_ATTN),
+        (False, False, AttentionBackendEnum.TORCH_SDPA),
+    ],
+)
+def test_vit_attn_backend_default_unchanged_on_cdna(
+    aiter_mha, flash_attn, expected, monkeypatch
+):
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setattr(rocm, "on_rdna4", lambda: False)
+    monkeypatch.setattr(rocm, "on_cdna", lambda: True)
+    monkeypatch.setattr(rocm, "on_gfx1x", lambda: False)
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda name: object() if (name == "flash_attn" and flash_attn) else None,
+    )
+    monkeypatch.setattr(
+        "vllm._aiter_ops.rocm_aiter_ops.is_mha_enabled",
+        lambda: aiter_mha,
+        raising=False,
+    )
+    assert rocm.RocmPlatform.get_vit_attn_backend(72, torch.bfloat16) == expected
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        None,
+        AttentionBackendEnum.FLASH_ATTN,
+        AttentionBackendEnum.ROCM_AITER_FA,
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.TORCH_SDPA,
+    ],
+)
+def test_vit_attn_backend_user_override_through_mm_config(override, monkeypatch):
+    """`--mm-encoder-attn-backend` reaches the platform and beats the RDNA4
+    default."""
+    import vllm.platforms.rocm as rocm
+    from vllm.config.multimodal import MultiModalConfig
+    from vllm.model_executor.models import vision
+
+    monkeypatch.setattr(rocm, "on_rdna4", lambda: True)
+    monkeypatch.setattr(rocm, "on_cdna", lambda: False)
+    monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
+    monkeypatch.setattr(
+        vision,
+        "get_multimodal_config",
+        lambda: MultiModalConfig(mm_encoder_attn_backend=override),
+    )
+    expected = override or AttentionBackendEnum.TRITON_ATTN
+    assert vision.get_vit_attn_backend(72, torch.bfloat16) == expected
+
+
 @pytest.mark.parametrize("use_dcp", [False, True])
 @pytest.mark.parametrize(
     "env_vars, selected_backend, block_size, expected_backend_path, should_raise",
