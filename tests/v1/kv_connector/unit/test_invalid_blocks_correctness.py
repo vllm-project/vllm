@@ -475,3 +475,79 @@ def test_async_recompute_blocks_not_cached_when_invalid(
 
     # request should be in the running queue
     assert request in recompute_scheduler.running
+
+
+@pytest.mark.parametrize(
+    "abort_owner,recompute", [(False, False), (True, False), (True, True)]
+)
+def test_sync_recompute_invalid_blocks_not_reused(
+    recompute_scheduler: Scheduler, abort_owner: bool, recompute: bool
+):
+    """Only repaired KV can be reused, even if the load's owner is aborted."""
+    block_size = recompute_scheduler.block_size
+    num_prompt_tokens = 8 * block_size
+    num_external_tokens = 7 * block_size
+    invalid_block_idx = 3
+    request = create_request(
+        num_tokens=num_prompt_tokens, common_prefix_len=num_prompt_tokens
+    )
+    recompute_scheduler.add_request(request)
+
+    recompute_scheduler.connector = create_mock_connector()
+    recompute_scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(
+            {request.request_id: num_external_tokens}, False
+        )
+    )
+    recompute_scheduler.connector.request_finished.return_value = (False, None)
+    recompute_scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = recompute_scheduler.schedule()
+    block_ids = scheduler_output.scheduled_new_reqs[0].block_ids[0]
+    other = create_request(
+        num_tokens=num_prompt_tokens, common_prefix_len=num_prompt_tokens
+    )
+    _, num_cached_tokens, _ = recompute_scheduler.kv_cache_manager.get_computed_blocks(
+        other
+    )
+    assert num_cached_tokens == num_external_tokens
+
+    recompute_scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            [request], invalid_block_ids={block_ids[invalid_block_idx]}
+        ),
+    )
+    assert request.status == RequestStatus.RUNNING
+    assert request.num_computed_tokens == invalid_block_idx * block_size
+    assert recompute_scheduler.kv_cache_manager.get_block_ids(request.request_id) == (
+        block_ids,
+    )
+
+    _, num_cached_tokens, _ = recompute_scheduler.kv_cache_manager.get_computed_blocks(
+        other
+    )
+    expected_cached_tokens = invalid_block_idx * block_size
+    assert num_cached_tokens == expected_cached_tokens
+
+    if recompute:
+        scheduler_output = recompute_scheduler.schedule()
+        expected_cached_tokens += scheduler_output.num_scheduled_tokens[
+            request.request_id
+        ]
+        expected_cached_tokens = min(
+            expected_cached_tokens // block_size * block_size, num_external_tokens
+        )
+        recompute_scheduler.update_from_output(
+            scheduler_output, create_model_runner_output([request])
+        )
+
+    if abort_owner:
+        recompute_scheduler.finish_requests(
+            request.request_id, RequestStatus.FINISHED_ABORTED
+        )
+
+    _, num_cached_tokens, _ = recompute_scheduler.kv_cache_manager.get_computed_blocks(
+        other
+    )
+    assert num_cached_tokens == expected_cached_tokens
