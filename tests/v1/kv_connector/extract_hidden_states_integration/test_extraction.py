@@ -7,6 +7,12 @@ import tempfile
 import pytest
 import torch
 
+from tests.models.multimodal.generation.test_nemotron_parse_35 import (
+    MODEL as NEMOTRON_PARSE_MODEL,
+)
+from tests.models.multimodal.generation.test_nemotron_parse_35 import (
+    PROMPT as NEMOTRON_PARSE_PROMPT,
+)
 from tests.utils import create_new_process_for_each_test, multi_gpu_test
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
@@ -253,15 +259,26 @@ def test_extract_hidden_states_with_predictable_dummy_model(
     example_hidden_states_connector.cleanup_hidden_states(custom_path)
 
 
-def test_extract_hidden_states_nemotron_parse(vllm_runner, tmp_path):
-    layer_ids = [2, 5, 9, 10]
+@pytest.mark.parametrize(
+    ("model", "engine_kwargs", "prompt_text", "image_token_id", "layer_ids"),
+    [
+        pytest.param(
+            NEMOTRON_PARSE_MODEL,
+            {"trust_remote_code": True, "max_model_len": 4096},
+            f"<pad>{NEMOTRON_PARSE_PROMPT}",
+            1,
+            [2, 5, 9, 10],
+            id="nemotron-parse",
+        ),
+    ],
+)
+@create_new_process_for_each_test()
+def test_extract_hidden_states_vision_language_model(
+    vllm_runner, tmp_path, model, engine_kwargs, prompt_text, image_token_id, layer_ids
+):
     with vllm_runner(
-        "nvidia/Nemotron-3.5-Parse",
-        trust_remote_code=True,
+        model,
         enforce_eager=True,
-        enable_chunked_prefill=True,
-        max_model_len=4096,
-        max_num_seqs=1,
         gpu_memory_utilization=0.5,
         speculative_config={
             "method": "extract_hidden_states",
@@ -275,10 +292,11 @@ def test_extract_hidden_states_nemotron_parse(vllm_runner, tmp_path):
             "kv_role": "kv_producer",
             "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
         },
+        **engine_kwargs,
     ) as runner:
         image = ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
         prompt = {
-            "prompt": "<pad></s><s><predict_no_text_in_pic>",
+            "prompt": prompt_text,
             "multi_modal_data": {"image": image},
         }
         (output,) = runner.llm.generate(
@@ -286,8 +304,9 @@ def test_extract_hidden_states_nemotron_parse(vllm_runner, tmp_path):
         )
 
         assert output.prompt_token_ids is not None
-        assert output.prompt_token_ids.count(1) > 1
-        expected_shape = (len(output.prompt_token_ids), len(layer_ids), 1024)
+        assert output.prompt_token_ids.count(image_token_id) > 100
+        hidden_size = runner.llm.model_config.get_hidden_size()
+        expected_shape = (len(output.prompt_token_ids), len(layer_ids), hidden_size)
         get_and_check_output(output, expected_shape)
 
 

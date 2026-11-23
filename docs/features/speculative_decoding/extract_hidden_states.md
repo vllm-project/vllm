@@ -53,8 +53,6 @@ A complete example is available at [`examples/features/speculative_decoding/extr
 
 ## Online Example
 
-To extract hidden states from `nvidia/Nemotron-3.5-Parse`, serve it with `--trust-remote-code` and the extraction flags below. Send the page image and Parse task prompt together as shown in [NVIDIA's serving example](https://huggingface.co/nvidia/Nemotron-3.5-Parse/blob/main/docs/serving.md). The exported states include the model's image prefix tokens.
-
 For improved performance, it is recommended to use a RAM-mounted file system such as `/dev/shm/` for online usage in which the client cleans up the files soon after they are generated.
 
 ```bash
@@ -126,3 +124,9 @@ The file path is returned in `output.kv_transfer_params["hidden_states_path"]`. 
 
 !!! note
     Chunked prefill is not compatible with this feature and must be disabled.
+
+## Specific Models
+
+### Nemotron 3.5 Parse
+
+To extract hidden states from `nvidia/Nemotron-3.5-Parse`, serve it with `--trust-remote-code` and the flags in the [online example](#online-example). Send the page image and Parse task prompt together as shown in [NVIDIA's serving example](https://huggingface.co/nvidia/Nemotron-3.5-Parse/blob/main/docs/serving.md). The exported states include the model's image prefix tokens.
