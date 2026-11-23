@@ -611,8 +611,10 @@ class KVCacheManager:
         deficit = required_blocks - available_blocks
         if full_sequence_shortfall > 0:
             deficit = max(deficit, full_sequence_shortfall)
+        # Pre-allocation must not evict this request's untouched prefix hits.
         if deficit > 0 and (
             self.try_preallocate is None
+            or any(new_computed_block_list)
             or not self.try_preallocate(
                 request.request_id,
                 deficit,
