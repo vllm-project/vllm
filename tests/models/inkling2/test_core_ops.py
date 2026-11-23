@@ -606,9 +606,9 @@ def test_attention_prologue_stores_low_precision_kv_without_touching_padding(
 )
 @pytest.mark.parametrize("shape", [(131, 130), (6552, 2304)])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_sm12x_gemv_projection_and_graph(tokens, shape, dtype):
+def test_sm12x_ll_gemm_projection_and_graph(tokens, shape, dtype):
     """Handle tail tiles, row strides, output storage, bias and graph replay."""
-    from vllm.models.inkling2.nvidia.ops.gemv import sm12x_bf16_gemv
+    from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm
 
     torch.manual_seed(0)
     n, k = shape
@@ -619,7 +619,7 @@ def test_sm12x_gemv_projection_and_graph(tokens, shape, dtype):
     out = storage[:, :n]
 
     def run():
-        return sm12x_bf16_gemv(x, weight, bias, out=out)
+        return sm12x_bf16_ll_gemm(x, weight, bias, out=out)
 
     def check():
         if k == 2304:
