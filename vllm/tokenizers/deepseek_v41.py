@@ -188,20 +188,39 @@ def _add_updated_tool_schemas(
     return result
 
 
+def _compile_added_tokens_pattern(tokens: list[str]) -> re.Pattern[str] | None:
+    """Match the longest added token at each position using shared prefixes."""
+    if not tokens:
+        return None
+
+    trie: dict[str, Any] = {}
+    for token in tokens:
+        node = trie
+        for char in token:
+            node = node.setdefault(char, {})
+        node[""] = {}  # End of a token, even if the node has children.
+
+    def build(node: dict[str, Any]) -> str:
+        branches = [
+            re.escape(char) + build(child) for char, child in node.items() if char
+        ]
+        if not branches:
+            return ""
+        if "" in node:
+            # Prefer a longer token before falling back to this prefix.
+            return f"(?:{'|'.join(branches)})?"
+        return branches[0] if len(branches) == 1 else f"(?:{'|'.join(branches)})"
+
+    return re.compile(build(trie))
+
+
 def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     """Wrap an HF tokenizer with the V4.1 prompt encoder."""
     wrapped = copy.copy(tokenizer)
     added_vocab = tokenizer.get_added_vocab()
 
-    def tokens_re(tokens: list[str]) -> re.Pattern[str] | None:
-        if not tokens:
-            return None
-        return re.compile(
-            "|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True))
-        )
-
-    added_tokens_re = tokens_re(list(added_vocab))
-    assistant_tokens_re = tokens_re(
+    added_tokens_re = _compile_added_tokens_pattern(list(added_vocab))
+    assistant_tokens_re = _compile_added_tokens_pattern(
         [t for t in added_vocab if t not in _ASSISTANT_SPECIAL_TOKENS]
     )
 
