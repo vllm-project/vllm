@@ -1172,3 +1172,39 @@ def test_select_skips_weights_proj_when_the_quant_projects(monkeypatch, gate, lo
     assert kwargs["hidden_states"] is normed
     assert kwargs["weights_proj"] is weights_proj.weight
     assert calls[-1][4] is out[1]
+
+
+def test_q_quant_gate_and_given_weights(monkeypatch):
+    from vllm.v1.attention.ops import rocm_paged_mxfp4_indexer as ops
+
+    hidden = torch.empty(7, 5120, dtype=torch.bfloat16)
+    weight = torch.empty(32, 5120, dtype=torch.bfloat16)
+    gate = ops.rocm_mxfp4_indexer_q_projects_weights
+    assert gate(hidden, weight)
+    assert not gate(hidden.new_empty(129, 5120), weight)
+    assert not gate(hidden.float(), weight.float())
+    assert not gate(hidden[:, :5000], weight[:, :5000])
+    assert not gate(hidden, weight.T.contiguous().T)
+    monkeypatch.setattr(ops.envs, "VLLM_BATCH_INVARIANT", True, raising=False)
+    assert not gate(hidden, weight)
+
+    seen: dict = {}
+
+    def quant(q, positions, cos_sin_cache, weights, weights_scale, **kwargs):
+        seen.update(kwargs)
+        return q, torch.zeros(7, 32, 4, dtype=torch.uint8), weights
+
+    monkeypatch.setattr(ops, "q_rope_mxfp4_quant", quant)
+    weights = torch.ones(7, 32)
+    (_, q_scale), w = ops.rocm_mxfp4_indexer_q_quant(
+        torch.arange(7),
+        torch.zeros(7, 32, 128),
+        torch.zeros(8, 64),
+        weights,
+        1.0,
+        1.0,
+        hidden_states=hidden,
+        weights_proj=weight,
+    )
+    assert seen == {"hidden_states": None, "weights_proj": None}
+    assert w is weights and q_scale.shape == (7, 32)

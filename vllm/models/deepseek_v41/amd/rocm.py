@@ -587,7 +587,7 @@ class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
     """The indexer on aiter's paged MXFP4 cache: its K store and Q quant write
     in the order aiter's MQA-logits kernel reads, and its layers score with it.
     `_produce_k` and `forward_q` mirror `DeepseekV4Indexer`'s except for
-    those two calls."""
+    those two calls, and the Q quant can also compute the head weights."""
 
     mqa_cls = RocmSparseMQAIndexer
     attn_cls = RocmSparseAttnIndexer
@@ -912,10 +912,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
         Each fork/join is a HIP event pair per side stream on ROCm, so the
         base three-fork pipeline is expensive there; the compressor chain and
-        the indexer weights projection run fully in parallel with the default
-        chain. The indexer K write and q-side stay serial after the join:
-        `wk` consumes the aux-0 latent and the q-side's wq_b consumes the
-        default-stream qr.
+        the indexer weights projection (unless the Q quant computes the
+        weights) run fully in parallel with the default chain. The indexer K
+        write and q-side stay serial after the join: `wk` consumes the aux-0
+        latent and the q-side's wq_b consumes the default-stream qr.
         """
         attn_metadata = get_forward_context().attn_metadata
         compressor = self.compressor
@@ -989,11 +989,15 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         indexer = self.indexer
         assert indexer is not None
         attn_metadata = get_forward_context().attn_metadata
-        # Serial on these layers: qr must sit on the default stream before the fork.
-        qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
-        indexer_weights = None
-        if not indexer.projects_weights(hidden_states):
-            indexer_weights, _ = indexer.weights_proj(hidden_states)
+        # Serial on these layers via the _run_parallel_input_projections
+        # override: qr must sit on the default stream before the fork.
+        if indexer.projects_weights(hidden_states):
+            qr_kv, indexer_weights = self._fused_wqa_wkv_gemm(hidden_states), None
+        else:
+            qr_kv, _, indexer_weights = self._run_parallel_input_projections(
+                hidden_states
+            )
+            assert indexer_weights is not None
         qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
 
         def swa_q_chain():
