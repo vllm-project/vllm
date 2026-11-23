@@ -9,7 +9,7 @@ combines in one launch, so it is paired with a pass-through prepare/finalize.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -24,10 +24,12 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
     FlashInferMoeEp,
     FlashInferMoeEpEpilogue,
+    FlashInferMoeEpWeightFormat,
     FlashInferMoeEpWeights,
     apply_topk_in_fc1,
     flashinfer_moe_ep_unsupported_reasons,
     is_sm107_device,
+    sm90_weight_format,
     supports_current_device,
     validate_flashinfer_moe_ep_layer,
 )
@@ -132,38 +134,42 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Build the megakernel from the layer's canonical weights.
 
-        The oracle has already put the weights in kernel format; the per-expert
-        weight global scales arrive through the quant config and become the
+        The oracle supplies the weights in the backend's input format.
+        Per-expert global scales arrive through the quant config and become
         epilogue alphas. On SM107 the checkpoint's activation input scales also
-        set the activation and FC1-output quantization (`sm107_nvfp4_epilogue`).
+        set the activation and FC1-output quantization of NVFP4 experts
+        (`sm107_nvfp4_epilogue`); MXFP4 experts have no such scales.
         """
         validate_flashinfer_moe_ep_layer(layer)  # type: ignore[arg-type]
-        block_fp8 = (
-            self.quant_config.use_fp8_w8a8 and self.quant_config.is_block_quantized
-        )
-        if block_fp8 and layer.apply_router_weight_on_input:
-            # The SM90 FP8 kernel weights the activation before fc2, which is
-            # not equivalent to weighting the expert input.
+        sm90_format = sm90_weight_format(self.quant_config)
+        if sm90_format is not None and layer.apply_router_weight_on_input:
+            # The SM90 kernels weight the activation before fc2, which is not
+            # equivalent to weighting the expert input.
             raise ValueError(
-                f"{self.moe_config.moe_backend} with block-FP8 weights does not "
-                "support apply_router_weight_on_input"
+                f"{self.moe_config.moe_backend} with {sm90_format} weights on "
+                "Hopper does not support apply_router_weight_on_input"
             )
+        weight_format: FlashInferMoeEpWeightFormat = (
+            "fp8_block"
+            if self.quant_config.use_fp8_w8a8 and self.quant_config.is_block_quantized
+            else cast(FlashInferMoeEpWeightFormat, self.quant_config.weight_quant_dtype)
+        )
         epilogue = epilogue_from_quant_config(self.quant_config)
         if is_sm107_device():
-            # Every rank refuses a reload here, before the epilogue's collective.
+            # Every rank refuses a reload here, before any collective.
             if getattr(layer, "_experts_sm107_loaded", False):
                 raise NotImplementedError(
                     "reloading weights is not supported with "
                     f"{self.moe_config.moe_backend} on SM107"
                 )
-            epilogue = sm107_nvfp4_epilogue(
-                epilogue,
-                getattr(layer, "w13_input_scale", None),
-                getattr(layer, "w2_input_scale", None),
-            )
+            if weight_format == "nvfp4":
+                epilogue = sm107_nvfp4_epilogue(
+                    epilogue,
+                    getattr(layer, "w13_input_scale", None),
+                    getattr(layer, "w2_input_scale", None),
+                )
             layer._experts_sm107_loaded = True
-        # Layer parameters the megakernel reads. They end up aliasing the
-        # megakernel's own tensors, so EPLB permutes exactly what it uses.
+        # Alias kernel buffers so supported EPLB paths permute the live weights.
         # Block-FP8 layers may name their scales weight_scale_inv.
         scale = (
             "weight_scale_inv"
@@ -184,11 +190,10 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
                 self.moe_config,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             ),
-            block_fp8=block_fp8,
+            weight_format=weight_format,
         )
         adapter.warmup()
         for name, tensor in zip(names, adapter.kernel_weights()):
-            # Rebind, never copy: the params must alias the megakernel buffers (EPLB).
             getattr(layer, name).data = tensor
         self._adapter = adapter
 
@@ -212,9 +217,7 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
     ) -> None:
         if self._adapter is None:
             raise RuntimeError("FlashInfer MoE-EP weights have not been processed")
-        output.copy_(
-            self._adapter(hidden_states, topk_ids.to(torch.int32), topk_weights)
-        )
+        output.copy_(self._adapter(hidden_states, topk_ids, topk_weights))
 
 
 def epilogue_from_quant_config(

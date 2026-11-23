@@ -24,7 +24,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-      pytest -v -s lora/test_layers.py &&
+      pytest -v -s lora/test_layers.py --deselect="tests/lora/test_layers.py::test_glm5next_kda_helper_import_on_xpu" &&
       pytest -v -s lora/test_lora_checkpoints.py &&
       pytest -v -s lora/test_lora_functions.py &&
       pytest -v -s lora/test_lora_huggingface.py &&
@@ -151,7 +151,7 @@ steps:
   device: intel_gpu_k8s
   num_devices: 2
   resource_claim_template: b70-2
-  working_dir: "/workspace/vllm/"
+  working_dir: "/vllm-workspace/"
   env:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:

@@ -673,7 +673,6 @@ def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
         model=model_name,
         max_model_len=8192,
         max_num_seqs=2,
-        trust_remote_code=True,
         dtype="half",
         limit_mm_per_prompt={"image": len(image_urls)},
     )
@@ -683,7 +682,7 @@ def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
     )
     messages = [{"role": "user", "content": f"{placeholders}\n{question}"}]
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     prompt = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
@@ -728,7 +727,6 @@ def load_paddleocr_vl(question: str, image_urls: list[str]) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         max_model_len=8192,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
@@ -1226,7 +1224,6 @@ def load_molmo2(question: str, image_urls: list[str]) -> ModelRequestData:
 def load_unlimited_ocr2(question: str, image_urls: list[str]) -> ModelRequestData:
     engine_args = EngineArgs(
         model="baidu/Unlimited-OCR-2",
-        attention_config={"backend": "FLASH_ATTN"},
         enable_chunked_prefill=True,
         enable_prefix_caching=False,
         max_model_len=32768,
