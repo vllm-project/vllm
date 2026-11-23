@@ -6,6 +6,10 @@ import threading
 import time
 from types import MethodType, SimpleNamespace
 
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    MoRIIOMode,
+    TransferBatchState,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
@@ -20,6 +24,7 @@ _map = MoRIIOConnectorScheduler.map_request_id
 def _producer_sched() -> SimpleNamespace:
     sched = SimpleNamespace(
         is_producer=True,
+        mode=MoRIIOMode.READ,
         _deferred_send_deadlines={},
         _pending_sent_acks={},
         _defer_timeout=60.0,
@@ -138,6 +143,9 @@ class _FakeNotifyWrapper:
         self.lock = threading.Lock()
         self.sent: list[tuple] = []
 
+    def poll_transfer_batch(self, statuses):
+        return TransferBatchState.PENDING
+
     def send_notify(
         self,
         transfer_id,
@@ -152,26 +160,23 @@ class _FakeNotifyWrapper:
         pass
 
 
-def test_timed_out_read_notifies_producer_to_release():
+def test_timed_out_read_does_not_release_producer_blocks():
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.world_size = 4
+    worker._has_mamba = False
+    worker._recving_local_blocks = {"req": [7]}
+    worker._invalid_block_ids = set()
+    worker.moriio_config = SimpleNamespace(recv_abort_timeout=120.0)
     worker.moriio_wrapper = _FakeNotifyWrapper()
-    worker._recving_transfers = {"req": {"layer0": _PendingStatus()}}
+    worker._recving_transfers = {"req": {"layer0": [_PendingStatus()]}}
     worker._recving_transfers_callback_addr = {
-        "req": ("127.0.0.1", "7000", "tx-timeout")
+        "req": ("127.0.0.1", [7000], "tx-timeout")
     }
     worker._recving_transfers_start = {"req": time.monotonic() - 200.0}
 
     assert worker._pop_done_transfers() == set()
-    assert worker.moriio_wrapper.sent == [
-        (
-            "tx-timeout",
-            "127.0.0.1",
-            "7000",
-            "release",
-            {"consumer_tp_size": 4},
-        )
-    ]
+    assert worker.moriio_wrapper.sent == []
+    assert worker._invalid_block_ids == {7}
     assert worker._recving_transfers == {}
     assert worker._recving_transfers_callback_addr == {}
     assert worker._recving_transfers_start == {}

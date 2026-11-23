@@ -170,7 +170,7 @@ class TestIsFunctionRecipientWithAllowedNames:
     """Tests for is_function_recipient with allowed_function_tool_names."""
 
     def test_prefixed_always_accepted(self):
-        """functions. prefix is always accepted regardless of allowed names."""
+        """Functions. prefix is always accepted regardless of allowed names."""
         fn_names = frozenset({"other_tool"})
         assert is_function_recipient("functions.get_weather", fn_names) is True
 
@@ -252,8 +252,7 @@ class TestExtractFunctionFromRecipient:
 
 
 class TestCommonParseInputToHarmonyMessage:
-    """
-    Tests for scenarios that are common to both Chat Completion
+    """Tests for scenarios that are common to both Chat Completion
     parse_chat_input_to_harmony_message and Responses API
     response_previous_input_to_harmony functions.
     """
@@ -448,8 +447,7 @@ class TestCommonParseInputToHarmonyMessage:
 
 
 class TestParseChatInputToHarmonyMessage:
-    """
-    Tests for scenarios that are specific to the Chat Completion API
+    """Tests for scenarios that are specific to the Chat Completion API
     parse_chat_input_to_harmony_message function.
     """
 
@@ -940,6 +938,9 @@ class TestAutoDropAnalysisMessages:
         assert cleaned_messages == messages[1:]
 
 
+pytestmark = pytest.mark.skip_global_cleanup
+
+
 def test_has_custom_tools() -> None:
     assert not has_custom_tools(set())
     assert not has_custom_tools({"web_search_preview", "code_interpreter", "container"})
@@ -1031,8 +1032,8 @@ class TestResponseInputToHarmonyReasoningItem:
         )
         assert msg.channel == "analysis"
 
-    def test_reasoning_without_content_returns_none(self):
-        """Test reasoning item without content field returns None."""
+    def test_reasoning_without_content_returns_empty_message(self):
+        """Test reasoning item without content field returns empty message."""
         item = {
             "type": "reasoning",
             "id": "rs_123",
@@ -1041,10 +1042,11 @@ class TestResponseInputToHarmonyReasoningItem:
 
         msg = response_input_to_harmony(item, prev_responses=[])
 
-        assert msg is None
+        assert msg is not None
+        assert msg.content[0].text == ""
 
-    def test_reasoning_with_none_content_returns_none(self):
-        """Test reasoning item with content=None returns None."""
+    def test_reasoning_with_none_content_returns_empty_message(self):
+        """Test reasoning item with content=None returns empty message."""
         item = {
             "type": "reasoning",
             "id": "rs_123",
@@ -1054,10 +1056,11 @@ class TestResponseInputToHarmonyReasoningItem:
 
         msg = response_input_to_harmony(item, prev_responses=[])
 
-        assert msg is None
+        assert msg is not None
+        assert msg.content[0].text == ""
 
-    def test_reasoning_with_empty_content_returns_none(self):
-        """Test reasoning item with empty content list returns None."""
+    def test_reasoning_with_empty_content_returns_empty_message(self):
+        """Test reasoning item with empty content list returns empty message."""
         item = {
             "type": "reasoning",
             "id": "rs_123",
@@ -1066,4 +1069,5 @@ class TestResponseInputToHarmonyReasoningItem:
 
         msg = response_input_to_harmony(item, prev_responses=[])
 
-        assert msg is None
+        assert msg is not None
+        assert msg.content[0].text == ""

@@ -3,13 +3,13 @@
 
 import torch.nn as nn
 
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
-    AutoRegressiveSpeculator,
-)
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+    TargetDependentARSpeculator,
+)
 
 
-class MTPSpeculator(AutoRegressiveSpeculator):
+class MTPSpeculator(TargetDependentARSpeculator):
     share_mtp_topk_indices: bool = False
 
     def load_draft_model(
@@ -18,6 +18,10 @@ class MTPSpeculator(AutoRegressiveSpeculator):
         target_attn_layer_names: set[str],
     ) -> nn.Module:
         draft_model = load_eagle_model(target_model, self.vllm_config)
+        if hasattr(draft_model.model, "set_prefill_rows"):
+            # bind before capture; replay reads the indices updated in place
+            # by prepare_prefill_inputs, including rejected and padded rows.
+            draft_model.model.set_prefill_rows(self.last_token_indices)
         spec_config = self.vllm_config.speculative_config
         draft_hf_config = (
             spec_config.draft_model_config.hf_config

@@ -8,7 +8,7 @@ This guide will help you quickly get started with vLLM to perform:
 ## Prerequisites
 
 - OS: Linux
-- Python: 3.10 -- 3.13
+- Python: 3.11 -- 3.14
 
 !!! note
     vLLM also works on macOS with [vLLM-Metal](https://github.com/vllm-project/vllm-metal) for Apple Silicon GPU acceleration. See the [GPU installation guide](installation/gpu.md) and select the "Apple Silicon" tab.
@@ -22,10 +22,13 @@ This guide will help you quickly get started with vLLM to perform:
     It's recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
 
     ```bash
-    uv venv --python 3.12 --seed
+    uv venv --python 3.14 --seed
     source .venv/bin/activate
     uv pip install vllm --torch-backend=auto
+    vllm download-kernels
     ```
+
+    `vllm download-kernels` installs precompiled kernels that vLLM otherwise downloads and compiles at startup, which can add several minutes on Hopper and newer GPUs. See the [installation guide](installation/gpu.md) for details.
 
     `uv` can [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu126`), set `--torch-backend=cu126` (or `UV_TORCH_BACKEND=cu126`).
 
@@ -38,7 +41,7 @@ This guide will help you quickly get started with vLLM to perform:
     You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments. You can install `uv` to the conda environment through `pip` if you want to manage it within the environment.
 
     ```bash
-    conda create -n myenv python=3.12 -y
+    conda create -n myenv python=3.14 -y
     conda activate myenv
     pip install --upgrade uv
     uv pip install vllm --torch-backend=auto
@@ -51,13 +54,13 @@ This guide will help you quickly get started with vLLM to perform:
     It's recommended to use [uv](https://docs.astral.sh/uv/), as it gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). `uv` is also a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
 
     ```bash
-    uv venv --python 3.12 --seed
+    uv venv --python 3.14 --seed
     source .venv/bin/activate
     uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
     ```
 
     !!! note
-        It currently supports Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
+        It currently supports Python 3.14, ROCm 7.0 and `glibc >= 2.35`.
 
     !!! note
         Note that, previously, docker images were published using AMD's docker release pipeline and were located `rocm/vllm-dev`. This is being deprecated by using vLLM's docker release pipeline.
@@ -329,5 +332,5 @@ Some of the available backend options include:
 - On AMD ROCm: `TRITON_ATTN`, `ROCM_ATTN`, `ROCM_AITER_FA`, `ROCM_AITER_UNIFIED_ATTN`, `TRITON_MLA`, `ROCM_AITER_MLA` or `ROCM_AITER_TRITON_MLA`.
 - On Intel XPU: `FLASH_ATTN`, `TRITON_ATTN`, `TRITON_MLA`, `XPU_MLA_SPARSE`, `TORCH_SDPA` or `TURBOQUANT`.
 
-!!! warning
-    There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see [docker/Dockerfile](../../docker/Dockerfile) for instructions on how to install it.
+!!! tip
+    FlashInfer is installed with vLLM, but its precompiled kernels are not. Run `vllm download-kernels` after installing or upgrading vLLM so they are not downloaded and compiled at startup.

@@ -42,7 +42,6 @@ from .interfaces import (
     HasInnerState,
     IsHybrid,
     SupportsLoRA,
-    SupportsMambaPrefixCaching,
     SupportsPP,
 )
 from .utils import (
@@ -140,8 +139,7 @@ class FalconH1SSMDecoderLayer(nn.Module):
         self._init_mup_vector()
 
     def _init_mup_vector(self):
-        """
-        Non learnable per-block scaling vector composed of element-wise
+        """Non learnable per-block scaling vector composed of element-wise
         multipliersapplied to each separate contiguous block of the output
         of the linear projection (in_proj) before further processing
         (gating, convolution, SSM):
@@ -313,8 +311,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
 
 
 class FalconH1ParallelHybrid(nn.Module):
-    """
-    A hybrid decoder layer for FalconH1 where the input is processed
+    """A hybrid decoder layer for FalconH1 where the input is processed
     in parallel through both the self-attention branch and the SSM (Mamba)
     branch. Their outputs are then summed to produce the final hidden state.
 
@@ -424,7 +421,9 @@ class FalconH1Model(nn.Module):
 
         self.vocab_size = config.vocab_size
 
-        if get_pp_group().is_first_rank:
+        if get_pp_group().is_first_rank or (
+            config.tie_word_embeddings and get_pp_group().is_last_rank
+        ):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
@@ -501,7 +500,6 @@ class FalconH1ForCausalLM(
     SupportsLoRA,
     SupportsPP,
     IsHybrid,
-    SupportsMambaPrefixCaching,
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -552,6 +550,7 @@ class FalconH1ForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
+
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
@@ -570,6 +569,7 @@ class FalconH1ForCausalLM(
             head_dim=hf_config.mamba_d_head,
             state_size=hf_config.mamba_d_state,
             conv_kernel=hf_config.mamba_d_conv,
+            num_spec=vllm_config.num_speculative_tokens,
         )
 
     @classmethod

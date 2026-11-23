@@ -14,7 +14,7 @@ from vllm.tool_parsers.granite4_tool_parser import Granite4ToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.transformers_utils.repo_utils import hf_api
 
-LORA_MODEL = "minpeter/LoRA-Llama-3.2-1B-tool-vllm-ci"
+LORA_MODEL = "vllm-project/LoRA-Llama-3.2-1B-tool-vllm-ci"
 
 TOOLS = [
     {
@@ -150,7 +150,6 @@ async def test_non_streaming_tool_call(
     client: openai.AsyncOpenAI, server_config: ServerConfig
 ):
     """Test tool call in non-streaming mode."""
-
     response = await client.chat.completions.create(
         model=server_config["model_arg"],
         messages=MESSAGES,
@@ -183,7 +182,6 @@ async def test_streaming_tool_call(
     client: openai.AsyncOpenAI, server_config: ServerConfig
 ):
     """Test tool call in streaming mode."""
-
     stream = await client.chat.completions.create(
         model=server_config["model_arg"],
         messages=MESSAGES,
@@ -230,7 +228,6 @@ async def test_non_streaming_product_tool_call(
     client: openai.AsyncOpenAI, server_config: ServerConfig
 ):
     """Test tool call integer and boolean parameters in non-streaming mode."""
-
     response = await client.chat.completions.create(
         model=server_config["model_arg"],
         messages=PRODUCT_MESSAGES,
@@ -272,7 +269,6 @@ async def test_streaming_product_tool_call(
     client: openai.AsyncOpenAI, server_config: ServerConfig
 ):
     """Test tool call integer and boolean parameters in streaming mode."""
-
     stream = await client.chat.completions.create(
         model=server_config["model_arg"],
         messages=PRODUCT_MESSAGES,

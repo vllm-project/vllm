@@ -9,6 +9,8 @@ use axum::middleware::Next;
 use axum::response::Response;
 use vllm_metrics::{HttpHandlerLabels, HttpRequestLabels, METRICS};
 
+use super::body_guard::hold_until_body_dropped;
+
 /// Endpoints that will be excluded from HTTP metrics tracking.
 ///
 /// Original Python definition:
@@ -25,9 +27,6 @@ const EXCLUDED_HANDLERS: &[&str] = &[
     "/reset_mm_cache",
     "/reset_encoder_cache",
     "/collective_rpc",
-    "/sleep",
-    "/wake_up",
-    "/is_sleeping",
 ];
 
 /// Map the request method to a bounded Prometheus label.
@@ -57,37 +56,55 @@ pub async fn track_http_metrics(req: Request, next: Next) -> Response {
         .extensions()
         .get::<MatchedPath>()
         .map_or_else(|| "none".to_string(), |path| path.as_str().to_string());
-    let excluded = EXCLUDED_HANDLERS.contains(&handler.as_str());
-    let started_at = Instant::now();
 
-    let response = next.run(req).await;
-
-    if excluded {
-        return response;
+    if EXCLUDED_HANDLERS.contains(&handler.as_str()) {
+        return next.run(req).await;
     }
 
-    let elapsed = started_at.elapsed().as_secs_f64();
-    let status = status_group(response.status().as_u16());
+    let mut guard = HttpMetricsGuard {
+        method,
+        handler,
+        // Kept when the future is dropped before a response (the client went
+        // away); Python's `with_cancellation` answers that with an empty 200.
+        status: "2xx",
+        started_at: Instant::now(),
+    };
+    let response = next.run(req).await;
+    guard.status = status_group(response.status().as_u16());
+    hold_until_body_dropped(response, guard)
+}
 
-    let metrics = &METRICS.api_server;
+struct HttpMetricsGuard {
+    method: String,
+    handler: String,
+    status: &'static str,
+    started_at: Instant,
+}
 
-    metrics
-        .http_requests
-        .get_or_create(&HttpRequestLabels {
-            method: method.clone(),
-            status,
-            handler: handler.clone(),
-        })
-        .inc();
+impl Drop for HttpMetricsGuard {
+    fn drop(&mut self) {
+        let elapsed = self.started_at.elapsed().as_secs_f64();
+        let metrics = &METRICS.api_server;
 
-    metrics
-        .http_request_duration_seconds
-        .get_or_create(&HttpHandlerLabels { method, handler })
-        .observe(elapsed);
+        metrics
+            .http_requests
+            .get_or_create(&HttpRequestLabels {
+                method: self.method.clone(),
+                status: self.status,
+                handler: self.handler.clone(),
+            })
+            .inc();
 
-    metrics.http_request_duration_highr_seconds.observe(elapsed);
+        metrics
+            .http_request_duration_seconds
+            .get_or_create(&HttpHandlerLabels {
+                method: self.method.clone(),
+                handler: self.handler.clone(),
+            })
+            .observe(elapsed);
 
-    response
+        metrics.http_request_duration_highr_seconds.observe(elapsed);
+    }
 }
 
 fn status_group(status: u16) -> &'static str {

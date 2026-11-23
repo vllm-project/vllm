@@ -18,7 +18,7 @@ use crate::error::{Error, Result, bail_multimodal, multimodal};
 pub(super) enum KwargValue {
     /// Tensor with row-major flat data and shape.
     Tensor { wire: WireTensor },
-    /// Non-tensor kwarg value that is shared or copied as-is.
+    /// Non-tensor kwarg value preserved in protocol form.
     Passthrough(ProtocolKwargValue),
 }
 
@@ -39,7 +39,7 @@ pub(super) fn collect_tensors(
         ..
     } = preprocessed;
 
-    let primary_value = KwargValue::from_f32_array(encoder_input, float_dtype)?;
+    let primary_value = KwargValue::from_f32_array(encoder_input.into_f32(), float_dtype)?;
 
     let mut tensors = HashMap::new();
     tensors.insert(primary_key.to_string(), primary_value);
@@ -150,7 +150,17 @@ impl KwargValue {
     /// Batched fields use their first axis as media-item index and drop that
     /// axis in the per-feature value, matching vLLM's batched-field semantics.
     pub(super) fn batched_wire_value_at(&self, index: usize) -> Result<ProtocolKwargValue> {
-        self.wire_value_range(index, index + 1, true)
+        match self {
+            Self::Passthrough(ProtocolKwargValue::List(values)) => values
+                .get(index)
+                .cloned()
+                .ok_or_else(|| multimodal!("batched passthrough has no item at index {index}")),
+            Self::Passthrough(value) if index == 0 => Ok(value.clone()),
+            Self::Passthrough(_) => Err(multimodal!(
+                "scalar batched passthrough has no item at index {index}"
+            )),
+            Self::Tensor { .. } => self.wire_value_range(index, index + 1, true),
+        }
     }
 
     /// Convert one media item's flat tensor range directly to wire bytes.
@@ -181,13 +191,22 @@ impl KwargValue {
 /// Compute the first-axis range for one media item in a flat tensor.
 ///
 /// `sizes_key` names a companion tensor whose entries are cumulative slice
-/// sizes per media item.
+/// sizes per media item. A 2-D companion (e.g. a `[num_items, 3]` grid THW)
+/// sizes each item by the product of its row, like vLLM's
+/// `flat_from_sizes(grid_thw.prod(-1))`.
 pub(super) fn flat_range_for_index(
     sizes: &KwargValue,
     sizes_key: &str,
     index: usize,
 ) -> Result<(usize, usize)> {
-    let sizes = tensor_as_usize_vec(sizes)?;
+    let row_len = match sizes {
+        KwargValue::Tensor { wire } if wire.shape.len() == 2 => wire.shape[1].max(1),
+        _ => 1,
+    };
+    let sizes = tensor_as_usize_vec(sizes)?
+        .chunks(row_len)
+        .map(|row| row.iter().product())
+        .collect::<Vec<usize>>();
     let size = *sizes.get(index).ok_or_else(|| {
         multimodal!("flat tensor sizes key `{sizes_key}` has no entry for media item {index}")
     })?;
@@ -337,6 +356,41 @@ mod tests {
     }
 
     #[test]
+    fn batched_passthrough_value_at_selects_media_item() {
+        let image_sizes = KwargValue::from_model_specific(
+            ModelSpecificValue::TupleVec(vec![(384, 736), (512, 512)]),
+            ModelDtype::BFloat16,
+        )
+        .unwrap();
+
+        assert_eq!(
+            image_sizes.batched_wire_value_at(1).unwrap(),
+            ProtocolKwargValue::List(vec![
+                ProtocolKwargValue::Int(512),
+                ProtocolKwargValue::Int(512),
+            ])
+        );
+        assert!(image_sizes.batched_wire_value_at(2).is_err());
+
+        let token_counts = KwargValue::from_model_specific(
+            ModelSpecificValue::IntVec(vec![276, 400]),
+            ModelDtype::BFloat16,
+        )
+        .unwrap();
+        assert_eq!(
+            token_counts.batched_wire_value_at(1).unwrap(),
+            ProtocolKwargValue::Int(400)
+        );
+
+        let scalar = KwargValue::Passthrough(ProtocolKwargValue::Int(7));
+        assert_eq!(
+            scalar.batched_wire_value_at(0).unwrap(),
+            ProtocolKwargValue::Int(7)
+        );
+        assert!(scalar.batched_wire_value_at(1).is_err());
+    }
+
+    #[test]
     fn flat_wire_value_range_keeps_first_axis() {
         let value = KwargValue::Tensor {
             wire: WireTensor::from_u32(vec![5, 2], (0..10_u32).collect()).unwrap(),
@@ -362,6 +416,18 @@ mod tests {
         assert_eq!(
             flat_range_for_index(&sizes, "image_grid_thw", 1).unwrap(),
             (2, 5)
+        );
+    }
+
+    #[test]
+    fn flat_range_for_index_uses_row_products_of_2d_size_tensor() {
+        let grid_thw = KwargValue::Tensor {
+            wire: WireTensor::from_i64(vec![2, 3], vec![1_i64, 2, 3, 1, 4, 5]).unwrap(),
+        };
+
+        assert_eq!(
+            flat_range_for_index(&grid_thw, "vision_grid_thw", 1).unwrap(),
+            (6, 26)
         );
     }
 

@@ -51,7 +51,7 @@ from transformers.models.cohere_compass.image_processing_cohere_compass import (
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -82,6 +82,7 @@ from vllm.multimodal.inputs import (
     ImageItem,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -107,15 +108,14 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import round_up
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from ...utils.torch_utils import async_tensor_h2d
 from .commandr import CohereForCausalLM, CohereMLP, LayerNorm
+from .encoder_cudagraph_utils import Qwen2VLEncoderCudaGraphMixin
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle,
     SupportsEagle3,
-    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -232,7 +232,7 @@ if HAS_TRITON:
     ) -> torch.Tensor:
         """Launch the fused Triton kernel for one (t,h,w) grid.
 
-        Returns a tensor of shape ``(t * h * w, hidden_dim)`` with the
+        Returns a tensor of shape `(t * h * w, hidden_dim)` with the
         bilinearly-interpolated position embeddings in spatial-merge order.
         """
         assert h % m_size == 0 and w % m_size == 0, (
@@ -278,7 +278,7 @@ def pos_embed_interpolate_native(
 ) -> torch.Tensor:
     """Eager PyTorch bilinear position-embedding interpolation.
 
-    Returns a tensor of shape ``(t * h * w, hidden_dim)`` with the
+    Returns a tensor of shape `(t * h * w, hidden_dim)` with the
     bilinearly-interpolated position embeddings in spatial-merge order.
     """
     assert h % m_size == 0 and w % m_size == 0, (
@@ -338,8 +338,7 @@ def pos_embed_interpolate_native(
 
 
 class Cohere_VLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - np: Number of patches
         - ni: Number of images
         - cps: Number of channels * patch_size * patch_size
@@ -365,8 +364,7 @@ class Cohere_VLImagePixelInputs(TensorSchema):
 
 
 class Cohere_VLImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - nf: Number of image features
         - hs: Hidden size
         - ni: Number of images
@@ -895,6 +893,7 @@ class Cohere_VisionTransformer(nn.Module):
                 instead of computing from cu_seqlens (needed for CUDA
                 graph capture to cover worst-case replay scenarios).
             device: Device to place tensors on. Defaults to self.device.
+
         """
         if device is None:
             device = self.device
@@ -1162,7 +1161,6 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> CohereCompassProcessor:
         return self.ctx.get_hf_processor(
             CohereCompassProcessor,
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 
@@ -1239,11 +1237,8 @@ class CohereCompassDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        image_overrides = mm_options.get("image")
-
         target_image_width, target_image_height = (
             self.info.get_image_size_with_most_features()
         )
@@ -1252,8 +1247,8 @@ class CohereCompassDummyInputsBuilder(
             "image": self._get_dummy_images(
                 width=target_image_width,
                 height=target_image_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
         }
 
@@ -1305,7 +1300,7 @@ class CohereCompassMultiModalProcessor(
 class CohereCompassForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
-    SupportsEncoderCudaGraph,
+    Qwen2VLEncoderCudaGraphMixin,
     SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,
@@ -1497,6 +1492,9 @@ class CohereCompassForConditionalGeneration(
                 "max_seqlen",
                 "sequence_lengths",
             ],
+            padding_logics=MMEncoderAttention.get_cu_seqlens_padding_logics(
+                self.visual.attn_backend, "cu_seqlens"
+            ),
             out_hidden_size=self.visual.out_hidden_size,
             max_frames_per_video=max_frames,
         )
@@ -1508,87 +1506,6 @@ class CohereCompassForConditionalGeneration(
         if "image_grid_thw" in mm_kwargs:
             return "image"
         raise AssertionError("This line should be unreachable.")
-
-    def get_encoder_cudagraph_budget_range(
-        self,
-        vllm_config,
-    ) -> tuple[int, int]:
-        # Min: estimated smallest possible encoder input.
-        # 224x224 image → 16x16 patches (patch_size=14)
-        #                 spatial_merge_size=2 → 8x8 = 64 tokens
-        min_budget = 64
-        # Max: capped by max_num_batched_tokens
-        # TODO(shen-shanshan): the max_budget auto-infer needs to be optimized later.
-        max_budget = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            self.model_config.max_model_len,
-        )
-        return (min_budget, max_budget)
-
-    def _get_pixel_values_by_modality(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> torch.Tensor:
-        modality = self.get_input_modality(mm_kwargs)
-        if modality == "image":
-            return mm_kwargs["pixel_values"]
-        raise AssertionError("This line should be unreachable.")
-
-    def _get_grid_thw_by_modality(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[list[int]]:
-        grid_thw_key = f"{self.get_input_modality(mm_kwargs)}_grid_thw"
-        grid_thw = mm_kwargs[grid_thw_key]
-        if not isinstance(grid_thw, list):
-            grid_thw = grid_thw.tolist()
-        return grid_thw
-
-    def get_encoder_cudagraph_item_specs(
-        self,
-        mm_kwargs: dict[str, Any],
-    ):
-        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
-
-        m = self.visual.spatial_merge_size
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return [
-            EncoderItemSpec(
-                input_size=t * h * w,
-                output_tokens=t * (h // m) * (w // m),
-            )
-            for t, h, w in grid_thw
-        ]
-
-    def select_encoder_cudagraph_items(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
-    ) -> dict[str, Any]:
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-
-        if len(indices) == 0:
-            return {
-                "pixel_values": pixel_values[:0],
-                "image_grid_thw": [],
-            }
-
-        # Compute cumulative patch offsets for slicing pixel_values
-        patches_per_item = [t * h * w for t, h, w in grid_thw]
-        cum_patches = [0]
-        for p in patches_per_item:
-            cum_patches.append(cum_patches[-1] + p)
-
-        selected_pv = torch.cat(
-            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
-        )
-        selected_grid = [grid_thw[i] for i in indices]
-
-        return {
-            "pixel_values": selected_pv,
-            "image_grid_thw": selected_grid,
-        }
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -1651,47 +1568,6 @@ class CohereCompassForConditionalGeneration(
             values=values,
         )
 
-    def prepare_encoder_cudagraph_replay_buffers(
-        self,
-        mm_kwargs: dict[str, Any],
-        max_batch_size: int,
-        max_frames_per_batch: int,
-        path: str = "default",
-    ) -> EncoderCudaGraphReplayBuffers:
-        modality = self.get_input_modality(mm_kwargs)
-        grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
-
-        if modality == "image":
-            metadata = self.visual.prepare_encoder_metadata(
-                grid_thw_list,
-                max_batch_size=max_batch_size,
-            )
-        else:
-            raise AssertionError("This line should be unreachable.")
-
-        values = metadata | {
-            "pixel_values": self._get_pixel_values_by_modality(mm_kwargs),
-        }
-        return EncoderCudaGraphReplayBuffers(values=values)
-
-    def encoder_cudagraph_forward(
-        self,
-        values: dict[str, torch.Tensor],
-        path: str = "default",
-    ) -> torch.Tensor:
-        pixel_values = values.pop("pixel_values")
-        metadata = values
-        return self.visual(pixel_values, None, encoder_metadata=metadata)
-
-    def encoder_eager_forward(
-        self,
-        mm_kwargs: dict[str, Any],
-        path: str = "default",
-    ) -> torch.Tensor:
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return self.visual(pixel_values, grid_thw)
-
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> Cohere_VLImageInputs | None:
@@ -1744,8 +1620,7 @@ class CohereCompassForConditionalGeneration(
         image_embeds_split: tuple[torch.Tensor, ...],
         image_input: Cohere_VLImageInputs,
     ) -> tuple[torch.Tensor, ...]:
-        """
-        Append mrope positions for each for images.
+        """Append mrope positions for each for images.
         This is necessary to recover correct mrope positions
 
         Args:
@@ -1757,6 +1632,7 @@ class CohereCompassForConditionalGeneration(
             Tuple of image embeddings for each image item.
             Resulting embeddings will have extra 5 channels for
             computed mrope positions, consistent with video embeddings.
+
         """
         if self.is_multimodal_pruning_enabled:
             merge_size = self.visual.spatial_merge_size
@@ -1837,8 +1713,7 @@ class CohereCompassForConditionalGeneration(
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
     ) -> tuple[MultiModalEmbeddings, torch.Tensor, int]:
-        """
-        Update part of input mrope positions (starting with
+        """Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
         for unpruned sequence and becomes incorrect once pruning occurs,
         so once we prune media tokens we should reflect this in the
@@ -1856,6 +1731,7 @@ class CohereCompassForConditionalGeneration(
         Returns:
             Tuple of (multimodal_embeddings, mrope_positions,
                 mrope_position_delta).
+
         """
         return self._recompute_mrope_positions(
             input_ids=input_ids,
@@ -2037,7 +1913,7 @@ class CohereCompassForConditionalGeneration(
                 batch.
                 **NOTE**: If mrope is enabled (default setting for Cohere Compass
                 opensource models), the shape will be `(3, seq_len)`,
-                otherwise it will be `(seq_len,).
+                otherwise it will be `(seq_len,)`.
             intermediate_tensors: Intermediate tensors from previous pipeline
                 stages.
             inputs_embeds: Pre-computed input embeddings.
@@ -2046,8 +1922,8 @@ class CohereCompassForConditionalGeneration(
                     `None` if no images are passed.
                 - image_grid_thw: Tensor `(n_images, 3)` of image 3D grid in
                     LLM. `None` if no images are passed.
-        """
 
+        """
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -2083,38 +1959,23 @@ class CohereCompassForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector=["visual.merger", "visual.deepstack_merger_list"],
             tower_model="visual.",
         )
 
-    def get_num_mm_encoder_tokens(
+    def get_mm_lora_token_counts(
         self,
-        num_image_tokens: int,
-    ) -> int:
-        hf_config = self.config
-        vision_config = hf_config.vision_config
-        merge_size = vision_config.spatial_merge_size
-
-        return num_image_tokens * merge_size**2
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        hf_config = self.config
-        vision_config = hf_config.vision_config
-        merge_size = vision_config.spatial_merge_size
-        return num_vision_tokens // merge_size**2
-
-
-@lru_cache
-def _cached_tensor(x, device) -> torch.Tensor:
-    return torch.tensor(x, device=device)
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        merge_size = self.config.vision_config.spatial_merge_size
+        return num_mm_embeds * merge_size**2, num_mm_embeds
 
 
 class CohereCompassAttention(nn.Module):

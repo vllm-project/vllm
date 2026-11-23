@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from collections import OrderedDict
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Sequence
+from dataclasses import dataclass, field, replace
 
 from typing_extensions import override
 
@@ -9,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.v1.kv_offload.base import (
+    ConfigInfoMapping,
     LoadStoreSpec,
     LookupResult,
     Medium,
@@ -18,18 +21,39 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    StoreTrigger,
+    get_offload_group_idx,
 )
 from vllm.v1.kv_offload.cpu.common import (
     CPULoadStoreSpec,
+    CPUOffloadingInfo,
     CPUOffloadingMetrics,
 )
 from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
+
+
+@dataclass(slots=True)
+class _RequestCacheAccess:
+    """Cache keys observed by one request, grouped in prefix order."""
+
+    owner: object
+    cache_generation: int
+    key_groups: dict[int, list[OffloadKey]] = field(default_factory=dict)
+    seen_keys: set[OffloadKey] = field(default_factory=set)
+    inserted_keys: set[OffloadKey] = field(default_factory=set)
+    reused_keys: set[OffloadKey] = field(default_factory=set)
+    store_miss_keys: set[OffloadKey] = field(default_factory=set)
+    # Keys this request has counted toward store_threshold. Each counts once
+    # per request: a retry of a failed offer, or a re-offer after preemption,
+    # is not another use of the content.
+    counted_keys: set[OffloadKey] = field(default_factory=set)
+    finished: bool = False
 
 
 class CPUOffloadingManager(OffloadingManager):
-    """
-    An OffloadingManager with a pluggable CachePolicy, resolved by name via
+    """An OffloadingManager with a pluggable CachePolicy, resolved by name via
     CachePolicyFactory (built in: "lru", "arc"; external policies can either
     register their own or be loaded out-of-tree via cache_policy_module_path).
 
@@ -47,9 +71,13 @@ class CPUOffloadingManager(OffloadingManager):
         enable_events: bool = False,
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
+        info: CPUOffloadingInfo | None = None,
     ):
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
+        self._config_info: ConfigInfoMapping = (
+            info.as_config_info() if info is not None else {}
+        )
         self._num_allocated_chunks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
@@ -66,6 +94,7 @@ class CPUOffloadingManager(OffloadingManager):
         self.max_tracker_size: int = max_tracker_size
         self.stores_skipped_in_current_batch: int = 0
         self.allocation_sizes_in_current_batch: list[int] = []
+        self._cache_generation = 0
 
         # Number of chunk references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
@@ -103,14 +132,21 @@ class CPUOffloadingManager(OffloadingManager):
     ) -> CPULoadStoreSpec:
         return CPULoadStoreSpec([chunk.chunk_id for chunk in chunks])
 
-    def _record_accesses(self, keys: Collection[OffloadKey]) -> None:
-        """Record an offer without evicting its tracked candidates."""
+    def _record_accesses(
+        self, keys: Collection[OffloadKey], counted: Collection[OffloadKey]
+    ) -> None:
+        """Record an offer without evicting its tracked candidates.
+
+        Keys in `counted` were counted by an earlier offer of the same request:
+        they stay tracked but don't count again.
+        """
         assert self.counts is not None
         protected: set[OffloadKey] = set()
         for key in keys:
             if key in self.counts:
                 self.counts.move_to_end(key)
-                self.counts[key] += 1
+                if key not in counted:
+                    self.counts[key] += 1
                 protected.add(key)
 
         num_unprotected = len(self.counts) - len(protected)
@@ -124,10 +160,52 @@ class CPUOffloadingManager(OffloadingManager):
                 num_unprotected -= 1
             self.counts[key] = 1
 
+    def _get_request_cache_access(self, req_context: ReqContext) -> _RequestCacheAccess:
+        state = req_context.get_state(_RequestCacheAccess)
+        if (
+            state is None
+            or state.owner is not self
+            or state.cache_generation != self._cache_generation
+        ):
+            state = _RequestCacheAccess(
+                owner=self, cache_generation=self._cache_generation
+            )
+            req_context.set_state(state)
+        return state
+
+    def _record_request_cache_access(
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+        inserted_keys: Iterable[OffloadKey] = (),
+        reused_keys: Iterable[OffloadKey] = (),
+    ) -> None:
+        state = self._get_request_cache_access(req_context)
+        new_keys = []
+        for key in keys:
+            if key in state.seen_keys:
+                continue
+            assert not state.finished, (
+                "New cache keys observed after request finalization"
+            )
+            group_idx = get_offload_group_idx(key)
+            state.key_groups.setdefault(group_idx, []).append(key)
+            state.seen_keys.add(key)
+            new_keys.append(key)
+        if new_keys:
+            self._policy.on_request_access(new_keys, req_context)
+        state.inserted_keys.update(inserted_keys)
+        # Re-reading a chunk inserted by this request is an internal transfer
+        # (for example, a tiering cascade), not a second cache access.
+        state.reused_keys.update(
+            key for key in reused_keys if key not in state.inserted_keys
+        )
+
     # --- OffloadingManager interface ---
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        self._get_request_cache_access(req_context)
         return RequestOffloadingContext()
 
     @override
@@ -140,10 +218,25 @@ class CPUOffloadingManager(OffloadingManager):
         return LookupResult.HIT
 
     @override
+    def get_load_source(
+        self, key: OffloadKey, req_context: ReqContext
+    ) -> CacheHitSource:
+        return CacheHitSource.HOST
+
+    @override
     def prepare_load(
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+    ) -> LoadStoreSpec:
+        return self._prepare_load(keys, req_context, record_access=True)
+
+    def _prepare_load(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        *,
+        record_access: bool,
     ) -> LoadStoreSpec:
         chunks = []
         for key in keys:
@@ -156,11 +249,9 @@ class CPUOffloadingManager(OffloadingManager):
                 assert self._num_evictable_cache_chunks >= 0
             chunk.ref_cnt += 1
             chunks.append(chunk)
+        if record_access:
+            self._record_request_cache_access(keys, req_context, reused_keys=keys)
         return self._get_load_store_spec(keys, chunks)
-
-    @override
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
-        self._policy.touch(keys, req_context)
 
     @override
     def complete_load(
@@ -180,14 +271,66 @@ class CPUOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
+        trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
+        return self._prepare_store(keys, req_context, allow_partial=True)
+
+    def _prepare_store(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        *,
+        allow_partial: bool = False,
+    ) -> PrepareStoreOutput | None:
+        keys = list(keys)
+        state = self._get_request_cache_access(req_context)
         if self.counts is not None:
-            num_keys = len(keys)
-            self._record_accesses(keys)
-            keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
-            self.stores_skipped_in_current_batch += num_keys - len(keys)
-        # filter out chunks that are already stored
-        keys_to_store = [k for k in keys if self._policy.get(k) is None]
+            self._record_accesses(keys, state.counted_keys)
+        # Partition the original offer before admission filtering. Ready
+        # resident chunks are request reuses even if their tracker entry was
+        # aged out; the threshold applies only to new store candidates.
+        keys_to_store: list[OffloadKey] = []
+        ready_existing_keys: list[OffloadKey] = []
+        evictable_existing_keys: set[OffloadKey] = set()
+        for key in keys:
+            chunk = self._policy.get(key)
+            if chunk is None:
+                keys_to_store.append(key)
+            else:
+                if chunk.is_ready:
+                    ready_existing_keys.append(key)
+                if chunk.ref_cnt == 0:
+                    evictable_existing_keys.add(key)
+
+        if self.counts is not None:
+            admitted_keys: list[OffloadKey] = []
+            for key in keys_to_store:
+                if self.counts.get(key, 0) >= self.store_threshold:
+                    admitted_keys.append(key)
+                elif key not in state.counted_keys:
+                    self.stores_skipped_in_current_batch += 1
+            keys_to_store = admitted_keys
+            state.counted_keys.update(keys)
+
+        new_store_misses = [
+            key for key in keys_to_store if key not in state.store_miss_keys
+        ]
+        if new_store_misses:
+            # ARC learns from B1/B2 before insert() removes the ghost entry.
+            # Deduplication makes this one policy observation per request.
+            self._policy.on_store_miss(new_store_misses, req_context)
+            state.store_miss_keys.update(new_store_misses)
+
+        recorded_keys = set(keys_to_store)
+        recorded_keys.update(ready_existing_keys)
+        # Record once before any allocation-related early return. Store
+        # candidates are classified as insertions only after allocation succeeds.
+        self._record_request_cache_access(
+            (key for key in keys if key in recorded_keys),
+            req_context,
+            reused_keys=ready_existing_keys,
+        )
 
         if not keys_to_store:
             return PrepareStoreOutput(
@@ -195,6 +338,48 @@ class CPUOffloadingManager(OffloadingManager):
                 store_spec=self._get_load_store_spec([], []),
                 evicted_keys=[],
             )
+
+        keys_to_retry: list[OffloadKey] = []
+        if allow_partial:
+            # Offered chunks are not evicted, so they are not room for the offer.
+            num_storable_keys = (
+                self._get_num_free_chunks()
+                + self._num_evictable_cache_chunks
+                - len(evictable_existing_keys)
+            )
+            if len(keys_to_store) > num_storable_keys:
+                # Store the lowest positions, so that the groups stay aligned.
+                order = {
+                    key: (
+                        math.inf
+                        if (position := req_context.get_offload_key_position(key))
+                        is None
+                        else position,
+                        offer_idx,
+                    )
+                    for offer_idx, key in enumerate(keys)
+                }
+                keys_by_position = sorted(keys_to_store, key=order.__getitem__)
+                # Retry each group from its first key that does not fit, resident
+                # keys included, as the connector offers all of them again.
+                group_cuts: dict[int, tuple[float, int]] = {}
+                for key in keys_by_position[num_storable_keys:]:
+                    group_cuts.setdefault(get_offload_group_idx(key), order[key])
+                keys_to_retry = [
+                    key
+                    for key in keys
+                    if (cut := group_cuts.get(get_offload_group_idx(key))) is not None
+                    and order[key] >= cut
+                ]
+                retried_keys = set(keys_to_retry)
+                keys_to_store = [k for k in keys_to_store if k not in retried_keys]
+                if not keys_to_store:
+                    return PrepareStoreOutput(
+                        keys_to_store=[],
+                        store_spec=self._get_load_store_spec([], []),
+                        evicted_keys=[],
+                        keys_to_retry=keys_to_retry,
+                    )
 
         self.allocation_sizes_in_current_batch.append(len(keys_to_store))
         num_chunks_to_evict = len(keys_to_store) - self._get_num_free_chunks()
@@ -237,8 +422,9 @@ class CPUOffloadingManager(OffloadingManager):
         )
 
         for key, chunk in zip(keys_to_store, chunks):
-            self._policy.insert(key, chunk)
+            self._policy.insert(key, chunk, req_context)
         self._num_write_pending_chunks += len(keys_to_store)
+        state.inserted_keys.update(keys_to_store)
 
         # build store specs for allocated chunks
         store_spec = self._get_load_store_spec(keys_to_store, chunks)
@@ -247,6 +433,7 @@ class CPUOffloadingManager(OffloadingManager):
             keys_to_store=keys_to_store,
             store_spec=store_spec,
             evicted_keys=to_evict,
+            keys_to_retry=keys_to_retry,
         )
 
     @override
@@ -254,9 +441,20 @@ class CPUOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
+        trigger: StoreTrigger,
+        success: bool = True,
+    ) -> None:
+        self._complete_store(keys, req_context, success)
+
+    def _complete_store(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
         success: bool = True,
     ) -> None:
         stored_keys: list[OffloadKey] = []
+        removed_keys: list[OffloadKey] = []
 
         if success:
             for key in keys:
@@ -274,6 +472,17 @@ class CPUOffloadingManager(OffloadingManager):
                     self._num_write_pending_chunks -= 1
                     self._policy.remove(key)
                     self._free_chunk(chunk)
+                    removed_keys.append(key)
+
+        if removed_keys and self.events is not None:
+            self.events.append(
+                OffloadingEvent(
+                    keys=removed_keys,
+                    medium=self.medium,
+                    removed=True,
+                    metadata_only=True,
+                )
+            )
 
         if stored_keys and self.events is not None:
             self.events.append(
@@ -281,8 +490,39 @@ class CPUOffloadingManager(OffloadingManager):
                     keys=stored_keys,
                     medium=self.medium,
                     removed=False,
+                    removal_expected=True,
+                    req_context=req_context,
                 )
             )
+
+    @override
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        state = req_context.get_state(_RequestCacheAccess)
+        if (
+            state is None
+            or state.owner is not self
+            or state.cache_generation != self._cache_generation
+            or state.finished
+        ):
+            return
+        state.finished = True
+        key_groups = []
+        for group_idx in sorted(state.key_groups):
+            keys = state.key_groups[group_idx]
+            positions = {
+                key: position
+                for key in keys
+                if (position := req_context.get_offload_key_position(key)) is not None
+            }
+            if len(positions) == len(keys):
+                keys = sorted(keys, key=positions.__getitem__)
+            key_groups.append(tuple(keys))
+        self._policy.on_request_finished(
+            tuple(key_groups),
+            state.inserted_keys - state.reused_keys,
+            state.reused_keys,
+            req_context,
+        )
 
     @override
     def reset_cache(self) -> None:
@@ -292,6 +532,7 @@ class CPUOffloadingManager(OffloadingManager):
         # flushes in-flight load job IDs to the workers before any new stores
         # can begin, preventing a cross-direction data race on reused offload chunk IDs.
         self._policy.clear()
+        self._cache_generation += 1
         self._num_evictable_cache_chunks = 0
         self._num_write_pending_chunks = 0
 
@@ -300,9 +541,24 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
-        if self.events is not None:
-            yield from self.events
-            self.events.clear()
+        if self.events is None:
+            return
+        # Detach the batch up front so a partially consumed drain cannot
+        # replay cleanup against a key a retry has since re-allocated.
+        events, self.events = self.events, []
+        for event in events:
+            if event.metadata_only:
+                # A retry may already own this key before cleanup is drained.
+                keys = [key for key in event.keys if self._policy.get(key) is None]
+                if not keys:
+                    continue
+                event = replace(event, keys=keys)
+            yield event
+
+    @override
+    def config_info(self) -> Sequence[ConfigInfoMapping]:
+        """Report the CPU cache facts of the one cache this manager holds."""
+        return [self._config_info]
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = OffloadingConnectorStats()

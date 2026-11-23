@@ -27,10 +27,10 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_diffkv,
 )
 from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.core.single_type_kv_cache_manager import SinkFullAttentionManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    KVCacheSpec,
-    SinkFullAttentionSpec,
+    KVCacheLayerConfig,
     get_kv_quant_mode,
 )
 
@@ -114,9 +114,7 @@ def create_static_sink_attention_backend(
 
 @CustomOp.register("static_sink_attention")
 class StaticSinkAttention(Attention, CustomOp):
-    """
-    Attention with static sink tokens
-    """
+    """Attention with static sink tokens."""
 
     def __init__(
         self,
@@ -152,8 +150,6 @@ class StaticSinkAttention(Attention, CustomOp):
             attn_backend=attn_backend,
             **kwargs,
         )
-        CustomOp.__init__(self)
-
         self.sink_len = sink_len
         self.sink_populated = False
         self.sink_key = None
@@ -212,21 +208,21 @@ class StaticSinkAttention(Attention, CustomOp):
         # We only populate the sink_key and sink_value once
         self.sink_populated = True
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # Block size may get updated after model loading, refresh it
         self.block_size = vllm_config.cache_config.block_size
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
 
-        return SinkFullAttentionSpec(
+        spec = AttentionSpec(
             block_size=self.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
             head_size_v=self.head_size_v,
-            sink_len=self.sink_len,
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
+        return SinkFullAttentionManager.layer_config(spec, sink_len=self.sink_len)
 
 
 def maybe_populate_sink(

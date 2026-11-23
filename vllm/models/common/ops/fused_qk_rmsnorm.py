@@ -5,11 +5,11 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -17,7 +17,7 @@ from vllm.utils.math_utils import next_power_of_2
 
 
 class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         q_size: int
@@ -68,7 +68,8 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
             weight_ptr = kv_weight_ptr
             row_out = kv_out_ptr + token_idx * kv_out_stride
 
-        # RMSNorm in fp32 throughout — matches csrc/layernorm_kernels.cu's
+        # RMSNorm in fp32 throughout — matches
+        # csrc/layernorm_kernels.cu's
         # `(scalar_t)(x * s_variance * w)` and DeepseekV4's compressor kernel, which
         # keep x, rrms, and w all in fp32 and perform a single cast at store.
         block = tl.arange(0, BLOCK_SIZE)
@@ -88,7 +89,7 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
         y = x * rrms * w
         tl.store(row_out + block, y.to(row_out.dtype.element_ty), mask=mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,

@@ -68,8 +68,7 @@ def server(request):
     if request.param is not None:
         args += ["--attention-backend", request.param]
         if "AITER" in request.param:
-            # TODO: re-enable once AITER reenables fp16 unified attention.
-            pytest.skip("ROCM_AITER_UNIFIED_ATTN does not support fp16")
+            env_dict = _AITER_ENV
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
 
@@ -89,6 +88,7 @@ async def test_basic_audio(whisper_client, mary_had_lamb):
         language="en",
         response_format="text",
         temperature=0.0,
+        extra_body={"vllm_xargs": json.dumps({"frontend_window": 128})},
     )
     out = json.loads(transcription)
     out_text = out["text"]
@@ -238,8 +238,7 @@ async def test_stream_options(winning_call, whisper_client):
 
 @pytest.mark.asyncio
 async def test_sampling_params(mary_had_lamb, whisper_client):
-    """
-    Compare sampling with params and greedy sampling to assert results
+    """Compare sampling with params and greedy sampling to assert results
     are different when extreme sampling parameters values are picked.
     """
     transcription = await whisper_client.audio.transcriptions.create(
