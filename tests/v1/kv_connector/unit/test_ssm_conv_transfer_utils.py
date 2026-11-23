@@ -6,7 +6,8 @@ to the decode rank that owns it.
 The test builds the full conv state with values that name their sub-projection,
 head, channel and row, shards it for the prefill TP, moves it with the byte
 ranges from `MambaConvSplitInfo` the way the NIXL connector does, and compares
-each decode page with the full state sharded directly for the decode TP.
+each decode page with the full state sharded directly for the decode TP, in
+both conv state layouts.
 """
 
 from dataclasses import dataclass
@@ -17,7 +18,10 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     derive_mamba_conv_split,
 )
-from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    get_conv_state_layout,
+    is_conv_state_dim_first,
+)
 from vllm.models.nemotron_shortcut.nvidia.gdp import (
     gdp_conv_proj_dims,
     gdp_state_shape,
@@ -93,9 +97,12 @@ class GDPLayer(Layer):
 def _spec(layer: Layer, tp: int, mamba_type) -> MambaSpec:
     local_conv_dim = sum(p.num_heads // tp * p.head_width for p in layer.projs)
     temporal = (layer.temporal[0] // tp, *layer.temporal[1:])
+    conv_shape = (local_conv_dim, layer.rows)
+    if not is_conv_state_dim_first():
+        conv_shape = conv_shape[::-1]
     return MambaSpec(
         block_size=16,
-        shapes=((local_conv_dim, layer.rows), temporal),
+        shapes=(conv_shape, temporal),
         dtypes=(torch.float32, torch.float32),
         mamba_type=mamba_type,
     )
@@ -151,19 +158,23 @@ def full_conv_state(layer: Layer) -> list[torch.Tensor]:
 
 
 def page(layer: Layer, state: list[torch.Tensor], tp: int, rank: int) -> bytes:
-    """Rank's dim-first conv page: its heads of each sub-projection, in order."""
+    """Rank's conv page: its heads of each sub-projection, in order, stored
+    (channels, rows) for DS or (rows, channels) for SD."""
     shards = []
     for proj, proj_state in zip(layer.projs, state):
         width = proj.num_heads // tp * proj.head_width
         shards.append(proj_state[rank * width : (rank + 1) * width])
-    return torch.cat(shards).contiguous().numpy().tobytes()
+    conv = torch.cat(shards)
+    if not is_conv_state_dim_first():
+        conv = conv.T
+    return conv.contiguous().numpy().tobytes()
 
 
 def transfer(layer: Layer, p_pages: list[bytes], p_tp: int, d_tp: int, d_rank: int):
     """Assemble a decode page from prefill pages like the NIXL connector:
     remote ranges from `remote_conv_offsets`, local ranges from
     `local_conv_offsets`, split per source rank when P_TP > D_TP."""
-    info = derive_mamba_conv_split(layer.spec(d_tp), d_tp)
+    info = derive_mamba_conv_split(layer.spec(d_tp), d_tp, require_dim_first=False)
     out = bytearray(info.ssm_sizes[0])
     local = info.local_conv_offsets
     if d_tp >= p_tp:
@@ -186,10 +197,9 @@ def transfer(layer: Layer, p_pages: list[bytes], p_tp: int, d_tp: int, d_rank: i
     return bytes(out)
 
 
-@pytest.fixture(autouse=True)
-def _dim_first_layout(monkeypatch):
-    # The NIXL path cuts the dim-first (DS) conv layout.
-    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+@pytest.fixture(autouse=True, params=["DS", "SD"])
+def _conv_layout(monkeypatch, request):
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", request.param)
     get_conv_state_layout.cache_clear()
     yield
     get_conv_state_layout.cache_clear()
@@ -211,5 +221,5 @@ def test_decode_ranks_get_their_heads(layer: Layer, p_tp: int, d_tp: int):
 @pytest.mark.parametrize("n", [1, 2, 3])
 def test_gdp_sub_projections(n: int):
     # 4 heads per rank: value pieces of 4*64, key and query pieces of 4*128.
-    info = derive_mamba_conv_split(gdp_layer(n).spec(2), 2)
+    info = derive_mamba_conv_split(gdp_layer(n).spec(2), 2, require_dim_first=False)
     assert info.local_proj_dims == (256,) * n + (512,) * (n + 1)

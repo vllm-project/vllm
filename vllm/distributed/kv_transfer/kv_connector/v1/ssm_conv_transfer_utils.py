@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Mamba conv-state sub-projection decomposition for KV transfer.
 
-With DS conv state layout (dim, state_len), sub-projections are
-contiguous in memory.  Each D rank reads its slices via separate
-RDMA transfers — no P-side permutation needed.
+With the DS conv state layout (dim, state_len), each sub-projection is
+contiguous in memory. With SD (state_len, dim), it is contiguous within each
+row, so every row is cut the same way. Each D rank reads its slices via
+separate RDMA transfers — no P-side permutation needed.
 
 Supported model types:
   - Mamba1: conv = [x], temporal = (intermediate_size, state_size)
@@ -32,7 +33,7 @@ class MambaConvSplitInfo:
     Used to build TP-aware transfer descriptors.
     All fields are LOCAL to this engine's TP (already divided by TP size).
 
-    DS memory layout within one page (contiguous):
+    Memory layout of one row group (DS: the whole page; SD: each row):
       Mamba1: |---- x ----|  (single sub-projection, no decomposition)
       Mamba2: |-- x --|- B -|- C -|  (B == C)
       GDN:    |- Q -|- K -|-- V --|  (dim(Q)==dim(K), V may differ)
@@ -44,6 +45,8 @@ class MambaConvSplitInfo:
     local_proj_dims: tuple[int, ...]
     conv_dtype_size: int  # bytes per element (e.g. 2 for float16)
     ssm_sizes: tuple[int, int]  # (conv_state_bytes, ssm_state_bytes)
+    # DS (dim, state_len) or SD (state_len, dim) conv state layout.
+    dim_first: bool = True
 
     @property
     def local_conv_dim(self) -> int:
@@ -51,23 +54,32 @@ class MambaConvSplitInfo:
         return sum(self.local_proj_dims)
 
     @property
+    def num_row_groups(self) -> int:
+        """Runs of the conv state cut the same way: 1 for DS, one per row
+        for SD."""
+        return 1 if self.dim_first else self.conv_rows
+
+    @property
     def proj_bytes(self) -> tuple[int, ...]:
-        """Byte sizes of the sub-projections for one rank."""
-        row_bytes = self.conv_rows * self.conv_dtype_size
-        return tuple(d * row_bytes for d in self.local_proj_dims)
+        """Byte sizes of the sub-projections in one row group for one rank."""
+        group_rows = self.conv_rows if self.dim_first else 1
+        return tuple(
+            d * group_rows * self.conv_dtype_size for d in self.local_proj_dims
+        )
 
     @property
     def local_conv_offsets(self) -> list[tuple[int, int]]:
         """(byte_offset, byte_size) of each sub-projection within this
-        engine's page.
+        engine's page, row group by row group.
 
         Used by both P and D for local descriptor registration.
         """
         offsets: list[tuple[int, int]] = []
         offset = 0
-        for size in self.proj_bytes:
-            offsets.append((offset, size))
-            offset += size
+        for _ in range(self.num_row_groups):
+            for size in self.proj_bytes:
+                offsets.append((offset, size))
+                offset += size
         return offsets
 
     def remote_conv_offsets(
@@ -88,21 +100,21 @@ class MambaConvSplitInfo:
 
         """
         offsets: list[tuple[int, int]] = []
-        if tp_ratio >= 1:
-            remote_base = 0
-            for size in self.proj_bytes:
-                offsets.append((remote_base + local_rank_offset * size, size))
-                remote_base += size * tp_ratio
-        else:
-            # NOTE (ZhanqiuHu): tp_ratio < 0 means P_TP > D_TP, so P pages
-            # are smaller than D's. Local dims are D-sized, but we need
-            # P-sized offsets. Scale down by |tp_ratio|.
-            abs_ratio = -tp_ratio
-            remote_base = 0
-            for size in self.proj_bytes:
-                remote_size = size // abs_ratio
-                offsets.append((remote_base, remote_size))
-                remote_base += remote_size
+        remote_base = 0
+        for _ in range(self.num_row_groups):
+            if tp_ratio >= 1:
+                for size in self.proj_bytes:
+                    offsets.append((remote_base + local_rank_offset * size, size))
+                    remote_base += size * tp_ratio
+            else:
+                # NOTE (ZhanqiuHu): tp_ratio < 0 means P_TP > D_TP, so P pages
+                # are smaller than D's. Local dims are D-sized, but we need
+                # P-sized offsets. Scale down by |tp_ratio|.
+                abs_ratio = -tp_ratio
+                for size in self.proj_bytes:
+                    remote_size = size // abs_ratio
+                    offsets.append((remote_base, remote_size))
+                    remote_base += remote_size
         return offsets
 
 
@@ -122,7 +134,8 @@ def derive_mamba_conv_split(
             shapes[0] = conv state in the configured DS or SD layout.
             shapes[1] = temporal state (model-specific shape).
         local_tp: this engine's tensor-parallel size.
-        require_dim_first: Require the DS layout used by NIXL 3-read transfer.
+        require_dim_first: Require the DS layout, for connectors whose
+            transfer cannot cut the SD layout.
 
     Returns:
         MambaConvSplitInfo with per-rank sub-projection dims, conv_rows,
@@ -146,7 +159,7 @@ def derive_mamba_conv_split(
 
     dim_first = is_conv_state_dim_first()
     if require_dim_first:
-        assert dim_first, "3-read requires DS conv state layout"
+        assert dim_first, "This connector requires the DS conv state layout"
     if dim_first:
         local_conv_dim, conv_rows = conv_shape
     else:
@@ -231,6 +244,7 @@ def derive_mamba_conv_split(
         local_proj_dims=local_proj_dims,
         conv_dtype_size=conv_dtype_size,
         ssm_sizes=(conv_state_bytes, ssm_state_bytes),
+        dim_first=dim_first,
     )
 
 

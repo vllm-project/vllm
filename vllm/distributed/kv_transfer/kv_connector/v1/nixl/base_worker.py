@@ -800,8 +800,7 @@ class NixlBaseConnectorWorker:
         # ---- Model state (derived from model config) ----
         mamba_ssm_size = (0, 0)
         # Conv state sub-projection decomposition (None when no Mamba).
-        # The transfer requires DS (dim, state_len) conv layout so that
-        # conv sub-projections are contiguous in memory.
+        # Sub-projections are contiguous per page (DS) or per row (SD).
         self._conv_decomp: MambaConvSplitInfo | None = None
         self._has_mamba = any(
             isinstance(spec, MambaSpec) for spec in self._layer_specs.values()
@@ -831,14 +830,6 @@ class NixlBaseConnectorWorker:
 
         if self._has_mamba:
             assert self._is_hma_required
-            from vllm.model_executor.layers.mamba.mamba_utils import (
-                is_conv_state_dim_first,
-            )
-
-            assert is_conv_state_dim_first(), (
-                "3-read Mamba conv transfer requires DS conv state layout. "
-                "Set VLLM_SSM_CONV_STATE_LAYOUT=DS"
-            )
             mamba_spec = next(
                 spec
                 for spec in self._layer_specs.values()
@@ -848,6 +839,7 @@ class NixlBaseConnectorWorker:
             self._conv_decomp = derive_mamba_conv_split(
                 mamba_spec,
                 vllm_config.parallel_config.tensor_parallel_size,
+                require_dim_first=False,
             )
             mamba_ssm_size = self._conv_decomp.ssm_sizes
         self._mamba_ssm_size = mamba_ssm_size
@@ -2153,7 +2145,9 @@ class NixlBaseConnectorWorker:
 
     def _build_mamba_local(self, base_addresses: list[int]) -> np.ndarray:
         """Build desc regions (conv sub-projections + ssm) per layer for
-        local mamba blocks with DS conv layout, as Nx5 uint64 strided descs.
+        local mamba blocks, as Nx5 uint64 strided descs. In the SD conv layout
+        each row holds every sub-projection, so there is one conv region per
+        row and sub-projection.
 
         A Mamba block interleaves conv and SSM state, which crucially differ in
         size, so the two are indexed as separate sub-regions. Attention blocks

@@ -209,6 +209,13 @@ def compute_nixl_compatibility_hash(
         # push (WRITE) and pull (READ) connectors are protocol-incompatible
         "transfer_mode": transfer_mode,
     }
+    if model_config.is_hybrid:
+        from vllm.model_executor.layers.mamba.mamba_utils import (
+            get_conv_state_layout,
+        )
+
+        # P and D cut the conv state at the same offsets only in one layout.
+        factors["ssm_conv_state_layout"] = get_conv_state_layout()
 
     compat_hash = hash_factors(factors)
     logger.debug(
