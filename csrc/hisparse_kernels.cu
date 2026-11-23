@@ -460,6 +460,24 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       int32_t* row_attention =
           attention_indices + static_cast<int64_t>(row) * attention_row_stride;
       __syncthreads();
+      if (tid == 0) s_chunk_off[0] = 0;
+      __syncthreads();
+      // Rows without a hole before a valid index are already packed.
+      int local_valid = 0;
+      int has_hole = 0;
+      for (int i = tid; i < top_k; i += blockDim.x) {
+        const bool valid = row_attention[i] >= 0;
+        local_valid += valid;
+        has_hole |= !valid && i + 1 < top_k && row_attention[i + 1] >= 0;
+      }
+      if (local_valid != 0) atomicAdd(&s_chunk_off[0], local_valid);
+      if (__syncthreads_or(has_hole) == 0) {
+        if (tid == 0) {
+          valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
+              s_chunk_off[0];
+        }
+        continue;
+      }
       for (int i = tid; i < num_chunks + 1; i += blockDim.x) {
         s_chunk_off[i] = 0;
       }
