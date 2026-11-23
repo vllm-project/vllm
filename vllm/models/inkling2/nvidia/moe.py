@@ -8,7 +8,7 @@ rank returns the full all-reduced bf16 output. Checkpoint names under
 """
 
 from collections.abc import Callable, Sequence
-from typing import Literal, Protocol
+from typing import Literal
 
 import torch
 from torch import nn
@@ -38,34 +38,6 @@ from .ops.trtllm_bmm import bmm, expert_plan, load_kernels
 QuantFormat = Literal["nvfp4", "mxfp8"]
 
 
-class ExpertsLoRA(Protocol):
-    """Adds the routed experts' LoRA deltas (`lora.Inkling2MoEWithLoRA`),
-    for an experts implementation over expert-sorted rows: row `r` is token
-    `perm[r] // topk`, and this rank's experts own rows
-    `[offsets[0], offsets[-1])`. The NVFP4 / MXFP8 experts here (tile-padded
-    rows, quantized activations) do not support it; the BF16 experts a model
-    may plug in instead (SkyRL's `Inkling2BF16Experts`) do.
-    """
-
-    def add_w13(
-        self,
-        gate_up: torch.Tensor,
-        x: torch.Tensor,
-        perm: torch.Tensor,
-        offsets: torch.Tensor,
-        topk: int,
-    ) -> None: ...
-
-    def add_w2(
-        self,
-        down: torch.Tensor,
-        activated: torch.Tensor,
-        perm: torch.Tensor,
-        offsets: torch.Tensor,
-        topk: int,
-    ) -> None: ...
-
-
 class Inkling2Gate(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
@@ -89,10 +61,6 @@ class Inkling2Gate(nn.Module):
 
 
 class Inkling2Experts(nn.Module):
-    # Expert LoRA (`ExpertsLoRA`) needs unquantized experts; experts that
-    # support it (e.g. BF16 ones plugged in by a model) need not define this.
-    supports_lora = False
-
     def __init__(self, config, quant_format: QuantFormat) -> None:
         super().__init__()
         self.ep_rank = get_tensor_model_parallel_rank()
@@ -356,7 +324,6 @@ class Inkling2MoE(nn.Module):
         x: torch.Tensor,
         reduce: bool = True,
         push: SeqParallel | None = None,
-        lora: ExpertsLoRA | None = None,
         pass_idx: int = 0,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None:
         """bf16 [T, H] -> bf16 [T, H], reduced over the expert-parallel group;
@@ -364,19 +331,12 @@ class Inkling2MoE(nn.Module):
         `Inkling2Experts`, or (with `push`) pushes this rank's partial sums
         to the token shard owners.
         Padding tokens (`is_padding` of the forward context) are routed to
-        no expert and come out as 0. `lora` (`Inkling2MoEWithLoRA`) adds
-        per-expert LoRA deltas inside the expert GEMMs, before any reduce or
-        push; the NVFP4 / MXFP8 experts here do not support it. With
-        routed-experts capture, the expert ids are recorded at the row of
+        no expert and come out as 0. With routed-experts capture, the expert
+        ids are recorded at the row of
         loop pass `pass_idx`."""
         capture_fn = self.routing_captures[pass_idx].capture_fn
         if capture_fn is not None:
             capture_fn(self.routed_expert_ids(x.contiguous()))
-        if lora is not None:
-            raise NotImplementedError(
-                "Inkling2 expert LoRA needs BF16 experts; the NVFP4 / MXFP8 "
-                "experts do not support it"
-            )
         x = x.contiguous()
         gate, experts = self.gate, self.experts
         is_padding = None

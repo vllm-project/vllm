@@ -319,11 +319,56 @@ def test_tiny_model_generates(
         assert 0 <= accepted <= drafted
 
 
-def test_tiny_model_lora_with_quantized_experts(tmp_path):
-    """With LoRA enabled, the NVFP4 / MXFP8 experts are no LoRA target: the
-    engine starts (its warmup adapter covers every LoRA module) and decodes
-    with the attention-only adapters these checkpoints support."""
-    (tmp_path / "config.json").write_text(json.dumps(TINY_CONFIG))
+@pytest.mark.parametrize("looped", [False, True])
+def test_tiny_model_lora_with_quantized_experts(tmp_path, looped):
+    """Nonzero attention adapters affect prefill/decode, including core loops."""
+    from safetensors.torch import save_file
+
+    from vllm.lora.request import LoRARequest
+
+    config = TINY_LOOP_CONFIG if looped else TINY_CONFIG
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    text = config["text_config"]
+    rank = 8
+    generator = torch.Generator().manual_seed(31)
+    tensors = {}
+    q_width = text["num_attention_heads"] * text["head_dim"]
+    kv_width = text["num_key_value_heads"] * text["head_dim"]
+    shapes = {
+        "wq_du": (text["hidden_size"], q_width),
+        "wv_dv": (text["hidden_size"], kv_width),
+        "wo_ud": (q_width, text["hidden_size"]),
+    }
+    for layer in range(text["num_hidden_layers"]):
+        for projection, (inputs, outputs) in shapes.items():
+            prefix = f"base_model.model.model.llm.layers.{layer}.attn.{projection}"
+            for suffix, shape in (("A", (rank, inputs)), ("B", (outputs, rank))):
+                tensors[f"{prefix}.lora_{suffix}.weight"] = (
+                    torch.randn(shape, generator=generator) * 0.1
+                ).bfloat16()
+    adapters = []
+    for index, scale in enumerate((1.0, -1.0), start=1):
+        path = tmp_path / f"adapter_{index}"
+        path.mkdir()
+        (path / "adapter_config.json").write_text(
+            json.dumps(
+                {
+                    "peft_type": "LORA",
+                    "r": rank,
+                    "lora_alpha": rank,
+                    "target_modules": list(shapes),
+                    "bias": "none",
+                }
+            )
+        )
+        save_file(
+            {
+                name: value * scale if ".lora_B." in name else value
+                for name, value in tensors.items()
+            },
+            path / "adapter_model.safetensors",
+        )
+        adapters.append(LoRARequest(f"adapter_{index}", index, str(path)))
     llm = LLM(
         model=str(tmp_path),
         load_format="dummy",
@@ -331,16 +376,33 @@ def test_tiny_model_lora_with_quantized_experts(tmp_path):
         tokenizer_mode="hf",
         gpu_memory_utilization=0.035,
         max_model_len=2048,
+        max_num_batched_tokens=256,
         max_num_seqs=4,
         enable_lora=True,
+        max_loras=2,
         max_lora_rank=8,
+        seed=0,
+        enable_prefix_caching=False,
         limit_mm_per_prompt={"image": 0},
     )
     outputs = llm.generate(
-        [{"prompt_token_ids": [5, 5, 5]}],
-        SamplingParams(max_tokens=8, temperature=0, ignore_eos=True, detokenize=False),
+        [{"prompt_token_ids": [5, 7, 11]}] * 3,
+        SamplingParams(
+            max_tokens=3, temperature=0, ignore_eos=True, detokenize=False, logprobs=5
+        ),
+        # The entry point accepts per-request None, but its annotation omits it.
+        lora_request=[None, *adapters],  # type: ignore[list-item]
     )
-    assert len(outputs[0].outputs[0].token_ids) == 8
+    results = [output.outputs[0] for output in outputs]
+    assert all(len(result.token_ids) == 3 for result in results)
+    distributions = []
+    for result in results:
+        assert result.logprobs is not None
+        distributions.append(
+            {token: item.logprob for token, item in result.logprobs[0].items()}
+        )
+    assert distributions[0] != distributions[1]
+    assert distributions[1] != distributions[2]
 
 
 def _record_moe_routing(model: torch.nn.Module) -> None:

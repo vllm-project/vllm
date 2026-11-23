@@ -316,7 +316,10 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             covered = count_covered(b_i.shape[0], self.output_sizes[lo_slice:])
             place(lo, lo_slice, covered)
             lo, lo_slice = lo + 1, lo_slice + covered
-        hi, hi_slice = len(lora_b), self.n_slices
+        # Alignment padding has no adapter and must not participate in
+        # aligning the last packed group to the end of the real outputs.
+        padding_slice = bool(getattr(self.base_layer, "padding_size", 0))
+        hi, hi_slice = len(lora_b), self.n_slices - padding_slice
         while hi > lo and (b_i := lora_b[hi - 1]) is not None:
             remaining = self.output_sizes[lo_slice:hi_slice][::-1]
             covered = count_covered(b_i.shape[0], remaining)

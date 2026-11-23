@@ -18,6 +18,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context
+from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -49,7 +50,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig
 
 from ..configs import Inkling2ModelConfig
-from .lora import add_linear_lora
 from .ops import use_sm100_kernels
 from .ops.attention import (
     _INKLING2_FA4_REL_ATTENTION_KERNEL,
@@ -63,6 +63,36 @@ from .ops.linear import linear
 from .ops.ll_gemm_sm120 import qkv_bmm, use_qkv_bmm
 from .ops.sconv import attention_prologue, shift_rel_proj
 from .sconv import K_STREAM, V_STREAM, Inkling2ShortConv, conv_metadata
+
+
+class Inkling2QKVR(MergedColumnParallelLinear):
+    """Packed Q/R/gate/sink/K/V projections with separate Q/K/V inputs."""
+
+    def forward(
+        self,
+        x_q: torch.Tensor,
+        x_k: torch.Tensor | None = None,
+        x_v: torch.Tensor | None = None,
+    ) -> list[torch.Tensor]:
+        x_k = x_q if x_k is None else x_k
+        x_v = x_q if x_v is None else x_v
+        split_sizes = [size // self.tp_size for size in self.output_sizes]
+        if x_k is x_q and x_v is x_q:
+            projected = linear(x_q, self.weight)
+            return list(projected.split(split_sizes, dim=-1)[:6])
+
+        q_side = sum(split_sizes[:4])
+        k_end = q_side + split_sizes[4]
+        if use_qkv_bmm(x_q, x_k, x_v, self.weight):
+            projected = qkv_bmm(x_q, x_k, x_v, self.weight, q_side, k_end)
+            return list(projected.split(split_sizes, dim=-1)[:6])
+
+        # Extra K rows keep the query-side GEMM aligned and are discarded.
+        q_splits = [*split_sizes[:4], -q_side % 8]
+        projected = linear(x_q, self.weight[: sum(q_splits)])
+        k = linear(x_k, self.weight[q_side:k_end])
+        v = linear(x_v, self.weight[k_end : k_end + split_sizes[5]])
+        return [*projected.split(q_splits, dim=-1)[:4], k, v]
 
 
 @dataclass
@@ -216,7 +246,7 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         q_size = self.num_heads * self.head_dim
         kv_size = self.num_kv_heads * self.head_dim
         # Query-side outputs first so full layers can project them in one GEMM.
-        self.split_sizes = [
+        split_sizes = [
             q_size,
             self.num_heads * self.d_rel,
             q_size,
@@ -224,17 +254,10 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
             kv_size,
             kv_size,
         ]
-        # Full layers project the query side alone; rounding its N up to 8
-        # keeps the output rows 16-byte aligned for cuBLAS (the extra columns,
-        # from the K rows, are discarded).
-        q_side = sum(self.split_sizes[:4])
-        self.q_side_splits = [*self.split_sizes[:4], -q_side % 8]
-        pad_size = -sum(self.split_sizes) % 8
-        if pad_size:
-            self.split_sizes.append(pad_size)
-        self.qkvr = MergedColumnParallelLinear(
+        self.qkvr = Inkling2QKVR(
             config.hidden_size,
-            [size * tp_size for size in self.split_sizes],
+            [size * tp_size for size in split_sizes],
+            padding_size=-sum(split_sizes) % 8,
             bias=False,
             prefix=f"{prefix}.qkvr",
         )
@@ -328,33 +351,6 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         cache = self.pass_caches[pass_idx - 1]
         return cache.prefix, cache.kv_cache
 
-    def _project(
-        self, x_q: torch.Tensor, x_k: torch.Tensor, x_v: torch.Tensor
-    ) -> list[torch.Tensor]:
-        # ``linear`` on the weight bypasses the layer (and a LoRA wrapper's
-        # forward), so the LoRA deltas are added here (no-op without LoRA).
-        weight = self.qkvr.weight
-        if x_k is x_q and x_v is x_q:
-            projected = linear(x_q, weight)
-            add_linear_lora(self.qkvr, projected, x_q, range(6))
-            return list(projected.split(self.split_sizes, dim=-1)[:6])
-        q_side, kv_size = sum(self.split_sizes[:4]), self.split_sizes[4]
-        k_end = q_side + kv_size
-        if use_qkv_bmm(x_q, x_k, x_v, weight):
-            projected = qkv_bmm(x_q, x_k, x_v, weight, q_side, k_end)
-            splits = projected.split(self.split_sizes, dim=-1)
-            add_linear_lora(self.qkvr, projected, x_q, range(4))
-            add_linear_lora(self.qkvr, splits[4], x_k, [4])
-            add_linear_lora(self.qkvr, splits[5], x_v, [5])
-            return list(splits[:6])
-        projected = linear(x_q, weight[: sum(self.q_side_splits)])
-        k = linear(x_k, weight[q_side:k_end])
-        v = linear(x_v, weight[k_end : k_end + kv_size])
-        add_linear_lora(self.qkvr, projected, x_q, range(4))
-        add_linear_lora(self.qkvr, k, x_k, [4])
-        add_linear_lora(self.qkvr, v, x_v, [5])
-        return [*projected.split(self.q_side_splits, dim=-1)[:4], k, v]
-
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -387,7 +383,7 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         if self.is_local and x_k is None:
             x_k = x_v = x_q
         assert x_k is not None and x_v is not None
-        q, r, gate, sinks, k, v = self._project(x_q, x_k, x_v)
+        q, r, gate, sinks, k, v = self.qkvr(x_q, x_k, x_v)
         output = torch.empty(gate.shape, dtype=q.dtype, device=q.device)
         self._attention(
             positions,
@@ -404,7 +400,13 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
             pass_idx,
         )
         out = linear(output, self.wo_ud.weight, out)
-        add_linear_lora(self.wo_ud, out, output)
+        if isinstance(self.wo_ud, BaseLinearLayerWithLoRA):
+            if self.wo_ud.lora_config.fully_sharded_loras:
+                raise NotImplementedError(
+                    "Inkling2 does not support fully sharded LoRA"
+                )
+            delta = self.wo_ud._apply_lora_to_output(output, torch.zeros_like(out))
+            out.add_(delta)
         return out
 
     @eager_break_during_capture
