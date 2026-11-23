@@ -939,7 +939,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # branch decodes through fused_recurrent_gated_delta_rule_replayssm.
         self.use_replayssm = self.cache_config.use_replayssm
         if self.use_replayssm and (
-            reason := self._replayssm_unsupported_reason(vllm_config)
+            reason := self._replayssm_unsupported_reason(vllm_config, self.beta_scale)
         ):
             raise ValueError(f"GDN ReplaySSM {reason}")
         self.replayssm_buffer_len = (
@@ -957,7 +957,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         compilation_config.static_forward_context[prefix] = self
 
     @staticmethod
-    def _replayssm_unsupported_reason(vllm_config: VllmConfig) -> str | None:
+    def _replayssm_unsupported_reason(
+        vllm_config: VllmConfig, beta_scale: float = 1.0
+    ) -> str | None:
+        if beta_scale != 1.0:
+            return "does not support scaled beta (linear_allow_neg_eigval)"
         if vllm_config.num_speculative_tokens > 0:
             return "does not support speculative decoding yet"
         if vllm_config.mamba_config.backend != MambaBackendEnum.TRITON:
