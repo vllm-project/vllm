@@ -36,10 +36,15 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.llama4 import Llama4DecoderLayer, Llama4ForCausalLM
 from vllm.model_executor.models.utils import extract_layer_index
 
-from .interfaces import SupportsMultiModal, SupportsMultiModalEmbeddings
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModalEmbeddings,
+    _require_is_multimodal,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    _merge_multimodal_embeddings,
     maybe_prefix,
     process_eagle_weight,
 )
@@ -174,9 +179,7 @@ class EagleLlama4ForCausalLM(_EagleLlama4ForCausalLMBase, SupportsMultiModalEmbe
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
         self.config = speculative_config.draft_model_config.hf_config
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
         # draft model quantization config may differ from target model
         quant_config = VllmConfig.get_quantization_config(
             speculative_config.draft_model_config, vllm_config.load_config
@@ -204,7 +207,21 @@ class EagleLlama4ForCausalLM(_EagleLlama4ForCausalLMBase, SupportsMultiModalEmbe
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
-    embed_input_ids = SupportsMultiModal.embed_input_ids  # type: ignore
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.model.embed_input_ids(input_ids)
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+        return _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=_require_is_multimodal(is_multimodal),
+        )
 
     def forward(
         self,

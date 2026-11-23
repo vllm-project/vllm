@@ -50,11 +50,13 @@ from vllm.v1.attention.backend import AttentionType
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 
 logger = init_logger(__name__)
@@ -154,20 +156,7 @@ class Gemma3Attention(nn.Module):
         self.is_sliding = layer_type == "sliding_attention"
         sliding_window = config.sliding_window if self.is_sliding else None
 
-        # Initialize the rotary embedding.
-        if layer_type in config.rope_parameters:
-            # Transformers v5 rope config.
-            rope_parameters = config.rope_parameters[layer_type]
-        else:
-            # Transformers v4 rope config.
-            # Global attention. Use the values in config.json.
-            rope_parameters = config.rope_parameters
-            # Local attention. Override the values in config.json.
-            if self.is_sliding:
-                rope_parameters = dict(
-                    rope_type="default", rope_theta=config.rope_local_base_freq
-                )
-
+        rope_parameters = config.rope_parameters[layer_type]
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=max_position_embeddings,
@@ -310,12 +299,19 @@ class Gemma3Model(nn.Module):
         self.config = config
         self.quant_config = quant_config
 
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.embed_tokens",
-        )
+        if (
+            get_pp_group().is_first_rank
+            or (config.tie_word_embeddings and get_pp_group().is_last_rank)
+            or spec_decode_needs_target_embed(vllm_config)
+        ):
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.embed_tokens",
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Gemma3DecoderLayer(
@@ -323,7 +319,10 @@ class Gemma3Model(nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        if get_pp_group().is_last_rank:
+            self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
 
         # Normalize the embedding by sqrt(hidden_size)
         # The normalizer's data type should be downcasted to the model's
@@ -402,14 +401,17 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-        if config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            if config.tie_word_embeddings:
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        else:
+            self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(
             config.vocab_size, soft_cap=config.final_logit_softcapping

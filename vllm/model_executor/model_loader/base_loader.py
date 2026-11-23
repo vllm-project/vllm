@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Generator
 
 import torch
 import torch.nn as nn
@@ -11,8 +13,13 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+from vllm.model_executor.model_loader.reload.direct import (
+    direct_reload_enabled,
+    track_loaded_params,
+)
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
+    log_layer_backends,
     process_weights_after_loading,
 )
 from vllm.platforms import current_platform
@@ -58,6 +65,18 @@ class BaseModelLoader(ABC):
         log_model_inspection(model)
         return model
 
+    def get_all_weights(
+        self,
+        model_config: ModelConfig,
+        model: nn.Module,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        """Iterate over all weights by checkpoint name, for filtered
+        partial reloads (e.g. FT expert reload after scale_down)."""
+        raise NotImplementedError(
+            f"load_format={self.load_config.load_format!r} does not support "
+            "iterating weights by checkpoint name"
+        )
+
     @instrument(span_name="Load model")
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
@@ -83,24 +102,41 @@ class BaseModelLoader(ABC):
                     time_after_load - time_before_load,
                 )
 
-            logger.debug("Loading weights on %s ...", load_device)
-            self.load_weights(model, model_config)
+            try:
+                logger.debug("Loading weights on %s ...", load_device)
+                if direct_reload_enabled():
+                    track_loaded_params(model)  # what every update must load again
+                self.load_weights(model, model_config)
 
-            # Log peak GPU memory after loading weights. This is needed
-            # to have test coverage on peak memory for online quantization.
-            if current_platform.is_cuda_alike() or current_platform.is_xpu():
-                peak_memory = torch.accelerator.max_memory_allocated()
-                logger.debug_once(
-                    "Peak GPU memory after loading weights: %s GiB",
-                    format_gib(peak_memory),
-                )
+                # Release transient tensors held by PyTorch's caching allocator
+                # before weight post-processing and raw CUDA driver allocations.
+                gc.collect()
+                torch.accelerator.empty_cache()
 
-            # Process weights into kernel format. Note that when using online
-            # quantization, weights are (typically) quantized as they are loaded.
-            if _has_online_quant(model):
-                finalize_layerwise_processing(model, model_config)
+                # Log peak GPU memory after loading weights. This is needed
+                # to have test coverage on peak memory for online quantization.
+                if current_platform.is_cuda_alike() or current_platform.is_xpu():
+                    peak_memory = torch.accelerator.max_memory_allocated()
+                    logger.debug_once(
+                        "Peak GPU memory after loading weights: %s GiB",
+                        format_gib(peak_memory),
+                    )
 
-            process_weights_after_loading(model, model_config, target_device)
+                # Process weights into kernel format. Note that when using online
+                # quantization, weights are (typically) quantized as they are loaded.
+                if _has_online_quant(model):
+                    finalize_layerwise_processing(model, model_config)
+
+                process_weights_after_loading(model, model_config, target_device)
+                log_online_quantization_time(vllm_config)
+            except Exception:
+                # The model runner logs the backends of a loaded model. A
+                # failed load never reaches it, but its selections were made.
+                log_layer_backends(model, model_config, load_failed=True)
+                raise
+
+            gc.collect()
+            torch.accelerator.empty_cache()
 
         return model.eval()
 
@@ -115,8 +151,8 @@ def log_model_inspection(model: nn.Module) -> None:
     logger.info("vLLM model structure:\n%s", format_model_inspection(model))
 
 
-def log_online_quantization(vllm_config: VllmConfig) -> None:
-    """Log the online-quantized layer count and types, when applicable."""
+def _get_online_quantization_config(vllm_config: VllmConfig):
+    """Return the online quantization config when one is configured."""
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
@@ -128,12 +164,32 @@ def log_online_quantization(vllm_config: VllmConfig) -> None:
     if isinstance(online_quantization_config, OnlineQuantizationConfig):
         quant_config = online_quantization_config
     if not isinstance(quant_config, OnlineQuantizationConfig):
+        return None
+    return quant_config
+
+
+def log_online_quantization(vllm_config: VllmConfig) -> None:
+    """Log the online-quantized layer count and types, when applicable."""
+    quant_config = _get_online_quantization_config(vllm_config)
+    if quant_config is None:
         return
 
     logger.info(
-        "Quantized %d layers of types: %s",
+        "Quantizing %d layers of types: %s",
         len(quant_config.quantized_layers),
         "; ".join(quant_config.quantized_layer_summaries),
+    )
+
+
+def log_online_quantization_time(vllm_config: VllmConfig) -> None:
+    """Log online quantization processing time, when applicable."""
+    quant_config = _get_online_quantization_config(vllm_config)
+    if quant_config is None:
+        return
+
+    logger.info(
+        "Online quantization as part of model loading took %.2f seconds",
+        quant_config.online_quantization_time,
     )
 
 

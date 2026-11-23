@@ -11,10 +11,11 @@ from vllm.platforms import current_platform
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
-import vllm._C  # noqa: F401, E402
+current_platform.import_kernels()
 
 VOCAB_SIZES = [32000, 49152, 128256]
 BATCH_SIZES = [1, 4, 16]
+PLACEHOLDER = -1
 
 
 def reference_greedy_sample(logits: torch.Tensor) -> torch.Tensor:
@@ -43,20 +44,20 @@ class TestGreedyArgmax:
 
 
 class TestFusedGumbelArgmax:
-    @pytest.mark.parametrize("vocab_size", VOCAB_SIZES)
-    def test_distribution_chi_squared(self, vocab_size: int):
+    def test_distribution_chi_squared(self):
         """Verify sampling distribution via chi-squared goodness of fit."""
-        small_vocab = min(vocab_size, 100)
+        # Small support is enough for chi-squared power; large-vocab bias
+        # is covered by test_noise_not_sliding_window (#59786).
+        small_vocab = 100
         logits = torch.randn(1, small_vocab, dtype=torch.float32)
         probs = logits.softmax(dim=-1).squeeze(0)
 
         n_samples = 100_000
-        counts = torch.zeros(small_vocab)
-        for trial in range(n_samples):
-            seed = torch.tensor([trial * 7 + 13], dtype=torch.long)
-            tile = logits.expand(1, -1).contiguous()
-            idx = torch.ops._C.fused_gumbel_argmax(tile, seed)
-            counts[idx.item()] += 1
+        seeds = torch.arange(n_samples, dtype=torch.long) * 7 + 13
+        idx = torch.ops._C.fused_gumbel_argmax(
+            logits.expand(n_samples, -1).contiguous(), seeds
+        )
+        counts = torch.bincount(idx, minlength=small_vocab).float()
 
         expected = probs * n_samples
         mask = expected > 5
@@ -68,6 +69,39 @@ class TestFusedGumbelArgmax:
         assert p_value > 0.001, (
             f"Chi-squared test failed: chi2={chi2.item():.1f}, "
             f"dof={dof}, p={p_value:.6f}"
+        )
+
+    def test_noise_not_sliding_window(self):
+        """Table[(seed+i)&MASK] made consecutive seeds a 1-token shift.
+
+        On uniform logits that yields P(w(s+1) == w(s)-1) ~ 1-2/V. Independent
+        per-token noise yields ~1/V. See #59786.
+        """
+        vocab, n = 128, 2048
+        logits = torch.zeros(n, vocab, dtype=torch.float32)
+        seeds = torch.arange(n, dtype=torch.long)
+        winners = torch.ops._C.fused_gumbel_argmax(logits, seeds)
+        shifted = (winners[:-1] - 1) % vocab
+        frac = (winners[1:] == shifted).float().mean().item()
+        assert frac < 0.05, (
+            f"consecutive-seed winners follow a table shift (frac={frac:.3f})"
+        )
+
+    def test_zipf_head_matches_softmax(self):
+        """Zipf head probability should match softmax (#59786)."""
+        vocab, n_samples, batch = 8192, 16384, 256
+        logits = -1.1 * torch.arange(1, vocab + 1, dtype=torch.float32).log()
+        p0 = torch.softmax(logits.double(), dim=-1)[0].item()
+        row = logits.view(1, -1).expand(batch, vocab).contiguous()
+        n_top = 0
+        for start in range(0, n_samples, batch):
+            seeds = torch.arange(start, start + batch, dtype=torch.long)
+            tokens = torch.ops._C.fused_gumbel_argmax(row, seeds)
+            n_top += int((tokens == 0).sum())
+        q0 = n_top / n_samples
+        se = (p0 * (1.0 - p0) / n_samples) ** 0.5
+        assert abs(q0 - p0) < 8.0 * se, (
+            f"P(top-1) kernel={q0:.4f} exact={p0:.4f} se={se:.4f}"
         )
 
     def test_deterministic_same_seed(self):
@@ -95,6 +129,108 @@ class TestFusedGumbelArgmax:
         assert result.min() >= 0
         assert result.max() < vocab_size
 
+    def test_samples_only_from_finite_logits(self):
+        """top-k/top-p mask with -inf; those IDs must never win."""
+        allowed = torch.tensor([3, 17, 99, 1024, 8191], dtype=torch.long)
+        logits = torch.full((64, 32000), float("-inf"), dtype=torch.float32)
+        logits[:, allowed] = torch.randn(64, allowed.numel())
+        tokens = torch.ops._C.fused_gumbel_argmax(
+            logits, torch.arange(64, dtype=torch.long)
+        )
+        assert torch.isin(tokens, allowed).all()
+
+    def test_single_unmasked_token(self):
+        logits = torch.full((8, 4096), float("-inf"), dtype=torch.float32)
+        logits[:, 123] = 0.0
+        seeds = torch.tensor([0, -1, -(2**63), 2**63 - 1, 42, 99, 1000, 7])
+        tokens = torch.ops._C.fused_gumbel_argmax(logits, seeds)
+        assert (tokens == 123).all()
+
+    def test_tokens_beyond_gumbel_max_cannot_win(self):
+        """A gap larger than GUMBEL_MAX is unreachable."""
+        logits = torch.zeros(256, 4, dtype=torch.float32)
+        logits[:, 1:] = -80.0
+        tokens = torch.ops._C.fused_gumbel_argmax(
+            logits, torch.arange(256, dtype=torch.long)
+        )
+        assert (tokens == 0).all()
+
+    def test_tied_huge_logits_not_index_biased(self):
+        """Noise must still break ties when logits sit at float32 max."""
+        logits = torch.full(
+            (4096, 2), torch.finfo(torch.float32).max, dtype=torch.float32
+        )
+        tokens = torch.ops._C.fused_gumbel_argmax(
+            logits, torch.arange(4096, dtype=torch.long)
+        )
+        frac0 = (tokens == 0).float().mean().item()
+        assert set(tokens.tolist()) == {0, 1}, tokens.unique().tolist()
+        assert 0.35 < frac0 < 0.65, f"P(index 0)={frac0:.3f} expected ~0.5"
+
+    def test_serial_batch1_matches_batched(self):
+        """OpenMP rows must match the batch=1 serial path."""
+        logits = torch.randn(8, 2048, dtype=torch.float32)
+        seeds = torch.arange(8, dtype=torch.long)
+        batched = torch.ops._C.fused_gumbel_argmax(logits, seeds)
+        serial = torch.stack(
+            [
+                torch.ops._C.fused_gumbel_argmax(logits[i : i + 1], seeds[i : i + 1])[0]
+                for i in range(8)
+            ]
+        )
+        torch.testing.assert_close(batched, serial)
+
+    def test_noncontiguous_matches_contiguous(self):
+        logits = torch.randn(8, 1024, dtype=torch.float32)[:, ::2]
+        seeds = torch.arange(16, dtype=torch.long)[::2]
+        assert not logits.is_contiguous() and not seeds.is_contiguous()
+        expected = torch.ops._C.fused_gumbel_argmax(
+            logits.contiguous(), seeds.contiguous()
+        )
+        actual = torch.ops._C.fused_gumbel_argmax(logits, seeds)
+        torch.testing.assert_close(actual, expected)
+
+    def test_empty_batch(self):
+        tokens = torch.ops._C.fused_gumbel_argmax(
+            torch.empty(0, 7), torch.empty(0, dtype=torch.long)
+        )
+        assert tokens.shape == (0,) and tokens.dtype == torch.int64
+
+    def test_masked_support_matches_softmax(self):
+        """Finite subset after -inf mask should match softmax."""
+        from scipy.stats import chisquare
+
+        logits = torch.tensor(
+            [0.0, -0.2, -0.7, -1.5, -3.0, float("-inf")], dtype=torch.float32
+        )
+        n_samples = 20_000
+        tokens = torch.ops._C.fused_gumbel_argmax(
+            logits.expand(n_samples, -1).contiguous(),
+            torch.arange(n_samples, dtype=torch.long),
+        )
+        counts = torch.bincount(tokens, minlength=logits.numel()).double()
+        assert counts[-1] == 0
+        probs = logits.double().softmax(-1)
+        _, p_value = chisquare(counts[:-1].numpy(), (probs[:-1] * n_samples).numpy())
+        assert p_value > 1e-7, f"masked-support p-value: {p_value}"
+
+    def test_zipf_tail_matches_softmax(self):
+        """Independent 53-bit Gumbel must not starve the Zipf tail (#59786)."""
+        vocab, n_samples, batch = 8192, 16384, 256
+        logits = -1.1 * torch.arange(1, vocab + 1, dtype=torch.float32).log()
+        p_tail = torch.softmax(logits.double(), dim=-1)[vocab // 2 :].sum().item()
+        row = logits.view(1, -1).expand(batch, vocab).contiguous()
+        n_tail = 0
+        for start in range(0, n_samples, batch):
+            seeds = torch.arange(start, start + batch, dtype=torch.long)
+            tokens = torch.ops._C.fused_gumbel_argmax(row, seeds)
+            n_tail += int((tokens >= vocab // 2).sum())
+        q_tail = n_tail / n_samples
+        se = (p_tail * (1.0 - p_tail) / n_samples) ** 0.5
+        assert abs(q_tail - p_tail) < 8.0 * se, (
+            f"P(tail) kernel={q_tail:.4f} exact={p_tail:.4f} se={se:.4f}"
+        )
+
 
 class TestMemory:
     def test_fused_no_intermediate_allocs(self):
@@ -118,3 +254,49 @@ class TestMemory:
             f"Fused kernel allocated {total_new_bytes} bytes, "
             f"expected < {vocab_bytes} (one intermediate tensor)"
         )
+
+
+@pytest.mark.parametrize("with_draft_probs", [False, True])
+def test_placeholder_draft_is_rejected(with_draft_probs: bool):
+    # Request 0 is a normal decode whose second row puts all mass on the last
+    # vocab id. Request 1 is padded with placeholder drafts: its first row is
+    # the real row (only token 3 allowed), its second row is padding.
+    # Reading target_probs at a placeholder id would hit the previous row's
+    # last entry (1.0) and accept the placeholder.
+    vocab = 16
+    target = torch.zeros(4, vocab)
+    target[0, 5] = 1.0
+    target[1, vocab - 1] = 1.0
+    target[2, 3] = 1.0
+    target[3, 7] = 1.0
+    draft_ids = torch.tensor([5, 5, PLACEHOLDER, PLACEHOLDER])
+    cu = torch.tensor([2, 4])
+    recovered = torch.tensor([5, vocab - 1, 3, 7])
+    bonus = torch.tensor([[9], [11]])
+    uniform = torch.full((4,), 0.5, dtype=torch.float32)
+    draft_probs = None
+    if with_draft_probs:
+        # Request 0's second row also gives the last vocab id draft mass, so
+        # a misread placeholder would see p / q = 2 and be accepted.
+        draft_probs = torch.zeros(4, vocab)
+        draft_probs[0, 5] = 1.0
+        draft_probs[1, 5] = draft_probs[1, vocab - 1] = 0.5
+        draft_probs[2:, 0] = 1.0
+
+    out = torch.full((2, 3), PLACEHOLDER, dtype=torch.int64)
+    torch.ops._C.rejection_random_sample_kernel_impl(
+        out,
+        cu,
+        draft_ids,
+        draft_probs,
+        target,
+        bonus,
+        recovered,
+        uniform,
+        None,
+        2,
+        vocab,
+        no_draft_probs=draft_probs is None,
+    )
+
+    assert out.tolist() == [[5, vocab - 1, PLACEHOLDER], [3, PLACEHOLDER, PLACEHOLDER]]

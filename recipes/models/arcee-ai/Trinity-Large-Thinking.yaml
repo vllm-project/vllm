@@ -1,0 +1,181 @@
+meta:
+  title: "Trinity-Large-Thinking"
+  slug: "trinity-large-thinking"
+  provider: "Arcee AI"
+  description: "Arcee AI's reasoning-focused sparse MoE (AfmoeForCausalLM) with structured <think> traces and agentic tool use"
+  date_added: 2026-04-10
+  date_updated: 2026-04-17
+  tasks:
+    - text
+  related_recipes: []
+
+model:
+  model_id: "arcee-ai/Trinity-Large-Thinking"
+  min_vllm_version: "0.11.1"
+  architecture: moe
+  parameter_count: "398B"
+  active_parameters: "13B"
+  context_length: 262144
+  base_args:
+    - "--dtype"
+    - "bfloat16"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Qwen3 Coder tool-call parser with automatic tool choice"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+  reasoning:
+    description: "DeepSeek-R1 reasoning parser extracts <think>...</think> into message.reasoning"
+    args:
+      - "--reasoning-parser"
+      - "deepseek_r1"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 955
+    description: "Full precision BF16 on multi-GPU (sparse MoE — multi-GPU recommended)"
+  nvfp4:
+    model_id: "arcee-ai/Trinity-Large-Thinking-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 239
+    description: "NVIDIA NVFP4 quantized weights for Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_nvfp4:
+    model_id: "RedHatAI/Trinity-Large-Thinking-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHat)"
+    vram_minimum_gb: 254
+    description: "RedHatAI NVFP4 quantization"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+
+hardware_overrides: {}
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Trinity-Large-Thinking](https://huggingface.co/arcee-ai/Trinity-Large-Thinking) is
+  Arcee AI's reasoning-focused Trinity Large checkpoint — a sparse MoE model designed for
+  long-horizon planning, tool use, and multi-step agent workflows. It uses the
+  `AfmoeForCausalLM` architecture and emits explicit reasoning traces inside `<think>...</think>`
+  blocks.
+
+  For multi-turn chat and agentic loops, reasoning tokens should be preserved across
+  turns as part of the working state.
+
+  ## Prerequisites
+
+  - vLLM >= 0.11.1
+  - Hardware: multi-GPU recommended for production deployments
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm openai --torch-backend auto
+  ```
+
+  ## Launch command
+
+  ```bash
+  vllm serve arcee-ai/Trinity-Large-Thinking \
+    --dtype bfloat16 \
+    --reasoning-parser deepseek_r1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder
+  ```
+
+  Why these flags:
+  - `--reasoning-parser deepseek_r1` extracts `<think>...</think>` into `message.reasoning`.
+  - `--enable-auto-tool-choice` lets the model decide when to call tools.
+  - `--tool-call-parser qwen3_coder` converts tool calls into OpenAI-style `tool_calls`.
+  - `--dtype bfloat16` matches the recommended serving dtype.
+
+  Add parallelism flags (`--tensor-parallel-size`, `--data-parallel-size`, or
+  `--enable-expert-parallel`) for your hardware. Lower `--max-model-len` if you don't
+  need the full long-context config.
+
+  ## Validation Request
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  model = client.models.list().data[0].id
+
+  tools = [{
+      "type": "function",
+      "function": {
+          "name": "get_weather",
+          "description": "Get the current weather for a location.",
+          "parameters": {
+              "type": "object",
+              "properties": {"location": {"type": "string"}},
+              "required": ["location"],
+          },
+      },
+  }]
+
+  response = client.chat.completions.create(
+      model=model,
+      messages=[{"role": "user", "content": "What is the weather in Paris right now?"}],
+      tools=tools, tool_choice="auto",
+  )
+
+  msg = response.choices[0].message
+  reasoning = msg.reasoning
+  print("reasoning:", reasoning)
+  print("content:", msg.content)
+  print("tool_calls:", msg.tool_calls)
+  ```
+
+  ## Preserving Reasoning Across Turns
+
+  Pass reasoning back as `reasoning` on assistant messages:
+
+  ```python
+  assistant_msg = {"role": "assistant", "content": msg.content or ""}
+  if reasoning:
+      assistant_msg["reasoning"] = reasoning
+  if msg.tool_calls:
+      assistant_msg["tool_calls"] = [
+          {"id": tc.id, "type": "function",
+           "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+          for tc in msg.tool_calls
+      ]
+  messages.append(assistant_msg)
+  ```
+
+  Rules:
+  - Pass reasoning back as `reasoning`.
+  - Keep `content` as an empty string (not `null`) on tool-only turns.
+  - Append the assistant message before tool-result messages.
+  - Use `/v1/chat/completions` for structured reasoning output.
+
+  ## Troubleshooting
+
+  - **No reasoning:** start server with `--reasoning-parser deepseek_r1`; use `/v1/chat/completions`.
+  - **Tool calls as plain text:** enable `--enable-auto-tool-choice` and `--tool-call-parser qwen3_coder`.
+  - **Loses coherence after tool turns:** preserve `reasoning` on each assistant turn; don't set content to `null`.
+  - **OOM:** lower `--max-model-len`; scale parallelism; use a local checkpoint path.
+
+  ## References
+
+  - [Trinity-Large-Thinking on Hugging Face](https://huggingface.co/arcee-ai/Trinity-Large-Thinking)

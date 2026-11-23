@@ -98,6 +98,7 @@ def test_processor_pixel_values(
 
     # Verify pixel_values shape
     pixel_values = mm_data_result["pixel_values"]
+    assert isinstance(pixel_values, torch.Tensor)
     assert pixel_values.dim() == 5  # [batch, num_crops, C, H, W]
     assert pixel_values.shape[2] == 3  # RGB channels
     assert pixel_values.shape[3] == 378  # crop height
@@ -138,7 +139,7 @@ def test_multi_crop_tiling(
 
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-    processor = Moondream3Processor.from_pretrained(model_id, trust_remote_code=True)
+    processor = Moondream3Processor.from_pretrained(model_id)
 
     # Create a large image that requires multiple crops
     large_image = Image.new("RGB", (1000, 1000), color="blue")
@@ -169,7 +170,7 @@ def test_tiling_various_sizes(
 
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-    processor = Moondream3Processor.from_pretrained(model_id, trust_remote_code=True)
+    processor = Moondream3Processor.from_pretrained(model_id)
 
     width, height = image_size
     image = Image.new("RGB", (width, height), color="red")
@@ -194,7 +195,7 @@ def test_pixel_normalization(
 
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-    processor = Moondream3Processor.from_pretrained(model_id, trust_remote_code=True)
+    processor = Moondream3Processor.from_pretrained(model_id)
 
     # Create test image
     image = Image.new("RGB", (378, 378), color="green")
@@ -336,7 +337,7 @@ def test_processor_with_small_image(
 
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-    processor = Moondream3Processor.from_pretrained(model_id, trust_remote_code=True)
+    processor = Moondream3Processor.from_pretrained(model_id)
 
     # Small image (smaller than crop size)
     small_image = Image.new("RGB", (100, 100), color="yellow")
@@ -364,7 +365,7 @@ def test_preprocess_image_accepts_non_pil_inputs(
 ):
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-    processor = Moondream3Processor.from_pretrained(model_id, trust_remote_code=True)
+    processor = Moondream3Processor.from_pretrained(model_id)
     pil_image = image_assets[0].pil_image.convert("RGB")
     hwc_array = np.asarray(pil_image)
     expected_pixel_values, expected_tiling = processor.preprocess_image(pil_image)
@@ -413,7 +414,9 @@ def test_processor_apply_accepts_non_pil_image_inputs(
     assert image_placeholders[0].length == EXPECTED_IMAGE_TOKENS
 
     mm_kwargs = processed_inputs["mm_kwargs"].get_data()
-    assert mm_kwargs["pixel_values"].shape[2:] == (3, 378, 378)
+    pixel_values = mm_kwargs["pixel_values"]
+    assert isinstance(pixel_values, torch.Tensor)
+    assert pixel_values.shape[2:] == (3, 378, 378)
 
 
 class TestMoondream3TilingLogic:
