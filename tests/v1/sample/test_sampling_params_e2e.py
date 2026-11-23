@@ -14,7 +14,7 @@ PROMPT = "Hello my name is Robert and I"
 
 @pytest.fixture(scope="module")
 def llm(vllm_runner) -> Generator[LLM, None, None]:
-    with vllm_runner(MODEL, enforce_eager=True) as runner:
+    with vllm_runner(MODEL, enforce_eager=True, enable_chunked_prefill=None) as runner:
         yield runner.llm
 
 
