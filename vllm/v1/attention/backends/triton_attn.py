@@ -579,7 +579,7 @@ class TritonAttentionImpl(AttentionImpl):
         # zero cost when TD is off.
         #
         # ``VLLM_TRITON_USE_TD``:
-        #   - unset or ``1```: on for XPU, off elsewhere,
+        #   - unset or ``1``: on for XPU, off elsewhere,
         #   - ``0``: force TD off regardless of platform (useful for A/B).
         td_override = envs.VLLM_TRITON_USE_TD
         if td_override is None:
