@@ -360,6 +360,9 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
 
 # Relink with the exact Git-derived package version.
 FROM rust-build-cache AS rust-build
+# Few crates recompile here, far from the open-file limit, and the job count
+# also caps the thin-LTO threads: lift the cap, as docker/Dockerfile.rocm does.
+ENV CARGO_BUILD_JOBS=default
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
