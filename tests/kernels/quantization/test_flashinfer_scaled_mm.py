@@ -140,8 +140,9 @@ def test_sm107_mxfp8_block_linear_matches_quantized_reference(
     layer = _block_fp8_layer(weight, scales, scale_name)
     baseline_layer = _block_fp8_layer(weight, scales, scale_name)
     # DeepGEMM requantizes this FP32 buffer in place before replacing its
-    # parameter with packed scales; keep the original buffer for the reference.
-    requantized_scales = getattr(baseline_layer, scale_name)
+    # parameter with packed scales; retain its FP32 storage, not the Parameter
+    # whose data is rebound by replace_parameter.
+    requantized_scales = getattr(baseline_layer, scale_name).detach()
     baseline.process_weights_after_loading(baseline_layer)
     kernel.process_weights_after_loading(layer)
     torch.testing.assert_close(
