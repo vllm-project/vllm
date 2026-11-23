@@ -25,14 +25,13 @@ class PreRotationRMSNorm(RotationAdapter, RMSNorm):
     def upgrade(
         cls, original: RMSNorm, *, tag: str, inverse: bool
     ) -> PreRotationRMSNorm:
-        """Add pre-rotation behavior without rebuilding the RMSNorm."""
+        """Upgrade in place, preserving parameter names and CustomOp dispatch."""
         if type(original) is not RMSNorm:
             raise TypeError(
                 "pre-rotation only supports plain RMSNorm, got "
                 f"{type(original).__name__}"
             )
 
-        # Upgrade in place to preserve parameter names and CustomOp dispatch.
         original.__class__ = cls
         upgraded = cast(PreRotationRMSNorm, original)
         upgraded.init_rotation_adapter(

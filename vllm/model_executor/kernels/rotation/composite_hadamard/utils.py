@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright (c) 2026 MetaX Integrated Circuits (Shanghai) Co., Ltd.
 
-"""Shape selection for composite Hadamard transforms."""
+"""Shape validation for composite Hadamard transforms."""
 
 from __future__ import annotations
 

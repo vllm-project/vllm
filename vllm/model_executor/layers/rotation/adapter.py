@@ -36,7 +36,7 @@ class RotationAdapter:
         return self._rotation
 
     def bind_rotation(self, rotation: RotationTransform) -> None:
-        """Bind a shared registry entry without registering it as a child."""
+        """Bind the shared rotation without registering it as a child module."""
         rotation_hidden_size = getattr(rotation, "hidden_size", None)
         if rotation_hidden_size != self.rotation_hidden_size:
             raise ValueError(
@@ -44,7 +44,6 @@ class RotationAdapter:
                 f"{rotation_hidden_size} does not match consumer hidden_size="
                 f"{self.rotation_hidden_size}"
             )
-        # Keep parameters under the registry's checkpoint namespace.
         object.__setattr__(self, "_rotation", rotation)
 
     def apply_rotation(self, hidden_states: torch.Tensor) -> torch.Tensor:
