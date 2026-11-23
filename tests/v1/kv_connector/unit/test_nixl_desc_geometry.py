@@ -60,6 +60,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheGroup,
+    KVCacheLayerConfig,
     KVCacheLayout,
     KVCacheTensor,
     MambaSpec,
@@ -891,6 +892,110 @@ def test_nixl_compressed_kernel_split(layout, kernel_block_size, raises):
     ):
         worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
         worker.shutdown()
+
+
+def _register_kernel_rows_worker(layer, layout, transfer_block_size):
+    """Register views whose kernel rows are the manager block, while NIXL picks
+    `transfer_block_size` (e.g. for a drafter in another group)."""
+    spec = layer.spec if isinstance(layer, KVCacheLayerConfig) else layer
+    num_blocks, layer_names = 3, ["layer.0", "layer.1"]
+    layer_stride = num_blocks * spec.page_size_bytes
+    tensor = KVCacheTensor(
+        size=len(layer_names) * layer_stride,
+        layers=layer_names,
+        layer_stride=layer_stride,
+        block_stride=spec.page_size_bytes,
+    )
+    caches = create_kv_cache_views(
+        torch.zeros(tensor.size, dtype=torch.int8), spec, num_blocks, layout, tensor
+    )
+    vllm_config = create_vllm_config(block_size=spec.block_size)
+    vllm_config.cache_config.kv_cache_layout = layout.name
+    vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
+    backend = MagicMock()
+    backend.get_name.return_value = "TEST"
+    with (
+        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=[backend]),
+        patch.object(bw, "select_common_block_size", return_value=transfer_block_size),
+        patch("threading.Thread"),
+        set_current_vllm_config(vllm_config),
+    ):
+        worker = NixlPullConnectorWorker(
+            vllm_config,
+            "local-engine",
+            KVCacheConfig(
+                num_blocks, [tensor], [make_kv_cache_group(layer_names, layer)]
+            ),
+        )
+        worker.use_mla = isinstance(spec, MLAAttentionSpec)
+        worker.register_kv_caches(dict(zip(layer_names, caches)))
+    return worker, caches
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("kernel_block_size", [128, 256])
+@pytest.mark.parametrize(
+    "make_layer, layout",
+    [
+        (
+            lambda bs: MLAAttentionSpec(
+                block_size=bs, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+            ),
+            KVCacheLayout.LBHNC,
+        ),
+        (
+            lambda bs: SlidingWindowManager.layer_config(
+                MLAAttentionSpec(
+                    block_size=bs, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+                ),
+                sliding_window=128,
+            ),
+            KVCacheLayout.LBHNC,
+        ),
+        (
+            lambda bs: AttentionSpec(
+                block_size=bs, num_kv_heads=4, head_size=64, dtype=torch.bfloat16
+            ),
+            KVCacheLayout.LBNHC,
+        ),
+    ],
+    ids=["mla", "sliding-window-mla", "attention-lbnhc"],
+)
+def test_token_major_kernel_rows_split_into_transfer_blocks(
+    make_layer, layout, kernel_block_size
+):
+    """NIXL pages tile a token-major kernel row larger than NIXL's block."""
+    transfer_block_size = 64
+    worker, caches = _register_kernel_rows_worker(
+        make_layer(kernel_block_size), layout, transfer_block_size
+    )
+
+    split = kernel_block_size // transfer_block_size
+    page = caches[0].stride(0) * caches[0].element_size() // split
+    assert worker.block_size == transfer_block_size
+    assert worker.num_blocks == caches[0].shape[0] * split
+    expected_descs = [
+        [cache.data_ptr() + block * page, page, 0]
+        for cache in caches
+        for block in range(worker.num_blocks)
+    ]
+    np.testing.assert_array_equal(
+        expand_strided_descs(worker.src_blocks_data),
+        np.asarray(expected_descs, dtype=np.uint64),
+    )
+
+
+@pytest.mark.cpu_test
+def test_head_major_kernel_rows_larger_than_transfer_block_rejected():
+    """A head-major row cannot be split into NIXL's smaller blocks."""
+    spec = AttentionSpec(
+        block_size=128, num_kv_heads=4, head_size=64, dtype=torch.bfloat16
+    )
+    with pytest.raises(NotImplementedError, match="cannot split"):
+        _register_kernel_rows_worker(spec, KVCacheLayout.LBHNC, 64)
 
 
 def _make_remote_meta(
