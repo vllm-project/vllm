@@ -13,9 +13,9 @@ The OpenAI batch file format consists of a series of json objects on new lines.
 Each line represents a separate request. See the [OpenAI package reference](https://platform.openai.com/docs/api-reference/batch/requestInput) for more details.
 
 ```{note}
-We currently support `/v1/chat/completions`, `/v1/embeddings`, `/score`, `/rerank`,
-`/v1/audio/transcriptions`, and `/v1/audio/translations` endpoints (`/v1/completions`
-coming soon). Score and rerank match any URL ending in `/score` or `/rerank`, such as
+We currently support `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
+`/score`, `/rerank`, `/v1/audio/transcriptions`, and `/v1/audio/translations`
+endpoints. Score and rerank match any URL ending in `/score` or `/rerank`, such as
 `/v1/score`.
 ```
 

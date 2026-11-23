@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import Any
+
 import msgspec
 
 
@@ -54,16 +56,42 @@ class LoRARequest(
         return self.lora_path
 
     def __eq__(self, value: object) -> bool:
-        """Overrides the equality method to compare LoRARequest
-        instances based on lora_name. This allows for identification
-        and comparison lora adapter across engines.
+        """Compares lora_name and lora_int_id. A name loaded again at runtime
+        gets a new lora_int_id while requests for the old one may still be
+        running, and the engine needs both adapters active.
         """
-        return isinstance(value, self.__class__) and self.lora_name == value.lora_name
+        return (
+            isinstance(value, self.__class__)
+            and self.lora_name == value.lora_name
+            and self.lora_int_id == value.lora_int_id
+        )
 
     def __hash__(self) -> int:
-        """Overrides the hash method to hash LoRARequest instances
-        based on lora_name. This ensures that LoRARequest instances
-        can be used in hash-based collections such as sets and dictionaries,
-        identified by their names across engines.
-        """
-        return hash(self.lora_name)
+        return hash((self.lora_name, self.lora_int_id))
+
+
+class _TensorLoRARequest(LoRARequest):
+    """Worker-local request for internal integrations such as verl.
+
+    Construct this after the framework has received and retained the complete
+    adapter tensors on the worker. Do not pass it through engine requests or
+    the public add_lora RPC. The framework owns update synchronization.
+
+    Warning:
+        Prefix cache keys use the adapter name and path, not tensor contents.
+        Replacing weights under the same name and path can reuse stale KV cache
+        and produce incorrect outputs, even if the adapter ID changes. The
+        framework must invalidate the old KV cache before resuming inference;
+        loading or removing an adapter does not do this automatically.
+
+    """
+
+    _lora_tensors: dict[str, Any] | None = None
+    _peft_config: dict[str, Any] | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self._lora_tensors is None or self._peft_config is None:
+            raise ValueError("_lora_tensors and _peft_config must be provided together")
+        if not self._lora_tensors:
+            raise ValueError("_lora_tensors cannot be empty")

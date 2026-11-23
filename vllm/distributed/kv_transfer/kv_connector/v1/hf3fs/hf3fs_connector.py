@@ -30,7 +30,7 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -465,6 +465,12 @@ class AsyncOperationManager:
 
 class HF3FSKVConnector(KVConnectorBase_V1):
     """HF3FS KV Connector implementation."""
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return False
 
     def __init__(
         self,
