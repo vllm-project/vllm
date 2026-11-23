@@ -268,13 +268,13 @@ def _compressor_state_name(layer_index: int) -> str:
 def _make_csa_linear_specs(
     num_mamba: int = 7,
     num_tuples: int = NUM_CACHE_TUPLES,
-    mamba_cache_mode: str = "none",
+    enable_prefix_caching: bool = False,
 ) -> dict[str, KVCacheLayerConfig]:
     specs: dict[str, KVCacheLayerConfig] = {}
     for layer_index in range(num_mamba):
         specs[f"model.layers.{layer_index}.linear_attn"] = MambaManager.layer_config(
             MambaSpec(block_size=16, shapes=((32,),), dtypes=(torch.bfloat16,)),
-            mamba_cache_mode=mamba_cache_mode,
+            enable_prefix_caching=enable_prefix_caching,
         )
     specs["model.layers.0.ple"] = MambaManager.layer_config(
         MambaSpec(
@@ -283,7 +283,7 @@ def _make_csa_linear_specs(
             dtypes=(torch.bfloat16,),
             tp_replicated=True,
         ),
-        mamba_cache_mode=mamba_cache_mode,
+        enable_prefix_caching=enable_prefix_caching,
     )
     for layer_index in range(num_tuples):
         specs[_main_kv_name(layer_index)] = full_layer(
@@ -329,7 +329,6 @@ def _shared_layout_config():
     config.cache_config.block_size = 16
     config.cache_config.enable_prefix_caching = False
     config.cache_config.prefix_match_unit = None
-    config.cache_config.mamba_cache_mode = "none"
     return config
 
 
@@ -407,9 +406,9 @@ class TestCSALinearGrouping:
         neither divides the hit length nor bounds the (empty) block list."""
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
-        config.cache_config.mamba_cache_mode = "align"
+        config.cache_config.enable_prefix_caching = True
         groups = get_kv_cache_groups(
-            config, _make_csa_linear_specs(mamba_cache_mode="align")
+            config, _make_csa_linear_specs(enable_prefix_caching=True)
         )
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=BYTES_PER_BLOCK * 64
@@ -440,8 +439,8 @@ class TestCSALinearGrouping:
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
         config.cache_config.prefix_match_unit = 16
-        config.cache_config.mamba_cache_mode = "align"
-        specs = _make_csa_linear_specs(num_tuples=1, mamba_cache_mode="align")
+        config.cache_config.enable_prefix_caching = True
+        specs = _make_csa_linear_specs(num_tuples=1, enable_prefix_caching=True)
         groups = get_kv_cache_groups(config, specs)
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
@@ -457,8 +456,8 @@ class TestCSALinearGrouping:
     def test_scratch_ring_does_not_drag_hash_granularity(self):
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
-        config.cache_config.mamba_cache_mode = "align"
-        specs = _make_csa_linear_specs(num_tuples=1, mamba_cache_mode="align")
+        config.cache_config.enable_prefix_caching = True
+        specs = _make_csa_linear_specs(num_tuples=1, enable_prefix_caching=True)
         groups = get_kv_cache_groups(config, specs)
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
