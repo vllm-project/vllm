@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import array
 import contextlib
+import functools
 import os
 import random
 import sys
 import threading
 from collections.abc import Callable, Collection, Sequence
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -94,6 +95,7 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 }
 
 T = TypeVar("T")
+_P = ParamSpec("_P")
 
 
 def token_ids_to_tensor(
@@ -179,6 +181,46 @@ def canonicalize_singleton_dim_strides(t: torch.Tensor) -> torch.Tensor:
     if not changed:
         return t
     return t.as_strided(t.shape, strides)
+
+
+@overload
+def lazy_torch_compile(
+    fn: Callable[_P, T], /, **compile_kwargs: Any
+) -> Callable[_P, T]: ...
+
+
+@overload
+def lazy_torch_compile(
+    **compile_kwargs: Any,
+) -> Callable[[Callable[_P, T]], Callable[_P, T]]: ...
+
+
+def lazy_torch_compile(fn: Callable | None = None, /, **compile_kwargs: Any):
+    """Defer `torch.compile` until the first call outside a compiled region.
+
+    Calling `torch.compile` at import loads Inductor in every process that
+    imports the module and can start background cache-key prefetch threads.
+    Inside an outer compiled region, Dynamo inlines the original function.
+    """
+
+    def decorate(fn: Callable[_P, T]) -> Callable[_P, T]:
+        compiled: Callable[_P, T] | None = None
+        lock = threading.Lock()
+
+        @functools.wraps(fn)
+        def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> T:
+            nonlocal compiled
+            if torch.compiler.is_compiling():
+                return fn(*args, **kwargs)
+            if compiled is None:
+                with lock:
+                    if compiled is None:
+                        compiled = torch.compile(fn, **compile_kwargs)
+            return compiled(*args, **kwargs)
+
+        return wrapper
+
+    return decorate if fn is None else decorate(fn)
 
 
 @contextlib.contextmanager

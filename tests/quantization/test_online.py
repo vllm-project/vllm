@@ -1452,7 +1452,7 @@ def test_online_requantized_moe_reload(
     monkeypatch.setattr(
         online_fp8,
         "per_block_cast_to_fp8",
-        online_fp8.per_block_cast_to_fp8.__wrapped__,
+        inspect.unwrap(online_fp8.per_block_cast_to_fp8),
     )
 
     default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)

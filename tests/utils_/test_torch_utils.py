@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from textwrap import dedent
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 import torch
@@ -13,6 +20,7 @@ from vllm.utils.torch_utils import (
     current_stream,
     get_kv_cache_torch_dtype,
     is_lossless_cast,
+    lazy_torch_compile,
     set_default_torch_dtype,
     set_random_seed,
     set_torch_threads_for_runtime,
@@ -261,3 +269,146 @@ def test_set_random_seed_differs_per_data_parallel_index():
     assert draws(42, 1) == draws(42, 1)
     assert len({str(draws(42, i)) for i in range(4)}) == 4
     assert draws(42, 1) != draws(43, 1)
+
+
+def test_engine_worker_imports_leave_compiler_and_deep_ep_unloaded():
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            dedent("""
+            import sys
+
+            import vllm.v1.engine.core
+            import vllm.v1.worker.gpu_worker
+            import vllm.v1.worker.gpu.model_runner
+
+            forbidden = {
+                "torch._inductor.compile_fx",
+                "torch._inductor.codecache",
+                "deep_ep",
+            }
+            loaded = forbidden.intersection(sys.modules)
+            assert not loaded, sorted(loaded)
+
+            # Recent torch versions prefetch cache keys in a dedicated pool.
+            helpers = sys.modules.get("torch.utils._functools")
+            pool = getattr(helpers, "_prefetch_executor", None)
+            if pool is not None:
+                assert not pool._threads, pool._threads
+        """),
+        ],
+        check=True,
+    )
+
+
+def test_lazy_torch_compile_imports_on_first_call():
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            dedent("""
+            import sys
+            import torch
+            from vllm.utils.torch_utils import lazy_torch_compile
+
+            graphs = []
+            def backend(gm, inputs):
+                graphs.append(gm)
+                return gm.forward
+
+            @lazy_torch_compile(backend=backend, fullgraph=True)
+            def increment(x):
+                return x + 1
+
+            assert "torch._dynamo" not in sys.modules
+            assert "torch._inductor" not in sys.modules
+            assert increment(torch.tensor(1)).item() == 2
+            assert "torch._dynamo" in sys.modules
+            assert len(graphs) == 1
+        """),
+        ],
+        check=True,
+    )
+
+
+@pytest.mark.parametrize("with_kwargs", [False, True])
+def test_lazy_torch_compile_binds_methods_and_compiles_once(with_kwargs):
+    compile_kwargs = {"fullgraph": True} if with_kwargs else {}
+    decorator = (
+        lazy_torch_compile(**compile_kwargs) if with_kwargs else lazy_torch_compile
+    )
+
+    class Offset:
+        def __init__(self, bias):
+            self.bias = bias
+
+        @decorator
+        def add(self, x):
+            return x + self.bias
+
+    first, second = Offset(1), Offset(3)
+    x = torch.tensor(2)
+    assert hasattr(Offset.add, "__wrapped__")
+    original = Offset.add.__wrapped__
+    assert original(first, x).item() == 3
+    real_compile = torch.compile
+    with patch.object(
+        torch,
+        "compile",
+        side_effect=lambda fn, **kw: real_compile(fn, backend="eager", **kw),
+    ) as compile_spy:
+        assert first.add(x).item() == 3
+        assert second.add(x).item() == 5
+        assert first.add(x).item() == 3
+        compile_spy.assert_called_once_with(original, **compile_kwargs)
+
+
+def test_lazy_torch_compile_inlines_in_fullgraph():
+    graphs = []
+
+    def backend(gm, inputs):
+        graphs.append(gm)
+        return gm.forward
+
+    @lazy_torch_compile(backend="eager")
+    def inner(x):
+        return x + 1
+
+    @torch.compile(backend=backend, fullgraph=True)
+    def outer(x):
+        return inner(x) * 2
+
+    x = torch.tensor(2)
+    with patch.object(torch, "compile", side_effect=AssertionError("nested compile")):
+        assert outer(x).item() == 6
+    assert len(graphs) == 1
+
+
+def test_lazy_torch_compile_concurrent_first_call():
+    compiling = threading.Event()
+    second_started = threading.Event()
+
+    def compile_fn(fn):
+        compiling.set()
+        assert second_started.wait(timeout=10)
+        return fn
+
+    @lazy_torch_compile
+    def increment(x):
+        return x + 1
+
+    def second_call():
+        second_started.set()
+        return increment(2)
+
+    with (
+        patch.object(torch, "compile", side_effect=compile_fn) as compile_spy,
+        ThreadPoolExecutor(max_workers=2) as pool,
+    ):
+        first = pool.submit(increment, 1)
+        assert compiling.wait(timeout=10)
+        second = pool.submit(second_call)
+        assert first.result(timeout=10) == 2
+        assert second.result(timeout=10) == 3
+    compile_spy.assert_called_once()
