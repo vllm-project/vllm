@@ -52,8 +52,6 @@ class MTPMixin(CausalMixin):
         self.check_version("5.20.0", "MTP")
         from transformers.modeling_layers import MtpModel
 
-        # `MtpModel` needs the main model with its LM head, which for a multimodal
-        # config is not registered with `AutoModelForCausalLM`
         if self.text_config is not self.config:
             auto_cls = AutoModelForMultimodalLM
         else:
