@@ -117,7 +117,8 @@ class OffloadingParallelConfig:
 @dataclass(frozen=True, slots=True)
 class OffloadingConfig:
     groups: tuple[OffloadingGroupConfig, ...]
-    # KV bytes stored by one worker per block.
+    # CPU bytes reserved for each worker per block, the same on every pipeline
+    # stage: the largest stage's KV bytes per block.
     worker_kv_bytes_per_block: int
     # Whether the scheduler emits KV cache events. When true,
     # the offloading backend should emit events as well.

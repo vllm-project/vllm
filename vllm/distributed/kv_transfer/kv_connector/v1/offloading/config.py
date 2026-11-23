@@ -169,6 +169,12 @@ def build_offloading_config(
         # so its size is the total, not a per-tensor share.
         total_gpu_kv_bytes = kv_cache_config.kv_cache_tensors[0].size
         worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
+        # The scheduler and every worker size CPU chunks by the pipeline stage
+        # with the largest blocks, so their chunk counts and row layouts match.
+        worker_kv_bytes_per_block = max(
+            (stage.bytes_per_block for stage in kv_cache_config.pipeline_stages),
+            default=worker_kv_bytes_per_block,
+        )
     elif kv_cache_config.num_blocks > 0:
         worker_kv_bytes_per_block = sum(
             group.page_size_bytes for _, group in selected_groups
