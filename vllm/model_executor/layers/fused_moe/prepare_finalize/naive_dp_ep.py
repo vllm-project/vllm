@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 
 import torch
@@ -83,16 +83,23 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
 
     Uses Torch AR/RS or AR for dispatch/combine operations, applied
     to the topk weights and ids.
+
+    A backend input_quantizer may return data and per-token scales, or None
+    to retain deferred quantization. Its choice must agree across dispatch ranks.
     """
 
     def __init__(
         self,
         is_sequence_parallel: bool = False,
         num_dispatchers: int = 1,
+        input_quantizer: (
+            Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor] | None] | None
+        ) = None,
     ) -> None:
         super().__init__()
         self.is_sequence_parallel = is_sequence_parallel
         self._num_dispatchers = num_dispatchers
+        self._input_quantizer = input_quantizer
         # Set by FusedMoEWithLoRA.set_mapping() when LoRA is active. When
         # present, prepare() dispatches the per-token LoRA mapping alongside
         # hidden_states and writes the gathered result back to the context so
@@ -189,9 +196,21 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
-            a1, quant_config, defer_input_quant
-        )
+        prepared = None
+        if (
+            self._input_quantizer is not None
+            and defer_input_quant
+            and not apply_router_weight_on_input
+            and self._lora_context is None
+        ):
+            prepared = self._input_quantizer(a1)
+        if prepared is None:
+            a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
+                a1, quant_config, defer_input_quant
+            )
+        else:
+            a1q, a1q_scale_orig = prepared
+            scales = [a1q_scale_orig]
 
         # When LoRA is active, dispatch the per-token LoRA id along with
         # hidden_states so every rank receives the correct mapping for the
@@ -393,6 +412,9 @@ def make_moe_prepare_and_finalize_naive_dp_ep(
     use_monolithic: bool,
     is_sequence_parallel: bool = False,
     num_dispatchers: int = 1,
+    input_quantizer: (
+        Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor] | None] | None
+    ) = None,
 ) -> MoEPrepareAndFinalizeNaiveDPEPModular | MoEPrepareAndFinalizeNaiveDPEPMonolithic:
     return (
         MoEPrepareAndFinalizeNaiveDPEPMonolithic(
@@ -403,5 +425,6 @@ def make_moe_prepare_and_finalize_naive_dp_ep(
         else MoEPrepareAndFinalizeNaiveDPEPModular(
             is_sequence_parallel=is_sequence_parallel,
             num_dispatchers=num_dispatchers,
+            input_quantizer=input_quantizer,
         )
     )

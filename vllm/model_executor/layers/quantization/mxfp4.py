@@ -157,6 +157,13 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         super().__init__(moe)
         self.weight_dtype = "gpt_oss_mxfp4"
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+        self._humming_fp8_dispatch_enabled = False
+        if self.mxfp4_backend == Mxfp4MoeBackend.HUMMING:
+            from vllm.model_executor.layers.quantization.utils.humming.moe import (
+                snapshot_humming_fp8_dispatch_enabled,
+            )
+
+            self._humming_fp8_dispatch_enabled = snapshot_humming_fp8_dispatch_enabled()
 
         self.max_capture_size = moe.max_capture_size
 
@@ -387,6 +394,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
                 mxfp4_backend=self.mxfp4_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
+                enabled=self._humming_fp8_dispatch_enabled,
             )
             self.moe_kernel.fused_experts.keep_constants(layer)
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)

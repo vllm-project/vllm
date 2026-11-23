@@ -386,6 +386,12 @@ class KernelConfig:
                    running QDQ on activations.
     """
 
+    humming_fp8_dispatch: bool = False
+    """Enable Humming per-token FP8 quantization before all-gather.
+    Applies to indexed Humming with AgRs and dynamic per-token E4M3 inputs;
+    Elastic EP and unsupported quantization configurations retain their
+    existing behavior."""
+
     step5_attention_backend: Literal["native", "prims_ts"] = "native"
     """Step5 attention backend. PrimTS supports SM100, SM103 and SM107 and
     handles all FP8 attention and BF16 prefill.

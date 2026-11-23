@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -197,6 +198,9 @@ def maybe_make_prepare_finalize(
     use_monolithic: bool = False,
     all2all_manager: Any | None = None,
     input_dtype: torch.dtype | None = None,
+    input_quantizer: (
+        Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor] | None] | None
+    ) = None,
 ) -> FusedMoEPrepareAndFinalize | None:
     if moe.moe_parallel_config.use_passthrough_all2all:
         # The experts dispatch and combine themselves, in every EP topology.
@@ -467,6 +471,7 @@ def maybe_make_prepare_finalize(
             use_monolithic=use_monolithic,
             is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
             num_dispatchers=all2all_manager.world_size,
+            input_quantizer=input_quantizer,
         )
 
     elif moe.use_nixl_ep_kernels:

@@ -18,6 +18,7 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.distributed.parallel_state import set_custom_all_reduce
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
@@ -55,6 +56,7 @@ def _set_vllm_config(
     vllm_config.parallel_config.rank = tp_pp_rank
 
     with set_current_vllm_config(vllm_config):
+        set_custom_all_reduce(not vllm_config.parallel_config.disable_custom_all_reduce)
         init_distributed_environment(
             world_size=tp_pp_world_size,
             rank=tp_pp_rank,
@@ -66,6 +68,9 @@ def _set_vllm_config(
         initialize_model_parallel(
             tensor_model_parallel_size=vllm_config.parallel_config.tensor_parallel_size,
             pipeline_model_parallel_size=vllm_config.parallel_config.pipeline_parallel_size,
+            prefill_context_model_parallel_size=(
+                vllm_config.parallel_config.prefill_context_parallel_size
+            ),
         )
         if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
             cpu_group = torch.distributed.split_group(

@@ -363,7 +363,9 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         - quant_config: Quantization info provided by the fused experts.
         - defer_input_quant: Runtime parameter indicating whether or not to
           defer input quantization to the FusedMoEExpertsModular
-          in cases where the compute kernel expects unquantized inputs
+          in cases where the compute kernel expects unquantized inputs.
+          A kernel factory may bind a backend-compatible input quantizer to
+          prepare, overriding this deferral without using the generic quantizer.
 
         Returns a tuple of:
         - quantized + dispatched a.
