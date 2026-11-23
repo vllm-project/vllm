@@ -23,6 +23,7 @@ from vllm.models.hy_v4.nvidia.model import (
 )
 from vllm.models.hy_v4.weight_utils import HYV4_MLP_MAPPER, HYV4_WEIGHTS_MAPPER
 from vllm.models.hy_v4_flash.configs import HYV4FlashConfig
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .attention import HYV4FlashAttention
@@ -32,6 +33,11 @@ _EXPERT_WEIGHT = re.compile(
     r"(.*)\.experts\.(?:(\d+)\.)?(gate_proj|up_proj|down_proj|gate_up_proj)"
     r"(\.weight(?:_packed|_scale(?:_inv)?)?|_scale(?:_inv)?)?"
 )
+
+
+def validate_platform() -> None:
+    if not current_platform.is_cuda():
+        raise NotImplementedError("HYV4 Flash requires NVIDIA CUDA")
 
 
 class HYV4FlashDecoderLayer(HYV4DecoderLayer):
@@ -274,6 +280,7 @@ class HYV4FlashForCausalLM(HYV4ForCausalLM):
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        validate_platform()
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.token_lookback_depth = self.model.token_lookback_depth
         self._weight_loading_depth = 0
