@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import bisect
 import heapq
-from collections.abc import Iterable, Sequence
+from collections import OrderedDict
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from itertools import chain
 
 from typing_extensions import override
 
@@ -13,7 +16,123 @@ from vllm.v1.kv_offload.cpu.policies.base import (
     order_request_keys,
 )
 
-_HeapEntry = tuple[bool, tuple[int, int], OffloadKey]
+_Rank = tuple[int, int]
+_IndexEntry = tuple[_Rank, OffloadKey]
+
+# Target sublist length of _SortedEntries; a sublist is split at twice this.
+_SUBLIST_LOAD = 512
+
+
+class _SortedEntries:
+    """Sorted list of distinct index entries with O(log n + load) updates.
+
+    Entries live in sorted sublists of bounded length, located by bisecting
+    the per-sublist maxima, so an insert or remove never moves more than one
+    sublist's worth of elements.
+    """
+
+    __slots__ = ("_len", "_lists", "_maxes")
+
+    def __init__(self) -> None:
+        self._lists: list[list[_IndexEntry]] = []
+        self._maxes: list[_IndexEntry] = []
+        self._len = 0
+
+    def __len__(self) -> int:
+        return self._len
+
+    def __iter__(self) -> Iterator[_IndexEntry]:
+        for sublist in self._lists:
+            yield from sublist
+
+    def clear(self) -> None:
+        self._lists.clear()
+        self._maxes.clear()
+        self._len = 0
+
+    def add(self, entry: _IndexEntry) -> None:
+        lists, maxes = self._lists, self._maxes
+        if not maxes:
+            lists.append([entry])
+            maxes.append(entry)
+            self._len += 1
+            return
+        i = bisect.bisect_left(maxes, entry)
+        if i == len(maxes):
+            i -= 1
+            lists[i].append(entry)
+            maxes[i] = entry
+        else:
+            bisect.insort(lists[i], entry)
+        sublist = lists[i]
+        if len(sublist) > 2 * _SUBLIST_LOAD:
+            upper = sublist[_SUBLIST_LOAD:]
+            del sublist[_SUBLIST_LOAD:]
+            maxes[i] = sublist[-1]
+            lists.insert(i + 1, upper)
+            maxes.insert(i + 1, upper[-1])
+        self._len += 1
+
+    def remove(self, entry: _IndexEntry) -> None:
+        lists, maxes = self._lists, self._maxes
+        i = bisect.bisect_left(maxes, entry)
+        if i == len(maxes):
+            raise ValueError(f"{entry!r} not in index")
+        sublist = lists[i]
+        j = bisect.bisect_left(sublist, entry)
+        if j == len(sublist) or sublist[j] != entry:
+            raise ValueError(f"{entry!r} not in index")
+        del sublist[j]
+        self._len -= 1
+        if not sublist:
+            del lists[i]
+            del maxes[i]
+        elif j == len(sublist):
+            maxes[i] = sublist[-1]
+
+
+class _EvictionIndex:
+    """Exact rank order for one retention class.
+
+    Fresh maximum ranks append to the ordered tail in O(1). Entries that
+    cannot append go into bounded sorted sublists. Iteration merges both
+    parts, and each indexed key has exactly one entry.
+    """
+
+    def __init__(self) -> None:
+        self.tail: OrderedDict[OffloadKey, _Rank] = OrderedDict()
+        self.sorted_entries = _SortedEntries()
+        self.sorted_ranks: dict[OffloadKey, _Rank] = {}
+
+    def discard(self, key: OffloadKey) -> None:
+        if self.tail.pop(key, None) is None:
+            rank = self.sorted_ranks.pop(key, None)
+            if rank is not None:
+                self.sorted_entries.remove((rank, key))
+
+    def add(self, key: OffloadKey, rank: _Rank) -> None:
+        tail = self.tail
+        if tail:
+            last_key = next(reversed(tail))
+            if (rank, key) > (tail[last_key], last_key):
+                tail[key] = rank
+                return
+        elif not self.sorted_ranks:
+            tail[key] = rank
+            return
+        self.sorted_entries.add((rank, key))
+        self.sorted_ranks[key] = rank
+
+    def __iter__(self) -> Iterator[_IndexEntry]:
+        tail_entries = ((rank, key) for key, rank in self.tail.items())
+        if not self.sorted_ranks:
+            return tail_entries
+        return heapq.merge(self.sorted_entries, tail_entries)
+
+    def clear(self) -> None:
+        self.tail.clear()
+        self.sorted_entries.clear()
+        self.sorted_ranks.clear()
 
 
 @dataclass(slots=True)
@@ -26,10 +145,10 @@ class _RequestRank:
 class LRUCachePolicy(CachePolicy):
     """LRU caching policy with logical recency independent of transfer pinning.
 
-    Evictable chunks live in a lazy-invalidating min-heap. A chunk's recency
-    can therefore be updated while it is pinned; when it later becomes
-    evictable, it enters the heap with the order assigned by the request
-    rather than its transfer-completion time.
+    Eviction takes unretained chunks before retained chunks, in increasing
+    (rank, key) order within each class. Recency can be updated while pinned;
+    when it later becomes evictable, it is ordered by the rank assigned by the
+    request rather than by its transfer-completion time.
 
     Active requests share a provisional rank across batches, ordered by token
     position so tails precede heads. Finalization commits the request's recency.
@@ -37,14 +156,18 @@ class LRUCachePolicy(CachePolicy):
     A use is indicated by,
      - First time the key is added (store).
      - A request-scoped access.
+
+    Each evictable chunk is indexed exactly once, under its current retention
+    class and rank. Updates avoid full rebuilds of the eviction order.
     """
 
     def __init__(self, cache_capacity: int):
         super().__init__(cache_capacity)
         self.chunks: dict[OffloadKey, ChunkStatus] = {}
-        self._ranks: dict[OffloadKey, tuple[int, int]] = {}
-        self._evictable: set[OffloadKey] = set()
-        self._heap: list[_HeapEntry] = []
+        self._ranks: dict[OffloadKey, _Rank] = {}
+        # Record the indexed class so a lease change can remove the old entry.
+        self._evictable: dict[OffloadKey, bool] = {}
+        self._indexes = (_EvictionIndex(), _EvictionIndex())  # unretained, retained
         self._next_rank = 0
         self._cache_generation = 0
 
@@ -60,50 +183,33 @@ class LRUCachePolicy(CachePolicy):
             req_context.set_state(state)
         return state.rank
 
-    def _assign_new_rank(self, key: OffloadKey) -> bool:
-        if key not in self.chunks:
-            return False
-        self._next_rank += 1
-        self._ranks[key] = (self._next_rank, 0)
-        return key in self._evictable
-
-    def _heap_entry(self, key: OffloadKey) -> _HeapEntry:
-        return self.chunks[key].retained, self._ranks[key], key
+    def _unindex(self, key: OffloadKey) -> None:
+        retained = self._evictable.pop(key, None)
+        if retained is not None:
+            self._indexes[retained].discard(key)
 
     def _push_evictable(self, key: OffloadKey) -> None:
-        heapq.heappush(self._heap, self._heap_entry(key))
-
-    def _is_current(self, entry: _HeapEntry) -> bool:
-        retained, rank, key = entry
-        return (
-            key in self._evictable
-            and self._ranks[key] == rank
-            and self.chunks[key].retained == retained
-        )
-
-    def _rebuild_heap(self) -> None:
-        self._heap = [self._heap_entry(key) for key in self._evictable]
-        heapq.heapify(self._heap)
-
-    def _maybe_compact_heap(self) -> None:
-        if len(self._heap) >= max(64, 2 * len(self._evictable)):
-            self._rebuild_heap()
+        """Index a newly evictable key using its current lease state."""
+        retained = self.chunks[key].retained
+        self._evictable[key] = retained
+        self._indexes[retained].add(key, self._ranks[key])
 
     def _update_recency(self, keys: Iterable[OffloadKey]) -> None:
-        updated_evictable = [key for key in keys if self._assign_new_rank(key)]
-        self._update_heap(updated_evictable)
+        for key in keys:
+            if key not in self.chunks:
+                continue
+            self._next_rank += 1
+            rank = (self._next_rank, 0)
+            self._ranks[key] = rank
+            retained = self._evictable.get(key)
+            if retained is not None:
+                index = self._indexes[retained]
+                index.discard(key)
+                # A fresh rank sorts after every indexed rank.
+                index.tail[key] = rank
 
-    def _update_heap(self, updated_evictable: Sequence[OffloadKey]) -> None:
-        if not updated_evictable:
-            return
-        # Rebuilding is linear and substantially cheaper than k heap pushes
-        # for a long prefix. Small updates retain the incremental path.
-        if len(updated_evictable) >= max(64, len(self._evictable) // 4):
-            self._rebuild_heap()
-        else:
-            for key in updated_evictable:
-                self._push_evictable(key)
-            self._maybe_compact_heap()
+    def _iter_evictable(self) -> Iterator[_IndexEntry]:
+        return chain.from_iterable(self._indexes)
 
     @override
     def get(self, key: OffloadKey) -> ChunkStatus | None:
@@ -121,14 +227,13 @@ class LRUCachePolicy(CachePolicy):
         else:
             self._ranks[key] = (self._get_request_rank(req_context), -position)
         if chunk.ref_cnt == 0:
-            self._evictable.add(key)
             self._push_evictable(key)
 
     @override
     def remove(self, key: OffloadKey) -> None:
         del self.chunks[key]
         self._ranks.pop(key, None)
-        self._evictable.discard(key)
+        self._unindex(key)
 
     @override
     def on_request_access(
@@ -137,7 +242,6 @@ class LRUCachePolicy(CachePolicy):
         req_context: ReqContext,
     ) -> None:
         request_rank = self._get_request_rank(req_context)
-        updated_evictable = []
         for key in keys:
             position = req_context.get_offload_key_position(key)
             if position is None or key not in self.chunks:
@@ -148,9 +252,11 @@ class LRUCachePolicy(CachePolicy):
             if self._ranks[key] >= rank:
                 continue
             self._ranks[key] = rank
-            if key in self._evictable:
-                updated_evictable.append(key)
-        self._update_heap(updated_evictable)
+            retained = self._evictable.get(key)
+            if retained is not None:
+                index = self._indexes[retained]
+                index.discard(key)
+                index.add(key, rank)
 
     @override
     def on_request_finished(
@@ -168,7 +274,8 @@ class LRUCachePolicy(CachePolicy):
         self.chunks.clear()
         self._ranks.clear()
         self._evictable.clear()
-        self._heap.clear()
+        for index in self._indexes:
+            index.clear()
         self._next_rank = 0
         self._cache_generation += 1
 
@@ -179,62 +286,43 @@ class LRUCachePolicy(CachePolicy):
         if n == 0:
             return []
 
-        selected: list[tuple[_HeapEntry, ChunkStatus]] = []
-        selected_keys: set[OffloadKey] = set()
-        deferred: list[_HeapEntry] = []
-        while self._heap and len(selected) < n:
-            entry = heapq.heappop(self._heap)
-            if not self._is_current(entry):
-                continue
-            key = entry[2]
-            # Transfer pinning or retention changes can leave equivalent
-            # lazy entries behind. Select each cache key at most once.
-            if key in selected_keys:
-                continue
+        selected: list[OffloadKey] = []
+        for _, key in self._iter_evictable():
             if key in protected:
-                deferred.append(entry)
                 continue
-            chunk = self.chunks[key]
-            assert chunk.ref_cnt == 0
-            selected.append((entry, chunk))
-            selected_keys.add(key)
-
+            assert self.chunks[key].ref_cnt == 0
+            selected.append(key)
+            if len(selected) == n:
+                break
         if len(selected) < n:
-            for entry, _ in selected:
-                heapq.heappush(self._heap, entry)
-            for entry in deferred:
-                heapq.heappush(self._heap, entry)
             return None
 
-        for entry in deferred:
-            heapq.heappush(self._heap, entry)
-
         candidates: list[tuple[OffloadKey, ChunkStatus]] = []
-        for entry, chunk in selected:
-            key = entry[2]
-            self._evictable.remove(key)
+        for key in selected:
+            chunk = self.chunks[key]
+            self._unindex(key)
             del self.chunks[key]
             del self._ranks[key]
             candidates.append((key, chunk))
-        self._maybe_compact_heap()
         return candidates
 
     @override
     def on_retention_changed(self, key: OffloadKey, retained: bool) -> None:
-        if key in self._evictable:
-            self._push_evictable(key)
-            self._maybe_compact_heap()
+        previous = self._evictable.get(key)
+        if previous is None or previous == retained:
+            return
+        self._indexes[previous].discard(key)
+        self._evictable[key] = retained
+        self._indexes[retained].add(key, self._ranks[key])
 
     @override
     def mark_evictable(self, key: OffloadKey) -> None:
         # chunks can become evictable when,
         # store completes - i.e. ref_cnt -1 -> 0 # not in evictable list
         # all loads complete - i.e ref_cnt 1 -> 0  # not in evictable list
-        self._evictable.add(key)
         self._push_evictable(key)
-        self._maybe_compact_heap()
 
     @override
     def mark_non_evictable(self, key: OffloadKey) -> None:
         # key must have been evictable before it was pinned.
-        self._evictable.remove(key)
+        self._unindex(key)

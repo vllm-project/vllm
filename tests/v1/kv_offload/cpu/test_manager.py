@@ -825,7 +825,7 @@ def test_lru_batch_eviction_failure_is_atomic():
     assert [key for key, _ in evicted] == [keys[0]]
 
 
-def test_lru_repeated_pin_cycles_compact_lazy_heap_entries():
+def test_lru_repeated_pin_cycles_keep_one_index_entry():
     manager = make_cpu_manager(num_chunks=1, cache_policy="lru")
     policy = manager._policy
     assert isinstance(policy, LRUCachePolicy)
@@ -840,7 +840,7 @@ def test_lru_repeated_pin_cycles_compact_lazy_heap_entries():
         manager.prepare_load([key], _EMPTY_REQ_CTX)
         manager.complete_load([key], _EMPTY_REQ_CTX)
 
-    assert len(policy._heap) < 64
+    assert len(list(policy._iter_evictable())) == 1
     evicted = policy.evict(1, set())
     assert evicted is not None
     assert [evicted_key for evicted_key, _ in evicted] == [key]
