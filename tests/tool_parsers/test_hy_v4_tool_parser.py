@@ -187,3 +187,22 @@ def test_whitespace_argument_state_resets_between_calls(suffix, chunking):
         suffix,
         chunking,
     )
+
+
+@pytest.mark.parametrize("chunking", ["whole", "tokens", "characters"])
+@pytest.mark.parametrize(
+    ("value_type", "raw"),
+    [
+        ("number", "1e400"),
+        ("number", "-1e400"),
+        ("number", "NaN"),
+        ("array", "[1e400]"),
+        ("object", '{"x": Infinity}'),
+        ("object", "{'x': 1e400}"),
+    ],
+)
+def test_non_finite_number_is_kept_as_raw_string(suffix, chunking, value_type, raw):
+    """`Infinity` and `NaN` are not valid JSON, so the raw text is kept."""
+    _assert_streaming_matches(
+        {"x": {"type": value_type}}, [[("x", raw)]], [{"x": raw}], suffix, chunking
+    )

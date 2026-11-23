@@ -275,3 +275,75 @@ def test_streaming_emits_complete_json_before_end_marker_without_duplication(
         '{"query": "chairs"}'
     )
     assert messages[-1].tool_calls == calls
+
+
+def _strict_json(arguments: str):
+    """Parse like a strict JSON client, which rejects `NaN` and `Infinity`."""
+
+    def reject(constant: str):
+        raise ValueError(f"invalid JSON constant: {constant}")
+
+    return json.loads(arguments, parse_constant=reject)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize(
+    ("param_type", "raw", "value"),
+    [
+        ("number", "12345678901234567890", 12345678901234567890),
+        ("number", "2.5", 2.5),
+        ("number", "1e400", "1e400"),
+        ("number", "nan", "nan"),
+        ("array", "[1e400]", "[1e400]"),
+    ],
+)
+def test_number_arguments_stay_exact_and_valid_json(
+    parser: DotsToolParser, streaming: bool, param_type: str, raw: str, value
+) -> None:
+    """Large integers keep every digit; values JSON cannot hold stay raw text."""
+    request = _request([_tool("record", {"value": {"type": param_type}})])
+    text = (
+        '<dots_function_call><invoke name="record">'
+        f'<parameter name="value">{raw}</parameter>'
+        "</invoke></dots_function_call>"
+    )
+
+    if streaming:
+        messages = _stream(parser, [text[:40], text[40:]], request)
+        calls = [call for message in messages for call in message.tool_calls]
+        arguments = "".join(get_function_delta(call).arguments or "" for call in calls)
+    else:
+        result = parser.extract_tool_calls(text, request)
+        arguments = result.tool_calls[0].function.arguments
+
+    assert _strict_json(arguments) == {"value": value}
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize(
+    ("raw", "value"),
+    [
+        ("12345678901234567890", 12345678901234567890),
+        ("1e400", "1e400"),
+        ("-1e400", "-1e400"),
+        ("NaN", "NaN"),
+        ("[1.5, 1e400]", [1.5, "1e400"]),
+    ],
+)
+def test_json_body_arguments_stay_valid_json(
+    parser: DotsToolParser, streaming: bool, raw: str, value
+) -> None:
+    """The JSON tool-call body keeps values JSON cannot hold as raw text."""
+    request = _request([_tool("record", {"value": {"type": "number"}})])
+    body = f'{{"name": "record", "arguments": {{"value": {raw}}}}}'
+    chunks = ["<dots_function_call>", body, "</dots_function_call>"]
+
+    if streaming:
+        messages = _stream(parser, chunks, request)
+        calls = [call for message in messages for call in message.tool_calls]
+        arguments = "".join(get_function_delta(call).arguments or "" for call in calls)
+    else:
+        result = parser.extract_tool_calls("".join(chunks), request)
+        arguments = result.tool_calls[0].function.arguments
+
+    assert _strict_json(arguments) == {"value": value}

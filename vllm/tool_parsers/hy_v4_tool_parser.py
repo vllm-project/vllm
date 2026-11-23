@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import copy
 import json
+import math
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypedDict
 from urllib.parse import unquote
@@ -28,7 +29,7 @@ from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
-from vllm.tool_parsers.utils import partial_tag_overlap
+from vllm.tool_parsers.utils import is_json_finite, partial_tag_overlap
 
 if TYPE_CHECKING:
     from xgrammar import StructuralTag
@@ -451,7 +452,8 @@ def _try_parse_wildcard_number(value: str) -> int | float | None:
     """
     try:
         if "." in value or "e" in value or "E" in value:
-            return float(value)
+            number = float(value)
+            return number if math.isfinite(number) else None
         return int(value)
     except (ValueError, TypeError):
         return None
@@ -459,14 +461,12 @@ def _try_parse_wildcard_number(value: str) -> int | float | None:
 
 def _deserialize(value: str) -> Any:
     """Deserialize a string value using json.loads then ast.literal_eval."""
-    try:
-        return json.loads(value)
-    except Exception:
-        pass
-    try:
-        return ast.literal_eval(value)
-    except Exception:
-        pass
+    for parse in (json.loads, ast.literal_eval):
+        try:
+            parsed = parse(value)
+        except Exception:
+            continue
+        return parsed if is_json_finite(parsed) else value
     return value
 
 
@@ -508,9 +508,12 @@ def _parse_value(
     # 4. Try json.loads (covers array/object and other unlisted types)
     if types - {"string", "boolean", "integer", "number"}:
         try:
-            return json.loads(value)
+            parsed = json.loads(value)
         except (json.JSONDecodeError, ValueError):
             pass
+        else:
+            if is_json_finite(parsed):
+                return parsed
 
     # 5. String fallback
     if "string" in types:

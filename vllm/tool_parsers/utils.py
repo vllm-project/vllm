@@ -176,7 +176,7 @@ def is_complete_json(input_str: str) -> bool:
         return False
 
 
-def _is_json_finite(obj: Any) -> bool:
+def is_json_finite(obj: Any) -> bool:
     """Whether *obj* can be serialized to valid JSON.
 
     `json.dumps(..., allow_nan=False)` raises `ValueError` on any
@@ -1224,7 +1224,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
                 parsed = json.loads(value)
             except (json.JSONDecodeError, ValueError, TypeError):
                 continue
-            if _is_json_finite(parsed):
+            if is_json_finite(parsed):
                 return parsed
             # Non-finite floats (e.g. "[1e999]" -> [inf]) cannot be
             # serialized back to valid JSON; preserve the raw string.
@@ -1237,7 +1237,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     # Reject non-finite results (e.g. json.loads("1e999") -> inf, or nested
     # inf/nan inside a parsed list/dict) which json.dumps would render as
     # invalid JSON (Infinity/NaN). Preserve the raw string instead.
-    if not _is_json_finite(parsed):
+    if not is_json_finite(parsed):
         return value
     return parsed
 
