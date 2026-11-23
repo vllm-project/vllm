@@ -506,6 +506,16 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
+            elif sampling_params.stop:
+                # The no-op detokenizer never matches stop strings, so they
+                # would silently never apply.
+                raise VLLMValidationError(
+                    "stop strings require a tokenizer but none is loaded "
+                    "(--skip-tokenizer-init or --tokens-only). Use "
+                    "stop_token_ids or load a tokenizer.",
+                    parameter="stop",
+                    value=sampling_params.stop,
+                )
             if sampling_params.trace_decode_token_ids:
                 self._normalize_trace_replay_params(sampling_params, prompt_len)
         else:
