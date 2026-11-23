@@ -13,7 +13,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator imp
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
     chunk_hashes_for_block_size,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    get_request_block_hasher,
+    init_none_hash,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     MambaManager,
@@ -25,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayerConfig,
     MambaSpec,
 )
+from vllm.v1.request import Request
 
 
 def _group(layer_names, layer: KVCacheLayerConfig, **kwargs) -> KVCacheGroup:
@@ -629,3 +636,72 @@ def test_dsv4_five_group_store_lookup_round_trip():
         cached_block_pool=ExternalCachedBlockPool(coord.hash_block_size, exists),
     )
     assert hit == token_len
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("lookahead", [0, 1, 3])
+@pytest.mark.parametrize(
+    ("block_size", "sliding_window", "step_tokens", "num_prompt_tokens"),
+    [
+        *((4, 10, 16, 40 + residue) for residue in range(4)),
+        *((64, 2051, 16384, 100_096 + residue) for residue in (0, 1, 2, 63)),
+    ],
+)
+def test_windowed_prefix_saved_by_chunked_prefill_serves_next_turn(
+    block_size, sliding_window, step_tokens, num_prompt_tokens, lookahead
+):
+    """Retain the finalized window across prefill chunks with lookahead hashes."""
+    groups = [
+        _group(["target"], _full(block_size)),
+        _group(["draft"], _swa(block_size, sliding_window)),
+    ]
+    coord = _make_coord(
+        groups,
+        hash_block_size=block_size,
+        retention_interval=0,
+        num_hash_lookahead_tokens=lookahead,
+    )
+    init_none_hash(sha256)
+    hasher = get_request_block_hasher(block_size, sha256, lookahead)
+    prompt = list(range(num_prompt_tokens))
+    first_turn = Request(
+        "first-turn", prompt, SamplingParams(max_tokens=1), None, block_hasher=hasher
+    )
+    saved_tokens = 0
+    finalized_tokens = len(first_turn.block_hashes) * block_size
+    stored: set[tuple[int, bytes]] = set()
+    for step_end in range(step_tokens, num_prompt_tokens + step_tokens, step_tokens):
+        token_len = min(step_end // block_size * block_size, finalized_tokens)
+        masks = coord.store_mask(
+            token_len, saved_tokens, num_prompt_tokens=num_prompt_tokens
+        )
+        for group_id, mask in enumerate(masks):
+            for offset, block in enumerate(
+                range(saved_tokens // block_size, token_len // block_size)
+            ):
+                if mask is None or mask[offset]:
+                    stored.add((group_id, bytes(first_turn.block_hashes[block])))
+        saved_tokens = token_len
+
+    next_turn = Request(
+        "next-turn",
+        prompt + [num_prompt_tokens + i for i in range(8 * block_size)],
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=hasher,
+    )
+    assert (
+        next_turn.block_hashes[: len(first_turn.block_hashes)]
+        == first_turn.block_hashes
+    )
+    masks, hit_length = coord.find_longest_cache_hit(
+        next_turn.block_hashes,
+        next_turn.num_tokens,
+        ExternalCachedBlockPool(block_size, stored),
+    )
+    assert hit_length == finalized_tokens
+    assert masks == coord.load_mask(next_turn.block_hashes, hit_length)
+    for group_id, mask in enumerate(masks):
+        for block in range(hit_length // block_size):
+            if mask is None or mask[block]:
+                assert (group_id, bytes(next_turn.block_hashes[block])) in stored
