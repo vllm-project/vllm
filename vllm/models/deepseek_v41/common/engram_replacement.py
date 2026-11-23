@@ -21,28 +21,6 @@ from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
 
 logger = init_logger(__name__)
 
-MODE_PER_TOKEN = "per_token"
-
-
-class ReplacementShard(nn.Module):
-    """Stand-in for `ParallelEngramEmbedding` in the replacement mode.
-
-    Carries the shard geometry the Engram module reads; it has no parameters
-    and holds no table. Only the ROCm `Engram.prepare_embeddings`/`embed`
-    path reads this geometry; the config check rejects the replacement mode on
-    other platforms.
-    """
-
-    def __init__(self, n_hash_cols: int, head_dim: int, tp_size: int, tp_rank: int):
-        super().__init__()
-        self.n_hash_cols = n_hash_cols
-        self.dim = head_dim
-        self.tp_size = tp_size
-        self.dp_size = 1
-        self.cpu_offload = False
-        self.part_n_hash_cols = -(-n_hash_cols // tp_size)
-        self.head_start = tp_rank * self.part_n_hash_cols
-
 
 class PerTokenTable(nn.Module):
     """One Engram layer's per-token table: `weight` holds this rank's hash
@@ -53,13 +31,24 @@ class PerTokenTable(nn.Module):
     is cropped after the TP all-gather, like the real lookup's.
     """
 
-    def __init__(self, shard: ReplacementShard, comp_vocab: int):
+    dp_size = 1
+    cpu_offload = False
+
+    def __init__(
+        self,
+        comp_vocab: int,
+        n_hash_cols: int,
+        head_dim: int,
+        tp_size: int,
+        tp_rank: int,
+    ):
         super().__init__()
         self.comp_vocab = comp_vocab
-        self.n_hash_cols = shard.n_hash_cols
-        self.head_dim = shard.dim
-        self.head_start = shard.head_start
-        self.part_n_hash_cols = shard.part_n_hash_cols
+        self.n_hash_cols = n_hash_cols
+        self.head_dim = head_dim
+        self.tp_size = tp_size
+        self.part_n_hash_cols = -(-n_hash_cols // tp_size)
+        self.head_start = tp_rank * self.part_n_hash_cols
         self.weight = nn.Parameter(
             # NaN marks a table that was never loaded (see
             # `process_weights_after_loading`).
@@ -105,9 +94,9 @@ class PerTokenTable(nn.Module):
         )
         param.data[:, used:].zero_()
 
-    def fill(self, rows: torch.Tensor, comp_ids: torch.Tensor | None) -> None:
+    def fill(self, rows: torch.Tensor, comp_ids: torch.Tensor) -> None:
         """Write the per-token rows into `rows` (= `staged_rows[:num_tokens]`)."""
-        if comp_ids is None or comp_ids.shape[0] != rows.shape[0]:
+        if comp_ids.shape[0] != rows.shape[0]:
             raise ValueError(
                 "engram mode 'per_token' needs one compressed token id per row"
             )

@@ -14,13 +14,15 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.models.deepseek_v41.common.engram import Engram
-from vllm.platforms.rocm import get_cdna_version
+from vllm.models.deepseek_v41.common.engram import Engram, EngramLayout
+from vllm.models.deepseek_v41.common.engram_replacement import PerTokenTable
 from vllm.triton_utils import tl, triton
 
 
 def _shards_engram_gate() -> bool:
     """Whether TP ranks keep a dim slice of `wkv` and exchange gate partial sums."""
+    from vllm.platforms.rocm import get_cdna_version
+
     return get_cdna_version() in (3, 4)
 
 
@@ -189,7 +191,7 @@ class RocmEngram(Engram):
         self, input_size: int, quant_config: QuantizationConfig | None, prefix: str
     ) -> ColumnParallelLinear:
         tp_size = get_tensor_model_parallel_world_size()
-        if not _shards_engram_gate() or tp_size == 1 or self.use_sequence_parallel:
+        if tp_size == 1 or self.use_sequence_parallel or not _shards_engram_gate():
             return super()._create_wkv(input_size, quant_config, prefix)
         self.kv_shards = tp_size
         return MergedColumnParallelLinear(
@@ -279,3 +281,23 @@ class RocmEngram(Engram):
             num_warps=8 if block_size >= 2048 else 4,
         )
         return output
+
+
+class RocmPerTokenEngram(RocmEngram):
+    """Engram whose lookup uses the compressed ID of the current token."""
+
+    def _init_embedding(self, layout: EngramLayout, layer_hash_index: int) -> None:
+        self.per_token_table = PerTokenTable(
+            layout.compressed_vocab_size,
+            (layout.max_ngram_size - 1) * layout.n_heads,
+            layout.head_dim,
+            get_tensor_model_parallel_world_size(),
+            get_tensor_model_parallel_rank(),
+        )
+
+    @property
+    def embedding_shard(self) -> PerTokenTable:
+        return self.per_token_table
+
+    def prepare_embeddings(self, comp_ids: torch.Tensor) -> None:
+        self.per_token_table.fill(self.staged_rows[: comp_ids.shape[0]], comp_ids)

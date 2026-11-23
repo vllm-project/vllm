@@ -247,6 +247,7 @@ class MonoProbe:
 
     def mono_layers(self) -> dict:
         from vllm.models.deepseek_v41.amd import mono_decode
+        from vllm.models.deepseek_v41.amd.engram import RocmPerTokenEngram
 
         def copies(m) -> bool:
             """Whether the layer holds the gfx942 copies of its weights, which
@@ -280,7 +281,9 @@ class MonoProbe:
         return {
             "layers": layers,
             "epoch": -1 if runner is None else int(runner.epoch[0]),
-            "per_token": {i: e.per_token_table is not None for i, e in engrams.items()},
+            "per_token": {
+                i: isinstance(e, RocmPerTokenEngram) for i, e in engrams.items()
+            },
         }
 
     def compare_merged_replays(self) -> None:

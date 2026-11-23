@@ -70,7 +70,7 @@ from vllm.models.deepseek_v4.amd.model import (
 )
 from vllm.models.deepseek_v4.amd.model import takes_rocm_mxfp8_input
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
-from vllm.models.deepseek_v41.amd.engram import RocmEngram
+from vllm.models.deepseek_v41.amd.engram import RocmEngram, RocmPerTokenEngram
 from vllm.models.deepseek_v41.amd.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     MHCOverlapStream,
@@ -243,7 +243,13 @@ class DeepseekV4DecoderLayer(nn.Module):
         if engram_layout is not None:
             layer_id = extract_layer_index(prefix)
             if layer_id in engram_layout.layer_ids:
-                self.engram = RocmEngram(
+                engram_cls = (
+                    RocmPerTokenEngram
+                    if vllm_config.engram_config is not None
+                    and vllm_config.engram_config.mode == "per_token"
+                    else RocmEngram
+                )
+                self.engram = engram_cls(
                     config,
                     vllm_config.quant_config,
                     engram_layout,
@@ -713,7 +719,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
         if engram is not None:
             # Shared host tables and GPU peer reads look up only local tokens.
-            self.engram_dp_shared_memory = engram.embed_tokens.dp_size == 1
+            self.engram_dp_shared_memory = engram.embedding_shard.dp_size == 1
 
         # Config flag is the switch. On ROCm, attention forces
         # swa_cache_layer.bounded_replay off unless the CDNA version
@@ -849,10 +855,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        # Engram n-gram hashes for the whole (flattened) batch, computed once
-        # on the full token stream — before any sequence-parallel sharding —
-        # and consumed by the engram layers (1 and 14) below. Profile runs
-        # (KV cache unbound) look up dead rows instead.
+        # Compute lookup IDs once for the full token stream. Profile runs use
+        # valid placeholder rows and mask their contribution to the residual.
         engram_hashes: torch.Tensor | None = None
         engram_mask: torch.Tensor | None = None
         if (
@@ -863,22 +867,31 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             attn_metadata = get_forward_context().attn_metadata
             if isinstance(attn_metadata, list):
                 attn_metadata = attn_metadata[dbo_current_ubatch_id()]
-            if isinstance(attn_metadata, dict) and self.engram_hash.ensure_cache():
+            live = isinstance(attn_metadata, dict) and self.engram_hash.ensure_cache()
+            if self.engram_per_token:
+                engram_mask = (
+                    ~image_sentinel_mask(input_ids)
+                    if live
+                    else torch.zeros_like(input_ids, dtype=torch.bool)
+                )
+                comp_ids = per_token_comp_ids(
+                    self.engram_hash.token_map, input_ids, engram_mask
+                )
+                # All layers read the same IDs. expand shares their storage.
+                engram_hashes = comp_ids[:, None].expand(
+                    -1, self.engram_hash.multipliers.shape[0]
+                )
+            elif live:
                 assert self.engram_swa_prefix is not None
                 swa_metadata = typing.cast(
                     "DeepseekSparseSWAMetadata", attn_metadata[self.engram_swa_prefix]
                 )
-                # Image-span tokens are dead: they break n-grams (hash op
-                # takes True=dead) and their gate is zeroed (Engram.forward
-                # takes True=keep).
                 image_mask = image_sentinel_mask(input_ids)
                 engram_mask = ~image_mask
                 if lookback_token_ids is None:
                     raise NotImplementedError(
                         "engram needs `lookback_token_ids` from the model runner"
                     )
-                # TODO: skip the n-gram hash when no Engram layer uses it; the
-                # per_token mode only needs the mask and the token map.
                 engram_hashes = self.engram_hash(
                     input_ids,
                     positions,
@@ -892,28 +905,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 # hash still has to reach them; the memory profile also has to
                 # see the Engram activations.
                 engram_hashes, engram_mask = self.engram_hash.dummy_hashes(input_ids)
-            if engram_hashes is not None:
-                # Compressed token ids for the per_token replacement mode;
-                # dead positions (image spans, profile runs) map to id 0.
-                engram_comp_ids = (
-                    per_token_comp_ids(
-                        self.engram_hash.token_map, input_ids, engram_mask
-                    )
-                    if self.engram_per_token
-                    else None
-                )
-                # Gather all Engram rows before entering the decoder layers.
-                # One gather feeds every layer sharing the DP-split table.
-                gathered_hashes = gather_engram_hashes(
-                    engram_hashes, dp_shared_memory=self.engram_dp_shared_memory
-                )
-                for layer in islice(self.layers, self.start_layer, self.end_layer):
-                    engram = getattr(layer, "engram", None)
-                    if engram is not None:
-                        engram.prepare_embeddings(
-                            gathered_hashes[:, engram.layer_hash_index],
-                            engram_comp_ids,
-                        )
+            lookup_ids = gather_engram_hashes(
+                engram_hashes, dp_shared_memory=self.engram_dp_shared_memory
+            )
+            for layer in islice(self.layers, self.start_layer, self.end_layer):
+                engram = getattr(layer, "engram", None)
+                if engram is not None:
+                    engram.prepare_embeddings(lookup_ids[:, engram.layer_hash_index])
 
         full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel:

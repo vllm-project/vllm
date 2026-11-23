@@ -28,6 +28,7 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import timedelta
 from functools import cache
+from typing import Protocol
 
 import numpy as np
 import torch
@@ -65,8 +66,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.cpu_resource_utils import get_available_memory
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
-
-from .engram_replacement import MODE_PER_TOKEN, PerTokenTable, ReplacementShard
 
 logger = init_logger(__name__)
 
@@ -1748,6 +1747,16 @@ class EngramBatch:
         )
 
 
+class EngramEmbeddingShard(Protocol):
+    """Table geometry used to stage local rows and gather heads across ranks."""
+
+    tp_size: int
+    dp_size: int
+    n_hash_cols: int
+    part_n_hash_cols: int
+    cpu_offload: bool
+
+
 class Engram(nn.Module):
     """Writes an n-gram lookup into the residual stream, gated by how well it
     matches that stream.
@@ -1787,23 +1796,8 @@ class Engram(nn.Module):
         self.clamp_value = 1e-6
         self.use_sequence_parallel = use_sequence_parallel
 
-        # Named ``embed_tokens`` so the checkpoint's ``engram.embed.weight``
-        # survives the mapper's ``embed.weight`` -> ``embed_tokens.weight``
-        # suffix rule.
-        engram_config = get_current_vllm_config().engram_config
-        mode = engram_config.mode if engram_config is not None else "ngram"
+        self._init_embedding(layout, layer_hash_index)
         n_hash_cols = (layout.max_ngram_size - 1) * layout.n_heads
-        if mode == "ngram":
-            self.embed_tokens = self._create_embedding(layout, layer_hash_index)
-        else:
-            # The per-token mode reads no n-gram table: this stand-in only
-            # carries the shard geometry.
-            self.embed_tokens = ReplacementShard(
-                n_hash_cols,
-                layout.head_dim,
-                get_tensor_model_parallel_world_size(),
-                get_tensor_model_parallel_rank(),
-            )
         self.wkv = self._create_wkv(
             n_hash_cols * layout.head_dim, quant_config, f"{prefix}.wkv"
         )
@@ -1818,12 +1812,14 @@ class Engram(nn.Module):
 
         max_tokens = get_current_vllm_config().scheduler_config.max_num_batched_tokens
         self._init_staging(max_tokens, layout.head_dim)
-        self.per_token_table: PerTokenTable | None = None
-        if mode == MODE_PER_TOKEN:
-            # Checkpoint tensor `engram.per_token_table.weight`.
-            self.per_token_table = PerTokenTable(
-                self.embed_tokens, layout.compressed_vocab_size
-            )
+
+    def _init_embedding(self, layout: EngramLayout, layer_hash_index: int) -> None:
+        # Match the checkpoint mapper's embed.weight -> embed_tokens.weight rule.
+        self.embed_tokens = self._create_embedding(layout, layer_hash_index)
+
+    @property
+    def embedding_shard(self) -> EngramEmbeddingShard:
+        return self.embed_tokens
 
     def _create_wkv(
         self, input_size: int, quant_config: QuantizationConfig | None, prefix: str
@@ -1865,31 +1861,22 @@ class Engram(nn.Module):
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
         # Persistent storage keeps lookup addresses stable across graph replays.
         self.staged_rows = torch.empty(
-            max_tokens * self.embed_tokens.dp_size,
-            self.embed_tokens.part_n_hash_cols,
+            max_tokens * self.embedding_shard.dp_size,
+            self.embedding_shard.part_n_hash_cols,
             head_dim,
             dtype=torch.bfloat16,
         )
-        if not self.embed_tokens.cpu_offload:
+        if not self.embedding_shard.cpu_offload:
             self._prefetch_stream = None
             return
         if self._prefetch_stream is None:
             self._prefetch_stream = torch.cuda.Stream(device=self.staged_rows.device)
         self._prefetch_done = torch.cuda.Event()
 
-    def prepare_embeddings(
-        self, hash_ids: torch.Tensor, comp_ids: torch.Tensor | None = None
-    ) -> None:
-        """Look up, or prefetch from host memory, rows before the decoder layers
-        consume them; DP-sharded tables take the group's gathered hash IDs.
-        In `per_token` mode the rows come from the per-token table instead and
-        `comp_ids`, the compressed id of each position's current token, is
-        required."""
+    def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
+        """Stage rows for the decoder using the DP group's gathered hash IDs."""
         rows = self.staged_rows[: hash_ids.shape[0]]
         assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"
-        if self.per_token_table is not None:
-            self.per_token_table.fill(rows, comp_ids)
-            return
         if self._prefetch_stream is None:
             self.embed_tokens.lookup(hash_ids, rows)
         else:
@@ -1927,9 +1914,9 @@ class Engram(nn.Module):
     def _ready_rows(self, num_tokens: int) -> torch.Tensor:
         if self._prefetch_done is not None:
             self._finish_prefetch(self._prefetch_done)
-        if self.embed_tokens.dp_size > 1:
+        if self.embedding_shard.dp_size > 1:
             slot = engram_gathered_num_tokens()
-            staged = self.staged_rows[: slot * self.embed_tokens.dp_size]
+            staged = self.staged_rows[: slot * self.embedding_shard.dp_size]
             return _gather_engram_rows(staged, num_tokens)
         return self.staged_rows[:num_tokens]
 
@@ -1938,7 +1925,7 @@ class Engram(nn.Module):
         2-D tensor's last dimension, every rank's columns side by side)
         instead of the TP group's all-gather. For TP-sharded tables without
         sequence parallelism or a DP-shared table."""
-        assert self.embed_tokens.tp_size > 1 and self.embed_tokens.dp_size == 1
+        assert self.embedding_shard.tp_size > 1 and self.embedding_shard.dp_size == 1
         assert not self.use_sequence_parallel and self._batch is None
         self._gather_columns = gather
         self.wkv.gather_output = False
@@ -1946,18 +1933,19 @@ class Engram(nn.Module):
     def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
         """Gather heads, returning only local tokens when SP is enabled."""
         rows = self._ready_rows(hash_ids.shape[0])
-        if self.embed_tokens.tp_size == 1:
-            return rows[:, : self.embed_tokens.n_hash_cols]
+        tp_size = self.embedding_shard.tp_size
+        n_hash_cols = self.embedding_shard.n_hash_cols
+        if tp_size == 1:
+            return rows[:, :n_hash_cols]
         if self._gather_columns is not None:
             dim = rows.shape[-1]
             rows = self._gather_columns(rows.flatten(1)).unflatten(1, (-1, dim))
-            return rows[:, : self.embed_tokens.n_hash_cols]
+            return rows[:, :n_hash_cols]
         if self.use_sequence_parallel:
-            tp_size = self.embed_tokens.tp_size
             num_tokens, local_heads, dim = rows.shape
             gathered = tensor_model_parallel_all_gather(rows, dim=0)
             chunk = (num_tokens + tp_size - 1) // tp_size
-            out = rows.new_empty((chunk, self.embed_tokens.n_hash_cols, dim))
+            out = rows.new_empty((chunk, n_hash_cols, dim))
             _engram_select_rows(
                 gathered,
                 out,
@@ -1967,7 +1955,7 @@ class Engram(nn.Module):
             )
             return out
         rows = tensor_model_parallel_all_gather(rows, dim=1)
-        return rows[:, : self.embed_tokens.n_hash_cols]
+        return rows[:, :n_hash_cols]
 
     def forward(
         self,

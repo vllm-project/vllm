@@ -60,8 +60,7 @@ from ..common.ngram_embedding import (
 )
 from ..common.ops.ple import ple_conv, ple_gate, ple_ngram_ids
 from ..common.ple_mode import (
-    PLE_EMBEDDING_MODE_NGRAM,
-    PLE_EMBEDDING_MODE_PER_TOKEN,
+    PleEmbeddingMode,
     validate_ple_embedding_config,
 )
 
@@ -570,13 +569,13 @@ class Qwen4ExpPerTokenEmbedding(nn.Module):
                 continue
             raise ValueError(
                 f"Unexpected PLE embedding tensor {name!r} in "
-                f"ple_embedding_mode={PLE_EMBEDDING_MODE_PER_TOKEN!r}"
+                f"ple_embedding_mode={PleEmbeddingMode.PER_TOKEN.value!r}"
             )
         return loaded
 
 
 def _build_ple_embedding(
-    mode: str,
+    mode: PleEmbeddingMode,
     config: Qwen4ExpTextConfig,
     ple_dense_layer_id: int,
     max_num_batched_tokens: int,
@@ -589,7 +588,7 @@ def _build_ple_embedding(
 ) -> nn.Module:
     """Create the PLE embedding module for `ple_embedding_mode`."""
     embedding: nn.Module
-    if mode == PLE_EMBEDDING_MODE_NGRAM:
+    if mode == PleEmbeddingMode.NGRAM:
         embedding = Qwen4ExpNGramEmbedding(
             config,
             int(config.ple_embed_dim),
@@ -606,7 +605,7 @@ def _build_ple_embedding(
     else:
         if use_sequence_parallel:
             raise NotImplementedError(
-                f"ple_embedding_mode={mode!r} does not "
+                f"ple_embedding_mode={mode.value!r} does not "
                 "support sequence parallelism yet; use 'ngram'."
             )
         embedding = Qwen4ExpPerTokenEmbedding(
