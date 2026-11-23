@@ -130,6 +130,21 @@ llm = LLM(
 )
 ```
 
+!!! note
+    If [embedding inputs](../features/multimodal_inputs.md#embedding-inputs) are enabled (`enable_mm_embeds=True`, which EC/KV consumers turn on automatically), a zero limit only disables raw inputs: the modality still accepts pre-computed embeddings and reserves encoder cache space for them.
+    Also set `"allow_embeds": False` to disable it completely:
+
+    ```python
+    from vllm import LLM
+
+    # Accept image embeddings, but neither videos nor video embeddings
+    llm = LLM(
+        model="Qwen/Qwen2.5-VL-3B-Instruct",
+        enable_mm_embeds=True,
+        limit_mm_per_prompt={"image": 0, "video": {"count": 0, "allow_embeds": False}},
+    )
+    ```
+
 ### Configurable options
 
 `limit_mm_per_prompt` also accepts configurable options per modality. In the configurable form, you still specify `count`, and you may optionally provide size hints that control how vLLM profiles and reserves memory for your multi‑modal inputs. This helps you tune memory for the actual media you expect, instead of the model’s absolute maxima.
@@ -166,6 +181,7 @@ For backward compatibility, passing an integer works as before and is interprete
 !!! note
     - The size hints affect memory profiling only. They shape the dummy inputs used to compute reserved activation sizes. They do not change how inputs are actually processed at inference time.
     - If a hint exceeds what the model can accept, vLLM clamps it to the model's effective maximum and may log a warning.
+    - For Qwen2-VL-family models, increasing `max_model_len` can increase the profiled video size and reduce the memory available for the KV cache. Profiling remains subject to the processor's pixel limits and the frame cap. Set `video` hints to profile the videos you expect instead.
 
 !!! warning
     These size hints currently only affect activation memory profiling. Encoder cache size is determined by the actual inputs at runtime and is not limited by these hints.

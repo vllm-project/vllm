@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
     """FlashInfer backend using the DSv4 sparse metadata/cache layout.
 
-    Inherits the base and backend reuses its``DeepseekV4SparseMLAMetadataBuilder``
+    Inherits the base and backend reuses its`DeepseekV4SparseMLAMetadataBuilder`
     """
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
@@ -72,6 +72,10 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        # SM12x kernels only instantiate 64-token sparse-MLA blocks (128
+        # trips the block_kv assert, #59203).
+        if current_platform.is_device_capability_family(120):
+            return [64]
         return [128]
 
     @staticmethod
@@ -340,8 +344,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build the combined sparse-index tensors for the mixed batch.
 
-        Returns ``(compressed_kv_cache, seq_lens, sparse_indices,
-        sparse_topk_lens)``.
+        Returns `(compressed_kv_cache, seq_lens, sparse_indices,
+        sparse_topk_lens)`.
         """
         num_decodes = swa_metadata.num_decodes
         num_prefills = swa_metadata.num_prefills
@@ -582,11 +586,11 @@ def _sm120_kv_cache_format(
     """FlashInfer's SM120 sparse MLA format for the caches one call reads.
 
     vLLM writes V4.1 MXFP8 records inline (each token's scales follow its own
-    data, as FlashMLA does), which FlashInfer reads as ``fp8_dsv41_inline``.
-    ``nvfp4_ds_mla`` keeps that record for the sliding window and stores the
+    data, as FlashMLA does), which FlashInfer reads as `fp8_dsv41_inline`.
+    `nvfp4_ds_mla` keeps that record for the sliding window and stores the
     compressed cache as inline V4.1 NVFP4 records, so a call that also reads the
-    compressed cache is ``fp8_dsv41_inline_fp4_ca``. Anything else is the V4
-    record (``fp8``).
+    compressed cache is `fp8_dsv41_inline_fp4_ca`. Anything else is the V4
+    record (`fp8`).
     """
     if kv_cache_dtype == "nvfp4_ds_mla" and has_compressed_cache:
         return "fp8_dsv41_inline_fp4_ca"
@@ -601,8 +605,8 @@ def _slots_to_inline_rows(
     """Map paged slot IDs to rows of the whole cache.
 
     FlashInfer addresses inline V4.1 records as rows of the cache, so a block
-    that packs several layers' pages (``block_span > block_size``) shifts each
-    slot by the rows of the other layers before it. ``-1`` stays ``-1``.
+    that packs several layers' pages (`block_span > block_size`) shifts each
+    slot by the rows of the other layers before it. `-1` stays `-1`.
     """
     if block_span == block_size:
         return indices

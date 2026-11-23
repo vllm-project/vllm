@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::borrow::Cow;
+
 use axum::Json;
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use thiserror_ext::{AsReport as _, Construct, Macro};
@@ -19,12 +21,22 @@ pub enum ApiError {
         message: String,
         param: Option<&'static str>,
     },
-    /// The requested model name does not match the single configured model.
-    ModelNotFound { model: String },
+    /// The requested model name is neither a served base model nor a loaded
+    /// LoRA adapter. `served_names` lists the base names, as Python does.
+    ModelNotFound {
+        model: String,
+        served_names: Vec<String>,
+    },
     /// A resource other than the model, such as a LoRA adapter, does not exist.
     NotFound { message: String },
     /// The request body could not be parsed as valid JSON.
     JsonParseError { message: String },
+    /// The query string could not be deserialized into the route's
+    /// parameters; `param` names the offending field as `query.<name>`.
+    InvalidQuery {
+        message: String,
+        param: Option<String>,
+    },
     /// The requested operation conflicts with current server state.
     Conflict { message: String },
     /// An unexpected internal failure happened before streaming started.
@@ -41,7 +53,7 @@ impl ApiError {
             Self::ModelNotFound { .. } | Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
+            Self::JsonParseError { .. } | Self::InvalidQuery { .. } => StatusCode::BAD_REQUEST,
             Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
@@ -55,9 +67,16 @@ impl ApiError {
                 message.clone(),
                 param.map(str::to_string),
             ),
-            Self::ModelNotFound { model } => (
+            Self::ModelNotFound {
+                model,
+                served_names,
+            } => (
                 "NotFoundError",
-                format!("The model `{model}` does not exist."),
+                format!(
+                    "The model `{}` does not exist. Valid aliases: {}.",
+                    truncate_echoed_model(model),
+                    served_names.join(", ")
+                ),
                 Some("model".to_string()),
             ),
             Self::NotFound { message } => ("NotFoundError", message.clone(), None),
@@ -65,6 +84,10 @@ impl ApiError {
             // model through FastAPI's validation handler, which names the
             // HTTP status instead of an error class.
             Self::JsonParseError { message } => ("Bad Request", message.clone(), None),
+            // A query value that fails validation takes the same handler.
+            Self::InvalidQuery { message, param } => {
+                ("Bad Request", message.clone(), param.clone())
+            }
             // Python has no error class for 409; like its `HTTPException`
             // handler, name the status.
             Self::Conflict { message } => ("Conflict", message.clone(), None),
@@ -85,9 +108,37 @@ impl ApiError {
     }
 }
 
+/// Bound the client-supplied model name echoed in an error message to 256
+/// characters, like Python.
+fn truncate_echoed_model(model: &str) -> Cow<'_, str> {
+    const MAX_CHARS: usize = 256;
+    match model.char_indices().nth(MAX_CHARS) {
+        Some((end, _)) => Cow::Owned(format!("{}...", &model[..end])),
+        None => Cow::Borrowed(model),
+    }
+}
+
 impl From<JsonRejection> for ApiError {
     fn from(error: JsonRejection) -> Self {
         Self::json_parse_error(error.body_text())
+    }
+}
+
+impl From<QueryRejection> for ApiError {
+    fn from(error: QueryRejection) -> Self {
+        // Axum deserializes through `serde_path_to_error`; name the failing
+        // field like FastAPI's `loc`, and leave `param` unset without one.
+        let param = std::iter::successors(
+            Some(&error as &(dyn std::error::Error + 'static)),
+            |error| error.source(),
+        )
+        .find_map(|error| {
+            error.downcast_ref::<serde_path_to_error::Error<serde::de::value::Error>>()
+        })
+        .map(|error| error.path().to_string())
+        .filter(|path| path != ".")
+        .map(|path| format!("query.{path}"));
+        Self::invalid_query(error.body_text(), param)
     }
 }
 
@@ -141,13 +192,34 @@ mod tests {
 
     use super::*;
 
+    /// The echoed model name is cut to 256 characters plus `...`, like
+    /// Python; a name of exactly 256 characters is kept whole.
+    #[test]
+    fn model_not_found_bounds_echoed_model_name() {
+        let message = |model: String| {
+            ApiError::model_not_found(model, vec!["base".to_string()])
+                .to_error_response()
+                .error
+                .message
+        };
+        let kept = "é".repeat(256);
+        assert_eq!(
+            message(kept.clone()),
+            format!("The model `{kept}` does not exist. Valid aliases: base.")
+        );
+        assert_eq!(
+            message(format!("{kept}x")),
+            format!("The model `{kept}...` does not exist. Valid aliases: base.")
+        );
+    }
+
     /// Each error class serializes like Python's `ErrorInfo`: the class name
     /// in `type` and the HTTP status as an integer `code`.
     #[test]
     fn error_response_names_error_class_and_status_code() {
         let errors = [
             ApiError::invalid_request("top_p must be in (0, 1].", Some("top_p")),
-            ApiError::model_not_found("missing"),
+            ApiError::model_not_found("missing", vec!["base".to_string(), "alias".to_string()]),
             ApiError::not_found("No adapter found for /not/an/adapter"),
             ApiError::json_parse_error("expected value at line 1 column 1"),
             ApiError::conflict("A profiling session is already active."),
@@ -160,7 +232,7 @@ mod tests {
             .join("\n");
         expect![[r#"
             {"error":{"message":"top_p must be in (0, 1].","type":"BadRequestError","param":"top_p","code":400}}
-            {"error":{"message":"The model `missing` does not exist.","type":"NotFoundError","param":"model","code":404}}
+            {"error":{"message":"The model `missing` does not exist. Valid aliases: base, alias.","type":"NotFoundError","param":"model","code":404}}
             {"error":{"message":"No adapter found for /not/an/adapter","type":"NotFoundError","param":null,"code":404}}
             {"error":{"message":"expected value at line 1 column 1","type":"Bad Request","param":null,"code":400}}
             {"error":{"message":"A profiling session is already active.","type":"Conflict","param":null,"code":409}}

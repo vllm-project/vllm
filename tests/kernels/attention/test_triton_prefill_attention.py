@@ -237,7 +237,7 @@ def test_context_attention_sliding_window(
 
 
 class _LaunchCapture:
-    """Records the launch configuration in place of ``_fwd_kernel``."""
+    """Records the launch configuration in place of `_fwd_kernel`."""
 
     grid: tuple
     kwargs: dict

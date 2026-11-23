@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -14,9 +13,7 @@ def _hc_prenorm_gemm_outputs(
     hc_mult: int,
     use_tilelang_fallback: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-        compute_num_split,
-    )
+    from vllm.model_executor.kernels.mhc.warmup import compute_mhc_num_splits
     from vllm.utils.deep_gemm import (
         is_deep_gemm_supported,
         tf32_hc_prenorm_gemm,
@@ -24,9 +21,7 @@ def _hc_prenorm_gemm_outputs(
 
     use_deep_gemm = is_deep_gemm_supported() or not use_tilelang_fallback
     num_tokens = x.shape[0]
-    n_splits = (
-        compute_num_split(64, x.shape[1], cdiv(num_tokens, 64)) if use_deep_gemm else 1
-    )
+    n_splits = compute_mhc_num_splits(x.shape[1], num_tokens) if use_deep_gemm else 1
     out = torch.empty(
         n_splits,
         num_tokens,
@@ -697,7 +692,7 @@ def mhc_pre_broadcast_tilelang(
     norm_eps: float = 1e-6,
     fn_broadcast: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """First-layer mHC pre for a residual broadcast from ``(T, H)``."""
+    """First-layer mHC pre for a residual broadcast from `(T, H)`."""
     # n_splits is retained for the shared API; split selection is internal.
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
@@ -819,15 +814,15 @@ def _mhc_fused_post_pre_tilelang_impl(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run one MHC post block followed by the next MHC pre block.
 
-    When ``norm_weight`` is provided, the layer_input_cur output is the
+    When `norm_weight` is provided, the layer_input_cur output is the
     RMSNorm'd activation (fused into the kernel); otherwise it is the
     raw pre-norm activation as before.
 
-    ``n_splits`` and ``tile_n`` are retained for the shared MHC operator API.
+    `n_splits` and `tile_n` are retained for the shared MHC operator API.
     The TileLang path selects both values internally from the runtime shape.
 
-    With ``reuse_residual``, the unfused path writes residual_cur into
-    ``residual``'s storage instead of allocating a new buffer. The post kernel
+    With `reuse_residual`, the unfused path writes residual_cur into
+    `residual`'s storage instead of allocating a new buffer. The post kernel
     reads every hc row of a hidden block before writing that block, so the
     in-place update is exact.
 
@@ -995,7 +990,7 @@ def mhc_fused_post_pre_tilelang(
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """See ``_mhc_fused_post_pre_tilelang_impl``. Never writes to its inputs."""
+    """See `_mhc_fused_post_pre_tilelang_impl`. Never writes to its inputs."""
     return _mhc_fused_post_pre_tilelang_impl(
         x,
         residual,
@@ -1032,9 +1027,9 @@ def mhc_fused_post_pre_tilelang_reuse_residual(
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Like ``mhc_fused_post_pre_tilelang`` but may overwrite ``residual``.
+    """Like `mhc_fused_post_pre_tilelang` but may overwrite `residual`.
 
-    Not a registered custom op. Only for eager callers that own ``residual``
+    Not a registered custom op. Only for eager callers that own `residual`
     and do not read it after this call.
     """
     return _mhc_fused_post_pre_tilelang_impl(

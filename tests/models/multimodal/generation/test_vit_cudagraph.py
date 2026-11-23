@@ -18,7 +18,7 @@ from ...utils import dummy_hf_overrides
 from .vlm_utils.builders import sample_frames_with_video_metadata
 
 
-@dataclass
+@dataclass(slots=True)
 class VitCudagraphTestConfig:
     model: str
     modalities: list[str] = field(default_factory=lambda: ["image", "video"])
@@ -101,6 +101,34 @@ def minicpmv_25_chat_template(content: str) -> str:
 def minicpmv_chat_template(content: str) -> str:
     """ChatML template used by MiniCPM-V 2.6 / 4.0 / 4.5."""
     return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
+
+
+def lfm3_vl_chat_template(content: str) -> str:
+    """ChatML template used by LFM3-VL."""
+    return (
+        f"<|startoftext|><|im_start|>user\n{content}<|im_end|>\n"
+        "<|im_start|>assistant\n<think></think>"
+    )
+
+
+def _lfm3_vl_dummy_hf_overrides(hf_config):
+    """Shrink LFM3-VL for dummy tests while keeping conv and attention layers."""
+    # `dummy_hf_overrides` sets num_hidden_layers=1 and slices vision
+    # layer_types[:1] (`["conv"]`), so restore both conv and full_attention.
+    hf_config = dummy_hf_overrides(
+        hf_config,
+        model_arch="Lfm3VlForConditionalGeneration",
+        num_hidden_layers=3,
+    )
+    if hasattr(hf_config, "vision_config"):
+        hf_config.vision_config.update(
+            {
+                "num_layers": 2,
+                "num_hidden_layers": 2,
+                "layer_types": ["conv", "full_attention"],
+            }
+        )
+    return hf_config
 
 
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
@@ -221,6 +249,25 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         marks=[pytest.mark.core_model],
     ),
+    "kimi_k3": VitCudagraphTestConfig(
+        model="moonshotai/Kimi-K3",
+        modalities=["image"],
+        image_prompt="<|kimi_image_placeholder|>What is in this image?",
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [512],
+        },
+        # 1 text + 1 vision layer with random weights, as for kimi_vl.
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+            "enable_chunked_prefill": True,
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="KimiK3ForConditionalGeneration",
+            ),
+        },
+        marks=[pytest.mark.core_model],
+    ),
     "minimax_m3": VitCudagraphTestConfig(
         model="MiniMaxAI/MiniMax-M3",
         modalities=["image"],
@@ -328,6 +375,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         # download. The test only validates that encoder CG capture/
         # replay functions correctly, not output quality.
         vllm_runner_kwargs={
+            "trust_remote_code": True,
             "load_format": "dummy",
             "hf_overrides": partial(
                 dummy_hf_overrides,
@@ -479,6 +527,27 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "encoder_cudagraph_max_frames_per_batch": 4,
         },
         vllm_runner_kwargs={"trust_remote_code": True},
+        marks=[pytest.mark.core_model],
+    ),
+    "lfm3_vl": VitCudagraphTestConfig(
+        model="LiquidAI/LFM3-VL-2B",
+        image_prompt=lfm3_vl_chat_template(
+            "<|vision_start|><|image|><|vision_end|>What is in this image?"
+        ),
+        video_prompt=lfm3_vl_chat_template(
+            "<|vision_start|><|video|><|vision_end|>"
+            "Describe this video in one sentence."
+        ),
+        needs_video_metadata=True,
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [1152, 2048],
+        },
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": _lfm3_vl_dummy_hf_overrides,
+            "enable_chunked_prefill": True,
+            "gpu_memory_utilization": 0.80,
+        },
         marks=[pytest.mark.core_model],
     ),
 }
@@ -666,7 +735,9 @@ def _check_eonly_encoder_outputs(worker, batches):
 
 @pytest.mark.parametrize(
     "model_id",
-    params_with_marks({key: MODEL_CONFIGS[key] for key in ("qwen3_vl", "qwen3_5")}),
+    params_with_marks(
+        {key: MODEL_CONFIGS[key] for key in ("qwen3_vl", "qwen3_5", "glm4_1v")}
+    ),
 )
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA graphs")
 def test_eonly_vit_cudagraph_outputs(
@@ -677,7 +748,8 @@ def test_eonly_vit_cudagraph_outputs(
     from PIL import Image
     from transformers import AutoProcessor
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # collective_rpc below sends a `partial` function, which needs pickle
+    # fallback since msgpack can't serialize it.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     config = MODEL_CONFIGS[model_id]
     token_budgets = [64, 256, 2048]
@@ -739,3 +811,200 @@ def test_eonly_vit_cudagraph_outputs(
         for result in results:
             assert result["stats"][0]["token_budgets"] == token_budgets
         print(f"E-only {model_id}: {results}")
+
+
+def _check_k3_replay_and_threshold(worker, grids, hits, misses):
+    """Run one image batch through the real manager; compare with eager.
+
+    Args:
+        grids: grid_thw of each image in the batch.
+        hits: expected graph hits for the batch.
+        misses: expected eager fallbacks for the batch.
+
+    """
+    import torch
+
+    from vllm.utils.torch_utils import set_random_seed
+
+    runner = worker.model_runner
+    manager = (
+        runner.model_state.encoder_runner.cudagraph_manager
+        if hasattr(runner, "model_state")
+        else runner.encoder_cudagraph_manager
+    )
+    assert manager is not None and manager.is_captured()
+    model = runner.model
+    patch = runner.model_config.hf_config.vision_config.patch_size
+    set_random_seed(0)
+    with torch.inference_mode():
+        num_patches = sum(t * h * w for t, h, w in grids)
+        kwargs = {
+            # The input norm takes raw 8-bit pixels.
+            "pixel_values": torch.randint(
+                0,
+                256,
+                (num_patches, 3, patch, patch),
+                device=runner.device,
+                dtype=torch.uint8,
+            ),
+            "grid_thws": grids,
+        }
+        before = manager.get_cumulative_stats()
+        actual = torch.cat(manager.execute(kwargs))
+        after = manager.get_cumulative_stats()
+        assert after["graph_hits"] - before["graph_hits"] == hits
+        assert after["graph_misses"] - before["graph_misses"] == misses
+        expected = model.encoder_eager_forward(kwargs)
+        assert actual.shape == expected.shape
+        assert torch.isfinite(actual).all() and expected.abs().max() > 0
+        # Two bf16 ulps at the output scale: replay runs padded GEMMs.
+        bound = 2 * expected.abs().max().item() * 2**-7
+        diff = (actual.float() - expected.float()).abs().max().item()
+        assert diff <= bound, f"max abs diff {diff} > {bound}"
+    return manager.token_budgets
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AMD Kimi-K3 encoder graphs")
+@pytest.mark.parametrize(
+    ("grids", "hits", "misses"),
+    [
+        pytest.param([[1, 16, 16]], 1, 0, id="fills_smallest_budget_64"),
+        pytest.param([[1, 28, 28]], 1, 0, id="padded_budget_196"),
+        pytest.param([[1, 32, 64]], 1, 0, id="fills_largest_budget_512"),
+        pytest.param([[1, 34, 64]], 0, 1, id="above_largest_budget_544"),
+        pytest.param([[1, 28, 28]] * 2, 2, 0, id="two_images_share_replay"),
+        pytest.param(
+            [[1, 28, 28], [1, 34, 64]], 0, 2, id="batch_over_budget_all_eager"
+        ),
+    ],
+)
+def test_kimi_k3_vit_cudagraph_replay_and_threshold(
+    grids, hits, misses, vllm_runner, monkeypatch
+):
+    """Replay matches eager; a batch whose total output tokens fit the largest
+    budget (512 by default) replays once, and a larger batch runs eagerly."""
+    # collective_rpc below sends a `partial` function, which needs pickle
+    # fallback since msgpack can't serialize it.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    config = MODEL_CONFIGS["kimi_k3"]
+    compilation_config = get_compilation_config(config)
+    compilation_config.pop("encoder_cudagraph_token_budgets")
+    compilation_config["encoder_cudagraph_max_vision_items_per_batch"] = 2
+    with vllm_runner(
+        config.model,
+        dtype=config.dtype,
+        max_model_len=config.max_model_len,
+        max_num_seqs=config.max_num_seqs,
+        limit_mm_per_prompt={"image": 1},
+        compilation_config=compilation_config,
+        **config.vllm_runner_kwargs,
+    ) as vllm_model:
+        results = vllm_model.llm.collective_rpc(
+            partial(
+                _check_k3_replay_and_threshold,
+                grids=grids,
+                hits=hits,
+                misses=misses,
+            )
+        )
+    for token_budgets in results:
+        assert token_budgets[-1] == 512
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
+def test_lfm3_vl_conv2d_gather_isolates_frames_and_tail_padding(dist_init):
+    """Verify `conv_indices` gather kernels match eager and ignore NaN tails."""
+    import torch
+
+    from vllm.model_executor.models.lfm3_vl import (
+        Lfm3VlVisionConv2d,
+        Lfm3VlVisionModel,
+        _native_conv2d_gather,
+        _triton_conv2d_gather,
+    )
+    from vllm.transformers_utils.configs.lfm3_vl import Lfm3VlVisionConfig
+    from vllm.triton_utils import HAS_TRITON
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    with torch.inference_mode():
+        torch.manual_seed(0)
+        device = torch.device(current_platform.device_type, 0)
+        cfg = Lfm3VlVisionConfig(
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            layer_types=["conv", "full_attention"],
+        )
+        with set_default_torch_dtype(torch.bfloat16):
+            vision = Lfm3VlVisionModel(cfg).to(device).eval()
+        conv = vision.layers[0].conv
+        assert isinstance(conv, Lfm3VlVisionConv2d)
+        for param in conv.parameters():
+            param.normal_(std=0.05)
+
+        grid_thw = [[1, 16, 32], [2, 8, 8]]
+        frame_shapes = [(h, w) for t, h, w in grid_thw for _ in range(t)]
+        n_valid = sum(h * w for h, w in frame_shapes)
+        n_buf = n_valid + 128
+
+        x = torch.randn(n_valid, cfg.hidden_size, device=device, dtype=torch.bfloat16)
+        eager = conv(x, frame_shapes=frame_shapes)
+
+        conv_indices = vision._build_conv_indices(grid_thw, device=device)
+        padded_idx = torch.zeros(
+            n_buf, cfg.conv_kernel_size**2, device=device, dtype=torch.int64
+        )
+        padded_idx[:n_valid].copy_(conv_indices)
+
+        padded_x = torch.full(
+            (n_buf, cfg.hidden_size),
+            float("nan"),
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        padded_x[:n_valid].copy_(x)
+
+        # Exercise both Triton and PyTorch fallback paths directly under NaN tails.
+        bcx, _ = conv.in_proj(x)
+        b_gate, c_gate, x_in = bcx.chunk(3, dim=-1)
+        padded_gated = torch.full(
+            (n_buf, b_gate.shape[1]),
+            float("nan"),
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        padded_gated[:n_valid].copy_(b_gate * x_in)
+
+        native_conv = _native_conv2d_gather(
+            padded_gated, conv.spatial_conv.weight, padded_idx
+        )
+        native_out, _ = conv.out_proj(c_gate * native_conv[:n_valid])
+        assert torch.isfinite(native_out).all()
+        torch.testing.assert_close(native_out, eager, rtol=1e-3, atol=1e-3)
+
+        if HAS_TRITON:
+            triton_conv = _triton_conv2d_gather(
+                padded_gated, conv.spatial_conv.weight, padded_idx
+            )
+            triton_out, _ = conv.out_proj(c_gate * triton_conv[:n_valid])
+            assert torch.isfinite(triton_out).all()
+            torch.testing.assert_close(triton_out, eager, rtol=1e-3, atol=1e-3)
+
+        graph_out = conv(padded_x, conv_indices=padded_idx)[:n_valid]
+        assert torch.isfinite(graph_out).all()
+        torch.testing.assert_close(graph_out, eager, rtol=1e-3, atol=1e-3)
+
+        swapped_grid = [[1, 32, 16], [2, 8, 8]]
+        padded_idx[:n_valid].copy_(
+            vision._build_conv_indices(swapped_grid, device=device)
+        )
+        swapped_eager = conv(x, frame_shapes=[(32, 16), (8, 8), (8, 8)])
+        swapped_out = conv(padded_x, conv_indices=padded_idx)[:n_valid]
+        torch.testing.assert_close(swapped_out, swapped_eager, rtol=1e-3, atol=1e-3)
+        assert not torch.allclose(swapped_out, eager, rtol=1e-2, atol=1e-2)

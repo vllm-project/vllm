@@ -10,8 +10,11 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
+from vllm.model_executor.utils import weights_already_processed
 
 from .lifecycle import finish_reload, start_reload
+from .types import WeightReloadValidator
 
 logger = init_logger(__name__)
 
@@ -39,7 +42,8 @@ def reload_weights(
     """Reload a model's weights in place from a weights iterator or from disk.
 
     Callers are responsible for invalidating any state derived from the old
-    weights (e.g. LoRA, encoder and multimodal caches).
+    weights (e.g. LoRA, encoder and multimodal caches). Modules that implement
+    `WeightReloadValidator` can reject reload before either format writes.
 
     Args:
         vllm_config: config of the model being reloaded. If `weights_path` is
@@ -52,6 +56,11 @@ def reload_weights(
             processed into kernel format (repacking, renaming, etc.)
 
     """
+    for module in model.modules():
+        if isinstance(module, WeightReloadValidator):
+            module.validate_weight_reload()
+
+    model_config = vllm_config.model_config
     # TODO(@kylesayrs): generalize to all runners and loaders
     # argument validation
     if weights_iterator is None and not is_checkpoint_format:
@@ -61,7 +70,6 @@ def reload_weights(
             "to avoid weight reloading errors"
         )
 
-    model_config = vllm_config.model_config
     load_config = vllm_config.load_config
     weights_to_load = {
         name.replace(".base_layer.", ".") if vllm_config.lora_config else name
@@ -99,7 +107,7 @@ def reload_weights(
     else:
         # load weights from kernel format
         logger.warning_once(
-            "Reloading with `is_checkpoint_format=True` requires that "
+            "Reloading with `is_checkpoint_format=False` requires that "
             "weights be in kernel format and already sharded",
         )
         loaded_weights = set()
@@ -107,6 +115,9 @@ def reload_weights(
             param = get_parameter_for_reload(model, name)  # TODO: buffers?
             param.copy_(loaded_weight)
             loaded_weights.add(name)
+        # kernel-format weights: hooks rebuild derived state, transform nothing
+        with weights_already_processed():
+            finalize_model_weights(model)
 
     # logging and validation
     counter_after_reloading = time.perf_counter()

@@ -8,6 +8,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
+from vllm.forward_context import in_piecewise_cudagraph
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.attention.mla_attention import split_kv_b_proj
 from vllm.model_executor.layers.fusion.quant_activation import (
@@ -140,9 +141,9 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     ) -> torch.Tensor:
         """W_fold = [W_UK @ W_qb_nope ; W_qb_pe]: one GEMM gives [ql_nope | q_pe].
 
-        ``w_qb`` is the q_b_proj weight [N * (P + R), Lq], ``w_uk`` is [L, N, P].
+        `w_qb` is the q_b_proj weight [N * (P + R), Lq], `w_uk` is [L, N, P].
         Rows hold all heads' nope rows, then all pe rows, so the two output
-        halves of ``x @ W_fold.T`` are contiguous: [B, N * L] and [B, N * R]."""
+        halves of `x @ W_fold.T` are contiguous: [B, N * L] and [B, N * R]."""
         N, P, R = num_heads, qk_nope_head_dim, qk_rope_head_dim
         L = w_uk.shape[0]
         w = w_qb.view(N, P + R, -1).float()
@@ -201,9 +202,9 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     ) -> torch.Tensor:
         """Decode-only MLA through one fused AITER launch.
 
-        Replaces the fp8 KV-cache write plus the ``[ql_nope | q_pe]`` concat and
+        Replaces the fp8 KV-cache write plus the `[ql_nope | q_pe]` concat and
         that query's static fp8 quant with a single
-        ``fused_qk_rope_concat_and_cache_mla``. On an untouched upstream build
+        `fused_qk_rope_concat_and_cache_mla`. On an untouched upstream build
         the concat and quant already arrive as one inductor-fused kernel, so
         this collapses two launches into one.
         """
@@ -374,11 +375,14 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             attn_metadata, layer, kv_cache, slot_mapping = get_attention_context(
                 self.mla_attn.layer_name
             )
+            # PIECEWISE graphs replay any batch shape; this check only sees the
+            # decode-only capture batch.
             fuse = (
                 attn_metadata is not None
                 and slot_mapping is not None
                 and kv_cache.numel() > 0
                 and attn_metadata.num_actual_tokens == attn_metadata.num_decode_tokens
+                and not in_piecewise_cudagraph()
             )
 
         if fuse and self._fold_qb_uk and llama_4_scaling is None:

@@ -8,7 +8,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import AttentionBackend, AttentionImpl
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
 
 class AttentionLayerBase(ABC):
@@ -23,6 +23,8 @@ class AttentionLayerBase(ABC):
     supports_dcp: bool = True
     # Set by the speculator on its draft model's layers.
     is_draft_layer: bool = False
+    # Name of the layer whose KV cache this layer reads instead of owning one.
+    kv_sharing_target_layer_name: str | None = None
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Bind the allocated KV cache tensor to this layer.
@@ -38,8 +40,8 @@ class AttentionLayerBase(ABC):
         pass
 
     @abstractmethod
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        """Get the KV cache spec for this layer.
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
+        """Get the KV cache config for this layer.
         May be None if the layer does not need KV cache.
         """
         pass
