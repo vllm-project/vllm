@@ -746,7 +746,6 @@ class HiSparseRuntime:
                 )
             self.region_stride = owner.region_stride
             group, owner_group = self.index_group, owner.index_group
-            group.lru_init = owner_group.lru_init
             group.device_global_indices = owner_group.device_global_indices
             group.lru_slots = owner_group.lru_slots
             group.swap_stats = owner_group.swap_stats

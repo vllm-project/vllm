@@ -3341,25 +3341,39 @@ def test_hisparse_swap_in_preserves_rows_across_eviction(row_width, kv_dtype):
 
 
 @requires_hisparse_ops
-def test_hisparse_swap_in_packs_valid_rows_to_front():
+@pytest.mark.parametrize(
+    ("top_k", "request_of_row"),
+    [(128, [0, 1]), (1100, [0, 0, 1])],
+)
+def test_hisparse_swap_in_packs_valid_rows_to_front(top_k, request_of_row):
     device = torch.device(DEVICE_TYPE)
-    block_size, row_width, top_k = 64, 64, 128
-    kv_pool = torch.randn(9, block_size, row_width).pin_memory()
+    block_size, row_width, num_reqs = 64, 64, 2
+    num_rows = len(request_of_row)
+    blocks_per_req = cdiv(top_k + num_rows, block_size)
+    kv_pool = torch.randn(
+        num_reqs * blocks_per_req + 1, block_size, row_width
+    ).pin_memory()
     flat_pool = kv_pool.reshape(-1, row_width)
     runtime = _make_hisparse_runtime(
-        top_k=top_k, device_buffer_size=256, max_num_reqs=2, row_width=row_width
+        top_k=top_k,
+        device_buffer_size=2 * top_k,
+        max_num_reqs=num_reqs,
+        row_width=row_width,
     )
     runtime.bind_source_cache(kv_pool)
     cache = HiSparseCacheHandle(runtime)
     cache.all_context_pages_resident = False
 
-    block_table = torch.arange(1, 9, dtype=torch.int32, device=device).view(2, 4)
-    req_ids = torch.arange(2, dtype=torch.int32, device=device)
-    topk = torch.arange(top_k, dtype=torch.int32, device=device).repeat(2, 1)
-    topk[1] += 3
-    topk[0, ::3] = -1
-    topk[1, 40:] = -1
-    topk[1, 7] = -1
+    block_table = torch.arange(
+        1, num_reqs * blocks_per_req + 1, dtype=torch.int32, device=device
+    ).view(num_reqs, blocks_per_req)
+    req_ids = torch.tensor(request_of_row, dtype=torch.int32, device=device)
+    cols = torch.arange(top_k, dtype=torch.int32, device=device)
+    topk = torch.stack([cols + row for row in range(num_rows)])
+    holes = torch.stack(
+        [cols % 3 == 0, (cols == 7) | (cols >= top_k * 9 // 10), cols % 5 == 1]
+    )[:num_rows]
+    topk.masked_fill_(holes, -1)
 
     cache.runtime.begin_forward()
     indices, valid_counts = cache.swap_in(
@@ -3367,7 +3381,7 @@ def test_hisparse_swap_in_packs_valid_rows_to_front():
         block_table=block_table,
         logical_topk_indices=topk.clone(),
         block_size=block_size,
-        num_valid_rows=_valid_rows(req_ids.numel()),
+        num_valid_rows=_valid_rows(num_rows),
         return_valid_counts=True,
     )
     torch.accelerator.synchronize()
@@ -3377,7 +3391,7 @@ def test_hisparse_swap_in_packs_valid_rows_to_front():
     ).cpu()
     assert isinstance(indices, torch.Tensor)
     attention_rows = cache.runtime.hot.attention_cache.reshape(-1, row_width)
-    for row in range(2):
+    for row in range(num_rows):
         expected = global_ref[row][global_ref[row] >= 0]
         count = expected.numel()
         assert valid_counts[row].item() == count

@@ -448,19 +448,18 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   // With valid_counts, each row's valid attention indices are packed to its
   // front in column order (the triton_convert contract), so the counts can
   // bound the kernel as topk_length even when the input rows have holes.
-  // hot_indices is free scratch once the phases above are done.
+  // Compaction is in place: an iteration reads its own chunks before any
+  // write, and every write lands at or before its source column.
+  const bool pack_attention =
+      valid_counts != nullptr && attention_indices != nullptr;
   const auto pack_valid_to_front = [&]() {
-    if (valid_counts == nullptr || attention_indices == nullptr) return;
+    if (!pack_attention) return;
     const int num_chunks = (top_k + kWarpSize - 1) / kWarpSize;
     const int iters = (num_chunks + NUM_WARPS - 1) / NUM_WARPS;
     for (int row = first_row; row < end_row; ++row) {
       int32_t* row_attention =
           attention_indices + static_cast<int64_t>(row) * attention_row_stride;
-      int32_t* scratch = hot_indices + static_cast<int64_t>(row) * top_k;
       __syncthreads();
-      for (int i = tid; i < top_k; i += blockDim.x) {
-        scratch[i] = row_attention[i];
-      }
       for (int i = tid; i < num_chunks + 1; i += blockDim.x) {
         s_chunk_off[i] = 0;
       }
@@ -470,7 +469,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
         const int chunk_idx = warp_id + iter * NUM_WARPS;
         const bool has_chunk = chunk_idx < num_chunks;
         const int i = chunk_idx * kWarpSize + lane_id;
-        const int32_t value = has_chunk && i < top_k ? scratch[i] : -1;
+        const int32_t value = has_chunk && i < top_k ? row_attention[i] : -1;
         const bool valid = value >= 0;
         int local_off = 0;
         if (has_chunk) {
@@ -520,7 +519,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
         source_num_blocks, source_block_size, resident_bt_stride,
         resident_num_reqs, resident_num_blocks, resident_block_size,
         resident_row);
-    if (resident_row >= 0 || g >= 0)
+    if (!pack_attention && (resident_row >= 0 || g >= 0))
       atomicAdd(&s_row_valid[row - first_row], 1);
     if (resident_row >= 0) {
       store_hot_index(row_out, row_attention, i, resident_row, hot_block_size,
@@ -557,7 +556,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   }
   __syncthreads();
   for (int row = first_row + tid; row < end_row; row += blockDim.x) {
-    if (valid_counts != nullptr) {
+    if (valid_counts != nullptr && !pack_attention) {
       valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
           s_row_valid[row - first_row];
     }
@@ -1309,11 +1308,6 @@ void hisparse_resolve_residency(
   STD_TORCH_CHECK(max_union_rows > 0 && max_union_rows <= hot_size,
                   "max_union_rows must be in [1, hot_size], got ",
                   max_union_rows);
-  STD_TORCH_CHECK(
-      !(valid_counts.has_value() && attention_indices.has_value()) ||
-          top_k <= hot_size,
-      "packing attention indices needs top_k <= hot_size, got top_k=", top_k,
-      " hot_size=", hot_size);
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
   const size_t fixed_smem_bytes =
       sizeof(int32_t) * (3 * num_buffer_chunks + 2 + kResidencyCounters) +
