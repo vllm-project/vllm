@@ -873,3 +873,43 @@ def test_cpu_caches_round_trip_on_pinned_host_buffer(hugepages, hugepage_with_fr
     finally:
         if worker._backend is not None:
             worker._backend.shutdown()
+
+
+@pytest.mark.parametrize("confidential", [False, True])
+def test_cpu_caches_unpinned_under_confidential_compute(monkeypatch, confidential):
+    """The GPU refuses to register guest memory under Confidential Computing."""
+    num_blocks = 4
+    raw = torch.zeros(num_blocks * BLOCK_BYTES, dtype=torch.int8, device="cuda")
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=raw.nbytes,
+                layers=["layer.0"],
+                layer_stride=num_blocks * BLOCK_BYTES,
+                block_stride=BLOCK_BYTES,
+            )
+        ],
+        kv_cache_groups=[],
+    )
+    pinned: list[torch.Tensor] = []
+
+    def pin_tensor(tensor: torch.Tensor) -> None:
+        if confidential:
+            raise RuntimeError("cudaHostRegister failed: cudaError.???")
+        pinned.append(tensor)
+
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", True)
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.pin_tensor", pin_tensor)
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.unpin_tensor", lambda t: None)
+    monkeypatch.setattr(
+        current_platform, "is_confidential_compute", lambda: confidential
+    )
+    worker = SimpleCPUOffloadWorker(None, config, 8 * BLOCK_BYTES, num_cpu_blocks=4)
+    try:
+        worker.register_kv_caches({"layer.0": raw.view(num_blocks, BLOCK_BYTES)})
+        assert worker.cpu_kv_caches is not None
+        assert bool(pinned) != confidential
+    finally:
+        if worker._backend is not None:
+            worker._backend.shutdown()

@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.host_memory import (
     host_registration_ranges,
     pin_tensor,
@@ -245,7 +246,15 @@ class SimpleCPUOffloadWorker:
         )
 
         pin_memory = PIN_MEMORY
-        if not pin_memory:
+        if pin_memory and current_platform.is_confidential_compute():
+            # The GPU cannot register guest memory under Confidential
+            # Computing; copies from pageable memory still work.
+            logger.info(
+                "NVIDIA Confidential Computing detected; CPU offload buffers "
+                "are not pinned."
+            )
+            pin_memory = False
+        elif not pin_memory:
             logger.warning(
                 "Pinned memory not available. CPU offload performance may be degraded."
             )
