@@ -8,11 +8,11 @@ vLLM maintains a per-commit wheel repository (commonly referred to as "nightly")
 
 Wheels are built in the `Release` pipeline
 (`.buildkite/release-pipeline.yaml`) after a PR is merged into the main branch.
-Regular builds produce the CUDA 13.0 wheels for x86_64 and aarch64. Additional
+Regular builds produce the CUDA 13.2 wheels for x86_64 and aarch64. Additional
 wheel variants and ROCm builds can be unblocked on demand and run automatically
 when `NIGHTLY=1`:
 
-- **Backend variants**: `cpu` and `cuXXX` (e.g., `cu129`, `cu130`).
+- **Backend variants**: `cpu` and `cuXXX` (e.g., `cu132`).
 - **Architecture variants**: `x86_64` and `aarch64`.
 
 Each build step:
@@ -55,7 +55,7 @@ s3://vllm-wheels/
 │   │   └── vllm/
 │   │       ├── index.html      # Package index (cu129 variant)
 │   │       └── metadata.json   # Metadata (cu129 variant)
-│   ├── cu130/                  # Variant subdirectory
+│   ├── cu132/                  # Variant subdirectory
 │   ├── cpu/                    # Variant subdirectory
 │   └── .../                    # More variant subdirectories
 ├── nightly/                    # Latest main branch wheels (mirror of latest commit)
@@ -67,7 +67,7 @@ This avoids duplication of wheel files.
 
 For example, you can specify the following URLs to use different indices:
 
-- `https://wheels.vllm.ai/nightly/cu130` for the latest main branch wheels built with CUDA 13.0.
+- `https://wheels.vllm.ai/nightly/cu132` for the latest main branch wheels built with CUDA 13.2.
 - `https://wheels.vllm.ai/{commit_hash}` for wheels built at a specific commit (default variant).
 - `https://wheels.vllm.ai/0.12.0/cpu` for 0.12.0 release wheels built for CPU variant.
 
@@ -79,7 +79,7 @@ Indices are organized by variant:
 
 - **Default variant**: Wheels without variant suffix (i.e., built with the current `VLLM_MAIN_CUDA_VERSION`) are placed in the root.
 - **Variant subdirectories**: Wheels with variant suffixes (e.g., `+cu130`, `.cpu`) are organized in subdirectories.
-- **Alias to default**: The default variant can have an alias (e.g., `cu129` for now) for consistency and convenience.
+- **Alias to default**: The default variant can have an alias (e.g., `cu132` for now) for consistency and convenience.
 
 The variant is extracted from the wheel filename (as described in the [file name convention](https://packaging.python.org/en/latest/specifications/binary-distribution-format/#file-name-convention)):
 
@@ -121,7 +121,7 @@ Since S3 does not provide proper directory listing, to support PyPI-compatible s
 For example, the following requests would be handled as:
 
 - `/nightly` -> `/nightly/index.html`
-- `/nightly/cu130/` -> `/nightly/cu130/index.html`
+- `/nightly/cu132/` -> `/nightly/cu132/index.html`
 - `/nightly/index.html` or `/nightly/vllm.whl` -> unchanged
 
 !!! note "AWS S3 Filename Escaping"
