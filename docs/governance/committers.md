@@ -56,6 +56,7 @@ Sorted alphabetically by GitHub handle:
 - [@tomeras91](https://github.com/tomeras91): MoE, Mamba, Ray
 - [@vadiklyutiy](https://github.com/vadiklyutiy): CI, performance, kernels
 - [@WoosukKwon](https://github.com/WoosukKwon): Project lead, engine core
+- [@wangxiyuan](https://github.com/wangxiyuan): Platform, KV cache, Mooncake
 - [@wzhao18](https://github.com/wzhao18): Kernels and performance, KV offloading
 - [@xinli-sw](https://github.com/xinli-sw): Quantization and model support
 - [@xuechendi](https://github.com/xuechendi): Intel CPU/XPU integration, KV connector
@@ -191,7 +192,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 
 ### Hardware
 
-- Plugin Interface: @youkaichao, @Yikun
+- Plugin Interface: @youkaichao, @Yikun, @wangxiyuan
 - NVIDIA GPU: @pavanimajety, @wzhao18
 - AMD GPU: @gshtras, @tjtanaa, @hongxiayang, @shen-shanshan, @AndreasKaratzas
 - Intel CPU/GPU: @jikunshang, @bigPYJ1151, @xuechendi
