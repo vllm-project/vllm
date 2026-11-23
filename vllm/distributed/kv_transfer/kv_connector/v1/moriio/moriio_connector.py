@@ -43,6 +43,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOError,
     MoRIIOMode,
     MoRIIOTransferAck,
+    ReadLease,
     ReadLeaseTarget,
     ReqId,
     ReqMeta,
@@ -790,7 +791,7 @@ class MoRIIOConnectorScheduler:
             set_role(ROLE.PRODUCER)
         else:
             set_role(ROLE.CONSUMER)
-        # READ: lease expiry (perf_counter) of newly finished requests.
+        # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
         # Requests whose block freeing is deferred. READ mode uses the deadline
         # as a backstop for the workers' leases; WRITE mode waits for the worker
@@ -805,16 +806,8 @@ class MoRIIOConnectorScheduler:
         )
         # READ decode: prefill leases renewed until the request is read, and the
         # last renewal of requests allocated this step.
-        self._read_leases: dict[ReqId, tuple[ReadLeaseTarget, TransferId]] = {}
+        self._read_leases: dict[ReqId, ReadLease] = {}
         self._final_read_lease_renewals: list[tuple[ReadLeaseTarget, TransferId]] = []
-        # When each lease was first tracked and last renewed (perf_counter), and
-        # the requests whose lease may have lapsed: they recompute, not read.
-        self._read_lease_tracked_at: dict[ReqId, float] = {}
-        self._read_lease_renewed_at: dict[ReqId, float] = {}
-        self._read_lease_lapsed: set[ReqId] = set()
-        # Leases not renewed yet: renewed in the next step, not the next interval,
-        # since prefill's lease started at its request_finished, before admission.
-        self._unrenewed_read_leases: set[ReqId] = set()
         self._last_read_lease_renewal = 0.0
         # Buffer for early ACKs that arrive before request_finished.
         self._pending_sent_acks: dict[ReqId, float] = {}
@@ -920,9 +913,7 @@ class MoRIIOConnectorScheduler:
                 num_external_tokens = max(num_external_tokens - 1, 0)
             return num_external_tokens, num_external_tokens > 0
 
-        if (
-            self._read_leases or self._read_lease_lapsed
-        ) and self._read_lease_has_lapsed(request.request_id):
+        if self._read_leases and self._read_lease_has_lapsed(request.request_id):
             # The prefill may have freed and reused the blocks: compute locally.
             return 0, False
 
@@ -996,11 +987,10 @@ class MoRIIOConnectorScheduler:
                 request.request_id,
             )
             return
-        self._read_leases[request.request_id] = (target, params["transfer_id"])
         now = time.perf_counter()
-        self._read_lease_tracked_at[request.request_id] = now
-        self._read_lease_renewed_at[request.request_id] = now
-        self._unrenewed_read_leases.add(request.request_id)
+        self._read_leases[request.request_id] = ReadLease(
+            target, params["transfer_id"], tracked_at=now, renewed_at=now
+        )
 
     def _read_lease_has_lapsed(self, request_id: ReqId) -> bool:
         """Whether the prefill may have freed this request's blocks.
@@ -1011,15 +1001,15 @@ class MoRIIOConnectorScheduler:
         covers the read. The renewal cap ends the lease regardless, so a request
         is not read within a lease (at most half the cap) of it.
         """
-        if request_id in self._read_lease_lapsed:
-            return True
         lease = self._read_leases.get(request_id)
         if lease is None:
             return False
-        duration = lease[0].lease_duration
+        if lease.lapsed:
+            return True
+        duration = lease.target.lease_duration
         now = time.perf_counter()
-        renewal_gap = now - self._read_lease_renewed_at.get(request_id, now)
-        held = now - self._read_lease_tracked_at.get(request_id, now)
+        renewal_gap = now - lease.renewed_at
+        held = now - lease.tracked_at
         if renewal_gap < duration * (
             MoRIIOConstants.READ_LEASE_EXTENSION_FRACTION
             - 1 / MoRIIOConstants.READ_LEASE_RENEWALS_PER_LEASE
@@ -1034,15 +1024,8 @@ class MoRIIOConnectorScheduler:
             renewal_gap,
             held,
         )
-        self._read_lease_lapsed.add(request_id)
-        self._forget_read_lease(request_id)
+        lease.lapsed = True
         return True
-
-    def _forget_read_lease(self, request_id: ReqId) -> None:
-        self._read_leases.pop(request_id, None)
-        self._read_lease_tracked_at.pop(request_id, None)
-        self._read_lease_renewed_at.pop(request_id, None)
-        self._unrenewed_read_leases.discard(request_id)
 
     def _truncate_mamba_request_for_prefill(self, request: "Request") -> None:
         """P-side only: drop the last prompt token so the prefiller computes
@@ -1226,12 +1209,15 @@ class MoRIIOConnectorScheduler:
         )
         request_id = request.request_id
         self.map_request_id(request_id, transfer_id)
+        lease = None
         if self.mode == MoRIIOMode.READ and not self.is_producer:
             lease = self._read_leases.get(request_id)
-            self._forget_read_lease(request_id)
-            if lease is not None:
+            if lease is not None and not lease.lapsed:
+                del self._read_leases[request_id]
                 # The read is posted this step; one last renewal covers it.
-                self._final_read_lease_renewals.append(lease)
+                self._final_read_lease_renewals.append(
+                    (lease.target, lease.transfer_id)
+                )
         if (
             not self.is_producer
             and self.mode == MoRIIOMode.WRITE
@@ -1344,10 +1330,10 @@ class MoRIIOConnectorScheduler:
                                     adjusted_remote_block_ids.append(aligned_remote)
                                 local_block_ids = aligned_local_block_ids
                         else:
-                            if request.request_id in self._read_lease_lapsed:
+                            if lease is not None and lease.lapsed:
                                 # The prefill may have reused the blocks: read
                                 # nothing, only release them.
-                                self._read_lease_lapsed.discard(request.request_id)
+                                del self._read_leases[request.request_id]
                                 local_block_ids = [[] for _ in remote_block_ids]
                             elif self._has_mamba:
                                 # Attention can be a complete local hit, but the
@@ -1689,7 +1675,6 @@ class MoRIIOConnectorScheduler:
         # Clear the list once workers start the transfers
 
         meta.reqs_to_send = self._reqs_need_send
-        meta.scheduler_clock = time.perf_counter()
         if self.mode == MoRIIOMode.READ and not self.is_producer:
             self._package_read_lease_renewals(meta)
 
@@ -1718,23 +1703,21 @@ class MoRIIOConnectorScheduler:
             return
         now = time.perf_counter()
         interval = (
-            min(target.lease_duration for target, _ in self._read_leases.values())
+            min(lease.target.lease_duration for lease in self._read_leases.values())
             / MoRIIOConstants.READ_LEASE_RENEWALS_PER_LEASE
         )
-        if now - self._last_read_lease_renewal >= interval:
+        renew_all = now - self._last_read_lease_renewal >= interval
+        if renew_all:
             self._last_read_lease_renewal = now
-            renew = list(self._read_leases)
-        else:
-            renew = [r for r in self._unrenewed_read_leases if r in self._read_leases]
-        self._unrenewed_read_leases.clear()
-        for req_id in renew:
+        for req_id, lease in self._read_leases.items():
             # A renewal cannot revive a lease that may have lapsed (e.g. during
             # a pause): prefill ignores it, so the request must recompute.
-            if self._read_lease_has_lapsed(req_id):
+            if (lease.renewed and not renew_all) or self._read_lease_has_lapsed(req_id):
                 continue
-            target, transfer_id = self._read_leases[req_id]
-            meta.read_lease_renewals.setdefault(target, []).append(transfer_id)
-            self._read_lease_renewed_at[req_id] = now
+            meta.read_lease_renewals.setdefault(lease.target, []).append(
+                lease.transfer_id
+            )
+            lease.renewed_at, lease.renewed = now, True
 
     def shutdown(self):
         for path, sock in self.paths.items():
@@ -1824,8 +1807,7 @@ class MoRIIOConnectorScheduler:
         if not self.is_producer:
             transfer_id = params.get("transfer_id") if params else None
             if self.mode == MoRIIOMode.READ:
-                self._forget_read_lease(request_id)
-                self._read_lease_lapsed.discard(request_id)
+                self._read_leases.pop(request_id, None)
             owner = (
                 self.transfer_id_to_request_id.get(transfer_id)
                 if transfer_id is not None
@@ -1916,7 +1898,8 @@ class MoRIIOConnectorScheduler:
             # READ workers free the blocks when D's lease expires; the deadline
             # here only caps renewals.
             self._reqs_need_send[request.request_id] = (
-                time.perf_counter() + self._defer_timeout
+                time.perf_counter()
+                + MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT
             )
             self._deferred_send_deadlines[request.request_id] = (
                 time.monotonic()
@@ -2280,13 +2263,8 @@ class MoRIIOConnectorWorker:
 
         # READ: lease expiry (this worker's perf_counter) of unreleased requests.
         self._reqs_to_send: dict[ReqId, float] = {}
-        self._read_lease_extension = (
-            self.moriio_config.defer_timeout
-            * MoRIIOConstants.READ_LEASE_EXTENSION_FRACTION
-        )
         # Transfers whose lease expired before decode released them.
         self._expired_read_leases: OrderedDict[TransferId, None] = OrderedDict()
-        self._num_late_read_releases = 0
 
         # Background thread for handling new handshake requests.
         self._moriio_handshake_listener_t: threading.Thread | None = None
@@ -3221,13 +3199,11 @@ class MoRIIOConnectorWorker:
             for ack in finished_acks:
                 transfer_id = ack if isinstance(ack, str) else ack.transfer_id
                 if transfer_id in self._expired_read_leases:
-                    self._num_late_read_releases += 1
                     logger.warning(
                         "Decode released transfer %s after its READ lease "
-                        "expired (%d so far); unless it computed the request "
-                        "locally, it may have read reused blocks.",
+                        "expired; unless it computed the request locally, it "
+                        "may have read reused blocks.",
                         transfer_id,
-                        self._num_late_read_releases,
                     )
                     continue
                 if transfer_id not in self.transfer_id_to_request_id:
@@ -3289,7 +3265,10 @@ class MoRIIOConnectorWorker:
         renewed = self.moriio_wrapper.pop_renewed_lease_transfer_ids()
         if not renewed:
             return
-        expiry = time.perf_counter() + self._read_lease_extension
+        expiry = time.perf_counter() + (
+            self.moriio_config.defer_timeout
+            * MoRIIOConstants.READ_LEASE_EXTENSION_FRACTION
+        )
         for transfer_id in renewed:
             req_id = self.transfer_id_to_request_id.get(transfer_id)
             if req_id in self._reqs_to_send:
@@ -3719,11 +3698,11 @@ class MoRIIOConnectorWorker:
             self._completed_consumer_notifications.intersection_update(
                 live_transfer_ids
             )
-            if self.mode == MoRIIOMode.READ:
-                # Rebase the scheduler's expiries onto this worker's clock.
-                offset = time.perf_counter() - metadata.scheduler_clock
-                for req_id, expiry in metadata.reqs_to_send.items():
-                    self._reqs_to_send[req_id] = expiry + offset
+            if self.mode == MoRIIOMode.READ and metadata.reqs_to_send:
+                # The lease starts when this worker learns of the request.
+                expiry = time.perf_counter() + self.moriio_config.defer_timeout
+                for req_id in metadata.reqs_to_send:
+                    self._reqs_to_send[req_id] = expiry
             self.moriio_wrapper.async_wait_reqid()
             return
         if self.mode == MoRIIOMode.WRITE:

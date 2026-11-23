@@ -612,15 +612,27 @@ class ReadLeaseTarget:
     lease_duration: float
 
 
+@dataclass(slots=True)
+class ReadLease:
+    """A READ request whose prefill lease decode renews until it reads it."""
+
+    target: ReadLeaseTarget
+    transfer_id: TransferId
+    # perf_counter when decode started tracking and last renewed the lease.
+    tracked_at: float
+    renewed_at: float
+    # A new lease is renewed in the next step, not the next interval, since
+    # prefill's lease started at its request_finished, before admission.
+    renewed: bool = False
+    # The prefill may have freed and reused the blocks: compute locally.
+    lapsed: bool = False
+
+
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
-        # READ lease expiry per request, in the scheduler's perf_counter domain.
         self.reqs_to_send: dict[ReqId, float] = {}
-        # The scheduler's perf_counter when it built this metadata, so a worker
-        # (possibly on another node) can rebase reqs_to_send onto its own clock.
-        self.scheduler_clock: float = 0.0
         # Decode: READ leases to renew on each prefill rank this step.
         self.read_lease_renewals: dict[ReadLeaseTarget, list[TransferId]] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
