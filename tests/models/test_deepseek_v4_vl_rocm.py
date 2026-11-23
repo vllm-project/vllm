@@ -456,9 +456,9 @@ def test_rocm_fse_rejects_data_parallel_deployment(
         )
 
 
-@pytest.mark.parametrize("fuse_heterogeneous", [False, True])
+@pytest.mark.parametrize("fusion", ["none", "heterogeneous", "mega_moe"])
 def test_rocm_fused_shared_expert_linears_skip_weight_relayout(
-    fuse_heterogeneous: bool, monkeypatch: pytest.MonkeyPatch
+    fusion: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The fused MoE copies the shared expert's weights as stored (#57132).
     from vllm.models.deepseek_v4.amd import model as rocm_model
@@ -472,13 +472,23 @@ def test_rocm_fused_shared_expert_linears_skip_weight_relayout(
             super().__init__()
             self.gate_up_proj, self.down_proj = nn.Module(), nn.Module()
 
+    class FakeMegaMoEExperts(nn.Module):
+        def __init__(self, *args, fuse_shared_expert: bool, **kwargs) -> None:
+            super().__init__()
+            self.fuse_shared_expert = fuse_shared_expert
+
     monkeypatch.setattr(rocm_model, "GateLinear", FakeGate)
     monkeypatch.setattr(rocm_model, "DeepseekV4MLP", FakeMLP)
     monkeypatch.setattr(rocm_model, "FusedMoEFactory", lambda **kwargs: nn.Identity())
+    monkeypatch.setattr(rocm_model, "DeepseekV4AiterMegaMoEExperts", FakeMegaMoEExperts)
+    monkeypatch.setattr(rocm_model, "_validate_aiter_mega_moe_config", lambda c: None)
     monkeypatch.setattr(rocm_model, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(rocm_model, "get_tensor_model_parallel_rank", lambda: 0)
+    # Only MegaMoE asks to fuse the shared expert; the AITER fused path stays off.
     monkeypatch.setattr(
-        rocm_model, "resolve_layer_fused_shared_expert", lambda *a, **k: False
+        rocm_model,
+        "resolve_layer_fused_shared_expert",
+        lambda *a, moe_backend=None, **k: moe_backend == "aiter_mega_moe",
     )
 
     config = SimpleNamespace(
@@ -496,21 +506,29 @@ def test_rocm_fused_shared_expert_linears_skip_weight_relayout(
         vision_n_layers=0,
         n_shared_experts=1,
     )
+    mega_moe = fusion == "mega_moe"
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=config),
-        quant_config=None,
+        # MegaMoE copies the quant config to drop online quantization.
+        quant_config=SimpleNamespace(online_quantization_config=None)
+        if mega_moe
+        else None,
         parallel_config=ParallelConfig(),
-        kernel_config=KernelConfig(),
+        kernel_config=KernelConfig(moe_backend="aiter_mega_moe")
+        if mega_moe
+        else KernelConfig(),
     )
     moe = rocm_model.DeepseekV4MoE(
         vllm_config,
         prefix="model.layers.0.ffn",
-        fuse_heterogeneous_shared_expert=fuse_heterogeneous,
+        fuse_heterogeneous_shared_expert=fusion == "heterogeneous",
     )
 
+    if mega_moe:
+        assert moe.experts.fuse_shared_expert
     shared = moe.shared_experts
     for linear in (shared.gate_up_proj, shared.down_proj):
-        assert getattr(linear, "skip_weight_relayout", False) == fuse_heterogeneous
+        assert getattr(linear, "skip_weight_relayout", False) == (fusion != "none")
 
 
 def test_rocm_mtp_forwards_input_ids_for_vision_routing(
