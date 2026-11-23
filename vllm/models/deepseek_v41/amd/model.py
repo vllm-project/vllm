@@ -70,7 +70,7 @@ from vllm.models.deepseek_v4.amd.model import (
 )
 from vllm.models.deepseek_v4.amd.model import takes_rocm_mxfp8_input
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
-from vllm.models.deepseek_v41.amd.engram import RocmEngram, RocmPerTokenEngram
+from vllm.models.deepseek_v41.amd.engram import PerTokenEngram, RocmEngram
 from vllm.models.deepseek_v41.amd.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     MHC_SEAM_MIN_TOKENS,
@@ -247,7 +247,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             layer_id = extract_layer_index(prefix)
             if layer_id in engram_layout.layer_ids:
                 engram_cls = (
-                    RocmPerTokenEngram
+                    PerTokenEngram
                     if vllm_config.engram_config is not None
                     and vllm_config.engram_config.mode == "per_token"
                     else RocmEngram
@@ -902,6 +902,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 swa_metadata = typing.cast(
                     "DeepseekSparseSWAMetadata", attn_metadata[self.engram_swa_prefix]
                 )
+                # Image-span tokens are dead: they break n-grams (hash op
+                # takes True=dead) and their gate is zeroed (Engram.forward
+                # takes True=keep).
                 image_mask = image_sentinel_mask(input_ids)
                 engram_mask = ~image_mask
                 if lookback_token_ids is None:
@@ -921,13 +924,18 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 # hash still has to reach them; the memory profile also has to
                 # see the Engram activations.
                 engram_hashes, engram_mask = self.engram_hash.dummy_hashes(input_ids)
-            lookup_ids = gather_engram_hashes(
-                engram_hashes, dp_shared_memory=self.engram_dp_shared_memory
-            )
-            for layer in islice(self.layers, self.start_layer, self.end_layer):
-                engram = getattr(layer, "engram", None)
-                if engram is not None:
-                    engram.prepare_embeddings(lookup_ids[:, engram.layer_hash_index])
+            if engram_hashes is not None:
+                # Gather all Engram rows before entering the decoder layers.
+                # One gather feeds every layer sharing the DP-split table.
+                gathered_hashes = gather_engram_hashes(
+                    engram_hashes, dp_shared_memory=self.engram_dp_shared_memory
+                )
+                for layer in islice(self.layers, self.start_layer, self.end_layer):
+                    engram = getattr(layer, "engram", None)
+                    if engram is not None:
+                        engram.prepare_embeddings(
+                            gathered_hashes[:, engram.layer_hash_index]
+                        )
 
         full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel:

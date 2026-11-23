@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Selection and validation of the Qwen4Exp PLE embedding mode.
-
-`ple_embedding_mode` is an optional field of the text `config.json`:
-
-* `"ngram"` (default, also used when the field is absent): hashed n-gram
-  embedding table, the original behaviour.
-* `"per_token"`: a replicated `[vocab_size, ple_embed_dim]` table indexed by
-  the current token id (no hashing, no context from earlier tokens).
-"""
-
 from enum import StrEnum
 from typing import Any
 
@@ -20,18 +10,6 @@ class PleEmbeddingMode(StrEnum):
 
 
 def validate_ple_embedding_config(config: Any) -> PleEmbeddingMode:
-    """Validate the PLE embedding fields of a text config.
-
-    Args:
-        config: Text config of the model.
-
-    Returns:
-        The validated mode.
-
-    Raises:
-        ValueError: If the mode or the fields it depends on are invalid.
-
-    """
     value = getattr(config, "ple_embedding_mode", None)
     try:
         mode = PleEmbeddingMode.NGRAM if value is None else PleEmbeddingMode(value)

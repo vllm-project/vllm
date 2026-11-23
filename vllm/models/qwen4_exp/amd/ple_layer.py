@@ -6,15 +6,9 @@ from collections.abc import Iterable, Sequence
 
 import torch
 from torch import nn
-from torch.nn import functional as F
 from transformers import Qwen4ExpTextConfig
 
-from vllm.config import (
-    CacheConfig,
-    ModelConfig,
-    VllmConfig,
-    get_current_vllm_config,
-)
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_etp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -391,10 +385,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             if leaf_name.startswith("hashstats_") or leaf_name == "token_lookup":
                 continue
             if name.startswith("per_token_table."):
-                logger.info_once(
-                    "Skipping the checkpoint's per-token PLE table: "
-                    "ple_embedding_mode is 'ngram'."
-                )
                 continue
             if name in persistent_buffers:
                 buffer = persistent_buffers[name]
@@ -447,59 +437,26 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         return loaded
 
 
-# Checkpoint tensors of the n-gram embedding that the per-token mode does not
-# use; they are skipped without error.
-_NGRAM_ONLY_BUFFERS = frozenset(
-    {"layer_multipliers", "ngram_heads_offsets", "ngram_heads_vocab_sizes"}
-)
-
-
 class Qwen4ExpPerTokenEmbedding(nn.Module):
-    """PLE embedding without the n-gram hash table (`per_token` mode).
-
-    `forward` returns `per_token_table[input_ids]`, where the table is a
-    plain, TP-replicated parameter of shape `[vocab_size, embedding_dim]`
-    (checkpoint tensor name `<prefix>.per_token_table.weight`). Ids are
-    clamped into `[0, vocab_size - 1]` on device (no host sync, safe under
-    CUDA graphs and torch.compile) instead of raising: an out-of-range id reads
-    the first or last row.
-
-    `query_start_loc` and `ngram_context` are accepted for interface
-    compatibility with `Qwen4ExpNGramEmbedding` and ignored.
-    """
+    """Replicated PLE table indexed by the current token."""
 
     def __init__(
         self,
         config: Qwen4ExpTextConfig,
-        embedding_dim: int,
-        *,
-        params_dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
+        use_sequence_parallel: bool,
     ) -> None:
         super().__init__()
-        self.embedding_dim = int(embedding_dim)
-        self.vocab_size = int(config.vocab_size)
-        self.params_dtype = (
-            params_dtype if params_dtype is not None else torch.get_default_dtype()
-        )
-        # nn.Embedding gives the checkpoint name per_token_table.weight. The
-        # table starts as NaN: a table that no loader wrote is caught in
-        # process_weights_after_loading.
+        if use_sequence_parallel:
+            raise NotImplementedError(
+                "ple_embedding_mode='per_token' does not support sequence parallelism"
+            )
+        shape = (int(config.vocab_size), int(config.ple_embed_dim))
+        # The NaN sentinel also detects missing tables on partial checkpoint loads.
         self.per_token_table = nn.Embedding(
-            self.vocab_size,
-            self.embedding_dim,
-            _weight=torch.full(
-                (self.vocab_size, self.embedding_dim),
-                float("nan"),
-                dtype=self.params_dtype,
-            ),
-            _freeze=True,
+            *shape, _weight=torch.full(shape, float("nan"), dtype=dtype), _freeze=True
         )
-        logger.info(
-            "Initialized AMD PLE per-token embedding (vocab=%d, dim=%d, dtype=%s)",
-            self.vocab_size,
-            self.embedding_dim,
-            self.params_dtype,
-        )
+        logger.info("Initialized per-token PLE table with shape %s", shape)
 
     def forward(
         self,
@@ -507,41 +464,28 @@ class Qwen4ExpPerTokenEmbedding(nn.Module):
         query_start_loc: torch.Tensor | None = None,
         ngram_context: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del query_start_loc, ngram_context
-        ids = input_ids.reshape(-1).long().clamp(0, self.vocab_size - 1)
-        return F.embedding(ids, self.per_token_table.weight)
+        ids = (
+            input_ids.reshape(-1)
+            .long()
+            .clamp(0, self.per_token_table.num_embeddings - 1)
+        )
+        return self.per_token_table(ids)
 
     def dequantize(
         self, embeddings: torch.Tensor, output_dtype: torch.dtype
     ) -> torch.Tensor:
-        del output_dtype
         return embeddings
 
     def process_weights_after_loading(self) -> None:
-        """Fail loudly if the table was never loaded (still NaN).
-
-        The table is allocated as NaN and vLLM's generic "all weights were
-        loaded" check is skipped for quantized checkpoints, so without this a
-        checkpoint lacking the tensor would load silently and serve garbage.
-        Runs on every load path (including ones that bypass `load_weights`).
-        """
         weight = self.per_token_table.weight
-        if is_weights_pre_processed() or weight.device.type == "meta":
-            return
-        if torch.isnan(weight).any():
+        if (
+            not is_weights_pre_processed()
+            and weight.device.type != "meta"
+            and torch.isnan(weight).any()
+        ):
             raise ValueError(
-                "ple_embedding_mode='per_token' but "
-                "'...ple_embedding.per_token_table.weight' was never loaded "
-                "(still NaN) or contains NaN "
-                f"(expected shape {(self.vocab_size, self.embedding_dim)}, "
-                f"dtype {self.params_dtype}). Export a per-token checkpoint or "
-                "use ple_embedding_mode='ngram'."
+                "PLE per_token_table.weight was never loaded or contains NaN"
             )
-        logger.info(
-            "PLE per_token_table loaded shape=%s dtype=%s",
-            tuple(weight.shape),
-            weight.dtype,
-        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load `per_token_table.weight`; skip the n-gram-only tensors."""
@@ -551,81 +495,34 @@ class Qwen4ExpPerTokenEmbedding(nn.Module):
             if (
                 leaf_name.startswith("hashstats_")
                 or leaf_name == "token_lookup"
-                or name in _NGRAM_ONLY_BUFFERS
+                or name
+                in {
+                    "layer_multipliers",
+                    "ngram_heads_offsets",
+                    "ngram_heads_vocab_sizes",
+                }
                 or name.startswith("ngram_embedding.")
             ):
                 continue
-            if name == "per_token_table.weight":
-                weight = self.per_token_table.weight
-                if weight.shape != loaded_weight.shape:
-                    raise ValueError(
-                        f"Shape mismatch for {name}: expected "
-                        f"{tuple(weight.shape)}, got {tuple(loaded_weight.shape)}"
-                    )
-                if loaded_weight.dtype not in (torch.bfloat16, weight.dtype):
-                    raise ValueError(
-                        f"dtype mismatch for {name}: expected bfloat16 or "
-                        f"{weight.dtype}, got {loaded_weight.dtype}"
-                    )
-                weight_loader = getattr(weight, "weight_loader", default_weight_loader)
-                weight_loader(weight, loaded_weight)
-                loaded.add(name)
-                continue
-            raise ValueError(
-                f"Unexpected PLE embedding tensor {name!r} in "
-                f"ple_embedding_mode={PleEmbeddingMode.PER_TOKEN.value!r}"
-            )
+            if name != "per_token_table.weight":
+                raise ValueError(
+                    f"Unexpected PLE embedding tensor {name!r} in per_token mode"
+                )
+            weight = self.per_token_table.weight
+            if weight.shape != loaded_weight.shape:
+                raise ValueError(
+                    f"Shape mismatch for {name}: expected "
+                    f"{tuple(weight.shape)}, got {tuple(loaded_weight.shape)}"
+                )
+            if loaded_weight.dtype not in (torch.bfloat16, weight.dtype):
+                raise ValueError(
+                    f"dtype mismatch for {name}: expected bfloat16 or "
+                    f"{weight.dtype}, got {loaded_weight.dtype}"
+                )
+            weight_loader = getattr(weight, "weight_loader", default_weight_loader)
+            weight_loader(weight, loaded_weight)
+            loaded.add(name)
         return loaded
-
-
-def _build_ple_embedding(
-    mode: PleEmbeddingMode,
-    config: Qwen4ExpTextConfig,
-    ple_dense_layer_id: int,
-    max_num_batched_tokens: int,
-    prefix: str,
-    use_sequence_parallel: bool,
-    *,
-    quant_config: QuantizationConfig | None,
-    params_dtype: torch.dtype,
-    data_parallel_rank: int,
-) -> nn.Module:
-    """Create the PLE embedding module for `ple_embedding_mode`."""
-    embedding: nn.Module
-    if mode == PleEmbeddingMode.NGRAM:
-        embedding = Qwen4ExpNGramEmbedding(
-            config,
-            int(config.ple_embed_dim),
-            ple_dense_layer_id,
-            max_num_batched_tokens,
-            f"{prefix}.ple_embedding",
-            prefix,
-            data_parallel_rank=data_parallel_rank,
-            quant_config=quant_config,
-            params_dtype=params_dtype,
-            use_sequence_parallel=use_sequence_parallel,
-        )
-        table_rows = int(embedding.ngram_embedding.org_vocab_size)
-    else:
-        if use_sequence_parallel:
-            raise NotImplementedError(
-                f"ple_embedding_mode={mode.value!r} does not "
-                "support sequence parallelism yet; use 'ngram'."
-            )
-        embedding = Qwen4ExpPerTokenEmbedding(
-            config,
-            int(config.ple_embed_dim),
-            params_dtype=params_dtype,
-        )
-        table_rows = int(embedding.vocab_size)
-    # Logged once per PLE layer so the selected mode is visible in server logs.
-    logger.info(
-        "PLE ple_embedding_mode=%s table_rows=%d layer=%s",
-        mode,
-        table_rows,
-        prefix,
-    )
-    return embedding
 
 
 class Qwen4ExpPLELayer(nn.Module, MambaBase):
@@ -664,18 +561,24 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         )
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.activation = "silu"
-        self.ple_embedding_mode = validate_ple_embedding_config(config)
-        self.ple_embedding = _build_ple_embedding(
-            self.ple_embedding_mode,
-            config,
-            self.ple_dense_layer_id,
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            prefix,
-            self.use_sequence_parallel,
-            quant_config=quant_config,
-            params_dtype=model_config.dtype,
-            data_parallel_rank=vllm_config.parallel_config.data_parallel_rank,
-        )
+        self.ple_embedding: nn.Module
+        if validate_ple_embedding_config(config) == PleEmbeddingMode.PER_TOKEN:
+            self.ple_embedding = Qwen4ExpPerTokenEmbedding(
+                config, model_config.dtype, use_sequence_parallel
+            )
+        else:
+            self.ple_embedding = Qwen4ExpNGramEmbedding(
+                config,
+                int(config.ple_embed_dim),
+                self.ple_dense_layer_id,
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                f"{prefix}.ple_embedding",
+                prefix,
+                data_parallel_rank=vllm_config.parallel_config.data_parallel_rank,
+                quant_config=quant_config,
+                params_dtype=model_config.dtype,
+                use_sequence_parallel=self.use_sequence_parallel,
+            )
         # Projection weights stay replicated even when their token rows are sharded.
         self.kv_proj = MergedColumnParallelLinear(
             int(config.ple_embed_dim),

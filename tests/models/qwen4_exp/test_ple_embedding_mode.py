@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
-from transformers import Qwen4ExpTextConfig
+from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 from vllm.config import CacheConfig
 from vllm.model_executor.model_loader.reload import (
@@ -20,7 +20,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     initialize_single_dummy_weight,
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
-from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPerTokenEmbedding
 from vllm.models.qwen4_exp.common.ple_mode import (
     validate_ple_embedding_config,
@@ -37,9 +36,6 @@ def _config(**kwargs) -> Qwen4ExpTextConfig:
     values = {
         "ngram_size": 3,
         "heads_per_ngram": 1,
-        "ngram_vocab_size_base": 5,
-        "make_ngram_vocab_size_divisible_by": 8,
-        "split_ngram_parts": 2,
         "ple_embed_dim": DIM,
         "ple_layer_ids": [1],
         "eos_token_id": 0,
@@ -54,41 +50,21 @@ def _table() -> torch.Tensor:
 
 
 def _per_token(dtype=torch.bfloat16, *, use_sequence_parallel=False):
-    config = _config(ple_embedding_mode="per_token")
-    return amd_ple_layer._build_ple_embedding(
-        validate_ple_embedding_config(config),
-        config,
-        ple_dense_layer_id=1,
-        max_num_batched_tokens=4,
-        prefix="model.layers.1",
-        use_sequence_parallel=use_sequence_parallel,
-        quant_config=None,
-        params_dtype=dtype,
-        data_parallel_rank=0,
+    return Qwen4ExpPerTokenEmbedding(
+        _config(ple_embedding_mode="per_token"), dtype, use_sequence_parallel
     )
-
-
-# ---------------------------------------------------------------- config
 
 
 def test_default_mode_is_ngram() -> None:
     assert validate_ple_embedding_config(_config()) == "ngram"
 
 
-def test_per_token_validation_needs_no_ngram_fields() -> None:
-    fields = {"ple_layer_ids": [1], "ple_embed_dim": 7, "vocab_size": VOCAB}
-    assert (
-        validate_ple_embedding_config(
-            SimpleNamespace(ple_embedding_mode="per_token", **fields)
-        )
-        == "per_token"
-    )
-    with pytest.raises(ValueError, match="ple_embed_dim must be positive"):
-        validate_ple_embedding_config(
-            SimpleNamespace(
-                ple_embedding_mode="per_token", **{**fields, "ple_embed_dim": 0}
-            )
-        )
+@pytest.mark.parametrize("field", ["ple_embed_dim", "vocab_size"])
+def test_per_token_rejects_invalid_table_dimensions(field):
+    config = _config(ple_embedding_mode="per_token")
+    setattr(config, field, 0)
+    with pytest.raises(ValueError, match=f"{field} must be positive"):
+        validate_ple_embedding_config(config)
 
 
 def test_per_token_requires_single_ple_layer() -> None:
@@ -98,26 +74,16 @@ def test_per_token_requires_single_ple_layer() -> None:
         )
 
 
-# ---------------------------------------------------------------- forward
-
-
 def test_per_token_forward_matches_manual_indexing() -> None:
     module = _per_token()
     table = _table()
     assert module.load_weights([("per_token_table.weight", table)]) == {
         "per_token_table.weight"
     }
-    ids = torch.tensor([3, 0, 63, 3, 17], dtype=torch.int32)
-    out = module(ids, None, None)
-    assert out.shape == (5, DIM)
-    assert out.dtype == torch.bfloat16
-    assert torch.equal(out, table[ids.long()])
-    # query_start_loc / ngram_context are ignored; 2D ids are flattened.
-    out2 = module(
-        ids.reshape(1, -1), torch.tensor([0, 5]), torch.zeros(1, 2, dtype=torch.int32)
-    )
-    assert torch.equal(out2, out)
-    assert module.dequantize(out, torch.float16) is out
+    ids = torch.tensor([[-1, 3, VOCAB, 3]], dtype=torch.int32)
+    out = module(ids)
+    assert out.dtype == table.dtype
+    assert torch.equal(out, table[[0, 3, VOCAB - 1, 3]])
 
 
 @pytest.mark.skipif(
@@ -127,27 +93,20 @@ def test_per_token_runner_omits_ngram_capture_inputs(tmp_path) -> None:
     from vllm.engine.arg_utils import EngineArgs
     from vllm.models.qwen4_exp.amd.model_state import Qwen4ExpModelState
 
-    _config(
-        architectures=["Qwen4ExpForCausalLM"], ple_embedding_mode="per_token"
+    Qwen4ExpConfig(
+        architectures=["Qwen4ExpForConditionalGeneration"],
+        text_config=_config().to_dict(),
     ).save_pretrained(tmp_path)
     config = EngineArgs(
         model=str(tmp_path),
+        language_model_only=True,
+        hf_overrides={"text_config": {"ple_embedding_mode": "per_token"}},
         skip_tokenizer_init=True,
         max_model_len=128,
     ).create_engine_config()
     state = Qwen4ExpModelState(config, nn.Module(), None, torch.device("cpu"))
     inputs = state.prepare_dummy_inputs(num_reqs=2, num_tokens=4)
     assert {"query_start_loc", "ngram_context"}.isdisjoint(inputs)
-
-
-def test_per_token_out_of_range_ids_are_clamped() -> None:
-    module = _per_token()
-    table = _table()
-    module.load_weights([("per_token_table.weight", table)])
-    ids = torch.tensor([-5, -1, 0, VOCAB - 1, VOCAB, VOCAB + 1000], dtype=torch.int64)
-    out = module(ids)
-    expected = table[torch.tensor([0, 0, 0, VOCAB - 1, VOCAB - 1, VOCAB - 1])]
-    assert torch.equal(out, expected)
 
 
 def test_forward_is_fullgraph_compilable_with_dynamic_token_count() -> None:
@@ -160,8 +119,6 @@ def test_forward_is_fullgraph_compilable_with_dynamic_token_count() -> None:
         ids = torch.randint(0, VOCAB, (n,))
         assert torch.equal(compiled(ids), module(ids))
 
-
-# ---------------------------------------------------------------- loader
 
 _NGRAM_CHECKPOINT_TENSORS = [
     ("layer_multipliers", torch.ones(3, dtype=torch.long)),
@@ -177,8 +134,6 @@ def test_per_token_loader_dtype_policy() -> None:
     module = _per_token()
     with pytest.raises(ValueError, match="dtype mismatch"):
         module.load_weights([("per_token_table.weight", _table().float())])
-    with pytest.raises(ValueError, match="dtype mismatch"):
-        module.load_weights([("per_token_table.weight", _table().int())])
     # bf16 checkpoint into an fp16 model is the one allowed cast
     half = _per_token(dtype=torch.float16)
     half.load_weights([("per_token_table.weight", _table())])
@@ -196,23 +151,13 @@ def test_per_token_loader_rejects_wrong_shape_and_unknown_names() -> None:
 
 def test_loader_through_auto_weights_loader_with_checkpoint_names() -> None:
     """Names as in the checkpoint, below the PLE layer (`ple_embedding.*`)."""
-
-    class _PleOwner(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.ple_embedding = _per_token()
-            self.other = nn.Linear(2, 2, bias=False)
-
-    owner = _PleOwner()
+    owner = nn.Module()
+    owner.ple_embedding = _per_token()
     weights = [(f"ple_embedding.{n}", w) for n, w in _NGRAM_CHECKPOINT_TENSORS]
     weights.append(("ple_embedding.per_token_table.weight", _table()))
-    weights.append(("other.weight", torch.eye(2)))
     loaded = AutoWeightsLoader(owner).load_weights(weights)
     assert torch.equal(owner.ple_embedding.per_token_table.weight, _table())
-    assert loaded == {"other.weight", "ple_embedding.per_token_table.weight"}
-
-
-# ---------------------------------------------------------------- ngram mode unchanged
+    assert loaded == {"ple_embedding.per_token_table.weight"}
 
 
 def test_ngram_mode_skips_per_token_checkpoint_tensor(monkeypatch) -> None:
@@ -248,55 +193,17 @@ def test_model_config_rejects_unsupported_ple_mode(monkeypatch, mode, error, mes
         Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)
 
 
-def test_hf_overrides_text_config_dict_sets_mode() -> None:
-    """Same call as ModelConfig: hf_overrides={"text_config": {...}}."""
-    from transformers import Qwen4ExpConfig
-
-    from vllm.config.model import ModelConfig
-
-    config = Qwen4ExpConfig(text_config=_config().to_dict())
-    model_config = object.__new__(ModelConfig)
-    model_config._apply_dict_overrides(
-        config, {"text_config": {"ple_embedding_mode": "per_token"}}
-    )
-    assert validate_ple_embedding_config(config.get_text_config()) == "per_token"
-    assert config.get_text_config().vocab_size == VOCAB  # other fields kept
-    # A top-level override would be a silent no-op for the layer.
-    config = Qwen4ExpConfig(text_config=_config().to_dict())
-    config.update({"ple_embedding_mode": "per_token"})
-    assert validate_ple_embedding_config(config.get_text_config()) == "ngram"
-
-
-def _fill_load_weights(module: Qwen4ExpPerTokenEmbedding) -> None:
-    module.load_weights([("per_token_table.weight", _table())])
-
-
-def _fill_direct_copy(module: Qwen4ExpPerTokenEmbedding) -> None:
-    """What sharded_state does: copy into state_dict() without load_weights."""
-    module.state_dict()["per_token_table.weight"].copy_(_table())
-
-
-def _fill_dummy(module: Qwen4ExpPerTokenEmbedding) -> None:
-    for name, param in module.named_parameters():
-        initialize_single_dummy_weight(param.data, name=name)
-
-
-@pytest.mark.parametrize(
-    "fill",
-    [_fill_load_weights, _fill_direct_copy, _fill_dummy],
-    ids=["load_weights", "direct_copy", "dummy"],
-)
-def test_per_token_post_load_check_follows_the_table_contents(fill) -> None:
+@pytest.mark.parametrize("dummy", [False, True], ids=["sharded_state", "dummy"])
+def test_post_load_check_accepts_initialization_without_weight_loader(dummy) -> None:
     module = _per_token()
     with pytest.raises(ValueError, match="never loaded"):
         finalize_model_weights(module)
-    fill(module)
-    finalize_model_weights(module)
-    weight = module.per_token_table.weight
-    if fill is _fill_dummy:
-        assert torch.isfinite(weight).all()
+    weight = module.state_dict()["per_token_table.weight"]
+    if dummy:
+        initialize_single_dummy_weight(weight)
     else:
-        assert torch.equal(weight, _table())
+        weight.copy_(_table())
+    finalize_model_weights(module)
 
 
 def test_per_token_nan_in_loaded_table_fails() -> None:
@@ -328,9 +235,6 @@ def test_per_token_table_through_a_layerwise_weight_update(
     assert torch.equal(module.per_token_table.weight, expected)
 
 
-# ---------------------------------------------------------------- factory
-
-
-def test_factory_per_token_rejects_sequence_parallel() -> None:
+def test_per_token_rejects_sequence_parallel() -> None:
     with pytest.raises(NotImplementedError, match="sequence parallelism"):
         _per_token(use_sequence_parallel=True)

@@ -78,9 +78,6 @@ CASES = {
     "cdna4": [(2, 8), (4, 8), (8, 8), (8, 28)],
     "gfx942": [(4, 8), (4, 42), (8, 8), (8, 42)],
 }
-# The cases also run with `--engram-config '{"mode": "per_token"}'`, where
-# layer 2's Engram reads its rows from a per-token table instead of the n-gram
-# table.
 PER_TOKEN_CASES = {"cdna4": [(2, 8)], "gfx942": [(4, 8)]}
 
 
@@ -247,7 +244,7 @@ class MonoProbe:
 
     def mono_layers(self) -> dict:
         from vllm.models.deepseek_v41.amd import mono_decode
-        from vllm.models.deepseek_v41.amd.engram import RocmPerTokenEngram
+        from vllm.models.deepseek_v41.amd.engram import PerTokenEngram
 
         def copies(m) -> bool:
             """Whether the layer holds the gfx942 copies of its weights, which
@@ -273,16 +270,13 @@ class MonoProbe:
             for i, m in self._decoder_layers().items()
         }
         runner = mono_decode._runner
-        engrams = {
-            i: m.engram
-            for i, m in self._decoder_layers().items()
-            if getattr(m, "engram", None) is not None
-        }
         return {
             "layers": layers,
             "epoch": -1 if runner is None else int(runner.epoch[0]),
             "per_token": {
-                i: isinstance(e, RocmPerTokenEngram) for i, e in engrams.items()
+                i: isinstance(layer.engram, PerTokenEngram)
+                for i, layer in self._decoder_layers().items()
+                if layer.engram is not None
             },
         }
 

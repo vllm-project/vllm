@@ -68,13 +68,8 @@ class EngramConfig:
     DP replicas are not co-located on one node or the host cannot hold them."""
 
     mode: Literal["ngram", "per_token"] = "ngram"
-    """Engram table lookup mode. `ngram` (default) uses the checkpoint's
-    hashed n-gram table. `per_token` (DeepSeek V4.1, ROCm only) reads one row
-    per token from the bf16 checkpoint tensor
-    `layers.<i>.engram.per_token_table.weight`, sliced over hash columns by
-    tensor parallelism; the n-gram table is not needed. Requires
-    embedding_across_dp, dp_shared_memory, use_thp and peer_group_size to be
-    off."""
+    """Use the hashed n-gram table or a per-token checkpoint table
+    (DeepSeek V4.1 on ROCm)."""
 
     use_thp: bool = False
     """Back private CPU-offloaded tables with transparent huge pages (best
@@ -122,7 +117,7 @@ class EngramConfig:
     them and fresh per launch (e.g. under a per-job directory)."""
 
     @model_validator(mode="after")
-    def _validate_mode(self) -> Self:
+    def _validate_shared_memory(self) -> Self:
         if self.mode != "ngram" and (
             self.embedding_across_dp
             or self.dp_shared_memory
@@ -134,10 +129,6 @@ class EngramConfig:
                 "embedding_across_dp, dp_shared_memory, use_thp and "
                 "peer_group_size must be off"
             )
-        return self
-
-    @model_validator(mode="after")
-    def _validate_shared_memory(self) -> Self:
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):

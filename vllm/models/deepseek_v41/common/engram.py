@@ -1803,7 +1803,8 @@ class Engram(nn.Module):
         self._prefetch_done = torch.cuda.Event()
 
     def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
-        """Stage rows for the decoder using the DP group's gathered hash IDs."""
+        """Look up, or prefetch from host memory, rows before the decoder layers
+        consume them; DP-sharded tables take the group's gathered hash IDs."""
         rows = self.staged_rows[: hash_ids.shape[0]]
         assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"
         if self._prefetch_stream is None:

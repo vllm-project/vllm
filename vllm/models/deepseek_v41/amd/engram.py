@@ -283,7 +283,7 @@ class RocmEngram(Engram):
         return output
 
 
-class RocmPerTokenEngram(RocmEngram):
+class PerTokenEngram(RocmEngram):
     """Engram whose lookup uses the compressed ID of the current token."""
 
     def _init_embedding(self, layout: EngramLayout, layer_hash_index: int) -> None:
@@ -300,4 +300,6 @@ class RocmPerTokenEngram(RocmEngram):
         return self.per_token_table
 
     def prepare_embeddings(self, comp_ids: torch.Tensor) -> None:
-        self.per_token_table.fill(self.staged_rows[: comp_ids.shape[0]], comp_ids)
+        rows = self.staged_rows[: comp_ids.shape[0]]
+        assert rows.shape[0] == comp_ids.shape[0], "engram staging buffer too small"
+        torch.index_select(self.per_token_table.weight, 0, comp_ids, out=rows)

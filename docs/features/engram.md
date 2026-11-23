@@ -14,16 +14,6 @@ vLLM enables Engram automatically whenever the checkpoint declares Engram
 layers, so basic serving needs no extra flags. This page explains what Engram
 does and how to control its memory footprint and multi-GPU topology.
 
-On ROCm, the `per_token` lookup mode replaces each hashed n-gram table with a
-per-token table: for DeepSeek-V4.1-Flash, about 1.2 GB per Engram layer
-instead of about 100 GB. Enable it with
-`--engram-config '{"mode": "per_token"}'` for DeepSeek V4.1, or with
-`ple_embedding_mode` set to `per_token` for Qwen4Exp PLE. The default is
-`ngram`. The mode must match the tables in the checkpoint; a checkpoint that
-carries both tables can be served in either mode. See
-[Per-token lookup mode](#per-token-lookup-mode-deepseek-v41-rocm) and
-[PLE embedding mode](#ple-embedding-mode-qwen4exp-rocm).
-
 ## Supported models
 
 Engram layers are declared by the checkpoint, not chosen at serve time:
@@ -173,7 +163,6 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
 Qwen4Exp n-gram PLE tables use ETP sharding by default. On NVIDIA they can also use
 the cross-engine Engram pool described below.
-For ROCm per-token tables, see [PLE embedding mode](#ple-embedding-mode-qwen4exp-rocm).
 
 ## Sharing host tables across DP replicas
 
@@ -273,63 +262,40 @@ inside `unshare -Urm` without root.
 Both require TP=1 and PP=1. Weights cannot be reloaded, and restarting one
 engine means restarting the group.
 
-## Per-token lookup mode (DeepSeek V4.1, ROCm)
+## Per-token lookup on ROCm
 
-On ROCm, `DeepseekV41ForCausalLM` accepts `mode` in `--engram-config`. The
-`per_token` mode replaces only the table lookup; the Engram projection, gate and
-residual add run unchanged.
+DeepSeek V4.1 and Qwen4Exp can load a smaller table indexed by the current
+token. The default is `ngram`. A checkpoint carrying both tables can run in
+either mode. The projection, gate, and residual use the same weights.
 
-| Mode | Behaviour |
-| --- | --- |
-| `ngram` (default) | Hashed n-gram lookup, as described above. |
-| `per_token` | Reads one row per token from a per-token table, indexed by the compressed id of the current token. |
+**DeepSeek V4.1** selects the lookup with `--engram-config`:
 
 ```bash
 vllm serve <model> --engram-config '{"mode": "per_token"}'
 ```
 
-The per-token table of each Engram layer is a regular bf16 checkpoint tensor,
-`layers.<layer>.engram.per_token_table.weight`, of shape
-`[engram_compressed_vocab_size, n_hash_cols, head_dim]` (for example
-`[99092, 24, 256]`). Loading fails with an error naming the tensor when the
-checkpoint lacks it or it holds NaN values, and when it has another dtype or
-shape. A per-token checkpoint can omit the n-gram tables. If present, the model
-loader skips them during weight assignment. Likewise, `ngram` mode
-skips the per-token tables, so a checkpoint that carries both can be served in
-either mode.
+Each Engram layer loads `layers.<layer>.engram.per_token_table.weight`, a bf16
+tensor shaped `[engram_compressed_vocab_size, n_hash_cols, head_dim]`. The
+compressed token ID selects the row. For DeepSeek-V4.1-Flash, each table is
+about 1.2 GB versus about 100 GB for the n-gram table. Each TP rank loads the
+full tensor and keeps its own hash columns on GPU. Leave `embedding_across_dp`,
+`dp_shared_memory`, `use_thp`, and `peer_group_size` off.
 
-For DeepSeek-V4.1-Flash, the table is about 1.2 GB per Engram layer (2.4 GB
-for both), against about 100 GB per n-gram table. Each
-tensor-parallel rank keeps only its own hash columns on its GPU, but while
-loading, each rank reads the full tensor into host memory before slicing.
-`cpu_offload` is ignored in this mode; `embedding_across_dp`,
-`dp_shared_memory`, `use_thp` and `peer_group_size` must stay off, and no
-Engram data-parallel group is formed. The mode is experimental, ROCm only.
-
-## PLE embedding mode (Qwen4Exp, ROCm)
-
-On ROCm, Qwen4Exp reads `ple_embedding_mode` from the text config. For a
-multimodal checkpoint such as `Qwen4ExpForConditionalGeneration`, nest the
-override under `text_config`. For a standalone text config, set
-`ple_embedding_mode` at the top level.
+**Qwen4Exp** reads `ple_embedding_mode` from the text config. For a composite
+checkpoint, override it under `text_config`. For a standalone text checkpoint,
+set it at the top level.
 
 ```bash
 vllm serve <model> --hf-overrides '{"text_config": {"ple_embedding_mode": "per_token"}}'
 ```
 
-| Mode | Behaviour |
-| --- | --- |
-| `ngram` (default) | Hashed n-gram lookup, as described above. |
-| `per_token` | Reads one row of a `[vocab_size, ple_embed_dim]` table (`per_token_table.weight`) indexed by the current token id. Loading fails with an error naming the tensor when the checkpoint lacks it or it holds NaN values. |
+The single PLE layer loads `ple_embedding.per_token_table.weight`, shaped
+`[vocab_size, ple_embed_dim]` and replicated on each GPU. This is about 1.3 GB
+for Qwen3.8-Flash-Next, versus 102.4 GB for the n-gram table. Token IDs are
+clamped to the vocabulary range. Sequence parallelism is unsupported.
 
-In `ngram` mode, `per_token_table.weight` is skipped, so a checkpoint that
-carries both tables can be served in either mode. `per_token` supports a
-single PLE layer. Its table is replicated on every rank's GPU (about 1.3 GB,
-against 102.4 GB for the n-gram table), so `cpu_offload` has no effect. Token
-ids outside the table are clamped to the first or last row instead of failing.
-The selected mode and table size are logged once per PLE layer. `per_token` is
-experimental and not supported on other platforms or with sequence
-parallelism.
+Both models keep the per-token table on GPU regardless of `cpu_offload` and
+check for missing or invalid table weights during loading.
 
 ## Limitations
 
