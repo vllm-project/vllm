@@ -405,8 +405,10 @@ class HYV4DFlySpeculator(DraftModelSpeculator):
             padded_batch=padded_batch,
         )
         if write_slots:
-            for gid, groups in enumerate(self.attn_groups):
-                if groups:
+            # HiSparse writes draft KV through the resident group's slot
+            # mapping, a group that holds no draft attention layers.
+            for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
+                if group.uses_slot_mapping:
                     write_dfly_query_slots(
                         self.block_tables.slot_mappings[gid],
                         self.input_buffers.positions,
