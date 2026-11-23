@@ -575,10 +575,14 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
+        video_io_defaults: dict[str, Any] | None = None,
     ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         """Load video from an HTTP or base64 data URL."""
         image_io = self._image_io(image_mode)
-        video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
+        video_io_kwargs = {
+            **(video_io_defaults or {}),
+            **self.media_io_kwargs.get("video", {}),
+        }
         if "video_backend" not in video_io_kwargs and (
             video_backend := get_video_loader_backend_for_processor(video_processor)
         ):
@@ -597,6 +601,7 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
+        video_io_defaults: dict[str, Any] | None = None,
     ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         """Asynchronously load video from an HTTP or base64 data URL.
 
@@ -605,7 +610,10 @@ class MediaConnector:
         original image mode (e.g. preserving the alpha channel).
         """
         image_io = self._image_io(image_mode)
-        video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
+        video_io_kwargs = {
+            **(video_io_defaults or {}),
+            **self.media_io_kwargs.get("video", {}),
+        }
         if "video_backend" not in video_io_kwargs and (
             video_backend := get_video_loader_backend_for_processor(video_processor)
         ):

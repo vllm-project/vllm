@@ -6,7 +6,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
-from typing import ClassVar, NamedTuple
+from typing import Any, ClassVar, NamedTuple
 
 import torch
 import torch._dynamo.decorators
@@ -1007,6 +1007,12 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         mode = self.vllm_config.compilation_config.cudagraph_mode
         return mode is not None and mode.has_full_cudagraphs()
 
+    def _make_metadata(self, **kwargs: Any) -> FlexAttentionMetadata:
+        """Create the metadata `build` returns and builds the block mask of. A
+        subclass may return its own subclass, e.g. with another `get_mask_mod`
+        and extra fields filled from this builder."""
+        return FlexAttentionMetadata(**kwargs)
+
     def build(
         self,
         common_prefix_len: int,
@@ -1100,7 +1106,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
                 logical_mask_mod = self.custom_logical_mask_mod
             sliding_window = self.sliding_window
 
-        out = FlexAttentionMetadata(
+        out = self._make_metadata(
             causal=common_attn_metadata.causal,
             logical_mask_mod=logical_mask_mod,
             sliding_window=sliding_window,
