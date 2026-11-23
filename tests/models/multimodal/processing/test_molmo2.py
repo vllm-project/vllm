@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 
 import httpx
+import numpy as np
 import pytest
 import torch
 from PIL import Image
@@ -226,6 +227,31 @@ def test_molmo2_rejects_cumulative_image_crops_before_processing(monkeypatch):
         hf_processor_mm_kwargs=kwargs,
     )
     assert len(one_image["mm_kwargs"]["image"]) == 1
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize("limit", [0, 100_000_000])
+@pytest.mark.parametrize("layout", ["chw", "rgba"])
+def test_molmo2_array_image_uses_hf_validation(monkeypatch, limit, layout):
+    ctx = build_model_context(
+        "allenai/Molmo2-8B",
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_cache_gb=0,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    image = (
+        torch.from_numpy(np.array(Image.new("RGB", (64, 80)))).permute(2, 0, 1)
+        if layout == "chw"
+        else np.array(Image.new("RGBA", (64, 80)))
+    )
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", limit)
+
+    with pytest.raises(ValueError, match="Failed to apply") as exc_info:
+        processor(
+            processor.dummy_inputs.get_dummy_text({"image": 1}),
+            mm_items=processor.info.parse_mm_data({"image": [image]}),
+        )
+    assert isinstance(exc_info.value.__cause__, ValueError)
 
 
 def test_molmo2_render_rejects_over_budget_image_crops():

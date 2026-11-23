@@ -62,6 +62,7 @@ from vllm.multimodal.inputs import (
     VideoItem,
 )
 from vllm.multimodal.parse import (
+    ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
     MultiModalDataParser,
@@ -1978,7 +1979,8 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         hf_config = self.info.get_hf_config()
         hf_processor = self.info.get_hf_processor(**hf_kwargs)
 
-        if images := hf_data.get("images"):
+        limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
+        if (images := hf_data.get("images")) and limit > 0 and not is_profiling_media():
             assert isinstance(images, Sequence)
             image_processor = hf_processor.image_processor
             resolved_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
@@ -1999,8 +2001,9 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             margin = patch_size * sum(overlap_margins)
             crop_window = size["height"] - margin
             output_pixels = 0
-            for image in images:
-                image_width, image_height = get_image_size(image)
+            image_items = ImageProcessorItems(images)
+            for image_idx in range(len(images)):
+                image_width, image_height = image_items.get_image_size(image_idx)
                 tiling_h, tiling_w = select_tiling(
                     height=image_height - margin,
                     width=image_width - margin,
@@ -2011,14 +2014,9 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                     size["height"] * size["width"]
                 )
 
-            limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
             bytes_per_channel = max(4, torch.get_default_dtype().itemsize)
             # The image processor retains individual crops while concatenating them.
-            if (
-                limit > 0
-                and not is_profiling_media()
-                and 2 * output_pixels * 3 * bytes_per_channel > limit
-            ):
+            if 2 * output_pixels * 3 * bytes_per_channel > limit:
                 raise VLLMValidationError(
                     "Image preprocessing exceeds "
                     f"VLLM_MAX_MEDIA_PREPROCESSING_BYTES={limit}.",
