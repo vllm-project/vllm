@@ -12,6 +12,7 @@ use std::sync::LazyLock;
 
 use llm_multimodal::{ModelMetadata, ModelProcessorSpec, ModelRegistry};
 
+mod hy_v4_vl;
 mod inkling2;
 mod muse_spark;
 mod step3_vl;
@@ -21,6 +22,7 @@ mod step3_vl;
 static SPECS: &[&dyn ModelProcessorSpec] = &[
     &step3_vl::Step3VLVisionSpec, // Step3-VL, Step5-VL
     &muse_spark::MuseSparkSpec,   // MuseSpark (image + video + audio)
+    &hy_v4_vl::Hy4VLSpec,         // HY4-VL (image + video)
     &inkling2::Inkling2Spec,      // Inkling2 (image)
 ];
 
