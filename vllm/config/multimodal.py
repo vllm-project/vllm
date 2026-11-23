@@ -335,7 +335,7 @@ class MultiModalConfig:
     """The maximum number of input items and options allowed per
     prompt for each modality.
 
-    Defaults to 16 for audio and 999 for other modalities.
+    Defaults to 999 for each modality.
 
     Legacy format (count only):
         {"image": 16, "video": 2}
@@ -740,7 +740,7 @@ class MultiModalConfig:
         limit_data = self.limit_per_prompt.get(modality)
 
         if limit_data is None:
-            return 16 if modality == "audio" else 999
+            return 999
 
         return limit_data.count
 

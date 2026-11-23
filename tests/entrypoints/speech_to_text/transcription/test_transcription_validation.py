@@ -19,7 +19,6 @@ from vllm.assets.audio import AudioAsset
 from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
 from vllm.multimodal.audio import AudioResampler
-from vllm.multimodal.utils import encode_audio_url
 
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode",
@@ -326,29 +325,6 @@ async def test_basic_audio(mary_had_lamb, model_name):
             expected_seconds=16,
             extra_body=extra_body,
         )
-
-
-def test_chat_rejects_excess_audio_items():
-    model_name = "Qwen/Qwen3-ASR-0.6B"
-    audio_url = encode_audio_url(np.zeros(16000, dtype=np.float32), 16000)
-    content = [
-        {"type": "audio_url", "audio_url": {"url": audio_url}} for _ in range(17)
-    ]
-    with RemoteOpenAIServer(
-        model_name, ["--enforce-eager", "--load-format", "dummy", *ROCM_EXTRA_ARGS]
-    ) as remote_server:
-        response = httpx.post(
-            remote_server.url_for("v1/chat/completions"),
-            json={
-                "model": model_name,
-                "messages": [{"role": "user", "content": content}],
-                "max_tokens": 1,
-            },
-            timeout=60,
-        )
-
-    assert response.status_code == 400, response.text
-    assert "At most 16 audio" in response.json()["error"]["message"]
 
 
 @pytest.mark.asyncio

@@ -36,9 +36,11 @@ from transformers.models.qwen2_audio import (
 )
 from transformers.models.whisper import WhisperFeatureExtractor
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
-from vllm.inputs import ModalityData, MultiModalDataDict
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalInput
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     AudioItem,
@@ -56,9 +58,12 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
+    TimingContext,
 )
+from vllm.multimodal.processing.context import is_profiling_media
 from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -237,6 +242,64 @@ class Qwen2AudioDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2AudioProcessingIn
 
 
 class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessingInfo]):
+    def apply(
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
+    ) -> MultiModalInput:
+        items = inputs.mm_data_items.get("audio")
+        if isinstance(items, AudioProcessorItems):
+            audios = [items.get(i) for i in range(len(items))]
+            self._validate_audio_preprocessing_budget(
+                audios, inputs.hf_processor_mm_kwargs
+            )
+        return super().apply(inputs, timing_ctx)
+
+    def _validate_audio_preprocessing_budget(
+        self, audios: list[Any], hf_kwargs: Mapping[str, object]
+    ) -> None:
+        limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
+        if limit <= 0 or is_profiling_media():
+            return
+
+        extractor = self.info.get_feature_extractor(**hf_kwargs)
+        audio_kwargs = hf_kwargs.get("audio_kwargs")
+        options = audio_kwargs if isinstance(audio_kwargs, Mapping) else hf_kwargs
+        max_length = options.get("max_length")
+        max_length = max_length if isinstance(max_length, int) and max_length > 0 else 0
+        pad_multiple = options.get("pad_to_multiple_of")
+        pad_multiple = (
+            pad_multiple if isinstance(pad_multiple, int) and pad_multiple > 0 else 0
+        )
+        padded_samples = max(extractor.n_samples, max_length)
+        if pad_multiple:
+            padded_samples = (
+                (padded_samples + pad_multiple - 1) // pad_multiple * pad_multiple
+            )
+        frames = (padded_samples + extractor.hop_length - 1) // extractor.hop_length
+        feature_bytes = frames * extractor.feature_size * 4
+        spectrum_bytes = (frames + 1) * (extractor.n_fft // 2 + 1) * 16
+        # The HF extractor computes the spectrogram for the full batch.
+        estimated_bytes = sum(
+            (len(audio) if audio is not None else 0) * 4 for audio in audios
+        ) + len(audios) * (padded_samples * 8 + spectrum_bytes + 3 * feature_bytes)
+        if estimated_bytes > limit:
+            raise VLLMValidationError(
+                "Qwen2-Audio preprocessing exceeds "
+                f"VLLM_MAX_MEDIA_PREPROCESSING_BYTES={limit}.",
+                parameter="audio",
+            )
+
+    def _call_hf_processor(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        audios = hf_data.get("audio")
+        if audios:
+            assert isinstance(audios, list)
+            self._validate_audio_preprocessing_budget(audios, hf_kwargs)
+
+        return super()._call_hf_processor(hf_data, hf_kwargs)
+
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 

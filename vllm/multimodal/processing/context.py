@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, get_type_hints, overload
@@ -41,6 +42,23 @@ else:
     TokenizeParams = object
 
 logger = init_logger(__name__)
+
+_profiling_media: ContextVar[bool] = ContextVar("_profiling_media", default=False)
+
+
+@contextmanager
+def profiling_media() -> Iterator[None]:
+    """Exclude internally generated profiling inputs from request limits."""
+    token = _profiling_media.set(True)
+    try:
+        yield
+    finally:
+        _profiling_media.reset(token)
+
+
+def is_profiling_media() -> bool:
+    return _profiling_media.get()
+
 
 # HuggingFace processors accept a shared flat namespace in addition to the
 # nested processor kwarg scopes ``text_kwargs`` / ``images_kwargs`` /

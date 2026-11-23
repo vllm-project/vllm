@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import pytest
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.renderers.chat_utils import parse_chat_messages, parse_chat_messages_async
 from vllm.utils.serial_utils import tensor2base64
 
@@ -13,6 +16,22 @@ from .utils import (
 )
 
 QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
+
+
+def test_qwen2_audio_preprocessing_budget_rejects_prompt(monkeypatch):
+    config = ModelConfig(QWEN2AUDIO_MODEL_ID, runner="generate")
+    processor = MULTIMODAL_REGISTRY.create_processor(config)
+    audios = [np.zeros(16000, dtype=np.float32)] * 17
+    assert config.get_multimodal_config().get_limit_per_prompt("audio") == 999
+    items = processor.info.parse_mm_data({"audio": audios})
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 20_000_000)
+    with pytest.raises(VLLMValidationError, match="Qwen2-Audio preprocessing exceeds"):
+        processor(
+            processor.dummy_inputs.get_dummy_text({"audio": len(audios)}),
+            mm_items=items,
+            hf_processor_mm_kwargs={},
+        )
 
 
 @pytest.fixture(scope="function")
@@ -36,29 +55,6 @@ def audio_embeds_model_config():
         },
         enable_mm_embeds=True,
     )
-
-
-@pytest.mark.parametrize("model_id", [QWEN2AUDIO_MODEL_ID, "Qwen/Qwen3-ASR-0.6B"])
-@pytest.mark.parametrize("part_type", ["input_audio", "audio_url"])
-@pytest.mark.parametrize("num_audios", [16, 17, 999])
-def test_default_audio_limit_rejects_before_feature_extraction(
-    model_id, part_type, num_audios
-):
-    model_config = ModelConfig(model_id, runner="generate")
-    parts = [
-        {"type": part_type, part_type: None, "uuid": str(index)}
-        for index in range(num_audios)
-    ]
-    messages = [{"role": "user", "content": parts}]
-
-    if num_audios > 16:
-        with pytest.raises(VLLMValidationError, match="At most 16 audio"):
-            parse_chat_messages(messages, model_config, content_format="string")
-    else:
-        _, mm_data, _ = parse_chat_messages(
-            messages, model_config, content_format="string"
-        )
-        assert_mm_data_inputs(mm_data, {"audio": 16})
 
 
 @pytest.mark.parametrize("input_audio", [None, {}, {"data": "", "format": "wav"}])
