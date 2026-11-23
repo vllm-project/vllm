@@ -178,8 +178,9 @@ def _assert_combine_and_mix_close(
 # 64 run the Triton chain.
 @pytest.mark.parametrize("norm_size", NORM_SIZES)
 @pytest.mark.parametrize("num_tokens", [1, 2, 3, 4, 5, 8, 64])
+@pytest.mark.parametrize("fold_w", [True, False])
 def test_hc_two_stage_combine_and_mix(
-    aiter_enabled: None, num_tokens: int, norm_size: int
+    aiter_enabled: None, num_tokens: int, norm_size: int, fold_w: bool
 ) -> None:
     if not rocm_aiter_ops.is_hc_two_stage_enabled():
         pytest.skip("AITER FlyDSL two-stage HC kernels are not supported here")
@@ -190,8 +191,10 @@ def test_hc_two_stage_combine_and_mix(
     norm_weight = _randn(norm_size)
     w_down_inject = _randn(DOWN_N, HYPER_HIDDEN_SIZE) / HYPER_HIDDEN_SIZE**0.5
     w_up = _randn(HYPER_HIDDEN_SIZE, LORA_RANK) / LORA_RANK**0.5
-    w_down_inject_folded = rocm_aiter_ops.hc_fold_norm_weight(
-        w_down_inject, norm_weight, HC
+    w_down_inject_skinny = (
+        rocm_aiter_ops.hc_fold_norm_weight(w_down_inject, norm_weight, HC)
+        if fold_w
+        else w_down_inject
     )
     max_tokens = rocm_aiter_ops.hc_two_stage_max_tokens(
         HYPER_HIDDEN_SIZE, DOWN_N, HC, LORA_RANK
@@ -203,12 +206,13 @@ def test_hc_two_stage_combine_and_mix(
         injection,
         norm_weight,
         w_down_inject,
-        w_down_inject_folded,
+        w_down_inject_skinny,
         w_up,
         EPS,
         HC,
         LORA_RANK,
         max_tokens,
+        fold_w,
     )
     op = torch.ops.vllm.qwen4_exp_hc_two_stage_combine_and_mix
 
@@ -219,8 +223,11 @@ def test_hc_two_stage_combine_and_mix(
         opcheck(op, args)
 
 
-# Covers the module wiring: the norm fold in process_weights_after_loading and
-# the dispatch to the two-stage kernels at 1-4 tokens only.
+# Covers the module wiring: the norm fold in process_weights_after_loading, or
+# its absence when AITER applies the norm weight itself, and the dispatch to the
+# two-stage kernels at 1-4 tokens only. AITER without SKINNY_DECODE_UNFOLDED
+# also takes fold_w=False, through its tiled path, so both cases run anywhere.
+@pytest.mark.parametrize("takes_unfolded", [False, True])
 @pytest.mark.parametrize("hc_per_branch_norm", [False, True])
 @pytest.mark.parametrize("num_tokens", [1, 4, 8])
 def test_gated_residual_combine_and_mix(
@@ -229,10 +236,17 @@ def test_gated_residual_combine_and_mix(
     monkeypatch: pytest.MonkeyPatch,
     num_tokens: int,
     hc_per_branch_norm: bool,
+    takes_unfolded: bool,
 ) -> None:
     if not rocm_aiter_ops.is_hc_two_stage_enabled():
         pytest.skip("AITER FlyDSL two-stage HC kernels are not supported here")
     from vllm.models.qwen4_exp.common.hyperconnection import HyperConnectionConfig
+
+    monkeypatch.setattr(
+        rocm_aiter_ops,
+        "hc_two_stage_takes_unfolded_weight",
+        lambda: takes_unfolded,
+    )
 
     config = HyperConnectionConfig(
         hc_count=HC,
@@ -245,6 +259,7 @@ def test_gated_residual_combine_and_mix(
         module = hyperconnection.GatedResidual(config)
     max_tokens = rocm_aiter_ops._HC_TWO_STAGE_MAX_TOKENS
     assert module.hc_two_stage_max_tokens == max_tokens
+    assert (module.w_down_inject_folded is None) == takes_unfolded
 
     set_random_seed(0)
     norm_weight = module.hc_norm.weight
@@ -258,11 +273,11 @@ def test_gated_residual_combine_and_mix(
         w_up.copy_(_randn(HYPER_HIDDEN_SIZE, LORA_RANK) / LORA_RANK**0.5)
     module.process_weights_after_loading()
 
-    calls: list[int] = []
+    calls: list[tuple[int, bool]] = []
     two_stage = rocm_aiter_ops.hc_two_stage_combine_and_mix
 
     def spy(**kwargs):
-        calls.append(kwargs["residual"].shape[0])
+        calls.append((kwargs["residual"].shape[0], kwargs["fold_w"]))
         return two_stage(**kwargs)
 
     monkeypatch.setattr(rocm_aiter_ops, "hc_two_stage_combine_and_mix", spy)
@@ -273,7 +288,8 @@ def test_gated_residual_combine_and_mix(
     with torch.no_grad():
         actual = module.combine_and_mix(residual, block_output, injection)
 
-    assert calls == ([num_tokens] if num_tokens <= max_tokens else [])
+    expected_calls = [(num_tokens, not takes_unfolded)]
+    assert calls == (expected_calls if num_tokens <= max_tokens else [])
     _assert_combine_and_mix_close(
         actual, residual, block_output, injection, norm_weight, w_down_inject, w_up
     )
