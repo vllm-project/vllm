@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
 from unittest.mock import MagicMock
 
 import httpx
 import numpy as np
+import pybase64
 import pytest
 import torch
 from tokenizers import Tokenizer
@@ -21,6 +23,7 @@ from vllm.model_executor.models.funaudiochat import (
     FunAudioChatProcessingInfo,
 )
 from vllm.multimodal.processing import InputProcessingContext
+from vllm.multimodal.processing.context import profiling_media
 from vllm.multimodal.utils import encode_audio_url
 from vllm.transformers_utils.configs.funaudiochat import FunAudioChatConfig
 
@@ -189,6 +192,50 @@ def test_audio_items_fit_the_preprocessing_budget(
         processor._apply_hf_processor_main(items, {})
 
 
+def test_precomputed_audio_embeds_ignore_waveform_budget(
+    local_funaudiochat_model, monkeypatch
+):
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 500_000)
+    model, tokenizer = local_funaudiochat_model
+    model_config = ModelConfig(
+        model=model,
+        dtype="float32",
+        max_model_len=128,
+        limit_mm_per_prompt={"audio": 2},
+        enable_mm_embeds=True,
+    )
+    info = FunAudioChatProcessingInfo(InputProcessingContext(model_config, tokenizer))
+    processor = FunAudioChatMultiModalProcessor(
+        info, FunAudioChatDummyInputsBuilder(info)
+    )
+    embeds = torch.zeros((2, 1, model_config.get_inputs_embeds_size()))
+    prompt = processor.dummy_inputs.get_dummy_text({"audio": 2})
+
+    result = processor(
+        prompt,
+        mm_items=info.parse_mm_data({"audio": embeds}),
+        hf_processor_mm_kwargs={},
+    )
+
+    processed_embeds = result["mm_kwargs"].get_data()["audio_embeds"]
+    assert isinstance(processed_embeds, torch.Tensor)
+    assert processed_embeds.shape == embeds.shape
+
+    audio = np.zeros(1600, dtype=np.float32)
+    with pytest.raises(VLLMValidationError, match="At most 1 audio"):
+        processor._apply_hf_processor_main(
+            info.parse_mm_data({"audio": [audio, audio]}), {}
+        )
+    with profiling_media():
+        profiled_items = info.parse_mm_data({"audio": [audio, audio]})
+        assert (
+            processor._apply_hf_processor_main(profiled_items, {})[
+                "input_features"
+            ].shape[0]
+            == 2
+        )
+
+
 def test_render_respects_the_audio_preprocessing_budget(local_funaudiochat_model):
     model, _ = local_funaudiochat_model
     audio = {
@@ -197,7 +244,16 @@ def test_render_respects_the_audio_preprocessing_budget(local_funaudiochat_model
     }
     with RemoteLaunchRenderServer(
         model,
-        ["--host", "127.0.0.1", "--dtype", "float32", "--max-model-len", "128"],
+        [
+            "--host",
+            "127.0.0.1",
+            "--dtype",
+            "float32",
+            "--max-model-len",
+            "128",
+            "--limit-mm-per-prompt",
+            '{"audio":2}',
+        ],
         env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": "500000"},
     ) as server:
         url = server.url_for("v1/chat/completions/render")
@@ -211,3 +267,34 @@ def test_render_respects_the_audio_preprocessing_budget(local_funaudiochat_model
             )
             assert response.status_code == status, response.text[:512]
         assert "At most 1 audio" in response.json()["error"]["message"]
+
+
+def test_render_audio_embeds_ignore_waveform_budget(local_funaudiochat_model):
+    model, _ = local_funaudiochat_model
+    hidden_size = ModelConfig(model=model).get_inputs_embeds_size()
+    buffer = io.BytesIO()
+    torch.save(torch.zeros((1, hidden_size)), buffer)
+    encoded = pybase64.b64encode(buffer.getvalue()).decode("ascii")
+    content = [{"type": "audio_embeds", "audio_embeds": encoded}] * 2
+
+    with RemoteLaunchRenderServer(
+        model,
+        [
+            "--host",
+            "127.0.0.1",
+            "--dtype",
+            "float32",
+            "--max-model-len",
+            "128",
+            "--enable-mm-embeds",
+            "--limit-mm-per-prompt",
+            '{"audio":2}',
+        ],
+        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": "500000"},
+    ) as server:
+        response = httpx.post(
+            server.url_for("v1/chat/completions/render"),
+            json={"model": model, "messages": [{"role": "user", "content": content}]},
+        )
+        assert response.status_code == 200, response.text[:512]
+        assert len(response.json()["features"]["mm_placeholders"]["audio"]) == 2

@@ -50,6 +50,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.context import is_profiling_media
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import _has_module
 
@@ -548,9 +549,12 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"audio": None}
+
+    def get_max_waveform_items(self) -> int | None:
         budget = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
         if budget <= 0:
-            return {"audio": None}
+            return None
 
         extractor = self.get_feature_extractor()
         float_bytes = np.dtype(np.float32).itemsize
@@ -564,7 +568,20 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
         )
         feature_bytes = extractor.feature_size * extractor.nb_max_frames * float_bytes
         bytes_per_item = padded_input_bytes + spectrum_bytes + feature_bytes
-        return {"audio": budget // bytes_per_item}
+        return budget // bytes_per_item
+
+    def validate_num_input_items(
+        self, modality: str, num_items: int, *, is_embedding: bool
+    ) -> None:
+        super().validate_num_input_items(modality, num_items, is_embedding=is_embedding)
+        if not is_embedding and not is_profiling_media():
+            max_items = self.get_max_waveform_items()
+            if max_items is not None and num_items > max_items:
+                raise VLLMValidationError(
+                    f"At most {max_items} audio(s) fit the FunAudioChat "
+                    "preprocessing budget.",
+                    parameter="audio",
+                )
 
     def get_target_channels(self) -> int:
         return 1
@@ -664,8 +681,12 @@ class FunAudioChatMultiModalProcessor(
             )
         assert isinstance(audios, Sequence)
 
-        max_audio_items = self.info.supported_mm_limits["audio"]
-        if max_audio_items is not None and len(audios) > max_audio_items:
+        max_audio_items = self.info.get_max_waveform_items()
+        if (
+            not is_profiling_media()
+            and max_audio_items is not None
+            and len(audios) > max_audio_items
+        ):
             raise VLLMValidationError(
                 f"At most {max_audio_items} audio(s) fit the FunAudioChat "
                 "preprocessing budget.",
@@ -745,6 +766,7 @@ class FunAudioChatMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return {
+            "audio_embeds": MultiModalFieldConfig.batched("audio"),
             "speech_ids": MultiModalFieldConfig.batched("audio"),
             "speech_attention_mask": MultiModalFieldConfig.batched(
                 "audio", keep_on_cpu=True
@@ -767,6 +789,7 @@ class FunAudioChatMultiModalProcessor(
         audio_token_id = vocab[audio_token]
 
         out_mm_data = out_mm_kwargs.get_data()
+        audio_embeds = out_mm_data.get("audio_embeds")
         speech_attention_mask = out_mm_data.get("speech_attention_mask")
         if speech_attention_mask is None:
             audio_output_lengths: list[int] = []
@@ -779,10 +802,15 @@ class FunAudioChatMultiModalProcessor(
             ).tolist()
 
         def get_replacement_funaudiochat(item_idx: int):
-            num_features = (
-                int(audio_output_lengths[item_idx]) if audio_output_lengths else 1
-            )
+            if audio_embeds is not None:
+                num_features = len(audio_embeds[item_idx])
+            else:
+                num_features = (
+                    int(audio_output_lengths[item_idx]) if audio_output_lengths else 1
+                )
             if num_features <= 0:
+                if audio_embeds is not None:
+                    raise ValueError("audio_embeds must contain at least one token")
                 audios = mm_items.get_items("audio", AudioProcessorItems)
                 audio_len = audios.get_audio_length(item_idx)
                 raise ValueError(
@@ -881,6 +909,11 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         return audio_outputs.last_hidden_state, audio_output_lengths
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        audio_embeds = kwargs.get("audio_embeds")
+        if audio_embeds is not None:
+            assert isinstance(audio_embeds, (torch.Tensor, list, tuple))
+            return tuple(audio_embeds)
+
         speech_ids = kwargs.get("speech_ids")
         speech_attention_mask = kwargs.get("speech_attention_mask")
         input_features = kwargs.get("input_features")

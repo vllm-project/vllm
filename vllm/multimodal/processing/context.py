@@ -674,6 +674,12 @@ class BaseProcessingInfo:
 
             raise VLLMValidationError(msg, parameter=modality)
 
+    def validate_num_input_items(
+        self, modality: str, num_items: int, *, is_embedding: bool
+    ) -> None:
+        """Validate a modality count with its input representation available."""
+        self.validate_num_items(modality, num_items)
+
     def parse_mm_data(
         self,
         mm_data: MultiModalDataDict,
@@ -709,7 +715,13 @@ class BaseProcessingInfo:
                             modality,
                         )
                         continue
-                self.validate_num_items(modality, len(items))
+                self.validate_num_input_items(
+                    modality,
+                    len(items),
+                    is_embedding=isinstance(
+                        items, (EmbeddingItems, DictEmbeddingItems)
+                    ),
+                )
 
         return mm_items
 

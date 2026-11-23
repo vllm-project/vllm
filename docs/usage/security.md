@@ -114,7 +114,9 @@ protection against resource-exhaustion attacks.
 
 Supported processors account for their allocations as follows.
 
-- FunAudioChat estimates padded audio, spectrum buffers, and feature tensors.
+- FunAudioChat estimates padded raw audio, spectrum buffers, and feature
+  tensors. The resulting item cap applies to waveforms, not precomputed
+  `audio_embeds`; the configured multimodal item limit still applies to both.
 - Nano Nemotron VL, DeepSeek-VL2, and Molmo2 account for image tiles and
   temporary tensors before materializing them.
 - DeepSeek-OCR and Unlimited-OCR account for all global views and local tiles
