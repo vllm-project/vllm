@@ -518,10 +518,7 @@ steps:
   commands:
   - pytest -v -s models/qwen4_exp/test_qsa_amd.py models/qwen4_exp/test_qsa_prepare_amd.py
   # PLE and QSA import conflicting HC registrations in a shared process.
-  - >-
-    pytest -v -s
-    models/qwen4_exp/test_ple.py
-    models/qwen4_exp/test_ple_embedding_mode.py
+  - pytest -v -s models/qwen4_exp/test_ple.py
   - pytest -v -s models/qwen4_exp/test_hc_ops_amd.py
 
 - label: ":computer: (CPU) Qwen4 Exp"
@@ -542,7 +539,6 @@ steps:
       pytest -v -s
       models/qwen4_exp/test_config.py
       models/qwen4_exp/test_ple.py
-      models/qwen4_exp/test_ple_embedding_mode.py
 
 - label: ":nvidia: (B200) Qwen3.5"
   key: qwen3-5-unit-tests-b200

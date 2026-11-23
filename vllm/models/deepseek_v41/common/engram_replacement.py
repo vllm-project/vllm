@@ -21,15 +21,13 @@ class PerTokenTable(nn.Module):
         tp_rank: int,
     ):
         super().__init__()
-        self.comp_vocab = comp_vocab
         self.n_hash_cols = n_hash_cols
-        self.head_dim = head_dim
         self.tp_size = tp_size
         self.part_n_hash_cols = -(-n_hash_cols // tp_size)
         self.head_start = tp_rank * self.part_n_hash_cols
         self.weight = nn.Parameter(
             torch.full(
-                (comp_vocab, self.part_n_hash_cols, self.head_dim),
+                (comp_vocab, self.part_n_hash_cols, head_dim),
                 float("nan"),
                 dtype=torch.bfloat16,
             ),
@@ -51,7 +49,7 @@ class PerTokenTable(nn.Module):
             )
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
-        expected = (self.comp_vocab, self.n_hash_cols, self.head_dim)
+        expected = (param.shape[0], self.n_hash_cols, param.shape[-1])
         if tuple(loaded_weight.shape) != expected:
             raise ValueError(
                 f"engram per_token_table.weight has shape "

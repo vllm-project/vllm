@@ -161,7 +161,7 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 ```
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
-Qwen4Exp n-gram PLE tables use ETP sharding by default. On NVIDIA they can also use
+Qwen4Exp PLE tables use ETP sharding by default. On NVIDIA they can also use
 the cross-engine Engram pool described below.
 
 ## Sharing host tables across DP replicas
@@ -299,7 +299,7 @@ check for missing or invalid table weights during loading.
 
 ## Limitations
 
-- CUDA-alike platforms only; the `per_token` lookup mode is ROCm only.
+- CUDA-alike platforms only.
 - DeepSeek V4.1 Engram does not support DBO or microbatching; disable
   `--enable-dbo` and set `--ubatch-size 0`.
 - `dp_shared_memory` requires `cpu_offload`, `data_parallel_size > 1`, and is

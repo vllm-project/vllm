@@ -531,7 +531,7 @@ def _merged_matches_two_launches(vllm_runner, monkeypatch) -> None:
         # The TP8 Buildkite step selects the original tp-rows node IDs.
         *[
             pytest.param(tp, rows, "ngram", id=f"{tp}-{rows}")
-            for tp, rows in sorted(set(CASES["cdna4"] + CASES["gfx942"]))
+            for tp, rows in [(2, 8), (4, 8), (4, 42), (8, 8), (8, 28), (8, 42)]
         ],
         (2, 8, "per_token"),
         (4, 8, "per_token"),
