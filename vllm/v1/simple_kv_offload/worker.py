@@ -312,9 +312,7 @@ class SimpleCPUOffloadWorker:
         """
         if self._backend is not None:
             self._backend.shutdown()
-        # Hybrid drains its DMA before freeing staging; its queues are now closed.
-        if not isinstance(self._backend, HybridBackend):
-            self._flush_and_sync_all()
+        self._flush_and_sync_all()
         for tensor in reversed(self._pinned_host_ranges):
             try:
                 unpin_tensor(tensor)
@@ -432,7 +430,7 @@ class SimpleCPUOffloadWorker:
 
     def _flush_and_sync_all(self) -> None:
         """Synchronize all in-flight transfer events."""
-        if isinstance(self._backend, HybridBackend):
+        if self._backend is not None:
             self._backend.synchronize()
         for event_idx, event in self._load_events:
             event.synchronize()
@@ -446,7 +444,7 @@ class SimpleCPUOffloadWorker:
 
     def _poll_stream_events(self, is_store: bool) -> int:
         """Non-blocking poll for completed events and return the high-water mark."""
-        if isinstance(self._backend, HybridBackend):
+        if self._backend is not None:
             self._backend.check_error()
         events = self._store_events if is_store else self._load_events
         hwm = self._store_hwm if is_store else self._load_hwm

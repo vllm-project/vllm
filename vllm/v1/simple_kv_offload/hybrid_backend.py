@@ -244,6 +244,8 @@ class HybridBackend:
 
     def synchronize(self) -> None:
         """Drain queued work before the worker reuses preempted GPU blocks."""
+        if self._shutdown or self._load_thread is None:
+            return
         self.check_error()
         for q in (self._store_queue, self._load_queue):
             done = threading.Event()
