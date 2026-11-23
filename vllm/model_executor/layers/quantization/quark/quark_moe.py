@@ -1686,7 +1686,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                     self.mxfp4_backend,
                     hidden_size,
                     intermediate_size_per_partition,
-                    activation=self.moe.activation,
                 )
             )
         return hidden_size, intermediate_size_per_partition
