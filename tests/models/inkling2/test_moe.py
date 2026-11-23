@@ -12,10 +12,12 @@ from vllm.platforms import current_platform
 if not (
     current_platform.is_device_capability_family(100)
     or current_platform.is_device_capability(90)
+    or current_platform.is_device_capability_family(120)
 ):
     pytest.skip("Inkling2 MoE requires Hopper or Blackwell", allow_module_level=True)
 
 import vllm.models.inkling2.nvidia.moe as moe_module  # noqa: E402
+import vllm.models.inkling2.nvidia.ops.moe_sm120 as moe_sm120  # noqa: E402
 import vllm.models.inkling2.nvidia.ops.trtllm_bmm as trtllm_bmm  # noqa: E402
 from vllm.models.inkling2.nvidia.moe import Inkling2MoE  # noqa: E402
 from vllm.models.inkling2.nvidia.ops import use_sm100_kernels  # noqa: E402
@@ -140,7 +142,7 @@ def _situ_reference_kernel(
     X, Gammas, Y, N: tl.constexpr, GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr
 ):
     row = tl.program_id(0)
-    cols = tl.program_id(1) * 256 + tl.arange(0, 256)
+    cols = tl.program_id(1) * 128 + tl.arange(0, 128)
     gate = tl.load(X + row * 2 * N + 2 * cols).to(tl.float32)
     up = tl.load(X + row * 2 * N + 2 * cols + 1).to(tl.float32)
     gate_cap = tl.inline_asm_elementwise(
@@ -177,13 +179,14 @@ def _unswizzled_scales(scales: torch.Tensor, rows: torch.Tensor, tile: int):
 
 @pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
 @pytest.mark.parametrize("tile", [8, 128])
-def test_situ_quantize_matches_separate_quantization(fmt: str, tile: int):
+@pytest.mark.parametrize("n", [1152, 2304])
+def test_situ_quantize_matches_separate_quantization(fmt: str, tile: int, n: int):
     """The fused SiTU quantization equals quantizing the bf16 SiTU output:
     bitwise values and scales, and for NVFP4 the row amax times the weight
     scale as the down-projection row scale. MXFP8 covers both the per-column
     block (few rows) and the whole-row programs."""
     torch.manual_seed(0)
-    n, num_rows, num_experts = 2304, 5 * tile, 4
+    num_rows, num_experts = 5 * tile, 4
     x = (torch.randn(num_rows, 2 * n, device="cuda") * 4).bfloat16()
     gammas = torch.rand(num_rows, device="cuda")
     routed = torch.randperm(num_rows, device="cuda")[: num_rows - 5].int()
@@ -204,7 +207,7 @@ def test_situ_quantize_matches_separate_quantization(fmt: str, tile: int):
     )
 
     y = torch.empty((num_rows, n), dtype=torch.bfloat16, device="cuda")
-    _situ_reference_kernel[(num_rows, n // 256)](
+    _situ_reference_kernel[(num_rows, n // 128)](
         x, gammas, y, n, 4.0, 25.0, enable_fp_fusion=False
     )
     rows = routed.long()
@@ -230,20 +233,22 @@ def test_shuffle_rows_matches_flashinfer():
     torch.testing.assert_close(unshuffle_rows(shuffle_rows(x)), x)
 
 
-requires_sm100 = pytest.mark.skipif(
-    not use_sm100_kernels(), reason="TRT-LLM-gen expert GEMMs (Blackwell)"
+requires_packed_experts = pytest.mark.skipif(
+    not (use_sm100_kernels() or current_platform.is_device_capability_family(120)),
+    reason="Packed activation expert GEMMs (SM100 or SM12x)",
 )
 
 
-@requires_sm100
+@requires_packed_experts
 @pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
-@pytest.mark.parametrize("tile", [8, 128])
-def test_bmm_matches_dequantized_matmul(fmt: str, tile: int):
+@pytest.mark.parametrize("tile", [8, 16, 32, 64, 128, 256])
+@pytest.mark.parametrize("n,k", [(256, 1024), (2304, 1152), (1152, 2304)])
+def test_bmm_matches_dequantized_matmul(fmt: str, tile: int, n: int, k: int):
     """Expert GEMM over tile-padded expert segments equals an fp64 matmul of
     the dequantized operands, scaled per row (NVFP4) and rounded to bf16."""
     torch.manual_seed(0)
     nvfp4 = fmt == "nvfp4"
-    counts, n, k = [3, 0, 17, 1], 256, 1024
+    counts = [3, 0, 17, 1]
     random_q = random_nvfp4 if nvfp4 else random_mxfp8
     weight, weight_scale = random_q(len(counts), n, k)
     shapes = ((n, k), (n, k))
@@ -265,12 +270,18 @@ def test_bmm_matches_dequantized_matmul(fmt: str, tile: int):
         device="cuda",
     )
     swizzle = swizzle_block_scales if tile >= 128 else r8c4_block_scales
-    out = trtllm_bmm.bmm(
+    if use_sm100_kernels():
+        bmm = trtllm_bmm.bmm
+        weight_in = shuffle_rows(weight)
+        scale_in = swizzle_block_scales(shuffle_rows(weight_scale))
+    else:
+        bmm, weight_in, scale_in = moe_sm120.bmm, weight, weight_scale
+    out = bmm(
         act,
         swizzle(act_scale),
         row_scale,
-        shuffle_rows(weight),
-        swizzle_block_scales(shuffle_rows(weight_scale)),
+        weight_in,
+        scale_in,
         torch.ones(len(counts), device="cuda"),
         tiles,
         plan,
@@ -291,7 +302,9 @@ def test_bmm_matches_dequantized_matmul(fmt: str, tile: int):
     )
 
 
-@pytest.mark.skipif(use_sm100_kernels(), reason="Humming experts (Hopper)")
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(90), reason="Humming experts (Hopper)"
+)
 @pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
 @pytest.mark.parametrize("tokens", [1, 32])
 def test_humming_experts_are_deterministic(fmt: str, tokens: int):
@@ -463,12 +476,13 @@ def _route(
     )
 
 
-@pytest.mark.parametrize("tokens", [33, 4000])
-def test_linear_k_groups_fp32(tokens: int):
+@pytest.mark.parametrize("tokens", [1, 33, 4000])
+@pytest.mark.parametrize("hidden", [64, 1152, 4608])
+def test_linear_k_groups_fp32(tokens: int, hidden: int):
     """Covers both the split-K (few tokens) and the in-program group sum."""
     torch.manual_seed(0)
-    x = torch.randn(tokens, 4608, device="cuda").bfloat16()
-    w = (torch.randn(384, 4608, device="cuda") * 0.02).bfloat16()
+    x = torch.randn(tokens, hidden, device="cuda").bfloat16()
+    w = (torch.randn(384, hidden, device="cuda") * 0.02).bfloat16()
     out = linear_k_groups(x, w)
     assert out.dtype == torch.float32
     torch.testing.assert_close(out, x.double() @ w.double().T, check_dtype=False)
@@ -494,12 +508,12 @@ def _moe_reference(
             w = dequant_nvfp4(w, s).double()
             amax = weights[f"{prefix}_amax"][e]
             w = w * (amax / weights[f"{prefix}_outer_scale_denominator"]).double()
-            if exp.sm100:
+            if exp.sm100 or exp.sm120:
                 av, as_, aa = nvfp4_quantize(a)
                 a = dequant_nvfp4(av, as_) * (aa / 1536)[:, None]
         else:
             w = dequant_mxfp8(w, s).double()
-            if exp.sm100:
+            if exp.sm100 or exp.sm120:
                 a = dequant_mxfp8(*mxfp8_quantize(a))
         return (a.double() @ w.T).bfloat16()
 
@@ -576,7 +590,75 @@ def test_moe_layer_matches_reference(dist_init, fmt: str, tokens: int):
     torch.testing.assert_close(out, ref, atol=1e-2 * scale, rtol=2e-2)
 
 
-@requires_sm100
+@pytest.mark.parametrize(
+    "tokens",
+    [1, 8, 33, 1024] if current_platform.is_device_capability_family(120) else [],
+)
+def test_humming_nvfp4_preserves_quantized_experts(dist_init, tokens: int):
+    """Repacked W4A4 experts release checkpoint storage and preserve graph output."""
+    from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
+    from vllm.models.inkling2.configs import Inkling2ModelConfig
+
+    config = Inkling2ModelConfig(**vars(MOE_CONFIG))
+    weights = _random_moe_weights("nvfp4")
+    models = []
+    for backend in ("auto", "humming"):
+        vllm_config = VllmConfig(kernel_config=KernelConfig(moe_backend=backend))
+        with set_current_vllm_config(vllm_config), torch.device("cuda"):
+            model = Inkling2MoE(config, "nvfp4")
+            for name, param in model.named_parameters():
+                param.weight_loader(param, weights[name])
+            model.experts.process_weights_after_loading()
+        models.append(model)
+    control, candidate = models
+    assert candidate.experts.w13_weight.numel() == 0
+    assert candidate.experts.w2_weight.numel() == 0
+    x = torch.randn(tokens + 3, config.hidden_size, device="cuda").bfloat16()
+    padding = torch.arange(x.shape[0], device="cuda") >= tokens
+
+    def run(model):
+        plan = model.experts.plan(x.shape[0])
+        routing, quantized = _route(model, x, plan, padding)
+        return model.experts(x, routing, quantized, plan)
+
+    x[tokens:] = float("nan")
+    torch.testing.assert_close(run(candidate), run(control), atol=0, rtol=0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = run(candidate)
+    for _ in range(3):
+        x.copy_(torch.randn_like(x))
+        x[tokens:] = float("nan")
+        expected = run(control)
+        graph.replay()
+        torch.testing.assert_close(captured, expected, atol=0, rtol=0)
+        assert (captured[tokens:] == 0).all()
+
+
+@requires_packed_experts
+@pytest.mark.skipif(not use_sm100_kernels(), reason="TRT-LLM-gen expert GEMMs")
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+def test_gemm_operands_span_128kib(dist_init, monkeypatch, fmt: str):
+    """The expert GEMMs' TMA accesses can reach 128 KiB past each operand's
+    base however few rows are used: even a one-token layer backs every
+    operand and output of both GEMMs with that much memory."""
+    moe = _build_moe(fmt, _random_moe_weights(fmt))
+    gemm, calls = moe_module.bmm, []
+
+    def record(act, act_scale, row_scale, *args):
+        out = gemm(act, act_scale, row_scale, *args)
+        calls.append((act, act_scale, row_scale, out))
+        return out
+
+    monkeypatch.setattr(moe_module, "bmm", record)
+    moe(torch.randn(1, 512, device="cuda").bfloat16())
+    assert len(calls) == 2
+    for tensor in (t for call in calls for t in call if t is not None):
+        offset = tensor.storage_offset() * tensor.element_size()
+        backed = tensor.untyped_storage().nbytes() - offset
+        assert backed >= trtllm_bmm.MIN_OPERAND_BYTES, (tensor.shape, backed)
+
+
 @pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
 @pytest.mark.parametrize("tokens", [5, 64])
 def test_token_tiles_match(dist_init, monkeypatch, fmt: str, tokens: int):
@@ -673,3 +755,22 @@ def test_padding_tokens_route_to_no_expert(
     out = moe(x)
     assert (out[tokens:] == 0).all()
     torch.testing.assert_close(out[:tokens], expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("hidden", [512, 2304, 4608])
+def test_combine_supports_mini_hidden_width(hidden):
+    """Sum routed rows in slot order, including absent experts and a 256 tail."""
+    from vllm.models.inkling2.nvidia.ops.moe import combine
+
+    torch.manual_seed(42)
+    down = torch.randn(16, hidden, device="cuda").bfloat16()
+    rows = torch.tensor(
+        [0, 3, -1, 7, 2, 15, 4, 6] * 2, device="cuda", dtype=torch.int32
+    )
+    ref = torch.zeros(2, hidden, device="cuda")
+    for slot in range(8):
+        index = rows.view(2, 8)[:, slot].long()
+        ref += torch.where(index[:, None] >= 0, down[index.clamp_min(0)].float(), 0)
+    torch.testing.assert_close(
+        combine(down, rows, 8, torch.bfloat16), ref.bfloat16(), atol=0, rtol=0
+    )
