@@ -1606,6 +1606,15 @@ class Platform:
         """
         return "vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder"
 
+    @classmethod
+    def get_accelerator_view_from_cpu_tensor(
+        cls, cpu_tensor: torch.Tensor
+    ) -> torch.Tensor:
+        """Create an accelerator view of a CPU tensor via UVA."""
+        raise NotImplementedError(
+            f"UVA tensor views are not supported on {cls.device_name}"
+        )
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED

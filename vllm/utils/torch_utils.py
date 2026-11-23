@@ -901,33 +901,13 @@ def weak_ref_tensors(
     raise ValueError(f"Invalid type for tensors: {type(tensors)}")
 
 
-def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
-    """Get an accelerator view of a CPU tensor via Unified Virtual Addressing."""
+def get_accelerator_view_from_cpu_tensor(
+    cpu_tensor: torch.Tensor,
+) -> torch.Tensor:
+    """Get an accelerator view of a CPU tensor via UVA."""
     from vllm.platforms import current_platform
 
-    if current_platform.is_xpu():
-        # Remove once the vllm-xpu-kernels fix for empty and non-pinned inputs
-        # (vllm-project/vllm-xpu-kernels#513) is in a released package.
-        if cpu_tensor.numel() == 0:
-            return torch.empty(cpu_tensor.shape, dtype=cpu_tensor.dtype, device="xpu")
-        if not cpu_tensor.is_pinned():
-            pinned = torch.empty_strided(
-                cpu_tensor.size(),
-                cpu_tensor.stride(),
-                dtype=cpu_tensor.dtype,
-                device="cpu",
-                pin_memory=True,
-            )
-            pinned.copy_(cpu_tensor)
-            return torch.ops._C.get_xpu_view_from_cpu_tensor(pinned)
-        return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
-    elif current_platform.is_cuda_alike():
-        return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
-    else:
-        raise ValueError(
-            f"`get_accelerator_view_from_cpu_tensor` is currently "
-            f"not supported in: {current_platform.device_name}"
-        )
+    return current_platform.get_accelerator_view_from_cpu_tensor(cpu_tensor)
 
 
 HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
