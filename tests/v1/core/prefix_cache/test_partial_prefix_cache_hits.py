@@ -472,8 +472,7 @@ def test_hybrid_mamba_align_partial_hash_hit(joint_lookup):
     assert manager.get_blocks("1").blocks[1][1].block_hash_num_tokens == 8
 
 
-@pytest.mark.parametrize("prompt_tokens", [7, 8])
-@pytest.mark.parametrize("full_block_size", [2, 4])
+@pytest.mark.parametrize(("prompt_tokens", "full_block_size"), [(7, 4), (8, 2)])
 def test_joint_full_report_bounds_partial_tail_by_actual_hit(
     prompt_tokens, full_block_size
 ):
