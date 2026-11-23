@@ -922,6 +922,14 @@ def _rocm_aiter_w8a8_gemm_fake(
     return Y
 
 
+# AITER picks the ASM FP4 tile per M, and its persistent 256x256 kernel is not
+# bitwise equal to the rest of the family, so batch invariance pins one tile.
+# Workaround: drop the pin once AITER can exclude persistent kernels.
+_BATCH_INVARIANT_FP4_ASM_KERNEL = (
+    "_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_64x128E"
+)
+
+
 def _rocm_aiter_mxfp4_gemm_dynamic_quant_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -986,14 +994,31 @@ def _rocm_aiter_mxfp4_gemm_dynamic_quant_impl(
                 x_q = x
                 x_s = x_scales
 
-            y = gemm_a4w4(
-                x_q,
-                weight.view(x_q.dtype),
-                x_s,
-                weight_scale.view(x_s.dtype),
-                dtype=out_dtype,
-                bpreshuffle=True,
-            )
+            if envs.VLLM_BATCH_INVARIANT:
+                from aiter.ops.gemm_op_a4w4 import gemm_a4w4_asm
+
+                y = torch.empty(
+                    (M + 31) // 32 * 32, N, device=x_q.device, dtype=out_dtype
+                )
+                gemm_a4w4_asm(
+                    x_q,
+                    weight.view(x_q.dtype),
+                    x_s,
+                    weight_scale.view(x_s.dtype),
+                    y,
+                    _BATCH_INVARIANT_FP4_ASM_KERNEL,
+                    bpreshuffle=True,
+                    log2_k_split=0,
+                )
+            else:
+                y = gemm_a4w4(
+                    x_q,
+                    weight.view(x_q.dtype),
+                    x_s,
+                    weight_scale.view(x_s.dtype),
+                    dtype=out_dtype,
+                    bpreshuffle=True,
+                )
         return y[:M]
     else:
         assert not hadamard_rotate, "hadamard_rotate needs the ASM GEMM path"
