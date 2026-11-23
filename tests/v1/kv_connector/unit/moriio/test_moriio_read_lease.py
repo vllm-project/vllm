@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio import (
+    moriio_common,
     moriio_connector,
     moriio_engine,
 )
@@ -20,7 +21,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
     MoRIIOMode,
-    ReadLeaseTarget,
     get_port_offset,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
@@ -34,7 +34,7 @@ from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.request import RequestStatus
 
-from ..utils import create_request, create_scheduler
+from ..utils import create_model_runner_output, create_request, create_scheduler
 from .test_moriio_connector import _setup_kv_transfer_request, create_vllm_config
 from .test_moriio_routing import _producer, _req, _request_finished
 
@@ -107,6 +107,54 @@ def _step(worker, held: dict[str, str], scheduler_clock=0.0, new=None) -> None:
     meta.reqs_to_send = new or {}
     meta.scheduler_clock = scheduler_clock
     worker.start_load_kv(meta)
+
+
+def test_prefill_keeps_blocks_past_defer_timeout_while_decode_may_read(clock):
+    """#759 Gap 2: a READ prefill freed a finished request's blocks
+    `defer_timeout` after it finished, while the request could still be queued
+    on decode, which then read reused blocks. The prefill scheduler now keeps
+    them until the decode releases them (or the 1 h cap); its workers' lease
+    decides earlier. Uses nothing that exists only with the lease, so it also
+    runs, and fails, without it."""
+    role = moriio_common.get_role()
+    try:
+        scheduler = create_scheduler(
+            create_vllm_config(role="kv_producer", read_mode=True)
+        )
+        pool = scheduler.kv_cache_manager.block_pool
+
+        def step(released=frozenset()):
+            out = scheduler.schedule()
+            scheduler.update_from_output(
+                out,
+                create_model_runner_output(
+                    [scheduler.requests[i] for i in out.num_scheduled_tokens],
+                    finished_sending=set(released),
+                ),
+            )
+
+        free_before = pool.get_num_free_blocks()
+        request = _setup_kv_transfer_request(
+            create_request(num_tokens=64, do_remote_decode=True)
+        )
+        scheduler.add_request(request)
+        step()
+        held = pool.get_num_free_blocks()
+        assert held < free_before
+
+        # Decode has not read them yet, e.g. the request is queued there.
+        clock.now += 2 * MoRIIOConstants.DEFAULT_DEFER_TIMEOUT
+        for _ in range(3):
+            step()
+        assert request.request_id in scheduler.requests
+        assert pool.get_num_free_blocks() == held
+
+        # The decode's release frees them.
+        step(released={request.request_id})
+        assert request.request_id not in scheduler.requests
+        assert pool.get_num_free_blocks() == free_before
+    finally:
+        moriio_common.set_role(role)
 
 
 def test_prefill_frees_blocks_once_renewals_stop(clock):
@@ -201,7 +249,7 @@ def _waiting_request(scheduler, request_id: int, lease: float | None):
 def test_decode_renews_waiting_requests_until_it_reads_them(clock):
     scheduler = _decode_scheduler()
     connector = scheduler.connector.connector_scheduler
-    target = ReadLeaseTarget("127.0.0.1", 4789, 1, 2, LEASE)
+    target = moriio_common.ReadLeaseTarget("127.0.0.1", 4789, 1, 2, LEASE)
 
     def renewals():
         meta = MoRIIOConnectorMetadata()
@@ -307,7 +355,7 @@ def test_decode_renews_a_new_lease_in_its_next_step(clock):
     admitted the request, so decode renews it at once, not an interval later."""
     scheduler = _decode_scheduler()
     connector = scheduler.connector.connector_scheduler
-    target = ReadLeaseTarget("127.0.0.1", 4789, 1, 2, LEASE)
+    target = moriio_common.ReadLeaseTarget("127.0.0.1", 4789, 1, 2, LEASE)
     scheduler.add_request(_waiting_request(scheduler, 1, lease=LEASE))
     connector._package_read_lease_renewals(MoRIIOConnectorMetadata())
 
@@ -368,7 +416,9 @@ def test_decode_tracks_a_lease_with_a_null_dp_rank():
 
 
 def test_decode_tp_rank_0_renews_on_every_prefill_tp_rank():
-    target = ReadLeaseTarget("10.0.0.1", 7000, dp_rank=1, tp_size=4, lease_duration=60)
+    target = moriio_common.ReadLeaseTarget(
+        "10.0.0.1", 7000, dp_rank=1, tp_size=4, lease_duration=60
+    )
     sent = {}
     for tp_rank in (0, 1):
         worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
