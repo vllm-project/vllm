@@ -37,7 +37,7 @@ def run_evalscope(
 def test_qwen4_exp_accuracy(config_filename: Path, tmp_path: Path):
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
     server_args = shlex.split(eval_config.get("server_args", ""))
-    server_args.extend(["--trust-remote-code", "--disable-uvicorn-access-log"])
+    server_args.append("--disable-uvicorn-access-log")
 
     model_name = eval_config["model_name"]
     print(f"Starting Qwen4Exp evaluation for model: {model_name}")

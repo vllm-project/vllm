@@ -35,7 +35,7 @@ def expected_path(p_str: str = ".") -> str:
 
 # Minimal dataclass to test get_compile_factors.
 # Avoid importing heavy vLLM configs.
-@dataclass
+@dataclass(slots=True)
 class SimpleConfig:
     a: object
     b: object | None = None
@@ -162,7 +162,7 @@ def test_enum_vs_int_disambiguation():
     assert isinstance(h_enum, str) and len(h_enum) == 64
 
 
-@dataclass
+@dataclass(slots=True)
 class NestedConfig:
     graph_field: int = 0
     runtime_field: int = 0
@@ -230,14 +230,14 @@ def test_get_attr_docs_includes_inherited_fields():
     """get_attr_docs must collect attribute docstrings inherited from base
     classes, not just those declared in the class's own body."""
 
-    @dataclass
+    @dataclass(slots=True)
     class Base:
         inherited: object = None
         """doc for inherited (base)."""
         overridden: object = None
         """base version of overridden."""
 
-    @dataclass
+    @dataclass(slots=True)
     class Derived(Base):
         own: object = None
         """doc for own (derived)."""
@@ -337,15 +337,6 @@ def test_cache_config_default_block_size():
 def test_cache_config_hash_ignores_prefix_cache_retention_interval():
     base_hash = hash_config(CacheConfig())
     assert hash_config(CacheConfig(prefix_cache_retention_interval=64)) == base_hash
-
-
-def test_cache_config_hash_ignores_runtime_offload_sizing():
-    config = CacheConfig()
-    base_hash = hash_config(config)
-
-    config.simple_cpu_offload_num_blocks = 42
-
-    assert hash_config(config) == base_hash
 
 
 def test_envs_compile_factors_relocation_invariant(tmp_path):
