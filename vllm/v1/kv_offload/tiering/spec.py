@@ -112,7 +112,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             OffloadingHistogramMetadata(
                 documentation=(
                     "Histogram of blocking time spent in a per-chunk tier lookup "
-                    "that resolved as a hit or miss, labeled by tier, in seconds."
+                    "that resolved as a hit or miss, labeled by tier, in seconds. "
+                    "DEPRECATED in v0.35.0, hidden in v0.36.0 and removed in "
+                    "v0.37.0. Use vllm:kv_offload_tiering_lookup_sync_time_seconds "
+                    "and vllm:kv_offload_tiering_lookup_keys_queried instead."
                 ),
                 labelnames=(TIER_LABEL,),
                 buckets=(
@@ -128,6 +131,23 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     0.5,
                     1,
                 ),
+            )
+        )
+        metrics[TieringOffloadingMetrics.LOOKUP_SYNC_TIME] = OffloadingCounterMetadata(
+            documentation=(
+                "Total blocking time spent in per-chunk tier lookups that "
+                "resolved as a hit or miss, in seconds, labeled by tier."
+            ),
+            labelnames=(TIER_LABEL,),
+        )
+        metrics[TieringOffloadingMetrics.LOOKUP_KEYS_QUERIED] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of keys covered by "
+                    "vllm:kv_offload_tiering_lookup_sync_time_seconds, labeled "
+                    "by tier."
+                ),
+                labelnames=(TIER_LABEL,),
             )
         )
         metrics[TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY] = (

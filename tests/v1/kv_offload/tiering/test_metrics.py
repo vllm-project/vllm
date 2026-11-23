@@ -54,6 +54,26 @@ def test_tiering_metrics_tracker_records_lookup_metrics():
     assert ("1:fs",) not in values[TieringOffloadingMetrics.CHUNK_HITS]
 
 
+def test_tiering_metrics_tracker_records_lookup_sync_time():
+    tracker = TieringMetricsTracker(
+        tier_types=["fs"],
+        num_primary_chunks=5,
+        primary_chunk_size=16,
+    )
+    tracker.on_new_request(_CTX)
+    label = tracker.primary_tier_label
+    for key, duration in zip(to_keys([1, 2]), (0.25, 0.5)):
+        tracker.on_lookup(_CTX, key, label, LookupResult.MISS, duration)
+
+    stats = tracker.take_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    assert values[TieringOffloadingMetrics.LOOKUP_SYNC_TIME][label] == 0.75
+    assert values[TieringOffloadingMetrics.LOOKUP_KEYS_QUERIED][label] == 2
+    # The deprecated histogram keeps one sample per chunk.
+    assert values[TieringOffloadingMetrics.LOOKUP_SYNC_DELAY][label] == [0.25, 0.5]
+
+
 def test_tiering_metrics_tracker_stops_lookup_metrics_after_allocation():
     tracker = TieringMetricsTracker(
         tier_types=["fs"],
