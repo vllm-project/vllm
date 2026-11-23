@@ -965,6 +965,19 @@ class BlockPool:
             self.free_block_queue.num_free_blocks + self.retained_queue.num_free_blocks
         )
 
+    def get_num_uncached_free_blocks(self, limit: int) -> int:
+        """Count, up to `limit`, the free blocks reused before any cached one.
+
+        These are the retained tier and the free queue's leading uncached run:
+        taking that many blocks evicts no cached prefix.
+        """
+        count = self.retained_queue.num_free_blocks
+        for block in self.free_block_queue.iter_blocks_after(None):
+            if count >= limit or block.block_hash is not None:
+                break
+            count += 1
+        return min(count, limit)
+
     def get_usage(self) -> float:
         """Get the KV cache usage.
 

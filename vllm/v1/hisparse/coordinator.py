@@ -676,12 +676,14 @@ class HiSparseCoordinator:
         Imports land in the host tier. While the GPU pool has room above the
         transition watermark, the imported pages are restored into resident
         pages too, so decode reads them like a locally computed prefix. They are
-        clean copies of durable host pages: the residency policy unpins them,
-        and the pool reclaims them only after every other free block.
+        clean copies of durable host pages: the residency policy unpins them.
+
+        Promotion takes only blocks that hold no cached prefix: a host prefix
+        hit also needs its prefix-cached indexer blocks, and a promoted page
+        costs one block per resident group.
         """
         assert self.host_manager is not None
         num_managers = len(self.resident_managers)
-        spare = self.gpu_pool.get_num_free_blocks() - self.transition_watermark
         host_blocks = self.host_manager.req_to_blocks[request_id]
         num_pages = min(
             num_pages, len(host_blocks), self._num_resident_pages(request_id)
@@ -700,7 +702,12 @@ class HiSparseCoordinator:
             page_idx
             for page_idx, blocks in zip(candidates, zip(*columns))
             if all(block.is_null for block in blocks)
-        ][: max(spare, 0) // num_managers]
+        ]
+        spare = min(
+            self.gpu_pool.get_num_free_blocks() - self.transition_watermark,
+            self.gpu_pool.get_num_uncached_free_blocks(len(pages) * num_managers),
+        )
+        pages = pages[: max(spare, 0) // num_managers]
         if not pages:
             return []
         blocks = self.gpu_pool.get_new_blocks(len(pages) * num_managers)
