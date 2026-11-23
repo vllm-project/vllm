@@ -7,7 +7,6 @@ import inspect
 import os
 import sys
 from collections.abc import Callable
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
@@ -50,30 +49,20 @@ def refuse_weight_rewrites(*features: str) -> None:
 
 def activate(vllm_config: "VllmConfig") -> None:
     _routes.clear()
-    if not (selection := os.environ.get("FLASHINFER_KERNEL_PACKAGES", "").strip()):
+    if not os.environ.get("FLASHINFER_KERNEL_PACKAGES", "").strip():
         return
     try:
-        from flashinfer.trace_apply import packages, preloaded_entry
+        from flashinfer.trace_apply import installed_packages
     except ImportError:
-        logger.warning("FLASHINFER_KERNEL_PACKAGES needs FlashInfer >= 0.7.5; ignored.")
+        logger.warning(
+            "Kernel packages at vLLM call sites need FlashInfer's "
+            "installed_packages(); skipped."
+        )
         return
 
-    root = Path(os.environ.get(packages.ROOT_ENV) or packages.DEFAULT_PACKAGE_ROOT)
-    sites: dict[str, str] = {}
-    for digest in filter(None, map(str.strip, selection.split(","))):
-        try:
-            package = packages.verify_package(root, digest)
-            tags = (package.definition or {}).get("tags") or ()
-            site = next((t[7:] for t in tags if t.startswith("fi_api:")), "")
-            key = package.operation, str(package.solution.get("name"))
-            if preloaded_entry(*key) is not None:
-                sites[digest] = site
-        except Exception:
-            continue  # FlashInfer warned about it at import
-    # FlashInfer's own checks again, installing nothing: a package it refused at
-    # import stays out, so a Definition only ever runs its own package's kernel.
-    loaded = packages.load_packages(root, list(sites), strict=False, enable=False)
-
+    # Listing binds each package in this process, so the refusal below also
+    # sees the packages of a forked worker.
+    installed = installed_packages()
     offload = vllm_config.offload_config
     features = {
         "sleep mode": vllm_config.model_config.enable_sleep_mode,
@@ -84,12 +73,11 @@ def activate(vllm_config: "VllmConfig") -> None:
     }
     refuse_weight_rewrites(*(name for name, on in features.items() if on))
 
-    for package in loaded.packages:
-        name = str(loaded.solutions[package.operation].name)
-        site = sites[package.digest]
-        _routes.setdefault(site, []).append(
-            (package.definition, loaded.callables[package.operation, name])
-        )
+    for package, run in installed:
+        tags = (package.definition or {}).get("tags")
+        tags = map(str, tags if isinstance(tags, list) else ())
+        site = next((t[7:] for t in tags if t.startswith("fi_api:")), "")
+        _routes.setdefault(site, []).append((package.definition, run))
         logger.info_once(
             "FlashInfer kernel package %s: %s.",
             package.digest[:12],

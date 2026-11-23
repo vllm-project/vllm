@@ -12,7 +12,8 @@ vllm serve <model>
 
 A package whose Definition is tagged `fi_api:<module>.<function>` can also serve a vLLM
 function marked `@kernel_site`, such as
-`vllm.model_executor.layers.mamba.ops.ssd_chunk_scan._chunk_scan_fwd`. Calls whose
+`vllm.model_executor.layers.mamba.ops.ssd_chunk_scan._chunk_scan_fwd`. This needs a
+FlashInfer that provides `installed_packages()`. Calls whose
 arguments match the Definition run the package's Solution with the Definition inputs as
 keyword arguments; other calls run the function itself. The log and
 `flashinfer.trace_apply.stats()` report hits and fallbacks.
