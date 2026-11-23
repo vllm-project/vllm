@@ -55,3 +55,7 @@ captures need normal upstream review before production integration.
 Code export checks cover syntax, file hashes and secret-pattern scanning.
 The reported device results belong to the retained 423 runs. Upstream CI and
 fresh-branch NPU validation have not been run.
+
+The vLLM-Ascend format.sh ci command was attempted during export and exited
+because pre-commit was unavailable. Python syntax and runtime-source byte checks
+passed. Upstream lint and CI remain unverified.
