@@ -95,3 +95,7 @@ vllm serve meta-llama/Llama-3.2-1B-Instruct --runner generate \
 Then, you can use the OpenAI client as follows:
 
 [examples/features/prompt_embed/prompt_embed_inference_with_openai_client.py](../../examples/features/prompt_embed/prompt_embed_inference_with_openai_client.py)
+
+## Prefix Caching
+
+With prefix caching (on by default), the engine hashes the prompt embeddings of each block to find cache hits. It hashes large prompts on several threads: by default up to 8, sharing the node's CPUs with the other local data-parallel engine cores. Set `--prompt-embeds-hash-threads` to change the number of threads, for example to hash very long prompts faster on a node with idle CPUs, or to `1` to hash on the engine core's input thread only.

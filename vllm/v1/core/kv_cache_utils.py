@@ -629,13 +629,12 @@ def _gen_prompt_embeds_extra_hash_keys(
 
 
 # Hash prompt embeds on the thread pool only when the new blocks hold at least
-# this many bytes in total and per block. Measured: below 4 MiB in total,
-# threads save under ~1 ms, and below 32 KiB per block the GIL handoffs
-# between blocks cost more than the threads save.
+# this many bytes in total and per block. Below them, thread dispatch and GIL
+# handoffs between blocks cost about as much as the threads save.
 PROMPT_EMBEDS_PARALLEL_HASH_MIN_BYTES = 4 << 20
 PROMPT_EMBEDS_PARALLEL_HASH_MIN_BLOCK_BYTES = 32 << 10
-# Measured: hashing scales to about 8 threads, so more would mostly compete with
-# the API server on the node.
+# Default cap when `--prompt-embeds-hash-threads` is unset. Empirically, hashing
+# scales nearly linearly to 8 threads. Measured on Threadripper 3970X and Xeon 8480+
 MAX_PROMPT_EMBEDS_HASH_THREADS = 8
 
 
@@ -656,11 +655,14 @@ def _parallel_prehash_pays_off(
 
 
 def num_prompt_embeds_hash_threads(vllm_config: VllmConfig) -> int:
-    """Threads to hash prompt embeds with: up to MAX_PROMPT_EMBEDS_HASH_THREADS,
-    sharing this node's usable CPUs with the other local data-parallel engine
-    cores. They are busy only while a large prompt is hashed."""
+    """Threads to hash prompt embeds with: `prompt_embeds_hash_threads` if set,
+    else up to MAX_PROMPT_EMBEDS_HASH_THREADS, sharing this node's usable CPUs
+    with the other local data-parallel engine cores. They are busy only while a
+    large prompt is hashed."""
     if not vllm_config.model_config.enable_prompt_embeds:
         return 1
+    if (num_threads := vllm_config.cache_config.prompt_embeds_hash_threads) is not None:
+        return num_threads
     num_local_engines = max(1, vllm_config.parallel_config.data_parallel_size_local)
     num_cpus = available_cpu_count() // num_local_engines
     return max(1, min(MAX_PROMPT_EMBEDS_HASH_THREADS, num_cpus))

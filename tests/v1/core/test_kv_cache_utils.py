@@ -2127,6 +2127,25 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
     assert block_hashes[1] == expected_hash2
 
 
+@pytest.mark.parametrize(
+    ("setting", "num_local_engines", "expected"),
+    [(None, 1, 8), (None, 16, 4), (3, 1, 3), (32, 16, 32)],
+)
+def test_prompt_embeds_hash_threads_setting_overrides_the_default(
+    monkeypatch, setting, num_local_engines, expected
+):
+    """`prompt_embeds_hash_threads` sets the thread count as given; unset, up
+    to 8 threads share the node's CPUs with the other local engine cores."""
+    monkeypatch.setattr(kv_cache_utils, "available_cpu_count", lambda: 64)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(enable_prompt_embeds=True),
+        cache_config=CacheConfig(prompt_embeds_hash_threads=setting),
+    )
+    vllm_config.parallel_config.data_parallel_size_local = num_local_engines
+
+    assert kv_cache_utils.num_prompt_embeds_hash_threads(vllm_config) == expected
+
+
 @pytest.mark.parametrize("hash_algo", get_args(PrefixCachingHashAlgo))
 @pytest.mark.parametrize("mixed_prompt", [False, True])
 @pytest.mark.parametrize("num_lookahead", [0, 1])
