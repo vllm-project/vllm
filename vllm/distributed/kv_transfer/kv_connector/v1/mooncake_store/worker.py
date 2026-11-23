@@ -19,7 +19,6 @@ import socket
 import threading
 import time
 from collections.abc import Callable, Sequence
-from collections.abc import Set as AbstractSet
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
@@ -1661,8 +1660,8 @@ class MooncakeStoreWorker:
             local_hostname = rdma_utils.get_requester_local_hostname(get_ip())
 
         self.store = MooncakeDistributedStore()
-        if not hasattr(self.store, "batch_is_exist_hashed"):
-            raise ImportError(
+        if not callable(getattr(self.store, "batch_is_exist_hashed", None)):
+            raise RuntimeError(
                 "MooncakeStoreConnector needs a Mooncake version whose "
                 "MooncakeDistributedStore has batch_is_exist_hashed."
             )
@@ -2579,8 +2578,9 @@ class MooncakeStoreWorker:
             if lookup_masks is not None and lookup_masks[g_idx] is not None:
                 mask = np.asarray(lookup_masks[g_idx], dtype=bool)
                 block_ids = units * unit_size // group.block_size
-                units = units[block_ids < len(mask)]
-                units = units[mask[block_ids[: len(units)]]]
+                keep = block_ids < len(mask)
+                keep[keep] = mask[block_ids[keep]]
+                units = units[keep]
             if len(units):
                 candidates.append((g_idx, (units + 1) * unit_size))
         return candidates
@@ -2665,7 +2665,7 @@ class MooncakeStoreWorker:
         num_tokens: int,
         token_len: int,
         block_hashes: Sequence[BlockHash],
-        exists_set: AbstractSet[tuple[int, bytes]],
+        exists_set: LoadablePairs,
     ) -> tuple[MooncakeLookupResult, tuple[list[bool], ...]]:
         """Longest prefix hit and its load masks over the stored group/hash pairs."""
         cached_block_pool = ExternalCachedBlockPool(

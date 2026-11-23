@@ -1505,11 +1505,21 @@ def test_selective_lease_with_partial_hash_hits(monkeypatch):
 
 
 def test_selective_lease_requires_probe_support(monkeypatch):
-    """Enabling the flag on a Mooncake without `batch_probe_key` fails at
-    startup instead of silently leasing every key."""
+    """Enabling the flag on a Mooncake without `batch_probe_key_hashed` fails
+    at startup instead of silently leasing every key."""
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
-    with pytest.raises(RuntimeError, match="batch_probe_key"):
+    with pytest.raises(RuntimeError, match="batch_probe_key_hashed"):
         _full_plus_mamba_worker(_DictStore())
+
+
+def test_worker_requires_hashed_lookup_support():
+    """A Mooncake without `batch_is_exist_hashed` fails at startup."""
+
+    class _OldMooncake(_DictStore):
+        batch_is_exist_hashed = None
+
+    with pytest.raises(RuntimeError, match="batch_is_exist_hashed"):
+        _full_plus_mamba_worker(_OldMooncake())
 
 
 def _swa_plus_full_worker(store):
@@ -1645,7 +1655,12 @@ def test_lookup_matches_per_key_reference(make_worker, seed):
             BlobBlockHashes(memoryview(b"".join(hs[:num_hashes])), 32),
         ):
             loadable = worker._probe_loadable(candidates, block_hashes)
-            assert set(loadable) == expected
+            assert {
+                (g, bytes(h))
+                for g in range(len(worker.token_dbs))
+                for h in hs[:num_hashes]
+                if (g, bytes(h)) in loadable
+            } == expected
             assert (
                 worker.lookup(num_tokens, block_hashes)
                 == (

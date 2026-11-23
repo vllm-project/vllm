@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """External-store cache-hit coordinator for MooncakeStoreConnector."""
 
-from collections.abc import Iterator, Sequence
-from collections.abc import Set as AbstractSet
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
@@ -33,9 +32,9 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
-class LoadablePairs(AbstractSet[tuple[int, bytes]]):
-    """`(group, hash)` pairs a lookup found loadable, as one boolean array per
-    group over the request's hashes instead of one set entry per stored key.
+class LoadablePairs:
+    """`(group, hash)` pairs a lookup found loadable, kept as one boolean array
+    per group over the request's hashes instead of one set entry per stored key.
     """
 
     def __init__(
@@ -44,47 +43,39 @@ class LoadablePairs(AbstractSet[tuple[int, bytes]]):
         self._blob = blob
         self._hash_len = hash_len
         self._loadable = loadable
-        self._index: dict[bytes, int] | None = None
-        self._all_of: dict[tuple[int, ...], np.ndarray] = {}
+        # Hashes loadable in every group of a group-id combination.
+        self._hits: dict[tuple[int, ...], set[bytes]] = {}
 
     def _hash(self, i: int) -> bytes:
         return bytes(self._blob[i * self._hash_len : (i + 1) * self._hash_len])
 
     def contains_all(self, group_ids: Sequence[int], block_hash: bytes) -> bool:
         """Whether every group in `group_ids` can load `block_hash`."""
-        if self._index is None:
-            # Only hashes loadable in some group can be hits.
-            any_group = np.logical_or.reduce(list(self._loadable.values()))
-            self._index = {self._hash(i): i for i in np.flatnonzero(any_group).tolist()}
-        idx = self._index.get(block_hash)
-        if idx is None:
-            return False
         key = tuple(group_ids)
-        all_of = self._all_of.get(key)
-        if all_of is None:
-            if not all(g in self._loadable for g in key):
-                return False
-            all_of = self._all_of[key] = np.logical_and.reduce(
-                [self._loadable[g] for g in key]
+        hits = self._hits.get(key)
+        if hits is None:
+            arrays = [self._loadable.get(g) for g in key]
+            hits = self._hits[key] = (
+                set()
+                if any(a is None for a in arrays)
+                else {
+                    self._hash(i)
+                    for i in np.flatnonzero(np.logical_and.reduce(arrays)).tolist()
+                }
             )
-        return bool(all_of[idx])
+        return block_hash in hits
 
-    def __contains__(self, pair: object) -> bool:
-        group_id, block_hash = pair  # type: ignore[misc]
-        return self.contains_all((group_id,), block_hash)
+    def __contains__(self, pair: tuple[int, bytes]) -> bool:
+        return self.contains_all((pair[0],), pair[1])
 
-    def __iter__(self) -> Iterator[tuple[int, bytes]]:
-        for group_id, group_loadable in self._loadable.items():
-            for i in np.flatnonzero(group_loadable).tolist():
-                yield group_id, self._hash(i)
-
-    def __len__(self) -> int:
-        return sum(int(np.count_nonzero(g)) for g in self._loadable.values())
-
-    @classmethod
-    def _from_iterable(cls, it):
-        # Set operations (the selective lease's eviction) give a plain set.
-        return set(it)
+    def __sub__(self, pairs: Iterable[tuple[int, bytes]]) -> "LoadablePairs":
+        """These pairs without `pairs`, e.g. keys evicted since the probe."""
+        index = {self._hash(i): i for i in range(len(self._blob) // self._hash_len)}
+        loadable = {g: a.copy() for g, a in self._loadable.items()}
+        for group_id, block_hash in pairs:
+            if group_id in loadable and block_hash in index:
+                loadable[group_id][index[block_hash]] = False
+        return LoadablePairs(self._blob, self._hash_len, loadable)
 
 
 class ExternalCachedBlockPool:
@@ -93,7 +84,7 @@ class ExternalCachedBlockPool:
     def __init__(
         self,
         hash_block_size: int,
-        exists: AbstractSet[tuple[int, bytes]] | None = None,
+        exists: LoadablePairs | set[tuple[int, bytes]] | None = None,
     ) -> None:
         # ``exists=None`` is used on the recv side where hit_length is already
         # determined and we just want each spec's manager to apply its own mask.
