@@ -4,6 +4,7 @@
 
 import gc
 import os
+import sys
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -1091,6 +1092,12 @@ class Worker(WorkerBase):
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
+
+        if "vllm.models.kimi_k3.amd.kda" in sys.modules:
+            # Kimi-K3.1 on ROCm: compile the amd_kernels prefill routes before serving
+            from vllm.models.kimi_k3.amd import akr_prefill_warmup
+
+            akr_prefill_warmup.run(self.vllm_config)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

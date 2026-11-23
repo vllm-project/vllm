@@ -822,6 +822,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         cache = self.hisparse_cache
         if slot_mapping is None or (cache is not None and cache.dummy_batch):
             return
+        akr_state = getattr(self, "_akr_ms_state", None)
+        if akr_state is not None and akr_state.skip_kv_update:
+            # amd_kernels prologue already inserted this pass's KV records
+            return
         kv_c_normed, k_pe, slot_mapping = maybe_gather_mla_latent_cache_inputs(
             kv_c_normed,
             k_pe,
@@ -1093,7 +1097,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 output_scale=mha_output_scale,
             )
 
-        if num_mqa_tokens > 0:
+        akr_q = None
+        akr_state = getattr(self, "_akr_ms_state", None)
+        if akr_state is not None and akr_state.q_lat is not None:
+            # amd_kernels: the DSA multi-stream decode's gathered latent query
+            akr_q = akr_state.q_lat[:num_mqa_tokens]
+            akr_state.q_lat = None
+            assert num_mha_tokens == 0 and attn_metadata.num_prefills == 0
+        if akr_q is not None and num_mqa_tokens > 0:
+            self._akr_decode(akr_q, kv_cache, attn_metadata, output[:num_mqa_tokens])
+        elif num_mqa_tokens > 0:
             # A DCP ShardQ step exchanges the local heads' query (shard_q).
             if q_dcp_replicated is not None and gathered_context is None:
                 mqa_q = q_dcp_replicated[:num_mqa_tokens]
@@ -1282,6 +1295,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     # Decode-only steps may combine v_up-first (one reduce-
                     # scatter of [B, H, V] instead of the latent a2a + v_up).
                     vup_done = (
+                        getattr(self, "akr_w_uv_t", None) is not None
+                        and attn_metadata.num_prefills == 0
+                        and not kvgather_rows
+                        and shardq is None
+                        and _akr_combine(
+                            self,
+                            attn_out,
+                            lse,
+                            mqa_output_slice.view(-1, self.num_heads, self.v_head_dim),
+                            seq_lens,
+                            query_start_loc,
+                        )
+                    ) or (
                         getattr(self, "W_UV_dcp", None) is not None
                         and attn_metadata.num_prefills == 0
                         and not kvgather_rows
@@ -1364,6 +1390,45 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if self.use_pcp and output_padded.shape[0] > num_actual_toks:
             output_padded[num_actual_toks:].zero_()
         return output_padded
+
+    def _akr_decode(
+        self,
+        mqa_q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: "MLACommonMetadata",
+        mqa_output_slice: torch.Tensor,
+    ) -> None:
+        """DSA decode on the amd_kernels gathered latent query [rows, 96, 576]:
+        sparse MLA, then the DCP combine (+ W_UV) into ``mqa_output_slice``."""
+        from vllm.models.kimi_k3.amd import akr_dsa
+
+        assert self.dcp_manager is not None
+        attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
+            mqa_q, kv_cache, attn_metadata, self
+        )
+        assert lse is not None
+        decode_metadata = getattr(attn_metadata, "decode", None)
+        seq_lens = (
+            decode_metadata.seq_lens
+            if decode_metadata is not None
+            else cast(torch.Tensor, attn_metadata.seq_lens)[  # type: ignore[attr-defined]
+                : attn_metadata.num_decodes
+            ]
+        )
+        query_start_loc = attn_metadata.query_start_loc[: attn_metadata.num_decodes + 1]
+        if akr_dsa.combine(
+            self,
+            attn_out,
+            lse,
+            mqa_output_slice.view(-1, self.num_heads, self.v_head_dim),
+            seq_lens,
+            query_start_loc,
+        ):
+            return
+        attn_out = self.dcp_manager.combine(
+            attn_out, lse, seq_lens=seq_lens, query_start_loc=query_start_loc
+        )
+        self._v_up_proj(attn_out, out=mqa_output_slice)
 
     def _dcp_decode_rows(
         self,
@@ -1585,6 +1650,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     get_dcp_group().all_gather(self.W_UV.contiguous(), dim=0),
                 )
 
+        # amd_kernels (Kimi-K3.1 DSA): replicated / packed weights of this layer
+        akr_post_load = getattr(self, "_akr_post_load", None)
+        if akr_post_load is not None:
+            akr_post_load()
+
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
         # for more details.
@@ -1665,6 +1735,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
+
+
+def _akr_combine(layer, attn_out, lse, out, seq_lens, query_start_loc) -> bool:
+    from vllm.models.kimi_k3.amd import akr_dsa
+
+    return akr_dsa.combine(layer, attn_out, lse, out, seq_lens, query_start_loc)
 
 
 def unified_mla_kv_cache_update(

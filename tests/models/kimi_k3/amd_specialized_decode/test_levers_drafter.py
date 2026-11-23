@@ -259,6 +259,13 @@ def test_dense_draft_backends(monkeypatch):
         kv_cache_dtype="fp8",
     )
     assert (s.attention_backend, s.kv_cache_dtype) == (B.ROCM_ATTN, "fp8")
+    # An fp8 draft cache alone (InferenceX #5119 c16-c48 without its
+    # TRITON_ATTN pin) keeps the FlyDSL backend.
+    s = _dense_draft(monkeypatch, rocm=True, mla=False, kv_cache_dtype="fp8")
+    assert (s.attention_backend, s.kv_cache_dtype) == (
+        B.KIMI_K3_FLYDSL_SWA_GQA,
+        "fp8",
+    )
 
 
 def test_rocm_gqa_draft_backend_fits_the_dsa_layout():

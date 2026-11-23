@@ -47,6 +47,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
+from vllm.models.kimi_k3.amd import akr_kda, akr_kda_prefill
 from vllm.models.kimi_k3.amd.kda_metadata import (
     PREFILL_CONV_BLOCK_M,
     KimiK3ROCmKDABackend,
@@ -356,6 +357,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        # amd_kernels kda route: spec-only decode runs f_b + conv + recurrence + norm
+        # in one launch (g1 is then only computed for batches that take the stock path).
+        self._akr_decode = akr_kda.setup(self)
 
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -407,12 +411,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         projected = projected_qkvgfab.split(split_sizes, dim=-1)
         mixed_qkv, g_proj_states, f_a, beta = projected[:4]
 
-        if self.use_strided_f_b:
-            g1 = torch.ops.vllm.kimi_k3_kda_fb_proj(f_a, self.f_b_proj.weight)
-        else:
-            g1 = self.f_b_proj(f_a)[0]
+        # akr decode: _forward computes g1 unless the fused decode kernel takes the
+        # batch
+        g1 = None if self._akr_decode else self._fb_proj(f_a)
         beta = beta.unsqueeze(0)
-        g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
         g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
 
         core_attn_out = torch.empty(
@@ -427,18 +429,30 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             g2=g2,
             beta=beta,
             core_attn_out=core_attn_out,
+            proj=projected_qkvgfab if self._akr_decode else None,
+            f_a=f_a if self._akr_decode else None,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         return self.o_proj(core_attn_out)[0]
+
+    def _fb_proj(self, f_a: torch.Tensor) -> torch.Tensor:
+        """g1 [1, n, h, d] = f_b(f_a)."""
+        if self.use_strided_f_b:
+            g1 = torch.ops.vllm.kimi_k3_kda_fb_proj(f_a, self.f_b_proj.weight)
+        else:
+            g1 = self.f_b_proj(f_a)[0]
+        return rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
 
     @eager_break_during_capture
     def _forward(
         self,
         mixed_qkv: torch.Tensor,
-        g1: torch.Tensor,
+        g1: torch.Tensor | None,
         g2: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
+        proj: torch.Tensor | None = None,
+        f_a: torch.Tensor | None = None,
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -463,7 +477,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         num_accepted_tokens = m.num_accepted_tokens
         num_actual_tokens = m.num_actual_tokens
         mixed_qkv = mixed_qkv[:num_actual_tokens]
-        g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
         constant_caches = self.kv_cache
@@ -473,6 +486,27 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # DS layout stores it that way directly; SD layout needs a transpose.
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
+
+        if g1 is None:
+            # amd_kernels kda route: spec-only decode batch in one launch (f_b included)
+            if (
+                spec_sequence_masks is not None
+                and m.num_prefills == 0
+                and m.num_decodes == 0
+                and proj is not None
+                and akr_kda.run(
+                    self,
+                    proj,
+                    conv_state,
+                    recurrent_state,
+                    m,
+                    num_accepted_tokens,
+                    core_attn_out,
+                )
+            ):
+                return
+            g1 = self._fb_proj(f_a)
+        g1 = g1[:, :num_actual_tokens]
 
         # The packed DSA block row gives state slots a fractional-row pitch.
         # Older AITER versions address states by whole rows and cannot take
@@ -668,6 +702,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         core_attn_out_non_spec = None
         if mixed_qkv_ns is not None:
             assert g1_ns is not None and beta_ns is not None
+            if m.num_prefills > 0 and akr_kda_prefill.try_prefill(
+                self,
+                m,
+                mixed_qkv_ns,
+                g1_ns,
+                beta_ns,
+                g2,
+                conv_state,
+                recurrent_state,
+                core_attn_out,
+                num_actual_tokens,
+            ):
+                return
             if m.num_prefills > 0:
                 if self._fused_qkv_conv_fn is not None:
                     # One launch (fused qkv) instead of 3

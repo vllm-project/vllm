@@ -11,6 +11,8 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerPrefillMetadata
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
+from .. import akr_config
+from .. import akr_indexer_prefill as akr
 from .fp4_indexer import quantize_queries
 
 
@@ -20,18 +22,22 @@ class FP4QueryPlan:
     end: int
     row_starts: torch.Tensor
     row_ends: torch.Tensor
-    batches: torch.Tensor
-    schedule: torch.Tensor
-    num_ctas: int
+    # aiter scorer schedule; None when `mxfp4_prefill_score` scores the tile
+    batches: torch.Tensor | None = None
+    schedule: torch.Tensor | None = None
+    num_ctas: int = 0
+    # amd_kernels top-k: longest-window-first row order (None: not needed / aiter top-k)
+    order: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
 class FP4ChunkPlan:
     all_cu: torch.Tensor
-    page_table: torch.Tensor
+    page_table: torch.Tensor | None
     first: int
     per_rank: int
     queries: list[FP4QueryPlan]
+    use_topk: bool = False
 
 
 @dataclass
@@ -47,19 +53,38 @@ def _local_key_cu(chunk, world, interleave):
     )
 
 
-def _prepare_chunk(chunk, world, rank, interleave):
-    from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill import (
-        compute_prefill_schedule,
-    )
-
-    device = chunk.cu_seq_lens.device
-    pages = triton.cdiv(chunk.total_seq_lens, 64)
-    width = pages * 64
+def _aiter_page_table(device, pages):
+    if akr.table_bucket_on():
+        # One compiled aiter scorer per table width: bucket (no per-step JIT).
+        return akr.identity_page_table(device, akr.page_table_width(pages))
     # The scorer prefetches page IDs one block beyond the final iteration.
     table = torch.zeros(
         (1, triton.cdiv(pages, 4) * 4 + 4), device=device, dtype=torch.int32
     )
     table[0, :pages] = torch.arange(pages, device=device, dtype=torch.int32)
+    return table
+
+
+def _aiter_schedule(starts, ends, width):
+    from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill import (
+        compute_prefill_schedule,
+    )
+
+    rows = starts.shape[0]
+    batches = torch.zeros(rows, device=starts.device, dtype=torch.int32)
+    _, schedule, num_ctas = compute_prefill_schedule(
+        batches, starts, ends, 256, max(4096, rows), width
+    )
+    return batches, schedule, num_ctas
+
+
+def _prepare_chunk(chunk, world, rank, interleave, out_width=akr.TOPK):
+    device = chunk.cu_seq_lens.device
+    pages = triton.cdiv(chunk.total_seq_lens, 64)
+    width = pages * 64
+    use_score = akr.score_on()
+    use_topk = akr.topk_for_chunk(chunk, out_width)
+    table = None if use_score else _aiter_page_table(device, pages)
     ks, ke = (
         (chunk.global_cu_seqlen_ks, chunk.global_cu_seqlen_ke)
         if world > 1
@@ -77,15 +102,24 @@ def _prepare_chunk(chunk, world, rank, interleave):
         end = min(start + row_chunk, last)
         lo, hi = start - chunk.token_start, end - chunk.token_start
         starts, ends = ks[lo:hi], ke[lo:hi]
-        batches = torch.zeros(end - start, device=device, dtype=torch.int32)
-        _, schedule, num_ctas = compute_prefill_schedule(
-            batches, starts, ends, 256, max(4096, end - start), width
-        )
+        # The optional longest-window-first `order` of topk_rows only balances ragged
+        # tiles; not passed (the entry's warm-up inputs do not accept it: amd_kernels
+        # topk host._warm_inputs lacks the argument).
+        order = None
+        if use_score:
+            queries.append(FP4QueryPlan(start, end, starts, ends, order=order))
+            continue
+        batches, schedule, num_ctas = _aiter_schedule(starts, ends, width)
         queries.append(
-            FP4QueryPlan(start, end, starts, ends, batches, schedule, num_ctas)
+            FP4QueryPlan(start, end, starts, ends, batches, schedule, num_ctas, order)
         )
     return FP4ChunkPlan(
-        _local_key_cu(chunk, world, interleave), table, first, per_rank, queries
+        _local_key_cu(chunk, world, interleave),
+        table,
+        first,
+        per_rank,
+        queries,
+        use_topk,
     )
 
 
@@ -188,10 +222,12 @@ def prefill_workspace_bytes(max_keys, max_reqs, world, interleave):
     share exceeds an even split by at most one interleave run per request.
     """
     pages = triton.cdiv(max_keys, 64) * 64
+    # The amd_kernels top-k keeps its candidate lists in a persistent scratch buffer.
+    extra = akr.topk_workspace_bytes(max_keys) if akr.topk_on() else 0
     if world == 1:
-        return 1024**3 + 68 * (max_keys + pages)
+        return 1024**3 + 68 * (max_keys + pages) + extra
     local = triton.cdiv(max_keys, world) + max_reqs * interleave
-    return 1024**3 + 68 * ((world + 1) * local + pages)
+    return 1024**3 + 68 * ((world + 1) * local + pages) + extra
 
 
 def stage_keys(cache, chunk, world, interleave, all_cu=None):
@@ -249,15 +285,10 @@ def prefill_indexer(
     pending=None,
     plan=None,
 ):
-    from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill import (
-        flydsl_pa_mqa_logits_fp4_prefill,
-    )
-    from aiter.ops.topk import top_k_per_row_prefill
-
     assert weights.dtype == torch.bfloat16
     if plan is None:
         rank = get_dcp_group().rank_in_group if world > 1 else 0
-        plan = _prepare_chunk(chunk, world, rank, interleave)
+        plan = _prepare_chunk(chunk, world, rank, interleave, out.shape[1])
     payload, scales = (
         stage_keys(cache, chunk, world, interleave, plan.all_cu)
         if staged_keys is None
@@ -268,28 +299,63 @@ def prefill_indexer(
     local_out = torch.full(
         (plan.per_rank, out.shape[1]), -1, dtype=out.dtype, device=out.device
     )
+    use_score = plan.page_table is None
+    use_topk = plan.use_topk
+    if use_score or use_topk:
+        from amd_kernels.indexer.mxfp4_indexer_common import (
+            mxfp4_prefill_score,
+            mxfp4_prefill_score_unsupported_reason,
+            mxfp4_prefill_topk,
+            mxfp4_prefill_topk_unsupported_reason,
+        )
+    from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill import (
+        flydsl_pa_mqa_logits_fp4_prefill,
+    )
+    from aiter.ops.topk import top_k_per_row_prefill
+
+    page_table = plan.page_table
     for query in plan.queries:
         start, end = query.start, query.end
         starts, ends = query.row_starts, query.row_ends
         qp, qs = quantize_queries(q[start:end])
         logits = torch.empty((end - start, width), device=q.device, dtype=torch.float32)
-        flydsl_pa_mqa_logits_fp4_prefill(
-            qp,
-            qs,
-            payload,
-            scales,
-            plan.page_table,
-            weights[start:end],
-            query.batches,
-            starts,
-            ends,
-            width,
-            weight_scale=weight_scale,
-            cta_info=query.schedule,
-            n_ctas=query.num_ctas,
-            out=logits,
-        )
+        score_args = (qp, qs, weights[start:end], payload, scales, starts, ends, logits)
+        if use_score and not akr_config.call_unsupported(
+            "indexer", mxfp4_prefill_score_unsupported_reason(*score_args, weight_scale)
+        ):
+            # Whole pages are stored: only [ks, ke) of a row is meaningful, and both
+            # top-k implementations read only the window.
+            mxfp4_prefill_score(*score_args, weight_scale)
+        else:
+            batches, schedule, num_ctas = query.batches, query.schedule, query.num_ctas
+            if schedule is None:
+                if page_table is None:
+                    page_table = _aiter_page_table(q.device, payload.shape[0])
+                batches, schedule, num_ctas = _aiter_schedule(starts, ends, width)
+            flydsl_pa_mqa_logits_fp4_prefill(
+                qp,
+                qs,
+                payload,
+                scales,
+                page_table,
+                weights[start:end],
+                batches,
+                starts,
+                ends,
+                width,
+                weight_scale=weight_scale,
+                cta_info=schedule,
+                n_ctas=num_ctas,
+                out=logits,
+            )
         selected = local_out[start - plan.first : end - plan.first]
+        if use_topk and not akr_config.call_unsupported(
+            "indexer",
+            mxfp4_prefill_topk_unsupported_reason(logits, starts, ends, selected),
+        ):
+            # Window-relative, ascending, -1 padded: no epilogue.
+            mxfp4_prefill_topk(logits, starts, ends, selected)
+            continue
         top_k_per_row_prefill(
             logits=logits,
             rowStarts=starts,

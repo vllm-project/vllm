@@ -12,6 +12,8 @@ word a rank (``alarm``): a rank whose wait gives up sets its word there before i
 stores anything else. The kernels see the buffer past the head.
 """
 
+from typing import Any
+
 import torch
 
 from vllm.distributed import get_dcp_group, get_tp_group
@@ -23,6 +25,10 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime.peer import PeerBuffer
 
 class MonoRunner:
     """Collective: every TP rank builds it at the same point."""
+
+    # amd_kernels K1 workspace / K2 runner (set by akr_k1k2.make_runner_state)
+    akr_k1: Any
+    akr_k2: Any
 
     def __init__(self, device: torch.device, dcp: int | None = None, m1: bool = True):
         """``dcp``: M1's ranks, 1 or the TP group (default: the DCP group's).
@@ -98,6 +104,11 @@ class MonoRunner:
         self.mla_prefix = ""  # an M1 layer's name: its decode metadata
         self.interleave = 1  # the DCP KV cache interleave
         self.num_spec = 0  # speculative tokens a request
+        # amd_kernels K1 / K2 (VLLM_KIMI_AKR_K1 / _K2, default off): their own
+        # workspaces
+        from vllm.models.kimi_k3.amd import akr_k1k2
+
+        akr_k1k2.make_runner_state(self, device, tp.cpu_group, self.rank)
 
     @property
     def m1c(self) -> bool:
@@ -108,6 +119,10 @@ class MonoRunner:
     def step_begin(self) -> None:
         """Once a forward, before its first mono launch (a graph captures it)."""
         self.epoch.add_(1)
+        if self.akr_k1 is not None or self.akr_k2 is not None:
+            from vllm.models.kimi_k3.amd import akr_k1k2
+
+            akr_k1k2.step_begin(self)
 
     def launch_args(self) -> dict:
         return {
