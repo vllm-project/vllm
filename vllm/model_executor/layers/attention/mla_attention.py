@@ -3156,7 +3156,9 @@ def accumulate_mla_context_chunk(
             output=output[token_start:init_start],
             output_lse=output_lse[:, token_start:init_start],
             prefix_output=output[token_start:init_start],
-            prefix_lse=output_lse[:, token_start:init_start],
+            # merge_attn_states may overwrite a head's lse before all of that
+            # head's threads have read it, so the lse cannot merge in place.
+            prefix_lse=output_lse[:, token_start:init_start].clone(),
             suffix_output=attn_output[:num_merged],
             suffix_lse=attn_softmax_lse[:, :num_merged],
         )

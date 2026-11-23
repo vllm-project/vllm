@@ -187,6 +187,11 @@ def tekken_convert_tokens_to_string(
     return "".join(cast(Sequence[str], tokens))
 
 
+# Chat-template kwargs that vLLM injects for HF/Cohere templates. They are not
+# mistral-common request fields, so don't forward them to `from_openai`.
+_TEMPLATE_ONLY_KWARGS = ("cohere_format", "enable_thinking")
+
+
 class MistralTokenizer(TokenizerLike):
     IS_MISTRAL_TOKENIZER = True  # used by vllm.utils.mistral
 
@@ -381,6 +386,8 @@ class MistralTokenizer(TokenizerLike):
         max_length = kwargs.pop("max_length", None)
         kwargs.pop("return_tensors", None)
         kwargs.pop("return_dict", None)
+        for key in _TEMPLATE_ONLY_KWARGS:
+            kwargs.pop(key, None)
 
         _validate_apply_chat_template_args(
             messages, continue_final_message, add_generation_prompt
