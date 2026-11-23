@@ -5,7 +5,7 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Looped multimodal (text and image in, text out) MoE from Thinking Machines Lab with 26B total and 3.5B active parameters and up to 1M context: its 12 middle layers run three passes per token, each with its own KV cache and gated messages from the previous pass. Bundles a DSpark speculator."
   date_added: 2026-11-20
-  date_updated: 2026-11-22
+  date_updated: 2026-11-23
   difficulty: intermediate
   tasks:
     - multimodal
@@ -20,6 +20,7 @@ meta:
     h100: verified
     h200: verified
     dgx_spark_gb10: verified
+    rtx_3090_2x: verified
 
 model:
   model_id: "thinkingmachines/Inkling-2-Mini"
@@ -69,9 +70,13 @@ hardware_overrides: {}
 strategy_overrides:
   # One GPU serves the model's full 1M context (a GB200 holds ~1.8 concurrent
   # 1M-token requests; ~69 KB of cache per token). H100 (80 GB) and DGX Spark
-  # (128 GB shared with the host) keep a 262,144-token cap.
+  # (128 GB shared with the host) keep a 262,144-token cap. Two RTX 3090s
+  # (24 GB each) need TP2 and a 4,096-token context; 64 sequences keep the
+  # DSpark verify step's logits within memory.
   single_node_tp:
-    tp: 1
+    tp:
+      default: 1
+      rtx_3090_2x: 2
     hardware_overrides:
       h100:
         extra_args:
@@ -81,6 +86,12 @@ strategy_overrides:
         extra_args:
           - "--max-model-len"
           - "262144"
+      rtx_3090_2x:
+        extra_args:
+          - "--max-model-len"
+          - "4096"
+          - "--max-num-seqs"
+          - "64"
 
 guide: |
   ## Overview
@@ -113,9 +124,10 @@ guide: |
 
   ## Configurations
 
-  Inkling 2 Mini runs on NVIDIA Blackwell (B200, GB200, B300, GB300), Hopper (H100, H200) and
-  DGX Spark, and is verified on GB200, B300, GB300, H100, H200 and DGX Spark. The configurations
-  below were verified on GB200 with DSpark and the reasoning parser enabled:
+  Inkling 2 Mini runs on NVIDIA Blackwell (B200, GB200, B300, GB300), Hopper (H100, H200),
+  DGX Spark, Ampere and Ada (SM80, SM86, SM89), and is verified on GB200, B300, GB300, H100,
+  H200, DGX Spark and 2× RTX 3090. The configurations below were verified on GB200 with DSpark
+  and the reasoning parser enabled:
 
   - **One GPU, TP1:** the full 1,048,576-token context (a GB200 holds about 1.8 concurrent
     1M-token requests). This is the most efficient way to serve the model; TP4 gives lower
@@ -124,6 +136,10 @@ guide: |
 
   On one GPU, the KV cache bounds the number of concurrent long sessions: with 32K, 64K and
   128K-token sessions, about 45, 32 and 20 sessions run at 100 tokens/s per user.
+
+  On Ampere and Ada the KV cache is BF16 and the routed experts take BF16 activations. Two
+  RTX 3090s at TP2 hold a 4,096-token context: about 100 output tokens/s for one stream, and
+  about 177 with DSpark (acceptance length 3.8).
 
   Tool calling uses the `inkling` tool-call parser (opt-in above).
 

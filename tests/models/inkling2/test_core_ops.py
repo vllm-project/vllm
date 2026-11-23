@@ -39,7 +39,7 @@ def test_rms_norm_rounds_once_to_bf16(in_dtype, width):
 
 def test_e4m3_conversions_match_torch():
     """`to_e4m3` rounds to nearest even like torch and `from_e4m3` decodes
-    every byte: in software below SM89."""
+    every byte: in software below SM90."""
     from vllm.models.inkling2.nvidia.ops.e4m3 import e4m3_arg, from_e4m3, to_e4m3
     from vllm.triton_utils import tl, triton
 
@@ -60,6 +60,9 @@ def test_e4m3_conversions_match_torch():
     x = torch.cat((finite, (finite[1:] + finite[:-1]) / 2))
     x = torch.cat((x, torch.randn(4096 - x.numel(), device=DEVICE) * 30))
     x = x.clamp(-448, 448)
+    # Out of range saturates to +-448 (`satfinite`), NaN is 0x7F.
+    edges = [1e4, -1e4, 464.0, float("inf"), float("-inf"), float("nan")]
+    x[-len(edges) :] = torch.tensor(edges, device=DEVICE)
     codes = torch.empty(4096, device=DEVICE, dtype=torch.float8_e4m3fn)
     roundtrip = torch.empty(4096, device=DEVICE)
     decoded = torch.empty(256, device=DEVICE)
@@ -71,9 +74,11 @@ def test_e4m3_conversions_match_torch():
         decoded,
         N=4096,
     )
-    expected = x.to(torch.float8_e4m3fn)
+    expected = x.clamp(-448, 448).to(torch.float8_e4m3fn)
+    expected.view(torch.uint8)[-1] = 0x7F
     assert torch.equal(codes.view(torch.uint8), expected.view(torch.uint8))
-    assert torch.equal(roundtrip, expected.float())
+    assert torch.equal(roundtrip[:-1], expected[:-1].float())
+    assert roundtrip[-1].isnan()
     assert torch.equal(decoded.isnan(), values.isnan())
     nan = values.isnan()
     assert torch.equal(decoded[~nan].view(torch.int32), values[~nan].view(torch.int32))
@@ -388,6 +393,23 @@ def _chunked_steps(
 STEPS = [[3, 7, 2, 9], [2, 6, 0, 0], [1, 1, 1, 1]]
 # Steps of over 256 tokens take the prefill tiling.
 LONG_STEPS = [[3, 150, 2, 140], [200, 6, 90, 0], [1, 1, 1, 1]]
+# A long step ending in a one-token request that continues earlier context:
+# with padding, its tile ends in padding rows (request start 0).
+PADDED_STEPS = [[120, 100, 3, 2], [120, 0, 138, 1]]
+
+
+def _pad(x: torch.Tensor, meta: _ConvMeta, rows: int) -> tuple[Any, _ConvMeta]:
+    """Append `rows` padding rows: position 0, request 0, no slot, start 0."""
+    pos, table, seq_idx, slots, qstart = meta
+    zeros = torch.zeros(rows, dtype=torch.int32, device=DEVICE)
+    meta = (
+        torch.cat([pos, zeros.to(pos.dtype)]),
+        table,
+        torch.cat([seq_idx, zeros]),
+        torch.cat([slots, torch.full_like(zeros, -1).to(slots.dtype)]),
+        torch.cat([qstart, zeros]),
+    )
+    return torch.cat([x, x.new_zeros(rows, x.shape[1])]), meta
 
 
 def _conv_cache_and_table(heads, block, row, blocks_per_req=8):
@@ -397,11 +419,13 @@ def _conv_cache_and_table(heads, block, row, blocks_per_req=8):
     return cache, perm.view(4, blocks_per_req).int()
 
 
+@pytest.mark.parametrize("pad", [0, 3])
 @pytest.mark.parametrize("fused_residual", [False, True])
-@pytest.mark.parametrize("steps", [STEPS, LONG_STEPS])
-def test_short_conv_chunked_matches_full_sequence(fused_residual, steps):
-    """Chunked prefill + decode through the paged conv state equals one pass;
-    the residual update `(res + addend) + y` is fused in fp32."""
+@pytest.mark.parametrize("steps", [STEPS, LONG_STEPS, PADDED_STEPS])
+def test_short_conv_chunked_matches_full_sequence(fused_residual, steps, pad):
+    """Chunked prefill + decode through the paged conv state equals one pass,
+    with or without padding rows; the residual update `(res + addend) + y` is
+    fused in fp32."""
     width, block, heads, stream_width, offset, row = 4, 4, 2, 128, 128, 1024
     channels = heads * stream_width
     totals = [sum(s[i] for s in steps) for i in range(4)]
@@ -419,6 +443,11 @@ def test_short_conv_chunked_matches_full_sequence(fused_residual, steps):
             res = torch.cat([ress[i][r] for i, r in zip(reqs, rows)])
             add = torch.cat([adds[i][r] for i, r in zip(reqs, rows)])
             kwargs = dict(addend=add, residual=res, out=res)
+        if pad:
+            for name, t in kwargs.items():
+                kwargs[name] = torch.cat([t, t.new_zeros(pad, channels)])
+            kwargs["out"] = kwargs["residual"] if fused_residual else None
+            x, meta = _pad(x, meta, pad)
         out = short_conv(x, weight, cache, *meta, offset, stream_width, **kwargs)
         for j, i in enumerate(reqs):
             outs[i].append(out[starts[j] : starts[j + 1]])

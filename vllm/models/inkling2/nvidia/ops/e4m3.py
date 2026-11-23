@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""E4M3 conversions of the Triton kernels. Triton converts fp8e4nv on SM89+
-only (`use_native_e4m3`): below, launchers pass e4m3 tensors as uint8
-(`e4m3_arg`) and the kernels convert in software, as the hardware rounds."""
+"""E4M3 conversions of the Triton kernels. They use Triton's fp8e4nv
+conversions on SM90+ only (`use_native_e4m3`): below, launchers pass e4m3
+tensors as uint8 (`e4m3_arg`) and the kernels convert in software, as the
+SM90 hardware rounds."""
 
 import torch
 
@@ -14,7 +15,7 @@ _NATIVE_E4M3 = tl.constexpr(use_native_e4m3())
 
 
 def e4m3_arg(x: torch.Tensor | None) -> torch.Tensor | None:
-    """`x` as a kernel argument: e4m3 tensors are uint8 below SM89."""
+    """`x` as a kernel argument: e4m3 tensors are uint8 below SM90."""
     if x is not None and x.dtype == torch.float8_e4m3fn and not use_native_e4m3():
         return x.view(torch.uint8)
     return x
@@ -78,19 +79,19 @@ def _e4m3_f16(b):
 
 @triton.jit
 def to_e4m3(x):
-    """`x` as e4m3, uint8 bits below SM89."""
+    """`x` as e4m3, uint8 bits below SM90."""
     # One expression: Triton also types code after a constexpr branch's return.
     return x.to(tl.float8e4nv) if _NATIVE_E4M3 else _e4m3_bits(x.to(tl.float32))
 
 
 @triton.jit
 def from_e4m3(x):
-    """fp32 values of e4m3 `x` (uint8 bits below SM89)."""
+    """fp32 values of e4m3 `x` (uint8 bits below SM90)."""
     return x.to(tl.float32) if _NATIVE_E4M3 else _e4m3_value(x)
 
 
 @triton.jit
 def cast_store(x, dtype: tl.constexpr):
     """`x` cast to pointer element type `dtype`, where uint8 stands for e4m3
-    below SM89."""
+    below SM90."""
     return _e4m3_bits(x.to(tl.float32)) if dtype == tl.uint8 else x.to(dtype)
