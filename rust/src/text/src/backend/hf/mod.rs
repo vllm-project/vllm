@@ -8,6 +8,7 @@ mod overrides;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use serde_json::{Map, Value};
 use tracing::info;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_tokenizer::{
@@ -15,7 +16,7 @@ use vllm_tokenizer::{
     UnavailableTokenizer,
 };
 
-use self::config::{GenerationConfig, load_generation_config};
+use self::config::{GenerationConfig, load_generation_config, parse_sampling_defaults};
 pub use self::config::{
     HfChatTemplate, HfNamedChatTemplate, HfSpecialTokens, HfTokenizerConfig, ModelConfig,
     NamedSpecialToken, load_model_config, load_tokenizer_config,
@@ -24,7 +25,7 @@ pub use self::model_files::{
     HfToken, ModelFileSources, ModelSource, ResolvedModelFiles, TokenizerSource,
 };
 pub use self::overrides::HfOverrides;
-use crate::backend::{GenerationConfigMode, SamplingHints, TextBackend};
+use crate::backend::{DefaultMaxTokens, GenerationConfigMode, SamplingHints, TextBackend};
 use crate::error::Result;
 
 fn load_tokenizer(tokenizer: &TokenizerSource) -> Result<DynTokenizer> {
@@ -42,14 +43,8 @@ pub struct HfTextBackend {
     /// [`UnavailableTokenizer`] when the files resolve no tokenizer
     /// (`--skip-tokenizer-init`).
     tokenizer: DynTokenizer,
-    /// Primary EOS handled by engine-core's dedicated EOS path.
-    primary_eos_token_id: Option<u32>,
-    /// Additional EOS ids that should flow through stop-token handling.
-    extra_eos_token_ids: BTreeSet<u32>,
-    /// Generation-config for sampling defaults that may be inherited when the
-    /// user does not explicitly override them.
-    generation_config: GenerationConfig,
-    generation_config_mode: GenerationConfigMode,
+    /// EOS ids and sampling defaults, fixed at load.
+    sampling_hints: SamplingHints,
     /// Model vocabulary size from the selected text config.
     model_vocab_size: usize,
     /// Model config (`config.json`).
@@ -62,6 +57,7 @@ impl HfTextBackend {
         files: ResolvedModelFiles,
         model_id: String,
         generation_config_mode: GenerationConfigMode,
+        override_generation_config: &Map<String, Value>,
     ) -> Result<Self> {
         let tokenizer_config = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
         let model_config = load_model_config(files.config_path.as_deref())?;
@@ -77,6 +73,13 @@ impl HfTextBackend {
             &generation_config,
             tokenizer.as_ref(),
         );
+        let sampling_hints = build_sampling_hints(
+            generation_config_mode,
+            generation_config.sampling,
+            override_generation_config,
+            primary_eos_token_id,
+            extra_eos_token_ids,
+        )?;
 
         info!(
             model_id,
@@ -87,10 +90,7 @@ impl HfTextBackend {
             model_id,
             files,
             tokenizer,
-            primary_eos_token_id,
-            extra_eos_token_ids,
-            generation_config,
-            generation_config_mode,
+            sampling_hints,
             model_vocab_size,
             model_config,
         })
@@ -165,47 +165,55 @@ impl TextBackend for HfTextBackend {
     }
 
     fn sampling_hints(&self) -> Result<SamplingHints> {
-        Ok(build_sampling_hints(
-            self.generation_config_mode,
-            &self.generation_config,
-            self.primary_eos_token_id,
-            self.extra_eos_token_ids.clone(),
-        ))
+        Ok(self.sampling_hints.clone())
     }
 }
 
+/// Merge `--override-generation-config` over the model's sampling keys, which
+/// `vllm` mode skips; a `null` override clears a default.
 fn build_sampling_hints(
     mode: GenerationConfigMode,
-    generation_config: &GenerationConfig,
+    model_sampling: Map<String, Value>,
+    overrides: &Map<String, Value>,
     primary_eos_token_id: Option<u32>,
     extra_eos_token_ids: BTreeSet<u32>,
-) -> SamplingHints {
-    let sampling_config = match mode {
-        // Auto inherits sampling defaults from the model's generation config.
-        GenerationConfigMode::Auto => Some(generation_config),
-        // Vllm skips model-provided sampling defaults. `lower_sampling_params`
-        // applies vLLM fallback values; separately resolved EOS tokens remain.
-        GenerationConfigMode::Vllm => None,
+) -> Result<SamplingHints> {
+    let mut sampling = match mode {
+        GenerationConfigMode::Auto => model_sampling,
+        // `lower_sampling_params` applies vLLM fallback values instead.
+        GenerationConfigMode::Vllm => Map::new(),
     };
+    sampling.extend(overrides.clone());
+    let defaults = parse_sampling_defaults(sampling)?;
+    // An operator-set `max_new_tokens` caps every request; the model's is a fallback.
+    let default_max_tokens = defaults.max_new_tokens.map(|max_tokens| {
+        if overrides.contains_key("max_new_tokens") {
+            DefaultMaxTokens::Cap(max_tokens)
+        } else {
+            DefaultMaxTokens::Fallback(max_tokens)
+        }
+    });
 
-    SamplingHints {
+    Ok(SamplingHints {
         primary_eos_token_id,
         extra_eos_token_ids,
-        default_temperature: sampling_config.and_then(|config| config.temperature),
-        default_top_p: sampling_config.and_then(|config| config.top_p),
-        default_top_k: sampling_config.and_then(|config| config.top_k),
-        default_min_p: sampling_config.and_then(|config| config.min_p),
-        default_repetition_penalty: sampling_config.and_then(|config| config.repetition_penalty),
-        default_presence_penalty: sampling_config.and_then(|config| config.presence_penalty),
-        default_frequency_penalty: sampling_config.and_then(|config| config.frequency_penalty),
-        default_max_tokens: sampling_config.and_then(|config| config.max_new_tokens),
-    }
+        default_temperature: defaults.temperature,
+        default_top_p: defaults.top_p,
+        default_top_k: defaults.top_k,
+        default_min_p: defaults.min_p,
+        default_repetition_penalty: defaults.repetition_penalty,
+        default_presence_penalty: defaults.presence_penalty,
+        default_frequency_penalty: defaults.frequency_penalty,
+        default_max_tokens,
+        default_skip_special_tokens: defaults.skip_special_tokens,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
+    use serde_json::{Map, Value};
     use vllm_tokenizer::Tokenizer;
 
     use super::{
@@ -286,6 +294,7 @@ mod tests {
             files,
             "test-model".to_string(),
             GenerationConfigMode::Auto,
+            &Default::default(),
         )
         .unwrap();
         assert!(!backend.has_tokenizer());
@@ -337,9 +346,8 @@ mod tests {
 
     #[test]
     fn vllm_generation_config_keeps_eos_and_uses_neutral_sampling_defaults() {
-        let generation_config: GenerationConfig = serde_json::from_str(
+        let generation_config = json_object(
             r#"{
-                "eos_token_id": [2, 3],
                 "temperature": 0.6,
                 "top_p": 0.95,
                 "top_k": 20,
@@ -349,23 +357,22 @@ mod tests {
                 "frequency_penalty": 0.5,
                 "max_new_tokens": 4096
             }"#,
-        )
-        .unwrap();
+        );
         let extra_eos_token_ids = BTreeSet::from([3]);
-
-        let hints = (
+        let hints_for = |mode| {
             build_sampling_hints(
-                GenerationConfigMode::Auto,
-                &generation_config,
+                mode,
+                generation_config.clone(),
+                &Map::new(),
                 Some(2),
                 extra_eos_token_ids.clone(),
-            ),
-            build_sampling_hints(
-                GenerationConfigMode::Vllm,
-                &generation_config,
-                Some(2),
-                extra_eos_token_ids,
-            ),
+            )
+            .unwrap()
+        };
+
+        let hints = (
+            hints_for(GenerationConfigMode::Auto),
+            hints_for(GenerationConfigMode::Vllm),
         );
 
         expect_test::expect![[r#"
@@ -399,8 +406,11 @@ mod tests {
                         0.5,
                     ),
                     default_max_tokens: Some(
-                        4096,
+                        Fallback(
+                            4096,
+                        ),
                     ),
+                    default_skip_special_tokens: None,
                 },
                 SamplingHints {
                     primary_eos_token_id: Some(
@@ -417,9 +427,115 @@ mod tests {
                     default_presence_penalty: None,
                     default_frequency_penalty: None,
                     default_max_tokens: None,
+                    default_skip_special_tokens: None,
                 },
             )
         "#]]
         .assert_debug_eq(&hints);
+    }
+
+    fn json_object(json: &str) -> Map<String, Value> {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[tokio::test]
+    async fn override_generation_config_merges_over_model_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.json"), r#"{"vocab_size": 128}"#).unwrap();
+        std::fs::write(
+            dir.path().join("generation_config.json"),
+            r#"{"temperature": 0.6, "top_p": 0.95, "top_k": 20, "skip_special_tokens": false}"#,
+        )
+        .unwrap();
+        let files = ResolvedModelFiles::from_sources(&ModelFileSources {
+            model: ModelSource {
+                id: dir.path().to_str().unwrap().to_string(),
+                revision: None,
+            },
+            tokenizer: None,
+            hf_config: None,
+            skip_tokenizer_init: true,
+            hf_token: None,
+        })
+        .await
+        .unwrap();
+        let hints = |mode, overrides: &str| {
+            HfTextBackend::from_resolved_model_files(
+                files.clone(),
+                "test-model".to_string(),
+                mode,
+                &json_object(overrides),
+            )
+            .and_then(|backend| backend.sampling_hints())
+        };
+        let overrides =
+            r#"{"temperature": 0.2, "top_k": null, "min_p": 0.05, "max_new_tokens": 64}"#;
+
+        // `auto` keeps the model's `top_p` and `skip_special_tokens`; `vllm` keeps
+        // only the overrides.
+        expect_test::expect![[r#"
+            (
+                SamplingHints {
+                    primary_eos_token_id: None,
+                    extra_eos_token_ids: {},
+                    default_temperature: Some(
+                        0.2,
+                    ),
+                    default_top_p: Some(
+                        0.95,
+                    ),
+                    default_top_k: None,
+                    default_min_p: Some(
+                        0.05,
+                    ),
+                    default_repetition_penalty: None,
+                    default_presence_penalty: None,
+                    default_frequency_penalty: None,
+                    default_max_tokens: Some(
+                        Cap(
+                            64,
+                        ),
+                    ),
+                    default_skip_special_tokens: Some(
+                        false,
+                    ),
+                },
+                SamplingHints {
+                    primary_eos_token_id: None,
+                    extra_eos_token_ids: {},
+                    default_temperature: Some(
+                        0.2,
+                    ),
+                    default_top_p: None,
+                    default_top_k: None,
+                    default_min_p: Some(
+                        0.05,
+                    ),
+                    default_repetition_penalty: None,
+                    default_presence_penalty: None,
+                    default_frequency_penalty: None,
+                    default_max_tokens: Some(
+                        Cap(
+                            64,
+                        ),
+                    ),
+                    default_skip_special_tokens: None,
+                },
+            )
+        "#]]
+        .assert_debug_eq(&(
+            hints(GenerationConfigMode::Auto, overrides).unwrap(),
+            hints(GenerationConfigMode::Vllm, overrides).unwrap(),
+        ));
+        assert!(hints(GenerationConfigMode::Vllm, r#"{"temperature": "hot"}"#).is_err());
+        assert_eq!(
+            hints(
+                GenerationConfigMode::Auto,
+                r#"{"skip_special_tokens": true}"#
+            )
+            .unwrap()
+            .default_skip_special_tokens,
+            Some(true)
+        );
     }
 }
