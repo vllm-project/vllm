@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import asdict
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -25,6 +27,15 @@ router = APIRouter()
 
 def render(request: Request) -> ServingRender | None:
     return getattr(request.app.state, "serving_render", None)
+
+
+@router.get("/inference/v1/render_fingerprint")
+async def show_render_fingerprint(raw_request: Request):
+    fingerprint = getattr(raw_request.app.state, "render_fingerprint", None)
+    if fingerprint is None:
+        raise NotImplementedError("This server does not compute a render fingerprint")
+
+    return JSONResponse(content=asdict(fingerprint))
 
 
 @router.post(

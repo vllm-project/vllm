@@ -413,3 +413,35 @@ Prefill omits `kwargs_data` and sends `mm_metadata` with
   "sampling_params": {"max_tokens": 64}
 }
 ```
+
+## Render fingerprint
+
+A worker that accepts token IDs from a separate render server must be
+configured the same way, or it runs a prompt it would not have produced.
+`GET /inference/v1/render_fingerprint` reports a digest of the server's render
+inputs. Like the other `/inference` routes, `--api-key` protects it:
+
+```json
+{
+  "render_fingerprint": "rf1:<sha256>:vllm-py/<version>;renderer=hf;tokenizer=tokenizers/<version>",
+  "presence": "hub",
+  "manifest": {"schema": 1, "files": {"tokenizer.json": "<sha256>"}, "flags": {"tokenizer_mode": "auto"}}
+}
+```
+
+- The digest is the SHA-256 of the manifest, serialized as canonical JSON
+  ([RFC 8785](https://www.rfc-editor.org/rfc/rfc8785)). `files` lists a fixed
+  set of tokenizer, template and config files by the hash of their bytes
+  (`null` when absent), and `flags` holds the flags that change rendering.
+  Two servers with the same files and flags report the same digest.
+- The renderer tag after the digest names the implementation, the renderer
+  that ran and the tokenizer library. It is outside the digest.
+- `presence` is `hub` when the file list came from the Hugging Face Hub, and
+  `local` for a local path or offline mode.
+
+`vllm launch render` always serves the route. `vllm serve` serves it when the
+scale-out endpoints are enabled. To find why two servers differ, compare
+their manifests.
+
+The fingerprint is not computed when `VLLM_USE_MODELSCOPE` is set; the route
+then returns `501`.
