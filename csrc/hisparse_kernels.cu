@@ -518,11 +518,10 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     if (warp_in_one_row) {
       const unsigned int lanes = __activemask();
       const int leader = __ffs(lanes) - 1;
-      const int encoded = top_k - (col - lane_id + leader);
-      if (lane_id == leader && encoded > s_first_invalid[r]) {
-        atomicMax(&s_first_invalid[r], encoded);
+      if (lane_id == leader) {
+        atomicMax(&s_first_invalid[r], top_k - (col - lane_id + leader));
       }
-    } else if (top_k - col > s_first_invalid[r]) {
+    } else {
       atomicMax(&s_first_invalid[r], top_k - col);
     }
   };
