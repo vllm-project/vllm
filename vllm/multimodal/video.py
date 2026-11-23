@@ -1084,6 +1084,7 @@ class Glm5NextVideoBackend(VideoBackend):
 class GLMGAVideoBackend(VideoBackend):
     _MAX_FRAMES: ClassVar[int] = 640
     _MAX_FPS: ClassVar[int] = 30
+    _DEFAULT_FPS: ClassVar[float] = 2.0
 
     @classmethod
     def _prepare_source(cls, source: VideoSourceMetadata) -> VideoSourceMetadata:
@@ -1110,7 +1111,9 @@ class GLMGAVideoBackend(VideoBackend):
         total_frames_num = source.total_frames_num
         duration = source.duration
         original_fps = source.original_fps
-        target_fps = min(target.fps, cls._MAX_FPS)
+        target_fps = (
+            min(target.fps, cls._MAX_FPS) if target.fps > 0 else cls._DEFAULT_FPS
+        )
         max_frame_idx = source.total_frames_num - 1
         max_frames = min(kwargs.get("max_frames", cls._MAX_FRAMES), cls._MAX_FRAMES)
 

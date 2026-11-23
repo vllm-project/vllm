@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from functools import partial
 from io import BytesIO
 from pathlib import Path
@@ -175,6 +176,11 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
             )
             total = int(frames.shape[0])
             fps = float(self.kwargs.get("fps", 1))
+            if not math.isfinite(fps):
+                raise ValueError(f"fps must be a finite number, got {fps}")
+            if fps <= 0:
+                # Treat fps <= 0 as unset, like a request without fps.
+                fps = 1.0
 
             # validate and extract frames_indices
             frames_indices = self.kwargs.get("frames_indices")
@@ -208,7 +214,7 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
                 if not isinstance(duration, (int, float)) or duration < 0:
                     raise ValueError("duration must be a non-negative number")
             else:
-                duration = total_num_frames / fps if fps > 0 else 0.0
+                duration = total_num_frames / fps
 
             metadata = {
                 "total_num_frames": total_num_frames,
