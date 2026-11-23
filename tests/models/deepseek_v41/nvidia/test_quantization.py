@@ -24,22 +24,34 @@ def _platform(capability):
 
 
 @pytest.mark.parametrize(
-    ("capability", "backend", "per_quant", "expected"),
+    ("capability", "backend", "per_quant", "expected", "tp_size"),
     [
-        (80, "auto", None, True),
-        (90, "auto", None, True),
-        (89, "auto", None, False),
-        (100, "auto", None, False),
+        (80, "auto", None, True, 8),
+        (90, "auto", None, True, 8),
+        (89, "auto", None, False, 8),
+        (100, "auto", None, False, 8),
         # An explicit MXFP8 backend keeps vLLM's choice on SM90 ...
-        (90, "marlin", None, False),
-        (90, "auto", {"mxfp8": "humming"}, False),
-        (90, "auto", {"nvfp4_w4a16": "humming"}, True),
+        (90, "marlin", None, False, 8),
+        (90, "auto", {"mxfp8": "humming"}, False, 8),
+        (90, "auto", {"nvfp4_w4a16": "humming"}, True, 8),
         # ... but not on SM80, whose attention reads the BF16 wo_a weight.
-        (80, "marlin", None, True),
+        (80, "marlin", None, True, 8),
+        # At TP1 on SM90 every rank holds whole dense layers, and the two extra
+        # copies cost 12.4 GiB per GPU; TP2 and up keep BF16 and the GEMV.
+        (90, "auto", None, False, 1),
+        (90, "auto", None, True, 2),
+        (90, "auto", None, True, 16),
+        (80, "auto", None, True, 1),
+        (100, "auto", None, False, 1),
     ],
 )
-def test_mxfp8_linear_as_bf16(monkeypatch, capability, backend, per_quant, expected):
+def test_mxfp8_linear_as_bf16(
+    monkeypatch, capability, backend, per_quant, expected, tp_size
+):
     monkeypatch.setattr(quantization, "current_platform", _platform(capability))
+    monkeypatch.setattr(
+        quantization, "get_tensor_model_parallel_world_size", lambda: tp_size
+    )
     kernel_config = SimpleNamespace(
         linear_backend=backend, linear_backend_per_quant=per_quant
     )
@@ -49,6 +61,22 @@ def test_mxfp8_linear_as_bf16(monkeypatch, capability, backend, per_quant, expec
         lambda: SimpleNamespace(kernel_config=kernel_config),
     )
     assert quantization.mxfp8_linear_as_bf16() == expected
+
+
+def test_mxfp8_linear_method_is_stock_at_sm90_tp1(monkeypatch):
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
+
+    monkeypatch.setattr(quantization, "current_platform", _platform(90))
+    monkeypatch.setattr(quantization, "get_tensor_model_parallel_world_size", lambda: 1)
+    kernel_config = SimpleNamespace(
+        linear_backend="auto", linear_backend_per_quant=None
+    )
+    monkeypatch.setattr(
+        quantization,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(kernel_config=kernel_config),
+    )
+    assert quantization.mxfp8_linear_method_cls() is ModelOptLinearMethod
 
 
 def test_bf16_mxfp8_linear_method_takes_emulation(monkeypatch):
