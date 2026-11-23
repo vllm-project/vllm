@@ -39,10 +39,13 @@ class SharedMLP(nn.Module):
     "routed_scale_mode",
     [RoutedScaleMode.OUTPUT, RoutedScaleMode.OUTPUT_FP16_GUARD],
 )
+# 2.0 takes the single torch.add(alpha=) path in BF16 (MiniMax-M3's factor).
+@pytest.mark.parametrize("routed_scaling_factor", [ROUTED_SCALING_FACTOR, 2.0])
 @override_parallel_groups(SingleRankGroup())
 def test_routed_scale_applied_to_output_with_shared_experts(
     dtype: torch.dtype,
     routed_scale_mode: RoutedScaleMode,
+    routed_scaling_factor: float,
     workspace_init,
 ):
     """OUTPUT gives scale * routed + shared for every dtype. OUTPUT_FP16_GUARD
@@ -70,7 +73,7 @@ def test_routed_scale_applied_to_output_with_shared_experts(
     with set_current_vllm_config(vllm_config):
         moe = FusedMoEFactory(
             shared_experts=shared_experts,
-            routed_scaling_factor=ROUTED_SCALING_FACTOR,
+            routed_scaling_factor=routed_scaling_factor,
             routed_scale_mode=routed_scale_mode,
             prefix="moe",
             **common,
@@ -96,10 +99,42 @@ def test_routed_scale_applied_to_output_with_shared_experts(
         routed_scale_mode is RoutedScaleMode.OUTPUT_FP16_GUARD
         and dtype == torch.float16
     ):
-        expected = routed + shared / ROUTED_SCALING_FACTOR
+        expected = routed + shared / routed_scaling_factor
     else:
-        expected = routed * ROUTED_SCALING_FACTOR + shared
+        expected = routed * routed_scaling_factor + shared
     torch.testing.assert_close(actual, expected, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize(
+    "scale,dtype,transform,fused",
+    [
+        (2.0, torch.bfloat16, None, True),
+        (0.5, torch.float32, None, True),
+        (2.5, torch.bfloat16, None, False),  # not exact: keep scale, then add
+        (1.0, torch.bfloat16, None, False),  # nothing to scale
+        (2.0, torch.float16, None, False),  # OUTPUT_FP16_GUARD territory
+        (2.0, torch.bfloat16, nn.Identity(), False),  # routed output transform
+    ],
+)
+def test_scale_in_shared_add_is_bit_identical(scale, dtype, transform, fused):
+    """One torch.add(alpha=) for shared + scale * routed only where it equals
+    scaling the routed output, then adding the shared output, bit for bit."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+
+    runner = SimpleNamespace(
+        routed_scaling_factor=scale, routed_output_transform=transform
+    )
+    g = torch.Generator().manual_seed(0)
+    shared = (torch.randn(64, 512, generator=g) * 3).to(dtype)
+    routed = (torch.randn(64, 512, generator=g) * 3).to(dtype)
+    assert MoERunner._scale_in_shared_add(runner, shared, routed) is fused
+    assert not MoERunner._scale_in_shared_add(runner, None, routed)
+    if fused:
+        assert torch.equal(
+            torch.add(shared, routed, alpha=scale), shared + routed * scale
+        )
 
 
 def test_routed_scale_mode_scales_output():
