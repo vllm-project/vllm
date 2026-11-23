@@ -2978,9 +2978,7 @@ tqdm==4.67.3 \
     #   -c requirements/test/cuda.txt
     #   huggingface-hub
     #   transformers
-transformers==5.24.0 \
-    --hash=sha256:ff5ebedf9359f94bb63772b6380eba6e7104d010cbbb2cb82c788817ea7486f6 \
-    --hash=sha256:906cb8c3cb2123575e263962586a4d21a979ce97feeb95fe6aaf66fe6ae88bf3
+transformers @ git+https://github.com/huggingface/transformers.git@14f676276b16a40b23624a5b956cdfccb76d2084
     # via
     #   -c requirements/common.txt
     #   -c requirements/test/cuda.txt
