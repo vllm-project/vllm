@@ -2,25 +2,68 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """`--disable-sagemaker-integration` leaves the SageMaker surface out."""
 
+import json
+import os
+import subprocess
 import sys
 from http import HTTPStatus
+from pathlib import Path
 
 import pytest
 import requests
 
 from tests.utils import RemoteOpenAIServer
 from vllm import envs
-from vllm.entrypoints.common.cli_args import make_arg_parser
-from vllm.entrypoints.launchers.app import build_app
-from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from .conftest import MODEL_NAME_SMOLLM
+from .sagemaker_app_probe import PACKAGE
 
 pytestmark = pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND, reason="Python frontend only"
 )
 
 DISABLED = [["--disable-sagemaker-integration"]]
+PROBE = Path(__file__).with_name("sagemaker_app_probe.py")
+MARKER = "imported"
+
+
+def _probe(tmp_path: Path, *cli_args: str, env: dict[str, str] | None = None) -> dict:
+    """Build the app in a fresh interpreter and return what the build left.
+
+    A fresh process is what makes the import check meaningful: `sys.modules`
+    in this one may already hold the package because an earlier test built a
+    server with the integration enabled.
+    """
+    (tmp_path / "model.py").write_text(
+        "import pathlib\n"
+        f"pathlib.Path({str(tmp_path / MARKER)!r}).touch()\n"
+        "\n"
+        "\n"
+        "async def pre_process(request, call_next):\n"
+        "    return await call_next(request)\n"
+    )
+    probe_env = os.environ | {
+        "SAGEMAKER_MODEL_PATH": str(tmp_path),
+        "CUSTOM_PRE_PROCESS": "model:pre_process",
+    }
+    result = subprocess.run(
+        [sys.executable, str(PROBE), *cli_args],
+        env=probe_env | (env or {}),
+        capture_output=True,
+        text=True,
+    )
+    lines = result.stdout.strip().splitlines()
+    if result.returncode != 0 or not lines:
+        pytest.fail(f"SageMaker probe failed:\n{result.stdout}\n{result.stderr}")
+    return json.loads(lines[-1])
+
+
+def _sagemaker_middleware(probe: dict) -> list[str]:
+    return [
+        middleware
+        for middleware in probe["middleware"]
+        if middleware.startswith(PACKAGE)
+    ]
 
 
 @pytest.mark.parametrize("basic_server_with_lora", DISABLED, indirect=True)
@@ -66,42 +109,26 @@ def test_native_lora_adapter_endpoints_still_work(
 @pytest.mark.parametrize(
     "runtime_lora_updating", [False, True], ids=["no-lora", "runtime-lora"]
 )
-def test_sagemaker_integration_is_not_imported(
-    tmp_path, monkeypatch, runtime_lora_updating: bool
-):
+def test_sagemaker_integration_is_not_imported(tmp_path, runtime_lora_updating: bool):
     """The flag skips the bootstrap, which is what imports `model.py` from
     `SAGEMAKER_MODEL_PATH` and installs the `CUSTOM_*` hooks, and it skips the
     runtime LoRA import of the same package."""
-    marker = tmp_path / "imported"
-    (tmp_path / "model.py").write_text(
-        "import pathlib\n"
-        f"pathlib.Path({str(marker)!r}).touch()\n"
-        "\n"
-        "\n"
-        "async def pre_process(request, call_next):\n"
-        "    return await call_next(request)\n"
+    probe = _probe(
+        tmp_path,
+        "--disable-sagemaker-integration",
+        env={"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "1" if runtime_lora_updating else "0"},
     )
-    monkeypatch.setenv("SAGEMAKER_MODEL_PATH", str(tmp_path))
-    monkeypatch.setenv("CUSTOM_PRE_PROCESS", "model:pre_process")
-    monkeypatch.setenv(
-        "VLLM_ALLOW_RUNTIME_LORA_UPDATING", "1" if runtime_lora_updating else "0"
-    )
-    modules_before = set(sys.modules)
 
-    parser = FlexibleArgumentParser()
-    serve_parser = parser.add_subparsers().add_parser("serve")
-    make_arg_parser(serve_parser)
-    args = serve_parser.parse_args(["--disable-sagemaker-integration"])
-    app = build_app(args, supported_tasks=())
+    assert probe["imported"] == []
+    assert _sagemaker_middleware(probe) == []
+    assert not (tmp_path / MARKER).exists()
 
-    assert not marker.exists()
-    assert not [
-        middleware
-        for middleware in app.user_middleware
-        if middleware.cls.__module__.startswith("model_hosting_container_standards")
-    ]
-    assert not [
-        name
-        for name in set(sys.modules) - modules_before
-        if name.startswith("model_hosting_container_standards")
-    ]
+
+def test_sagemaker_integration_runs_by_default(tmp_path):
+    """Positive control for the probe: without the flag the same run sees the
+    package, its middleware and the imported `model.py`."""
+    probe = _probe(tmp_path, env={"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "1"})
+
+    assert probe["imported"]
+    assert _sagemaker_middleware(probe)
+    assert (tmp_path / MARKER).exists()
