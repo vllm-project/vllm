@@ -22,7 +22,7 @@ from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
-from vllm.v1.simple_kv_offload.sizing import sync_num_offload_blocks_across_workers
+from vllm.v1.simple_kv_offload.sizing import num_offload_blocks
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -192,7 +192,10 @@ class SimpleCPUOffloadWorker:
         local_capacity = capacity_bytes // bytes_per_block
         requested = self._num_cpu_blocks_override
         if requested is None:
-            return sync_num_offload_blocks_across_workers(max(1, local_capacity))
+            assert self.kv_cache_config is not None
+            return num_offload_blocks(
+                self.kv_cache_config, capacity_bytes, bytes_per_block
+            )
         if type(requested) is not int or not 0 < requested <= local_capacity:
             raise ValueError(
                 f"num_cpu_blocks={requested!r} must be between 1 and "
