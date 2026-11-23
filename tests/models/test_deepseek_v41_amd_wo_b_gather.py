@@ -297,12 +297,10 @@ def test_a_call_may_carry_only_some_of_wo_b_s_tensors():
     assert not layers[1][1].weight_scale.any() and not layers[0][1].weight.any()
 
 
-def test_threshold_defaults(monkeypatch):
-    monkeypatch.delenv("VLLM_ROCM_DSV41_WO_B_GATHER_MIN_TOKENS", raising=False)
+def test_thresholds():
     assert rocm._wo_b_gather_min_rows(2) == 256
     assert rocm._wo_b_gather_min_rows(4) == 1024
-    monkeypatch.setenv("VLLM_ROCM_DSV41_WO_B_GATHER_MIN_TOKENS", "0")
-    assert rocm._wo_b_gather_min_rows(2) == 0
+    assert rocm._wo_b_gather_min_rows(8) == 1024
 
 
 @pytest.mark.parametrize("tp_size", [2, 4, 8])
@@ -333,7 +331,6 @@ def _copy_builder(monkeypatch, kernel_type=None):
         prefix="layers.0.attn",
     )
     comm = SimpleNamespace(use_aiter_tp_all_gather=True)
-    monkeypatch.delenv("VLLM_ROCM_DSV41_WO_B_GATHER_MIN_TOKENS", raising=False)
     monkeypatch.delenv("VLLM_BATCH_INVARIANT", raising=False)
     monkeypatch.setattr(rocm, "_ON_GFX950", True)
     monkeypatch.setattr(rocm, "get_tensor_model_parallel_world_size", lambda: 2)
@@ -356,7 +353,6 @@ def test_the_copy_is_built_for_tensor_parallel_mxfp8(monkeypatch):
     "case",
     [
         "tp1",
-        "threshold_0",
         "gfx942",
         "batch_invariant",
         "lora",
@@ -371,8 +367,6 @@ def test_the_copy_is_not_built(monkeypatch, case):
     build, attn, comm, config, _ = _copy_builder(monkeypatch, kernel_type)
     if case == "tp1":
         monkeypatch.setattr(rocm, "get_tensor_model_parallel_world_size", lambda: 1)
-    elif case == "threshold_0":
-        monkeypatch.setenv("VLLM_ROCM_DSV41_WO_B_GATHER_MIN_TOKENS", "0")
     elif case == "gfx942":
         monkeypatch.setattr(rocm, "_ON_GFX950", False)
     elif case == "batch_invariant":

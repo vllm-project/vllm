@@ -719,17 +719,14 @@ class DeepseekV41ROCMAiterSparseSWABackend(DeepseekSparseSWABackend):
 
 def _wo_b_gather_min_rows(tp_size: int) -> int:
     """The row count from which a step all-gathers wo_b's MXFP8 input and runs
-    the whole wo_b on every rank, instead of all-reducing its bf16 output; 0
-    for never.
+    the whole wo_b on every rank, instead of all-reducing its bf16 output.
 
     A row is 33 / 32 * (K / TP) bytes on the wire against 2 * hidden_size and
     costs TP - 1 more slices of GEMM, and a step pays a second collective for
-    the scales. The defaults are where that crosses over on gfx950.
+    the scales, which a small step does not earn back. These are where that
+    crosses over on gfx950.
     """
-    min_rows = envs.VLLM_ROCM_DSV41_WO_B_GATHER_MIN_TOKENS
-    if min_rows is None:
-        min_rows = 256 if tp_size == 2 else 1024
-    return min_rows
+    return 256 if tp_size == 2 else 1024
 
 
 class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
@@ -805,8 +802,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         tp_size = get_tensor_model_parallel_world_size()
         self._wo_b_gather_min_rows = _wo_b_gather_min_rows(tp_size)
         if not (
-            self._wo_b_gather_min_rows > 0
-            and tp_size > 1
+            tp_size > 1
             and _ON_GFX950
             # The path depends on the step's row count.
             and not envs.VLLM_BATCH_INVARIANT

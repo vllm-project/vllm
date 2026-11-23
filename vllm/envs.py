@@ -161,7 +161,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: bool = False
     VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS: int = 160
-    VLLM_ROCM_DSV41_WO_B_GATHER_MIN_TOKENS: int | None = None
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
@@ -1444,13 +1443,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # there. 160 is the measured gfx950 crossover for 2048-key rows, H 8..16.
     "VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS", "160")
-    ),
-    # DeepSeek V4.1 with tensor parallelism: steps of at least this many tokens
-    # all-gather the MXFP8 input of the attention's wo_b and run the whole
-    # wo_b on every rank, instead of all-reducing its output. Unset is 256 at
-    # TP2 and 1024 above, the gfx950 crossovers; 0 keeps the all-reduce.
-    "VLLM_ROCM_DSV41_WO_B_GATHER_MIN_TOKENS": lambda: maybe_convert_int(
-        os.environ.get("VLLM_ROCM_DSV41_WO_B_GATHER_MIN_TOKENS", None)
     ),
     # Whether to use aiter rope.
     # By default is disabled.
