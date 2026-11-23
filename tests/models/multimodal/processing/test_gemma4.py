@@ -848,7 +848,7 @@ def test_unresized_image_accepts_configured_budget(
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID, "google/gemma-4-12B-it"])
 @pytest.mark.parametrize("request_override", [False, True])
 def test_unresized_video_frames_respect_fixed_budget(model_id, request_override):
-    kwargs = {"do_resize": False}
+    kwargs = {"do_resize": False, "max_soft_tokens": 1120}
     ctx = build_model_context(
         model_id,
         mm_processor_kwargs={} if request_override else kwargs,
@@ -856,7 +856,9 @@ def test_unresized_video_frames_respect_fixed_budget(model_id, request_override)
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     frames = np.zeros((2, 672, 960, 3), dtype=np.uint8)
-    with pytest.raises(ValueError, match="exceed.*max_soft_tokens=70"):
+    with pytest.raises(
+        ValueError, match="exceed.*fixed per-frame video budget of 70 soft tokens"
+    ):
         processor(
             processor.info.get_hf_processor().video_token,
             mm_items=processor.info.parse_mm_data(

@@ -332,6 +332,8 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         image_height: int,
         max_soft_tokens: int | None = None,
         do_resize: bool = True,
+        *,
+        is_video_frame: bool = False,
     ) -> int:
         """Compute the number of soft tokens the vision tower produces
         for an image of the given dimensions, after padding is stripped.
@@ -343,6 +345,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
                 `default_output_length`.  When *None*, the value from
                 the model config is used.
             do_resize: Whether the image processor resizes the image.
+            is_video_frame: Whether to describe the budget as fixed per frame.
 
         """
         vision_cfg = self.get_hf_config().vision_config
@@ -373,10 +376,15 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             )
         num_soft_tokens = (image_height // unit) * (image_width // unit)
         if not do_resize and num_soft_tokens > max_soft_tokens:
+            budget = (
+                f"the fixed per-frame video budget of {max_soft_tokens} soft tokens"
+                if is_video_frame
+                else f"max_soft_tokens={max_soft_tokens}"
+            )
             raise ValueError(
                 f"With do_resize=False, image dimensions "
                 f"{image_width}x{image_height} require {num_soft_tokens} soft tokens, "
-                f"exceeding max_soft_tokens={max_soft_tokens}."
+                f"exceeding {budget}."
             )
         return num_soft_tokens
 
@@ -790,6 +798,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                         h,
                         max_soft_tokens=_VIDEO_MAX_SOFT_TOKENS,
                         do_resize=video_do_resize,
+                        is_video_frame=True,
                     )
                     num_soft_per_frame.append(n)
 

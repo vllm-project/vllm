@@ -216,6 +216,8 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
         image_height: int,
         max_soft_tokens: int | None = None,
         do_resize: bool = True,
+        *,
+        is_video_frame: bool = False,
     ) -> int:
         if max_soft_tokens is None:
             max_soft_tokens = self.get_hf_config().vision_config.num_soft_tokens
@@ -224,6 +226,7 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
             image_height,
             max_soft_tokens=max_soft_tokens,
             do_resize=do_resize,
+            is_video_frame=is_video_frame,
         )
 
 
