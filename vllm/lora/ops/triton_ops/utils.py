@@ -327,6 +327,9 @@ def get_lora_op_configs(
     return config_data
 
 
+FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS = 64
+
+
 @lru_cache
 def supports_multicta_shrink(device: torch.device | None = None) -> bool:
     """Check basic device/toolchain requirements for experimental shrink."""

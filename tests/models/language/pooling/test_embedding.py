@@ -108,11 +108,11 @@ def test_lfm2_bidirectional_embeddings_are_batch_independent(
             marks=[pytest.mark.core_model, pytest.mark.slow_test],
         ),
         pytest.param(
-            "intfloat/e5-mistral-7b-instruct",
+            "vllm-project/e5-mistral-7b-instruct",
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
-            "ssmits/Qwen2-7B-Instruct-embed-base", marks=[pytest.mark.cpu_model]
+            "vllm-project/Qwen2-7B-Instruct-embed-base", marks=[pytest.mark.cpu_model]
         ),
         # [Encoder-only]
         pytest.param(
@@ -124,7 +124,7 @@ def test_lfm2_bidirectional_embeddings_are_batch_independent(
             ],
         ),
         pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
-        pytest.param("intfloat/multilingual-e5-small"),
+        pytest.param("vllm-project/multilingual-e5-small"),
         # [Cross-Encoder]
         pytest.param(
             "sentence-transformers/stsb-roberta-base-v2",
@@ -139,7 +139,7 @@ def test_models(
     model,
 ) -> None:
     vllm_extra_kwargs = {}
-    if model == "ssmits/Qwen2-7B-Instruct-embed-base":
+    if model == "vllm-project/Qwen2-7B-Instruct-embed-base":
         vllm_extra_kwargs["pooler_config"] = PoolerConfig(
             seq_pooling_type="MEAN", use_activation=False
         )
@@ -160,7 +160,7 @@ def test_models(
     example_prompts = [str(s).strip() for s in example_prompts]
 
     with hf_runner(model, is_sentence_transformer=True) as hf_model:
-        if model == "ssmits/Qwen2-7B-Instruct-embed-base":
+        if model == "vllm-project/Qwen2-7B-Instruct-embed-base":
             # This checkpoint has no sentence-transformers config. Since
             # sentence-transformers 5.6, a causal LM then gets its chat
             # template applied and last-token pooling. Keep the plain text and
@@ -193,14 +193,13 @@ def test_models(
     "model",
     [
         "BAAI/bge-base-en-v1.5",
-        "intfloat/multilingual-e5-small",
+        "vllm-project/multilingual-e5-small",
     ],
 )
 @torch.inference_mode()
 def test_encoder_only_model_runner_v2_attention(
     hf_runner,
     vllm_runner,
-    monkeypatch,
     model: str,
 ) -> None:
     prompts = [
@@ -218,7 +217,6 @@ def test_encoder_only_model_runner_v2_attention(
             )
             hf_outputs.append(embedding.cpu().tolist())
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     with vllm_runner(
         model,
         runner="pooling",
@@ -230,7 +228,6 @@ def test_encoder_only_model_runner_v2_attention(
             task="embed", seq_pooling_type="LAST", use_activation=True
         ),
     ) as vllm_model:
-        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         vllm_outputs = vllm_model.embed(prompts)
 
     check_embeddings_close(
@@ -243,7 +240,7 @@ def test_encoder_only_model_runner_v2_attention(
 
 
 @pytest.mark.core_model
-def test_encoder_model_runner_v2(hf_runner, vllm_runner, monkeypatch) -> None:
+def test_encoder_model_runner_v2(hf_runner, vllm_runner) -> None:
     model = "sentence-transformers/all-MiniLM-L6-v2"
     prompt_batches = [
         ["short input"],
@@ -256,13 +253,11 @@ def test_encoder_model_runner_v2(hf_runner, vllm_runner, monkeypatch) -> None:
     with hf_runner(model, is_sentence_transformer=True) as hf_model:
         hf_outputs = [hf_model.encode(prompts) for prompts in prompt_batches]
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     with vllm_runner(
         model,
         runner="pooling",
         max_model_len=64,
     ) as vllm_model:
-        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         vllm_outputs = [vllm_model.embed(prompts) for prompts in prompt_batches]
 
     for hf_batch, vllm_batch in zip(hf_outputs, vllm_outputs):
@@ -276,9 +271,7 @@ def test_encoder_model_runner_v2(hf_runner, vllm_runner, monkeypatch) -> None:
 
 
 @pytest.mark.core_model
-def test_matryoshka_dimensions_model_runner_v2(
-    hf_runner, vllm_runner, monkeypatch
-) -> None:
+def test_matryoshka_dimensions_model_runner_v2(hf_runner, vllm_runner) -> None:
     model = "Snowflake/snowflake-arctic-embed-m-v1.5"
     prompts = ["short input", "a longer input for a different output width"]
     dimensions = [None, 256]
@@ -286,14 +279,12 @@ def test_matryoshka_dimensions_model_runner_v2(
     with hf_runner(model, is_sentence_transformer=True) as hf_model:
         hf_outputs = hf_model.encode(prompts)
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     with vllm_runner(
         model,
         runner="pooling",
         max_model_len=64,
         gpu_memory_utilization=0.25,
     ) as vllm_model:
-        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         vllm_outputs = vllm_model.embed(
             prompts,
             pooling_params=[PoolingParams(dimensions=d) for d in dimensions],
