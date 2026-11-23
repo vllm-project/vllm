@@ -10,6 +10,7 @@ state machine: job submission, transfer completion polling, and lookup.
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -34,6 +35,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
@@ -226,6 +228,46 @@ class MockNixlAgent:
 # ---------------------------------------------------------------------------
 # Fixture
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("access_mode", ["read", "write", "readwrite"])
+def test_write_only_credentials_can_store_without_read_permission(access_mode):
+    """A writer must not need HEAD permission; readable tiers still probe."""
+
+    class WriteOnlyAgent(MockNixlAgent):
+        def _query_memory(self, queries, mem_type, agent_name):
+            raise PermissionError("HeadObject requires s3:GetObject")
+
+    config = replace(
+        _make_offloading_config(False), extra_config={"cpu_bytes_to_use": 4096}
+    )
+    spec = CPUOffloadingSpec(config)
+    primary = memoryview(np.zeros((4, _BLOCK_ELEMENTS), dtype=np.float32))
+    with patch(
+        "vllm.v1.kv_offload.tiering.obj.manager.nixl_agent",
+        side_effect=WriteOnlyAgent,
+    ):
+
+        def create_tier():
+            return ObjectStoreSecondaryTierManager(
+                spec, primary, "obj", _STORE_CONFIG, access_mode=access_mode
+            )
+
+        if access_mode != "write":
+            with pytest.raises(RuntimeError, match="connectivity probe failed"):
+                create_tier()
+            return
+        tier = create_tier()
+        try:
+            tier.submit_store(make_job(1, [key(1)]))
+            results = list(tier.get_finished_jobs())
+            assert len(results) == 1
+            assert results[0].job_id == 1 and results[0].success
+            assert (
+                tier._file_mapper.get_file_name(key(1)) in tier._agent._stored_obj_keys
+            )
+        finally:
+            tier.shutdown()
 
 
 def _make_events_spec(enable_kv_cache_events: bool) -> SimpleNamespace:

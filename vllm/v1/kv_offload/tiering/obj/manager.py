@@ -210,7 +210,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         )
         self._next_obj_dev_id: int = 1  # dev_id=0 is reserved for _exists() probes
 
-        self._probe_connectivity()
+        # HEAD requires read permission, which write-only credentials may lack.
+        if self.access_mode.can_read:
+            self._probe_connectivity()
 
         base_addr = ctypes.addressof(ctypes.c_char.from_buffer(primary_kv_view))
         assert primary_kv_view.strides is not None
