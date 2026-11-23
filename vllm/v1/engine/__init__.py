@@ -178,9 +178,12 @@ class EngineCoreReadyResponse:
     # total, for frontends without a VllmConfig (the Rust frontend). Set
     # without chunked prefill, when they are all encoded in one step.
     max_mm_embeds_per_request: int | None = None
-    # False when the engine disabled chunked prefill during initialization,
-    # e.g. for a model without KV cache.
-    enable_chunked_prefill: bool = True
+    # Longest prompt the engine can schedule in one step when it does not
+    # chunk prefills (`SchedulerConfig.max_unchunked_prompt_len`), else None.
+    # The engine may disable chunked prefill during initialization, e.g. for a
+    # model without KV cache. Frontends reject longer prompts, which could
+    # never be scheduled.
+    max_unchunked_prompt_len: int | None = None
 
 
 class EngineCoreRequest(

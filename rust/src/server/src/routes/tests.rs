@@ -7125,8 +7125,7 @@ async fn prompt_logprobs_rejected_when_engine_lacks_them() {
 async fn unchunked_prompt_longer_than_step_is_bad_request() {
     let (mut app, engine_task) = test_app_with_ready_and_engine_request_check(
         vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
-            enable_chunked_prefill: false,
-            max_num_batched_tokens: 4,
+            max_unchunked_prompt_len: Some(4),
             ..default_ready_response()
         },
         |llm| ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new())),

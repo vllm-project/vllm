@@ -65,10 +65,16 @@ def test_max_unchunked_prompt_len():
     speculative_config = cast(
         SpeculativeConfig, SimpleNamespace(max_num_new_slots_for_drafting=6)
     )
+    # Prompts may be split across steps.
+    assert config.enable_chunked_prefill
+    assert config.max_unchunked_prompt_len(speculative_config) is None
+    config.enable_chunked_prefill = False
     assert config.max_unchunked_prompt_len() == 256
     assert config.max_unchunked_prompt_len(speculative_config) == 250
     config.max_num_scheduled_tokens = 200
     assert config.max_unchunked_prompt_len(speculative_config) == 200
+    # Multimodal encoder-only requests are not held back by the budget.
+    assert config.max_unchunked_prompt_len(is_mm_encoder_only=True) is None
 
 
 @pytest.mark.cpu_test
@@ -111,21 +117,22 @@ def test_long_prompt_allowed_when_it_can_be_scheduled(kwargs):
 
 
 @pytest.mark.cpu_test
-def test_rejects_prompt_when_config_disables_chunked_prefill():
-    """A model config hook may turn chunked prefill off after the token budget
-    was validated (HRM-Text does). Admission enforces the limit from the start,
-    without a ready response from the engine."""
+def test_hrm_text_config_raises_budget_with_chunked_prefill_off():
+    """HRM-Text's config hook turns chunked prefill off after the token budget
+    was validated. Like EngineArgs, it raises the budget to max_model_len, so
+    every prompt up to max_model_len can be scheduled."""
     from vllm.model_executor.models.config import HrmTextForCausalLMConfig
 
     processor = _input_processor(enable_chunked_prefill=True)
-    processor._validate_prompt_len(1024, "decoder")
     vllm_config = processor.vllm_config
     vllm_config.cache_config = SimpleNamespace(enable_prefix_caching=True)
+    vllm_config.model_config = processor.model_config
     HrmTextForCausalLMConfig.verify_and_update_config(vllm_config)
-    assert not vllm_config.scheduler_config.enable_chunked_prefill
-    processor._validate_prompt_len(256, "decoder")
-    with pytest.raises(VLLMValidationError, match="can schedule in one step"):
-        processor._validate_prompt_len(257, "decoder")
+    scheduler_config = vllm_config.scheduler_config
+    assert not scheduler_config.enable_chunked_prefill
+    assert not vllm_config.cache_config.enable_prefix_caching
+    assert scheduler_config.max_num_batched_tokens == 2048
+    processor._validate_prompt_len(2047, "decoder")
 
 
 @pytest.mark.cpu_test
@@ -140,7 +147,7 @@ def test_ready_response_syncs_disabled_chunked_prefill():
         parallel_config=SimpleNamespace(_coord_store_port=0),
     )
 
-    def ready(enable_chunked_prefill: bool) -> bytes:
+    def ready(max_unchunked_prompt_len: int | None) -> bytes:
         return msgspec.msgpack.encode(
             EngineCoreReadyResponse(
                 max_model_len=2048,
@@ -160,16 +167,16 @@ def test_ready_response_syncs_disabled_chunked_prefill():
                 instance_id="test-instance",
                 supports_lora=False,
                 max_loras=0,
-                enable_chunked_prefill=enable_chunked_prefill,
+                max_unchunked_prompt_len=max_unchunked_prompt_len,
             )
         )
 
-    client._apply_ready_response(ready(True))
+    client._apply_ready_response(ready(None))
     assert client.vllm_config.scheduler_config.enable_chunked_prefill
-    client._apply_ready_response(ready(False))
+    client._apply_ready_response(ready(256))
     assert not client.vllm_config.scheduler_config.enable_chunked_prefill
-    # Another data-parallel engine reporting True does not re-enable it.
-    client._apply_ready_response(ready(True))
+    # Another data-parallel engine without a limit does not re-enable it.
+    client._apply_ready_response(ready(None))
     assert not client.vllm_config.scheduler_config.enable_chunked_prefill
 
 

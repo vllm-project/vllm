@@ -554,7 +554,7 @@ class EngineCoreReadyResponse:
     supports_prompt_logprobs: bool = True
     allow_missing_mm_embeddings: bool = False
     max_mm_embeds_per_request: int | None = None
-    enable_chunked_prefill: bool = True
+    max_unchunked_prompt_len: int | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -607,7 +607,7 @@ ready_response = EngineCoreReadyResponse(
     supports_prompt_logprobs=False,
     allow_missing_mm_embeddings=True,
     max_mm_embeds_per_request=16384,
-    enable_chunked_prefill=False,
+    max_unchunked_prompt_len=512,
 )
 
 nixl_stats = {

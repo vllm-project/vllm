@@ -611,14 +611,10 @@ impl EngineCoreClient {
     ///
     /// Without chunked prefill, a longer prompt can never be scheduled and
     /// would block the engine's waiting queue.
-    // TODO: Python's `SchedulerConfig.max_unchunked_prompt_len` also applies
-    // `max_num_scheduled_tokens` and the draft slots of speculative decoding,
-    // which the ready response does not report.
-    pub fn max_unchunked_prompt_len(&self) -> Option<u32> {
-        (self.engines.iter())
-            .map(|engine| &engine.ready_response)
-            .filter(|ready| !ready.enable_chunked_prefill)
-            .map(|ready| u32::try_from(ready.max_num_batched_tokens).unwrap_or(u32::MAX))
+    pub fn max_unchunked_prompt_len(&self) -> Option<u64> {
+        self.engines
+            .iter()
+            .filter_map(|engine| engine.ready_response.max_unchunked_prompt_len)
             .min()
     }
 

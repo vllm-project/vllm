@@ -657,11 +657,9 @@ class InputProcessor:
     def _max_unchunked_prompt_len(self) -> int | None:
         """Prompt limit when prompts cannot be split across steps, else None."""
         vllm_config = self.vllm_config
-        scheduler_config = vllm_config.scheduler_config
-        # The scheduler does not hold back multimodal encoder-only requests.
-        if scheduler_config.enable_chunked_prefill or vllm_config.is_mm_encoder_only:
-            return None
-        return scheduler_config.max_unchunked_prompt_len(vllm_config.speculative_config)
+        return vllm_config.scheduler_config.max_unchunked_prompt_len(
+            vllm_config.speculative_config, vllm_config.is_mm_encoder_only
+        )
 
     def _validate_model_input(
         self,

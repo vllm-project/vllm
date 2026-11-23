@@ -288,7 +288,7 @@ impl EngineCoreLlm {
     /// every request queued behind it.
     fn check_prompt_schedulable(&self, prompt_token_ids: &[u32]) -> Result<()> {
         match self.client.max_unchunked_prompt_len() {
-            Some(max_prompt_len) if prompt_token_ids.len() > max_prompt_len as usize => {
+            Some(max_prompt_len) if prompt_token_ids.len() as u64 > max_prompt_len => {
                 Err(Error::PromptExceedsUnchunkedLimit {
                     prompt_len: prompt_token_ids.len(),
                     max_prompt_len,

@@ -909,9 +909,10 @@ class MPClient(EngineCoreClient):
         vllm_config.model_config.max_model_len = min(
             vllm_config.model_config.max_model_len, response.max_model_len
         )
-        # The engine may disable chunked prefill after startup validation;
-        # input validation must then reject prompts that cannot be scheduled.
-        if not response.enable_chunked_prefill:
+        # The engine may disable chunked prefill after startup validation, and
+        # then reports a prompt limit; input validation computes the same
+        # limit from the config and rejects prompts that cannot be scheduled.
+        if response.max_unchunked_prompt_len is not None:
             vllm_config.scheduler_config.enable_chunked_prefill = False
 
         # Setup KV cache config with initialization state from

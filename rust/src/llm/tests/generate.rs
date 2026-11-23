@@ -882,8 +882,7 @@ async fn unchunked_prompt_longer_than_step_rejected() {
         handshake_address.clone(),
         b"engine-unchunked".to_vec(),
         EngineCoreReadyResponse {
-            enable_chunked_prefill: false,
-            max_num_batched_tokens: 2,
+            max_unchunked_prompt_len: Some(2),
             ..default_ready_response()
         },
         |dealer, push| {

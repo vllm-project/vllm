@@ -50,7 +50,7 @@ pub enum Error {
     )]
     PromptExceedsUnchunkedLimit {
         prompt_len: usize,
-        max_prompt_len: u32,
+        max_prompt_len: u64,
     },
     /// The request uses a field this implementation does not carry out.
     #[error("`{field}` is not supported")]

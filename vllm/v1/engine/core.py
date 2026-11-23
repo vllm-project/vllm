@@ -137,10 +137,10 @@ def _warn_unchunked_prompt_limit(vllm_config: VllmConfig) -> None:
     on admission instead of waiting forever for a step that can hold them.
     """
     limit = vllm_config.scheduler_config.max_unchunked_prompt_len(
-        vllm_config.speculative_config
+        vllm_config.speculative_config, vllm_config.is_mm_encoder_only
     )
     max_model_len = vllm_config.model_config.max_model_len
-    if limit < max_model_len:
+    if limit is not None and limit < max_model_len:
         logger.warning(
             "Chunked prefill is disabled, so a prompt must be scheduled in a "
             "single step: prompts longer than %d tokens will be rejected "
@@ -222,8 +222,12 @@ class EngineCore:
                 _warn_unchunked_prompt_limit(vllm_config)
             # There are no blocks to share, and the KV cache coordinator
             # requires a cacheable group when prefix caching is on.
+            # This also overrides an explicit --enable-prefix-caching (#55049).
             if vllm_config.cache_config.enable_prefix_caching:
-                logger.info("Disabling prefix caching for model without KVCache")
+                logger.warning(
+                    "Disabling prefix caching for model without KV cache: there "
+                    "are no KV cache blocks to share (see vllm-project/vllm#55049)."
+                )
                 vllm_config.cache_config.enable_prefix_caching = False
 
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
@@ -2217,7 +2221,10 @@ class EngineCoreProc(EngineCore):
             data_parallel_rank=self.engine_index,
             max_num_seqs=scheduler_config.max_num_seqs,
             max_num_batched_tokens=scheduler_config.max_num_batched_tokens,
-            enable_chunked_prefill=scheduler_config.enable_chunked_prefill,
+            max_unchunked_prompt_len=scheduler_config.max_unchunked_prompt_len(
+                self.vllm_config.speculative_config,
+                self.vllm_config.is_mm_encoder_only,
+            ),
             instance_id=self.vllm_config.instance_id,
             supports_lora=self.vllm_config.lora_config is not None,
             max_loras=(

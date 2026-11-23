@@ -157,18 +157,16 @@ pub struct EngineCoreReadyResponse {
     /// step, so a request needing more could never be scheduled.
     #[serde(default)]
     pub max_mm_embeds_per_request: Option<u64>,
-    /// Whether the engine schedules prompts in chunks. `false` when the engine
-    /// disabled chunked prefill during initialization, e.g. for a model
-    /// without KV cache; a prompt must then fit in one scheduling step.
-    #[serde(default = "enable_chunked_prefill_default")]
-    pub enable_chunked_prefill: bool,
+    /// Longest prompt the engine can schedule in one step when it does not
+    /// chunk prefills (Python's `SchedulerConfig.max_unchunked_prompt_len`,
+    /// which accounts for `max_num_scheduled_tokens` and speculative decoding
+    /// draft slots), or `None` when prompts may be split across steps. A
+    /// longer prompt could never be scheduled.
+    #[serde(default)]
+    pub max_unchunked_prompt_len: Option<u64>,
 }
 
 fn supports_prompt_logprobs_default() -> bool {
-    true
-}
-
-fn enable_chunked_prefill_default() -> bool {
     true
 }
 
