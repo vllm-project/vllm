@@ -701,6 +701,14 @@ _TOOL: dict[str, Any] = {
 }
 
 _USER = {"role": "user", "content": "go"}
+_DEFERRED_TOOL_DESCRIPTION = "Schema for the referenced deferred tool"
+
+
+def _tool_reference_case(value):
+    name = "f" + value
+    tool = function_tool(name, _DEFERRED_TOOL_DESCRIPTION, {"type": "object"}, True)
+    return tool_search_messages(name), [TOOL_SEARCH_TOOLS[0], tool]
+
 
 # Every place a client text enters a request: value -> (messages, tools).
 _FIELDS = {
@@ -717,6 +725,7 @@ _FIELDS = {
         _tool_turn(result=[{"type": "text", "text": v}]),
         None,
     ),
+    "tool_reference": _tool_reference_case,
     "assistant": lambda v: (
         [_USER, {"role": "assistant", "content": v}, {"role": "user", "content": "ok"}],
         None,
@@ -763,9 +772,15 @@ def test_reserved_tokens_in_text_are_plain_text(field, token):
     # The client text adds the token's id only where it is meant to stay special.
     assert extra == special
     # With tokenize=False the text comes back as sent...
-    assert text in render(text, False)
+    rendered = render(text, False)
+    assert text in rendered
     # ...without a leftover escape marker.
-    assert "\ue000" not in render(text, False)
+    assert "\ue000" not in rendered
+    if field == "tool_reference":
+        # Check the rendered name itself, not just its copy in the schema, and
+        # verify that the original name still resolves the deferred schema.
+        assert f"<tool_result>f{text}</tool_result>" in rendered
+        assert _DEFERRED_TOOL_DESCRIPTION in rendered
 
 
 @pytest.mark.parametrize(
