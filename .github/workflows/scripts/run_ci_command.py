@@ -731,7 +731,16 @@ def is_build_for_pr(build: Mapping[str, Any], pr_number: int) -> bool:
 
 
 def is_active_build(build: Mapping[str, Any]) -> bool:
-    return bool(build.get("blocked")) or build.get("state") in ACTIVE_BUILD_STATES
+    state = build.get("state")
+    if state == "blocked" or build.get("blocked"):
+        # A build stays blocked after every job has finished while an optional
+        # block or input step (the "Run more tests" picker) waits for a click,
+        # which may never come. Only a block that holds back unfinished work
+        # keeps the build active.
+        if build.get("finished_at"):
+            return state in ACTIVE_BUILD_STATES - {"blocked"}
+        return True
+    return state in ACTIVE_BUILD_STATES
 
 
 def is_comment_triggered_build(build: Mapping[str, Any]) -> bool:

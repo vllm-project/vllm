@@ -568,6 +568,24 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertTrue(is_active_build({"state": "running"}))
         self.assertTrue(is_active_build({"state": "waiting"}))
         self.assertTrue(is_active_build({"blocked": True, "state": "passed"}))
+        self.assertTrue(is_active_build({"blocked": True, "state": "blocked"}))
+        # Every job finished; only an optional picker step is still blocked.
+        finished = "2026-11-23T23:04:32Z"
+        self.assertFalse(
+            is_active_build(
+                {"blocked": True, "finished_at": finished, "state": "blocked"}
+            )
+        )
+        self.assertFalse(
+            is_active_build(
+                {"blocked": True, "finished_at": finished, "state": "passed"}
+            )
+        )
+        self.assertTrue(
+            is_active_build(
+                {"blocked": True, "finished_at": finished, "state": "failing"}
+            )
+        )
         self.assertFalse(is_active_build({"state": "failed"}))
 
     def test_build_payload_preserves_pr_context(self) -> None:
@@ -1383,6 +1401,58 @@ class RunCiCommandTest(unittest.TestCase):
         )
         self.assertIn("running 2 failed step", github.comments[0])
         self.assertIn("Buildkite CI #122", github.comments[0])
+
+    def test_ci_retry_new_head_accepts_finished_build_left_blocked(self) -> None:
+        # The "Run more tests" picker leaves a finished build in state blocked.
+        github = FakeGitHub(permission="read", pr=make_pr(labels=[{"name": "ready"}]))
+        source_build = {
+            "blocked": True,
+            "commit": "old-commit",
+            "created_at": "2026-11-21T04:16:19Z",
+            "finished_at": "2026-11-23T23:04:32Z",
+            "number": 122,
+            "pull_request": {"id": 42},
+            "state": "blocked",
+            "web_url": "https://buildkite.example/builds/122",
+        }
+        buildkite = FakeBuildkite(
+            [[], [source_build]],
+            [
+                [
+                    {
+                        "state": "failed",
+                        "step_key": "basic-models-test-other-cpu",
+                        "type": "script",
+                    }
+                ]
+            ],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(len(buildkite.created_builds), 1)
+        self.assertNotIn("still running", github.comments[0])
+
+    def test_ci_retry_new_head_waits_for_blocked_build_with_unfinished_jobs(
+        self,
+    ) -> None:
+        github = FakeGitHub(permission="read", pr=make_pr(labels=[{"name": "ready"}]))
+        source_build = {
+            "blocked": True,
+            "commit": "old-commit",
+            "created_at": "2026-11-21T04:16:19Z",
+            "finished_at": None,
+            "number": 122,
+            "pull_request": {"id": 42},
+            "state": "blocked",
+            "web_url": "https://buildkite.example/builds/122",
+        }
+        buildkite = FakeBuildkite([[], [source_build]])
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertIn("still running", github.comments[0])
 
     def test_ci_retry_new_head_requires_stable_step_keys(self) -> None:
         github = FakeGitHub(
