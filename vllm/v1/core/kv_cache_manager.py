@@ -137,7 +137,7 @@ class KVCacheManager:
         max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
         num_hash_lookahead_tokens: int = 0,
-        log_stats: bool = False,
+        collect_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -154,12 +154,12 @@ class KVCacheManager:
 
         self.enable_caching = enable_caching
         self.enable_kv_cache_events = enable_kv_cache_events
-        self.log_stats = log_stats
+        self.collect_stats = collect_stats
         self.metrics_collector = metrics_collector
-        # FIXME: make prefix cache stats conditional on log_stats. We still need
+        # FIXME: make prefix cache stats conditional on collect_stats. We still need
         # this comment because when the log stats is enabled there are still
         # potential configs we could expose in the future.
-        self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
+        self.prefix_cache_stats = PrefixCacheStats() if collect_stats else None
 
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
@@ -232,7 +232,7 @@ class KVCacheManager:
             The current prefix caching stats, or None if logging is disabled.
 
         """
-        if not self.log_stats:
+        if not self.collect_stats:
             return None
         stats = self.prefix_cache_stats
         self.prefix_cache_stats = PrefixCacheStats()
@@ -266,7 +266,7 @@ class KVCacheManager:
 
     def record_prefix_cache_stats(self, request: Request, num_hits: int) -> None:
         # Don't count a request that skipped the cache lookup.
-        if not self.log_stats or not self.prefix_cache_lookup_enabled(request):
+        if not self.collect_stats or not self.prefix_cache_lookup_enabled(request):
             return
         assert self.prefix_cache_stats is not None
         self.prefix_cache_stats.record(
@@ -704,7 +704,7 @@ class KVCacheManager:
         """
         if not self.coordinator.reset_prefix_cache():
             return False
-        if self.log_stats:
+        if self.collect_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True
         return True

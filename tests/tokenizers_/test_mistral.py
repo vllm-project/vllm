@@ -2348,6 +2348,35 @@ def test_apply_chat_template_forwards_kwargs(
     assert captured_kwargs[-1].items() >= extra_kwargs.items()
 
 
+def test_apply_chat_template_drops_template_only_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+    v15_mistral_tokenizer: MistralTokenizer,
+) -> None:
+    """vLLM-injected template kwargs must not reach `from_openai`."""
+    captured_kwargs: list[dict] = []
+
+    def fake_apply_chat_template(**kwargs):
+        captured_kwargs.append(kwargs)
+        return [0]
+
+    monkeypatch.setattr(
+        v15_mistral_tokenizer.transformers_tokenizer,
+        "apply_chat_template",
+        fake_apply_chat_template,
+    )
+
+    v15_mistral_tokenizer.apply_chat_template(
+        messages=_PASSTHROUGH_MESSAGES,
+        cohere_format="cmd4",
+        enable_thinking=True,
+        reasoning_effort="high",
+    )
+
+    assert "cohere_format" not in captured_kwargs[-1]
+    assert "enable_thinking" not in captured_kwargs[-1]
+    assert captured_kwargs[-1]["reasoning_effort"] == "high"
+
+
 def test_apply_chat_template_accepts_renderer_kwargs(
     v15_mistral_tokenizer: MistralTokenizer,
 ) -> None:
