@@ -18,6 +18,7 @@ import torch
 from vllm.config import SpeculativeConfig, VllmConfig, replace, set_current_vllm_config
 from vllm.model_executor.models.interfaces import SupportsEagleBase
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.spec_decode.eagle.config import EagleSpeculatorConfig
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -69,10 +70,6 @@ DaemonRole = Literal["target", "draft"]
 """Which daemon group serves a model: the target or the speculative draft."""
 
 
-# Speculative methods whose draft model the daemon caches in its own group.
-# Other drafts keep loading from disk in the engine.
-WEIGHT_CACHE_DRAFT_METHODS = frozenset({"mtp", "eagle", "eagle3"})
-
 # Python-side flags that weight loading sets on EAGLE-style drafts; the engine
 # never runs load_weights for cached models, so the daemon ships them.
 EXPORTED_MODEL_ATTRS = tuple(SupportsEagleBase.__annotations__)
@@ -87,11 +84,12 @@ def export_model_attrs(model: Any) -> dict[str, bool]:
 
 
 def is_draft_model_cacheable(speculative_config: SpeculativeConfig | None) -> bool:
-    """Whether the daemon serves the speculative draft as a separate role."""
+    """Whether the daemon serves the speculative draft as a separate role:
+    EAGLE-style drafts only. Other drafts keep loading from disk in the engine."""
     return (
         speculative_config is not None
-        and speculative_config.method in WEIGHT_CACHE_DRAFT_METHODS
         and speculative_config.draft_model_config is not None
+        and isinstance(speculative_config.speculator_config, EagleSpeculatorConfig)
     )
 
 

@@ -61,6 +61,7 @@ from vllm.v1.kv_offload.base import (
     TierFilter,
     TierMatcher,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -191,10 +192,13 @@ class _StoreJobSink:
             keys, req_context, trigger=self._trigger
         )
         if output is None:
-            self._scheduler._connector_stats.increase_counter(
-                _ConnectorMetricName.ALLOCATION_FAILURE
-            )
+            self.record_allocation_failure()
         return output
+
+    def record_allocation_failure(self) -> None:
+        self._scheduler._connector_stats.increase_counter(
+            _ConnectorMetricName.ALLOCATION_FAILURE
+        )
 
     def add_job(
         self,
@@ -253,6 +257,10 @@ class OffloadingConnectorScheduler:
         self._ready_ranks: set[int] = set()
         if not self._offloading_enabled:
             logger.info("KV offloading is off until every worker is ready")
+        # Direction(s) in which this manager may transfer data. Lookups are
+        # skipped when it cannot read, and the store handlers do not run when
+        # it cannot write.
+        self.access_mode: OffloadAccessMode = spec.access_mode
         self._connector_stats = OffloadingConnectorStats()
         self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
 
@@ -959,7 +967,11 @@ class OffloadingConnectorScheduler:
             request.skip_reading_external_kv
             or req_status.load_failed
             or not self._offloading_enabled
+            or not self.access_mode.can_read
         ):
+            # A manager that cannot read is never queried, so it serves no
+            # external hits; nor does an engine still waiting for its workers
+            # (async_init).
             num_hit_tokens = 0
         else:
             lookup_start = time.monotonic()
@@ -1399,9 +1411,11 @@ class OffloadingConnectorScheduler:
             )
 
         store_jobs: dict[int, TransferJob] = {}
-        if self._offloading_enabled:
+        if self._offloading_enabled and self.access_mode.can_write:
             # Chunks skipped while offloading was off are still offered:
-            # stored indices have not moved.
+            # stored indices have not moved. A manager that cannot write is
+            # offered no chunks, so it issues no store, and no GPU block is
+            # fenced for a transfer that would never happen.
             for handler in self._store_handlers.values():
                 sink = _StoreJobSink(self, handler.trigger)
                 handler.build_store_jobs(scheduler_output, self._req_status, sink)

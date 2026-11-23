@@ -200,7 +200,8 @@ def test_eagle3_mm(vllm_runner: type[VllmRunner], tmp_path) -> None:
 
 
 def test_infer_dynamic_arg_dims():
-    """Only unannotated and (legacy) tensor arguments are dynamic."""
+    """Unannotated and tensor arguments are dynamic, unless a non-`None` default
+    means they are passed as a plain value (e.g. Gemma 4's `logits_to_keep=0`)."""
 
     class Encoder(nn.Module):
         def forward(
@@ -210,12 +211,15 @@ def test_infer_dynamic_arg_dims():
             mask: torch.BoolTensor | None = None,
             grid: tuple[int, int] = (1, 1),
             tiles: list[torch.Tensor] | None = None,
+            use_cache=False,
+            logits_to_keep: int | torch.Tensor = 0,
             **kwargs,
         ):
             pass
 
-    expected = {"pixel_values": 0, "position_ids": 0, "mask": 0}
-    assert infer_dynamic_arg_dims(Encoder) == expected
+    dynamic = ("pixel_values", "position_ids", "mask")
+    assert infer_dynamic_arg_dims(Encoder) == dict.fromkeys(dynamic, 0)
+    assert infer_dynamic_arg_dims(Encoder, dim=1) == dict.fromkeys(dynamic, 1)
 
 
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
