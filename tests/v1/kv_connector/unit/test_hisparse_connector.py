@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiCo
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.hisparse import runtime as runtime_module
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
+from vllm.v1.hisparse.dma import HiSparseDMA
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     update_hisparse_residency,
@@ -39,6 +40,87 @@ from vllm.v1.hisparse.types import (
 )
 from vllm.v1.metrics.stats import KVCacheEvictionEvent
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
+
+
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.bfloat16])
+def test_layerwise_dma_roundtrip_respects_padded_pages_and_dirty_rows(
+    monkeypatch, dtype
+):
+    from vllm.v1.hisparse import layerwise
+    from vllm.v1.hisparse.types import LayerwiseStep
+
+    host = torch.arange(6 * 7 * 8).to(dtype).view(6, 7, 8)[:, :4]
+    gpu = torch.full((8, 5, 8), 3, dtype=dtype)[:, :2]
+    expected = host.clone()
+
+    def swap_blocks_batch(src, dst, sizes):
+        for s, d, n in zip(src.tolist(), dst.tolist(), sizes.tolist(), strict=True):
+            ctypes.memmove(d, s, n)
+
+    load, save, compute = MagicMock(), MagicMock(), MagicMock()
+    compute.device = torch.device("cpu")
+    first_ready, first_saved, second_ready = MagicMock(), MagicMock(), MagicMock()
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: compute)
+    monkeypatch.setattr(torch, "Stream", MagicMock(side_effect=[load, save]))
+    monkeypatch.setattr(
+        torch, "Event", MagicMock(side_effect=[first_ready, first_saved, second_ready])
+    )
+    monkeypatch.setattr(layerwise, "get_hisparse_host_pool", MagicMock())
+    backend = MagicMock()
+    backend.swap_blocks_batch.side_effect = swap_blocks_batch
+    monkeypatch.setattr(layerwise, "get_hisparse_backend", lambda: backend)
+    worker = layerwise.LayerwiseWorker(
+        MagicMock(), MagicMock(hisparse_shared_host_pool=False)
+    )
+    worker.host = {"first": host, "second": torch.zeros_like(host)}
+    worker.slots = {"first": gpu, "second": gpu}
+    for name in worker.slots:
+        worker.register_layer(torch.nn.Identity(), name)
+    worker.start(
+        HiSparseConnectorMetadata(
+            None,
+            (),
+            (),
+            {},
+            False,
+            {},
+            LayerwiseStep(reads=((4, 6, 6),), writes=((9, 11, 1),), sealed_pages=()),
+        )
+    )
+
+    worker.before("first", None, ())
+    first_ready.record.assert_called_once_with(load)
+    compute.wait_event.assert_called_once_with(first_ready)
+    assert torch.equal(gpu[3:6].reshape(6, 8), host[1:3].reshape(8, 8)[:6])
+    gpu[5, 1].fill_(21)
+    worker.after("first", None, (), None)
+    save.wait_stream.assert_called_once_with(compute)
+    first_saved.record.assert_called_once_with(save)
+    load.wait_event.assert_called_once_with(first_saved)
+    worker.before("second", None, ())
+    compute.wait_event.assert_called_with(second_ready)
+    assert gpu[3:6].count_nonzero() == 0
+    expected[2, 1].fill_(21)
+    assert torch.equal(host, expected)
+
+
+def test_hisparse_dma_recycles_descriptors_only_after_completion(monkeypatch):
+    backend = MagicMock()
+    dma = HiSparseDMA(backend)
+    stream, done, host_write = MagicMock(), MagicMock(), MagicMock()
+    monkeypatch.setattr(torch, "Event", lambda: done)
+    descriptors = dma.acquire(4)
+    dma.submit(stream, descriptors, 2, host_write_event=host_write)
+    host_write.record.assert_called_once_with(stream)
+    done.record.assert_called_once_with(stream)
+    assert all(arg.numel() == 2 for arg in backend.swap_blocks_batch.call_args.args)
+
+    done.query.return_value = False
+    dma.release_completed()
+    assert dma.acquire(2) is not descriptors
+    done.query.return_value = True
+    dma.release_completed()
+    assert dma.acquire(2) is descriptors
 
 
 @pytest.mark.parametrize("nested", [False, True])
@@ -426,11 +508,11 @@ def test_zero_token_step_holds_tp_ranks_after_host_write_wait(
     worker._next_host_write_event = 0
     worker._slot_mapping_staging = None
     worker.cache_handles = []
+    worker.dma = MagicMock()
     worker._pending_invalid_block_ids = []
     for name in (
         "_stage_row_mirror_mapping",
         "_finish_previous_step",
-        "_release_completed_dma_descriptors",
         "_set_row_mirrors",
         "_clear_forward_mirror_state",
         "_copy_host_blocks",

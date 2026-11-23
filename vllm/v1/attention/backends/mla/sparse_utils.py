@@ -303,7 +303,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         )
         max_num_blocks_per_req = get_block_table_width(max_num_blocks, block_size)
         hisparse_combos: list[dict[str, Any]] = []
-        if vllm_config.attention_config.hisparse_config is not None:
+        if vllm_config.attention_config.use_hisparse_decode_cache:
             hisparse_combos.extend(
                 dict(
                     HAS_PREFILL_WORKSPACE=False,

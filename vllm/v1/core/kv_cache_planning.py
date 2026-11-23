@@ -33,6 +33,7 @@ from vllm.v1.hisparse.layout import (
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
     get_hisparse_kv_cache_groups,
+    layerwise_bytes_per_block,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -273,7 +274,15 @@ def _pool_bytes_per_block(
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
     capacity once `num_gpu_blocks_override` is applied.
     """
-    return _get_kv_cache_bytes_per_block(
+    hs = getattr(
+        getattr(vllm_config, "attention_config", None), "hisparse_config", None
+    )
+    workspace = (
+        layerwise_bytes_per_block(kv_cache_groups, hs.prefill_layerwise_num_buffers)
+        if hs
+        else 0
+    )
+    return workspace + _get_kv_cache_bytes_per_block(
         [group for group in kv_cache_groups if not group.host_resident],
         vllm_config.cache_config.get_resolved_kv_cache_layout(),
     )
@@ -1216,15 +1225,20 @@ def _max_memory_usage_bytes_from_groups(
     Each group independently claims blocks from the shared pool, so a request consumes
     the sum of the per-group block counts, i.e. `bytes_per_block * total_blocks`.
     """
-    kv_cache_groups = [group for group in kv_cache_groups if not group.host_resident]
-    if not kv_cache_groups:
+    device_groups = [group for group in kv_cache_groups if not group.host_resident]
+    if not device_groups:
         return 0
 
+    # HiSparse's workspace capacity depends on both its host and indexer page sizes.
+    hs = vllm_config.attention_config.hisparse_config
+    budget_groups = (
+        kv_cache_groups if hs and hs.prefill_layerwise_num_buffers else device_groups
+    )
     bytes_per_block = _pool_bytes_per_block_from_builder(
-        builder, vllm_config, kv_cache_groups
+        builder, vllm_config, budget_groups
     )
     total_blocks = sum(
-        group.max_allocated_blocks_per_request(vllm_config) for group in kv_cache_groups
+        group.max_allocated_blocks_per_request(vllm_config) for group in device_groups
     )
 
     return bytes_per_block * total_blocks

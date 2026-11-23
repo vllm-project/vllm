@@ -167,6 +167,27 @@ class _RegionPairs:
     remote_ple_region: int | None = None
 
 
+def _memory_descriptor_indices(
+    region_types: Sequence[str],
+    counts: Sequence[int] | np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map flattened region/block IDs to the DRAM and device descriptor lists."""
+    is_dram = np.repeat(
+        np.asarray(region_types) == "DRAM", np.asarray(counts, dtype=np.intp)
+    )
+    positions = np.empty(is_dram.size, dtype=np.int64)
+    positions[is_dram] = np.arange(np.count_nonzero(is_dram))
+    positions[~is_dram] = np.arange(np.count_nonzero(~is_dram))
+    return is_dram, positions
+
+
+@dataclass(slots=True)
+class _RemoteDramDescriptors:
+    handle: int
+    is_dram: np.ndarray
+    positions: np.ndarray
+
+
 @dataclass(slots=True)
 class _RemoteStage:
     """The KV regions of one PP stage of a remote engine (of the whole engine
@@ -181,6 +202,7 @@ class _RemoteStage:
     region_group_ids: list[int]
     # Remote TP rank -> prepped descriptor list of that rank's paired regions.
     xfer_side_handles: dict[int, int] = field(default_factory=dict)
+    dram_descriptors: dict[int, _RemoteDramDescriptors] = field(default_factory=dict)
 
 
 class NixlBaseConnectorWorker:
@@ -768,6 +790,16 @@ class NixlBaseConnectorWorker:
             if get_representative_spec_type(group) is not MambaSpec
             and not issubclass(group.manager_cls, CircularBufferManager)
         ]
+        if (
+            kv_cache_config.hisparse_prefill_indexer_group is not None
+            and len(set(transfer_block_sizes)) > 1
+        ):
+            # The pull protocol expands every group's block IDs with the same
+            # logical-to-kernel ratio. A differently sized group would address
+            # the wrong remote rows with that ratio.
+            raise ValueError(
+                "NIXL layerwise prefill needs equal block sizes in all transfer groups."
+            )
         self.block_size = (
             math.lcm(*transfer_block_sizes)
             if transfer_block_sizes
@@ -2461,26 +2493,11 @@ class NixlBaseConnectorWorker:
             blocks_data = np.concatenate([blocks_data, mamba])
 
         if self._mixed_mem_types:
-            desc_is_dram = np.concatenate(
-                [
-                    np.full(
-                        count * block_size_ratio,
-                        mem_type == "DRAM",
-                        dtype=bool,
-                    )
-                    for mem_type, count in zip(
-                        self.region_mem_types,
-                        self.region_num_blocks,
-                        strict=True,
-                    )
-                ]
+            desc_is_dram, desc_pos = _memory_descriptor_indices(
+                self.region_mem_types,
+                np.asarray(self.region_num_blocks) * block_size_ratio,
             )
-            assert len(desc_is_dram) == blocks_data[:, 4].sum()
-            desc_pos = np.empty(len(desc_is_dram), dtype=np.int64)
-            dram_idx = np.where(desc_is_dram)[0]
-            vram_idx = np.where(~desc_is_dram)[0]
-            desc_pos[dram_idx] = np.arange(len(dram_idx), dtype=np.int64)
-            desc_pos[vram_idx] = np.arange(len(vram_idx), dtype=np.int64)
+            assert desc_is_dram.size == blocks_data[:, 4].sum()
             self._desc_is_dram_by_block_size[block_size] = desc_is_dram
             self._desc_pos_by_block_size[block_size] = desc_pos
             # DRAM descriptors are registered under CPU device 0.
@@ -2818,13 +2835,46 @@ class NixlBaseConnectorWorker:
         remote_mem_types = set(
             nixl_agent_meta.region_mem_types or [self.nixl_memory_type]
         )
-        if len(remote_mem_types) != 1:
-            raise NotImplementedError(
-                "NIXL pull does not yet support a mixed-memory producer"
+        if len(remote_mem_types) > 1:
+            if not (
+                self._TRANSFER_MODE == "pull"
+                and tp_ratio == 1
+                and self._mixed_mem_types
+                and remote_mem_types == {"DRAM", self.nixl_memory_type}
+                and not self._has_mamba
+            ):
+                raise NotImplementedError(
+                    "Mixed-memory producers require NIXL pull, matching TP, "
+                    "and a mixed-memory MLA consumer."
+                )
+            # _build_fa_remote emits one strided descriptor per remote region.
+            assert nixl_agent_meta.region_mem_types is not None
+            dram_regions = np.asarray(nixl_agent_meta.region_mem_types) == "DRAM"
+            is_dram, positions = _memory_descriptor_indices(
+                nixl_agent_meta.region_mem_types, blocks_data[:, 4]
             )
-        stage.xfer_side_handles[remote_tp_rank] = self.nixl_wrapper.prep_xfer_dlist(
-            remote_agent_name, blocks_data, mem_type=remote_mem_types.pop()
-        )
+            dram_data = blocks_data[dram_regions]
+            dram_data[:, 2] = 0
+            dram_handle = self.nixl_wrapper.prep_xfer_dlist(
+                remote_agent_name, dram_data, mem_type="DRAM"
+            )
+            try:
+                device_handle = self.nixl_wrapper.prep_xfer_dlist(
+                    remote_agent_name,
+                    blocks_data[~dram_regions],
+                    mem_type=self.nixl_memory_type,
+                )
+            except Exception:
+                self.nixl_wrapper.release_dlist_handle(dram_handle)
+                raise
+            stage.dram_descriptors[remote_tp_rank] = _RemoteDramDescriptors(
+                dram_handle, is_dram, positions
+            )
+            stage.xfer_side_handles[remote_tp_rank] = device_handle
+        else:
+            stage.xfer_side_handles[remote_tp_rank] = self.nixl_wrapper.prep_xfer_dlist(
+                remote_agent_name, blocks_data, mem_type=remote_mem_types.pop()
+            )
 
         return remote_agent_name
 
@@ -3403,7 +3453,9 @@ class NixlBaseConnectorWorker:
         same host KV into them. Private pools are unaffected.
         """
         if not (
-            self._mixed_mem_types and self.kv_cache_config.hisparse_shared_host_pool
+            self._mixed_mem_types
+            and self.kv_cache_config.hisparse_shared_host_pool
+            and self.kv_cache_config.hisparse_prefill_indexer_group is None
         ):
             return False
         skip = self.tp_rank != 0
@@ -4401,6 +4453,8 @@ class NixlBaseConnectorWorker:
 
         # Notif-only engines (push-mode D side) have no descriptor state.
         for stage in self._remote_stages.pop(engine_id, {}).values():
+            for dram in stage.dram_descriptors.values():
+                self.nixl_wrapper.release_dlist_handle(dram.handle)
             for handle in stage.xfer_side_handles.values():
                 self.nixl_wrapper.release_dlist_handle(handle)
         # Pop under the handshake lock; NIXL teardown stays outside it.

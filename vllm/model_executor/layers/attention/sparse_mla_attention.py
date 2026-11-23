@@ -418,7 +418,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         supports_spec_as_decode: bool = False,
         supports_dcp_with_varlen: bool = False,
     ) -> None:
-        if self.vllm_config.attention_config.hisparse_config is not None:
+        if self.vllm_config.attention_config.use_hisparse_decode_cache:
             reorder_batch_threshold = 1
         super()._init_reorder_batch_threshold(
             reorder_batch_threshold,
@@ -542,7 +542,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 prefill_query_lens_cpu,
             )
             staging_plan = None
-            if self.vllm_config.attention_config.hisparse_config is not None:
+            if self.vllm_config.attention_config.use_hisparse_decode_cache:
                 staging_plan = build_hisparse_prefill_staging_plan(
                     block_table,
                     common_attn_metadata.seq_lens[num_decodes:],

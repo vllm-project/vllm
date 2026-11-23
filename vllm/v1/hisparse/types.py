@@ -41,3 +41,11 @@ class SparseKVOffloadCommand:
     """Opaque scheduler-to-worker command for one model step."""
 
     page_transfers: list[SparseKVPageTransfer]
+
+
+@dataclass(frozen=True)
+class LayerwiseStep:
+    # Each span is (host row, workspace row, number of contiguous rows).
+    reads: tuple[tuple[int, int, int], ...]
+    writes: tuple[tuple[int, int, int], ...]
+    sealed_pages: tuple[int, ...]

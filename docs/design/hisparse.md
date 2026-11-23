@@ -48,6 +48,92 @@ host only their active tail pages, plus one request being admitted at its full
 footprint. Host-pool metrics are listed in
 [Metrics](../usage/metrics.md#hisparse-kv-connector-metrics).
 
+## Layerwise Main KV on a DSA prefill producer
+
+An eager CUDA prefill producer can keep Main KV for every layer in local
+pinned DRAM. The indexer and other GPU KV groups keep their normal device
+storage. Set `hisparse_config.prefill_layerwise_num_buffers` to a positive
+integer on the producer. The default, zero, selects the existing HiSparse path.
+
+For example, with 4,096 cached tokens and a 16-token append, each layer loads
+the 4,096 history rows needed for that request, computes against its GPU buffer,
+and writes the 16 new rows back to DRAM. Attention still applies its usual
+top-k selection. Two requests referencing the same physical workspace page
+load its common history once in that layer. A one-token final append follows
+the same transfer lifecycle even when attention uses its decode kernel.
+
+The GPU workspace uses the indexer's physical page IDs. For each compatible
+Main KV layout, multiply the GPU pool's block count by the number of Main KV
+pages per indexer block, the bytes per Main KV page, and the configured buffer
+count (capped at the number of layers of that layout). Sum these products for
+the total workspace. This includes page padding and reserves space across the
+GPU block pool. The scheduler accounts for this reservation before admitting
+requests. The buffer count is per layout, independent of the number of requests.
+
+With one buffer, the next layer waits for writeback before loading its history.
+With more buffers, a device copy stream prefetches other layers while the active
+layer computes. A second stream copies new rows back. Both streams use the same
+HiSparse batched DMA and completion events as decode. Backends declare support
+for this producer path with `supports_layerwise_prefill`. Completion of a chunk
+waits for its writebacks, including partial tails, before P/D handoff.
+The scheduler publishes sealed prefix pages after the workers acknowledge them.
+
+### GLM-5.3 configuration and validation
+
+Use the full GLM-5.3 checkpoint. Both endpoints should use the same attention
+backend, KV dtype, block size and tensor parallel size. The example uses
+`FLASHMLA_SPARSE`, `--kv-cache-dtype fp8_ds_mla` and a host pool of 32 GiB
+per replica. Size the host pool for the chosen context length and concurrency.
+For a BF16 correctness control, select `--kv-cache-dtype bfloat16` on both
+endpoints. The producer uses eager execution without speculation, context
+parallelism or ubatching.
+
+Producer arguments for NIXL pull:
+
+```shell
+--enforce-eager --block-size 64 --attention-backend FLASHMLA_SPARSE \
+--kv-cache-dtype fp8_ds_mla --enable-prefix-caching \
+--attention-config '{"hisparse_config":{"prefill_layerwise_num_buffers":2}}' \
+--kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer"},{"kv_connector":"HiSparseConnector","kv_role":"kv_producer","kv_connector_extra_config":{"host_pool_gib":32}}]}}'
+```
+
+On the decoder use the same transfer configuration with both nested roles
+and the outer role set to `kv_consumer`. Omit the producer's
+`--attention-config` override. NIXL pulls Main KV from the producer's DRAM and
+indexer pages from its GPU. The decoder uses its existing HiSparse hot cache.
+This mixed-memory pull requires the same block size across transferable groups
+and matching P/D tensor parallelism.
+
+The following test compares the layerwise producer with an all-GPU baseline of
+the same dtype. It warms a long prefix, appends divergent suffixes, checks the
+reported cache hit and compares generation logprobs. It covers buffer counts 1,
+2 and 4 for both KV dtypes.
+
+```shell
+VLLM_TEST_HISPARSE_GLM_MODEL="$MODEL_PATH" VLLM_TEST_HISPARSE_TP="$TP" \
+  VLLM_TEST_HISPARSE_HOST_GIB=32 .venv/bin/python -m pytest -q \
+  tests/v1/e2e/general/test_hisparse.py -k layerwise_prefill_matches_gpu_main_kv
+```
+
+For the P/D check, run
+`tests/v1/kv_connector/nixl_integration/test_disagg_accuracy.py` in
+`--mode baseline` against a reference server, then in `--mode disagg`
+against the proxy, with matching `--model_name` and `--file_name`. Repeat
+for each KV dtype. Measure throughput and p95 TTFT at the same concurrency
+and GPU memory budget across the baseline and each buffer count. An example
+workload for the P/D proxy is:
+
+```shell
+vllm bench serve --base-url "$PROXY_URL" --model "$MODEL_PATH" \
+  --dataset-name prefix_repetition --prefix-repetition-num-prefixes 4 \
+  --prefix-repetition-prefix-len 8192 --prefix-repetition-suffix-len 32 \
+  --prefix-repetition-output-len 1 --num-prompts 256 --max-concurrency 32 \
+  --metric-percentiles 50,95,99
+```
+
+Warm the prefixes first with the same dataset seed. Record prefix-cache hits
+and the layerwise H2D/D2H byte counters on the producer along with throughput.
+
 ## QSA models
 
 For Qwen4Exp QSA models, configure `HiSparseConnector` to offload the main K/V

@@ -127,6 +127,7 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops import flashmla
 from vllm.v1.hisparse import runtime as hisparse_runtime
 from vllm.v1.hisparse.backend import get_hisparse_backend
+from vllm.v1.hisparse.dma import HiSparseDMA
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseRuntime,
@@ -3747,8 +3748,7 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
     ]
     worker.dma_stream = torch.Stream(device=device)
     worker.host_write_event = torch.Event()
-    worker._dma_free_descriptors = []
-    worker._pending_dma_descriptors = deque()
+    worker.dma = HiSparseDMA(worker.backend)
     worker._pending_transfer_events = deque()
     worker._enqueued_transfer_ids = []
     worker._dma_submitted = False

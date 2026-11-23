@@ -807,7 +807,7 @@ def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
     )
     with pytest.raises(RuntimeError, match="initialization failed"):
         attn_utils_module.init_hisparse_kv_cache(
-            SimpleNamespace(),
+            KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=[]),
             torch.device("cpu"),
             [],
             vllm_config,

@@ -33,7 +33,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
-from vllm.config.attention import HiSparseConfig
+from vllm.config.attention import AttentionConfig, HiSparseConfig
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (
@@ -65,6 +65,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparsePageSpec,
     KVCacheConfig,
     KVCacheGroup,
+    KVCacheGroupRole,
     KVCacheLayerConfig,
     KVCacheTensor,
     MambaSpec,
@@ -75,6 +76,97 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize("buffers", [1, 2, 4])
+def test_layerwise_workspace_allocates_budgeted_bytes_per_layout(buffers):
+    from vllm.v1.hisparse.layerwise import allocate_layer_buffers
+    from vllm.v1.hisparse.layout import layerwise_bytes_per_block
+
+    main = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.bfloat16,
+        cache_role=SparseCacheRole.SPARSE,
+    )
+    packed = replace(main, dtype=torch.uint8, state_content_bytes=80)
+    index = replace(main, block_size=32, cache_role=SparseCacheRole.INDEXER)
+    layers = {
+        f"model.layers.{i}": full_layer(main if i < 3 else packed) for i in range(4)
+    }
+    source = KVCacheGroup.from_layers(layers, host_resident=True)
+    indexer = KVCacheGroup.from_layers(
+        {"indexer": full_layer(index)}, role=KVCacheGroupRole.HISPARSE_INDEXER
+    )
+    groups = [source, indexer]
+    cache = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+        hisparse_prefill_indexer_group=1,
+    )
+    views = allocate_layer_buffers(cache, buffers, [16, 32], torch.device("cpu"))
+    actual = {v.data_ptr(): v.untyped_storage().nbytes() for v in views.values()}
+    assert len(actual) == min(buffers, 3) + 1
+    assert sum(actual.values()) == cache.num_blocks * layerwise_bytes_per_block(
+        groups, buffers
+    )
+    assert all(v.shape[0] == 16 for v in views.values())
+    assert views["model.layers.3"].shape[-1] == 80
+
+
+def test_layerwise_hybrid_planner_reserves_workspace_before_admission(monkeypatch):
+    from vllm.v1.hisparse.layout import get_hisparse_kv_cache_config
+
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
+    config = VllmConfig(
+        model_config=ModelConfig(
+            max_model_len=128, enforce_eager=True, hf_overrides={"index_topk": 8}
+        ),
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(prefill_layerwise_num_buffers=2)
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_producer",
+            kv_connector_extra_config={"host_pool_gib": 1},
+        ),
+    )
+    config.cache_config.kv_cache_layout = "BLHNC"
+    main = MLAAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.bfloat16,
+        cache_role=SparseCacheRole.SPARSE,
+    )
+    layers = {f"model.layers.{i}": full_layer(main) for i in range(4)}
+    layers["indexer"] = full_layer(replace(main, cache_role=SparseCacheRole.INDEXER))
+    regular = AttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+    )
+    layers["dense"] = full_layer(regular)
+    groups = get_hisparse_kv_cache_groups(config, layers)
+    assert groups is not None
+    host, indexer, dense = groups
+    assert host.host_resident and dense.layer_names == ["dense"]
+    ratio = indexer.block_size // main.block_size
+    assert ratio > 1
+    shared_bytes = max(indexer.page_size_bytes, regular.page_size_bytes)
+    bytes_per_block = shared_bytes + ratio * main.page_size_bytes * 2
+    cache = get_hisparse_kv_cache_config(
+        config, groups, 16 * bytes_per_block - 1, 2**20
+    )
+    assert cache.num_blocks == 15
+    assert kv_cache_planning._pool_bytes_per_block(config, groups) == bytes_per_block
+    assert {t.size for t in cache.kv_cache_tensors if not t.host_resident} == {
+        15 * shared_bytes
+    }
 
 
 @pytest.mark.parametrize("gpu_block_size", [32, 64])

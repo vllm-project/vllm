@@ -25,6 +25,7 @@ from vllm.v1.hisparse.layout import (
     HISPARSE_RESIDENT_SUFFIX,
     get_hisparse_page_layer_configs,
     get_hisparse_source_layers,
+    get_layerwise_num_buffers,
 )
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
@@ -62,6 +63,13 @@ def resolve_hisparse_specs(
     sparse_layers = get_hisparse_source_layers(layer_configs)
     if not sparse_layers:
         return layer_configs
+    if get_layerwise_num_buffers(vllm_config) and any(
+        layer.kv_sharing_target_layer_name in sparse_layers
+        for layer in attn_layers.values()
+    ):
+        raise ValueError(
+            "Layerwise HiSparse requires each DSA layer to own its Main KV."
+        )
     block_sizes = {lc.spec.block_size for lc in sparse_layers.values()}
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")
@@ -232,6 +240,8 @@ def init_hisparse_kv_cache(
             allocate=allocate,
         )
         backend.prepare_kv_cache_views(kv_cache_config, kv_caches, forward_context)
+        if kv_cache_config.hisparse_prefill_indexer_group is not None:
+            return kv_caches
         cache_handles = bind_hisparse_kv_caches(
             forward_context=forward_context,
             kv_cache_config=kv_cache_config,
