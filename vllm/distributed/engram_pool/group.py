@@ -3,6 +3,8 @@
 """Startup rendezvous of every GPU that shares a pool's tables."""
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from functools import cache
 
@@ -45,6 +47,22 @@ class PeerGroup:
                 "VLLM_ENGINE_READY_TIMEOUT_S), and none may restart alone"
             ) from e
         return self.store.multi_get(keys)
+
+    @contextmanager
+    def startup_stage(self, operation: str) -> Iterator[None]:
+        """Report rank-local failures before any peer enters the next collective."""
+        error = b""
+        try:
+            yield
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}".encode()
+        failures = [
+            f"rank {rank}: {message.decode()}"
+            for rank, message in enumerate(self.all_gather(error))
+            if message
+        ]
+        if failures:
+            raise RuntimeError(f"{operation} failed: " + "; ".join(failures))
 
     def barrier(self) -> None:
         self.all_gather(b"")
