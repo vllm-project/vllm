@@ -45,6 +45,8 @@ class UnquantizedMoeBackend(Enum):
     XPU = "XPU"
     TPU = "TPU"
     OOT = "OOT"
+    # No compute backend: requantization sources only dequantize weights.
+    NONE = "NONE"
 
 
 def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBackend]:
@@ -233,7 +235,14 @@ def select_unquantized_moe_backend(
 ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
+    Returns `NONE` and a placeholder experts class when an online method
+    replaces the unquantized one.
     """
+    # TODO: migrate to oracle base method.
+    source = UnquantizedMoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     if current_platform.is_tpu():
         return UnquantizedMoeBackend.TPU, None
 
@@ -267,6 +276,16 @@ def select_unquantized_moe_backend(
             )
             return UnquantizedMoeBackend.FLASHINFER_TRTLLM, TrtLlmBf16LoRAExperts
 
+        # On XPU, TRITON stays the fallback (e.g. for batch invariance) and is
+        # forced by --moe-backend triton.
+        if current_platform.is_xpu() and moe_config.moe_backend != "triton":
+            backend = UnquantizedMoeBackend.XPU
+            oracle = UnquantizedMoEKernelOracle(moe_config, None, None)
+            kernel_cls, _ = oracle.try_backend(backend)
+            if kernel_cls is not None:
+                logger.debug_once(oracle.make_log_backend(backend, is_lora=True))
+                return backend, kernel_cls
+
         return UnquantizedMoEKernelOracle(moe_config, None, None).return_or_raise(
             UnquantizedMoeBackend.TRITON,
             [UnquantizedMoeBackend.TRITON],
@@ -287,10 +306,11 @@ def select_unquantized_moe_backend(
         return oracle.return_or_raise(UnquantizedMoeBackend.MOONEP, AVAILABLE_BACKENDS)
 
     runner_backend = moe_config.moe_backend
-    # 'humming' and 'marlin' are quantization-only; an unquantized layer (e.g.
-    # excluded via modules_to_not_convert, or an unquantized MTP draft of a
-    # quantized model) falls through to auto instead of erroring.
-    if runner_backend not in ["auto", "humming", "marlin"]:
+    # 'humming', 'marlin' and the RDNA3 int4 backends are quantization-only; an
+    # unquantized layer (e.g. excluded via modules_to_not_convert, or an
+    # unquantized MTP draft of a quantized model) falls through to auto instead
+    # of erroring.
+    if runner_backend not in ["auto", "humming", "marlin", "rdna3", "rdna3_int4_int8"]:
         requested_backend = map_unquantized_backend(runner_backend)
         if (
             moe_config.activation_format.is_batched
@@ -314,7 +334,7 @@ def select_unquantized_moe_backend(
             backend = UnquantizedMoeBackend.AITER
             kernel_cls, rejected = oracle.try_backend(backend)
             if kernel_cls is not None:
-                logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
+                logger.debug_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
                 return backend, kernel_cls
             # AITER was explicitly requested but does not support this
             # deployment configuration (e.g. a non-gated MoE activation,
@@ -341,7 +361,7 @@ def select_unquantized_moe_backend(
     for backend in AVAILABLE_BACKENDS:
         kernel_cls, _ = oracle.try_backend(backend)
         if kernel_cls is not None:
-            logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
+            logger.debug_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
             return backend, kernel_cls
 
     raise NotImplementedError(
@@ -518,6 +538,7 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
     """
 
     name = "Unquantized"
+    placeholder_backend = UnquantizedMoeBackend.NONE
 
     def backend_enum_cls(self) -> type[UnquantizedMoeBackend]:
         return UnquantizedMoeBackend
