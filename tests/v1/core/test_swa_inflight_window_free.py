@@ -18,6 +18,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import RequestStatus
 
 from .utils import create_requests, create_scheduler, mock_kv
 
@@ -47,7 +48,7 @@ def _make_model_runner_output(
     )
 
 
-def _create_swa_scheduler(async_scheduling: bool):
+def _create_swa_scheduler(async_scheduling: bool, **kwargs):
     return create_scheduler(
         block_size=BLOCK_SIZE,
         async_scheduling=async_scheduling,
@@ -57,6 +58,7 @@ def _create_swa_scheduler(async_scheduling: bool):
             ),
             sliding_window=SLIDING_WINDOW,
         ),
+        **kwargs,
     )
 
 
@@ -161,6 +163,44 @@ def test_swa_admission_cap_accounts_for_overlapping_batches():
     )
     # One extra in-flight chunk is held back: (1024 - 1 + 2 * 1024) tokens.
     assert overlapped == 193
+
+
+def test_swa_admission_cap_splits_into_window_and_shared_reserve():
+    """Of the cap, only the window belongs to one request: the token budget
+    bounds in-flight tokens across all requests together."""
+    config = SlidingWindowManager.config(sliding_window=1024)
+    admission = SlidingWindowManager.max_admission_blocks(
+        config, 16, max_in_flight_tokens=2 * 1024, max_model_len=16384
+    )
+    resident = SlidingWindowManager.max_resident_blocks(config, 16, max_model_len=16384)
+    reserve = SlidingWindowManager.shared_in_flight_reserve_blocks(
+        config, 16, max_in_flight_tokens=2 * 1024, max_model_len=16384
+    )
+    # 1023 window tokens -> 64 blocks, +1 for window misalignment.
+    assert resident == 65
+    # Two in-flight batches of 1024 tokens.
+    assert reserve == 128
+    assert admission == resident + reserve
+
+
+def test_parked_swa_loads_share_one_in_flight_reserve():
+    """Each parked async KV load reserves the blocks it still needs, but the
+    loads' in-flight tokens come out of one token budget. Reserving that budget
+    once per load kept 2 of these 4 loads out of a pool that fits all of them."""
+    scheduler = _create_swa_scheduler(
+        async_scheduling=False,
+        max_num_batched_tokens=256,
+        max_model_len=2048,
+        num_blocks=30,
+        use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE, is_async=True),
+    )
+    requests = create_requests(num_requests=4, num_tokens=1024, block_size=BLOCK_SIZE)
+    for request in requests:
+        scheduler.add_request(request)
+
+    scheduler.schedule()
+
+    assert all(r.status == RequestStatus.WAITING_FOR_REMOTE_KVS for r in requests)
 
 
 def test_chunked_local_free_waits_for_in_flight_step():

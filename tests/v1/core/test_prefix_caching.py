@@ -69,6 +69,8 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     HiSparseResidentManager,
     HiSparseSourceManager,
     MambaManager,
+    ShortConvStateManager,
+    SlidingWindowManager,
 )
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.hisparse.types import SparseKVOffloadCommand, SparseKVPageTransfer
@@ -1320,7 +1322,7 @@ def test_hisparse_async_import_preserves_hot_transition_reservation(tmp_path):
     assert manager.block_pool.get_num_free_blocks() == 13
     second = _add_hisparse_request(scheduler, "second", 2, offset=1000)
     assert second.status == RequestStatus.WAITING
-    assert scheduler._request_remaining_blocks(first) == 14
+    assert scheduler._request_remaining_blocks(first) == (14, 0)
     assert manager.block_pool.get_num_free_blocks() == 13
     assert manager.allocate_slots(first, 2 * block, reserved_blocks=8) is None
     assert manager.block_pool.get_num_free_blocks() == 13
@@ -7480,3 +7482,156 @@ def test_mamba_deprioritize_preserves_shared_fork_fallback():
     pool.get_new_blocks(num_uncached + 1)
     assert pool.get_cached_block(branch_b.block_hashes[4], [1]) is None
     assert pool.get_cached_block(root_a.block_hashes[1], [1]) is not None
+
+
+def _short_conv_kv_cache_manager(
+    conv_manager_cls=ShortConvStateManager, num_blocks: int = 200
+) -> KVCacheManager:
+    params = {"sliding_window": 4}
+    if conv_manager_cls is ShortConvStateManager:
+        params |= {"max_in_flight_steps": 2}
+    spec = {"num_kv_heads": 1, "head_size": 1, "dtype": torch.float32}
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(["full"], AttentionSpec(block_size=16, **spec)),
+            new_kv_cache_group(
+                ["conv"],
+                conv_manager_cls.layer_config(
+                    AttentionSpec(block_size=4, **spec), **params
+                ),
+            ),
+        ],
+    )
+    return make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=4,
+        retention_interval=0,
+    )
+
+
+def _prefill_in_chunks(manager, request, chunks, computed_blocks=None, num_hit=0):
+    """Allocate `chunks` and return the conv rows each step reads from the cache."""
+    conv_manager = manager.coordinator.single_type_managers[1]
+    request.num_computed_tokens = 0
+    start = num_hit
+    for num_new_tokens in chunks:
+        blocks = manager.allocate_slots(
+            request,
+            num_new_tokens,
+            num_hit if start == num_hit else 0,
+            computed_blocks if start == num_hit else None,
+            full_sequence_must_fit=True,
+        )
+        assert blocks is not None
+        conv_blocks = conv_manager.req_to_blocks[request.request_id]
+        for position in range(max(start - 3, 0), start):
+            assert not conv_blocks[position // 4].is_null, position
+        num_held_blocks = sum(not block.is_null for block in conv_blocks)
+        assert num_held_blocks <= conv_manager.max_admission_blocks_per_request
+        start += num_new_tokens
+        request.num_computed_tokens = start
+    return conv_manager.req_to_blocks[request.request_id]
+
+
+def test_short_conv_state_backs_only_tails_and_reachable_boundaries():
+    manager = _short_conv_kv_cache_manager()
+    request = make_request("0", list(range(100)), 4, sha256)
+    computed_blocks, _, _ = manager.get_computed_blocks(request)
+
+    conv_blocks = _prefill_in_chunks(manager, request, (64, 36), computed_blocks)
+
+    # Tail of chunk 1, the hit boundary at 96, and tail of chunk 2.
+    assert [i for i, b in enumerate(conv_blocks) if not b.is_null] == [15, 23, 24]
+    manager.free(request)
+    assert manager.block_pool.get_usage() == 0
+    assert manager.reset_prefix_cache()
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [(100,), (64, 36), (13, 51, 36), (7,) * 14 + (2,), (97, 3)],
+)
+@pytest.mark.parametrize(
+    "follow_up",
+    [list(range(100)), list(range(150)), list(range(70)) + [999] * 40],
+)
+def test_short_conv_state_keeps_plain_sliding_window_prefix_hits(chunks, follow_up):
+    hits = []
+    for manager_cls in (SlidingWindowManager, ShortConvStateManager):
+        manager = _short_conv_kv_cache_manager(manager_cls)
+        request = make_request("0", list(range(100)), 4, sha256)
+        computed_blocks, _, _ = manager.get_computed_blocks(request)
+        if manager_cls is ShortConvStateManager:
+            _prefill_in_chunks(manager, request, chunks, computed_blocks)
+        else:
+            start = 0
+            for num_new_tokens in chunks:
+                assert manager.allocate_slots(
+                    request,
+                    num_new_tokens,
+                    0,
+                    computed_blocks if start == 0 else None,
+                    full_sequence_must_fit=True,
+                )
+                start += num_new_tokens
+                request.num_computed_tokens = start
+        manager.free(request)
+        follower = make_request("1", follow_up, 4, sha256)
+        _, num_hit_tokens, _ = manager.get_computed_blocks(follower)
+        hits.append(num_hit_tokens)
+    assert hits[0] == hits[1]
+
+
+def test_short_conv_state_resumes_a_hit_from_a_backed_tail():
+    manager = _short_conv_kv_cache_manager()
+    request = make_request("0", list(range(100)), 4, sha256)
+    computed_blocks, _, _ = manager.get_computed_blocks(request)
+    _prefill_in_chunks(manager, request, (64, 36), computed_blocks)
+    manager.free(request)
+
+    follower = make_request("1", list(range(140)), 4, sha256)
+    computed_blocks, num_hit_tokens, _ = manager.get_computed_blocks(follower)
+    assert num_hit_tokens == 96
+
+    conv_blocks = _prefill_in_chunks(
+        manager, follower, (44,), computed_blocks, num_hit=96
+    )
+    assert not conv_blocks[23].is_null
+
+
+def test_short_conv_state_admission_cap_ignores_chunk_size():
+    config = ShortConvStateManager.config(sliding_window=4, max_in_flight_steps=2)
+    # Three 2-block tails plus one block per reachable boundary.
+    for in_flight_tokens in (16384, 32768):
+        cap = ShortConvStateManager.max_admission_blocks(
+            config, 4, in_flight_tokens, 262144
+        )
+        assert cap == 3 * 2 + 3
+    assert ShortConvStateManager.max_resident_blocks(config, 4, 262144) is None
+
+
+def test_short_conv_state_load_backs_the_rows_before_its_hit():
+    manager = _short_conv_kv_cache_manager()
+    conv_manager = manager.coordinator.single_type_managers[1]
+    request = make_request("0", list(range(164)), 4, sha256)
+    free_blocks = manager.block_pool.get_num_free_blocks()
+    manager.coordinator.set_reachable_boundaries(request)
+    expected = conv_manager.get_num_blocks_to_allocate(
+        request.request_id, 164, [], 64, 0, 164
+    )
+
+    assert manager.allocate_slots(request, 100, num_external_computed_tokens=64)
+
+    conv_blocks = conv_manager.req_to_blocks[request.request_id]
+    backed = [i for i, block in enumerate(conv_blocks) if not block.is_null]
+    # The load's last block, the boundary tail at 160, and the step's tail.
+    assert backed == [15, 39, 40]
+    assert expected == len(backed)
+    num_full_attention_blocks = 11
+    assert free_blocks - manager.block_pool.get_num_free_blocks() == (
+        num_full_attention_blocks + len(backed)
+    )

@@ -772,6 +772,25 @@ class KVCacheGroup:
             self.manager_config, self.block_size, self.dcp_sharded, vllm_config
         )
 
+    def max_resident_blocks_per_request(self, vllm_config: VllmConfig) -> int | None:
+        """The part of `max_allocated_blocks_per_request` that is not in-flight
+        reserve, or None if the request holds all of it."""
+        return self.manager_cls.max_resident_blocks(
+            self.manager_config,
+            self.block_size,
+            vllm_config.model_config.max_model_len,
+        )
+
+    def shared_in_flight_reserve_blocks(self, vllm_config: VllmConfig) -> int:
+        """Blocks all requests together need for in-flight tokens beyond their
+        `max_resident_blocks_per_request`."""
+        return self.manager_cls.shared_in_flight_reserve_blocks(
+            self.manager_config,
+            self.block_size,
+            vllm_config.max_in_flight_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+
     def max_num_blocks_per_req(
         self, vllm_config: VllmConfig, max_len: int | None = None
     ) -> int:

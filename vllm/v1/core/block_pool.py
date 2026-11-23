@@ -104,6 +104,10 @@ class BlockHashToBlockMap:
         self._dup_ids.clear()
 
 
+# The first block the pool hands out after the null block.
+DISCARD_BLOCK_ID = 1
+
+
 class BlockPool:
     """BlockPool that manages KVCacheBlocks.
     It provides methods to allocate, free and cache the kv cache blocks. The
@@ -163,6 +167,8 @@ class BlockPool:
         # avoid freeing it.
         self.null_block = self.free_block_queue.popleft()
         self.null_block.is_null = True
+        self._discard_block: KVCacheBlock | None = None
+        self._num_reserved_blocks = 1
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
@@ -171,6 +177,20 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+
+    @property
+    def discard_block(self) -> KVCacheBlock:
+        """A reserved block for KV writes that no step reads back.
+
+        Attention kernels may load the null block in a tile straddling their
+        window, so it must not take arbitrary data; nothing reads this block.
+        """
+        if self._discard_block is None:
+            self._discard_block = self.free_block_queue.popleft()
+            assert self._discard_block.block_id == DISCARD_BLOCK_ID
+            self._discard_block.is_null = True
+            self._num_reserved_blocks += 1
+        return self._discard_block
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -883,11 +903,12 @@ class BlockPool:
 
         """
         num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
-        if num_used_blocks != 1:  # The null block is always marked as used
+        # The reserved blocks are always marked as used.
+        if num_used_blocks != self._num_reserved_blocks:
             logger.warning(
                 "Failed to reset prefix cache because some "
                 "blocks (%d) are not freed yet",
-                num_used_blocks - 1,
+                num_used_blocks - self._num_reserved_blocks,
             )
             return False
 
@@ -941,8 +962,7 @@ class BlockPool:
             The KV cache usage (between 0.0 and 1.0).
 
         """
-        # Subtract 1 to account for null block.
-        total_gpu_blocks = self.num_gpu_blocks - 1
+        total_gpu_blocks = self.num_gpu_blocks - self._num_reserved_blocks
         if not total_gpu_blocks:
             return 0
         return 1.0 - (self.get_num_free_blocks() / total_gpu_blocks)

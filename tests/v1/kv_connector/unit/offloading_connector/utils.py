@@ -373,6 +373,7 @@ class RequestRunner:
             num_blocks=num_gpu_blocks,
             kv_cache_tensors=kv_cache_tensors,
             kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=retention_interval,
         )
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         self.num_kv_groups = len(kv_cache_config.kv_cache_groups)

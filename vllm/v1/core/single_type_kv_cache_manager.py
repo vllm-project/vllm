@@ -70,6 +70,9 @@ class SingleTypeKVCacheManager(ABC):
     # Keep this group's longer prefix until external cache lookup completes.
     retains_longer_hit: bool = False
 
+    # Whether allocations depend on the request's reachable cache boundaries.
+    tracks_reachable_boundaries: ClassVar[bool] = False
+
     @classmethod
     def config(cls, **params: Any) -> ManagerConfig:
         """This manager's policy with `Params(**params)`."""
@@ -114,9 +117,41 @@ class SingleTypeKVCacheManager(ABC):
         Single source of truth for both startup pool sizing
         (`max_allocated_blocks_per_request`) and the runtime admission gate, so requests
         admitted by startup can also be admitted at runtime. `None` means no
-        cap: the request holds every block until it finishes.
+        cap: the request holds every block until it finishes. Bounds summed
+        over several requests split this cap; see `max_resident_blocks`.
         """
         return None
+
+    @classmethod
+    def max_resident_blocks(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        max_model_len: int,
+    ) -> int | None:
+        """The part of `max_admission_blocks` a request keeps once its
+        in-flight tokens settle.
+
+        The rest of the cap backs in-flight tokens, which the token budget
+        bounds for all requests together (`max_in_flight_tokens`), so a set of
+        requests shares one `shared_in_flight_reserve_blocks` for them.
+        `None` means the whole cap belongs to the request.
+        """
+        return None
+
+    @classmethod
+    def shared_in_flight_reserve_blocks(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        max_in_flight_tokens: int,
+        max_model_len: int,
+    ) -> int:
+        """Blocks all requests together need for in-flight tokens beyond their
+        `max_resident_blocks`; 0 if the manager has no resident bound."""
+        if cls.max_resident_blocks(config, block_size, max_model_len) is None:
+            return 0
+        return cdiv(max_in_flight_tokens, block_size)
 
     @classmethod
     def max_allocated_blocks_per_request(
@@ -186,6 +221,7 @@ class SingleTypeKVCacheManager(ABC):
         dcp_world_size: int = 1,
         needs_kv_cache_zeroing: bool = False,
         max_admission_blocks_per_request: int | None = None,
+        max_resident_blocks_per_request: int | None = None,
         retention_interval: int | None = None,
     ) -> None:
         """Initializes the SingleTypeKVCacheManager.
@@ -206,6 +242,10 @@ class SingleTypeKVCacheManager(ABC):
                 chunked-local); `None` (the default) means no cap, which is
                 correct for full-attention-style managers that hold every
                 block until the request finishes.
+            max_resident_blocks_per_request: The part of
+                `max_admission_blocks_per_request` that is not in-flight
+                reserve (see `max_resident_blocks`); `None` if all of it is
+                the request's own.
             retention_interval: The prefix-cache retention interval; `None`
                 is dense (see `cache_blocks`).
 
@@ -224,6 +264,7 @@ class SingleTypeKVCacheManager(ABC):
         self.enable_caching = enable_caching
         self.retention_interval = retention_interval
         self.max_admission_blocks_per_request = max_admission_blocks_per_request
+        self.max_resident_blocks_per_request = max_resident_blocks_per_request
         # Record newly allocated block ids only when worker-side zeroing will
         # consume them and this manager's blocks get zeroed.
         self._record_new_block_ids = needs_kv_cache_zeroing and self.zeroes_new_blocks
@@ -282,6 +323,12 @@ class SingleTypeKVCacheManager(ABC):
 
     def get_num_blocks_to_reserve(self, request_id: str, num_tokens: int) -> int | None:
         """Return a reservation, or None to use the allocation-based admission check."""
+        return None
+
+    def set_reachable_boundaries(
+        self, request_id: str, boundaries: Sequence[int]
+    ) -> None:
+        """Record the token positions the request's cached prefix can be hit at."""
         return None
 
     def get_num_blocks_to_allocate(
@@ -1134,6 +1181,21 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         return cdiv(num_tokens, block_size) + 1
 
     @classmethod
+    def max_resident_blocks(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        max_model_len: int,
+    ) -> int | None:
+        # `max_admission_blocks` without its in-flight tokens.
+        params = config.params
+        assert isinstance(params, SlidingWindowManager.Params)
+        num_tokens = min(
+            params.sliding_window - 1 + params.extra_retained_tokens, max_model_len
+        )
+        return cdiv(num_tokens, block_size) + 1
+
+    @classmethod
     def max_allocated_blocks_per_request(
         cls,
         config: ManagerConfig,
@@ -1415,6 +1477,17 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         )
         return min(window_blocks, (params.max_in_flight_steps + 1) * tail_blocks)
 
+    @classmethod
+    def max_resident_blocks(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        max_model_len: int,
+    ) -> int | None:
+        # Each in-flight step backs its own tail however few tokens it has, so
+        # the token budget does not bound the tails across requests.
+        return None
+
     def __init__(self, kv_cache_group: KVCacheGroup, **kwargs) -> None:
         super().__init__(kv_cache_group, **kwargs)
         params = self.manager_config.params
@@ -1553,6 +1626,193 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
             ):
                 mask[j - start_block] = True
         return mask
+
+
+class ShortConvStateManager(DFlashSlidingWindowManager):
+    """Short-conv input history, of which later steps read only a few rows.
+
+    A conv with `W` taps reads its in-step taps from the activations and only
+    the `W - 1` rows before the step from this cache. An allocation therefore
+    backs each step's tail and the tails before the prefix-cache boundaries the
+    request can be hit at. The other rows are still written, to the pool's
+    discard block, so a long prefill chunk holds a few blocks instead of one
+    per `block_size` tokens. A KV-connector load backs the rows before its hit.
+    Requires sparse prefix-cache retention, and a connector that stores only
+    those reachable tails and treats discarded rows as null.
+    """
+
+    tracks_reachable_boundaries: ClassVar[bool] = True
+
+    # A request's boundaries: a resend, an extension and a shared-prefix junction.
+    MAX_REACHABLE_BOUNDARIES: ClassVar[int] = 3
+
+    @classmethod
+    def max_admission_blocks(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        max_in_flight_tokens: int,
+        max_model_len: int,
+    ) -> int | None:
+        params = config.params
+        assert isinstance(params, ShortConvStateManager.Params)
+        tail_blocks = super().max_admission_blocks(
+            config, block_size, max_in_flight_tokens, max_model_len
+        )
+        window_blocks = SlidingWindowManager.max_admission_blocks(
+            config,
+            block_size,
+            max_in_flight_tokens + params.num_lookahead_tokens,
+            max_model_len,
+        )
+        assert tail_blocks is not None and window_blocks is not None
+        boundary_blocks = cls.MAX_REACHABLE_BOUNDARIES * cdiv(
+            params.sliding_window - 1, block_size
+        )
+        return min(window_blocks, tail_blocks + boundary_blocks)
+
+    @classmethod
+    def find_longest_cache_hit(cls, *args: Any, **kwargs: Any):
+        # Unlike a drafter, the conv reads the rows right before the hit.
+        return super(DFlashSlidingWindowManager, cls).find_longest_cache_hit(
+            *args, **kwargs
+        )
+
+    @classmethod
+    def reachable_block_mask(cls, *args: Any, **kwargs: Any) -> list[bool] | None:
+        return super(DFlashSlidingWindowManager, cls).reachable_block_mask(
+            *args, **kwargs
+        )
+
+    def __init__(self, kv_cache_group: KVCacheGroup, **kwargs) -> None:
+        super().__init__(kv_cache_group, **kwargs)
+        assert self.retention_interval == 0
+        self._null_block = self.block_pool.discard_block
+        self._reachable_boundaries: dict[str, tuple[int, ...]] = {}
+
+    def set_reachable_boundaries(
+        self, request_id: str, boundaries: Sequence[int]
+    ) -> None:
+        self._reachable_boundaries[request_id] = tuple(boundaries)
+
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        self._reachable_boundaries.pop(request_id, None)
+        return super().pop_blocks_for_free(request_id)
+
+    def _num_unbacked_leading_blocks(self, num_tokens_main_model: int) -> int:
+        params = self.manager_config.params
+        assert isinstance(params, ShortConvStateManager.Params)
+        num_tail_tokens = self.tail_tokens + params.extra_retained_tokens
+        return max(num_tokens_main_model - num_tail_tokens, 0) // self.block_size
+
+    def _boundary_tail_mask(
+        self, request_id: str, start_block: int, end_block: int
+    ) -> list[bool]:
+        """Which blocks of `[start_block, end_block)` end on a reachable hit."""
+        if start_block >= end_block:
+            return []
+        mask = None
+        if self.enable_caching:
+            mask = self.reachable_block_mask(
+                start_block=start_block,
+                end_block=end_block,
+                alignment_tokens=self.cache_hit_alignment_tokens,
+                block_size=self.group_block_size,
+                manager_config=self.manager_config,
+                retention_interval=0,
+                reachable_boundaries=self._reachable_boundaries.get(request_id, ()),
+            )
+        return [False] * (end_block - start_block) if mask is None else mask
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+        prefill_end: int = 0,
+    ) -> int:
+        num_blocks = super().get_num_blocks_to_allocate(
+            request_id,
+            num_tokens,
+            new_computed_blocks,
+            total_computed_tokens,
+            num_local_computed_tokens,
+            num_tokens_main_model,
+            apply_admission_cap=apply_admission_cap,
+            prefill_end=prefill_end,
+        )
+        first_block = len(self.req_to_blocks.get(request_id, ()))
+        last_block = min(
+            self._num_unbacked_leading_blocks(num_tokens_main_model),
+            cdiv(num_tokens, self.block_size),
+        )
+        num_loaded_blocks = 0
+        if request_id not in self.num_cached_block:
+            first_block = max(
+                self.get_num_skipped_tokens(total_computed_tokens) // self.block_size,
+                first_block + len(new_computed_blocks),
+            )
+            computed_end = cdiv(total_computed_tokens, self.block_size)
+            num_loaded_blocks = max(min(computed_end, last_block) - first_block, 0)
+            first_block = max(first_block, computed_end)
+        return (
+            num_blocks
+            + num_loaded_blocks
+            + sum(self._boundary_tail_mask(request_id, first_block, last_block))
+        )
+
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+        record_for_zeroing: bool = True,
+        num_tokens_main_model: int = 0,
+    ) -> None:
+        # Unlike a drafter, the conv reads the rows right before the hit.
+        super().allocate_external_computed_blocks(
+            request_id,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+            record_for_zeroing=record_for_zeroing,
+            num_tokens_main_model=0,
+        )
+
+    def allocate_new_blocks(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> list[KVCacheBlock]:
+        assert request_id not in self._partial_hit_reqs
+        req_blocks = self.req_to_blocks[request_id]
+        first_block = len(req_blocks)
+        num_required_blocks = cdiv(num_tokens, self.block_size)
+        if first_block >= num_required_blocks:
+            return []
+        tail_start = max(
+            first_block,
+            min(
+                self._num_unbacked_leading_blocks(num_tokens_main_model),
+                num_required_blocks,
+            ),
+        )
+        boundary_tails = self._boundary_tail_mask(request_id, first_block, tail_start)
+        new_blocks = iter(
+            self.block_pool.get_new_blocks(
+                sum(boundary_tails) + num_required_blocks - tail_start
+            )
+        )
+        entries = [
+            next(new_blocks) if backed else self._null_block
+            for backed in boundary_tails
+        ]
+        entries.extend(new_blocks)
+        req_blocks.extend(entries)
+        if self._record_new_block_ids:
+            self.new_block_ids.extend(b.block_id for b in entries if not b.is_null)
+        return entries
 
 
 class CircularBufferManager(SingleTypeKVCacheManager):
@@ -3483,5 +3743,12 @@ def create_single_type_manager(
     )
     if max_admission_blocks is not None:
         kwargs["max_admission_blocks_per_request"] = max_admission_blocks
+    max_resident_blocks = manager_class.max_resident_blocks(
+        kv_cache_group.manager_config,
+        kv_cache_group.block_size,
+        max_model_len=max_model_len,
+    )
+    if max_resident_blocks is not None:
+        kwargs["max_resident_blocks_per_request"] = max_resident_blocks
     manager = manager_class(kv_cache_group, **kwargs)
     return manager

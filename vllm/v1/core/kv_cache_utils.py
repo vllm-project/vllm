@@ -1152,17 +1152,35 @@ def get_max_concurrency_for_kv_cache_config(
     table, and all device groups draw those block ids from one shared pool, so
     the per-request total is the sum over groups.
 
+    Blocks that back in-flight tokens are bounded for all requests together:
+    `n` requests need `n * resident + min(reserve, n * in_flight)` blocks.
+
     Host groups use a separate pool; the smaller concurrency limit applies.
     """
     num_blocks_per_request = 0
+    num_in_flight_blocks_per_request = 0
+    shared_reserve_blocks = 0
     host_blocks_per_request = 0
     for group in kv_cache_config.kv_cache_groups:
         required = group.max_allocated_blocks_per_request(vllm_config)
         if group.host_resident:
             host_blocks_per_request += required
-        else:
+            continue
+        resident = group.max_resident_blocks_per_request(vllm_config)
+        if resident is None:
             num_blocks_per_request += required
-    limits = [kv_cache_config.num_blocks / num_blocks_per_request]
+        else:
+            num_blocks_per_request += resident
+            num_in_flight_blocks_per_request += required - resident
+            shared_reserve_blocks += group.shared_in_flight_reserve_blocks(vllm_config)
+    num_blocks = kv_cache_config.num_blocks
+    device_limit = num_blocks / (
+        num_blocks_per_request + num_in_flight_blocks_per_request
+    )
+    if device_limit * num_in_flight_blocks_per_request > shared_reserve_blocks:
+        # The in-flight share of this many requests outgrows the reserve.
+        device_limit = (num_blocks - shared_reserve_blocks) / num_blocks_per_request
+    limits = [device_limit]
     if host_blocks_per_request:
         assert kv_cache_config.hisparse_host_num_blocks is not None
         limits.append(

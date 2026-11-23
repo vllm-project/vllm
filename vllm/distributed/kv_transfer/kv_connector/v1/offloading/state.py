@@ -11,8 +11,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.block_pool import DISCARD_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import is_mamba_prefix_caching_group
 from vllm.v1.core.single_type_kv_cache_manager import (
+    ShortConvStateManager,
     SingleTypeKVCacheManager,
     SlidingWindowManager,
 )
@@ -343,7 +345,14 @@ class RequestOffloadState:
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
         ):
-            group_state.block_ids.extend(new_block_id_groups[group_config.group_idx])
+            block_ids = new_block_id_groups[group_config.group_idx]
+            if issubclass(group_config.manager_cls, ShortConvStateManager):
+                # A discarded row holds no state to store.
+                block_ids = [
+                    0 if block_id == DISCARD_BLOCK_ID else block_id
+                    for block_id in block_ids
+                ]
+            group_state.block_ids.extend(block_ids)
 
     def storable_chunks(
         self,

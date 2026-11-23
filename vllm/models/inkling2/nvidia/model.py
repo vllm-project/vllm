@@ -187,6 +187,7 @@ class Inkling2DecoderLayer(nn.Module):
                 kernel_size=config.sconv_kernel_size,
                 prefix=f"{prefix}.conv_state" + (f".pass{p}" if p else ""),
                 replicate_hidden=True,
+                sparse_history=True,
             )
             for p in range(num_passes)
         )

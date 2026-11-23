@@ -134,6 +134,20 @@ class KVCacheCoordinator(ABC):
         self.group_block_sizes = tuple(
             manager.block_size for manager in self.single_type_managers
         )
+        self._boundary_tracking_managers = tuple(
+            manager
+            for manager in self.single_type_managers
+            if manager.tracks_reachable_boundaries
+        )
+        self.shared_in_flight_reserve_blocks = sum(
+            manager.shared_in_flight_reserve_blocks(
+                manager.manager_config,
+                manager.block_size,
+                max_in_flight_tokens,
+                max_model_len,
+            )
+            for manager in self.single_type_managers
+        )
 
         # A positive retention interval must be a multiple of the base hit granularity
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
@@ -220,6 +234,35 @@ class KVCacheCoordinator(ABC):
                     prefill_end=prefill_end,
                 )
         return num_blocks_to_allocate
+
+    def set_reachable_boundaries(self, request: Request) -> None:
+        """Tell managers which positions `cache_blocks` can keep for `request`."""
+        if not self._boundary_tracking_managers:
+            return
+        boundaries = (
+            *replay_boundaries(
+                request.num_prompt_tokens,
+                num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+            ),
+            request.shared_prefix_boundary,
+        )
+        for manager in self._boundary_tracking_managers:
+            manager.set_reachable_boundaries(request.request_id, boundaries)
+
+    def get_num_in_flight_share_blocks(self, num_tokens: int) -> int:
+        """Blocks of a `num_tokens` request's admission cap that back in-flight
+        tokens rather than its own window, summed over groups. Sets of requests
+        share `shared_in_flight_reserve_blocks` for these."""
+        num_blocks = 0
+        for manager in self.single_type_managers:
+            resident_cap = manager.max_resident_blocks_per_request
+            if resident_cap is None:
+                continue
+            admission_cap = manager.max_admission_blocks_per_request
+            assert admission_cap is not None
+            required = cdiv(num_tokens, manager.block_size)
+            num_blocks += min(required, admission_cap) - min(required, resident_cap)
+        return num_blocks
 
     def allocate_new_computed_blocks(
         self,

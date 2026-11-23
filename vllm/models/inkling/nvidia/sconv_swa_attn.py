@@ -32,7 +32,10 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    ShortConvStateManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig
 
 from .ops.sconv import sconv_seq_metadata
@@ -119,6 +122,22 @@ class InklingSconvBackend(AttentionBackend):
         return InklingSconvMetadataBuilder
 
 
+def _supports_sparse_history(vllm_config: VllmConfig) -> bool:
+    """Whether every reader of the conv history tolerates discarded rows."""
+    if vllm_config.cache_config.prefix_cache_retention_interval != 0:
+        return False
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return True
+    extra_config = kv_transfer_config.kv_connector_extra_config
+    # Larger chunks floor hits below the boundaries the allocator keeps.
+    return (
+        kv_transfer_config.kv_connector == "OffloadingConnector"
+        and extra_config.get("block_size") is None
+        and int(extra_config.get("blocks_per_chunk") or 1) == 1
+    )
+
+
 class InklingConvState(nn.Module, AttentionLayerBase):
     """Per-decoder-layer owner emitting one sliding-window conv-state spec."""
 
@@ -131,9 +150,11 @@ class InklingConvState(nn.Module, AttentionLayerBase):
         kernel_size: int,
         prefix: str,
         replicate_hidden: bool = False,
+        sparse_history: bool = False,
     ) -> None:
         super().__init__()
         self.prefix = prefix
+        self.sparse_history = sparse_history
         # Bound to the manager-allocated paged cache by bind_kv_cache; a
         # placeholder until then. Read out-of-band by InklingShortConv.
         self.kv_cache = torch.tensor([])
@@ -203,6 +224,14 @@ class InklingConvState(nn.Module, AttentionLayerBase):
             head_size_v=0,  # all 4 streams packed into head_size
             dtype=self._dtype,
         )
+        if self.sparse_history and _supports_sparse_history(vllm_config):
+            return ShortConvStateManager.layer_config(
+                spec,
+                sliding_window=self.sliding_window,
+                num_speculative_tokens=vllm_config.num_speculative_tokens,
+                max_in_flight_steps=vllm_config.max_concurrent_batches,
+                num_lookahead_tokens=vllm_config.num_lookahead_tokens,
+            )
         return SlidingWindowManager.layer_config(
             spec, sliding_window=self.sliding_window
         )
