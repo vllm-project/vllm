@@ -433,11 +433,8 @@ def resolve_default_chat_template_kwargs(
 ) -> dict[str, Any]:
     """Resolve renderer defaults, including the dedicated Cohere format flag.
 
-    'cohere_format' only exists for the Cohere renderer ('--tokenizer-mode
-    cohere'), so it is injected only when the resolved tokenizer mode is
-    '"cohere"'. Injecting it unconditionally leaks it into every request's
-    'chat_template_kwargs', where the Mistral renderer forwards it to
-    mistral-common and strict validation rejects it.
+    `cohere_format` is only injected for `--tokenizer-mode cohere`; other
+    renderers don't consume it.
     """
     kwargs = dict(args.default_chat_template_kwargs or {})
     if getattr(args, "cohere_format", None) and tokenizer_mode == "cohere":
