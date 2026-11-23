@@ -3,7 +3,7 @@
 """KV cache helper for store."""
 
 import time
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator, Sequence
 from dataclasses import dataclass
 from itertools import chain
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -22,7 +22,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheStage
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -517,6 +517,80 @@ def get_current_attn_backend(
 ) -> type[AttentionBackend]:
     """Get the first attention backend for the given layers."""
     return get_current_attn_backends(vllm_config, layer_names)[0]
+
+
+# ---- Pipeline stages of two engines ----
+
+
+def pipeline_stage_layers(kv_cache_config: KVCacheConfig) -> list[list[str]]:
+    """The layers whose KV transfers externally on every pipeline stage of the
+    engine, by PP rank. Without `pipeline_stages`, one stage with this
+    worker's layers."""
+    stages: Sequence[KVCacheStage | KVCacheConfig] = (
+        kv_cache_config.pipeline_stages or (kv_cache_config,)
+    )
+    return [
+        [
+            layer_name
+            for group_id in kv_cache_config.transfer_group_ids
+            for layer_name in stage.kv_cache_groups[group_id].layer_names
+        ]
+        for stage in stages
+    ]
+
+
+def pair_pipeline_stages(
+    local_stages: Sequence[Collection[str]],
+    local_layers: Collection[str],
+    remote_stages: Sequence[Collection[str]],
+) -> dict[int, list[str]]:
+    """Which pipeline stage of a remote engine holds each layer of this worker.
+
+    Args:
+        local_stages: The layers of every pipeline stage of this engine.
+        local_layers: The layers of this worker, one of `local_stages`.
+        remote_stages: The layers of every pipeline stage of the remote engine.
+
+    Returns:
+        The layers of this worker that each remote stage holds, by the remote
+        PP rank, for the stages that hold some.
+
+    Raises:
+        ValueError: If `local_layers` is not one of `local_stages`, a layer is
+            on two stages of one engine, or the engines hold different layers.
+    """
+    if set(local_layers) not in [set(layers) for layers in local_stages]:
+        raise ValueError(
+            "This worker's KV layers are not one pipeline stage of its engine."
+        )
+    local = _pipeline_stage_by_layer(local_stages, "this")
+    remote = _pipeline_stage_by_layer(remote_stages, "the remote")
+    if local.keys() != remote.keys():
+        raise ValueError(
+            "The engines hold different KV layers: only this engine holds "
+            f"{sorted(local.keys() - remote.keys())}, only the remote engine "
+            f"holds {sorted(remote.keys() - local.keys())}."
+        )
+    pairs: dict[int, list[str]] = {}
+    for layer_name in local_layers:
+        pairs.setdefault(remote[layer_name], []).append(layer_name)
+    return pairs
+
+
+def _pipeline_stage_by_layer(
+    stages: Sequence[Collection[str]], engine: str
+) -> dict[str, int]:
+    stage_by_layer: dict[str, int] = {}
+    for pp_rank, layers in enumerate(stages):
+        for layer_name in layers:
+            if layer_name in stage_by_layer:
+                raise ValueError(
+                    f"KV layer {layer_name!r} is on pipeline stages "
+                    f"{stage_by_layer[layer_name]} and {pp_rank} of {engine} "
+                    "engine."
+                )
+            stage_by_layer[layer_name] = pp_rank
+    return stage_by_layer
 
 
 # ---- Per-engine transfer info ----

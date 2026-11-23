@@ -6,6 +6,7 @@ import pytest
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineTransferInfo,
     TransferTopology,
+    pair_pipeline_stages,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -137,3 +138,48 @@ def test_engine_info_fields_have_backward_compatible_defaults() -> None:
     assert registered.remote_pp_rank == 0
     assert registered.start_layer == 0
     assert registered.end_layer == 0
+
+
+@pytest.mark.parametrize(
+    ("local_stages", "local_rank", "remote_stages", "expected"),
+    [
+        # A PP=1 worker pulls each layer from the prefill stage holding it.
+        (
+            [["a", "b", "c", "d"]],
+            0,
+            [["a", "b"], ["c", "d"]],
+            {0: ["a", "b"], 1: ["c", "d"]},
+        ),
+        # A prefill PP stage pairs with a PP=1 peer through its own layers.
+        ([["a", "b"], ["c", "d"]], 1, [["a", "b", "c", "d"]], {0: ["c", "d"]}),
+        # Two layer partitions of one PP size.
+        (
+            [["a"], ["b", "c", "d"]],
+            1,
+            [["a", "b"], ["c", "d"]],
+            {0: ["b"], 1: ["c", "d"]},
+        ),
+    ],
+)
+def test_pair_pipeline_stages_finds_the_stage_holding_each_layer(
+    local_stages, local_rank, remote_stages, expected
+) -> None:
+    pairs = pair_pipeline_stages(local_stages, local_stages[local_rank], remote_stages)
+    assert pairs == expected
+
+
+@pytest.mark.parametrize(
+    ("local_stages", "local_layers", "remote_stages", "match"),
+    [
+        ([["a", "b"]], ["a", "b"], [["a"]], r"only this engine holds \['b'\]"),
+        ([["a"]], ["a"], [["a"], ["b"]], r"only the remote engine holds \['b'\]"),
+        ([["a"]], ["a"], [["a"], ["a"]], "on pipeline stages 0 and 1 of the remote"),
+        ([["a"], ["b"]], ["a", "b"], [["a", "b"]], "not one pipeline stage"),
+    ],
+)
+def test_pair_pipeline_stages_rejects_engines_holding_different_layers(
+    local_stages, local_layers, remote_stages, match
+) -> None:
+    """Pairing engines whose layers differ would leave some layer's KV stale."""
+    with pytest.raises(ValueError, match=match):
+        pair_pipeline_stages(local_stages, local_layers, remote_stages)

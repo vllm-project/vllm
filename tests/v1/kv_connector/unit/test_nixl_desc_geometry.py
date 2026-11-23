@@ -358,6 +358,8 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
     assert producer.block_len_per_layer == [128, 64, 64]
     assert producer.region_members == [["L2"], ["L2.swa"], ["L3"]]
     assert producer.num_descs == 3 * p_num_blocks
+    # The producer's other PP stage holds L0.
+    producer._pipeline_stage_layers = [["L0"], ["L2", "L2.swa", "L3"]]
     # Each decoder TP rank receives the complete MLA page, without head slicing.
     for rank in (0, 1):
         metadata = msgspec.msgpack.decode(
@@ -756,7 +758,7 @@ def _own_region_pairs(worker) -> bw._RegionPairs:
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
     )
-    return worker._pair_regions(metadata)
+    return worker._pair_regions(metadata, worker._regions_by_layer)
 
 
 def _own_pairs(worker) -> tuple[list[int], list[int]]:
@@ -2720,12 +2722,15 @@ def _make_pp_attn_worker(
     return worker
 
 
-def _pp_stage_metadata(stage, pp_rank):
-    """The handshake metadata a prefill PP stage advertises."""
+def _pp_stage_metadata(stages, pp_rank):
+    """The handshake metadata prefill PP stage `pp_rank` of `stages`
+    advertises, with the layers of every stage as its engine plans them."""
     metadata = msgspec.msgpack.decode(
-        stage.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+        stages[pp_rank].xfer_handshake_metadata.agent_metadata_bytes,
+        type=NixlAgentMetadata,
     )
     metadata.agent_metadata = f"prefill-pp{pp_rank}".encode()
+    metadata.pipeline_stage_layers = [list(s._regions_by_layer) for s in stages]
     return metadata
 
 
@@ -2776,7 +2781,7 @@ def test_pull_pp_rejects_packed_peer_before_pairing(layout, packed_endpoint):
     handles = set(wrapper.dlists)
 
     with pytest.raises(NotImplementedError, match="pull.*packed.*" + layout.name):
-        decode.add_remote_agent(_pp_stage_metadata(peer, 0), remote_pp_size=2)
+        decode.add_remote_agent(_pp_stage_metadata([peer], 0), remote_pp_size=2)
 
     assert wrapper.registered == registrations
     assert set(wrapper.dlists) == handles
@@ -2790,11 +2795,11 @@ def _add_prefill_stages(decode, stages):
     decode.nixl_wrapper.add_remote_agent = bytes.decode
     decode._remote_agents["prefill"] = {
         (pp_rank, 0): decode.add_remote_agent(
-            _pp_stage_metadata(stage, pp_rank),
+            _pp_stage_metadata(stages, pp_rank),
             remote_pp_rank=pp_rank,
             remote_pp_size=len(stages),
         )
-        for pp_rank, stage in enumerate(stages)
+        for pp_rank in range(len(stages))
     }
 
 
@@ -3230,7 +3235,8 @@ def test_pull_from_hma_pp_stages_pairs_unequal_blocks_after_prefix_hit():
 
 @pytest.mark.cpu_test
 def test_pull_from_pp_stages_rejects_a_layer_no_stage_holds():
-    """A local layer no prefill PP stage holds would keep stale KV."""
+    """A local layer no prefill PP stage holds would keep stale KV, so the
+    first stage's handshake fails, before any stage registers."""
     decode = _make_pp_attn_worker("decode", _PP_TARGET_LAYERS, hma=False)
     stages = [
         _make_pp_attn_worker(
@@ -3240,10 +3246,8 @@ def test_pull_from_pp_stages_rejects_a_layer_no_stage_holds():
             "prefill", _PP_TARGET_LAYERS[2:], hma=False, pp_stage=(1, 2)
         ),
     ]
-    decode.add_remote_agent(
-        _pp_stage_metadata(stages[0], 0), remote_pp_rank=0, remote_pp_size=2
-    )
-    with pytest.raises(RuntimeError, match="exactly once"):
+    with pytest.raises(RuntimeError, match="only this engine holds"):
         decode.add_remote_agent(
-            _pp_stage_metadata(stages[1], 1), remote_pp_rank=1, remote_pp_size=2
+            _pp_stage_metadata(stages, 0), remote_pp_rank=0, remote_pp_size=2
         )
+    assert "prefill" not in decode._remote_stages
