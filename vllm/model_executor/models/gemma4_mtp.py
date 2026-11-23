@@ -414,8 +414,6 @@ class Gemma4MTP(nn.Module):
             config,
             hidden_size=text_config.hidden_size,
             vocab_size=text_config.vocab_size,
-            router_path=speculative_config.hierarchical_lm_head_router_path,
-            top_k=speculative_config.hierarchical_lm_head_top_k,
         )
         if self.masked_embedding is not None:
             num_centroids = self.masked_embedding.num_centroids
@@ -507,16 +505,8 @@ class Gemma4MTP(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        if self.masked_embedding is not None and self.masked_embedding.router_path:
-            weights = (
-                (name, weight)
-                for name, weight in weights
-                if not name.startswith("masked_embedding.")
-            )
         loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         if self.masked_embedding is not None:
-            if self.masked_embedding.router_path is not None:
-                loaded.update(self.masked_embedding.load_sidecar_weights())
             self.masked_embedding.validate_loaded_weights(loaded)
         return loaded
 

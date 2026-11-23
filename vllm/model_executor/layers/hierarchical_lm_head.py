@@ -3,7 +3,6 @@
 """Centroid-based vocabulary selection with compiled sparse scoring."""
 
 from collections.abc import Iterable
-from pathlib import Path
 
 import torch
 from torch import nn
@@ -20,27 +19,6 @@ def selected_logits(
     torch._dynamo.mark_static(sel, 1)
     torch._dynamo.mark_static(hidden, 1)
     return (lm_head_weights[sel] * hidden[:, None, :]).sum(-1)
-
-
-def load_router_checkpoint(path: str) -> dict[str, torch.Tensor]:
-    """Read only the two router tensors from a local, weights-only sidecar."""
-    checkpoint = Path(path).expanduser()
-    if checkpoint.suffix == ".safetensors":
-        from safetensors.torch import load_file
-
-        state = load_file(checkpoint, device="cpu")
-    else:
-        state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    required = ("centroids.weight", "token_ordering")
-    if not isinstance(state, dict) or any(
-        not isinstance(state.get("masked_embedding." + key), torch.Tensor)
-        for key in required
-    ):
-        raise ValueError(
-            "Router sidecar must contain masked_embedding.centroids.weight "
-            "and masked_embedding.token_ordering tensors"
-        )
-    return {key: state["masked_embedding." + key] for key in required}
 
 
 class HierarchicalLMHead(nn.Module):
@@ -60,7 +38,6 @@ class HierarchicalLMHead(nn.Module):
             )
         if not 1 <= centroid_intermediate_top_k <= num_centroids:
             raise ValueError("top-k must be between 1 and num_centroids")
-        self.router_path: str | None = None
         self.hidden_size = hidden_size
         self.vocab_size = vocab_size
         self.num_centroids = num_centroids
@@ -79,40 +56,16 @@ class HierarchicalLMHead(nn.Module):
         *,
         hidden_size: int,
         vocab_size: int,
-        router_path: str | None = None,
-        top_k: int | None = None,
     ) -> "HierarchicalLMHead | None":
-        """Resolve an embedded router or a sidecar without changing HF config."""
-        if router_path is not None:
-            if top_k is None:
-                raise ValueError("Sidecar router requires an explicit top-k")
-            state = load_router_checkpoint(router_path)
-            centroids = state["centroids.weight"]
-            if centroids.ndim != 2 or centroids.shape[1] != hidden_size:
-                raise ValueError("Router centroid shape must match draft hidden size")
-            num_centroids = centroids.shape[0]
-        elif getattr(config, "use_ordered_embeddings", False):
-            num_centroids = getattr(config, "num_centroids", 2048)
-            if top_k is None:
-                top_k = getattr(config, "centroid_intermediate_top_k", 32)
-        else:
-            if top_k is not None:
-                raise ValueError("Top-k override requires a hierarchical router")
+        """Build the head when its draft checkpoint enables ordered embeddings."""
+        if not getattr(config, "use_ordered_embeddings", False):
             return None
-        head = cls(
+        return cls(
             hidden_size,
             vocab_size,
-            num_centroids,
-            top_k,
+            getattr(config, "num_centroids", 2048),
+            getattr(config, "centroid_intermediate_top_k", 32),
         )
-        head.router_path = router_path
-        return head
-
-    def load_sidecar_weights(self) -> set[str]:
-        """Reload sidecar tensors through the same validation as embedded ones."""
-        assert self.router_path is not None
-        loaded = self.load_weights(load_router_checkpoint(self.router_path).items())
-        return {"masked_embedding." + name for name in loaded}
 
     def _select_and_score(
         self, hidden_states: torch.Tensor, lm_head_weight: torch.Tensor

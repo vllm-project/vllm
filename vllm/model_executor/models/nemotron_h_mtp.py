@@ -389,8 +389,6 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbed
             config,
             hidden_size=config.hidden_size,
             vocab_size=config.vocab_size,
-            router_path=speculative_config.hierarchical_lm_head_router_path,
-            top_k=speculative_config.hierarchical_lm_head_top_k,
         )
         if self.masked_embedding is not None:
             if speculative_config.draft_lm_head_quantization is not None:
@@ -517,10 +515,9 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbed
                 continue
             if name.startswith("masked_embedding."):
                 assert self.masked_embedding is not None
-                if self.masked_embedding.router_path is None:
-                    router_weights.append(
-                        (name.removeprefix("masked_embedding."), loaded_weight)
-                    )
+                router_weights.append(
+                    (name.removeprefix("masked_embedding."), loaded_weight)
+                )
                 continue
             # Skip rotary embeddings (computed, not loaded)
             if "rotary_emb.inv_freq" in name:
@@ -609,8 +606,6 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbed
             loaded_params.add(name)
 
         if self.masked_embedding is not None:
-            if self.masked_embedding.router_path is not None:
-                loaded_params.update(self.masked_embedding.load_sidecar_weights())
             loaded_params.update(
                 "masked_embedding." + name
                 for name in self.masked_embedding.load_weights(router_weights)

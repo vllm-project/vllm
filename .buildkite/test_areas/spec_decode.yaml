@@ -282,7 +282,6 @@ steps:
   device: b200-k8s
   optional: true
   source_file_dependencies:
-    - vllm/config/speculative.py
     - vllm/model_executor/layers/hierarchical_lm_head.py
     - vllm/model_executor/models/nemotron_h_mtp.py
     - vllm/model_executor/models/gemma4_mtp.py
