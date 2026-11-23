@@ -123,8 +123,12 @@ Supported processors account for their allocations as follows.
 - Qwen3-VL and LLaVA-OneVision account for the video pixel tensors retained
   across clips. Qwen3-VL also counts the concatenated output while the
   individual tensors are live. Both processors accept up to 32 videos per
-  prompt by default. Configure the count with `--limit-mm-per-prompt.video`.
-  Frame, size, and embedding options alone do not change the default count.
+  prompt by default. The Qwen3-VL default also applies to processors that
+  inherit from it: Qwen3.5, Qwen3-VL-MoE, Cosmos3, Cosmos3-Edge,
+  InternS1-Pro, InternS2-Preview, InternS2-Mobius, LFM3-VL, LFM3-Omni,
+  ColQwen3, ColQwen3.5, Alpamayo2-Super, and D3. Configure the count with
+  `--limit-mm-per-prompt.video`. Frame, size, and embedding options alone do
+  not change the default count.
 - Gemma 4 and EmbeddingGemma2 account for video pixel tensors retained across
   clips and the concatenated output while the individual tensors are live.
 
