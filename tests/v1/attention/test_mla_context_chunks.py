@@ -23,6 +23,8 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadataBuilder,
 )
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.merge_attn_states import _merge_attn_states_torch
 
 BLOCK_SIZE = 16
@@ -185,7 +187,7 @@ def test_continuation_is_confined_to_a_chunks_first_request():
         ]
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 def test_continuation_merge_matches_an_out_of_place_merge():
     """A continuation chunk merges into the running partial in place.
 
@@ -199,7 +201,7 @@ def test_continuation_merge_matches_an_out_of_place_merge():
     first, second = metadata.chunks
     assert second.is_continuation
     num_tokens, num_heads, head_size = sum(query_lens), 16, 192
-    device = torch.device("cuda")
+    device = torch.device(current_platform.device_type)
 
     def random_partial(chunk):
         chunk_tokens = chunk.token_slice.stop - chunk.token_slice.start
@@ -208,7 +210,7 @@ def test_continuation_merge_matches_an_out_of_place_merge():
         )
         return out, torch.randn(num_heads, chunk_tokens, device=device)
 
-    torch.manual_seed(0)
+    set_random_seed(0)
     first_out, first_lse = random_partial(first)
     second_out, second_lse = random_partial(second)
     merged = slice(second.token_slice.start, second.continuation_token_end)
