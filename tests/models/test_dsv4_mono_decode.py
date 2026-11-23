@@ -267,7 +267,7 @@ def _decoder_layer(layer_id=5, **attn):
         experts=SimpleNamespace(
             routed_experts=SimpleNamespace(quant_method=quant_method)
         ),
-        shared_experts=object(),
+        shared_experts=SimpleNamespace(down_proj=SimpleNamespace()),
         use_mega_moe=False,
         fuse_heterogeneous_shared_expert=False,
         is_fused_shared_expert_enabled=False,
@@ -363,6 +363,15 @@ def test_opt_in_outside_the_kernels_raises(monkeypatch, case, match):
         md.MonoDecodeLayer.create(_decoder_layer(), _config())
 
 
+def test_shared_down_proj_keeps_the_checkpoint_layout(monkeypatch):
+    """The kernels read the shared down_proj as stored, so its FP8 linear
+    kernel must not preshuffle it at load."""
+    _deployment(monkeypatch)
+    layer = _decoder_layer()
+    assert md.MonoDecodeLayer.create(layer, _config()) is not None
+    assert layer.ffn.shared_experts.down_proj.skip_weight_relayout
+
+
 def test_hca_key_table_is_vllms_c128a_width(monkeypatch):
     """The runner's HCA key table is as wide as the c128a table vLLM's metadata
     builder allocates: every compressed row of the longest context, in 128-row
@@ -413,6 +422,20 @@ def _loaded_layer():
     hc = {f"hc_{s}_{p}": t for s in ("attn", "ffn") for p in ("fn", "scale", "base")}
     norms = dict(attn_norm=lin(), ffn_norm=lin())
     return SimpleNamespace(attn=attn, ffn=ffn, **hc, **norms)
+
+
+@pytest.mark.parametrize("holder, linear", [("attn", "wq_b"), ("ffn", "down_proj")])
+def test_weights_refuse_a_preshuffled_plain_read(monkeypatch, holder, linear):
+    """wq_b and the shared down_proj are read as stored: a preshuffled one
+    would be garbage, so it is an error."""
+    _deployment(monkeypatch)
+    runner = sys.modules["vllm.models.deepseek_v4.amd.mono.runner"]
+    runner.AttnWeights = runner.MonoLayerWeights = SimpleNamespace  # type: ignore[attr-defined]
+    layer = _loaded_layer()
+    owner = layer.attn if holder == "attn" else layer.ffn.shared_experts
+    getattr(owner, linear).aiter_bpreshuffled = True
+    with pytest.raises(AssertionError):
+        md.MonoDecodeLayer(HCA_WIDTH).weights(layer)
 
 
 def test_weight_update_refills_the_derived_scales_in_place(monkeypatch):

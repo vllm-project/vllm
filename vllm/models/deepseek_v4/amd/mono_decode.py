@@ -251,6 +251,9 @@ class MonoDecodeLayer:
             logger.info_once("DSv4 mono decode off for some layers: %s", why)
             return None
         logger.info_once("DSv4 mono decode: the whole backbone layers")
+        # the kernels read the shared down_proj in the checkpoint layout, so
+        # no FP8 linear kernel may relayout it at load
+        ffn.shared_experts.down_proj.skip_weight_relayout = True
         return cls(_hca_width(vllm_config))
 
     def prepare(self, layer: "DeepseekV4DecoderLayer") -> None:
@@ -274,6 +277,9 @@ class MonoDecodeLayer:
         # the kernels read vLLM's preshuffled wqkv / wo_b / shared gate_up
         assert a._wqa_wkv_scale is not None and a._wo_b_scale is not None
         assert sh is not None and sh._gateup_scale is not None
+        # and wq_b / shared down_proj in the checkpoint layout
+        assert not getattr(a.wq_b, "aiter_bpreshuffled", False)
+        assert not getattr(sh.down_proj, "aiter_bpreshuffled", False)
         d = Dims(get_tensor_model_parallel_world_size())
         attn = AttnWeights(
             layer_id=extract_layer_index(a.prefix),

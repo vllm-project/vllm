@@ -456,6 +456,63 @@ def test_rocm_fse_rejects_data_parallel_deployment(
         )
 
 
+@pytest.mark.parametrize("fuse_heterogeneous", [False, True])
+def test_rocm_fused_shared_expert_linears_skip_weight_relayout(
+    fuse_heterogeneous: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fused MoE copies the shared expert's weights as stored (#57132).
+    from vllm.models.deepseek_v4.amd import model as rocm_model
+
+    class FakeGate(nn.Module):
+        def __init__(self, **kwargs) -> None:
+            super().__init__()
+
+    class FakeMLP(nn.Module):
+        def __init__(self, **kwargs) -> None:
+            super().__init__()
+            self.gate_up_proj, self.down_proj = nn.Module(), nn.Module()
+
+    monkeypatch.setattr(rocm_model, "GateLinear", FakeGate)
+    monkeypatch.setattr(rocm_model, "DeepseekV4MLP", FakeMLP)
+    monkeypatch.setattr(rocm_model, "FusedMoEFactory", lambda **kwargs: nn.Identity())
+    monkeypatch.setattr(rocm_model, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(rocm_model, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        rocm_model, "resolve_layer_fused_shared_expert", lambda *a, **k: False
+    )
+
+    config = SimpleNamespace(
+        hidden_size=16,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=8,
+        hidden_act="silu",
+        swiglu_limit=None,
+        norm_topk_prob=True,
+        scoring_func="sqrtsoftplus",
+        num_hash_layers=0,
+        vocab_size=32,
+        topk_method="noaux_tc",
+        vision_n_layers=0,
+        n_shared_experts=1,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=config),
+        quant_config=None,
+        parallel_config=ParallelConfig(),
+        kernel_config=KernelConfig(),
+    )
+    moe = rocm_model.DeepseekV4MoE(
+        vllm_config,
+        prefix="model.layers.0.ffn",
+        fuse_heterogeneous_shared_expert=fuse_heterogeneous,
+    )
+
+    shared = moe.shared_experts
+    for linear in (shared.gate_up_proj, shared.down_proj):
+        assert getattr(linear, "skip_weight_relayout", False) == fuse_heterogeneous
+
+
 def test_rocm_mtp_forwards_input_ids_for_vision_routing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
