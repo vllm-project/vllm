@@ -1234,20 +1234,19 @@ class EngineCore:
         args = () if model == "target" else (model,)
         return self.collective_rpc("compute_weight_checksums", args=args)
 
-    def reset_weights(
-        self, model: WeightCheckerModel, validate_only: bool
+    def prepare_weight_reset(
+        self, model: WeightCheckerModel, reset_id: str
     ) -> str | None:
-        # Both phases validate every worker. EngineCore processes the checks
-        # and writes in the second phase without interleaving utility calls.
         errors: list[str | None] = self.collective_rpc(
-            "reset_weights", args=(model, True)
+            "prepare_weight_reset", args=(model, reset_id)
         )
-        if error := next((error for error in errors if error is not None), None):
-            return error
-        if not validate_only:
-            errors = self.collective_rpc("reset_weights", args=(model,))
-            return next((error for error in errors if error is not None), None)
-        return None
+        return next((error for error in errors if error is not None), None)
+
+    def commit_weight_reset(self, reset_id: str) -> None:
+        self.collective_rpc("commit_weight_reset", args=(reset_id,))
+
+    def release_weight_reset(self, reset_id: str) -> None:
+        self.collective_rpc("release_weight_reset", args=(reset_id,))
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)

@@ -245,25 +245,6 @@ def test_dplb_weight_checksums_gather_every_engine(model):
     ]
 
 
-def test_dplb_reset_stops_before_commit_if_any_engine_rejects_it():
-    client = _make_dplb_client(num_engines=2)
-    calls = []
-
-    async def call_utility(method, *args, engine):
-        calls.append((method, args, engine))
-        if engine == client.core_engines[1]:
-            return "Missing resident draft model"
-
-    client._call_utility_async = call_utility
-    assert (
-        asyncio.run(client.reset_weights_async("both"))
-        == "Missing resident draft model"
-    )
-    assert calls == [
-        ("reset_weights", ("both", True), engine) for engine in client.core_engines
-    ]
-
-
 def test_dplb_late_interaction_sticky_routing():
     client = _make_dplb_client()
 

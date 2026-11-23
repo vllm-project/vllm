@@ -408,7 +408,7 @@ steps:
       v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_pipeline_parallelism
       v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism
       v1/e2e/spec_decode/draft_model/test_structured_output_pp.py::test_specdec_pp_structured_output
-      entrypoints/rl/state_transitions/test_weight_checker.py::test_draft_checksum_and_reset_use_only_the_last_pp_stage
+      entrypoints/rl/state_transitions/test_weight_checker.py::test_draft_checksums_use_last_pp_stage_and_reset_is_rejected
   mirror:
     amd:
       automatic_shard: true

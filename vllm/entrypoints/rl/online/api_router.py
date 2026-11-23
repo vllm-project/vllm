@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
@@ -229,14 +230,19 @@ async def weight_info(raw_request: Request):
     return JSONResponse(content={"weight_version": weight_version})
 
 
+class WeightCheckerRequest(BaseModel):
+    action: Literal["checksum", "reset", "compare"]
+    baseline: dict[str, str] | None = None
+    model: WeightCheckerModel = "target"
+
+
 @router.post("/weight_checker")
 async def weight_checker(
     raw_request: Request,
-    action: Annotated[Literal["checksum", "reset", "compare"], Body(embed=True)],
-    baseline: Annotated[dict[str, str] | None, Body(embed=True)] = None,
-    model: Annotated[WeightCheckerModel, Body(embed=True)] = "target",
+    body: WeightCheckerRequest,
 ) -> JSONResponse:
     """Checksum, reset, or compare model weights against a baseline."""
+    action, model, baseline = body.action, body.model, body.baseline
     client = engine_client(raw_request)
     if action == "reset":
         if error := await client.reset_weights(model):

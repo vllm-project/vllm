@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import os
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import pytest
@@ -25,6 +26,9 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_worker import Worker
 
 
 def weight_checker(
@@ -78,7 +82,6 @@ class TestSingleGPU:
             {"action": "frobnicate"},
             {"action": "compare"},
             {"action": "checksum", "model": "model"},
-            {"action": "reset", "model": None},
             [],
             None,
         ],
@@ -89,6 +92,16 @@ class TestSingleGPU:
         )
         assert response.status_code == 400, response.text
         assert health(server_url) == 200
+
+    def test_null_model_reset_does_not_change_weights(self, server_url):
+        baseline = checksums(server_url)
+        response = requests.post(
+            f"{server_url}/weight_checker",
+            json={"action": "reset", "model": None},
+            timeout=300,
+        )
+        assert response.status_code == 400, response.text
+        assert checksums(server_url) == baseline
 
     @pytest.mark.parametrize("model", ["draft", "both"])
     def test_missing_draft_rejects_all_actions_without_resetting_target(
@@ -161,6 +174,27 @@ def test_checksum_and_reset_cover_every_worker(args, expected):
     with server(extra_args=args, port=8771, timeout=600) as url:
         assert ranks(checksums(url)) == expected
         reset_reload_and_compare(url)
+
+
+def test_weight_checker_rejects_a_draft_without_weight_parameters():
+    args = [
+        "--speculative-config",
+        json.dumps(
+            {
+                "method": "extract_hidden_states",
+                "num_speculative_tokens": 1,
+                "draft_model_config": {
+                    "hf_config": {"eagle_aux_hidden_state_layer_ids": [0, 1]}
+                },
+            }
+        ),
+    ]
+    with server(extra_args=args) as url:
+        target = checksums(url)
+        assert weight_checker(url, "checksum", model="draft").status_code == 409
+        assert weight_checker(url, "compare", {}, model="draft").status_code == 409
+        assert weight_checker(url, "reset", model="both").status_code == 409
+        assert checksums(url) == target
 
 
 DRAFT_MODEL = "Qwen/Qwen3-0.6B"
@@ -244,9 +278,26 @@ def test_ipc_transfer_restores_target_and_draft_weights():
         assert ok(gen(url))
 
 
+class WeightCheckerWorkerExtension:
+    def prepare_weight_reset_on_dp(self, rank: int, reset_id: str) -> None:
+        worker = cast("Worker", self)
+        if worker.parallel_config.data_parallel_index == rank:
+            error = worker.prepare_weight_reset("both", reset_id)
+            assert error is None, error
+
+
 @multi_gpu_test(num_gpus=4)
 def test_both_checksums_cover_every_dp_tp_shard():
-    args = [*draft_args(), "--data-parallel-size", "2", "--tensor-parallel-size", "2"]
+    args = [
+        *draft_args(),
+        "--data-parallel-size",
+        "2",
+        "--tensor-parallel-size",
+        "2",
+        "--worker-extension-cls",
+        "tests.entrypoints.rl.state_transitions.test_weight_checker"
+        ".WeightCheckerWorkerExtension",
+    ]
     with server(extra_args=args, port=8771, timeout=600) as url:
         requests.post(f"{url}/pause?mode=abort", timeout=30).raise_for_status()
         expected = {
@@ -257,6 +308,24 @@ def test_both_checksums_cover_every_dp_tp_shard():
         }
         baseline = checksums(url, "both")
         assert ranks(baseline) == expected
+
+        # Reserve one DP replica through the real worker RPC. The HTTP reset
+        # must leave every replica untouched and release its own reservations.
+        requests.post(
+            f"{url}/collective_rpc",
+            json={"method": "prepare_weight_reset_on_dp", "args": [1, "busy-dp"]},
+            timeout=60,
+        ).raise_for_status()
+        conflict = weight_checker(url, "reset", model="both")
+        assert conflict.status_code == 409, conflict.text
+        assert "Another weight reset is in progress" in conflict.text
+        assert checksums(url, "both") == baseline
+        requests.post(
+            f"{url}/collective_rpc",
+            json={"method": "release_weight_reset", "args": ["busy-dp"]},
+            timeout=60,
+        ).raise_for_status()
+
         weight_checker(url, "reset", model="both").raise_for_status()
         comparison = weight_checker(url, "compare", baseline, model="both")
         comparison.raise_for_status()
@@ -264,17 +333,22 @@ def test_both_checksums_cover_every_dp_tp_shard():
 
 
 @multi_gpu_test(num_gpus=2)
-def test_draft_checksum_and_reset_use_only_the_last_pp_stage():
+def test_draft_checksums_use_last_pp_stage_and_reset_is_rejected():
     args = [*draft_args(), "--pipeline-parallel-size", "2"]
     with server(extra_args=args, port=8771, timeout=600) as url:
         requests.post(f"{url}/pause?mode=abort", timeout=30).raise_for_status()
-        assert ranks(checksums(url, "both")) == {
+        baseline = checksums(url, "both")
+        assert ranks(baseline) == {
             "target:dp0:pp0:pcp0:tp0",
             "target:dp0:pp1:pcp0:tp0",
             "draft:dp0:pp1:pcp0:tp0",
         }
-        target = checksums(url, "target")
-        draft = checksums(url, "draft")
-        weight_checker(url, "reset", model="draft").raise_for_status()
-        assert checksums(url, "target") == target
-        assert checksums(url, "draft") != draft
+        for model in ("draft", "both"):
+            response = weight_checker(url, "reset", model=model)
+            assert response.status_code == 409, response.text
+            assert (
+                "Cannot reset draft weights with pipeline parallelism" in response.text
+            )
+        comparison = weight_checker(url, "compare", baseline, model="both")
+        comparison.raise_for_status()
+        assert comparison.json() == {"match": True, "mismatches": []}

@@ -369,9 +369,9 @@ steps:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not (server_info and 4)"
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not (server_info and 4)"
   - >-
-    pytest -v -s
+    PYTHONPATH=/vllm-workspace pytest -v -s
     entrypoints/rl/state_transitions/test_weight_checker.py::test_both_checksums_cover_every_dp_tp_shard
-    entrypoints/rl/state_transitions/test_weight_checker.py::test_draft_checksum_and_reset_use_only_the_last_pp_stage
+    entrypoints/rl/state_transitions/test_weight_checker.py::test_draft_checksums_use_last_pp_stage_and_reset_is_rejected
   mirror:
     amd:
       # Run on PRs even when the L4 step is optional (nightly only).
