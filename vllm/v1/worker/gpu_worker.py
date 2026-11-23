@@ -448,7 +448,7 @@ class Worker(WorkerBase):
         if isinstance(draft, str):
             return draft
         prefix = self._weight_checksum_prefix()
-        checksums = {}
+        checksums: dict[str, str] = {}
         if model != "draft":
             target_prefix = "target:" + prefix if model == "both" else prefix
             checksums.update(
