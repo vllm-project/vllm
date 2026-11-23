@@ -1594,6 +1594,11 @@ def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
     assert get_hisparse_coordinator(manager).all_context_pages_resident(
         ((resumed.request_id, num_computed, len(tokens) - num_computed),)
     )
+    # Adopting a copy took it out of the free blocks; the rest stay allocatable.
+    pool = manager.block_pool
+    taken = pool.get_new_blocks(pool.get_num_free_blocks())
+    assert len({block.block_id for block in taken}) == len(taken)
+    assert all(block.ref_cnt == 1 for block in taken)
 
 
 @pytest.mark.parametrize("free_blocks,adopted_pages", [(7, []), (10, [0, 1])])

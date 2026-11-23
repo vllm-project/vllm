@@ -1058,20 +1058,21 @@ class HiSparseCoordinator:
             # Preemption can cancel a scheduled forward after its spills were
             # planned, so its copies do not prove that the KV was computed.
             state.publication = None
-        for manager in self.resident_managers:
-            blocks = manager.get_residency_row(request_id)
-            released: list[KVCacheBlock] = []
-            detached: list[KVCacheBlock] = []
-            dropped: list[int] = []
-            # Tail first, so a prefix loses its tail pages before its head.
-            for page_idx in reversed(range(len(blocks))):
-                block = blocks[page_idx]
-                if block.is_null:
+        rows = [
+            manager.get_residency_row(request_id) for manager in self.resident_managers
+        ]
+        released: list[KVCacheBlock] = []
+        reclaimable: list[KVCacheBlock] = []
+        dropped: list[list[int]] = [[] for _ in rows]
+        # Tail first, so a prefix loses its tail pages before its head, and
+        # page by page, since a copy needs the page's block in every group.
+        for page_idx in reversed(range(max(map(len, rows), default=0))):
+            for row, row_dropped in zip(rows, dropped):
+                if page_idx >= len(row) or row[page_idx].is_null:
                     continue
+                block = row[page_idx]
                 if page_idx in state.unpinned_pages:
                     self._discard_owner(block.block_id, (request_id, page_idx))
-                    if block.block_id not in self._owners:
-                        detached.append(block)
                 elif (
                     page_idx in state.valid_pages
                     and page_idx not in state.pending_pages
@@ -1079,13 +1080,17 @@ class HiSparseCoordinator:
                     released.append(block)
                 else:
                     continue
-                dropped.append(page_idx)
-            # A copy only serves prefix hits that also need the prefix-cached
-            # indexer blocks, so it must not outlive them in the pool.
-            self.gpu_pool.retain(detached)
-            if released:
-                self.gpu_pool.unpin_blocks(released, self._reuse_watcher, retain=True)
-            manager.drop_resident_pages(request_id, dropped)
+                reclaimable.append(block)
+                row_dropped.append(page_idx)
+        if released:
+            self.gpu_pool.unpin_blocks(released, self._reuse_watcher)
+        # A copy only serves prefix hits that also need the prefix-cached
+        # indexer blocks, so it must not outlive them in the pool.
+        self.gpu_pool.retain(
+            block for block in reclaimable if block.block_id not in self._owners
+        )
+        for manager, row_dropped in zip(self.resident_managers, dropped):
+            manager.drop_resident_pages(request_id, row_dropped)
 
 
 def get_hisparse_coordinator(
