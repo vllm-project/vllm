@@ -1065,6 +1065,10 @@ def get_config(
     if hf_overrides_kw:
         logger.debug("Overriding HF config with %s", hf_overrides_kw)
         config.update(hf_overrides_kw)
+        # A flat rope_theta is ignored when rope_parameters already has one
+        if "rope_theta" in hf_overrides_kw and "rope_parameters" not in hf_overrides_kw:
+            for rope_parameters in iter_rope_parameters(config):
+                rope_parameters["rope_theta"] = hf_overrides_kw["rope_theta"]
     if hf_overrides_fn:
         logger.debug("Overriding HF config with %s", hf_overrides_fn)
         config = hf_overrides_fn(config)

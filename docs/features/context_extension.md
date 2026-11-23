@@ -58,6 +58,8 @@ print(response.choices[0].message.content)
 
 The available parameters depend on the `rope_type` you choose. For detailed information about all supported RoPE types and their specific parameters, please refer to the [Hugging Face Transformers RoPE documentation](https://huggingface.co/docs/transformers/main/en/internal/rope_utils#transformers.RopeParameters).
 
+To change only the RoPE base, pass a top-level `rope_theta`, e.g. `--hf-overrides '{"rope_theta": 500000}'`. It is ignored when `rope_parameters` is also overridden.
+
 Common parameters include:
 
 - `rope_type`: The type of RoPE implementation (e.g., "yarn", "linear", "dynamic")

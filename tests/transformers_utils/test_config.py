@@ -125,6 +125,45 @@ def test_thinker_config_is_served(
     assert config.name_or_path == str(tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("hf_overrides", "expected"),
+    [
+        ({"rope_theta": 500000}, 500000),
+        ({"rope_theta": 500000, "rope_parameters": {"rope_theta": 250000}}, 250000),
+    ],
+)
+def test_hf_overrides_flat_rope_theta(tmp_path, hf_overrides, expected):
+    config_json = {
+        "model_type": "qwen3",
+        "rope_parameters": {"rope_type": "default", "rope_theta": 1000000.0},
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config_json))
+
+    config = config_module.get_config(
+        tmp_path, trust_remote_code=False, hf_overrides_kw=hf_overrides
+    )
+    assert config.rope_parameters["rope_theta"] == expected
+
+
+def test_hf_overrides_flat_rope_theta_nested_layer_types(tmp_path):
+    config_json = {
+        "model_type": "gemma4_text",
+        "num_hidden_layers": 2,
+        "layer_types": ["full_attention", "sliding_attention"],
+        "rope_parameters": {
+            "full_attention": {"rope_type": "default", "rope_theta": 1000000.0},
+            "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0},
+        },
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config_json))
+
+    config = config_module.get_config(
+        tmp_path, trust_remote_code=False, hf_overrides_kw={"rope_theta": 500000}
+    )
+    for rope_parameters in config.rope_parameters.values():
+        assert rope_parameters["rope_theta"] == 500000
+
+
 def test_patch_legacy_rope_type_preserves_nope_layers():
     """NoPE layers stay disabled while later RoPE layers are normalized."""
     rope_parameters = {
