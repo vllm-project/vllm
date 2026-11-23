@@ -2844,15 +2844,19 @@ class NixlBaseConnectorWorker:
                 f"The KV regions of PP stage {pp_rank} of engine {engine_id} do "
                 "not hold the layers it advertises for that stage."
             )
+        if set(self._regions_by_layer) not in map(set, self._pipeline_stage_layers):
+            raise RuntimeError(
+                "This worker's KV layers are not one pipeline stage of its engine."
+            )
         try:
-            stage_layers = pair_pipeline_stages(
-                self._pipeline_stage_layers, self._regions_by_layer, remote_stages
+            remote_rank = pair_pipeline_stages(
+                self._pipeline_stage_layers, remote_stages
             )
         except ValueError as e:
             raise RuntimeError(
                 f"Cannot transfer KV with engine {engine_id}: {e}"
             ) from e
-        return stage_layers.get(pp_rank, [])
+        return [name for name in self._regions_by_layer if remote_rank[name] == pp_rank]
 
     def _add_remote_stage(
         self,

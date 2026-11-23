@@ -539,20 +539,15 @@ def pipeline_stage_layers(kv_cache_config: KVCacheConfig) -> list[list[str]]:
 
 def pair_pipeline_stages(
     local_stages: Sequence[Collection[str]],
-    local_layers: Collection[str],
     remote_stages: Sequence[Collection[str]],
-) -> dict[int, list[str]]:
-    """This worker's layers held by each remote pipeline stage, by PP rank.
+) -> dict[str, int]:
+    """PP rank of the remote pipeline stage holding each KV layer.
 
     Raises:
-        ValueError: If `local_layers` is not one of `local_stages`, a layer is
-            on two stages of one engine, or the engines hold different layers.
+        ValueError: If a layer is on two stages of one engine, or the engines
+            hold different layers.
 
     """
-    if set(local_layers) not in [set(layers) for layers in local_stages]:
-        raise ValueError(
-            "This worker's KV layers are not one pipeline stage of its engine."
-        )
     local = _pipeline_stage_by_layer(local_stages, "this")
     remote = _pipeline_stage_by_layer(remote_stages, "the remote")
     if local.keys() != remote.keys():
@@ -561,10 +556,7 @@ def pair_pipeline_stages(
             f"{sorted(local.keys() - remote.keys())}, only the remote engine "
             f"holds {sorted(remote.keys() - local.keys())}."
         )
-    pairs: dict[int, list[str]] = {}
-    for layer_name in local_layers:
-        pairs.setdefault(remote[layer_name], []).append(layer_name)
-    return pairs
+    return remote
 
 
 def _pipeline_stage_by_layer(

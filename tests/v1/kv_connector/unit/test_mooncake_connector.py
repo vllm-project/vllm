@@ -3042,7 +3042,6 @@ def test_prepare_transfer_regions_rejects_engines_holding_different_layers():
     meta.pipeline_stage_layers = [layers]
     assert worker._prepare_transfer_regions(meta)[2] is None
 
-    meta.remote_port = 2
     meta.pipeline_stage_layers = [[*layers, _layer_name(2)]]
     err = worker._prepare_transfer_regions(meta)[2]
     assert err is not None and "only the remote engine holds" in err

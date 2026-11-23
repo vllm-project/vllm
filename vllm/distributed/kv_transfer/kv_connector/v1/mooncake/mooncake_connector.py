@@ -1564,11 +1564,6 @@ class MooncakeConnectorWorker:
         self.cache_config = vllm_config.cache_config
         self.kv_cache_config = kv_cache_config
         self._pipeline_stage_layers = pipeline_stage_layers(kv_cache_config)
-        self._transfer_layers = [
-            layer_name
-            for group in kv_cache_config.transfer_groups
-            for layer_name in group.layer_names
-        ]
         self.use_mla = self.model_config.use_mla
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
@@ -3200,9 +3195,7 @@ class MooncakeConnectorWorker:
             # hold the same ones.
             try:
                 pair_pipeline_stages(
-                    self._pipeline_stage_layers,
-                    self._transfer_layers,
-                    meta.pipeline_stage_layers,
+                    self._pipeline_stage_layers, meta.pipeline_stage_layers
                 )
             except ValueError as e:
                 return finish(

@@ -3255,3 +3255,23 @@ def test_pull_from_pp_stages_rejects_a_layer_no_stage_holds():
             _pp_stage_metadata(stages, 0), remote_pp_rank=0, remote_pp_size=2
         )
     assert "prefill" not in decode._remote_stages
+
+
+@pytest.mark.cpu_test
+def test_handshake_rejects_regions_that_are_not_one_local_stage():
+    """A worker whose regions do not hold one planned stage's layers cannot
+    tell which peer stage holds them."""
+    decode = _make_pp_attn_worker("decode", _PP_TARGET_LAYERS, hma=False)
+    stages = [
+        _make_pp_attn_worker(
+            "prefill", _PP_TARGET_LAYERS[:2], hma=False, pp_stage=(0, 2)
+        ),
+        _make_pp_attn_worker(
+            "prefill", _PP_TARGET_LAYERS[2:], hma=False, pp_stage=(1, 2)
+        ),
+    ]
+    decode._pipeline_stage_layers = [_PP_TARGET_LAYERS[:2], _PP_TARGET_LAYERS[2:]]
+    with pytest.raises(RuntimeError, match="not one pipeline stage"):
+        decode.add_remote_agent(
+            _pp_stage_metadata(stages, 0), remote_pp_rank=0, remote_pp_size=2
+        )

@@ -1878,10 +1878,9 @@ def _agent_metadata(
 def _layer_routing_worker(
     region_layers: list[list[str]],
     group_by_layer: dict[str, int],
-    pp_size: int = 2,
 ) -> _StubWriterWorker:
     worker = _StubWriterWorker.fresh()
-    worker.pp_size = pp_size
+    worker.pp_size = 2
     worker.dcp_size = 1
     worker.block_size = 16
     worker._has_mamba = False
@@ -2114,19 +2113,17 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
 
 
 @pytest.mark.parametrize(
-    ("local_layers", "pp_size", "remote_layers", "error", "match"),
+    ("local_layers", "remote_layers", "error", "match"),
     [
         # Pairing by index would silently transfer stale KV, so a peer that
         # does not advertise its layers must fail the handshake instead.
-        ([["a"]], 2, [], RuntimeError, "did not advertise the layers"),
-        ([["a"], ["b"]], 2, [["a"]], RuntimeError, "does not hold the KV layers"),
-        ([["a"]], 2, [["a"], ["a"]], NotImplementedError, "spans 2 NIXL regions"),
+        ([["a"]], [], RuntimeError, "did not advertise the layers"),
+        ([["a"], ["b"]], [["a"]], RuntimeError, "does not hold the KV layers"),
+        ([["a"]], [["a"], ["a"]], NotImplementedError, "spans 2 NIXL regions"),
     ],
 )
-def test_pairing_rejects_unpairable_peers(
-    local_layers, pp_size, remote_layers, error, match
-):
-    worker = _layer_routing_worker(local_layers, {"a": 0, "b": 0}, pp_size=pp_size)
+def test_pairing_rejects_unpairable_peers(local_layers, remote_layers, error, match):
+    worker = _layer_routing_worker(local_layers, {"a": 0, "b": 0})
     num_regions = max(len(remote_layers), 1)
     metadata = _agent_metadata(
         remote_layers,
