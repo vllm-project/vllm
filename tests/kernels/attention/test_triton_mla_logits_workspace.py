@@ -196,11 +196,12 @@ def test_undersized_draft_lane_allocates_the_logits():
     "layer_windows, num_kv_splits",
     [
         ({"draft.0": DRAFT_WINDOW, "draft.1": DRAFT_WINDOW}, DRAFT_WINDOW_SPLITS),
+        ({"draft.0": DRAFT_WINDOW, "draft.1": 2 * DRAFT_WINDOW}, 8),
         ({"draft.0": DRAFT_WINDOW, "draft.1": None}, MAX_MODEL_LEN_SPLITS),
     ],
 )
 def test_builder_reserves_for_its_widest_layer(layer_windows, num_kv_splits):
-    """One full-attention layer in the group keeps the max_model_len bound."""
+    """Mixed finite windows use their maximum; full attention uses max_model_len."""
     with (
         _workspace_requests() as requests,
         patch.object(MLACommonMetadataBuilder, "__init__", _stub_builder_base_init),
