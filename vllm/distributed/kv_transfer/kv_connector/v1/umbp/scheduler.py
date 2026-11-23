@@ -341,6 +341,7 @@ class UMBPStoreConnectorScheduler:
                 manager._null_block = self._lookup_pool.null_block
         self._pending_loads: dict[str, list[BlockTransferPlan] | BlockLoadBatch] = {}
         self._load_specs: dict[str, LoadSpec] = {}
+        self._load_failure_bypass_req_ids: set[str] = set()
         self._lookup_units = {
             group_id: (
                 self.hash_block_size
@@ -453,9 +454,24 @@ class UMBPStoreConnectorScheduler:
         self.runtime = runtime
         self.codec = codec
 
+    def on_load_failure(self, request_ids: set[str]) -> None:
+        """Keep failed requests local through allocation and later preemption."""
+        self._load_failure_bypass_req_ids.update(request_ids)
+        for request_id in request_ids:
+            self._load_specs.pop(request_id, None)
+            self._pending_loads.pop(request_id, None)
+            tracker = self._request_trackers.get(request_id)
+            if tracker is not None:
+                tracker.load_spec = None
+            pending = self._pending_lookups.pop(request_id, None)
+            if pending is not None:
+                pending.future.cancel()
+
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
+        if request.request_id in self._load_failure_bypass_req_ids:
+            return 0, False
         if not self.enable_lookup:
             return 0, False
         if self.runtime is None:
@@ -722,6 +738,7 @@ class UMBPStoreConnectorScheduler:
             key for event in self._store_events.values() for key in event.iter_keys()
         }
         for request_id in scheduler_output.finished_req_ids:
+            self._load_failure_bypass_req_ids.discard(request_id)
             self._pending_loads.pop(request_id, None)
             self._load_specs.pop(request_id, None)
             self._request_trackers.pop(request_id, None)

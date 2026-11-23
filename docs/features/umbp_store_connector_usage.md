@@ -141,6 +141,11 @@ Use `kv_load_failure_policy: "recompute"` in `kv_transfer_config`, as in the
 examples above. An object can be evicted between lookup and load; the default
 `fail` policy fails the request instead of recomputing it.
 
+After a reported load failure under `recompute`, that request bypasses external
+lookup until it finishes, including if it is preempted. Local GPU prefix-cache
+reuse and stores remain available. Other requests still look up the pool
+normally; this does not invalidate shared objects or prevent eviction races.
+
 With `kv_role: "kv_consumer"` the connector only restores and never stores.
 
 ## Limitations

@@ -3908,6 +3908,9 @@ class Scheduler(SchedulerInterface):
                 if self.recompute_kv_load_failures:
                     request.num_computed_tokens = 0
                     self.failed_recving_kv_req_ids.add(req_id)
+        if self.recompute_kv_load_failures and affected_req_ids:
+            assert self.connector is not None
+            self.connector.on_load_failure(affected_req_ids)
         return set() if self.recompute_kv_load_failures else affected_req_ids
 
     def _handle_invalid_blocks(
@@ -3987,16 +3990,10 @@ class Scheduler(SchedulerInterface):
             total_failed_tokens,
         )
 
-        # Only async requests rewound to zero return to the waiting queue and
-        # run the connector lookup again. Notify the connector so a persistent
-        # external hit cannot make that request repeat the same failed load.
-        async_relookup_req_ids = {
-            req_id
-            for req_id in async_failed_req_ids
-            if self.requests[req_id].num_computed_tokens == 0
-        }
-        if self.connector is not None and async_relookup_req_ids:
-            self.connector.on_load_failure(async_relookup_req_ids)
+        # A later preemption can re-enter lookup even after partial or sync
+        # recovery. Let connectors retain request-local failure state.
+        assert self.connector is not None
+        self.connector.on_load_failure(async_failed_req_ids | sync_failed_req_ids)
 
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids

@@ -675,7 +675,7 @@ class KVConnectorBase_V1(ABC):
         """Notify the connector before failed external KV loads are looked up again.
 
         Connectors may use this callback to make a failed external cache hit a
-        request-local miss on the next scheduling attempt. The default is a
+        request-local miss, including after a subsequent preemption. The default is a
         no-op because not every connector needs special handling before the
         affected tokens are recomputed.
         """

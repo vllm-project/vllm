@@ -622,3 +622,9 @@ PYTHONHASHSEED=<shared-value> vllm serve ...
 Set `kv_load_failure_policy="recompute"` in the KV transfer configuration to
 recompute failed remote loads locally. The existing `"fail"` policy terminates
 affected requests. Transfer completion is reported after synchronous SDK return.
+
+With `recompute`, a reported load failure disables further external lookup for
+that request until it finishes, including after preemption. GPU prefix-cache
+reuse and stores remain available; other requests and shared store metadata are
+unaffected. A synchronous worker error that terminates the engine instead of
+reporting a load failure cannot be recovered by this policy.
