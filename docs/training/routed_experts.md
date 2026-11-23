@@ -66,8 +66,13 @@ Per-request, default `0`: drops the first N prompt-token rows (e.g. routing alre
 
 Per-request, default `true`. Set it to `false` for requests that don't need RL auxiliary outputs, such as evaluation traffic on a server that also serves rollouts. Such a request gets no `routed_experts` and no `sampling_mask`, and vLLM does not store its routing. Logprobs are unaffected: request them or not with `logprobs`, `logprob_token_ids` and `prompt_logprobs` as usual. Pass it inside `sampling_params` on `/inference/v1/generate` or as `SamplingParams(return_aux_outputs=False)`.
 
-Requests that opt out get their own prefix-cache namespace, because their KV blocks have no stored routing. They share cached prefixes with each other but not with requests that record routing.
+The opt-out removes the per-request work; the batch-wide work stays as long as the server flags are on:
 
-Routing capture and mask computation run for the whole batch, so an opted-out request still pays that part of the cost while the server flags are on, and on a `--return-sampling-mask` server it still needs `temperature > 0` and `top_k > 0`.
+| Output | Skipped for an opted-out request | Still paid |
+| --- | --- | --- |
+| `routed_experts` | Recording and storing its routing rows, keeping them for cached blocks, and returning them. A step with no recording request skips the routing copy to the host entirely. | Routing capture on the GPU for the whole batch, and the host copy of the whole batch when any request in the step records. |
+| `sampling_mask` | Extracting, packing and returning its mask. | Mask computation for the whole batch and the PyTorch sampling path; the request still needs `temperature > 0` and `top_k > 0`. |
+
+Requests that opt out get their own prefix-cache namespace, because their KV blocks have no stored routing. They share cached prefixes with each other but not with requests that record routing.
 
 Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2e.py).
