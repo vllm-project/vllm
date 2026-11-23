@@ -107,9 +107,7 @@ def test_embed_models(
 def test_non_causal_models(
     hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
-    with vllm_runner(
-        model, max_model_len=512, dtype=dtype, trust_remote_code=False
-    ) as vllm_model:
+    with vllm_runner(model, max_model_len=512, dtype=dtype) as vllm_model:
         vllm_config = vllm_model.llm.llm_engine.vllm_config
         cache_config = vllm_config.cache_config
         assert not cache_config.enable_prefix_caching
