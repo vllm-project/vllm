@@ -60,6 +60,9 @@ void expandInputRowsKernelLauncher(
     int64_t const* num_valid_tokens_ptr, int64_t const cols, int const k,
     int num_local_experts, cudaStream_t stream) {
   int64_t const blocks = num_rows * k;
+  if (blocks == 0) {
+    return;
+  }
   int64_t const threads = 256;
   using FuncPtr = decltype(&expandInputRowsKernel<T, true>);
   FuncPtr func_map[2] = {
@@ -154,6 +157,9 @@ void finalizeMoeRoutingKernelLauncher(
     int64_t const num_rows, int64_t const cols, int64_t const k,
     int64_t const* num_valid_ptr, cudaStream_t stream) {
   int64_t const blocks = num_rows;
+  if (blocks == 0) {
+    return;
+  }
   int64_t const threads = 256;
   bool const check_finished = num_valid_ptr != nullptr;
   using FuncPtr = decltype(&finalizeMoeRoutingKernel<T, OutputType, false>);

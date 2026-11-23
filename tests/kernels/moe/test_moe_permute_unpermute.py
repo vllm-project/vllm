@@ -252,6 +252,10 @@ def test_moe_permute_empty_routing(use_scratch: bool) -> None:
     assert inverse.numel() == 0
     assert permuted_idx.numel() == 0
 
+    out = torch.empty_like(hidden_states)
+    topk_weights = torch.empty((0, 2), dtype=torch.float32, device="cuda")
+    moe_unpermute(out, permuted, topk_weights, inverse, offsets)
+
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("n_token", [1, 33, 128])
