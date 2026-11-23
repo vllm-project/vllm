@@ -292,6 +292,13 @@ def test_export_batches_with_one_oidc_token(monkeypatch, byte_limited):
     assert len(requests) == 3
 
 
+def test_spans_that_exactly_fill_the_byte_limit_share_one_batch(monkeypatch):
+    monkeypatch.setattr(
+        ci_otel, "MAX_BATCH_BYTES", len(ci_otel._encode_span(_span())) * 2
+    )
+    assert [len(batch) for batch in ci_otel._batches([_span(), _span()])] == [2]
+
+
 def test_successful_flush_removes_spool_and_does_not_duplicate(monkeypatch, tmp_path):
     monkeypatch.setenv("CI_INFRA_OTEL_SPOOL_DIR", str(tmp_path))
     uploaded = []
@@ -314,6 +321,100 @@ def test_failed_flush_preserves_spool(monkeypatch, tmp_path):
 
     assert ci_otel.flush_spans() is False
     assert len(list(tmp_path.glob("spans-*.jsonl"))) == 1
+
+
+def _test_span(index: int) -> Span:
+    return Span(
+        trace_id="01" * 16,
+        span_id=f"{index:016x}",
+        parent_span_id="02" * 8,
+        name="pytest.test",
+        start_ns=100,
+        end_ns=200,
+        attributes={"ci.span.kind": "test", "test.nodeid": f"t.py::test_{index}"},
+    )
+
+
+def test_flush_sends_command_spans_before_test_spans(monkeypatch, tmp_path):
+    # Spool files are read in name order, and a command span's file can sort
+    # after the pytest process's. Sent last, it was the span a deadline dropped,
+    # leaving every uploaded test without its parent.
+    monkeypatch.setenv("CI_INFRA_OTEL_SPOOL_DIR", str(tmp_path))
+    (tmp_path / "spans-1.jsonl").write_text(
+        "\n".join(json.dumps(ci_otel.asdict(_test_span(i))) for i in range(3)) + "\n"
+    )
+    (tmp_path / "spans-2.jsonl").write_text(json.dumps(ci_otel.asdict(_span())) + "\n")
+    uploaded = []
+    monkeypatch.setattr(
+        ci_otel, "export_spans", lambda spans, timeout: uploaded.extend(spans) or True
+    )
+
+    assert ci_otel.flush_spans() is True
+    assert [span.name for span in uploaded] == ["ci.command"] + ["pytest.test"] * 3
+
+
+@pytest.mark.parametrize(
+    ("spans", "seconds"),
+    [(2, 3.0), (5, 3.0 + 2 * 3.0), (200, 20.0)],
+)
+def test_flush_budget_grows_with_batches_up_to_a_cap(
+    monkeypatch, tmp_path, spans, seconds
+):
+    # Two spans per batch: 2 spans is one batch and keeps the base budget,
+    # 5 spans is three batches, 200 spans would exceed the cap.
+    monkeypatch.setenv("CI_INFRA_OTEL_SPOOL_DIR", str(tmp_path))
+    monkeypatch.setattr(ci_otel, "MAX_BATCH_SIZE", 2)
+    assert ci_otel.record_spans([_test_span(i) for i in range(spans)]) is True
+    budgets = []
+    monkeypatch.setattr(
+        ci_otel, "export_spans", lambda spans, timeout: budgets.append(timeout) or True
+    )
+
+    assert ci_otel.flush_spans() is True
+    assert budgets == [pytest.approx(seconds)]
+
+
+def test_slow_uploads_land_every_batch_within_the_flush_budget(monkeypatch, tmp_path):
+    # Each upload takes 0.3 s and there are three batches: 0.9 s in all, over
+    # the 0.5 s base budget that used to cover the whole flush.
+    monkeypatch.setenv("BUILDKITE", "true")
+    monkeypatch.setenv("CI_INFRA_OTEL_SPOOL_DIR", str(tmp_path))
+    monkeypatch.setattr(ci_otel, "MAX_BATCH_SIZE", 2)
+    monkeypatch.setattr(ci_otel, "FLUSH_SECONDS", 0.5)
+    monkeypatch.setattr(ci_otel, "FLUSH_SECONDS_PER_EXTRA_BATCH", 0.4)
+    monkeypatch.setattr(ci_otel, "_oidc_token", lambda deadline: "token")
+    assert ci_otel.record_spans([_test_span(i) for i in range(5)]) is True
+    assert ci_otel.record_spans([_span()]) is True
+    batches = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def slow_upload(request, timeout):
+        time.sleep(0.3)
+        batches.append(request.data)
+        return Response()
+
+    monkeypatch.setattr(ci_otel.urllib.request, "urlopen", slow_upload)
+
+    assert ci_otel.flush_spans() is True
+    assert len(batches) == 3
+    assert list(tmp_path.glob("spans-*.jsonl")) == []
+
+
+def test_shell_waits_longer_for_the_flush_than_its_own_cap():
+    shell = (SCRIPTS_DIR / "ci_otel.sh").read_text()
+    flush_line = next(
+        line for line in shell.splitlines() if "timeout " in line and "s \\" in line
+    )
+    seconds = int(flush_line.split("timeout ", 1)[1].split("s", 1)[0])
+    assert seconds > ci_otel.FLUSH_MAX_SECONDS
 
 
 def test_cli_rejects_bad_arguments_without_traceback(capsys):
