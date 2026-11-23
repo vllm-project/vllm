@@ -102,6 +102,7 @@ impl MultimodalModelInfo {
         clip: Arc<VideoClip>,
     ) -> Result<PreprocessedEncoderInputs> {
         let processor = Arc::clone(&support.processor);
+        let needs_frame_indices = support.spec.field_layout_for("frames_indices").is_some();
 
         tokio::task::spawn_blocking(move || {
             // Request-scoped clip facts travel per call; the checkpoint's
@@ -135,30 +136,23 @@ impl MultimodalModelInfo {
             }
 
             let frames = clip.materialized_frames().map_err(|error| multimodal!("{error}"))?;
-            match (
-                processor.preprocess_video(&frames, &clip_options),
-                clip.sampling.as_ref(),
-            ) {
-                // Only the RGB entry point takes the decoder's sampling, which
-                // a processor may need (Nemotron's frame times). A clip with
-                // an RGB buffer already went through it above.
-                // TODO: use a sampled image-frame entry point once
-                // llm-multimodal has one.
-                (Err(error), Some(sampling)) if clip.rgb_video().is_none() => {
-                    let frames = frames.iter().map(|frame| frame.to_rgb8()).collect::<Vec<_>>();
-                    let frame_refs = frames
-                        .iter()
-                        .map(|frame| RgbFrameRef {
-                            width: frame.width(),
-                            height: frame.height(),
-                            data: frame.as_raw(),
-                        })
-                        .collect::<Vec<_>>();
-                    Ok(processor
-                        .preprocess_video_rgb_sampled(&frame_refs, &clip_options, Some(sampling))
-                        .map_err(|_| error)?)
-                }
-                (preprocessed, _) => Ok(preprocessed?),
+            if needs_frame_indices {
+                let frames = frames.iter().map(|frame| frame.to_rgb8()).collect::<Vec<_>>();
+                let frame_refs = frames
+                    .iter()
+                    .map(|frame| RgbFrameRef {
+                        width: frame.width(),
+                        height: frame.height(),
+                        data: frame.as_raw(),
+                    })
+                    .collect::<Vec<_>>();
+                Ok(processor.preprocess_video_rgb_sampled(
+                    &frame_refs,
+                    &clip_options,
+                    clip.sampling.as_ref(),
+                )?)
+            } else {
+                Ok(processor.preprocess_video(&frames, &clip_options)?)
             }
         })
         .await
@@ -496,6 +490,7 @@ mod tests {
             from_images.replacements[0].tokens,
             prepared.replacements[0].tokens
         );
+        assert_eq!(from_images.items[0].data, prepared.items[0].data);
 
         let data = &prepared.items[0].data;
         let Some(MmKwargValue::Tensor(indices)) = data["frames_indices"].data.as_ref() else {
