@@ -1180,6 +1180,65 @@ def test_select_mxfp4_moe_backend_relu2_dispatches_to_aiter(
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
+def test_aiter_mxfp4_experts_rejects_relu2_w4a4(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+):
+    """AiterMxfp4Experts.is_supported_config must reject relu2 activation
+    paired with MXFP4 (W4A4) activations: no AITER GEMM kernel backs this
+    combination. relu2 + bf16-fallback activations (AITER_MXFP4_BF16) must
+    stay supported.
+    """
+    _fake_rocm_arch(monkeypatch, "gfx950")
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterMxfp4Experts,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp4Dynamic,
+        kMxfp4Static,
+    )
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr(rocm_aiter_ops, "_FMOE_ENABLED", True)
+
+    moe_config = make_dummy_moe_config(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=256,
+        activation=MoEActivation.RELU2_NO_MUL,
+    )
+    activation_format = moe_config.activation_format
+
+    # relu2 + MXFP4 (W4A4) activation: must be rejected (AITER_MXFP4_MXFP4).
+    supported, reason = AiterMxfp4Experts.is_supported_config(
+        AiterMxfp4Experts,
+        moe_config,
+        kMxfp4Static,
+        kMxfp4Dynamic,
+        activation_format,
+    )
+    assert not supported, "relu2 + AITER_MXFP4_MXFP4 (W4A4) must be rejected"
+    assert reason and "relu2" in reason.lower()
+
+    # relu2 + bf16-fallback activation (no activation key, AITER_MXFP4_BF16):
+    # must remain supported.
+    supported, reason = AiterMxfp4Experts.is_supported_config(
+        AiterMxfp4Experts,
+        moe_config,
+        kMxfp4Static,
+        None,
+        activation_format,
+    )
+    assert supported, (
+        f"relu2 + AITER_MXFP4_BF16 should remain supported, got reason={reason!r}"
+    )
+
+
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
     """The gfx950 AITER MXFP4 W4A16 MoE path should match the dequantized
     MXFP4 reference."""
