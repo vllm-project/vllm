@@ -52,14 +52,16 @@ GLM_TURN_BOUNDARIES = frozenset(
     ("<|system|>", "<|user|>", "<|assistant|>", "<|observation|>")
 )
 
+# Key cannot cross `<arg_key>` or `</arg_key>`, so stray tags never leak into
+# `key`. Possessive quantifiers prevent backtracking on unterminated buffers.
+_ARG_KEY = r"<arg_key>(?P<key>[^<]*+(?:<(?!/?arg_key>)[^<]*+)*+)(?:</arg_key>\s*+)++"
+
 _ARG_RE = re.compile(
-    r"<arg_key>(?P<key>.*?)</arg_key>\s*"
-    r"<arg_value>(?P<value>.*?)</arg_value>",
+    _ARG_KEY + r"<arg_value>(?P<value>.*?)</arg_value>",
     re.DOTALL,
 )
 _PARTIAL_ARG_RE = re.compile(
-    r"<arg_key>(?P<key>.*?)</arg_key>\s*"
-    r"<arg_value>(?P<value>.*)$",
+    _ARG_KEY + r"<arg_value>(?P<value>.*)$",
     re.DOTALL,
 )
 

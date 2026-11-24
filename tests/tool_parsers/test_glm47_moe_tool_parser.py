@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.utils import build_response_output_items
+from vllm.parser.glm47_moe import _ClosedArgs, _glm47_arg_converter
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
@@ -187,6 +188,26 @@ class TestGlm47ExtractToolCalls:
         r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
         assert r.content is None
 
+    @pytest.mark.parametrize(
+        "key_prefix",
+        [
+            pytest.param(
+                "<arg_key>city</arg_key></arg_key>",
+                id="repeated-closing-tag",
+            ),
+            pytest.param(
+                "<arg_key><arg_key>city</arg_key>",
+                id="repeated-opening-tag",
+            ),
+        ],
+    )
+    def test_stray_arg_key_tag(self, glm47_tool_parser, mock_request, key_prefix):
+        """Stray `arg_key` tags must not leak into extracted tool-call keys."""
+        out = f"<tool_call>get_weather\n{key_prefix}<arg_value>Beijing</arg_value></tool_call>"
+        r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
+        assert r.tools_called
+        assert json.loads(r.tool_calls[0].function.arguments) == {"city": "Beijing"}
+
 
 def _reset(parser):
     parser.current_tool_name_sent = False
@@ -266,3 +287,107 @@ class TestGlm47Streaming:
         ]
         args = json.loads("".join(arguments))
         assert args["city"] == "Beijing"
+
+    @pytest.mark.parametrize(
+        "key_chunks",
+        [
+            pytest.param(
+                ["<arg_key>city</arg_key>", "</arg_key>"],
+                id="repeated-closing-tag",
+            ),
+            pytest.param(
+                ["<arg_key>", "<arg_key>city</arg_key>"],
+                id="repeated-opening-tag",
+            ),
+        ],
+    )
+    def test_stray_arg_key_tag(self, glm47_tool_parser, mock_request, key_chunks):
+        """Stray `<arg_key>` / `</arg_key>` tags in a stream must not reach the key."""
+        _reset(glm47_tool_parser)
+        chunks = [
+            "<tool_call>",
+            "get_weather\n",
+            *key_chunks,
+            "<arg_value>",
+            "Beijing",
+            "</arg_value>",
+            "<arg_key>date</arg_key>",
+            "<arg_value>2026-11-24</arg_value>",
+            "</tool_call>",
+        ]
+        current_text = ""
+        deltas = []
+        for chunk in chunks:
+            current_text += chunk
+            delta = glm47_tool_parser.extract_tool_calls_streaming(
+                previous_text="",
+                current_text=current_text,
+                delta_text=chunk,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=mock_request,
+            )
+            if delta:
+                deltas.append(delta)
+        arguments = [
+            tool_call.function.arguments
+            for delta in deltas
+            for tool_call in (delta.tool_calls or [])
+            if tool_call.function and tool_call.function.arguments
+        ]
+        joined = "".join(arguments)
+        # Checked before json.loads: a partial fix truncates the stream, and
+        # the JSONDecodeError would hide which half regressed.
+        assert "arg_key" not in joined
+        assert json.loads(joined) == {"city": "Beijing", "date": "2026-11-24"}
+
+
+_STRAY_KEY_CASES = [
+    pytest.param(
+        "<arg_key>path</arg_key></arg_key>",
+        id="repeated-closing-tag",
+    ),
+    pytest.param(
+        "<arg_key>path</arg_key>\n</arg_key>\n",
+        id="repeated-closing-tag-whitespace",
+    ),
+    pytest.param(
+        "<arg_key><arg_key>path</arg_key>",
+        id="repeated-opening-tag",
+    ),
+    pytest.param(
+        "<arg_key>stale</arg_key><arg_key>path</arg_key>",
+        id="dangling-key-before-pair",
+    ),
+    pytest.param(
+        "<arg_key>path</arg_key>",
+        id="well-formed",
+    ),
+]
+
+
+@pytest.mark.parametrize("key_prefix", _STRAY_KEY_CASES)
+def test_arg_converter_ignores_stray_arg_tags(key_prefix: str):
+    """Stray `arg_key` tags must not leak into the argument key."""
+    raw_args = f"{key_prefix}<arg_value>/tmp/x</arg_value>"
+    assert json.loads(_glm47_arg_converter(raw_args, False)) == {"path": "/tmp/x"}
+
+
+@pytest.mark.parametrize("key_prefix", _STRAY_KEY_CASES)
+def test_partial_arg_converter_ignores_stray_arg_tags(key_prefix: str):
+    """Without `</arg_value>` the input reaches `_PARTIAL_ARG_RE`, not `_ARG_RE`."""
+    raw_args = f"{key_prefix}<arg_value>/tmp/x"
+    assert json.loads(_glm47_arg_converter(raw_args, True)) == {"path": "/tmp/x"}
+
+
+@pytest.mark.parametrize("key_prefix", _STRAY_KEY_CASES)
+def test_closed_args_cache_matches_full_parse_with_stray_tags(key_prefix: str):
+    """Incremental `_ClosedArgs` reuse matches uncached parsing across stray tags."""
+    closed = _ClosedArgs()
+    first = f"{key_prefix}<arg_value>/tmp/x</arg_value>"
+    second = f"{first}<arg_key>mode</arg_key><arg_value>rw"
+    assert json.loads(_glm47_arg_converter(first, True, closed)) == {"path": "/tmp/x"}
+    assert json.loads(_glm47_arg_converter(second, True, closed)) == json.loads(
+        _glm47_arg_converter(second, True)
+    )
