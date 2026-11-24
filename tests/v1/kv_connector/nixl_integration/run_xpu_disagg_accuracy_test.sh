@@ -21,8 +21,7 @@ DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 KV_BUFFER_DEVICE=${KV_BUFFER_DEVICE:-"xpu"}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
 
-# Build mask-local device indices. If ZE_AFFINITY_MASK=6,7, then
-# --device-ids 0,1 selects physical devices 6 and 7.
+# Mask-local indices: with ZE_AFFINITY_MASK=6,7, --device-ids 0,1 -> cards 6,7.
 if [[ -n "${ZE_AFFINITY_MASK:-}" ]]; then
   IFS=',' read -r -a SHARED_DEVICES <<< "${ZE_AFFINITY_MASK}"
   NUM_AVAILABLE_DEVICES=${#SHARED_DEVICES[@]}
@@ -102,6 +101,7 @@ launch_pd() {
 
   sleep 2
 
+  # Don't set per-instance ZE_AFFINITY_MASK: ze_ipc needs D to see P's GPU.
   echo "Starting prefill on GPU ${PREFILL_GPU_ID}, port ${PREFILL_PORT}"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=200 \
   VLLM_NIXL_SIDE_CHANNEL_HOST="${PREFILL_HOST}" \

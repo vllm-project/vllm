@@ -142,9 +142,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM vllm-base AS ucx-nixl-build
 
-# Pin UCX to a commit with Level Zero IPC (ze_ipc) support (openucx/ucx#11218).
-# TODO: Move back to a tagged UCX release (aligned with NIXL's UCX_REF) once
-# one includes openucx/ucx#11218.
+# Pinned for ze_ipc (openucx/ucx#11218).
+# TODO: switch to a UCX release tag (aligned with NIXL's UCX_REF) once it includes ze_ipc.
 ARG UCX_VERSION=90c8961021dcf72357e076845857d7a235e2bb88
 ARG NIXL_VERSION=v1.5.2
 
@@ -162,9 +161,7 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
 # Build UCX and produce a NIXL wheel so the final image needs no compiler.
 # patchelf (installed via uv) is used by the NIXL wheel build to rewrite
 # RPATH entries, making the wheel portable across stages.
-# TODO: use shallow fetch by commit SHA while UCX_VERSION is pinned; switch
-# back to `git clone --depth 1 --branch "${UCX_VERSION}"` once moving to a
-# release branch/tag.
+# TODO: revert to `git clone --depth 1 --branch "${UCX_VERSION}"` once on a release tag.
 RUN --mount=type=cache,target=/root/.cache/uv \
     git init /tmp/ucx_source && cd /tmp/ucx_source && \
     git fetch --depth 1 https://github.com/openucx/ucx "${UCX_VERSION}" && \
@@ -188,7 +185,7 @@ ENV UV_COMPILE_BYTECODE=1
 
 # Must match the ucx-nixl-build stage above: ARG does not cross stages, so a stale
 # value here installs a meta package that disagrees with the wheel built there.
-ARG NIXL_VERSION=v1.5.0
+ARG NIXL_VERSION=v1.5.2
 
 # Copy compiled UCX runtime libraries and the pre-built NIXL wheel.
 # No compiler or autotools are installed in this stage.
