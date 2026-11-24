@@ -21,13 +21,3 @@ python examples/features/logits_processor/dry.py
 
 - [vLLM Sampling Parameters](https://docs.vllm.ai/en/latest/api/inference_params.html#sampling-parameters)
 - [vLLM LLM API](https://docs.vllm.ai/en/latest/api/offline_inference/llm.html)
-
-### Bounded sampling traces
-
-`sampling_trace.py` captures device-resident logits and row mappings through the
-Model Runner V2 processor API. See the [observation guide](../../../docs/features/custom_logitsprocs.md#observe-sampling-without-changing-logits)
-for bounds, collection timing, and scope. Run the GPU example from the repository root:
-
-```bash
-VLLM_GPU_SYNC_CHECK=error python -m examples.features.logits_processor.sampling_trace_demo
-```

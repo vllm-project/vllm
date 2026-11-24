@@ -1,0 +1,69 @@
+--- a/vllm/models/kimi_k3/amd/linear.py
++++ b/vllm/models/kimi_k3/amd/linear.py
+@@ -1080,6 +1080,9 @@
+         # The model's final norm is applied here (not at the end of forward) so
+         # that the pre-norm hidden states can be fed to the MTP draft model.
+         hidden_states = self.model.norm(hidden_states, None)
++        import os as alignment_os
++        if alignment_os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
++            self._alignment_post_norm_hidden = hidden_states.detach()
+         return self.logits_processor(self.lm_head, hidden_states)
+ 
+     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -970,6 +970,40 @@
+     ) -> list[_R]:
+         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
+ 
++    def alignment_scheduler_budget(self, value: int | None = None) -> int:
++        if __import__("os").environ.get("KIMI_ALIGNMENT_SERVING_PROBE") != "1":
++            raise RuntimeError("Alignment scheduler probe is not enabled")
++        if not self.is_scheduler_paused():
++            raise RuntimeError("Change diagnostic budget only while paused")
++        if not hasattr(self.scheduler, "_alignment_original_schedule"):
++            import json
++            import os
++            from pathlib import Path
++            scheduler = self.scheduler
++            original = scheduler.schedule
++            def trace_schedule():
++                output = original()
++                if scheduler.max_num_scheduled_tokens == 512:
++                    record = {"budget": 512, "requests": [
++                        {"id": key, "scheduled": count,
++                         "computed": scheduler.requests[key].num_computed_tokens,
++                         "tokens": list(scheduler.requests[key].all_token_ids[
++                             scheduler.requests[key].num_computed_tokens:
++                             scheduler.requests[key].num_computed_tokens + count])}
++                        for key, count in output.num_scheduled_tokens.items()]}
++                    path = Path(os.environ["KIMI_ALIGNMENT_AUDIT_DIR"]) / "serving_invariance" / "scheduler-chunks.jsonl"
++                    with path.open("a") as handle:
++                        handle.write(json.dumps(record) + "\n")
++                return output
++            scheduler._alignment_original_schedule = original
++            scheduler.schedule = trace_schedule
++        before = self.scheduler.max_num_scheduled_tokens
++        if value is not None:
++            if not 0 < value <= self.scheduler.scheduler_config.max_num_batched_tokens:
++                raise ValueError("Diagnostic token budget out of range")
++            self.scheduler.max_num_scheduled_tokens = value
++        return before
++
+     def set_weight_version(self, weight_version: str) -> None:
+         self._weight_version = weight_version
+ 
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -1534,6 +1534,11 @@
+             sample_hidden_states = hidden_states[input_batch.logits_indices]
+             logits = self.model.compute_logits(sample_hidden_states)
+ 
++        import os as alignment_os
++        if alignment_os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
++            from alignment_audit import capture_vllm_v2_step
++            capture_vllm_v2_step(self, logits, sample_hidden_states, input_batch)
++
+         if grammar_output is not None:
+             # Apply grammar bitmask to the logits in-place.
+             assert self.structured_outputs_worker is not None
