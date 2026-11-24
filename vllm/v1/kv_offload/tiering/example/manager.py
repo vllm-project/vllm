@@ -111,6 +111,10 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         return self._config_info.as_config_info()
 
     @override
+    def is_stored(self, key: OffloadKey, req_context: ReqContext) -> bool:
+        return self.lookup(key, req_context) is LookupResult.HIT
+
+    @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """Check whether a chunk exists in this secondary tier.
 

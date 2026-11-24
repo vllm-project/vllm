@@ -52,6 +52,22 @@ class _RequestCacheAccess:
     finished: bool = False
 
 
+def store_order(
+    keys: Iterable[OffloadKey], req_context: ReqContext
+) -> dict[OffloadKey, tuple[float, int]]:
+    """The order in which a partial store keeps offered keys: token position,
+    then offer order. Each group is retried from its first key that is cut."""
+    return {
+        key: (
+            math.inf
+            if (position := req_context.get_offload_key_position(key)) is None
+            else position,
+            offer_idx,
+        )
+        for offer_idx, key in enumerate(keys)
+    }
+
+
 class CPUOffloadingManager(OffloadingManager):
     """An OffloadingManager with a pluggable CachePolicy, resolved by name via
     CachePolicyFactory (built in: "lru", "arc"; external policies can either
@@ -102,6 +118,29 @@ class CPUOffloadingManager(OffloadingManager):
         )
 
     # --- chunk pool ---
+
+    def num_chunks_short(self, keys: Collection[OffloadKey]) -> int:
+        """How many more chunks than there is room for an offer of `keys` adds.
+
+        Read-only; ignores store admission, so it can only overestimate.
+        """
+        num_new = 0
+        num_evictable_offered = 0
+        for key in keys:
+            chunk = self._policy.get(key)
+            if chunk is None:
+                num_new += 1
+            elif chunk.ref_cnt == 0:
+                num_evictable_offered += 1
+        return max(0, num_new - self._store_room(num_evictable_offered))
+
+    def _store_room(self, num_evictable_offered: int) -> int:
+        """Chunks a store can take; offered chunks are not evicted for it."""
+        return (
+            self._get_num_free_chunks()
+            + self._num_evictable_cache_chunks
+            - num_evictable_offered
+        )
 
     def _get_num_free_chunks(self) -> int:
         return len(self._free_list) + self._num_chunks - self._num_allocated_chunks
@@ -341,24 +380,10 @@ class CPUOffloadingManager(OffloadingManager):
 
         keys_to_retry: list[OffloadKey] = []
         if allow_partial:
-            # Offered chunks are not evicted, so they are not room for the offer.
-            num_storable_keys = (
-                self._get_num_free_chunks()
-                + self._num_evictable_cache_chunks
-                - len(evictable_existing_keys)
-            )
+            num_storable_keys = self._store_room(len(evictable_existing_keys))
             if len(keys_to_store) > num_storable_keys:
                 # Store the lowest positions, so that the groups stay aligned.
-                order = {
-                    key: (
-                        math.inf
-                        if (position := req_context.get_offload_key_position(key))
-                        is None
-                        else position,
-                        offer_idx,
-                    )
-                    for offer_idx, key in enumerate(keys)
-                }
+                order = store_order(keys, req_context)
                 keys_by_position = sorted(keys_to_store, key=order.__getitem__)
                 # Retry each group from its first key that does not fit, resident
                 # keys included, as the connector offers all of them again.

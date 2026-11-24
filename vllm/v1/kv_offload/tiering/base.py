@@ -252,6 +252,17 @@ class SecondaryTierManager(ABC):
         """
         pass
 
+    def is_stored(self, key: OffloadKey, req_context: ReqContext) -> bool:
+        """Whether this tier holds the chunk's data itself, so storing it here
+        again would be redundant.
+
+        A store that does not fit the primary tier leaves out chunks that every
+        writable tier receiving the request's stores holds. Tiers whose lookup()
+        HIT does not mean that (for example a P2P source that can supply the
+        chunk) keep this default.
+        """
+        return False
+
     @abstractmethod
     def submit_store(self, job_metadata: TransferJob) -> None:
         """Submit an async job to store chunks from the primary tier to this

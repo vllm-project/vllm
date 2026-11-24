@@ -1058,6 +1058,182 @@ class TestTieringOffloadingManager:
         assert len(result.evicted_keys) == 2
         assert len(result.keys_to_store) == 2
 
+    def _hold_only_in_secondary_tiers(self, held, read_only_tier2=False):
+        """Store `held` (offload keys, or ids of group-0 keys), cascading them
+        to the secondary tiers (tier 2 skipped while read-only), then evict them
+        from the 5-chunk primary tier by storing five other chunks."""
+        trigger = StoreTrigger.ON_COMPUTE
+        self._start_request()
+        if read_only_tier2:
+            self.secondary_tier2.access_mode = OffloadAccessMode.READ
+        held = [k if isinstance(k, bytes) else to_keys([k])[0] for k in held]
+        for keys in (held, to_keys(range(100, 105))):
+            assert self.manager.prepare_store(keys, _CTX, trigger=trigger)
+            self.manager.complete_store(keys, _CTX, trigger=trigger)
+            self._simulate_on_schedule_end()
+        assert all(self.primary_tier.lookup(k, _CTX) is LookupResult.MISS for k in held)
+        assert all(
+            self.secondary_tier1.lookup(k, _CTX) is LookupResult.HIT for k in held
+        )
+
+    def test_oversized_store_drops_chunks_the_secondary_tiers_hold(self, manager_setup):
+        """An offer larger than the primary tier leaves out the chunks every
+        secondary tier already holds, so the new chunks fit and none is retried
+        (a long, already-offloaded prefix no longer crowds out a new tail)."""
+        self._hold_only_in_secondary_tiers(range(4))
+
+        result = self.manager.prepare_store(
+            to_keys(range(8)), _CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+
+        assert result is not None
+        assert result.keys_to_store == to_keys(range(4, 8))
+        assert not result.keys_to_retry
+
+    def test_held_chunks_after_the_cut_are_retried(self, manager_setup):
+        """When the remaining offer is still cut, held chunks at or after the
+        cut are in keys_to_retry, as the connector offers the group again from
+        there; held chunks before the cut are not."""
+        self._hold_only_in_secondary_tiers([0, 1, 8, 9])
+        ctx = ReqContext(req_id="req_cut")
+        self._start_request(ctx)
+        offer = to_keys(range(10))
+        for position, key in enumerate(offer, start=1):
+            ctx.set_offload_key_position(key, position * 16)
+
+        result = self.manager.prepare_store(offer, ctx, trigger=StoreTrigger.ON_COMPUTE)
+
+        assert result is not None
+        assert result.keys_to_store == to_keys(range(2, 7))
+        assert result.keys_to_retry == to_keys([7, 8, 9])
+
+    def test_held_chunks_keep_the_retry_contract_of_each_group(self, manager_setup):
+        """With two groups, each group's keys_to_retry is exactly its offered
+        keys from its first cut key on (what the connector offers again); a
+        group whose new chunks all fit, with a held chunk last, retries
+        nothing."""
+
+        def keys(group, ids):
+            return [make_offload_key(str(i).encode(), group) for i in ids]
+
+        self._hold_only_in_secondary_tiers(keys(0, [0]) + keys(1, [3]))
+        ctx = ReqContext(req_id="req_groups")
+        self._start_request(ctx)
+        offer = keys(0, range(4)) + keys(1, range(4))
+        for i, key in enumerate(offer):
+            ctx.set_offload_key_position(key, (i % 4 + 1) * 16)
+
+        result = self.manager.prepare_store(offer, ctx, trigger=StoreTrigger.ON_COMPUTE)
+
+        assert result is not None
+        assert sorted(result.keys_to_store) == sorted(
+            keys(0, [1, 2]) + keys(1, range(3))
+        )
+        assert result.keys_to_retry == keys(0, [3])
+
+    def test_store_keeps_held_chunks_a_request_cannot_load(self, manager_setup):
+        """Held chunks stay in the offer of a request whose load filter allows
+        none of the tiers that hold them, since it could not load them back."""
+        self._hold_only_in_secondary_tiers(range(4))
+        ctx = ReqContext(
+            req_id="req_storage_only",
+            load_tier_filter=TierFilter(matchers=(TierMatcher(medium=Medium.STORAGE),)),
+        )
+        self._start_request(ctx)
+
+        result = self.manager.prepare_store(
+            to_keys(range(8)), ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
+
+        assert result is not None
+        assert result.keys_to_store == to_keys(range(5))
+        assert result.keys_to_retry == to_keys(range(5, 8))
+
+    def test_fitting_store_still_restages_held_chunks(self, manager_setup):
+        """An offer the primary tier can take goes through it whole, as before,
+        even for chunks the secondary tiers hold."""
+        self._hold_only_in_secondary_tiers(range(3))
+
+        result = self.manager.prepare_store(
+            to_keys(range(4)), _CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+
+        assert result is not None
+        assert result.keys_to_store == to_keys(range(4))
+
+    @pytest.mark.parametrize("tier2_writable", [True, False])
+    def test_only_writable_tiers_decide_which_chunks_are_held(
+        self, manager_setup, tier2_writable: bool
+    ):
+        """A chunk a writable tier lacks is still stored, since the primary tier
+        is its only way there; a read-only tier, never cascaded to, does not
+        keep a chunk in the offer."""
+        self._hold_only_in_secondary_tiers(range(4), read_only_tier2=True)
+        if tier2_writable:
+            self.secondary_tier2.access_mode = OffloadAccessMode.READWRITE
+
+        result = self.manager.prepare_store(
+            to_keys(range(8)), _CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+
+        assert result is not None
+        if tier2_writable:
+            assert result.keys_to_store == to_keys(range(5))
+            assert result.keys_to_retry == to_keys(range(5, 8))
+        else:
+            assert result.keys_to_store == to_keys(range(4, 8))
+            assert not result.keys_to_retry
+
+    @pytest.mark.parametrize("tier1_receives_stores", [True, False])
+    def test_only_tiers_receiving_the_stores_decide_which_chunks_are_held(
+        self, manager_setup, monkeypatch, tier1_receives_stores: bool
+    ):
+        """A writable tier that opts out of this request's stores is never
+        cascaded its chunks, so lacking one does not keep it in the offer; with
+        no tier receiving the stores, the offer is unchanged."""
+        self._hold_only_in_secondary_tiers(range(4), read_only_tier2=True)
+        assert all(
+            self.secondary_tier2.lookup(k, _CTX) is LookupResult.MISS
+            for k in to_keys(range(4))
+        )
+        self.secondary_tier2.access_mode = OffloadAccessMode.READWRITE
+        opt_out = SecondaryTierRequestContext(receives_stores=False)
+        monkeypatch.setattr(self.secondary_tier2, "on_new_request", lambda _: opt_out)
+        if not tier1_receives_stores:
+            monkeypatch.setattr(
+                self.secondary_tier1, "on_new_request", lambda _: opt_out
+            )
+        ctx = ReqContext(req_id="req_opt_out")
+        self._start_request(ctx)
+
+        result = self.manager.prepare_store(
+            to_keys(range(8)), ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
+
+        assert result is not None
+        if tier1_receives_stores:
+            assert result.keys_to_store == to_keys(range(4, 8))
+            assert not result.keys_to_retry
+        else:
+            assert result.keys_to_store == to_keys(range(5))
+            assert result.keys_to_retry == to_keys(range(5, 8))
+
+    def test_request_level_tiers_keep_held_chunks_in_the_offer(
+        self, manager_setup, monkeypatch
+    ):
+        """A request with a request-level tier is cascaded each of its chunks,
+        so held chunks are not dropped from its offer."""
+        self._hold_only_in_secondary_tiers(range(4))
+        ctx = self._make_request_level_request(monkeypatch, "req_level")
+
+        result = self.manager.prepare_store(
+            to_keys(range(8)), ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
+
+        assert result is not None
+        assert result.keys_to_store == to_keys(range(5))
+        assert result.keys_to_retry == to_keys(range(5, 8))
+
     def test_partial_primary_store_cascades_each_resident_key_once(
         self, manager_setup, monkeypatch
     ):

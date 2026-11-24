@@ -208,7 +208,8 @@ class PrepareStoreOutput:
     # Offered keys to offer again because the manager had no room. Within a
     # group (get_offload_group_idx), they are the offered keys from the first
     # one that did not fit on, by token position, including keys that are
-    # already stored. Disjoint from keys_to_store.
+    # already stored or that a manager left out of the store. Disjoint from
+    # keys_to_store.
     keys_to_retry: list[OffloadKey] = field(default_factory=list)
 
 
