@@ -126,6 +126,8 @@ if TYPE_CHECKING:
     VLLM_COMPILE_ON_ONE_RANK: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
+    VLLM_SAFETENSORS_PREFETCH_LEAD_S: float | None = None
+    VLLM_SAFETENSORS_PREFETCH_MIN_LEAD_GB: float = 0.0
     VLLM_TRITON_FORCE_FIRST_CONFIG: bool = False
     VLLM_TRITON_JIT_WARMUP_NUM_THREADS: int = 4
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
@@ -1177,6 +1179,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # at peak during loading.
     "VLLM_FASTSAFETENSORS_QUEUE_SIZE": lambda: int(
         os.getenv("VLLM_FASTSAFETENSORS_QUEUE_SIZE", "0")
+    ),
+    # How many seconds of loading the safetensors prefetch may run ahead of
+    # the loaders. Unset: a quarter of the Lustre client's lock max age on
+    # Lustre, unpaced elsewhere. 0 disables pacing.
+    "VLLM_SAFETENSORS_PREFETCH_LEAD_S": lambda: (
+        float(os.environ["VLLM_SAFETENSORS_PREFETCH_LEAD_S"])
+        if os.environ.get("VLLM_SAFETENSORS_PREFETCH_LEAD_S")
+        else None
+    ),
+    # GiB the paced safetensors prefetch may always run ahead of the loaders.
+    "VLLM_SAFETENSORS_PREFETCH_MIN_LEAD_GB": lambda: float(
+        os.getenv("VLLM_SAFETENSORS_PREFETCH_MIN_LEAD_GB", "0")
     ),
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
@@ -2581,6 +2595,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
+        "VLLM_SAFETENSORS_PREFETCH_LEAD_S",
+        "VLLM_SAFETENSORS_PREFETCH_MIN_LEAD_GB",
         "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
         "VLLM_MAX_TOKENIZE_TOKENS",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",

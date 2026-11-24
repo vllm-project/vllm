@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests that each node prefetches what it reads, and how ranks read it."""
 
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -86,14 +87,14 @@ def test_each_node_prefetches_what_it_reads(
             monkeypatch.setattr(weight_utils, "get_world_group", lambda w=world: w)
             ranges = None
             if ids is not None:
-                ranges, node_bytes = weight_utils._node_prefetch_ranges(files, ids)
+                ranges, node_bytes, _ = weight_utils._node_prefetch_ranges(files, ids)
             weight_utils._prefetch_all_checkpoints(files, 1, ranges=ranges)
             needed.update(b for p in files for b in tensor_bytes(p, ids))
         # The page cache is per node: each node must prefetch exactly the bytes
         # its ranks read, no more and no less, and estimate them exactly.
         assert prefetched == needed, f"node {node}"
         if ids is not None:
-            assert node_bytes == len(needed), f"node {node}"
+            assert sum(node_bytes) == len(needed), f"node {node}"
 
 
 def test_prefetch_checkpoint_sends_the_ranges(tmp_path, monkeypatch):
@@ -146,10 +147,153 @@ def test_read_whole_tensors_when_the_rank_uses_them(
     monkeypatch.setattr(weight_utils, "_prefetch_all_checkpoints", lambda *a, **k: None)
     calls = []
     read = weight_utils._read_safetensors_file
-    monkeypatch.setattr(
-        weight_utils, "_read_safetensors_file", lambda *a: calls.append(a) or read(*a)
-    )
+
+    def record(*args):
+        calls.append(args)
+        return read(*args)
+
+    monkeypatch.setattr(weight_utils, "_read_safetensors_file", record)
     dict(weight_utils.safetensors_weights_iterator([path], False, strategy))
     # Under TP/PP with prefetch, the loader copies its slices from the cached
     # mapping; without prefetch, reading whole tensors beats cold faults.
     assert bool(calls) == reads
+
+
+@pytest.mark.parametrize(
+    "contents,expected", [(["600000", "900000"], 600.0), (["300s\n"], 300.0)]
+)
+def test_lustre_lock_max_age(monkeypatch, tmp_path, contents, expected):
+    paths = []
+    for i, text in enumerate(contents):
+        paths.append(tmp_path / f"lru_max_age{i}")
+        paths[-1].write_text(text)
+    monkeypatch.setattr(
+        weight_utils.glob,
+        "glob",
+        lambda p: [str(x) for x in paths] if "sys" in p else [],
+    )
+    assert weight_utils._lustre_lock_max_age_s() == expected
+
+
+@pytest.mark.parametrize(
+    "env,fs_type,max_age,expected",
+    [
+        (None, "lustre", 600.0, 150.0),
+        (None, "lustre", None, 150.0),
+        (None, "nfs4", 600.0, 0.0),
+        ("90", "nfs4", 600.0, 90.0),
+        ("0", "lustre", 600.0, 0.0),
+    ],
+)
+def test_prefetch_lead(monkeypatch, env, fs_type, max_age, expected):
+    if env is None:
+        monkeypatch.delenv("VLLM_SAFETENSORS_PREFETCH_LEAD_S", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_SAFETENSORS_PREFETCH_LEAD_S", env)
+    monkeypatch.setattr(weight_utils, "_lustre_lock_max_age_s", lambda: max_age)
+    assert weight_utils._prefetch_lead_s(fs_type) == expected
+
+
+def test_pacer_allows_files_within_the_lead(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(weight_utils.time, "monotonic", lambda: now[0])
+    # Ranks load half of each file, the node prefetches all of it.
+    pacer = weight_utils._PrefetchPacer([100] * 10, [50] * 10, lead_s=2)
+    # Unpaced until the loader's rate is known.
+    assert pacer.unpaced_s == 0.4 and pacer.allowed(9)
+    now[0] = 0.5
+    assert pacer.allowed(0) and not pacer.allowed(1)
+    now[0] = 1.0
+    pacer.start_file(1)
+    pacer.add(25)  # halfway through file 1: 150 bytes in 1 s
+    pacer.sync()
+    assert pacer.position() == 1.5
+    # 300 bytes of lead: files starting up to 450
+    assert [pacer.allowed(i) for i in range(6)] == [True] * 5 + [False]
+    now[0] = 3.0  # the loader stalls: 150 bytes in 3 s, 100 bytes of lead
+    assert pacer.allowed(2) and not pacer.allowed(3)
+    pacer.min_lead_bytes = 300
+    assert pacer.allowed(4) and not pacer.allowed(5)
+    assert pacer.passed(0) and not pacer.passed(1)
+
+
+class _FakeStore:
+    def __init__(self):
+        self.values: dict[str, int] = {}
+
+    def add(self, key, value):
+        self.values[key] = self.values.get(key, 0) + value
+        return self.values[key]
+
+
+def test_pacer_follows_the_node_fastest_loader(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(weight_utils.time, "monotonic", lambda: now[0])
+    store = _FakeStore()
+    pacers = []
+    for rank in range(2):
+        pacer = weight_utils._PrefetchPacer([100] * 10, [100] * 10, lead_s=1)
+        pacer.store, pacer.keys = store, ["r0", "r1"]
+        pacer.key = pacer.keys[rank]
+        pacers.append(pacer)
+    fast, slow = pacers
+    now[0] = 10.0
+    fast.start_file(5)
+    slow.start_file(1)
+    for pacer in (fast, slow, fast):
+        pacer.sync()
+    # The slow rank prefetches for the fast one (50 bytes/s of lead) and keeps
+    # the files it has not read itself.
+    assert slow.allowed(5) and not slow.allowed(6)
+    assert slow.passed(0) and not slow.passed(1) and not fast.passed(1)
+    slow.finish()
+    slow.sync()
+    fast.sync()
+    assert fast.passed(4) and not fast.passed(5)
+
+
+def test_paced_prefetch_follows_the_loader(monkeypatch, tmp_path):
+    files = [str(tmp_path / f"model-{i}.safetensors") for i in range(4)]
+    prefetched: list[str] = []
+    monkeypatch.setattr(
+        weight_utils, "_prefetch_checkpoint", lambda p, *a: prefetched.append(p)
+    )
+    pacer = weight_utils._PrefetchPacer([1] * 4, [1] * 4, lead_s=1e-9)
+    weight_utils._prefetch_all_checkpoints(files, 2, pacer=pacer)
+
+    def wait_for(n):
+        deadline = time.monotonic() + 10
+        while len(prefetched) < n and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.5)  # nothing more arrives
+        return prefetched
+
+    assert wait_for(1) == files[:1]
+    for i in range(1, 4):
+        pacer.start_file(i)
+        assert wait_for(i + 1) == files[: i + 1]
+    pacer.finish()
+
+
+def test_iterator_reports_progress_and_finishes(monkeypatch, tmp_path):
+    monkeypatch.setenv("VLLM_SAFETENSORS_PREFETCH_LEAD_S", "60")
+    pacers = []
+    monkeypatch.setattr(
+        weight_utils,
+        "_prefetch_all_checkpoints",
+        lambda *a, pacer=None, **k: pacers.append(pacer),
+    )
+    monkeypatch.setattr(weight_utils, "_rank_reads_whole_tensors", lambda: True)
+    files = []
+    for i in range(3):
+        files.append(str(tmp_path / f"model-{i}.safetensors"))
+        save_file({f"w{i}.a": torch.zeros(64), f"w{i}.b": torch.zeros(64)}, files[-1])
+    it = weight_utils.safetensors_weights_iterator(files, False, "prefetch")
+    next(it)
+    next(it)
+    next(it)
+    (pacer,) = pacers
+    assert pacer.loaded == (1, 256) and not pacer.done
+    # A loader that stops early still releases the prefetch.
+    it.close()
+    assert pacer.done and pacer.position() == 3
