@@ -88,7 +88,4 @@ def test_per_token_head_kv_cache_accuracy(
             outputs_1_lst=test_outputs,
             name_0="bf16_kv_cache",
             name_1=f"{kv_cache_dtype}_kv_cache",
-            # bf16 can tie two next tokens exactly (e.g. "Answer"/"Solution");
-            # greedy picks either one, so accept a quantized run that ranks one.
-            tie_aware=True,
         )
