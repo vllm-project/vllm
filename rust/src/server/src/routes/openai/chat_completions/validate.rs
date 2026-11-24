@@ -3,7 +3,6 @@
 
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
-use crate::routes::openai::utils::validate_stop_strings;
 
 /// Validate OpenAI chat-completions protocol invariants and reject
 /// unimplemented request fields.
@@ -41,7 +40,6 @@ pub(super) fn validate_request(request: &ChatCompletionRequest) -> Result<(), Ap
         );
     }
 
-    validate_stop_strings(request.stop.as_ref())?;
     reject_unsupported_fields(request)?;
 
     Ok(())
@@ -139,21 +137,6 @@ mod tests {
         };
 
         validate_request(&request).expect("stop strings should be accepted");
-    }
-
-    #[test]
-    fn validate_request_rejects_more_than_four_stop_strings() {
-        let request = ChatCompletionRequest {
-            stop: Some(StringOrArray::Array(
-                ["one", "two", "three", "four", "five"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
-            )),
-            ..base_request()
-        };
-
-        assert!(validate_request(&request).is_err());
     }
 
     #[test]

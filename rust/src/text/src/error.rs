@@ -23,6 +23,8 @@ pub enum Error {
     EmptyPromptTokenIds { request_id: String },
     #[error("text request `{request_id}` stop strings cannot be empty")]
     EmptyStopString { request_id: String },
+    #[error("Too many stop strings: {count}. The max number is {max}.")]
+    TooManyStopStrings { count: usize, max: usize },
     #[error(
         "text request `{request_id}` stop strings require detokenization; enable it or use stop \
          token IDs"
@@ -118,9 +120,9 @@ impl Error {
                 ErrorKind::invalid_param("input_tokens")
             }
             Self::EmptyPromptTokenIds { .. } => ErrorKind::invalid_param("prompt"),
-            Self::EmptyStopString { .. } | Self::StopStringsRequireDetokenize { .. } => {
-                ErrorKind::invalid_param("stop")
-            }
+            Self::EmptyStopString { .. }
+            | Self::TooManyStopStrings { .. }
+            | Self::StopStringsRequireDetokenize { .. } => ErrorKind::invalid_param("stop"),
             Self::InvalidCacheSalt => ErrorKind::invalid_param("cache_salt"),
             Self::Logprobs(error) => ErrorKind::invalid_param(error.param()),
             Self::TokenIds(error) => ErrorKind::InvalidRequest {

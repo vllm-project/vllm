@@ -5,7 +5,6 @@ use serde_json::Value;
 
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
-use crate::routes::openai::utils::validate_stop_strings;
 
 /// Validate OpenAI completions protocol invariants and reject unimplemented
 /// request fields.
@@ -52,7 +51,6 @@ pub(super) fn validate_request(request: &CompletionRequest) -> Result<(), ApiErr
         }
     }
 
-    validate_stop_strings(request.stop.as_ref())?;
     reject_unsupported_fields(request)?;
 
     Ok(())

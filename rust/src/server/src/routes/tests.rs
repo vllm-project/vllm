@@ -15141,6 +15141,14 @@ async fn request_validation_reports_canonical_param_across_routes() {
             with_patch(generate_base.clone(), json!({"cache_salt": ""})),
             Some("cache_salt"),
         ),
+        (
+            "/inference/v1/generate",
+            with_patch(
+                generate_base.clone(),
+                json!({"sampling_params": {"stop": ["a", "b", "c", "d", "e"]}}),
+            ),
+            Some("stop"),
+        ),
     ] {
         let (status, json) = post_json(&mut app, uri, body.clone()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {body} -> {json}");

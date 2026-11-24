@@ -329,6 +329,15 @@ impl TextRequest {
                 request_id: self.request_id.clone(),
             });
         }
+        if let Some(stops) = self.decode_options.stop_strings.as_ref() {
+            let max = max_stop_strings();
+            if stops.len() > max {
+                return Err(Error::TooManyStopStrings {
+                    count: stops.len(),
+                    max,
+                });
+            }
+        }
         if !self.decode_options.detokenize
             && self.decode_options.stop_strings.as_ref().is_some_and(|stops| !stops.is_empty())
         {
@@ -354,6 +363,16 @@ fn is_valid_cache_salt(salt: &str) -> bool {
     const FORBIDDEN: [char; 4] = ['@', '/', '\\', '\0'];
 
     !salt.is_empty() && salt.chars().count() <= MAX_LEN && !salt.contains(FORBIDDEN)
+}
+
+const MAX_STOP_STRINGS_ENV: &str = "VLLM_MAX_STOP_STRINGS";
+const DEFAULT_MAX_STOP_STRINGS: usize = 4;
+
+fn max_stop_strings() -> usize {
+    std::env::var(MAX_STOP_STRINGS_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_MAX_STOP_STRINGS)
 }
 
 #[cfg(test)]
@@ -396,6 +415,24 @@ mod tests {
         assert!(err.kind().is_invalid_request());
         assert!(err.to_string().contains("stop strings cannot be empty"));
         assert!(err.to_string().contains("req-empty-stop"));
+    }
+
+    #[test]
+    fn validate_enforces_stop_string_limit_at_shared_chokepoint() {
+        let mut request = TextRequest::for_test();
+        request.decode_options.stop_strings =
+            Some(["one", "two", "three", "four"].into_iter().map(str::to_string).collect());
+        request.validate().expect("four stop strings should be accepted");
+
+        request.decode_options.stop_strings = Some(
+            ["one", "two", "three", "four", "five"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+        let err = request.validate().expect_err("five stop strings should be rejected");
+        assert_eq!(err.kind(), crate::ErrorKind::invalid_param("stop"));
+        assert!(err.to_string().contains("Too many stop strings: 5"));
     }
 
     #[test]

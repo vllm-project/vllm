@@ -17,6 +17,9 @@ use crate::utils::{
     resolve_session_id,
 };
 
+/// Default `max_tokens` when omitted or null, matching Python vLLM / OpenAI.
+const DEFAULT_COMPLETION_MAX_TOKENS: u32 = 16;
+
 /// Lowered completion request plus the public response metadata carried by
 /// every SSE chunk.
 #[derive(Debug, Clone, PartialEq)]
@@ -109,9 +112,6 @@ pub(super) fn prepare_completion_request(
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
     let include_prompt_logprobs = prompt_logprobs.is_some();
-    /// Default `max_tokens` when omitted or null, matching Python vLLM / OpenAI.
-    const DEFAULT_COMPLETION_MAX_TOKENS: u32 = 16;
-
     let max_tokens = if prompt_only {
         Some(1)
     } else {
