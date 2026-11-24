@@ -20,6 +20,8 @@ from pydantic import ValidationError
 
 import vllm.envs as envs
 from vllm import SamplingParams
+from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.generate.beam_search.utils import get_beam_search_score
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -27,9 +29,14 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.engine import embeds_input
+from vllm.inputs.engine import embeds_input, mm_input
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import BeamSearchParams
-from vllm.tokenizers import deepseek_v4_encoding, deepseek_v32_encoding
+from vllm.tokenizers import (
+    deepseek_v4_encoding,
+    deepseek_v32_encoding,
+    deepseek_v41_encoding,
+)
 from vllm.v1.engine.input_processor import InputProcessor
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
@@ -92,6 +99,71 @@ def test_prompt_embeds_valid_inputs_preserved(prompt_embeds_processor, token_ids
     assert request.prompt_embeds is embeds
     assert request.prompt_token_ids == token_ids
     assert request.prompt_is_token_ids == mask
+
+
+@pytest.mark.parametrize(
+    "enable_chunked_prefill,mm_hashes,rejected",
+    [
+        (False, ["a", "b", "c"], True),
+        # A repeated item is encoded once.
+        (False, ["a", "b", "a"], False),
+        (True, ["a", "b", "c"], False),
+    ],
+    ids=["no-chunked-prefill", "repeated-item", "chunked-prefill"],
+)
+def test_mm_items_must_fit_encoder_cache_together_without_chunked_prefill(
+    enable_chunked_prefill, mm_hashes, rejected
+):
+    """Without chunked prefill, a prompt whose items don't fit the encoder cache
+    together could never be scheduled, so it is rejected at admission."""
+    config = EngineArgs(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_model_len=2048,
+        enable_chunked_prefill=enable_chunked_prefill,
+        encoder_cache_size=1200,
+    ).create_engine_config()
+    processor = InputProcessor(config)
+    # Three 576-token images: each fits the cache, but not all three together.
+    prompt = mm_input(
+        prompt_token_ids=[0] * 1800,
+        mm_kwargs={},
+        mm_hashes={"image": mm_hashes},
+        mm_placeholders={
+            "image": [PlaceholderRange(offset=o, length=576) for o in (0, 600, 1200)]
+        },
+    )
+    if rejected:
+        with pytest.raises(VLLMValidationError, match="must fit together"):
+            processor._validate_model_input(prompt, prompt_type="decoder")
+    else:
+        processor._validate_model_input(prompt, prompt_type="decoder")
+
+
+def test_rejected_mm_request_invalidates_sender_cache(monkeypatch):
+    """Rendering records a request's multimodal items as sent to the engine, so
+    a request rejected after rendering must have them sent again next time."""
+    config = EngineArgs(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_model_len=2048,
+        enable_chunked_prefill=False,
+        encoder_cache_size=1200,
+    ).create_engine_config()
+    processor = InputProcessor(config)
+    invalidated: list[str] = []
+    monkeypatch.setattr(
+        processor.renderer, "queue_mm_cache_invalidations", invalidated.extend
+    )
+    prompt = mm_input(
+        prompt_token_ids=[0] * 1800,
+        mm_kwargs={},
+        mm_hashes={"image": ["a", "b", "c"]},
+        mm_placeholders={
+            "image": [PlaceholderRange(offset=o, length=576) for o in (0, 600, 1200)]
+        },
+    )
+    with pytest.raises(VLLMValidationError):
+        processor.process_inputs("rejected", prompt, SamplingParams(), ("generate",))
+    assert invalidated == ["a", "b", "c"]
 
 
 @pytest.mark.parametrize("offset", [-1, 0, 2, 3, 4, 2**127])
@@ -339,6 +411,22 @@ def test_direct_beam_width_rejects_values_over_sequence_cap(
         BeamSearchParams(beam_width=5, max_tokens=1)
 
 
+@pytest.mark.parametrize("length_penalty", [-1e4, 1e4])
+def test_beam_score_saturates_on_extreme_length_penalty(length_penalty: float):
+    # 12 ** -1e4 underflows to 0.0 and 12 ** 1e4 overflows. Either used to raise
+    # while sorting the beams, which turned the request into a 500.
+    scores = [
+        get_beam_search_score(12, logprob, length_penalty) for logprob in (-3.0, 0.0)
+    ]
+    assert scores == sorted(scores)
+
+
+@pytest.mark.parametrize("length_penalty", [float("inf"), float("nan")])
+def test_beam_search_params_rejects_non_finite_length_penalty(length_penalty: float):
+    with pytest.raises(VLLMValidationError, match="length_penalty must be finite"):
+        BeamSearchParams(beam_width=2, max_tokens=1, length_penalty=length_penalty)
+
+
 def test_chat_beam_conversion_rejects_n_before_stream_state_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -372,6 +460,43 @@ def test_chat_beam_conversion_accepts_n_at_sequence_cap(
     params = request.to_beam_search_params(max_tokens=1, default_sampling_params={})
 
     assert params.beam_width == 4
+
+
+@pytest.mark.parametrize("request_cls", [ChatCompletionRequest, CompletionRequest])
+@pytest.mark.parametrize("conversion", ["to_sampling_params", "to_beam_search_params"])
+@pytest.mark.parametrize("requested", [None, False, True])
+@pytest.mark.parametrize("default", [None, False, True])
+def test_skip_special_tokens_resolves_before_decoding(
+    request_cls, conversion, requested, default
+):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import TokenizersBackend
+
+    inputs = (
+        {"messages": [{"role": "user", "content": "hello"}]}
+        if request_cls is ChatCompletionRequest
+        else {"prompt": "hello"}
+    )
+    request = request_cls(model="test", skip_special_tokens=requested, **inputs)
+    defaults = {} if default is None else {"skip_special_tokens": default}
+    params = getattr(request, conversion)(
+        max_tokens=1, default_sampling_params=defaults
+    )
+    expected = (
+        requested
+        if requested is not None
+        else defaults.get("skip_special_tokens", True)
+    )
+    assert params.skip_special_tokens is expected
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0, "[EOS]": 1})),
+        unk_token="[UNK]",
+        eos_token="[EOS]",
+    )
+    assert tokenizer.decode([1], skip_special_tokens=params.skip_special_tokens) == (
+        "" if expected else "[EOS]"
+    )
 
 
 # --- DeepSeek encoders: the last-user scan runs once per conversation ------
@@ -434,8 +559,8 @@ def test_encode_messages_preserves_small_chat_prompt(encoding_module):
 
 @pytest.mark.parametrize(
     "encoding_module",
-    ENCODING_MODULES,
-    ids=["deepseek_v32", "deepseek_v4"],
+    [*ENCODING_MODULES, deepseek_v41_encoding],
+    ids=["deepseek_v32", "deepseek_v4", "deepseek_v41"],
 )
 def test_encode_messages_unknown_role_raises_value_error(encoding_module):
     # An invalid role (e.g. uppercase "SYSTEM") is a client error and must be
@@ -446,3 +571,129 @@ def test_encode_messages_unknown_role_raises_value_error(encoding_module):
             [{"role": "SYSTEM", "content": "Hello"}],
             thinking_mode="chat",
         )
+
+
+# --- GHSA-cg76-73hw-qg4m: stop_token_ids count cap and set lookup ---------
+
+
+def test_stop_token_ids_count_cap_rejects_oversized_list():
+    with pytest.raises(VLLMValidationError, match="Too many stop_token_ids"):
+        SamplingParams(stop_token_ids=list(range(200)))
+
+
+def test_stop_token_ids_pydantic_cap_on_completion_request():
+    with pytest.raises(ValidationError, match="at most 128"):
+        CompletionRequest(
+            model="test-model",
+            prompt="hello",
+            stop_token_ids=list(range(200)),
+        )
+
+
+def test_stop_token_ids_pydantic_cap_on_chat_request():
+    with pytest.raises(ValidationError, match="at most 128"):
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "hello"}],
+            stop_token_ids=list(range(200)),
+        )
+
+
+def test_stop_token_ids_set_property():
+    params = SamplingParams(stop_token_ids=[10, 20, 30])
+    assert params.stop_token_ids_set == frozenset({10, 20, 30})
+
+
+# --- GHSA-v782-f4x3-chvf: stop strings dedup and cap at SamplingParams ----
+
+
+def test_stop_strings_deduped_at_sampling_params():
+    params = SamplingParams(stop=["a", "b", "a", "c"])
+    assert params.stop == ["a", "b", "c"]
+
+
+def test_stop_strings_cap_at_sampling_params():
+    with pytest.raises(VLLMValidationError, match="Too many stop strings"):
+        SamplingParams(stop=[f"stop{i}" for i in range(10)])
+
+
+# --- GHSA-4r96-ccfx-mq85: DeepSeek V3.2 tool-message linear scan ---------
+
+
+def test_deepseek_v32_tool_messages_linear_scan():
+    k = 64
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {"name": f"f{i}", "arguments": "{}"},
+                }
+                for i in range(k)
+            ],
+        },
+    ]
+    msgs.extend({"role": "tool", "content": "result"} for _ in range(k))
+
+    reads = 0
+    orig_getitem = list.__getitem__
+
+    class CountingList(list):
+        def __getitem__(self, i):
+            nonlocal reads
+            reads += 1
+            return orig_getitem(self, i)
+
+    counting_msgs = CountingList(msgs)
+
+    deepseek_v32_encoding.encode_messages(counting_msgs, thinking_mode="chat")
+
+    # O(n) should be well under k^2/2 = 2048
+    assert reads < k * 10, (
+        f"Expected linear reads but got {reads} "
+        f"(k={k}, quadratic would be ~{k * k // 2})"
+    )
+
+
+# --- GHSA-9862-57p7-p868: bad_words Pydantic cap and total-token limit ----
+
+
+def test_bad_words_pydantic_cap_on_completion_request():
+    with pytest.raises(ValidationError, match="at most 128"):
+        CompletionRequest(
+            model="test-model",
+            prompt="hello",
+            bad_words=[f"bad{i}" for i in range(200)],
+        )
+
+
+def test_bad_words_pydantic_cap_on_chat_request():
+    with pytest.raises(ValidationError, match="at most 128"):
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "hello"}],
+            bad_words=[f"bad{i}" for i in range(200)],
+        )
+
+
+def test_bad_words_count_cap_at_sampling_params():
+    with pytest.raises(VLLMValidationError, match="Too many bad_words"):
+        SamplingParams(bad_words=[f"bad{i}" for i in range(200)])
+
+
+class MultiTokenMockTokenizer:
+    max_token_id = 1024
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return list(range(10))
+
+
+def test_bad_words_total_token_limit_enforced_in_frontend():
+    params = SamplingParams(bad_words=[f"word{i}" for i in range(120)])
+    tokenizer = MultiTokenMockTokenizer()
+
+    with pytest.raises(VLLMValidationError, match="Too many total bad word tokens"):
+        params.update_from_tokenizer(tokenizer)

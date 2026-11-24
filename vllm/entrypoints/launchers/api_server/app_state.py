@@ -7,8 +7,7 @@ from typing import cast
 from starlette.datastructures import State
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import load_chat_template
-from vllm.entrypoints.launchers.cli_args import resolve_default_chat_template_kwargs
+from vllm.entrypoints.common.cli_args import resolve_default_chat_template_kwargs
 from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -16,6 +15,7 @@ from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import process_lora_modules
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.plugins.endpoint_plugins.interface import init_endpoint_plugins_state
+from vllm.renderers.chat_utils import load_chat_template
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tasks import FALLBACK_SUPPORTED_TASKS, POOLING_TASKS, SupportedTask
@@ -65,7 +65,9 @@ async def init_app_state(
     state.vllm_config = vllm_config
     state.args = args
     resolved_chat_template = load_chat_template(args.chat_template)
-    default_chat_template_kwargs = resolve_default_chat_template_kwargs(args)
+    default_chat_template_kwargs = resolve_default_chat_template_kwargs(
+        args, tokenizer_mode=vllm_config.model_config.tokenizer_mode
+    )
     state.tool_server = (
         await init_tool_server(args) if "generate" in supported_tasks else None
     )
@@ -99,6 +101,7 @@ async def init_app_state(
         tool_strict_level=args.tool_strict_level,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
+        reasoning_effort_map=args.reasoning_effort_map,
         log_error_stack=args.log_error_stack,
     )
     state.online_renderer.warmup()
@@ -110,13 +113,16 @@ async def init_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         trust_request_chat_template=args.trust_request_chat_template,
+        response_role=args.response_role,
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
         tool_strict_level=args.tool_strict_level,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
+        reasoning_effort_map=args.reasoning_effort_map,
         log_error_stack=args.log_error_stack,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
 
     state.serving_tokenization = ServingTokenization(
@@ -127,6 +133,7 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
         default_chat_template_kwargs=default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
+        max_tokenize_tokens=args.max_tokenize_tokens,
     )
 
     if "generate" in supported_tasks:
@@ -156,6 +163,19 @@ async def init_app_state(
         from vllm.entrypoints.pooling.factories import init_pooling_state
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
+
+    from vllm.entrypoints.generate.structured_decisions.api_router import (
+        init_structured_decisions_state,
+    )
+
+    init_structured_decisions_state(
+        engine_client,
+        state,
+        args,
+        request_logger,
+        supported_tasks,
+        default_chat_template_kwargs,
+    )
 
     await init_endpoint_plugins_state(engine_client, state, args)
 

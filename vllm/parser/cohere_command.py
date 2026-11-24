@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Cohere Command parser.
 
-Uses ``cohere_melody`` as a stateful parser filter.
+Uses `cohere_melody` as a stateful parser filter.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ from vllm.reasoning.cohere_command_reasoning_parser import (
     BaseCohereCommandReasoningParser,
 )
 from vllm.renderers.cohere import POSITION_TO_SOURCE_KEY
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import StructuredOutputsParams, check_json_nesting
 from vllm.tool_parsers.cohere_command_tool_parser import BaseCohereCommandToolParser
 
 if TYPE_CHECKING:
@@ -61,7 +61,7 @@ PositionToSource = Mapping[tuple[int, int], CitationSource]
 
 
 class CohereTagRegistry(NamedTuple):
-    """A single ``structural_tag`` trigger / end pair (``begin`` uses ``trigger``)."""
+    """A single `structural_tag` trigger / end pair (`begin` uses `trigger`)."""
 
     trigger: str
     end: str
@@ -70,8 +70,8 @@ class CohereTagRegistry(NamedTuple):
 class CohereTagStyle(NamedTuple):
     """The structural tags style for a given model architecture.
 
-    ``json_tags`` lists every JSON-schema wrapper the model may emit (MOE uses
-    both response and text delimiters). ``tools`` is the tool-call wrapper.
+    `json_tags` lists every JSON-schema wrapper the model may emit (MOE uses
+    both response and text delimiters). `tools` is the tool-call wrapper.
     """
 
     json_tags: tuple[CohereTagRegistry, ...]
@@ -79,9 +79,9 @@ class CohereTagStyle(NamedTuple):
 
 
 class CohereNormalizedTool(TypedDict):
-    """A tool definition normalized to the shape ``collect_tool_schema`` expects.
+    """A tool definition normalized to the shape `collect_tool_schema` expects.
 
-    ``parameters`` is a JSON Schema object (possibly empty) describing the tool's
+    `parameters` is a JSON Schema object (possibly empty) describing the tool's
     call signature.
     """
 
@@ -122,11 +122,12 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
     """Build an xgrammar EBNF grammar that matches a JSON array of tool calls.
 
     The grammar shape is architecture-independent; callers are responsible for
-    wrapping it in the correct structural tag (see ``CohereTagStyle.tools``).
+    wrapping it in the correct structural tag (see `CohereTagStyle.tools`).
     """
     tool_dictionary: dict[str, str] = {}
     for tool in tool_schema:
         tool_name = tool["name"]
+        check_json_nesting(tool["parameters"])
         tool_parameters = dict(tool["parameters"])
         json_schema: dict[str, Any] = {
             "type": "object",
@@ -166,14 +167,14 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
 def _tool_definitions_to_schema_list(
     tools: str | list[Any],
 ) -> list[CohereNormalizedTool]:
-    """Build the list of ``CohereNormalizedTool`` dicts expected by
-    ``collect_tool_schema``.
+    """Build the list of `CohereNormalizedTool` dicts expected by
+    `collect_tool_schema`.
 
     Accepts:
     - JSON string
-    - list of dicts with top-level ``name`` / ``parameters``
-    - list of Chat Completions-style ``{"type": "function", "function": {...}}``
-    - list of Pydantic models with ``model_dump()``
+    - list of dicts with top-level `name` / `parameters`
+    - list of Chat Completions-style `{"type": "function", "function": {...}}`
+    - list of Pydantic models with `model_dump()`
     """
     if isinstance(tools, str):
         try:
@@ -210,10 +211,10 @@ def _tool_definitions_to_schema_list(
 def _has_effective_tools(
     tools: str | list[Any] | None,
 ) -> TypeGuard[str | list[Any]]:
-    """True when ``tools`` contains at least one tool definition to convert.
+    """True when `tools` contains at least one tool definition to convert.
 
-    ``ResponsesRequest`` defaults ``tools`` to ``[]``; ``ChatCompletionRequest``
-    uses ``None``. Both mean "no tools" here. Strings (e.g. a JSON blob) are
+    `ResponsesRequest` defaults `tools` to `[]`; `ChatCompletionRequest`
+    uses `None`. Both mean "no tools" here. Strings (e.g. a JSON blob) are
     treated as effective only when non-blank.
     """
     if tools is None:
@@ -236,7 +237,7 @@ def convert_schema_to_structural_tags(
     format.type "triggered_tags" and tag content type "json_schema" or "grammar".
 
     Callers that are not on an engine path (e.g. the reasoning parser) must pass
-    ``model_architecture`` explicitly.
+    `model_architecture` explicitly.
     """
     if model_architecture is None or model_architecture not in MODEL_TO_TAG_STYLE:
         return None
@@ -307,9 +308,9 @@ def _maybe_parse_json_dict(value: Any) -> dict | None:
 
 
 def _unwrap_nested_schema(candidate: Any) -> dict | None:
-    """Return ``candidate`` as a dict, unwrapping a nested ``schema`` if present.
+    """Return `candidate` as a dict, unwrapping a nested `schema` if present.
 
-    Returns ``None`` if ``candidate`` is not (and cannot be parsed into) a dict.
+    Returns `None` if `candidate` is not (and cannot be parsed into) a dict.
     """
     cand = _maybe_parse_json_dict(candidate)
     if not isinstance(cand, dict):
@@ -319,12 +320,12 @@ def _unwrap_nested_schema(candidate: Any) -> dict | None:
 
 
 def _schema_from_json_schema_field(js_wr: Any) -> dict | None:
-    """Extract the JSON Schema object from Chat Completions ``json_schema`` payload.
+    """Extract the JSON Schema object from Chat Completions `json_schema` payload.
 
     Accepts:
-    - ``JsonSchemaResponseFormat`` (Pydantic) with ``schema`` / ``json_schema`` field
-    - dict in OpenAI shape ``{"name": ..., "schema": {...}}``
-    - dict with ``json_schema`` key holding either the schema or a nested wrapper
+    - `JsonSchemaResponseFormat` (Pydantic) with `schema` / `json_schema` field
+    - dict in OpenAI shape `{"name": ..., "schema": {...}}`
+    - dict with `json_schema` key holding either the schema or a nested wrapper
     - dict that is already a JSON Schema document (some clients omit the wrapper)
     - JSON strings for any of the above
     """
@@ -360,7 +361,7 @@ def _schema_from_json_schema_field(js_wr: Any) -> dict | None:
 def _schema_dict_from_chat_response_format(
     rf: AnyResponseFormat | dict | None,
 ) -> dict | None:
-    """JSON schema dict from Chat Completions ``request.response_format`` only."""
+    """JSON schema dict from Chat Completions `request.response_format` only."""
     if rf is None:
         return None
     rf_type = _response_format_type(rf)
@@ -379,11 +380,11 @@ def _schema_dict_from_chat_response_format(
 def _schema_dict_from_structured_outputs(
     so: StructuredOutputsParams | None,
 ) -> dict | None:
-    """Schema dict from ``structured_outputs`` (``json`` / ``json_object``).
+    """Schema dict from `structured_outputs` (`json` / `json_object`).
 
-    Same unwrapping as ``json_schema``. ``json`` is expected to be ``str`` or
-    ``dict`` (enforced by ``StructuredOutputsParams`` / request models); other
-    types raise ``ValueError`` only if a caller bypasses that validation.
+    Same unwrapping as `json_schema`. `json` is expected to be `str` or
+    `dict` (enforced by `StructuredOutputsParams` / request models); other
+    types raise `ValueError` only if a caller bypasses that validation.
     """
     if so is None:
         return None
@@ -404,6 +405,7 @@ def _schema_dict_from_structured_outputs(
     if isinstance(raw, str):
         if not raw.strip():
             raise ValueError("structured_outputs.json cannot be empty.")
+        check_json_nesting(raw)
         try:
             raw = json.loads(raw)
         except json.JSONDecodeError as e:
@@ -423,12 +425,12 @@ def _schema_dict_from_structured_outputs(
 def _melody_sources_to_vllm(
     sources: list[Source], position_to_source: PositionToSource | None
 ) -> list[CitationSource]:
-    """Resolve melody ``Source`` addresses into :class:`CitationSource` objects.
+    """Resolve melody `Source` addresses into `CitationSource` objects.
 
-    Melody reports each source as ``(tool_call_index, tool_result_indices)``.
-    ``position_to_source`` is built by
-    :meth:`vllm.entrypoints.cohere.serving.CohereServingChatV2._build_position_to_source`
-    and forwarded through ``chat_template_kwargs``; each index fans out to one
+    Melody reports each source as `(tool_call_index, tool_result_indices)`.
+    `position_to_source` is built by
+    `vllm.entrypoints.cohere.serving.CohereServingChatV2._build_position_to_source`
+    and forwarded through `chat_template_kwargs`; each index fans out to one
     resolved source, and unresolved positions are skipped. Without a map (a
     request that did not come through the Cohere v2 handler) every source is
     dropped and the serving layer discards the citation at wire-coercion time.
@@ -447,10 +449,10 @@ def _melody_sources_to_vllm(
 def _melody_citations_to_vllm(
     citations: list[FilterCitation], position_to_source: PositionToSource | None
 ) -> list[Citation] | None:
-    """Convert melody ``FilterCitation`` objects into :class:`Citation`.
+    """Convert melody `FilterCitation` objects into `Citation`.
 
     Citations whose sources all fail to resolve are still returned with
-    ``sources=[]``; the serving layer drops them so the fail-closed policy
+    `sources=[]`; the serving layer drops them so the fail-closed policy
     lives in one place.
     """
     if not citations:
@@ -510,7 +512,7 @@ class CohereCommandParser(DelegatingParser):
     def _apply_structural_tags(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        """Fold ``tools`` and any JSON schema into a Cohere ``structural_tag``."""
+        """Fold `tools` and any JSON schema into a Cohere `structural_tag`."""
         so = request.structured_outputs
         if so is not None and so.structural_tag:
             return request

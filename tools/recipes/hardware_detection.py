@@ -4,7 +4,7 @@
 """CPU hardware discovery for optional vLLM Recipes runtime tuning.
 
 Keep this module focused on facts exposed to the current process/container.
-Tuning decisions belong in runtime_tuning.py.
+Tuning decisions belong in sweep/runtime_tuning.py.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from vllm.utils.cpu_resource_utils import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class NumaNodeInfo:
     node_id: int
     logical_cpu_ids: tuple[int, ...]
@@ -30,7 +30,7 @@ class NumaNodeInfo:
     available_memory_bytes: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HardwareInfo:
     architecture: str
     socket_count: int | None

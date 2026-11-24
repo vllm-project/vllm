@@ -24,7 +24,7 @@ def test_stat_logger_plugin_is_discovered(monkeypatch: pytest.MonkeyPatch):
         vllm_config = VllmConfig()
         instance = factories[0](vllm_config)
         # The `is` check above narrows DummyStatLogger to a Callable
-        assert isinstance(instance, DummyStatLogger)  # type: ignore[arg-type]
+        assert isinstance(instance, DummyStatLogger)
 
 
 def test_no_plugins_loaded_if_env_empty(monkeypatch: pytest.MonkeyPatch):

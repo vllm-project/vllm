@@ -2,14 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for INT8 (W8A8) fused-MoE oracle backend selection.
 
-These exercise ``select_int8_moe_backend`` only (no MoE kernels are launched),
-so they run on any platform where the Triton INT8 MoE kernel is available —
-CUDA (SM >= 7.5), ROCm, or XPU — not just gfx950.
+These exercise backend selection without launching MoE kernels, so they run
+wherever Triton INT8 MoE is available: CUDA (SM >= 7.5), ROCm, or XPU.
 """
+
+from dataclasses import replace
 
 import pytest
 import torch
 
+from vllm.config.kernel import MoEBackend
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -44,7 +46,9 @@ requires_int8_moe = pytest.mark.skipif(
 DEVICE = current_platform.device_type
 
 
-def _make_int8_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
+def _make_int8_moe_config(
+    moe_backend: MoEBackend = "auto", *, is_lora_enabled: bool = False
+) -> FusedMoEConfig:
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
     return FusedMoEConfig(
@@ -60,6 +64,7 @@ def _make_int8_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
         device=DEVICE,
         routing_method=RoutingMethodType.Renormalize,
         moe_backend=moe_backend,
+        is_lora_enabled=is_lora_enabled,
     )
 
 
@@ -77,10 +82,20 @@ def _make_int8_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
             kInt8DynamicTensorSym,
             id="per_tensor_weight-per_tensor_act",
         ),
+        pytest.param(
+            kInt8StaticChannelSym,
+            kInt8StaticTensorSym,
+            id="per_channel_weight-static_tensor_act",
+        ),
+        pytest.param(
+            kInt8StaticTensorSym,
+            kInt8StaticTensorSym,
+            id="per_tensor_weight-static_tensor_act",
+        ),
     ],
 )
-def test_int8_dynamic_schemes_dispatch_to_triton(weight_key, activation_key):
-    """Both dynamic-activation INT8 MoE schemes select the Triton backend."""
+def test_int8_schemes_dispatch_to_triton(weight_key, activation_key):
+    """Supported dynamic and static INT8 schemes select Triton."""
     config = _make_int8_moe_config()
     backend, experts_cls = select_int8_moe_backend(
         config, weight_key=weight_key, activation_key=activation_key
@@ -93,8 +108,8 @@ def test_int8_dynamic_schemes_dispatch_to_triton(weight_key, activation_key):
 def test_scaled_int8_quant_is_available_on_xpu():
     """The per-tensor scheme's activation quantization works on XPU.
 
-    ``_int8_quantize`` sends per-tensor activations through
-    ``ops.scaled_int8_quant``, which has an XPU branch. This is what lets the
+    `_int8_quantize` sends per-tensor activations through
+    `ops.scaled_int8_quant`, which has an XPU branch. This is what lets the
     per-tensor scheme be enabled here alongside CUDA and ROCm; pin it so a
     future change cannot silently remove that branch.
     """
@@ -134,3 +149,68 @@ def test_int8_unsupported_moe_backend_raises():
             weight_key=kInt8StaticChannelSym,
             activation_key=kInt8DynamicTokenSym,
         )
+
+
+@requires_int8_moe
+@pytest.mark.parametrize(
+    "activation_key,supported",
+    [
+        pytest.param(kInt8DynamicTokenSym, True, id="dynamic-token"),
+        pytest.param(kInt8StaticTensorSym, False, id="static-tensor"),
+    ],
+)
+def test_int8_triton_lora_activation_support(activation_key, supported):
+    """Static activation scales must not inherit dynamic INT8 LoRA support."""
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+
+    config = _make_int8_moe_config("triton", is_lora_enabled=True)
+    if not supported:
+        with pytest.raises(
+            ValueError, match="static INT8 activation quantization with LoRA"
+        ):
+            select_int8_moe_backend(config, kInt8StaticChannelSym, activation_key)
+        return
+
+    backend, experts_cls = select_int8_moe_backend(
+        config, kInt8StaticChannelSym, activation_key
+    )
+    assert backend == Int8MoeBackend.TRITON
+    assert experts_cls is TritonExperts
+    assert experts_cls.supports_lora()
+
+
+@requires_int8_moe
+@pytest.mark.parametrize(
+    "all2all_backend,batched",
+    [
+        ("allgather_reducescatter", False),
+        ("deepep_high_throughput", False),
+        ("deepep_low_latency", True),
+    ],
+)
+def test_static_int8_dispatch_uses_backend_capabilities(all2all_backend, batched):
+    """Static INT8 is only supported with naive AllGather/ReduceScatter."""
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+
+    config = _make_int8_moe_config(moe_backend="triton")
+    config = replace(
+        config,
+        num_local_experts=4,
+        moe_parallel_config=replace(
+            config.moe_parallel_config,
+            dp_size=2,
+            ep_size=2,
+            use_ep=True,
+            all2all_backend=all2all_backend,
+        ),
+    )
+    assert config.activation_format.is_batched is batched
+    if all2all_backend != "allgather_reducescatter":
+        with pytest.raises(ValueError, match="activation format|all2all"):
+            select_int8_moe_backend(config, kInt8StaticChannelSym, kInt8StaticTensorSym)
+    else:
+        backend, experts_cls = select_int8_moe_backend(
+            config, kInt8StaticChannelSym, kInt8StaticTensorSym
+        )
+        assert backend == Int8MoeBackend.TRITON
+        assert experts_cls is TritonExperts

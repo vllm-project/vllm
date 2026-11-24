@@ -244,9 +244,7 @@ fn preamble_tool_descriptions(
     leading_developer_tools: Option<&[ChatTool]>,
 ) -> Vec<ToolDescription> {
     let mut tools = Vec::new();
-    if request.tool_parsing_enabled() {
-        tools.extend(to_tool_descriptions(request.initial_tools()));
-    }
+    tools.extend(to_tool_descriptions(request.initial_tools()));
     if let Some(leading_developer_tools) = leading_developer_tools {
         tools.extend(to_tool_descriptions(leading_developer_tools));
     }

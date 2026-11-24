@@ -47,23 +47,14 @@ def check_mtp_correctness(
             extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
         elif "gemma-4" in model_name:
             extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "audio": 0}
-
-        if draft_model is not None and "gemma-4" in draft_model:
-            import transformers
-            from packaging.version import Version
-
-            if Version(transformers.__version__) < Version("5.8.0"):
-                pytest.skip(
-                    "Gemma4 MTP assistant requires transformers>=5.8.0, "
-                    f"got {transformers.__version__}"
-                )
+        if "MiMo" in model_name:
+            extra_kwargs["trust_remote_code"] = True
 
         with vllm_runner(
             model_name,
             block_size=None,
             max_model_len=2048,
             tensor_parallel_size=tp_size,
-            trust_remote_code=True,
             attention_backend=attn_backend,
             enable_chunked_prefill=None,
             compilation_config=CompilationConfig(),
@@ -87,7 +78,6 @@ def check_mtp_correctness(
         with vllm_runner(
             model_name,
             block_size=None,
-            trust_remote_code=True,
             tensor_parallel_size=tp_size,
             speculative_config=speculative_config,
             max_model_len=2048,
