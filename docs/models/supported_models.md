@@ -771,6 +771,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     image and video only, as do the Nemotron 3.5 Super VL checkpoints.
     `NemotronH_Omni_Reasoning_V3` checkpoints load without `--trust-remote-code`
     on `transformers>=5.18.0`; older versions still require the flag.
+    The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) serves image and video inputs
+    for these checkpoints. Audio inputs need the Python frontend.
 
 !!! note
     On ROCm, `Step5ForConditionalGeneration` requires CDNA3 or newer (MI300 series
