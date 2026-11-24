@@ -171,7 +171,7 @@ def test_incremental_detokenization(
         output_processor.add_request(request, prompt)
 
     gen_strings = {}
-    gen_tokens = {}
+    gen_tokens: dict[str, list] = {}
     while True:
         # Mock output from the EngineCore.
         outputs = engine_core.get_outputs()
@@ -187,6 +187,7 @@ def test_incremental_detokenization(
         # Update tracking.
         for request_output in request_outputs:
             request_id = request_output.request_id
+            assert isinstance(request_output.outputs, list)
             new_text = request_output.outputs[0].text
             new_tokens = request_output.outputs[0].token_ids
             if request_id not in gen_strings:
@@ -244,6 +245,7 @@ def test_request_lists_are_untracked():
 
     assert state.prompt_token_ids is prompt_tokens
     assert not gc.is_tracked(prompt_tokens)
+    assert state.detokenizer is not None
     assert state.detokenizer.token_ids == [42]
     assert not gc.is_tracked(state.detokenizer.token_ids)
 
@@ -355,6 +357,7 @@ def test_request_stream_interval_raises_but_not_below_engine_default(
     while outputs := engine_core.get_outputs():
         for request_output in output_processor.process_outputs(outputs).request_outputs:
             request_id = request_output.request_id
+            assert isinstance(request_output.outputs, list)
             new_tokens = request_output.outputs[0].token_ids
             if request_id not in gen_strings:
                 gen_strings[request_id] = request_output.outputs[0].text
@@ -424,6 +427,7 @@ def _validate_logprobs(
                 (ref_pos_logprob_toks, ref_pos_logprob_vals, ref_sampled_token_rank) = (
                     ref_logprobs[idx]
                 )
+                assert pos_logprob_dict is not None
                 # For each position in the completion sequence,
                 # ensure the actual sampled token is among the
                 # logprobs
@@ -477,6 +481,7 @@ def _validate_logprobs(
                     lp = pos_logprob_dict[ref_tok_id]
                     lp_val = lp.logprob
                     lp_rank = lp.rank
+                    assert lp_rank is not None
 
                     # A "top" (rank 1) logprob must be
                     # present
@@ -508,6 +513,7 @@ def _validate_logprobs(
                     # Confirm that sample logprob decoded token matches
                     # the logprob token id at this sequence position
                     decoded_token = pos_logprob_dict[lp_tok].decoded_token
+                    assert decoded_token is not None
                     ref_decoded_token = _ref_convert_id_to_token(dtv.tokenizer, lp_tok)
 
                     # With UTF-8 correction logic, tokens ending with "�"
@@ -587,6 +593,7 @@ def _validate_logprobs(
                     ref_prompt_logprob_vals[idx, :],
                     ref_prompt_token_ranks[idx],
                 )
+                assert pos_logprob_dict is not None
 
                 # For each position in the prompt sequence,
                 # ensure the actual prompt token is among the
@@ -640,6 +647,7 @@ def _validate_logprobs(
                     plp = pos_logprob_dict[ref_tok_id]
                     plp_val = plp.logprob
                     plp_rank = plp.rank
+                    assert plp_rank is not None
 
                     # A "top" (rank 1) logprob must be
                     # present
@@ -671,6 +679,7 @@ def _validate_logprobs(
                     # Confirm that prompt logprob decoded token matches
                     # the logprob token id at this sequence position
                     decoded_token = pos_logprob_dict[plp_tok].decoded_token
+                    assert decoded_token is not None
                     ref_decoded_token = _ref_convert_id_to_token(dtv.tokenizer, plp_tok)
 
                     # With UTF-8 correction logic, tokens ending with "�"
@@ -758,7 +767,7 @@ def test_logprobs_processor(
     for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
         output_processor.add_request(request, prompt)
 
-    gen_tokens = {}
+    gen_tokens: dict[str, list] = {}
     gen_logprobs = {}
     gen_prompt_logprobs = {}
     gen_cumulative_logprobs = {}
@@ -777,6 +786,8 @@ def test_logprobs_processor(
         # Update tracking.
         for request_output in request_outputs:
             request_id = request_output.request_id
+            assert not isinstance(request_output, PoolingRequestOutput)
+            assert isinstance(request_output.outputs, list)
             new_tokens = request_output.outputs[0].token_ids
             prompt_logprobs = request_output.prompt_logprobs
             logprobs = request_output.outputs[0].logprobs
@@ -946,8 +957,8 @@ def test_stop_token(
 
     # Loop over engine core steps; run output processor
     gen_string = ""
-    gen_tokens = []
-    gen_logprobs = []
+    gen_tokens: list[int] = []
+    gen_logprobs: list = []
     while True:
         # Mock output from the EngineCore.
         outputs = engine_core.get_outputs()
@@ -963,6 +974,7 @@ def test_stop_token(
 
         # Update tracking.
         request_output = request_outputs[0]
+        assert isinstance(request_output.outputs, list)
         if request_output.finished:
             finish_reason = "length" if is_eos_ignore_test else "stop"
             assert request_output.outputs[0].finish_reason == finish_reason
@@ -1052,7 +1064,7 @@ def test_stop_string(
         output_processor.add_request(request, prompt)
 
     gen_strings = {}
-    gen_tokens = {}
+    gen_tokens: dict[str, list] = {}
     gen_logprobs = {}
     gen_prompt_logprobs = {}
     gen_cumulative_logprobs = {}
@@ -1074,6 +1086,8 @@ def test_stop_string(
 
         # Update tracking.
         for request_output in request_outputs:
+            assert not isinstance(request_output, PoolingRequestOutput)
+            assert isinstance(request_output.outputs, list)
             if request_output.finished:
                 assert request_output.outputs[0].finish_reason == "stop"
 
@@ -1360,6 +1374,7 @@ def test_lora_request_tracking(collect_stats: bool, dummy_test_vectors):
     output_processor.process_outputs(
         outputs.outputs, engine_core_timestamp, iteration_stats
     )
+    assert outputs.scheduler_stats is not None
     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
     if collect_stats:
@@ -1392,6 +1407,7 @@ def test_lora_request_tracking(collect_stats: bool, dummy_test_vectors):
     output_processor.process_outputs(
         outputs.outputs, engine_core_timestamp, iteration_stats
     )
+    assert outputs.scheduler_stats is not None
     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
     if collect_stats:
@@ -1418,6 +1434,7 @@ def test_lora_request_tracking(collect_stats: bool, dummy_test_vectors):
     output_processor.process_outputs(
         outputs.outputs, engine_core_timestamp, iteration_stats
     )
+    assert outputs.scheduler_stats is not None
     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
     if collect_stats:
@@ -1443,6 +1460,7 @@ def test_lora_request_tracking(collect_stats: bool, dummy_test_vectors):
     output_processor.process_outputs(
         outputs.outputs, engine_core_timestamp, iteration_stats
     )
+    assert outputs.scheduler_stats is not None
     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
     if collect_stats:
@@ -1467,6 +1485,7 @@ def test_lora_request_tracking(collect_stats: bool, dummy_test_vectors):
     output_processor.process_outputs(
         outputs.outputs, engine_core_timestamp, iteration_stats
     )
+    assert outputs.scheduler_stats is not None
     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
     # Verify all requests are finished
@@ -1492,7 +1511,7 @@ async def test_request_output_collector():
                         text=TEXT,
                         token_ids=[idx],
                         cumulative_logprob=(idx + 1 * 1.0),
-                        logprobs=[{"a": idx, "b": idx}],
+                        logprobs=[{"a": idx, "b": idx}],  # type: ignore[dict-item]
                         routed_experts=(
                             routed_experts if idx == NUM_REQS - 1 else None
                         ),
@@ -1512,6 +1531,7 @@ async def test_request_output_collector():
     outputs = make_outputs()
     collector.put(outputs[0])
     output = await collector.get()
+    assert isinstance(output.outputs, list)
     assert not collector.ready.is_set()
     assert collector.output is None
     assert output.outputs[0].text == "a"
@@ -1523,6 +1543,7 @@ async def test_request_output_collector():
     for i in range(num_to_put):
         collector.put(outputs[i])
     output = await collector.get()
+    assert isinstance(output.outputs, list)
     assert not collector.ready.is_set()
     assert collector.output is None
 
@@ -1543,6 +1564,7 @@ async def test_request_output_collector():
     for i in range(num_to_put):
         collector.put(outputs[i])
     output = await collector.get()
+    assert isinstance(output.outputs, list)
     assert not collector.ready.is_set()
     assert collector.output is None
 
@@ -1589,11 +1611,13 @@ def test_routed_experts_are_accumulated_until_finish():
 
     partial = state.make_request_output([5], None, None, None)
     assert partial is not None
+    assert isinstance(partial.outputs, list)
     assert partial.outputs[0].routed_experts is None
 
     state.routed_experts_chunks.append(decode_chunk)
     finished = state.make_request_output([6], None, FinishReason.LENGTH, None)
     assert finished is not None
+    assert isinstance(finished.outputs, list)
     np.testing.assert_array_equal(
         finished.outputs[0].routed_experts,
         np.concatenate((prompt_chunk, decode_chunk)),
@@ -1663,6 +1687,7 @@ async def test_cumulative_output_collector_n():
 
     # Get the output and check that the text and token_ids are correct.
     result = await collector.get()
+    assert isinstance(result.outputs, list)
     # We are expecting
     # [{index: 0, text: "ab"}, {index: 1, text: "b"}, {index: 2, text: "c"}]
     assert len(result.outputs) == 3
@@ -1718,10 +1743,12 @@ async def test_streaming_input_collector_preserves_chunk_boundary():
     collector.put(_make_boundary_output(2, None))
 
     boundary = await collector.get()
+    assert isinstance(boundary.outputs, list)
     assert boundary.outputs[0].finish_reason == "stop"
     assert boundary.outputs[0].token_ids == [0]
 
     following = await collector.get()
+    assert isinstance(following.outputs, list)
     assert following.outputs[0].finish_reason is None
     assert following.outputs[0].token_ids == [1, 2]
 
@@ -1782,6 +1809,7 @@ def test_streaming_input_stop_is_chunk_boundary():
     assert processor.get_num_unfinished_requests() == 1
     output = queue.get_nowait()
     assert output is not None
+    assert isinstance(output.outputs, list)
     assert output.finished is False
     assert output.outputs[0].finish_reason == "stop"
     req_state = processor.request_states["stream-req"]
@@ -1810,6 +1838,7 @@ def test_streaming_input_abort_error_is_terminal(finish_reason: FinishReason):
     assert processed.reqs_to_abort == ["stream-req"]
     output = queue.get_nowait()
     assert output is not None
+    assert isinstance(output.outputs, list)
     assert output.finished is True
     assert output.outputs[0].finish_reason == str(finish_reason)
 
@@ -1836,8 +1865,10 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
 
     for request in requests:
         if runner == "generate":
+            assert request.sampling_params is not None
             output_kind = request.sampling_params.output_kind
         else:
+            assert request.pooling_params is not None
             output_kind = request.pooling_params.output_kind
         queue = RequestOutputCollector(
             output_kind=output_kind, request_id=request.request_id
@@ -1848,6 +1879,7 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
         if abort_by == "internal":
             output_processor.abort_requests([request.request_id], internal=True)
         else:
+            assert request.external_req_id is not None
             output_processor.abort_requests([request.external_req_id], internal=False)
 
 
@@ -2091,10 +2123,12 @@ def test_weight_version_spans(output_kind: RequestOutputKind, steps, expected):
         if i == 0 and output_kind == RequestOutputKind.DELTA:
             intermediate = queue.get_nowait()
             assert intermediate is not None
+            assert isinstance(intermediate.outputs, list)
             assert intermediate.outputs[0].weight_versions is None
 
     # Unread deltas merge into the abort output without losing spans.
     output_processor.abort_requests(["request-0"], internal=False)
     final = queue.get_nowait()
     assert final is not None and final.finished
+    assert isinstance(final.outputs, list)
     assert final.outputs[0].weight_versions == [WeightVersionSpan(*s) for s in expected]
