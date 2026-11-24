@@ -178,13 +178,8 @@ def build_offloading_config(
             parallel_config.tensor_parallel_size,
             parallel_config.decode_context_parallel_size,
         )
-    spec_name = extra_config.get("spec_name", "CPUOffloadingSpec")
-    cpu_only = spec_name == "CPUOffloadingSpec" or (
-        spec_name == "TieringOffloadingSpec" and not extra_config.get("secondary_tiers")
-    )
     replicated_layout = (
         vllm_config.model_config.use_mla
-        and parallel_config.tensor_parallel_size > 1
         and kv_tp_replicas == parallel_config.tensor_parallel_size
         and worker_kv_bytes_per_block > 0
         # The offloaded KV must be replicated across the entire TP group.
@@ -193,11 +188,7 @@ def build_offloading_config(
         and parallel_config.decode_context_parallel_size == 1
         and parallel_config.world_size == parallel_config.tensor_parallel_size
         and parallel_config.distributed_executor_backend == "mp"
-        # Each host can keep its own copy when only local workers need the bytes.
-        and (
-            parallel_config.nnodes_within_dp == 1
-            or (cpu_only and parallel_config.local_world_size > 1)
-        )
+        and parallel_config.local_world_size > 1
     )
 
     canonical_layout = bool(extra_config.get("canonical_layout", False))

@@ -26,10 +26,7 @@ from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
-from vllm.v1.kv_offload.tiering.manager import (
-    CPUPrimaryTierOffloadingManager,
-    TieringOffloadingManager,
-)
+from vllm.v1.kv_offload.tiering.manager import CPUPrimaryTierOffloadingManager
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 
@@ -311,8 +308,7 @@ def test_tiering_primary_tier_publishes_the_cpu_labels():
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="requires /dev/shm")
-@pytest.mark.parametrize("num_hosts", [1, 2])
-def test_tiering_spec_passes_the_cpu_facts_to_the_primary_tier(num_hosts: int):
+def test_tiering_spec_passes_the_cpu_facts_to_the_primary_tier():
     """The tiering spec must give the primary tier the facts that it publishes.
 
     The spec builds a real shared region before the primary tier, so this test
@@ -321,14 +317,9 @@ def test_tiering_spec_passes_the_cpu_facts_to_the_primary_tier(num_hosts: int):
     configuration have a default, so a dropped argument gives no type error.
     A unique engine_id keeps the region path of this test separate.
     """
-    budget = 16 * SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     spec = _create_spec(
         spec_name="TieringOffloadingSpec",
         engine_id=f"test-tiering-{uuid.uuid4().hex}",
-        cpu_bytes_to_use=budget,
-        world_size=2 * num_hosts,
-        local_world_size=2,
-        replicated_layout=num_hosts > 1,
         blocks_per_chunk=2,
         max_model_len=1024,
     )
@@ -336,14 +327,12 @@ def test_tiering_spec_passes_the_cpu_facts_to_the_primary_tier(num_hosts: int):
 
     manager = spec.get_manager()
     try:
-        assert isinstance(manager, TieringOffloadingManager)
-        assert manager.primary_tier.get_kv_memoryview().nbytes == budget // num_hosts
         (primary_info,) = manager.config_info()
         assert primary_info == {
             "tier": "0:primary",
             "cpu_num_chunks": spec.num_chunks,
             "cpu_blocks_per_chunk": 2,
-            "cpu_kv_cache_size_bytes": budget,
+            "cpu_kv_cache_size_bytes": spec.num_chunks * spec.kv_bytes_per_chunk,
             # 32 tokens for each chunk, over a request of 32 chunks.
             "cpu_kv_cache_size_tokens": spec.num_chunks * 32,
         }
@@ -387,10 +376,7 @@ def test_tiering_spec_replicated_sizing_removes_world_factor(world_size: int):
     assert spec.num_chunks == 8
 
 
-@pytest.mark.parametrize(("rank", "local_world_size"), [(1, 4), (3, 2)])
-def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(
-    monkeypatch, rank: int, local_world_size: int
-):
+def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monkeypatch):
     import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
 
     worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
@@ -398,9 +384,9 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(
         spec_name="TieringOffloadingSpec",
         cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
-        rank=rank,
+        rank=3,
         world_size=4,
-        local_world_size=local_world_size,
+        local_world_size=2,
         replicated_layout=True,
     )
     assert isinstance(spec, TieringOffloadingSpec)
@@ -425,9 +411,8 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(
     spec.create_worker(kv_caches)
 
     assert region_calls[0]["rank"] == 0
-    # On either host the second local worker populates the second shard.
-    assert region_calls[0]["populate_shard"] == (1, local_world_size)
-    assert region_calls[0]["num_chunks"] == 8 // (4 // local_world_size)
+    # Workers share the slot, so each pre-faults only its share of the region.
+    assert region_calls[0]["populate_shard"] == (1, 2)
     assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region

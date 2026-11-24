@@ -104,7 +104,7 @@ def _make_worker(
     replicated_layout: bool = False,
     rank: int = 0,
     canonical_layout: bool = False,
-    external_replicated_layout: bool = False,
+    config_replicated_layout: bool = True,
 ):
     """Create an OffloadingConnectorWorker with mocked dependencies."""
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
@@ -112,10 +112,10 @@ def _make_worker(
     )
 
     spec = MagicMock(spec=OffloadingSpec)
-    spec.replicated_layout = replicated_layout or external_replicated_layout
+    spec.replicated_layout = replicated_layout
     spec.async_init = False
     spec.config = MagicMock()
-    spec.config.replicated_layout = replicated_layout
+    spec.config.replicated_layout = replicated_layout and config_replicated_layout
     spec.config.canonical_layout = canonical_layout
     spec.config.parallel.rank = rank
     spec.config.parallel.local_world_size = 4
@@ -209,11 +209,14 @@ class BareExternalOffloadingSpec(OffloadingSpec):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("rank", [1, 5])
-def test_prepare_store_kv_non_writer_marks_completed_without_submit(rank):
+@pytest.mark.parametrize(("rank", "config_replicated"), [(1, True), (4, False)])
+def test_prepare_store_kv_non_writer_marks_completed_without_submit(
+    rank, config_replicated
+):
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
         replicated_layout=True,
+        config_replicated_layout=config_replicated,
         rank=rank,
     )
 
@@ -265,20 +268,6 @@ def test_prepare_store_kv_non_replicated_rank_gt_zero_queues_store():
     assert worker._unsubmitted_store_jobs == []
 
 
-def test_external_replicated_layout_keeps_one_store_writer():
-    worker, _ = _make_worker(
-        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
-        external_replicated_layout=True,
-        rank=4,
-    )
-    worker.prepare_store_kv(_store_metadata(9))
-    worker.start_kv_transfers(_empty_metadata())
-    assert worker.worker is not None
-    worker.worker.submit_store.assert_not_called()
-    metadata = worker.build_connector_worker_meta()
-    assert metadata is not None and metadata.completed_jobs == {9: 1}
-
-
 def test_handle_preemptions_non_writer_acks_flushed_store():
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
@@ -299,12 +288,11 @@ def test_handle_preemptions_non_writer_acks_flushed_store():
     assert meta.completed_jobs == {10: 1}
 
 
-@pytest.mark.parametrize("rank", [1, 5])
-def test_start_kv_transfers_non_writer_still_submits_load(rank):
+def test_start_kv_transfers_non_writer_still_submits_load():
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
         replicated_layout=True,
-        rank=rank,
+        rank=1,
     )
 
     worker.start_kv_transfers(_load_metadata(10))

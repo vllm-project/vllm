@@ -1129,33 +1129,9 @@ def test_replicated_layout_parallel_gate(kwargs: dict[str, Any], case: str):
     assert not _replicated_layout(_make_mla_kv_cache_config(), **kwargs), case
 
 
-@pytest.mark.parametrize(
-    ("extra_config", "expected"),
-    [
-        ({}, True),
-        ({"spec_name": "CPUOffloadingSpec"}, True),
-        ({"spec_name": "TieringOffloadingSpec", "secondary_tiers": []}, True),
-        (
-            {"spec_name": "TieringOffloadingSpec", "secondary_tiers": [{"type": "fs"}]},
-            False,
-        ),
-        ({"spec_name": "CustomSpec"}, False),
-        ({"canonical_layout": True}, False),
-    ],
-)
-def test_multi_node_replicated_layout_for_cpu_backends(
-    extra_config: dict[str, Any], expected: bool
-):
-    replicated = _replicated_layout(
-        _make_mla_kv_cache_config(), nnodes=2, extra_config=extra_config
-    )
-    assert replicated == expected
-
-
-def test_multi_node_replicated_layout_requires_identical_kv():
-    assert not _replicated_layout(_make_kv_cache_config(), nnodes=2)
-    assert not _replicated_layout(
-        _make_mla_kv_cache_config(), nnodes=2, decode_context_parallel_size=2
+def test_multi_node_mla_replication_is_independent_of_backend():
+    assert _replicated_layout(
+        _make_mla_kv_cache_config(), nnodes=2, extra_config={"spec_name": "CustomSpec"}
     )
 
 

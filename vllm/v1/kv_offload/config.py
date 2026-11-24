@@ -129,9 +129,8 @@ class OffloadingConfig:
     model: OffloadingModelConfig
     cache: OffloadingCacheConfig
     parallel: OffloadingParallelConfig
-    # The selected layout can share one copy of each block per host. Native
-    # CPU-only backends can do this across hosts for fully replicated MLA KV
-    # under TP-only multiprocessing.
+    # The KV layout permits sharing one copy of a block per host. The
+    # offloading backend decides whether to use the shared copy.
     replicated_layout: bool = False
     # True when the canonical per-layer host byte layout was requested via
     # kv_connector_extra_config; certified per-layer at worker registration.
