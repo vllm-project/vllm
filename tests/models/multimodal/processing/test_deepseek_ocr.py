@@ -298,10 +298,13 @@ def test_image_budget_covers_every_tile_layout(model_id, kwargs):
         Image.new("RGB", (tile * width, tile * height))
         for width, height in calculate_aspect_ratios(MIN_CROPS, hf.max_crops)
     ]
-    result = processor(
-        "<image>" * len(images),
-        mm_items=processor.info.parse_mm_data({"image": images}),
-        hf_processor_mm_kwargs={},
-    )
+    lengths = [
+        processor(
+            "<image>",
+            mm_items=processor.info.parse_mm_data({"image": [image]}),
+            hf_processor_mm_kwargs={},
+        )["mm_placeholders"]["image"][0].length
+        for image in images
+    ]
     budget = get_mm_max_toks_per_item(processor, {"image": 1}, None)["image"]
-    assert budget == max(p.length for p in result["mm_placeholders"]["image"])
+    assert budget == max(lengths)
