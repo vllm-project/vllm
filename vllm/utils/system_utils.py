@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import errno
 import logging
 import multiprocessing
 import os
+import platform
 import signal
 import sys
 from collections.abc import Callable, Generator
@@ -318,3 +320,73 @@ def find_loaded_libraries(lib_name: str) -> list[str]:
 def find_loaded_library(lib_name: str) -> str | None:
     paths = find_loaded_libraries(lib_name)
     return paths[0] if paths else None
+
+
+# Linux memfd_create flags
+MFD_CLOEXEC: int = getattr(os, "MFD_CLOEXEC", 0x0001)
+MFD_ALLOW_SEALING: int = getattr(os, "MFD_ALLOW_SEALING", 0x0002)
+MFD_HUGETLB: int = getattr(os, "MFD_HUGETLB", 0x0004)
+
+_MEMFD_CREATE_SYSCALL_MAP: dict[str, int] = {
+    "x86_64": 319,
+    "aarch64": 279,
+    "arm64": 279,
+    "riscv64": 279,
+    "s390x": 350,
+    "ppc64le": 360,
+    "ppc64": 360,
+    "i386": 356,
+    "i686": 356,
+}
+
+
+def memfd_create(name: str, flags: int = 0) -> int:
+    """Create an anonymous file descriptor via `memfd_create`.
+
+    Falls back to `libc.memfd_create` or direct syscall if `os.memfd_create`
+    is unavailable (e.g. uv-managed Python builds compiled against older glibc).
+
+    Args:
+        name: Name for the anonymous file (visible in `/proc/self/fd/`).
+        flags: Flags passed to `memfd_create` (e.g. `MFD_CLOEXEC`).
+
+    Returns:
+        The created file descriptor.
+
+    Raises:
+        OSError: If `memfd_create` fails or is not supported.
+    """
+    if hasattr(os, "memfd_create"):
+        return os.memfd_create(name, flags)
+
+    # Try libc.memfd_create if exported by host C library
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if hasattr(libc, "memfd_create"):
+            libc.memfd_create.argtypes = [ctypes.c_char_p, ctypes.c_uint]
+            libc.memfd_create.restype = ctypes.c_int
+            fd = libc.memfd_create(name.encode("utf-8"), flags)
+            if fd < 0:
+                err = ctypes.get_errno()
+                raise OSError(err, os.strerror(err))
+            return fd
+    except (AttributeError, OSError):
+        pass
+
+    # Fall back to direct architecture syscall
+    machine = platform.machine().lower()
+    sys_nr = _MEMFD_CREATE_SYSCALL_MAP.get(machine)
+    if sys_nr is not None:
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            libc.syscall.argtypes = [ctypes.c_long, ctypes.c_char_p, ctypes.c_uint]
+            libc.syscall.restype = ctypes.c_int
+            fd = libc.syscall(sys_nr, name.encode("utf-8"), flags)
+            if fd < 0:
+                err = ctypes.get_errno()
+                raise OSError(err, os.strerror(err))
+            return fd
+        except (AttributeError, OSError):
+            pass
+
+    raise OSError(errno.ENOSYS, "memfd_create system call not supported")

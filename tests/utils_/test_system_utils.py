@@ -129,3 +129,27 @@ raise SystemExit(1 if hung else proc.exitcode)
     env = os.environ | {"VLLM_WORKER_MULTIPROC_METHOD": "fork"}
     result = subprocess.run([sys.executable, "-c", script], env=env, timeout=120)
     assert result.returncode == 0
+
+
+def test_memfd_create():
+    fd = system_utils.memfd_create("test_memfd", system_utils.MFD_CLOEXEC)
+    try:
+        assert fd >= 0
+        os.ftruncate(fd, 4096)
+        assert os.fstat(fd).st_size == 4096
+    finally:
+        os.close(fd)
+
+
+def test_memfd_create_fallback_when_os_has_no_attribute(monkeypatch):
+    if hasattr(os, "memfd_create"):
+        monkeypatch.delattr(os, "memfd_create")
+    fd = system_utils.memfd_create(
+        "test_fallback_memfd", system_utils.MFD_CLOEXEC
+    )
+    try:
+        assert fd >= 0
+        os.ftruncate(fd, 4096)
+        assert os.fstat(fd).st_size == 4096
+    finally:
+        os.close(fd)

@@ -19,6 +19,7 @@ from vllm.platforms import current_platform
 from vllm.utils.host_memory import exclude_from_core_dump, pin_tensor
 from vllm.utils.math_utils import round_up
 from vllm.utils.numa_utils import get_libnuma
+from vllm.utils.system_utils import MFD_CLOEXEC, memfd_create
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
@@ -152,7 +153,18 @@ class SharedHost:
             # Peers open it through /proc/<pid>/fd, as they would a memfd.
             os.unlink(path)
         else:
-            self.fd = os.memfd_create(f"vllm_engram_{name}", os.MFD_CLOEXEC)
+            try:
+                self.fd = memfd_create(f"vllm_engram_{name}", MFD_CLOEXEC)
+            except (OSError, AttributeError):
+                import tempfile
+
+                path = os.path.join(
+                    tempfile.gettempdir(),
+                    f"vllm_engram_{name}_{uuid.uuid4().hex}",
+                )
+                flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+                self.fd = os.open(path, flags, 0o600)
+                os.unlink(path)
         os.ftruncate(self.fd, self.nbytes)
         mapping = mmap.mmap(self.fd, self.nbytes, flags=mmap.MAP_SHARED)
         exclude_from_core_dump(mapping)
