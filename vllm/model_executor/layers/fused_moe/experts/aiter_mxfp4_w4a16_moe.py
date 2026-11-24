@@ -5,7 +5,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    MoEActivation,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -137,6 +140,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
     score_mode: str | None = None,
     input_ids: torch.Tensor | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    activation_config: ApplyMoEActivationConfig | None = None,
 ):
     assert quant_config is not None and rocm_aiter_ops.is_enabled()
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
@@ -270,10 +274,18 @@ def aiter_triton_kernel_w4a16_moe_forward(
     # SILU: silu(gate) * up — same kernel, just no "+1" residual in swiglu.
     swiglu_add_residual = activation != MoEActivation.SILU
     if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
-        assert quant_config.gemm1_beta in (None, 1.0), (
-            "aiter's fused swiglu hardcodes the residual to (up + 1); "
-            f"gemm1_beta={quant_config.gemm1_beta} cannot be expressed"
+        # The clamp, alpha and beta `apply_moe_activation` resolves for it.
+        assert activation_config is not None
+        assert activation_config.clamp_limit is not None, (
+            "SWIGLUOAI_UNINTERLEAVE requires gemm1_clamp_limit"
         )
+        assert activation_config.beta in (0.0, 1.0), (
+            "aiter's fused swiglu multiplies by up or (up + 1); "
+            f"beta={activation_config.beta} cannot be expressed"
+        )
+        swiglu_alpha = activation_config.alpha
+        swiglu_limit = activation_config.clamp_limit
+        swiglu_add_residual = activation_config.beta == 1.0
 
     # Weight loading already swizzled the block scales on gfx950, so the kernel
     # has to be told; the load-time swizzle and this gate must agree or the
@@ -476,4 +488,5 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             score_mode=score_mode,
             input_ids=input_ids,
             hash_indices_table=hash_indices_table,
+            activation_config=self.activation_config,
         )
