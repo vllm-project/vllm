@@ -120,7 +120,8 @@ class SplitWeights:
         self.converter = converter
         self.mapper = mapper
         self.config = model.config
-        self.shapes = {name: p.shape for name, p in model.named_parameters()}
+        tensors = chain(model.named_parameters(), model.named_buffers())
+        self.shapes = {name: t.shape for name, t in tensors}
 
     def get_parameter(self, name: str) -> torch.Tensor:
         """Stand in for the model whose parameters `Split` reads the sizes of."""
@@ -137,13 +138,20 @@ class SplitWeights:
             if source is None:
                 yield name, tensor
                 continue
+            full_layer_name = self.mapper.map_name(first)
+            if full_layer_name not in self.shapes:
+                raise ValueError(
+                    f"Cannot split {name!r} into {targets}: {full_layer_name!r} is "
+                    "not a tensor of the model. Splitting quantized tensors is not "
+                    "supported."
+                )
             pieces = {source: tensor}
             for op in converter.operations:
                 pieces = op.convert(
                     pieces,
                     sources,
                     targets,
-                    full_layer_name=self.mapper.map_name(first),
+                    full_layer_name=full_layer_name,
                     model=self,
                     config=self.config,
                 )

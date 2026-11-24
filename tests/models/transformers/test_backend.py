@@ -1077,7 +1077,8 @@ def test_init_parameters_keeps_declared_dtype_and_requires_grad():
 def test_split_weights_splits_fused_gqa_qkv():
     """A checkpoint that fuses GQA `[q|k|v]` into one tensor (Sarvam-30B) is split
     into each projection's size, matched before and named after the renamings. Like
-    in Transformers, a longer name that only starts with the pattern is not split."""
+    in Transformers, a longer name that only starts with the pattern is not split,
+    and a quantization scale for the fused tensor is rejected, not split."""
     with torch.device("meta"):
         model = nn.Module()
         model.config = PreTrainedConfig()
@@ -1108,3 +1109,7 @@ def test_split_weights_splits_fused_gqa_qkv():
     split = [pieces[f"attention.{p}_proj.weight"] for p in "qkv"]
     torch.testing.assert_close(torch.cat(split), fused)
     assert [p.shape[0] for p in split] == [8, 2, 2]
+
+    scale = ("attention.query_key_value.weight_scale", torch.ones(1))
+    with pytest.raises(ValueError, match="quantized tensors is not supported"):
+        list(weights([scale]))
