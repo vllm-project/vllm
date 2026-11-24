@@ -7,6 +7,7 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
 import builtins
+import importlib
 import importlib.util
 import math
 import pickle
@@ -599,6 +600,55 @@ class TestEngineRegistry:
             config, vllm_config, device, model
         )
         assert engine is module.ModelExpressWeightTransferEngine.return_value
+
+    def test_connex_registration_is_native_and_lazy(self, monkeypatch):
+        from vllm.distributed.weight_transfer import factory
+
+        imported = []
+        module = MagicMock()
+        module.ConnexWeightTransferEngine.__name__ = "ConnexWeightTransferEngine"
+
+        def import_module(name):
+            imported.append(name)
+            return module
+
+        monkeypatch.setattr(factory.importlib, "import_module", import_module)
+        config = WeightTransferConfig(backend="connex")
+        vllm_config = create_mock_vllm_config()
+        device = torch.device("cpu")
+        model = MagicMock(spec=torch.nn.Module)
+
+        assert imported == []
+        engine = WeightTransferEngineFactory.create_engine(
+            config, vllm_config, device, model
+        )
+
+        assert imported == ["vllm.distributed.weight_transfer.connex_engine"]
+        module.ConnexWeightTransferEngine.assert_called_once_with(
+            config, vllm_config, device, model
+        )
+        assert engine is module.ConnexWeightTransferEngine.return_value
+
+    def test_connex_missing_package_raises_install_hint(self, monkeypatch):
+        import sys
+
+        for name in [
+            m for m in sys.modules if m == "connex" or m.startswith("connex.")
+        ]:
+            monkeypatch.delitem(sys.modules, name)
+        monkeypatch.delitem(
+            sys.modules, "vllm.distributed.weight_transfer.connex_engine", raising=False
+        )
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "connex" or name.startswith("connex."):
+                raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        with pytest.raises(ImportError, match="connex-ai"):
+            importlib.import_module("vllm.distributed.weight_transfer.connex_engine")
 
     def test_create_engine_invalid_backend(self):
         config = WeightTransferConfig(backend="invalid")
@@ -1976,6 +2026,21 @@ class TestTrainerClients:
         client.shutdown_weight_transfer_engine()
         assert captured == {"path": "shutdown_weight_transfer_engine", "json": None}
 
+    def test_http_client_finish_raises_on_baseline_mismatch(self, monkeypatch):
+        """finish_weight_update sends the baseline and raises on a mismatch."""
+        captured = {}
+
+        def fake_post(self, path, json=None):
+            captured["json"] = json
+            return {"match": False, "mismatches": ["dp0:pp0:pcp0:tp0:w"]}
+
+        monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
+        client = HTTPVLLMWeightSyncClient("http://localhost:8000")
+        baseline = {"dp0:pp0:pcp0:tp0:w": "0" * 64}
+        with pytest.raises(RuntimeError, match="dp0:pp0:pcp0:tp0:w"):
+            client.finish_weight_update(baseline=baseline)
+        assert captured["json"] == {"baseline": baseline}
+
 
 class TestModuleSource:
     """`ModuleSource` metadata vs. its iteration modes (dense, no GPU)."""
@@ -2104,10 +2169,12 @@ class TestDeferredProcessingContract:
 
     def _engines(self):
         registry = dict(WeightTransferEngineFactory._registry)
-        # ModelExpress is an optional, separately installed package, but its
-        # backend is always registered. Skip it when the package is missing.
-        if importlib.util.find_spec("modelexpress") is None:
-            registry.pop("modelexpress")
+        # ModelExpress and Connex are optional, separately installed packages,
+        # but their backends are always registered. Skip each one whose
+        # package is missing.
+        for name, package in (("modelexpress", "modelexpress"), ("connex", "connex")):
+            if importlib.util.find_spec(package) is None:
+                registry.pop(name)
         return {name: loader() for name, loader in registry.items()}
 
     def test_every_engine_declares_whether_it_defers(self):
@@ -2158,6 +2225,36 @@ class TestTrainerFactory:
                 )
         finally:
             WeightTransferTrainerFactory._registry = saved
+
+    def test_connex_trainer_registration_is_lazy(self, monkeypatch):
+        from vllm.distributed.weight_transfer import factory
+
+        imported = []
+        module = MagicMock()
+        module.ConnexTrainerWeightTransferEngine.__name__ = (
+            "ConnexTrainerWeightTransferEngine"
+        )
+
+        def import_module(name):
+            imported.append(name)
+            return module
+
+        monkeypatch.setattr(factory.importlib, "import_module", import_module)
+        init_info = MagicMock(backend="connex")
+        client = RecordingClient()
+        source = ModuleSource(_module_with(("w", torch.zeros(2))))
+
+        assert imported == []
+        engine = WeightTransferTrainerFactory.trainer_init(
+            init_info, client=client, source=source
+        )
+
+        assert imported == ["vllm.distributed.weight_transfer.connex_engine"]
+        trainer_init = module.ConnexTrainerWeightTransferEngine.trainer_init
+        trainer_init.assert_called_once_with(
+            init_info=init_info, client=client, source=source
+        )
+        assert engine is trainer_init.return_value
 
     def test_unknown_backend_raises(self):
         with pytest.raises(ValueError, match="Invalid weight transfer backend"):
