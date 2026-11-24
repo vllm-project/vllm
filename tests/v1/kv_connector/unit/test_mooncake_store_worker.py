@@ -5639,6 +5639,24 @@ def test_start_load_kv_queues_async_load():
 
 
 @pytest.mark.cpu_test
+def test_early_recv_keeps_any_reported_load_error_on_the_step():
+    """A load that reports an error but returns normally is still never pushed
+    early, so the scheduler sees the failure before the request runs."""
+    notifier = MagicMock()
+    recv_thread = _make_store_recving_thread(MagicMock(), early_recv_notifier=notifier)
+
+    def load_with_reported_error(req_meta):
+        recv_thread._report_load_error(req_meta.req_id, [0])
+
+    recv_thread._load_request = load_with_reported_error  # type: ignore[method-assign]
+    recv_thread._handle_request(_make_load_req("req", [b"h0"], token_len=16))
+
+    notifier.try_notify.assert_not_called()
+    assert recv_thread.get_and_clear_finished_requests() == {"req"}
+    assert recv_thread.get_and_clear_failed_requests() == {"req"}
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize("is_hma_required", [False, True])
 def test_early_recv_reports_only_error_free_loads_early(is_hma_required):
     """Only loads without errors are pushed early, each once; failed loads and

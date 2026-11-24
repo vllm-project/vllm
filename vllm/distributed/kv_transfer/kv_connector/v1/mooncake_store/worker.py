@@ -1270,6 +1270,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         # are only unique within a group, so failures are reported per request.
         self._is_hma_required = is_hma_required
         self._failed_requests: set[str] = set()
+        # Requests this thread reported a load error for; touched only here.
+        self._load_error_req_ids: set[str] = set()
         self._early_recv_notifier = early_recv_notifier
         self.disk_offload_buffer_budget_bytes = disk_offload_buffer_budget_bytes
         self.usable_disk_offload_buffer_budget_bytes = (
@@ -1300,6 +1302,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self._early_recv_notifier = notifier
 
     def _report_load_error(self, req_id: str, block_ids: list[int]) -> None:
+        self._load_error_req_ids.add(req_id)
         # Request-level failure survives cross-rank aggregation until every
         # transfer is drained, including layouts with globally unique block IDs.
         self.set_failed_request(req_id)
@@ -1313,13 +1316,12 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         return invalid_block_ids
 
     def _handle_request(self, req_meta: ReqMeta):
-        had_error = False
+        req_id = req_meta.req_id
         try:
-            had_error = self._load_request(req_meta)
+            self._load_request(req_meta)
         except Exception:
-            had_error = True
             self._report_load_error(
-                req_meta.req_id,
+                req_id,
                 [
                     bid
                     for group in req_meta.block_ids
@@ -1327,21 +1329,19 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     if bid != NULL_BLOCK_ID
                 ],
             )
-            logger.exception("Mooncake load failed for request %s", req_meta.req_id)
+            logger.exception("Mooncake load failed for request %s", req_id)
         finally:
+            had_error = req_id in self._load_error_req_ids
+            self._load_error_req_ids.discard(req_id)
             notifier = self._early_recv_notifier
             # Error-free loads push early; errored loads or failed sends stay on
             # the step-output path so the scheduler sees errors first and every
             # rank votes exactly once.
-            if (
-                had_error
-                or notifier is None
-                or not notifier.try_notify({req_meta.req_id})
-            ):
-                self.set_finished_request(req_meta.req_id)
+            if had_error or notifier is None or not notifier.try_notify({req_id}):
+                self.set_finished_request(req_id)
             self.request_queue.task_done()
 
-    def _load_request(self, req_meta: ReqMeta) -> bool:
+    def _load_request(self, req_meta: ReqMeta):
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
         req_id = req_meta.req_id
         mask_num = (
@@ -1399,7 +1399,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             block_id_list.extend(g_block_ids)
 
         if not key_list:
-            return False
+            return
 
         # Rotate aligned lists by tp_rank for load balancing.
         rotation = self.tp_rank % len(key_list)
@@ -1446,7 +1446,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                         oversized_key_bytes,
                         self.disk_offload_buffer_budget_bytes,
                     )
-                    return True
+                    return
                 load_batches = []
                 block_id_offset = 0
                 for batch_keys, batch_addrs, batch_sizes in split_batches:
@@ -1515,7 +1515,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                         len(batch_keys),
                         [(key, value) for key, value, _ in failed[:3]],
                     )
-                    return True
+                    break
                 remaining_blocks = remaining_blocks[len(batch_block_ids) :]
         except Exception as e:
             self._report_load_error(req_id, remaining_blocks)
@@ -1532,8 +1532,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 current_batch_keys[:3],
                 e,
             )
-            return True
-        return False
 
 
 # ============================================================
