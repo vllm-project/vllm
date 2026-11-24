@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Qwen4Exp n-gram embeddings with device, pinned-host and disk storage."""
+"""Qwen4Exp n-gram embeddings with device, host, disk and peer storage."""
 
 import mmap
 import os
@@ -12,11 +12,13 @@ from transformers import Qwen4ExpTextConfig
 
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_engram_dp_group, get_etp_group, get_tp_group
+from vllm.distributed.engram_pool import EngramTable, get_engram_pool
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
+from vllm.model_executor.model_loader.reload.types import WeightReloadValidator
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -262,6 +264,75 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
         raise RuntimeError("PLE disk offload does not support prefetch")
 
 
+class Qwen4ExpPLEPoolEmbedding(Qwen4ExpPLEDeviceEmbedding, WeightReloadValidator):
+    """Serve FP8 PLE rows from shards split over an NVLink or RDMA peer group."""
+
+    def validate_weight_reload(self) -> None:
+        raise RuntimeError(
+            "Qwen4Exp Engram pool tables cannot reload weights; restart the group"
+        )
+
+    def __init__(
+        self,
+        *args,
+        embedding_method: Qwen4ExpPLEEmbeddingMethod,
+        num_ngram_heads: int,
+        max_total_tokens: int,
+        **kwargs,
+    ) -> None:
+        if not isinstance(embedding_method, Qwen4ExpPLEFp8EmbeddingMethod):
+            raise ValueError("Qwen4Exp Engram pool requires an FP8 PLE table")
+        self._max_items = max_total_tokens * num_ngram_heads
+        self.table: EngramTable | None = None
+        self._loaded_ranges: list[tuple[int, int]] = []
+        super().__init__(*args, embedding_method=embedding_method, **kwargs)
+        if self.table is not None:
+            start = self.table.row_start
+            end = start + self.table.shard.shape[0]
+            self.shard_indices.org_vocab_start_index = start
+            self.shard_indices.org_vocab_end_index = end
+            self.shard_indices.padded_org_vocab_start_index = start
+            self.shard_indices.padded_org_vocab_end_index = end
+            self.num_org_embeddings_per_partition = end - start
+            if get_current_vllm_config().load_config.load_format == "dummy":
+                self._loaded_ranges.append((start, end))
+
+    def allocate_embedding_weight(
+        self, num_embeddings: int, embedding_dim: int, dtype: torch.dtype
+    ) -> torch.Tensor:
+        if torch.get_default_device().type == "meta":
+            return torch.empty(num_embeddings, embedding_dim, dtype=dtype)
+        self.pool = get_engram_pool(self._max_items, embedding_dim)
+        self.table = self.pool.table(num_embeddings, embedding_dim, self.prefix)
+        return self.table.shard.view(dtype)
+
+    def process_weights_after_loading(self) -> None:
+        if self.table is None or self.weight.data_ptr() != self.table.shard.data_ptr():
+            raise RuntimeError("Qwen4Exp PLE weight must alias its Engram pool shard")
+        start = self.table.row_start
+        end = start + self.table.shard.shape[0]
+        cursor = start
+        for first, last in sorted(self._loaded_ranges):
+            if first != cursor:
+                raise RuntimeError(f"Missing or overlapping PLE rows at {cursor}")
+            cursor = last
+        if cursor != end:
+            raise RuntimeError(f"PLE rows covered through {cursor}, expected {end}")
+        self.pool.ready(self.table)
+
+    def record_checkpoint_rows(self, start: int, end: int) -> None:
+        assert self.table is not None
+        first = max(start, self.table.row_start)
+        last = min(end, self.table.row_start + self.table.shard.shape[0])
+        if first < last:
+            self._loaded_ranges.append((first, last))
+
+    def forward(self, ngram_ids: torch.Tensor) -> torch.Tensor:
+        assert self.table is not None
+        rows = self.pool.lookup([self.table], ngram_ids.unsqueeze(-2))[0]
+        return rows[..., : self.embedding_dim].view(self.weight.dtype)
+
+
 class Qwen4ExpNGramEmbedding(nn.Module):
     _MASK64 = (1 << 64) - 1
     _SPLITMIX_GAMMA = 0x9E3779B97F4A7C15
@@ -433,7 +504,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             params_dtype = torch.get_default_dtype()
         engram_config = get_current_vllm_config().engram_config
         embedding_cls = (
-            Qwen4ExpPLEDiskOffloadEmbedding
+            Qwen4ExpPLEPoolEmbedding
+            if engram_config is not None and engram_config.peer_group_size
+            else Qwen4ExpPLEDiskOffloadEmbedding
             if engram_config is not None and engram_config.disk_offload
             else Qwen4ExpPLESharedHostEmbedding
             if engram_config is not None
@@ -718,6 +791,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                         loaded_weight,
                         checkpoint_start=checkpoint_start,
                     )
+                    if isinstance(embedding, Qwen4ExpPLEPoolEmbedding):
+                        embedding.record_checkpoint_rows(
+                            checkpoint_start, checkpoint_start + expected_rows
+                        )
                 loaded.add(f"ngram_embedding.{suffix}")
                 continue
             if nvfp4_method is not None and name in (
@@ -732,6 +809,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
 
         if regular_weights:
             loaded.update(AutoWeightsLoader(self).load_weights(regular_weights))
+            if isinstance(embedding, Qwen4ExpPLEPoolEmbedding):
+                for name, _ in regular_weights:
+                    if name == "ngram_embedding.weight":
+                        embedding.record_checkpoint_rows(0, embedding.org_vocab_size)
         return loaded
 
 
