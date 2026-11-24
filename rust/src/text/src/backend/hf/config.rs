@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 use serde_with::{DefaultOnError, serde_as};
 use thiserror_ext::AsReport as _;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
+use vllm_tokenizer::parse_checkpoint_json;
 
 use crate::error::{Error, Result};
 use crate::normalize_top_k;
@@ -393,7 +394,7 @@ where
             error.as_report()
         ))
     })?;
-    json5::from_str(&content).map_err(|error| {
+    parse_checkpoint_json(&content).map_err(|error| {
         Error::Tokenizer(format!(
             "failed to parse {}: {}",
             path.display(),
