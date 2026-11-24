@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -69,3 +71,34 @@ def test_loads_real_bench_serve_result():
     assert mod._load_files([str(result)], 1) == [
         (pytest.approx(data["request_throughput"]), data["median_tpot_ms"])
     ]
+
+
+@pytest.mark.parametrize("unmatched", ["run_004.json", "typo_*.json"])
+def test_cli_rejects_unmatched_input_among_valid_runs(tmp_path, unmatched):
+    for i in range(1, 4):
+        (tmp_path / f"run_{i:03}.json").write_text(
+            '{"request_throughput": 2.5, "median_tpot_ms": 50}', encoding="utf-8"
+        )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MODULE_PATH),
+            "--baseline",
+            "run_*.json",
+            unmatched,
+            "--candidate",
+            "run_*.json",
+            "--control-baseline",
+            "run_*.json",
+            "--control-candidate",
+            "run_*.json",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert unmatched in result.stderr
+    assert not result.stdout

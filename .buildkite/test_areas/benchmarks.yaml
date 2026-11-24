@@ -11,6 +11,7 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - rust/src/bench/tests/python_serve_flags.txt
+  - benchmarks/issues/69408/analyze.py
   - tests/benchmarks/
   commands:
   - pytest -v -s benchmarks/

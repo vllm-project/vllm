@@ -29,6 +29,9 @@ python benchmarks/issues/69408/analyze.py \
   --control-candidate 'v034_n1_*.json' --n 32
 ```
 
+Every input filename or glob must match at least one file. If an input has no
+matches, the analyzer exits with an error before emitting a comparison.
+
 Inspect scheduling time, sampled step CPU time, per-step logits/sampling kernel work, CUDA Graph dispatch and GPU trace before editing production code. In particular test the hypothesis that Model Runner V2's parallel child handling changed, instead of assuming that `ParentRequest` itself causes the slowdown. Profiling and bisecting v0.29–v0.33 are required before proposing a fix.
 
 Use distinct output filenames such as `v028_n32_seed42.json` and

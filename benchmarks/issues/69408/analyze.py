@@ -44,10 +44,13 @@ def _get_metric(run: dict, n: int) -> tuple[float, float]:
 
 def _load_files(paths: list[str], n: int) -> list[tuple[float, float]]:
     result: list[tuple[float, float]] = []
-    files = sorted({path for pattern in paths for path in glob.glob(pattern)})
-    if not files:
-        raise ValueError(f"No JSON files matched {paths!r}")
-    for name in files:
+    files: set[str] = set()
+    for pattern in paths:
+        matches = [name for name in glob.glob(pattern) if Path(name).is_file()]
+        if not matches:
+            raise ValueError(f"No JSON files matched {pattern!r}")
+        files.update(matches)
+    for name in sorted(files):
         data = json.loads(Path(name).read_text())
         if not isinstance(data, dict):
             raise ValueError(f"Expected JSON object: {name}")
@@ -98,14 +101,17 @@ def main() -> None:
     parser.add_argument("--control-candidate", nargs="+", required=True)
     parser.add_argument("--output-json", type=Path)
     args = parser.parse_args()
-    high_n = summarize(
-        _load_files(args.baseline, args.n),
-        _load_files(args.candidate, args.n),
-    )
-    control = summarize(
-        _load_files(args.control_baseline, 1),
-        _load_files(args.control_candidate, 1),
-    )
+    try:
+        high_n = summarize(
+            _load_files(args.baseline, args.n),
+            _load_files(args.candidate, args.n),
+        )
+        control = summarize(
+            _load_files(args.control_baseline, 1),
+            _load_files(args.control_candidate, 1),
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     report = {
         "n": args.n,
         "parallel": high_n,
