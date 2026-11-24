@@ -147,6 +147,7 @@ def _stub(seen: dict):
         checkpoint_every_n_tokens=0,
         use_cp="auto",
         backend="auto",
+        checkpoint_state_indices=None,
         max_seqlen=None,
         cu_seqlens_cpu=None,
     ):
