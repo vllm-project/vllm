@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """SlotLMStrategy prompts and reads, against prompts rendered by qev, the
-checkpoints' reference runtime (`qev.engine.DecisionEngine`, installed by their
-`setup.sh`)."""
+Qwen3.5 checkpoints' reference runtime (`qev.engine.DecisionEngine`, installed
+by their `setup.sh`), and against the same prompts in the Gemma 4 chat format
+of bison-1 and groundhog-1."""
 
 import math
 from types import SimpleNamespace
@@ -79,15 +80,36 @@ QEV_PROMPTS = {
 #: qev's shared prefix for PROBE_STATE, ending in `</`, `state`, `>`, `ĊĊ`.
 QEV_PREFIX_LEN = 99
 
+_GEMMA_PREFIX = (
+    "<bos><|turn>system\n"
+    + slot_prompt.SYSTEM_PROMPT
+    + "<turn|>\n<|turn>user\n"
+    + _PREFIX.split("<|im_start|>user\n")[1]
+)
+_GEMMA_TAIL = "<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+#: The PROBE_QUESTIONS prompts in the stock Gemma 4 chat format.
+GEMMA_PROMPTS = {
+    k: _GEMMA_PREFIX + p[len(_PREFIX) : -len(_TAIL)] + _GEMMA_TAIL
+    for k, p in QEV_PROMPTS.items()
+}
+
 
 @pytest.fixture(scope="module")
 def tokenizer():
     return get_tokenizer("baselabs/elephant-1")
 
 
-def make_strategy(tokenizer, *, head_dtype=torch.float32, prefix_caching=False):
+@pytest.fixture(scope="module")
+def gemma_tokenizer():
+    # groundhog-1 ships the same tokenizer and chat template.
+    return get_tokenizer("baselabs/bison-1")
+
+
+def make_strategy(
+    tokenizer, *, head_dtype=torch.float32, prefix_caching=False, hf_config=None
+):
     model_config = SimpleNamespace(
-        hf_config=SimpleNamespace(modeling_overrides={}),
+        hf_config=hf_config or SimpleNamespace(modeling_overrides={}),
         head_dtype=head_dtype,
         max_model_len=32768,
         is_hybrid=True,
@@ -235,3 +257,32 @@ async def test_refuses_a_prompt_without_room_for_the_answer(tokenizer):
     with pytest.raises(StructuredDecisionError, match="max_model_len"):
         await read(strategy, request)
     engine.generate.assert_not_called()
+
+
+@pytest.mark.parametrize("key", ["modeling_overrides", "baseten_modeling_overrides"])
+def test_reads_n_slots_from_either_overrides_key(tokenizer, key):
+    hf_config = SimpleNamespace(**{key: {"readout": "slot_lm", "n_slots": 26}})
+    strategy, _ = make_strategy(tokenizer, hf_config=hf_config)
+    assert len(strategy.slot_ids) == 26
+    assert strategy.limits().max_options == 26
+
+
+@pytest.mark.asyncio
+async def test_gemma_reads_render_the_gemma_chat_format(gemma_tokenizer):
+    strategy, engine = make_strategy(gemma_tokenizer)
+    labels = [gemma_tokenizer.decode([i]) for i in strategy.slot_ids]
+    assert labels == list(slot_prompt.SLOT_LABELS)
+    request = StructuredDecisionRequest(
+        state=PROBE_STATE, questions=PROBE_QUESTIONS, cache_salt="salt"
+    )
+    questions, _ = await read(strategy, request)
+
+    prefix = gemma_tokenizer.encode(_GEMMA_PREFIX, add_special_tokens=False)
+    for q, call in zip(questions, engine.generate.call_args_list, strict=True):
+        prompt, params = call.args[0], call.args[1]
+        ids = gemma_tokenizer.encode(GEMMA_PROMPTS[q.id], add_special_tokens=False)
+        assert prompt["prompt_token_ids"] == ids
+        # The prefix ends at the state block, on a token boundary.
+        assert ids[: len(prefix)] == prefix
+        assert prompt["cache_salt"] == prefix_lm_salt(prefix, "salt")
+        assert params.extra_args == {"prefix_lm_len": len(prefix)}

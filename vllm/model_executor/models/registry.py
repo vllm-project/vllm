@@ -425,6 +425,7 @@ _MULTIMODAL_MODELS = {
         "DiffusionGemmaForConditionalGeneration",
     ),
     "Gemma4ForConditionalGeneration": ("gemma4_mm", "Gemma4ForConditionalGeneration"),
+    "Gemma4ForSlotDecision": ("gemma4_slot", "Gemma4ForSlotDecision"),
     "Gemma4UnifiedForConditionalGeneration": (
         "gemma4_unified",
         "Gemma4UnifiedForConditionalGeneration",

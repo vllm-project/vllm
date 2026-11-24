@@ -808,6 +808,20 @@ class Gemma4MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 
 class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def __init__(
+        self,
+        hf_config: PreTrainedConfig,
+        hf_text_config: PreTrainedConfig,
+        revision: str | None = None,
+    ):
+        if (
+            getattr(hf_config, "architectures", None)
+            == ["Gemma4ForConditionalGeneration"]
+            and getattr(hf_config, "baseten_modeling_overrides", None) is not None
+        ):
+            hf_config.architectures = ["Gemma4ForSlotDecision"]
+        super().__init__(hf_config, hf_text_config, revision)
+
     def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
         if not supports_multimodal:
             return False

@@ -99,6 +99,7 @@ def create_scheduler(
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
     encoder_cache_size: int | None = None,
+    prefix_cache_retention_interval: int | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -246,6 +247,7 @@ def create_scheduler(
             if mamba_layer_config
             else []
         ),
+        prefix_cache_retention_interval=prefix_cache_retention_interval,
     )
     cache_config.num_gpu_blocks = num_blocks
     if scheduler_cls is None:

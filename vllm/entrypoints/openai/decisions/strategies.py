@@ -1475,9 +1475,12 @@ class SlotLMStrategy(NextTokenStrategy):
         # read() renders no media, though the base model takes images.
         self.modalities = frozenset()
         self.max_model_len = model_config.max_model_len
-        n_slots = model_config.hf_config.modeling_overrides.get(
-            "n_slots", len(slot_prompt.SLOT_LABELS)
+        hf_config = model_config.hf_config
+        overrides = (
+            getattr(hf_config, "baseten_modeling_overrides", None)
+            or hf_config.modeling_overrides
         )
+        n_slots = overrides.get("n_slots", len(slot_prompt.SLOT_LABELS))
         # Each slot label's own token must also be the reply's first token.
         labels = slot_prompt.SLOT_LABELS[:n_slots]
         _, self.slot_ids = reply_label_ids(
@@ -1638,6 +1641,7 @@ READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
     "D3ForSequenceClassification": D3Strategy,
     "Gemma4ForCausalLM": NextTokenStrategy,
     "Gemma4ForConditionalGeneration": NextTokenStrategy,
+    "Gemma4ForSlotDecision": SlotLMStrategy,
     "Gemma4UnifiedForConditionalGeneration": NextTokenStrategy,
     "Lfm2VlForConditionalGeneration": LiquidStrategy,
     "Qwen3ForCausalLM": NextTokenStrategy,
