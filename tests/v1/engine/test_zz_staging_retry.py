@@ -9,6 +9,8 @@ def test_staging_k8s_ok():
     assert True
 
 
-def test_staging_k8s_fail_once():
-    retry = int(os.environ.get("BUILDKITE_RETRY_COUNT") or 0)
-    assert retry >= 1, "staging: intentional L4 K8s failure on attempt 0"
+def test_staging_k8s_crash_once():
+    # Exit 137 avoids K8s exit-1 automatic retry while proving flushed pre-crash
+    # JSONL preservation and Tier 1/2/3 skipping on tagged retry.
+    if os.environ.get("BUILDKITE_RETRY_COUNT") == "0":
+        os._exit(137)
