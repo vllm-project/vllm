@@ -222,6 +222,17 @@ RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
     else \
         : > /pins/rubin-prerelease.txt; \
     fi
+# The [tool.uv] section cut out of pyproject.toml so unrelated pyproject.toml
+# edits leave test-deps cached. Fails closed if tomllib disagrees.
+COPY pyproject.toml /tmp/pyproject.toml
+RUN { echo '[tool.uv]'; \
+        awk '/^\[tool\.uv\][[:space:]]*$/{f=1; next} /^\[/{f=0} \
+            f && !/^[[:space:]]*(#|$)/' /tmp/pyproject.toml; \
+    } > /pins/uv-pyproject.toml \
+    && python3 -c "import tomllib; \
+        full = tomllib.load(open('/tmp/pyproject.toml', 'rb')); \
+        uv_stub = tomllib.load(open('/pins/uv-pyproject.toml', 'rb')); \
+        assert full.get('tool', {}).get('uv', {}) == uv_stub.get('tool', {}).get('uv', {}), '[tool.uv] extraction mismatch'"
 
 #################### BASE BUILD IMAGE ####################
 # toolchain + PyTorch: all that the native builds (csrc-build, extensions-build,
@@ -1022,14 +1033,26 @@ RUN apt-get update -y \
 # We can specify the standard or nightly build of PyTorch
 ARG PYTORCH_NIGHTLY
 
+# Prebuilt hybrid-model test extensions. --no-deps --offline: their dependencies
+# come only from the hash-pinned test requirements installed below. Installed
+# first so a test requirement change does not rebuild this layer.
+RUN --mount=type=bind,from=hybrid-test-wheels,source=/wheels,target=/tmp/hybrid-test-wheels \
+    --mount=type=cache,target=/opt/uv/cache \
+    if ls /tmp/hybrid-test-wheels/*.whl >/dev/null 2>&1; then \
+        uv pip install --system --no-deps --offline /tmp/hybrid-test-wheels/*.whl \
+        && cp /tmp/hybrid-test-wheels/commits.txt /opt/hybrid-test-deps-commits.txt; \
+    fi
+
 # Install development dependencies (for testing)
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test/cuda.in requirements/test/cuda.in
 COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
-# uv reads `[tool.uv] exclude-dependencies` from here when recompiling below.
-COPY pyproject.toml pyproject.toml
+# uv reads `[tool.uv]` (exclude-dependencies, no-build-isolation-package)
+# from here. Keyed on the extracted section so unrelated pyproject.toml
+# edits leave test-deps cached.
+COPY --from=requirement-pins /pins/uv-pyproject.toml pyproject.toml
 COPY tools/use_existing_torch.py tools/use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
@@ -1079,14 +1102,20 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && rm -f /tmp/kv-before.txt /tmp/kv-after.txt /tmp/kv-new.txt; \
     fi
 
-# Prebuilt hybrid-model test extensions. --no-deps --offline: their dependencies
-# come only from the hash-pinned test requirements installed above.
-RUN --mount=type=bind,from=hybrid-test-wheels,source=/wheels,target=/tmp/hybrid-test-wheels \
+# vLLM's own runtime requirements must hold in the finished environment. The
+# locked installs above can leave them unmet, so settle them here, in a layer
+# that changes with requirements/, and not in the per-commit wheel install:
+# the test-wheel stage fails if the wheel still has to change a package.
+COPY requirements/cuda.txt requirements/cuda.txt
+RUN --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
     --mount=type=cache,target=/opt/uv/cache \
-    if ls /tmp/hybrid-test-wheels/*.whl >/dev/null 2>&1; then \
-        uv pip install --system --no-deps --offline /tmp/hybrid-test-wheels/*.whl \
-        && cp /tmp/hybrid-test-wheels/commits.txt /opt/hybrid-test-deps-commits.txt; \
-    fi
+    # The same CUDA 12 substitutions setup.py makes in the wheel's requirements.
+    if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
+        sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' requirements/cuda.txt; \
+        sed -i 's/^humming-kernels\[cu13\]/humming-kernels[cu12]/' requirements/cuda.txt; \
+    fi \
+    && if [ "${PYTORCH_NIGHTLY}" = "1" ]; then python3 tools/use_existing_torch.py --prefix; fi \
+    && /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" -r requirements/cuda.txt
 
 # torchao and conch for the Quantization steps, which put /opt/quantization-deps on
 # PYTHONPATH. Kept out of site-packages so other jobs never see them (see
@@ -1105,47 +1134,74 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         exit 1; \
     fi
 
-# image to run unit testing suite
-# note that this uses vllm installed by `pip`
-FROM test-deps AS test
-
-ARG PYTHON_VERSION
-ARG TARGETPLATFORM
-
-ARG PIP_INDEX_URL UV_INDEX_URL
-ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
-ARG PYTORCH_CUDA_INDEX_BASE_URL
-ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
-
-# We can specify the standard or nightly build of PyTorch
-ARG PYTORCH_NIGHTLY
-
-# Install vLLM and EP kernel wheels after the stable test dependencies so
-# source-only changes do not invalidate the dependency layers above.
-COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
-COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
-RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
-    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
-    --mount=type=cache,target=/opt/uv/cache \
-    /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" dist/*.whl
-
-COPY --from=extensions-build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
-RUN --mount=type=bind,from=extensions-build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
-    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
-    --mount=type=cache,target=/opt/uv/cache \
-    /tmp/uv_install_cuda.sh 0 ep_kernels/dist/*.whl
-
-ADD . /vllm-workspace/
-
-# install development dependencies (for testing)
+# Test helpers, installed editable from their place in the source tree that the
+# test stage copies in.
+COPY tests/vllm_test_utils tests/vllm_test_utils
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system -e tests/vllm_test_utils
 
-# The installs above may move packages the KV connector layer relied on.
+# The DeepEP wheels built by extensions-build. Last in test-deps (and in
+# vllm-base before the vLLM wheel) because their bytes change whenever
+# extensions-build reruns: here that rebuilds one small layer, not every
+# test dependency layer. Only the checksum enters the image; the wheels are
+# bind-mounted.
+COPY --from=extensions-build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
+RUN --mount=type=bind,from=extensions-build,src=/tmp/ep_kernels_workspace/dist,target=/tmp/ep-kernels-dist \
+    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
+    --mount=type=cache,target=/opt/uv/cache \
+    /tmp/uv_install_cuda.sh 0 /tmp/ep-kernels-dist/*.whl
+
+# Helper, not shipped: pip-installs the vLLM wheel on top of test-deps, then
+# sorts the installed files into /split/{native,rust,python} for the test stage.
+FROM test-deps AS test-wheel
+
+COPY tools/ci/split_vllm_install.sh /tmp/split_vllm_install.sh
+COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
+# The test stage takes only vLLM's own files from here, so the install must not
+# change any other package: test dependencies come from the lock in test-deps.
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/tmp/vllm-dist \
+    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
+    --mount=type=cache,target=/opt/uv/cache \
+    uv pip freeze --system | grep -v '^vllm[ =]' | sort > /tmp/deps-before.txt \
+    && /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" /tmp/vllm-dist/*.whl \
+    && uv pip freeze --system | grep -v '^vllm[ =]' | sort > /tmp/deps-after.txt \
+    && if ! diff /tmp/deps-before.txt /tmp/deps-after.txt; then \
+        echo "Installing the vLLM wheel changed the test dependencies above;" \
+             "add them to requirements/test/cuda.in and recompile the lock" >&2; \
+        exit 1; \
+    fi \
+    && /tmp/split_vllm_install.sh /split
+
+# The wheel must leave the KV connector packages as their lock expects.
 RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
         && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
         python3 tools/kv_connector_lock.py verify requirements/test/kv_connectors_cuda.txt; \
     fi
+
+# Helper, not shipped: the source tree as the test image lays it out.
+# Branches from toolchain rather than test-deps so this stage runs in parallel
+# with vllm-runtime-base/test-deps and does not invalidate on requirements/ edits.
+FROM toolchain AS test-src
+COPY . /src
+# Source code is used in the `python_only_compile.sh` test
+# We hide it inside `src/` so that this source code
+# will not be imported by other tests
+RUN cd /src && mkdir src && mv vllm src/vllm
+
+# image to run unit testing suite
+# note that this uses vllm installed by `pip` (in the test-wheel stage)
+#
+# Every layer below is a `COPY --link` of one tree from a helper stage. Such a
+# layer is reused whenever the copied files are unchanged, whatever happened in
+# the layers under it, so a host that has the previous commit's image pulls
+# only what the new commit changed: usually the Python files and the source
+# tree, not the compiled extensions.
+FROM test-deps AS test
+
+COPY --link --from=test-wheel /split/native/ /
+COPY --link --from=test-wheel /split/rust/ /
+COPY --link --from=test-wheel /split/python/ /
+COPY --link --from=test-src /src/ /vllm-workspace/
 
 # enable fast downloads from hf (for testing)
 ENV HF_XET_HIGH_PERFORMANCE 1
@@ -1155,15 +1211,6 @@ ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 
 # Catch GPU<->CPU syncs in execute_model/sample_tokens
 ENV VLLM_GPU_SYNC_CHECK=error
-
-# Copy in the v1 package for testing (it isn't distributed yet)
-COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
-
-# Source code is used in the `python_only_compile.sh` test
-# We hide it inside `src/` so that this source code
-# will not be imported by other tests
-RUN mkdir src
-RUN mv vllm src/vllm
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
