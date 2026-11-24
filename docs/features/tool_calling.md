@@ -487,15 +487,6 @@ Supported models:
 
 Flags: `--tool-call-parser longcat`
 
-### GigaChat4 Models (`gigachat4`)
-
-Supported models:
-
-* `ai-sage/GigaChat4-708B-A41B`
-* `ai-sage/GigaChat4-37B-A4B`
-
-Flags: `--enable-auto-tool-choice --tool-call-parser gigachat4 --reasoning-parser gigachat4`
-
 ### GLM-4.5 Models (`glm45`)
 
 Supported models:
@@ -594,6 +585,17 @@ Supported models:
 * `ai-sage/GigaChat3-10B-A1.8B-bf16`
 
 Flags: `--tool-call-parser gigachat3`
+
+### GigaChat4 Models (`gigachat4`)
+
+Supported models:
+
+* `ai-sage/GigaChat4-708B-A41B`
+* `ai-sage/GigaChat4-708B-A41B-bf16`
+* `ai-sage/GigaChat4-37B-A4B`
+* `ai-sage/GigaChat4-37B-A4B-bf16`
+
+Flags: `--enable-auto-tool-choice --tool-call-parser gigachat4 --reasoning-parser gigachat4`
 
 ### Apertus Models (`apertus`)
 
