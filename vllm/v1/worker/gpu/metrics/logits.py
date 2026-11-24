@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
-from torch._inductor.runtime.triton_helpers import libdevice
 
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tldevice as libdevice
 
 
 @triton.jit

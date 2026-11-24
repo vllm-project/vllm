@@ -131,7 +131,7 @@ impl DefaultChatOutputProcessor {
         };
 
         if parser.preserve_special_tokens() {
-            request.decode_options.skip_special_tokens = false;
+            request.decode_options.skip_special_tokens = Some(false);
         }
         let tool_strict_level =
             tool_strict_level.unwrap_or_else(|| parser.default_tool_strict_level());
@@ -322,7 +322,9 @@ mod tests {
     use crate::output::ChatOutputProcessor;
     use crate::parser::unified::{HfTemplateError, ResponseTemplate};
     use crate::parser::{ParserSelection, ToolStrictLevel};
-    use crate::request::{ChatRequest, ChatTool, ChatToolChoice, ResolvedToolContext};
+    use crate::request::{
+        AllowedToolsMode, ChatRequest, ChatTool, ChatToolChoice, ResolvedToolContext,
+    };
 
     fn tokenizer() -> Arc<TestTokenizer> {
         Arc::new(
@@ -458,6 +460,15 @@ mod tests {
             );
             assert_eq!(
                 run(tool_parser, reasoning_parser, text, ChatToolChoice::None).await,
+                (none_content.to_string(), vec![])
+            );
+            // An empty allowed-tools list allows no call, like `none`.
+            let no_tools_allowed = ChatToolChoice::AllowedTools {
+                mode: AllowedToolsMode::Auto,
+                names: Vec::new(),
+            };
+            assert_eq!(
+                run(tool_parser, reasoning_parser, text, no_tools_allowed).await,
                 (none_content.to_string(), vec![])
             );
         }
@@ -686,7 +697,7 @@ mod tests {
             reasoning,
             None,
         )?;
-        Ok(!request.decode_options.skip_special_tokens)
+        Ok(request.decode_options.skip_special_tokens == Some(false))
     }
 
     #[test]
@@ -731,6 +742,43 @@ mod tests {
         // An unusable template is not consulted unless `hf` is selected.
         assert!(!keeps_special_tokens("other-model", &invalid_template(), &auto, &auto).unwrap());
         keeps_special_tokens("google/gemma-4-27b-it", &invalid_template(), &auto, &auto).unwrap();
+    }
+
+    #[test]
+    fn mistral_reasoning_keeps_special_tokens() {
+        let mut request = ChatRequest::for_test();
+        DefaultChatOutputProcessor::with_response_template(
+            &mut request,
+            "mistralai/Mistral-Large-4-1T-A52B",
+            Arc::new(
+                TestTokenizer::new()
+                    .with_special_token("[THINK]", 256)
+                    .with_special_token("[/THINK]", 257),
+            ),
+            &Err(HfTemplateError::Missing),
+            &ParserSelection::Auto,
+            &ParserSelection::Explicit("mistral".to_string()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(request.decode_options.skip_special_tokens, Some(false));
+    }
+
+    #[test]
+    fn auto_selects_no_reasoning_parser_for_mistral_models() {
+        // Most Mistral tokenizers have no `[THINK]` token, so `mistral` stays
+        // opt-in rather than failing every request under `auto`.
+        let mut request = ChatRequest::for_test();
+        DefaultChatOutputProcessor::with_response_template(
+            &mut request,
+            "mistralai/Mistral-7B-Instruct-v0.3",
+            Arc::new(TestTokenizer::new()),
+            &Err(HfTemplateError::Missing),
+            &ParserSelection::Auto,
+            &ParserSelection::Auto,
+            None,
+        )
+        .unwrap();
     }
 
     #[test]
