@@ -538,9 +538,6 @@ class ModelConfig:
             "mm_ipc_gpu_memory_gb",
             "checkpoint_prepare_on_startup",
             "masked_token_ids",
-            # Frontend thread pool size; resolves differently for `LLM` and
-            # the async server, so hashing it splits compile/autotune caches.
-            "renderer_num_workers",
         }
 
         factors = get_compile_factors(self, ignored_factors)
