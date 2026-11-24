@@ -1067,10 +1067,8 @@ class OffloadingConnectorScheduler:
     ):
         req_status = self._req_status[request.request_id]
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
-        sync_load = request.request_id in self._current_batch_sync_loads
-        use_load_destinations = num_external_tokens > 0 and not sync_load
-        if not use_load_destinations:
-            # Cover sibling-managed loads and skip shared full-attention hits.
+        if num_external_tokens == 0:
+            # Includes sibling-managed loads, whose destinations are unknown here.
             for group_idx, group_blocks in enumerate(blocks.blocks):
                 if group_idx not in self._groups_sharing_offload_pool:
                     continue
@@ -1082,13 +1080,13 @@ class OffloadingConnectorScheduler:
                     for block in group_blocks[num_prefix_blocks:]
                     if block.block_id != 0
                 )
-
-        if num_external_tokens == 0:
             return
 
         # prepare_load() below pins keys that get_num_new_matched_tokens()
         # already saw as HIT, so both must sit inside the same region.
         self._acquire_step()
+
+        sync_load = request.request_id in self._current_batch_sync_loads
 
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
         partial_tail_boundary = req_status.partial_tail_boundary
@@ -1186,11 +1184,10 @@ class OffloadingConnectorScheduler:
             dst_block_ids, group_sizes=group_sizes, block_indices=block_indices
         )
 
-        # Other blocks can be reserved for a later forward, such as SWA replay.
-        if use_load_destinations:
-            self._current_batch_write_candidate_block_ids.update(
-                bid for bid in dst_block_ids if bid != 0
-            )
+        # Null slots preserve transfer offsets and are excluded from fences.
+        self._current_batch_write_candidate_block_ids.update(
+            bid for bid in dst_block_ids if bid != 0
+        )
 
         load_job_id = self._generate_job_id()
         self._current_batch_load_jobs[load_job_id] = TransferJob(
