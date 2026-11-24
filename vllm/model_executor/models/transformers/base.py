@@ -110,13 +110,11 @@ _SPLIT_OPS = tuple(
 
 
 def _only_splits(converter: WeightConverter) -> bool:
-    ops = converter.operations
-    single_source = len(converter.source_patterns) == 1
-    return single_source and all(isinstance(op, _SPLIT_OPS) for op in ops)
+    return all(isinstance(op, _SPLIT_OPS) for op in converter.operations)
 
 
 class SplitWeights:
-    """Apply Transformers conversions that only split a checkpoint tensor (e.g. a
+    """Apply a Transformers conversion that only splits a checkpoint tensor (e.g. a
     fused `query_key_value` into `q_proj`, `k_proj` and `v_proj`) to the weights.
 
     `Split` sizes each piece like its target parameter, which vLLM may replace (e.g.
@@ -124,11 +122,11 @@ class SplitWeights:
 
     def __init__(
         self,
-        converters: list[WeightConverter],
+        converter: WeightConverter,
         mapper: WeightsMapper,
         model: nn.Module,
     ):
-        self.converters = converters
+        self.converter = converter
         self.mapper = mapper
         self.config = model.config
         self.shapes = {name: p.shape for name, p in model.named_parameters()}
@@ -140,15 +138,12 @@ class SplitWeights:
     def __call__(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
+        converter = self.converter
+        sources, targets = converter.source_patterns, converter.target_patterns
         for name, tensor in weights:
-            converter = next(
-                (c for c in self.converters if re.search(c.source_patterns[0], name)),
-                None,
-            )
-            if converter is None:
+            if not re.search(sources[0], name):
                 yield name, tensor
                 continue
-            sources, targets = converter.source_patterns, converter.target_patterns
             # The name of the first target, as `Split` looks it up in the model
             first = self.mapper.map_name(re.sub(sources[0], targets[0], name))
             pieces = {sources[0]: tensor}
@@ -496,9 +491,12 @@ class Base(
             orig_to_new_renaming=orig_to_new_renaming,
             orig_to_new_regex=orig_to_new_regex,
         )
-        if splits:
-            split_weights = SplitWeights(splits, self.hf_to_vllm_mapper, self)
-            self.hf_to_vllm_mapper |= WeightsMapper(weights_transforms=[split_weights])
+        # `Split` looks targets up by their names before vLLM's fusions are mapped
+        mapper = self.hf_to_vllm_mapper
+        split_weights: list[WeightsTransformFn] = [
+            SplitWeights(c, mapper, self) for c in splits
+        ]
+        self.hf_to_vllm_mapper |= WeightsMapper(weights_transforms=split_weights)
 
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()

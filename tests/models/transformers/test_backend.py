@@ -1094,7 +1094,7 @@ def test_split_weights_splits_fused_gqa_qkv():
     )
     fused = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
 
-    weights = SplitWeights([converter], mapper, model)
+    weights = SplitWeights(converter, mapper, model)
     pieces = dict(weights([("attention.query_key_value.weight", fused)]))
 
     assert list(pieces) == [
