@@ -1,26 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlashTopK behind fused_mqa_topk_prefill (VLLM_FUSED_MQA_TOPK_BACKEND=flashtopk,
-see fused_mqa_topk.py): exact, deterministic top-k of the FP8 MQA indexer's
-prefill scores with adaptive key pruning.
+"""FlashTopK behind `fused_mqa_topk_prefill` (`VLLM_FUSED_MQA_TOPK_BACKEND=flashtopk`,
+see `fused_mqa_topk.py`): exact, deterministic top-k of the FP8 MQA indexer's prefill
+scores with adaptive key pruning.
 
-This module is the vLLM side; the kernels are topk.py (Selector), plan.py,
-recovery.py and kernels/ (CuTe DSL and Triton, compiled at runtime), imported
-on first use (import_flashtopk). They derive from FlashTopK
+This module is the vLLM adapter; the kernels live in `topk.py` (`Selector`),
+`plan.py`, `recovery.py` and `kernels/` (CuTe DSL and Triton, compiled at runtime),
+imported on first use (`import_flashtopk`). They derive from FlashTopK
 (https://github.com/Tencent-Hunyuan/FlashTopK, Apache-2.0) at commit
-090902abad86e5bb3324519124a680122fff91a1, keeping only what the indexer uses
-(FP8 operands, adaptive pruning, caller-owned scratch); files derived from
-FlashInfer, TensorRT-LLM and LiteTopK say so in their headers.
+`090902abad86e5bb3324519124a680122fff91a1`, keeping only what the indexer uses (FP8
+operands, adaptive pruning, unordered indices, caller-owned scratch); files derived
+from FlashInfer, TensorRT-LLM and LiteTopK state so in their headers.
 
-A Selector per (device, top-k) holds only per-row state. Each call's scratch
-(candidates, pruning plan and mask, recovery) is the caller's: the indexers
-take it from the workspace manager with their K-gather buffers, so the
-profiling run accounts for it and no call allocates it. kernel_warmup compiles
-and loads the kernels of the calls the profiling run reserved (FLASHTOPK_WARMUP,
-registered by the indexers when kernel_config.enable_jit_warmup).
+A `Selector` per `(device, top-k)` holds only small per-row state. Each call allocates
+its scratch from PyTorch's caching allocator and frees it on return, and
+`reserve_flashtopk` touches the peak scratch during the profiling run so it overlaps
+dense logits and model activations instead of pinning KV-cache memory in the workspace
+manager. `FLASHTOPK_WARMUP` compiles and loads the kernels of reserved calls during
+`kernel_warmup`.
 """
 
 import functools
+import math
 from dataclasses import dataclass
 
 import torch
@@ -32,18 +33,15 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-# FlashTopK prunes keys adaptively from this many keys (its ADAPTIVE_MIN_KEYS).
-# Below it, it scans every key and is no faster than the native op.
+# FlashTopK prunes keys adaptively from this many keys (plan.ADAPTIVE_MIN_KEYS).
 FLASHTOPK_MIN_KEYS = 1 << 17
-# Rows per slice: bounds the scratch (~8 * 8192 * max(4 * topk, 16384) bytes).
-_CHUNK_SIZE = 8192
+_MAX_SLICE_ROWS = 8192
 
 
 @functools.cache
 def import_flashtopk():
-    """FlashTopK's kernels (the topk module, imported on first use so this
-    package loads without CuTe DSL); raises if their runtime dependencies (CuTe
-    DSL, TVM FFI) are missing."""
+    """Import FlashTopK's `topk` module on first use; raises if runtime dependencies
+    (`nvidia-cutlass-dsl`, `apache-tvm-ffi`) are missing."""
     try:
         from . import topk
     except ImportError as e:
@@ -61,28 +59,14 @@ def flashtopk_supported() -> bool:
 
 @functools.cache
 def flashtopk_available() -> bool:
-    """FlashTopK is the selected fused MQA+top-k backend
-    (VLLM_FUSED_MQA_TOPK_BACKEND=flashtopk) and runs on this GPU; raises if its
-    runtime dependencies are missing."""
+    """True when `VLLM_FUSED_MQA_TOPK_BACKEND=flashtopk` and this GPU supports it;
+    raises if FlashTopK's runtime dependencies are missing."""
     if envs.VLLM_FUSED_MQA_TOPK_BACKEND != "flashtopk" or not (
         current_platform.is_cuda() and flashtopk_supported()
     ):
         return False
     import_flashtopk()
     return True
-
-
-def flashtopk_takes(keys: int) -> bool:
-    """Whether a fused_mqa_topk_prefill call over `keys` keys runs on FlashTopK:
-    from FLASHTOPK_MIN_KEYS keys, where key pruning makes it faster than the
-    native op, or always without the native op (SM90)."""
-    from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
-        fused_mqa_topk_available,
-    )
-
-    return flashtopk_available() and (
-        keys >= FLASHTOPK_MIN_KEYS or not fused_mqa_topk_available()
-    )
 
 
 def _device_index(device: torch.device) -> int:
@@ -94,30 +78,95 @@ def _device_index(device: torch.device) -> int:
 
 
 @functools.cache
-def _selector(index: int, topk: int):
-    """The Selector of (device, top-k), its per-row state planned for the
-    largest fused chunk (a slice of _CHUNK_SIZE rows). Kernels compile in
-    FLASHTOPK_WARMUP (or at first use when JIT warmup is off)."""
+def _chunk_size(index: int) -> int:
+    """Rows per slice on `cuda:index`: two full waves of 16-row pruning tiles (four
+    waves of 8-row scan/refine tiles), keeping 100% wave efficiency while bounding peak
+    per-call scratch below the dense prefill logits budget."""
+    sms = torch.cuda.get_device_properties(index).multi_processor_count
+    return min(_MAX_SLICE_ROWS, max(1024, 32 * sms))
+
+
+def flashtopk_prunes(index: int, rows: int, keys: int) -> bool:
+    """Whether a call of `rows` rows and `keys` keys on `cuda:index` has enough key
+    length and CTA occupancy for adaptive pruning to apply."""
+    if keys < FLASHTOPK_MIN_KEYS or rows <= 0:
+        return False
+    topk_mod = import_flashtopk()
+    slice_rows = min(rows, _chunk_size(index))
+    return topk_mod.planner.adaptive_threshold(index, slice_rows, keys) > 0.0
+
+
+def flashtopk_chunk(
+    max_seqlen_k: int,
+    keys: int,
+    rows: int,
+    device: torch.device | None = None,
+) -> bool:
+    """Whether a prefill chunk takes FlashTopK: its longest row sees at least
+    `FLASHTOPK_MIN_KEYS` keys, its gathered keys fit the fused path, and its rows give
+    key pruning enough CTAs to beat scanning and dense logits."""
     from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
         FUSED_MQA_TOPK_MAX_KEYS,
     )
 
+    if (
+        not flashtopk_available()
+        or max_seqlen_k < FLASHTOPK_MIN_KEYS
+        or keys > FUSED_MQA_TOPK_MAX_KEYS
+    ):
+        return False
+    index = (
+        torch.accelerator.current_device_index()
+        if device is None
+        else _device_index(device)
+    )
+    return flashtopk_prunes(index, rows, keys)
+
+
+def flashtopk_takes(
+    device: torch.device,
+    rows: int,
+    keys: int,
+    max_seqlen_k: int | None = None,
+) -> bool:
+    """Whether `fused_mqa_topk_prefill` dispatches to FlashTopK: when `flashtopk_chunk`
+    accepts the call, or always when no native op is available (SM90)."""
+    from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+        fused_mqa_topk_available,
+    )
+
+    if not flashtopk_available():
+        return False
+    if not fused_mqa_topk_available():
+        return True
+    longest = keys if max_seqlen_k is None else max_seqlen_k
+    return flashtopk_chunk(longest, keys, rows, device)
+
+
+@functools.cache
+def _selector(index: int, topk: int):
+    """The cached `Selector` for `(device, top-k)`, holding only per-row state."""
+    from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+        FUSED_MQA_TOPK_MAX_KEYS,
+    )
+
+    chunk_size = _chunk_size(index)
     logger.info(
         "Planning the FlashTopK fused MQA+top-k prefill backend "
         "(top-k %d, chunk_size %d) on cuda:%d.",
         topk,
-        _CHUNK_SIZE,
+        chunk_size,
         index,
     )
     selector = import_flashtopk().Selector(
-        topk, torch.device("cuda", index), _CHUNK_SIZE
+        topk, torch.device("cuda", index), chunk_size
     )
-    return selector.plan(_CHUNK_SIZE, FUSED_MQA_TOPK_MAX_KEYS)
+    return selector.plan(chunk_size, FUSED_MQA_TOPK_MAX_KEYS)
 
 
 @functools.lru_cache(maxsize=64)
 def flashtopk_scratch_bytes(index: int, rows: int, keys: int, topk: int) -> int:
-    """Bytes of scratch of calls of up to `rows` rows and `keys` keys."""
+    """Bytes of per-call scratch for up to `rows` rows and `keys` keys."""
     return _selector(index, topk).scratch_bytes(rows, keys)
 
 
@@ -129,92 +178,55 @@ def flashtopk_mqa_topk_prefill(
     starts: torch.Tensor,
     ends: torch.Tensor,
     output: torch.Tensor,
-    workspace: torch.Tensor | None = None,
 ) -> None:
-    """fused_mqa_topk_prefill on FlashTopK, its scratch in `workspace`
-    (uint8, at least flashtopk_scratch_bytes of this call; allocated when
-    None). FlashTopK writes absolute key indices sorted by score, -1 padded;
-    vLLM's convention is `key - start`."""
+    """Run `fused_mqa_topk_prefill` on FlashTopK with per-call scratch, converting
+    indices in place to vLLM's `key - start` convention with `-1` padding."""
     if not output.is_contiguous():
         raise ValueError("fused_mqa_topk_prefill: output must be contiguous")
-    index, topk = q.device.index, output.shape[1]
-    if workspace is None:
-        workspace = torch.empty(
-            flashtopk_scratch_bytes(index, q.shape[0], k.shape[0], topk),
-            dtype=torch.uint8,
-            device=q.device,
-        )
-    _selector(index, topk).run(q, k, weights, starts, ends, scales, output, workspace)
+    index, topk = _device_index(q.device), output.shape[1]
+    scratch = torch.empty(
+        flashtopk_scratch_bytes(index, q.shape[0], k.shape[0], topk),
+        dtype=torch.uint8,
+        device=q.device,
+    )
+    _selector(index, topk).run(q, k, weights, starts, ends, scales, output, scratch)
     output.sub_(starts[:, None]).clamp_(min=-1)
 
 
-# (device index, top-k) of the calls the profiling run reserved, with their
-# most rows and keys: what FLASHTOPK_WARMUP compiles.
 _RESERVED: dict[tuple[int, int], tuple[int, int]] = {}
 
 
-def _max_keys(keys: int) -> int:
+def reserve_flashtopk(device: torch.device, rows: int, keys: int, topk: int) -> None:
+    """Profiling run: accounts for FlashTopK's peak per-call scratch (freed again so it
+    overlaps dense logits and model activations) and records calls for warmup."""
     from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+        FUSED_MQA_TOPK_HEAD_DIM,
+        FUSED_MQA_TOPK_HEADS,
         FUSED_MQA_TOPK_MAX_KEYS,
+        FUSED_MQA_TOPK_MAX_ROWS,
     )
 
-    return min(keys, FUSED_MQA_TOPK_MAX_KEYS)
-
-
-def flashtopk_workspace_specs(
-    device: torch.device, rows: int, keys: int, topk: int
-) -> list[tuple[tuple[int, ...], torch.dtype]]:
-    """The workspace-manager scratch of fused_mqa_topk_prefill calls of up to
-    `rows` rows and `keys` keys when FlashTopK takes them, else none (the
-    native op allocates its own workspaces). Request it in the same
-    `get_simultaneous` call as the buffers that hold the calls' operands (the
-    gathered K), so they do not overlap."""
-    keys = _max_keys(keys)
-    if not flashtopk_takes(keys):
-        return []
-    nbytes = flashtopk_scratch_bytes(_device_index(device), rows, keys, topk)
-    return [((nbytes,), torch.uint8)]
-
-
-def reserve_flashtopk(device: torch.device, rows: int, keys: int, topk: int) -> None:
-    """Profiling run: records the FlashTopK calls of up to `rows` rows and
-    `keys` keys for FLASHTOPK_WARMUP (their scratch: flashtopk_workspace_specs)."""
-    keys = _max_keys(keys)
-    if not flashtopk_takes(keys):
+    rows = min(rows, FUSED_MQA_TOPK_MAX_ROWS)
+    keys = min(keys, FUSED_MQA_TOPK_MAX_KEYS)
+    if not flashtopk_chunk(keys, keys, rows, device):
         return
-    key = (_device_index(device), topk)
+    index = _device_index(device)
+    nbytes = flashtopk_scratch_bytes(index, rows, keys, topk)
+    if torch.cuda.get_device_capability(index)[0] == 9:
+        slice_rows = math.ceil(min(rows, _chunk_size(index)) / 8) * 8
+        nbytes += slice_rows * FUSED_MQA_TOPK_HEADS * FUSED_MQA_TOPK_HEAD_DIM
+    _ = torch.empty(nbytes, dtype=torch.uint8, device=device)
+    key = (index, topk)
     reserved_rows, reserved_keys = _RESERVED.get(key, (0, 0))
     _RESERVED[key] = (max(reserved_rows, rows), max(reserved_keys, keys))
 
 
-# Selector.compile() compiles FlashTopK's CuTe kernels but not the
-# Triton planner of adaptive pruning, which specializes on its integer
-# arguments: a slice's rows and their padding to the row group (2 rows on
-# SM100, 16 on SM90) by divisibility by 16 and by 1, the keys and their
-# padding to 4 by divisibility by 16. These rows and keys reach every
-# combination. The calls also load each kernel module, which a first launch
-# otherwise does inside a prefill.
-_WARMUP_ROWS = (_CHUNK_SIZE, _CHUNK_SIZE - 1, 1000, 1)
 _WARMUP_KEYS = (FLASHTOPK_MIN_KEYS, FLASHTOPK_MIN_KEYS + 1, FLASHTOPK_MIN_KEYS + 13)
 
 
-def _warmup_scratch(index: int, rows: int, keys: int, topk: int) -> torch.Tensor:
-    """The warmup calls' scratch, from the workspace the profiling run sized."""
-    from vllm.v1.worker.workspace import (
-        current_workspace_manager,
-        is_workspace_manager_initialized,
-    )
-
-    spec = ((flashtopk_scratch_bytes(index, rows, keys, topk),), torch.uint8)
-    if is_workspace_manager_initialized():
-        return current_workspace_manager().get_simultaneous(spec)[0]
-    return torch.empty(spec[0], dtype=spec[1], device=torch.device("cuda", index))
-
-
 class FlashTopkWarmup(VllmJitKernel["FlashTopkWarmup.CompileKey"]):
-    """kernel_warmup for FlashTopK: compiles and loads the kernels of each
-    (device, top-k) the profiling run reserved, before the first prefill. With
-    no reservation (FlashTopK takes no calls) it has no keys."""
+    """`kernel_warmup` for FlashTopK: compiles CuTe variants and every reachable
+    integer specialization of the Triton pruning planner before serving."""
 
     @dataclass(frozen=True)
     class CompileKey:
@@ -237,15 +249,17 @@ class FlashTopkWarmup(VllmJitKernel["FlashTopkWarmup.CompileKey"]):
         index, topk = compile_key.device_index, compile_key.topk
         _selector(index, topk).compile()
         reserved_rows, reserved_keys = _RESERVED[(index, topk)]
-        rows = sorted({min(r, reserved_rows) for r in _WARMUP_ROWS})
+        chunk_size = _chunk_size(index)
+        warmup_rows = (chunk_size, chunk_size - 1, 1000, 1)
+        rows = sorted({min(r, reserved_rows) for r in warmup_rows})
         keys = sorted({min(n, reserved_keys) for n in _WARMUP_KEYS})
-        scratch = _warmup_scratch(index, rows[-1], keys[-1], topk)
         device = torch.device("cuda", index)
         gen = torch.Generator(device=device).manual_seed(0)
         fp8 = current_platform.fp8_dtype()
         with torch.inference_mode():
-            q = torch.randn(rows[-1], heads, head_dim, device=device, generator=gen)
-            q = q.to(fp8)
+            q = torch.randn(rows[-1], heads, head_dim, device=device, generator=gen).to(
+                fp8
+            )
             k = torch.randn(keys[-1], head_dim, device=device, generator=gen).to(fp8)
             scales = torch.ones(keys[-1], device=device)
             weights = torch.randn(rows[-1], heads, device=device, generator=gen) / heads
@@ -253,8 +267,6 @@ class FlashTopkWarmup(VllmJitKernel["FlashTopkWarmup.CompileKey"]):
             output = torch.empty(rows[-1], topk, dtype=torch.int32, device=device)
             for r in rows:
                 for n in keys:
-                    # Every row sees all keys: adaptive pruning then plans and
-                    # launches both its scan and its pruning kernels.
                     ends = torch.full((r,), n, dtype=torch.int32, device=device)
                     flashtopk_mqa_topk_prefill(
                         q[:r],
@@ -264,7 +276,6 @@ class FlashTopkWarmup(VllmJitKernel["FlashTopkWarmup.CompileKey"]):
                         starts[:r],
                         ends,
                         output[:r],
-                        scratch,
                     )
             torch.accelerator.synchronize()
         logger.info(

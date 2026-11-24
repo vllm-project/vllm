@@ -53,18 +53,21 @@ from cutlass.cute.nvgpu import cpasync, tcgen05
 
 from .common import (
     BLOCK_KV,
-    HEAD_DIM,
+    GATHER_THREADS,
     NUM_HEADS,
     REFINE_BLOCK_Q,
     atomic_add_global_i32,
-    cp_async_4,
-    cp_async_16,
-    find_nth_set,
     fp32_to_i32_bits,
-    load_global_v4_b32,
     loose_raw_gate,
+    refine_gather,
     select_i32,
     store_global_b32,
+)
+from .common import (
+    REFINE_MAX_BLOCKS as MAX_BLOCKS,
+)
+from .common import (
+    REFINE_STAGES as NUM_TILES,
 )
 from .sm100_utils import (
     CLUSTER_SHAPE_MN,
@@ -89,22 +92,8 @@ from .sm100_utils import (
     setup_umma,
 )
 
-NUM_TILES = 4  # compact tiles in shared memory, one per gather warp
-GATHER_THREADS = 128
-GATHER_BARRIER_ID = 3  # the gather warpgroup only
-ROW_BYTES = HEAD_DIM  # an FP8 K row
+GATHER_BARRIER_ID = 3
 THREADS_PER_CTA = 512
-# KV blocks a CTA's range may span: its survivor prefix is in shared memory.
-MAX_BLOCKS = 16384
-
-
-def _swizzled(slot, chunk):
-    """Byte offset of 16-byte chunk `chunk` of row `slot` in a 128-row K-major tile with
-    the 128-byte swizzle: the tile is 128-byte column blocks of all 128 rows (an FP8 row
-    is one block), each row's chunks XOR-ed with its row mod 8."""
-    return (
-        (chunk // 8) * (BLOCK_KV * 128) + slot * 128 + (((slot % 8) ^ (chunk % 8)) * 16)
-    )
 
 
 class RefineSm100(UmmaKernel):
@@ -316,14 +305,14 @@ class RefineSm100(UmmaKernel):
                 cute.arch.mbarrier_init(count_bar, 1)
                 for i in cutlass.range_constexpr(NUM_TILES):
                     cute.arch.mbarrier_init(
-                        full_tile + i, 1
-                    )  # its gather warp, once the copies have landed
+                        full_tile + i, 32
+                    )  # all 32 lanes of its gather warp, once the copies have landed
                     cute.arch.mbarrier_init(
-                        empty_tile + i, 5
-                    )  # the MMA's commit and the epilogue's four warps
+                        empty_tile + i, 1 + 4 * 32
+                    )  # the MMA's commit and the epilogue warpgroup's 128 threads
                 for i in cutlass.range_constexpr(2):
                     cute.arch.mbarrier_init(full_tmem + i, 1)
-                    cute.arch.mbarrier_init(empty_tmem + i, 4)
+                    cute.arch.mbarrier_init(empty_tmem + i, 4 * 32)
                 cute.arch.mbarrier_init_fence()
             if tidx < REFINE_BLOCK_Q:
                 row_q = query_start + tidx
@@ -421,7 +410,7 @@ class RefineSm100(UmmaKernel):
             elif warp_idx >= 8:
                 cute.arch.setmaxregister_decrease(self.other_registers)
                 if (warp_idx < 12) & has_work:
-                    self._gather(
+                    refine_gather(
                         tidx - NUM_MATH_THREADS,
                         warp_idx - 8,
                         lane,
@@ -440,6 +429,8 @@ class RefineSm100(UmmaKernel):
                         count_bar,
                         full_tile,
                         empty_tile,
+                        BLOCK_KV,
+                        GATHER_BARRIER_ID,
                     )
             else:
                 self._run_math(
@@ -466,165 +457,6 @@ class RefineSm100(UmmaKernel):
                     mCandIdx,
                     mCandCnt,
                 )
-
-    @cute.jit
-    def _gather(
-        self,
-        gt,
-        gw,
-        lane,
-        num_kv,
-        kv_start,
-        tile,
-        mask_blocks,
-        mMask,
-        mKV,
-        mScales,
-        sPrefix,
-        sTile,
-        sMetaIdx,
-        sMetaScale,
-        sCounts,
-        count_bar,
-        full_tile,
-        empty_tile,
-    ):
-        """Survivors per block into an exclusive prefix, then compact tiles t = gw (mod
-        4)."""
-        mask_base = (
-            mMask.iterator.toint()
-            + (cutlass.Int64(tile) * mask_blocks + kv_start // BLOCK_KV) * 16
-        )
-        # Each thread counts a run of consecutive blocks (four loads in flight); a warp
-        # scan of the run totals, then the four warps' totals in sCounts, give each
-        # run's base, from which the run is walked again into the exclusive prefix.
-        run = (num_kv + (GATHER_THREADS - 1)) // GATHER_THREADS
-        b_lo = min(gt * run, num_kv)
-        b_hi = min(b_lo + run, num_kv)
-        local = Int32(0)
-        for blk in cutlass.range(b_lo, b_hi, 4, unroll=1):
-            words = [
-                load_global_v4_b32(
-                    mask_base + cutlass.Int64(min(blk + u, b_hi - 1)) * 16
-                )
-                for u in range(4)
-            ]
-            for u in cutlass.range_constexpr(4):
-                c = Int32(0)
-                for word in words[u]:
-                    c = c + Int32(cute.arch.popc(word))
-                in_run = blk + u < b_hi
-                if in_run:
-                    sPrefix[blk + u] = c
-                local = local + select_i32(in_run, c, 0)
-        incl = local
-        for off in cutlass.range_constexpr(5):
-            # An up-shuffle's clamp is the lowest source lane: 0 (the default, 31, suits
-            # idx shuffles).
-            up = cute.arch.shuffle_sync_up(incl, 1 << off, mask_and_clamp=0)
-            if lane >= (1 << off):
-                incl = incl + up
-        if lane == 31:
-            sCounts[1 + gw] = incl
-        cute.arch.barrier(
-            barrier_id=GATHER_BARRIER_ID, number_of_threads=GATHER_THREADS
-        )
-        base = Int32(0)
-        total = Int32(0)
-        for i in cutlass.range_constexpr(4):
-            v = sCounts[1 + i]
-            base = base + select_i32(i < gw, v, 0)
-            total = total + v
-        running = base + incl - local
-        for blk in cutlass.range(b_lo, b_hi, unroll=1):
-            c = sPrefix[blk]
-            sPrefix[blk] = running
-            running = running + c
-        if gt == 0:
-            sPrefix[num_kv] = total
-            sCounts[0] = total
-        cute.arch.barrier(
-            barrier_id=GATHER_BARRIER_ID, number_of_threads=GATHER_THREADS
-        )
-        if gt == 0:
-            cute.arch.mbarrier_arrive(count_bar)
-
-        # Slot 32j + lane of compact tile t holds survivor 128t + 32j + lane. The next
-        # tile's keys are located while the stage is still busy with this one.
-        tiles = (total + BLOCK_KV - 1) // BLOCK_KV
-        tile_bytes = BLOCK_KV * ROW_BYTES
-        smem_base = sTile.iterator.toint()
-        scale_smem = sMetaScale.iterator.toint()
-        kv_base = mKV.iterator.toint()
-        scale_base = mScales.iterator.toint()
-        i0, i1, i2, i3 = Int32(0), Int32(0), Int32(0), Int32(0)
-        if gw < tiles:
-            i0, i1, i2, i3 = self._locate(
-                gw, lane, num_kv, kv_start, total, mask_base, sPrefix
-            )
-        for t in cutlass.range(gw, tiles, NUM_TILES, unroll=1):
-            s = t % NUM_TILES
-            cute.arch.mbarrier_wait(empty_tile + s, (t // NUM_TILES) % 2 ^ 1)
-            keys = (i0, i1, i2, i3)
-            for j in cutlass.range_constexpr(4):
-                slot = j * 32 + lane
-                if t * BLOCK_KV + slot < total:
-                    src = kv_base + cutlass.Int64(keys[j]) * ROW_BYTES
-                    dst = smem_base + s * tile_bytes
-                    for chunk in cutlass.range_constexpr(ROW_BYTES // 16):
-                        cp_async_16(dst + _swizzled(slot, chunk), src + chunk * 16)
-                    sMetaIdx[(s, slot)] = keys[j]
-                    cp_async_4(
-                        scale_smem + (s * BLOCK_KV + slot) * 4,
-                        scale_base + cutlass.Int64(keys[j]) * 4,
-                    )
-            cute.arch.cp_async_commit_group()
-            cute.arch.cp_async_wait_group(0)
-            cute.arch.fence_view_async_shared()
-            cute.arch.sync_warp()
-            if lane == 0:
-                cute.arch.mbarrier_arrive(full_tile + s)
-            if t + NUM_TILES < tiles:
-                i0, i1, i2, i3 = self._locate(
-                    t + NUM_TILES, lane, num_kv, kv_start, total, mask_base, sPrefix
-                )
-
-    @cute.jit
-    def _locate(self, t, lane, num_kv, kv_start, total, mask_base, sPrefix):
-        """The keys of tile t's slots 32j + lane: the last block whose prefix is at most
-        the survivor's rank (ranks past the last survivor clamped to it), then the
-        rank's bit in the block's mask. The four searches interleave."""
-        g0 = min(t * BLOCK_KV + lane, total - 1)
-        g1 = min(t * BLOCK_KV + 32 + lane, total - 1)
-        g2 = min(t * BLOCK_KV + 64 + lane, total - 1)
-        g3 = min(t * BLOCK_KV + 96 + lane, total - 1)
-        b0, b1, b2, b3 = Int32(0), Int32(0), Int32(0), Int32(0)
-        length = num_kv
-        while length > 1:
-            half = length // 2
-            b0 = select_i32(sPrefix[b0 + half] <= g0, b0 + half, b0)
-            b1 = select_i32(sPrefix[b1 + half] <= g1, b1 + half, b1)
-            b2 = select_i32(sPrefix[b2 + half] <= g2, b2 + half, b2)
-            b3 = select_i32(sPrefix[b3 + half] <= g3, b3 + half, b3)
-            length = length - half
-        blks = (b0, b1, b2, b3)
-        words = [load_global_v4_b32(mask_base + cutlass.Int64(b) * 16) for b in blks]
-        keys = []
-        for j, g in enumerate((g0, g1, g2, g3)):
-            r = g - sPrefix[blks[j]]
-            w = words[j]
-            part = Int32(0)
-            word = w[0]
-            for i in cutlass.range_constexpr(3):
-                cnt = Int32(cute.arch.popc(word))
-                step = (part == i) & (r >= cnt)
-                r = select_i32(step, r - cnt, r)
-                part = select_i32(step, part + 1, part)
-                word = select_i32(step, w[i + 1], word)
-            keys.append(
-                kv_start + blks[j] * BLOCK_KV + part * 32 + find_nth_set(word, r + 1)
-            )
-        return keys[0], keys[1], keys[2], keys[3]
 
     @cute.jit
     def _run_math(
@@ -706,9 +538,7 @@ class RefineSm100(UmmaKernel):
                     else:
                         # Every subtile is in registers: hand the stage back to the
                         # tensor core.
-                        cute.arch.sync_warp()
-                        if lane == 0:
-                            cute.arch.mbarrier_arrive(empty_tmem + wg)
+                        cute.arch.mbarrier_arrive(empty_tmem + wg)
                     red.extend(
                         self._fast_sums(acc, w_cache, sWarpWeights, warp_idx, 2 * e)
                     )
@@ -764,9 +594,7 @@ class RefineSm100(UmmaKernel):
                                     kv_idx,
                                 )
                 # The tile's metadata is used: it may be refilled.
-                cute.arch.sync_warp()
-                if lane == 0:
-                    cute.arch.mbarrier_arrive(empty_tile + s)
+                cute.arch.mbarrier_arrive(empty_tile + s)
         cute.arch.barrier(
             barrier_id=MATH_BARRIER_ID, number_of_threads=NUM_MATH_THREADS
         )

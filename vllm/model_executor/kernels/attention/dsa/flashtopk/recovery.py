@@ -90,14 +90,13 @@ class Recovery:
         ke,
         health,
         bad_rows,
-        scores,
         indices,
         arena,
         stage_scores,
         stage_indices,
     ) -> None:
-        """Enqueue the recovery of this call's selection (scores / indices, its health
-        and bad-row table)."""
+        """Enqueue the recovery of this call's selection (indices, its health and
+        bad-row table)."""
         num_q, seq_len_kv = q.shape[0], kv.shape[0]
         if arena.numel() < RECOVERY_ROWS * seq_len_kv:
             raise ValueError(
@@ -144,20 +143,19 @@ class Recovery:
                 self.slot_ks,
                 self.slot_ke,
                 self.row_map,
-                stage_scores[:stage],
                 stage_indices[:stage],
+                stage_scores[:stage],
                 splits,
             )
             launch.select_staged(
                 stage_scores[:stage],
                 stage_indices[:stage],
                 self.row_map,
-                scores,
                 indices,
             )
         else:
             launch.select_dense(
-                dense, self.slot_ks, self.slot_ke, self.row_map, scores, indices
+                dense, self.slot_ks, self.slot_ke, self.row_map, indices
             )
 
         # whole call, `chunk` rows at a time
@@ -189,6 +187,5 @@ class Recovery:
                 self.whole_ks[part],
                 self.whole_ke[part],
                 self.whole_map[part],
-                scores,
                 indices,
             )

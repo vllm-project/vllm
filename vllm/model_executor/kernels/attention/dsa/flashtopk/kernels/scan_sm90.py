@@ -19,8 +19,8 @@ candidate buffer as (-score, kv index). Warp roles (384 threads):
 
 Scores come in a fixed order, so every run gives the same bits. A thread of the WGMMA
 accumulator holds columns 8i + 2l + e (l = lane % 4) of two keys; the Q operand's rows
-are permuted (``q_n_of``) so that lane l holds rows 2l and 2l + 1 with all 32 heads, and
-forms each (row, key) score alone (``score_owned``): heads 0, 2, .., 30 and 1, 3, .., 31
+are permuted (`q_n_of`) so that lane l holds rows 2l and 2l + 1 with all 32 heads, and
+forms each (row, key) score alone (`score_owned`): heads 0, 2, .., 30 and 1, 3, .., 31
 in two fma(max(x, 0), w_h, .) chains, their sum, then the key's kv scale -- no lane
 exchange. The SM90 refine, the shared-sample scoring and recovery (the dense variant)
 use the same functions. Hits are appended with one atomic per row and warp: four ballots
@@ -89,16 +89,6 @@ from .sm90_utils import (
 N = NEXT_N * NUM_HEADS  # the WGMMA's N: the tile's rows x heads
 
 
-def q_n_of(r: int, h: int) -> int:
-    """The Q operand row (accumulator column) of tile row r's head h: thread lane % 4 ==
-    l holds columns 8i + 2l + e, so rows 2l and 2l + 1 go to lane l, head pairs (h, h +
-    1) to one column group.
-
-    Reference only, not called by the kernels: the host side builds the permuted
-    operand (launch.py, triage.py) and this documents the permutation."""
-    return 8 * ((r % 2) * 16 + h // 2) + 2 * (r // 2) + h % 2
-
-
 def head_table_layout():
     """The weights of lane l's row 2l + t, heads 4k .. 4k + 3, at (t, k, l): the four
     lanes of a load read adjacent 16 bytes."""
@@ -113,9 +103,9 @@ def fill_head_table(sW, sWq, tidx):
 
 
 def score_chain(acc, w, base, scale):
-    """One (row, key) score from the accumulator values acc[base + h % 2 + 4 (h // 2)]
-    of heads h and the weights w[h // 4][h % 4]: heads 0, 2, .., 30 and 1, 3, .., 31 in
-    two fma(max(x, 0), w_h, .) chains, their sum, then the kv scale. Every SM90 CuTe
+    """One (row, key) score from the accumulator values `acc[base + h % 2 + 4 (h // 2)]`
+    of heads h and the weights `w[h // 4][h % 4]`: heads 0, 2, .., 30 and 1, 3, .., 31
+    in two fma(max(x, 0), w_h, .) chains, their sum, then the kv scale. Every SM90 CuTe
     scorer forms its scores here."""
     chains = [Float32(0.0), Float32(0.0)]
     for h in range(NUM_HEADS):
@@ -129,7 +119,7 @@ def score_chain(acc, w, base, scale):
 
 @cute.jit
 def score_owned(acc, sWq, lane, scale0, scale1):
-    """Lane 4g + q's scores, [t][slot]: rows 2q + t of its key slots (keys key_lo and
+    """Lane 4g + q's scores, `[t][slot]`: rows 2q + t of its key slots (keys key_lo and
     key_lo + 8), each formed by this lane alone."""
     q4 = lane % 4
     raws = []
@@ -325,7 +315,10 @@ class ScanSm90:
             row_q = query_start + tidx
             row = min(row_q, num_q - 1)
             load_row_count(sCnt, tidx, row_q, num_q, mCandCnt, self.single_split)
-            sGate[tidx] = loose_raw_gate(mInvDelta[row], mOrigin[row], mThBucket[row])
+            if cutlass.const_expr(not self.dense):
+                sGate[tidx] = loose_raw_gate(
+                    mInvDelta[row], mOrigin[row], mThBucket[row]
+                )
             store_row_window(
                 sWin,
                 tidx,
@@ -536,8 +529,8 @@ class ScanSm90:
 @cute.jit
 def owned_hits(raws, key0, key1, gates, win_lo, win_len):
     """Whether each owned score passes its row's gate inside the row's window
-    ([t][slot]; gates and windows are rows 2q + t's), and the warp's ballots of that:
-    row 2q + t's hits are ballots[t][slot] & (0x11111111 << q)."""
+    (`[t][slot]`; gates and windows are rows 2q + t's), and the warp's ballots of that:
+    row 2q + t's hits are `ballots[t][slot] & (0x11111111 << q)`."""
     takes, ballots = [], []
     for t in cutlass.range_constexpr(2):
         take0 = (raws[t][0] > gates[t]) & (

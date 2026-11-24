@@ -38,13 +38,12 @@ from .common import (
     PRUNE_BLOCK_Q,
     PRUNE_COLS,
     REFINE_BLOCK_Q,
+    REFINE_MAX_BLOCKS,
 )
 from .prologue import EST_WORDS, Decide, SampleWindows
 from .prune_sm90 import PruneSm90
 from .prune_sm100 import PruneSm100
-from .refine_sm90 import MAX_BLOCKS as REFINE_SM90_MAX_BLOCKS
 from .refine_sm90 import RefineSm90
-from .refine_sm100 import MAX_BLOCKS as REFINE_SM100_MAX_BLOCKS
 from .refine_sm100 import RefineSm100
 from .scan_sm90 import ScanSm90
 from .scan_sm100 import ScanSm100
@@ -393,9 +392,12 @@ def prune_scan(
         mask_blocks,
         prune_kv_splits(num_q, seq_len_kv, PRUNE_BLOCK_Q, 1, sms),
     )
-    max_blocks = REFINE_SM90_MAX_BLOCKS if sm90 else REFINE_SM100_MAX_BLOCKS
     splits = prune_kv_splits(
-        num_q, seq_len_kv, REFINE_BLOCK_Q, math.ceil(mask_blocks / max_blocks), sms
+        num_q,
+        seq_len_kv,
+        REFINE_BLOCK_Q,
+        math.ceil(mask_blocks / REFINE_MAX_BLOCKS),
+        sms,
     )
     _compile_refine(sm90, sm90 and splits == 1)(
         as_operand(kv),
@@ -486,20 +488,16 @@ def _compile_decide():
         make_fake_tensor(Int32, vec),
         make_fake_tensor(Int32, vec),
         make_fake_tensor(Int32, (1,)),
-        make_fake_tensor(Float32, (1,)),
         Int32(0),
         Float32(0.0),
     )
 
 
-def decide(est, ks, ke, scan_ks, prune_ks, flag, threshold: float, estimate) -> None:
+def decide(est, ks, ke, scan_ks, prune_ks, flag, threshold: float) -> None:
     """Adaptive pruning's choice on the device from the estimate rows' sample masks:
-    flag[0] = (group estimate <= threshold), and the windows for the scan (scan_ks: ke
-    when pruning, else ks) and for the pruning kernels (prune_ks: the other way round);
-    estimate[0] receives the group estimate."""
-    _compile_decide()(
-        est, ks, ke, scan_ks, prune_ks, flag, estimate, ks.shape[0], threshold
-    )
+    flag[0] = (group estimate <= threshold), and the windows for the scan and for the
+    pruning kernels."""
+    _compile_decide()(est, ks, ke, scan_ks, prune_ks, flag, ks.shape[0], threshold)
 
 
 @functools.cache
@@ -560,11 +558,11 @@ def seed_prep(
 
 
 @functools.cache
-def _compile_select(topk: int, source: int):
+def _compile_select(topk: int, source: int, write_scores: bool):
     rows, cap, slots, out_rows = (cute.sym_int() for _ in range(4))
     vec = (rows,)
     return _compile(
-        Select(topk, source),
+        Select(topk, source, write_scores),
         make_fake_tensor(Float32, (rows, cap)),
         make_fake_tensor(Int32, (rows, cap)),
         make_fake_tensor(Int32, vec),
@@ -575,7 +573,6 @@ def _compile_select(topk: int, source: int):
         make_fake_tensor(Int32, (out_rows, topk)),
         make_fake_tensor(cutlass.Int64, (HEALTH_WORDS,)),
         make_fake_tensor(Int32, (RECOVERY_ROWS,)),
-        Int32(0),
         Int32(0),
         Int32(0),
     )
@@ -590,71 +587,67 @@ def _unused_health(device_index: int) -> tuple[torch.Tensor, torch.Tensor]:
     )
 
 
-def select(cand_val, cand_idx, cand_cnt, ks, ke, scores, indices, health, bad_rows):
-    """Each row's exact top-k of its candidates into scores / indices in canonical order
-    (score descending, index ascending; -inf / -1 padding last), accumulating the call's
-    health and recording its first bad rows."""
-    _compile_select(scores.shape[1], CANDIDATES)(
+def select(cand_val, cand_idx, cand_cnt, ks, ke, indices, health, bad_rows):
+    """Each row's exact unordered top-k of its candidates into indices (-1 padded),
+    accumulating the call's health and recording its first bad rows."""
+    _compile_select(indices.shape[1], CANDIDATES, False)(
         cand_val,
         cand_idx,
         cand_cnt,
         ks,
         ke,
         cand_cnt,
-        scores,
+        indices.view(torch.float32),
         indices,
         health,
         bad_rows,
         cand_val.shape[0],
         1,
-        0,
     )
 
 
-def select_dense(dense, ks, ke, row_map, scores, indices, splits: int = 1) -> None:
-    """Recovery: slot s's exact top-k over its window [ks[s], ke[s]) of dense[s] (the
-    index is the column), in canonical order, to row row_map[s] of scores / indices;
-    slots mapped to -1 are skipped. With splits > 1 each slot is cut into that many
-    slices, and slice p of slot s writes its own top-k to row s * splits + p of the
-    stage buffers scores / indices instead (select_staged finishes)."""
+def select_dense(
+    dense, ks, ke, row_map, indices, scores: torch.Tensor | None = None, splits: int = 1
+) -> None:
+    """Recovery: slot s's exact top-k over its window [ks[s], ke[s]) of dense[s] to row
+    row_map[s] of indices (slots mapped to -1 are skipped). With splits > 1 each slot is
+    cut into that many slices written to stage buffers scores / indices instead."""
     health, bad_rows = _unused_health(dense.device.index)
-    _compile_select(scores.shape[1], DENSE)(
+    write_scores = scores is not None
+    _compile_select(indices.shape[1], DENSE, write_scores)(
         dense,
         dense.view(torch.int32),
         ks,
         ks,
         ke,
         row_map,
-        scores,
+        scores if scores is not None else indices.view(torch.float32),
         indices,
         health,
         bad_rows,
         dense.shape[0] * splits,
         splits,
-        0,
     )
 
 
-def select_staged(stage_scores, stage_indices, row_map, scores, indices) -> None:
-    """Recovery's second stage: slot s's exact top-k over its slices' selections (stage
-    rows s * splits ... s * splits + splits - 1), to row row_map[s] of scores / indices.
-    """
+def select_staged(stage_scores, stage_indices, row_map, indices) -> None:
+    """Recovery's second stage: slot s's exact top-k over its slices' selections to row
+    row_map[s] of indices."""
     health, bad_rows = _unused_health(stage_scores.device.index)
     slots = row_map.shape[0]
-    _compile_select(scores.shape[1], STAGED)(
+    _compile_select(indices.shape[1], STAGED, False)(
         stage_scores.view(slots, -1),
         stage_indices.view(slots, -1),
         row_map,
         row_map,
         row_map,
         row_map,
-        scores,
+        indices.view(torch.float32),
         indices,
         health,
         bad_rows,
         slots,
         1,
-        0,
     )
 
 
@@ -736,8 +729,13 @@ def warmup(arch_major: int, topk: int) -> None:
     _compile_sample_windows()
     _compile_decide()
     _compile_seed_prep()
-    for source in (CANDIDATES, DENSE, STAGED):
-        _compile_select(topk, source)
+    for source, write_scores in (
+        (CANDIDATES, False),
+        (DENSE, False),
+        (DENSE, True),
+        (STAGED, False),
+    ):
+        _compile_select(topk, source, write_scores)
     _compile_triage(sm90)
 
 

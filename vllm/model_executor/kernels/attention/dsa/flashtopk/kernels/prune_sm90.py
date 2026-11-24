@@ -12,7 +12,7 @@ block, the two math warpgroups taking alternate blocks in turn
 (sm90_utils.wgmma_in_turn), warps 8 and 9 the TMA of each group's ring (KV, kv scales,
 key norms). A thread of the
 accumulator holds columns 8i + 2l + e (l = lane % 4) of two keys, so the operand's rows
-are permuted (``n_of``) for lane l to hold rows 4l .. 4l + 3 whole: each lane forms its
+are permuted (`n_of`) for lane l to hold rows 4l .. 4l + 3 whole: each lane forms its
 rows' bounds alone, no lane exchange,
 
     s_k * (sum_{c < 14} relu(x_c) w_c - relu(x_14 w_14 + x_15 w_15))
@@ -22,7 +22,7 @@ as two interleaved fma(max(x, 0), w, .) chains over the retained columns plus th
 aggregate's relu. FP32 rounding in any order is inside plan.SCREEN_ROUNDING. A key is
 kept for an 8-row half when some row's bound passes its raw gate (NaN keeps) within its
 window: each warp covers 16 consecutive keys, so it writes its half of a mask word
-directly (mask[2 * tile + half][block][4], one bit per key, as prune_sm100.py). The
+directly (`mask[2 * tile + half][block][4]`, one bit per key, as prune_sm100.py). The
 CTA's range starts on a 128-key block and covers whole blocks, so every word the refine
 reads is written. Like the scan, a group issues its next block's WGMMA once the partials
 are formed, before reducing them.
@@ -76,16 +76,6 @@ from .sm90_utils import (
 
 N = BLOCK_Q * COLS  # the WGMMA's N: the tile's rows x pruning columns
 ROW_FLOATS = COLS + 2  # the row's weights by column, its allowance, its raw gate
-
-
-def n_of(r: int, c: int) -> int:
-    """The operand row (accumulator column) of tile row r's pruning column c: thread
-    lane % 4 == l holds columns 8i + 2l + e, so rows 4l .. 4l + 3 go to lane l, column
-    pairs (c, c + 1) to one column group.
-
-    Reference only, not called by the kernel: the host side builds the permuted
-    operand (plan.py) and this documents the permutation."""
-    return 8 * ((r % 4) * 8 + c // 2) + 2 * (r // 4) + c % 2
 
 
 @dsl_user_op
@@ -299,10 +289,7 @@ class PruneSm90:
         if tidx < BLOCK_Q:
             row_q = query_start + tidx
             row = min(row_q, num_q - 1)
-            # Review fix (changes codegen): the planner leaves the allowances unwritten
-            # when it decides not to prune (then no CTA has work), so read them only
-            # with work, as prune_sm100.py does. The allowance column is used only by
-            # the math loop, which runs no block without work.
+            # Allowances are written only when the call prunes (and has_work is set).
             if has_work:
                 sRow[(tidx, COLS)] = mAllowance[row]
             sRow[(tidx, COLS + 1)] = loose_raw_gate(
@@ -521,7 +508,7 @@ class PruneSm90:
 
     @cute.jit
     def _rows(self, acc, sTab, q4):
-        """Lane q4's rows 4 q4 + rr, both key slots, before the scale, [rr][slot]: the
+        """Lane q4's rows 4 q4 + rr, both key slots, before the scale, `[rr][slot]`: the
         retained columns' relu times weight in two interleaved chains, less the relu of
         the aggregate."""
         parts = []

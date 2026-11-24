@@ -61,7 +61,6 @@ import cutlass
 import cutlass.cute as cute
 import cutlass.pipeline as pipeline
 import cutlass.utils as utils
-import cutlass.utils.blackwell_helpers as blackwell
 from cutlass import Float32, Int32
 from cutlass._mlir.dialects import llvm
 from cutlass.cute.nvgpu import cpasync, tcgen05
@@ -82,25 +81,24 @@ from .simt import bits_f32
 from .sm100_utils import (
     CLUSTER_SHAPE_MN,
     NUM_EPI_SUBTILES,
-    NUM_MATH_THREADS,
     NUM_MATH_WARPS,
     NUM_MATH_WG,
     RND_RN,
     TMEM_ALLOC_THREADS,
     UmmaKernel,
     clip_window,
-    create_umma_pipeline,
     cta_kv_range,
     head_quad_activations,
     head_weight,
     make_group_pipelines,
+    make_kv_q_operands,
+    make_q_kv_umma_pipelines,
     make_tmem_allocator,
     make_tmem_load_atom,
     make_weight_cache,
     named_barrier_sync_unaligned,
     partition_tmem_readout,
     replicate_weights,
-    setup_umma,
 )
 
 NUM_KV_STAGES = 3
@@ -199,40 +197,16 @@ class ScanSm100(UmmaKernel):
         num_splits: Int32,
         stream: cuda.CUstream,
     ):
-        kv_typed = cute.recast_tensor(kv, cutlass.Float8E4M3FN)
-        b = cute.recast_tensor(q, cutlass.Float8E4M3FN)
-        a = cute.make_tensor(
-            kv_typed.iterator,
-            cute.make_layout(
-                (seq_len_kv, HEAD_DIM, 1), stride=(kv_typed.layout.stride[0], 1, 0)
-            ),
-        )
-        a_major = utils.LayoutEnum.from_tensor(a).mma_major_mode()
-        b_major = utils.LayoutEnum.ROW_MAJOR.mma_major_mode()
-        tiled_mma = setup_umma(
-            self, a.element_type, b.element_type, a_major, b_major, NUM_KV_STAGES
-        )
-
-        tma_load_op = cpasync.CopyBulkTensorTileG2SOp()
-        a_op = blackwell.cluster_shape_to_tma_atom_A(CLUSTER_SHAPE_MN, tiled_mma.thr_id)
-        tma_atom_a, tma_tensor_a = cute.nvgpu.make_tiled_tma_atom_A(
-            a_op,
-            a,
-            self.a_smem_layout_staged,
-            self.mma_tiler,
+        (
             tiled_mma,
-            self.cluster_layout_vmnk.shape,
-        )
-        b_op = blackwell.cluster_shape_to_tma_atom_B(CLUSTER_SHAPE_MN, tiled_mma.thr_id)
-        b_smem_layout = cute.slice_(self.b_smem_layout_staged, (None, None, None, 0))
-        tma_atom_b, tma_tensor_b = cute.nvgpu.make_tiled_tma_atom_B(
-            b_op,
-            b,
+            tma_atom_a,
+            tma_tensor_a,
+            tma_atom_b,
+            tma_tensor_b,
+            b_dtype,
             b_smem_layout,
-            self.mma_tiler,
-            tiled_mma,
-            self.cluster_layout_vmnk.shape,
-        )
+        ) = make_kv_q_operands(self, kv, q, seq_len_kv, NUM_KV_STAGES)
+        tma_load_op = cpasync.CopyBulkTensorTileG2SOp()
         w_smem_layout_staged = cute.make_layout(
             (self.N, NUM_Q_STAGES), stride=(1, W_STAGE_STRIDE)
         )
@@ -243,9 +217,7 @@ class ScanSm100(UmmaKernel):
         tma_atom_s, tma_tensor_s = cpasync.make_tiled_tma_atom(
             tma_load_op, kv_scales, cute.make_layout((BLOCK_KV,)), (BLOCK_KV,)
         )
-        self.num_q_tma_bytes = (
-            cute.size_in_bytes(b.element_type, b_smem_layout) + self.N * 4
-        )
+        self.num_q_tma_bytes = cute.size_in_bytes(b_dtype, b_smem_layout) + self.N * 4
         # One byte per FP8 element, then the block's scales.
         self.num_kv_scale_tma_bytes = BLOCK_KV * HEAD_DIM + BLOCK_KV * 4
 
@@ -367,45 +339,21 @@ class ScanSm100(UmmaKernel):
         smem = utils.SmemAllocator()
         storage = smem.allocate(SharedStorage)
 
-        prod_group = pipeline.CooperativeGroup(pipeline.Agent.Thread)
-        q_pipeline = pipeline.PipelineTmaAsync.create(
-            barrier_storage=storage.q_mbar.data_ptr(),
-            num_stages=NUM_Q_STAGES,
-            producer_group=prod_group,
-            consumer_group=pipeline.CooperativeGroup(pipeline.Agent.Thread, 8),
-            tx_count=self.num_q_tma_bytes,
-            cta_layout_vmnk=cluster_layout_vmnk,
-            tidx=tidx,
-            defer_sync=True,
-        )
-        # Per group: a KV ring, a TMEM accumulator and a ring of score planes; the
-        # math warpgroup's handles are on its own group's (math_ring).
-        kv_cons_group = pipeline.CooperativeGroup(pipeline.Agent.Thread, 4)
-        kv_pipeline_0, kv_pipeline_1, kv_pipeline_math, math_ring = (
-            make_group_pipelines(
-                pipeline.PipelineTmaAsync.create,
-                storage.kv_mbar.data_ptr,
-                lambda g: g * NUM_KV_STAGES * 2,
-                lambda: min(warpgroup_idx, Int32(1)),
-                num_stages=NUM_KV_STAGES,
-                producer_group=prod_group,
-                consumer_group=kv_cons_group,
-                tx_count=self.num_kv_scale_tma_bytes,
-                cta_layout_vmnk=cluster_layout_vmnk,
-                tidx=tidx,
-                defer_sync=True,
-            )
-        )
-        umma_cons_group = pipeline.CooperativeGroup(
-            pipeline.Agent.Thread, NUM_MATH_THREADS // 2
-        )
-        umma_pipeline_0, umma_pipeline_1, umma_pipeline_math, _ = make_group_pipelines(
-            create_umma_pipeline,
-            storage.umma_mbar.data_ptr,
-            lambda g: g * NUM_UMMA_STAGES * 2,
+        (
+            q_pipeline,
+            (kv_pipeline_0, kv_pipeline_1),
+            kv_pipeline_math,
+            (umma_pipeline_0, umma_pipeline_1),
+            umma_pipeline_math,
             math_ring,
-            consumer_group=umma_cons_group,
-            cta_layout_vmnk=cluster_layout_vmnk,
+        ) = make_q_kv_umma_pipelines(
+            storage,
+            NUM_KV_STAGES,
+            self.num_q_tma_bytes,
+            self.num_kv_scale_tma_bytes,
+            cluster_layout_vmnk,
+            tidx,
+            warpgroup_idx,
         )
         store_group = pipeline.CooperativeGroup(pipeline.Agent.Thread, 128)
         store_pipeline_0, store_pipeline_1, store_pipeline_math, _ = (

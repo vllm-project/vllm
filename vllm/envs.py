@@ -1136,9 +1136,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Kernel of the fused MQA-logits + top-k prefill path (VLLM_USE_FUSED_MQA_TOPK):
     # "native": vLLM's fused_mqa_topk op, SM100-family GPUs only.
-    # "flashtopk": FlashTopK (model_executor/kernels/attention/dsa/flashtopk) for chunks
-    # of at least 128K keys, where it prunes keys, and the native op below; on
-    # SM90 (no native op) FlashTopK for every chunk. Default: "native".
+    # "flashtopk": FlashTopK (model_executor/kernels/attention/dsa/flashtopk) on
+    # SM90 and SM100-family GPUs for chunks where its key pruning applies (>=128K
+    # keys and enough query rows to fill the SMs), falling back to the native op on
+    # SM100 or the dense path on SM90. Default: "native".
     "VLLM_FUSED_MQA_TOPK_BACKEND": env_with_choices(
         "VLLM_FUSED_MQA_TOPK_BACKEND", "native", ["native", "flashtopk"]
     ),

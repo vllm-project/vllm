@@ -64,48 +64,6 @@ def ceil_f32(x, *, loc=None, ip=None) -> Float32:
 
 
 @dsl_user_op
-def bit_length_u32(x, *, loc=None, ip=None) -> Int32:
-    """32 - clz(x): the bits x needs (0 for 0)."""
-    clz = Int32(
-        _asm(
-            Int32.mlir_type,
-            [cutlass.Uint32(x)],
-            "clz.b32 $0, $1;",
-            "=r,r",
-            loc=loc,
-            ip=ip,
-        )
-    )
-    return Int32(32) - clz
-
-
-@dsl_user_op
-def atomic_min_shared_u32(smem_addr, value, *, loc=None, ip=None) -> None:
-    _asm(
-        Int32.mlir_type,
-        [Int32(smem_addr), cutlass.Uint32(value)],
-        "atom.shared.min.u32 $0, [$1], $2;",
-        "=r,r,r",
-        True,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def atomic_max_shared_u32(smem_addr, value, *, loc=None, ip=None) -> None:
-    _asm(
-        Int32.mlir_type,
-        [Int32(smem_addr), cutlass.Uint32(value)],
-        "atom.shared.max.u32 $0, [$1], $2;",
-        "=r,r,r",
-        True,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
 def red_add_shared_u32(smem_addr, value, *, loc=None, ip=None) -> None:
     """A shared-memory add whose old value is not needed."""
     llvm.inline_asm(
@@ -170,19 +128,6 @@ def atomic_add_global_u64(address, value, *, loc=None, ip=None) -> cutlass.Int64
 
 
 @dsl_user_op
-def atomic_max_global_u64(address, value, *, loc=None, ip=None) -> None:
-    _asm(
-        cutlass.Int64.mlir_type,
-        [cutlass.Int64(address), cutlass.Int64(value)],
-        "atom.global.max.u64 $0, [$1], $2;",
-        "=l,l,l",
-        True,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
 def f32_bits(x, *, loc=None, ip=None) -> cutlass.Uint32:
     return cutlass.Uint32(
         llvm.bitcast(
@@ -237,23 +182,6 @@ def block_sum_i32(value, sScratch, tid) -> Int32:
         total = total + sScratch[w]
     cute.arch.sync_threads()
     return total
-
-
-@cute.jit
-def block_max_i32(value, sScratch, tid) -> Int32:
-    """The maximum over the block's THREADS threads (every thread gets it); sScratch
-    holds WARPS ints."""
-    v = value
-    for off in cutlass.range_constexpr(5):
-        v = max(v, cute.arch.shuffle_sync_bfly(v, 1 << off))
-    if tid % 32 == 0:
-        sScratch[tid // 32] = v
-    cute.arch.sync_threads()
-    m = sScratch[0]
-    for w in cutlass.range_constexpr(1, WARPS):
-        m = max(m, sScratch[w])
-    cute.arch.sync_threads()
-    return m
 
 
 @cute.jit

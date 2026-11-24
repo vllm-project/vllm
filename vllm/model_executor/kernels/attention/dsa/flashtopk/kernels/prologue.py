@@ -99,14 +99,11 @@ class Decide:
         scan_ks: cute.Tensor,
         prune_ks: cute.Tensor,
         flag: cute.Tensor,
-        estimate: cute.Tensor,
         num_q: Int32,
         threshold: Float32,
         stream: cuda.CUstream,
     ):
-        self.kernel(
-            est, ks, ke, scan_ks, prune_ks, flag, estimate, num_q, threshold
-        ).launch(
+        self.kernel(est, ks, ke, scan_ks, prune_ks, flag, num_q, threshold).launch(
             grid=((num_q + THREADS - 1) // THREADS, 1, 1),
             block=[THREADS, 1, 1],
             stream=stream,
@@ -121,7 +118,6 @@ class Decide:
         mScanKs,
         mPruneKs,
         mFlag,
-        mEstimate,
         num_q: Int32,
         threshold: Float32,
     ):
@@ -164,7 +160,6 @@ class Decide:
         prune = share <= threshold
         if (bid == 0) & (tid == 0):
             mFlag[0] = select_i32(prune, Int32(1), Int32(0))
-            mEstimate[0] = share
         r = bid * THREADS + tid
         if r < num_q:
             s = mKs[r]

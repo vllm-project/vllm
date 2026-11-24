@@ -35,7 +35,6 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 )
 from vllm.model_executor.kernels.attention.dsa.flashtopk import (
     FLASHTOPK_WARMUP,
-    flashtopk_workspace_specs,
     reserve_flashtopk,
 )
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
@@ -671,10 +670,6 @@ def sparse_attn_indexer(
                 total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
             )
             profile_specs.extend(gather_spec * 2)
-        if fused_mqa_topk:
-            profile_specs += flashtopk_workspace_specs(
-                q_quant.device, q_quant.shape[0], total_seq_lens, topk_tokens
-            )
         current_workspace_manager().get_simultaneous(*profile_specs)
         if fused_mqa_topk:
             # Allocate the largest fused_mqa_topk workspaces so they are
@@ -847,24 +842,11 @@ def sparse_attn_indexer(
                 gather_specs.extend(
                     _gather_workspace_shapes(rows, head_dim, fp8_dtype, use_fp4_cache)
                 )
-        # FlashTopK's scratch, beside the gathered K its calls read.
-        fused_specs = (
-            flashtopk_workspace_specs(
-                q_quant.device,
-                max(c.token_end - c.token_start for c in prefill_metadata.chunks),
-                total_seq_lens,
-                topk_tokens,
-            )
-            if fused_mqa_topk
-            else []
-        )
         k_quant_full, k_scale_full, *gather_bufs = workspace_manager.get_simultaneous(
             values_spec,
             scales_spec,
             *gather_specs,
-            *fused_specs,
         )
-        fused_workspace = gather_bufs.pop() if fused_specs else None
         # Under ShardQ the chunks index the shardq_gather_indices tokens. The
         # caller may have computed the query and weights of just those.
         prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
@@ -940,7 +922,7 @@ def sparse_attn_indexer(
                     cu_seqlen_ks,
                     cu_seqlen_ke,
                     topk_indices,
-                    fused_workspace,
+                    max_seqlen_k=chunk.max_seqlen_k,
                 )
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
             else:

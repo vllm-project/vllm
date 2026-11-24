@@ -154,7 +154,6 @@ class Selector:
         self._scan_ks = torch.empty(max_rows, **i32)
         self._prune_ks = torch.empty(max_rows, **i32)
         self._flag = torch.zeros(1, **i32)
-        self._estimate = torch.zeros(1, **f32)
         self._health = torch.zeros(HEALTH_WORDS, dtype=torch.int64, device=dev)
         self._bad_rows = torch.zeros(RECOVERY_ROWS, **i32)
         self._recovery = Recovery(max_rows, self.topk, dev)
@@ -179,13 +178,20 @@ class Selector:
     def _carve(self, take: _Take, num_q: int, seq_len_kv: int) -> SimpleNamespace:
         """The scratch of one pass over num_q rows and seq_len_kv keys, from take."""
         topk, stage = self.topk, stage_rows(seq_len_kv)
+        index = (
+            self.device.index
+            if self.device.index is not None
+            else torch.accelerator.current_device_index()
+        )
+        can_prune = planner.adaptive_threshold(index, num_q, seq_len_kv) > 0.0
         return SimpleNamespace(
             arena=take((_arena_elements(num_q, seq_len_kv, topk),), torch.float32),
-            scores=take((num_q, topk), torch.float32),
             stage_scores=take((stage, topk), torch.float32),
             stage_indices=take((stage, topk), torch.int32),
-            plan=planner.plan_scratch(take, num_q, seq_len_kv),
-            mask=take(launch.mask_shape(num_q, seq_len_kv), torch.int32),
+            plan=planner.plan_scratch(take, num_q, seq_len_kv) if can_prune else None,
+            mask=take(launch.mask_shape(num_q, seq_len_kv), torch.int32)
+            if can_prune
+            else None,
         )
 
     def _check(self, q, kv, weights, ks, ke, kv_scales, out):
@@ -256,7 +262,7 @@ class Selector:
         num_samples = sample_count(seq_len_kv)
         width = math.ceil(num_samples / 4) * 4
         s = self._carve(_Take(scratch), num_q, seq_len_kv)
-        arena, scores = s.arena, s.scores
+        arena = s.arena
         sample = arena[: num_q * width].view(num_q, width)
         cand_val = arena[: num_q * cap].view(num_q, cap)
         cand_idx = (
@@ -269,7 +275,7 @@ class Selector:
         seed_topk = min(topk + SEED_MARGIN, cap)
         gate = (origin, inv_delta, th_bucket, cand_val, cand_idx, cand_cnt)
 
-        with torch.cuda.device(q.device), launch.sm90_q_scope(q):
+        with torch.accelerator.device_index(q.device.index), launch.sm90_q_scope(q):
             launch.sample_scores(
                 q, kv, kv_scales, weights, ks, ke, num_samples, sample, cand_cnt, lo,
                 hi, health,
@@ -278,7 +284,8 @@ class Selector:
                 sample, ks, ke, lo, hi, seed_topk, GATE_SLACK * topk,
                 min(K_MIN, seed_topk), origin, inv_delta, th_bucket, cand_cnt,
             )  # fmt: skip
-            if seq_len_kv < planner.ADAPTIVE_MIN_KEYS:
+            threshold = planner.adaptive_threshold(q.device.index, num_q, seq_len_kv)
+            if threshold <= 0.0:
                 launch.scan(q, kv, kv_scales, weights, ks, ke, *gate)
             else:
                 # Both paths launch; the scan sees empty windows when the call prunes,
@@ -286,7 +293,7 @@ class Selector:
                 scan_ks, prune_ks = self._scan_ks[:num_q], self._prune_ks[:num_q]
                 plan = planner.adaptive_estimate(
                     q, weights, kv, kv_scales, ks, ke, origin, inv_delta, th_bucket,
-                    self._flag, scan_ks, prune_ks, self._estimate, s.plan,
+                    self._flag, scan_ks, prune_ks, threshold, s.plan,
                 )  # fmt: skip
                 launch.scan(q, kv, kv_scales, weights, scan_ks, ke, *gate)
                 q_prune, w_prune, allowance, knsc = planner.adaptive_finish(
@@ -297,10 +304,10 @@ class Selector:
                     prune_ks, ke, *gate, s.mask,
                 )  # fmt: skip
             launch.select(
-                cand_val, cand_idx, cand_cnt, ks, ke, scores, indices, health, bad_rows
+                cand_val, cand_idx, cand_cnt, ks, ke, indices, health, bad_rows
             )
             assert self._recovery is not None  # planned above
             self._recovery.run(
-                q, kv, kv_scales, weights, ks, ke, health, bad_rows, scores, indices,
+                q, kv, kv_scales, weights, ks, ke, health, bad_rows, indices,
                 arena, s.stage_scores, s.stage_indices,
             )  # fmt: skip

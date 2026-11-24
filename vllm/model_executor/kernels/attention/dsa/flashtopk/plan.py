@@ -6,44 +6,44 @@
 """Adaptive key pruning's planner: a score upper bound per row, and the estimate that
 decides whether a call prunes.
 
-A key can pass the gate only if its score does, so a cheap upper bound ``U >= s`` lets
+A key can pass the gate only if its score does, so a cheap upper bound `U >= s` lets
 the selection skip every key whose bound already fails the gate without changing a
-selected bit: the gate test ``fma(-inv, x, c0) < th + 1`` is non-increasing in ``x``, so
+selected bit: the gate test `fma(-inv, x, c0) < th + 1` is non-increasing in `x`, so
 a bound that fails it means a score that fails it. The kept keys are scored in full by
 the scan's own arithmetic (the refine kernels), so the candidates, and everything after
 them, are the scan's.
 
-The bound, after DoSA (arXiv 2610.13990, sections 2.2-2.5), for a row with heads ``q_h``
-and weights ``w_h`` and a key ``k`` with kv scale ``s_k``::
+The bound, after DoSA (arXiv 2610.13990, sections 2.2-2.5), for a row with heads `q_h`
+and weights `w_h` and a key `k` with kv scale `s_k`::
 
     U = s_k * (sum_{j in R} wt_j relu(q_j . k) - relu(a . k) + E ||k||)
 
-* ``R`` holds ``r = 14`` retained heads: the strongest positive ones by ``w_h ||q_h||``,
-  or every positive head and then the negative ones by ``|w_h| ||q_h|| min(p_h, 1 -
-  p_h)`` when there are at most ``r`` positive heads (``p_h``: the head's activation
+* `R` holds `r = 14` retained heads: the strongest positive ones by `w_h ||q_h||`,
+  or every positive head and then the negative ones by `|w_h| ||q_h|| min(p_h, 1 -
+  p_h)` when there are at most `r` positive heads (`p_h`: the head's activation
   rate on a key sample).
 * An omitted positive head is projected onto the retained head it is most aligned with,
-  ``q_h = alpha_h q_j + u_h``, ``alpha_h >= 0``. Then ``relu(q_h . k) <= alpha_h
-  relu(q_j . k) + relu(u_h . k)``: ``w_h alpha_h`` folds into ``wt_j``, and the
-  residuals are bounded together by ``sqrt(sum_{h,g} max(0, w_h u_h . w_g u_g)) ||k||``
-  (or ``sum_h w_h ||u_h|| ||k||`` when smaller).
+  `q_h = alpha_h q_j + u_h`, `alpha_h >= 0`. Then `relu(q_h . k) <= alpha_h
+  relu(q_j . k) + relu(u_h . k)`: `w_h alpha_h` folds into `wt_j`, and the
+  residuals are bounded together by `sqrt(sum_{h,g} max(0, w_h u_h . w_g u_g)) ||k||`
+  (or `sum_h w_h ||u_h|| ||k||` when smaller).
 * Omitted negative heads only subtract. Those active on at least half of the sample are
-  aggregated, ``a = sum |w_h| q_h``; by subadditivity ``relu(a . k)`` is at most what
+  aggregated, `a = sum |w_h| q_h`; by subadditivity `relu(a . k)` is at most what
   they subtract. The aggregate goes to the kernels as two rows of the operand type, a
-  high part and its rounding error; what is left of that error joins ``E``.
-* ``E`` also carries the FP32 rounding of ``wt`` and ``a`` and ``SCREEN_ROUNDING`` of
+  high part and its rounding error; what is left of that error joins `E`.
+* `E` also carries the FP32 rounding of `wt` and `a` and `SCREEN_ROUNDING` of
   both sides' weight mass: the kernels' dot products and the scan's are both within
-  ``(gamma_{H+1} + gamma_128 + 2u) s ||k|| M`` of exact.
+  `(gamma_{H+1} + gamma_128 + 2u) s ||k|| M` of exact.
 
 Adaptive pruning estimates, before the scan, how much of the KV the refine would score:
-the refine scores a key for all ``EST_GROUP`` rows of a row group once any of them keeps
+the refine scores a key for all `EST_GROUP` rows of a row group once any of them keeps
 it, so the estimate is the share of the in-window sampled keys whose bound passes the
 seed gate of some row of their group, pooled over the sampled groups (one in
-``EST_GROUPS``, at most ``EST_MAX_GROUPS``). Trained rows keep nearly the same keys as
+`EST_GROUPS`, at most `EST_MAX_GROUPS`). Trained rows keep nearly the same keys as
 their neighbors, untrained ones do not, so one row's share says little about its
 group's: a group's union can be 2-3 times its rows' shares. The call prunes when the
-estimate is at or below ``adaptive_threshold``, where pruning's predicted cost
-(``PRUNE_COSTS``) meets the scan's, otherwise it scans every key. The GPU decides: the
+estimate is at or below `adaptive_threshold`, where pruning's predicted cost
+(`PRUNE_COSTS`) meets the scan's, otherwise it scans every key. The GPU decides: the
 estimate never reaches the host, both paths launch and the one not taken sees empty
 windows.
 """
@@ -52,14 +52,22 @@ from __future__ import annotations
 
 import functools
 import logging
+import math
 from types import SimpleNamespace
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import tl, triton
 
 from .kernels import launch
-from .kernels.common import HEAD_DIM
+from .kernels.common import (
+    BLOCK_KV,
+    HEAD_DIM,
+    NEXT_N,
+    PRUNE_BLOCK_Q,
+    REFINE_BLOCK_Q,
+    REFINE_MAX_BLOCKS,
+)
 from .kernels.prologue import EST_GROUP, EST_WORDS
 
 # The pruning kernels' columns per row: the retained heads and the negative aggregate's
@@ -445,7 +453,7 @@ class _Plan:
         self.args = (q, weights, ks, ke, origin, inv_delta, th_bucket)
 
     def rows(self, num_q: int, estimate: bool, flag: torch.Tensor | None) -> None:
-        """Plan the estimate groups' rows (estimate), else every row; with ``flag``, the
+        """Plan the estimate groups' rows (estimate), else every row; with `flag`, the
         rows the estimate pass left, if it is set."""
         q, weights, ks, ke, origin, inv_delta, th_bucket = self.args
         _plan_kernel[(self.est_rows if estimate else self.padded,)](
@@ -536,11 +544,32 @@ def prune_costs(device_index: int) -> tuple[float, float, float]:
 
 
 @functools.lru_cache(maxsize=4096)
-def adaptive_threshold(device_index: int, seq_len_kv: int) -> float:
+def adaptive_threshold(device_index: int, num_q: int, seq_len_kv: int) -> float:
     """The group estimate at or below which a call prunes: where pruning's predicted
-    cost meets the scan's, p * 128K / L + c + b * U = 1."""
+    cost meets the scan's, accounting for each stage's CTA wave count."""
+    if seq_len_kv < ADAPTIVE_MIN_KEYS or num_q <= 0:
+        return 0.0
+    sms = launch.sm_count(device_index)
+    ss = launch.scan_kv_splits(num_q, seq_len_kv, sms)
+    ws = math.ceil(math.ceil(num_q / NEXT_N) * ss / sms)
+    ps = launch.prune_kv_splits(num_q, seq_len_kv, PRUNE_BLOCK_Q, 1, sms)
+    wp = math.ceil(math.ceil(num_q / PRUNE_BLOCK_Q) * ps / sms)
+    mask_blocks = math.ceil(seq_len_kv / BLOCK_KV)
+    rs = launch.prune_kv_splits(
+        num_q,
+        seq_len_kv,
+        REFINE_BLOCK_Q,
+        math.ceil(mask_blocks / REFINE_MAX_BLOCKS),
+        sms,
+    )
+    wr = math.ceil(math.ceil(num_q / REFINE_BLOCK_Q) * rs / sms)
+    rp = max(1.0, 2.0 * (wp * ss) / (ws * ps))
+    rr = max(1.0, (wr * ss) / (ws * rs))
+    rplan = max(1.0, (math.ceil(num_q / sms) * ss) / (8.0 * ws))
     p, c, b = prune_costs(device_index)
-    return min(max((1.0 - p * 131072 / seq_len_kv - c) / b, 0.0), 1.0)
+    return min(
+        max((1.0 - p * rplan * 131072 / seq_len_kv - c * rp) / (b * rr), 0.0), 1.0
+    )
 
 
 def adaptive_estimate(
@@ -556,22 +585,19 @@ def adaptive_estimate(
     flag,
     scan_ks,
     prune_ks,
-    estimate,
+    threshold: float,
     scratch,
 ):
-    """The plan of the estimate groups' rows, then the GPU's choice: ``flag`` (int32[1])
-    set when this call's group estimate is at or below ``adaptive_threshold``,
-    ``scan_ks`` / ``prune_ks`` the windows' starts for the scan and for the pruning
-    kernels (the row's own on the path chosen, past its end on the other); ``estimate``
-    (FP32[1]) receives the estimate; ``scratch`` (plan_scratch) holds the plan. Returns
-    the plan, which ``adaptive_finish`` completes."""
+    """The plan of the estimate groups' rows, then the GPU's choice: `flag` (int32[1])
+    set when this call's group estimate is at or below `threshold`, and `scan_ks` /
+    `prune_ks` set to the windows' starts on the path chosen and past their ends on the
+    other. Returns the plan, which `adaptive_finish` completes."""
     num_q = q.shape[0]
     plan = _Plan(
         q, weights, kv, kv_scales, ks, ke, origin, inv_delta, th_bucket, scratch
     )
     plan.rows(num_q, True, None)
-    threshold = adaptive_threshold(q.device.index, kv.shape[0])
-    launch.decide(plan.est, ks, ke, scan_ks, prune_ks, flag, threshold, estimate)
+    launch.decide(plan.est, ks, ke, scan_ks, prune_ks, flag, threshold)
     return plan
 
 

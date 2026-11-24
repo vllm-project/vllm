@@ -108,6 +108,111 @@ def setup_umma(kernel: UmmaKernel, a_dtype, b_dtype, a_major, b_major, num_a_sta
     return tiled_mma
 
 
+def make_kv_q_operands(kernel: UmmaKernel, kv, q, seq_len_kv, num_kv_stages: int):
+    """Host TMA setup shared by ScanSm100 and PruneSm100: tiled UMMA, staged KV and
+    single-stage Q TMA atoms and tensors, and the Q SMEM slice."""
+    kv_typed = cute.recast_tensor(kv, cutlass.Float8E4M3FN)
+    b = cute.recast_tensor(q, cutlass.Float8E4M3FN)
+    a = cute.make_tensor(
+        kv_typed.iterator,
+        cute.make_layout(
+            (seq_len_kv, HEAD_DIM, 1), stride=(kv_typed.layout.stride[0], 1, 0)
+        ),
+    )
+    tiled_mma = setup_umma(
+        kernel,
+        a.element_type,
+        b.element_type,
+        utils.LayoutEnum.from_tensor(a).mma_major_mode(),
+        utils.LayoutEnum.ROW_MAJOR.mma_major_mode(),
+        num_kv_stages,
+    )
+    tma_atom_a, tma_tensor_a = cute.nvgpu.make_tiled_tma_atom_A(
+        blackwell.cluster_shape_to_tma_atom_A(CLUSTER_SHAPE_MN, tiled_mma.thr_id),
+        a,
+        kernel.a_smem_layout_staged,
+        kernel.mma_tiler,
+        tiled_mma,
+        kernel.cluster_layout_vmnk.shape,
+    )
+    b_smem_layout = cute.slice_(kernel.b_smem_layout_staged, (None, None, None, 0))
+    tma_atom_b, tma_tensor_b = cute.nvgpu.make_tiled_tma_atom_B(
+        blackwell.cluster_shape_to_tma_atom_B(CLUSTER_SHAPE_MN, tiled_mma.thr_id),
+        b,
+        b_smem_layout,
+        kernel.mma_tiler,
+        tiled_mma,
+        kernel.cluster_layout_vmnk.shape,
+    )
+    return (
+        tiled_mma,
+        tma_atom_a,
+        tma_tensor_a,
+        tma_atom_b,
+        tma_tensor_b,
+        b.element_type,
+        b_smem_layout,
+    )
+
+
+@cute.jit
+def make_q_kv_umma_pipelines(
+    storage,
+    num_kv_stages: cutlass.Constexpr,
+    q_tx_bytes: cutlass.Constexpr,
+    kv_tx_bytes: cutlass.Constexpr,
+    cluster_layout_vmnk,
+    tidx,
+    warpgroup_idx,
+):
+    """Single-stage Q TMA pipeline, per-group KV TMA pipelines, and per-group UMMA
+    pipelines for ScanSm100 and PruneSm100."""
+    prod_group = pipeline.CooperativeGroup(pipeline.Agent.Thread)
+    q_pipeline = pipeline.PipelineTmaAsync.create(
+        barrier_storage=storage.q_mbar.data_ptr(),
+        num_stages=1,
+        producer_group=prod_group,
+        consumer_group=pipeline.CooperativeGroup(pipeline.Agent.Thread, 8),
+        tx_count=q_tx_bytes,
+        cta_layout_vmnk=cluster_layout_vmnk,
+        tidx=tidx,
+        defer_sync=True,
+    )
+    kv_cons_group = pipeline.CooperativeGroup(pipeline.Agent.Thread, 4)
+    kv_0, kv_1, kv_math, math_ring = make_group_pipelines(
+        pipeline.PipelineTmaAsync.create,
+        storage.kv_mbar.data_ptr,
+        lambda g: g * num_kv_stages * 2,
+        lambda: min(warpgroup_idx, Int32(1)),
+        num_stages=num_kv_stages,
+        producer_group=prod_group,
+        consumer_group=kv_cons_group,
+        tx_count=kv_tx_bytes,
+        cta_layout_vmnk=cluster_layout_vmnk,
+        tidx=tidx,
+        defer_sync=True,
+    )
+    umma_cons_group = pipeline.CooperativeGroup(
+        pipeline.Agent.Thread, NUM_MATH_THREADS // 2
+    )
+    umma_0, umma_1, umma_math, _ = make_group_pipelines(
+        create_umma_pipeline,
+        storage.umma_mbar.data_ptr,
+        lambda g: g * 2,
+        math_ring,
+        consumer_group=umma_cons_group,
+        cta_layout_vmnk=cluster_layout_vmnk,
+    )
+    return (
+        q_pipeline,
+        (kv_0, kv_1),
+        kv_math,
+        (umma_0, umma_1),
+        umma_math,
+        math_ring,
+    )
+
+
 def make_tmem_allocator(holding_buf):
     """Warp 0 allocates; the math warps and the UMMA warp retrieve the address."""
     return utils.TmemAllocator(

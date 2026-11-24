@@ -15,7 +15,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.kernels.attention.dsa.flashtopk import (
     FLASHTOPK_WARMUP,
-    flashtopk_workspace_specs,
     reserve_flashtopk,
 )
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
@@ -177,18 +176,10 @@ def sparse_attn_indexer_kpool(
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
-        fused_specs = (
-            flashtopk_workspace_specs(
-                q_quant.device, q_quant.shape[0], total_seq_lens, fused_topk
-            )
-            if fused_mqa_topk
-            else []
-        )
         current_workspace_manager().get_simultaneous(
             values_spec,
             scales_spec,
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
-            *fused_specs,
         )
         # Allocate the largest fused_mqa_topk workspaces so they are accounted
         # for (freed again, they overlap the dense logits below).
@@ -386,23 +377,10 @@ def sparse_attn_indexer_kpool(
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
-        # FlashTopK's scratch, beside the gathered K its calls read.
-        fused_specs = (
-            flashtopk_workspace_specs(
-                q_quant.device,
-                max(c.token_end - c.token_start for c in prefill_metadata.chunks),
-                total_seq_lens,
-                fused_topk,
-            )
-            if fused_mqa_topk and prefill_metadata.chunks
-            else []
-        )
-        k_quant_full, k_scale_full, *fused_bufs = workspace_manager.get_simultaneous(
+        k_quant_full, k_scale_full = workspace_manager.get_simultaneous(
             values_spec,
             scales_spec,
-            *fused_specs,
         )
-        fused_workspace = fused_bufs[0] if fused_bufs else None
         for chunk in prefill_metadata.chunks if not short_prefill else ():
             # Under DCP this rank only gathers the pools it owns.
             assert chunk.local_cu_seq_lens is not None
@@ -469,7 +447,7 @@ def sparse_attn_indexer_kpool(
                     cu_seqlen_ks,
                     cu_seqlen_ke,
                     topk_dst,
-                    fused_workspace,
+                    max_seqlen_k=chunk.max_seqlen_k,
                 )
                 logits = q_slice.new_empty((num_rows, 0), dtype=torch.float32)
             else:

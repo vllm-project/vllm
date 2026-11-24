@@ -34,15 +34,18 @@ from .common import (
     BLOCK_KV,
     HEAD_DIM,
     NUM_HEADS,
-    cp_async_4,
-    cp_async_16,
-    find_nth_set,
-    load_global_v4_b32,
     loose_raw_gate,
+    refine_gather,
     select_f32,
     select_i32,
 )
 from .common import REFINE_BLOCK_Q as BLOCK_Q
+from .common import (
+    REFINE_MAX_BLOCKS as MAX_BLOCKS,
+)
+from .common import (
+    REFINE_STAGES as RING_STAGES,
+)
 from .scan_sm90 import (
     append_owned,
     fill_head_table,
@@ -69,21 +72,9 @@ from .sm90_utils import (
     wgmma_in_turn,
 )
 
-TILE_KEYS = WGMMA_KEYS  # keys of a compact tile: the WGMMA's M
-RING_STAGES = 4  # compact tiles in flight: gather warp w fills stage w
-N = BLOCK_Q * NUM_HEADS  # the WGMMA's N: the tile's rows x heads
-ROW_BYTES = HEAD_DIM  # an FP8 K row
-GATHER_THREADS = WARPGROUP_THREADS  # warps 8-11
-GATHER_BARRIER = 4  # named barrier of the gather warpgroup
-# Mask blocks a CTA's range may span: its survivor prefix is in shared memory.
-MAX_BLOCKS = 16384
-
-
-def _swizzled(slot, chunk):
-    """Byte offset of 16-byte chunk `chunk` (< 8) of row `slot` in a 64-row K-major
-    tile of 128-byte FP8 rows with the 128-byte swizzle: each row's chunks XOR-ed with
-    its row mod 8."""
-    return slot * 128 + (((slot % 8) ^ (chunk % 8)) * 16)
+TILE_KEYS = WGMMA_KEYS
+N = BLOCK_Q * NUM_HEADS
+GATHER_BARRIER = 4
 
 
 class RefineSm90:
@@ -284,10 +275,10 @@ class RefineSm90:
                 cute.arch.mbarrier_init(q_bar, 1)
                 cute.arch.mbarrier_init(count_bar, 1)
                 for i in cutlass.range_constexpr(RING_STAGES):
-                    # Its gather warp, once the copies have landed.
-                    cute.arch.mbarrier_init(full_tile + i, 1)
-                    # The consuming group's warps, done with it.
-                    cute.arch.mbarrier_init(empty_tile + i, WARPS_PER_GROUP)
+                    # All 32 lanes of its gather warp, once the copies have landed.
+                    cute.arch.mbarrier_init(full_tile + i, 32)
+                    # All threads of the consuming warpgroup, done with it.
+                    cute.arch.mbarrier_init(empty_tile + i, WARPGROUP_THREADS)
                 cute.arch.mbarrier_init_fence()
             if tidx < BLOCK_Q:
                 row_q = query_start + tidx
@@ -332,7 +323,7 @@ class RefineSm90:
                             )
                         cute.arch.sync_warp()
                         issue_q_tma(q_tma, q_bar)
-                    self._gather(
+                    refine_gather(
                         tidx - MATH_THREADS,
                         warp_idx - PRODUCER_WARP,
                         lane,
@@ -351,6 +342,8 @@ class RefineSm90:
                         count_bar,
                         full_tile,
                         empty_tile,
+                        TILE_KEYS,
+                        GATHER_BARRIER,
                     )
             else:
                 cute.arch.setmaxregister_increase(self.math_regs)
@@ -381,153 +374,6 @@ class RefineSm90:
                 )
                 if cutlass.const_expr(self.single_split):
                     store_row_counts(sCnt, tidx, query_start, num_q, mCandCnt, BLOCK_Q)
-
-    @cute.jit
-    def _gather(
-        self,
-        gt,
-        gw,
-        lane,
-        nb,
-        kv_start,
-        q_tile,
-        mask_blocks,
-        mMask,
-        mKV,
-        mScales,
-        sPrefix,
-        sTile,
-        sMetaIdx,
-        sMetaScale,
-        sCounts,
-        count_bar,
-        full_tile,
-        empty_tile,
-    ):
-        """Gather thread gt (warp gw): survivors per mask block into an exclusive
-        prefix, then compact tiles t = gw (mod RING_STAGES)."""
-        mask_base = (
-            mMask.iterator.toint()
-            + (cutlass.Int64(q_tile) * mask_blocks + kv_start // BLOCK_KV) * 16
-        )
-        # Each gather thread counts a run of consecutive mask blocks.
-        run = (nb + (GATHER_THREADS - 1)) // GATHER_THREADS
-        b_lo = min(gt * run, nb)
-        b_hi = min(b_lo + run, nb)
-        local = Int32(0)
-        for blk in cutlass.range(b_lo, b_hi, 4, unroll=1):
-            words = [
-                load_global_v4_b32(
-                    mask_base + cutlass.Int64(min(blk + u, b_hi - 1)) * 16
-                )
-                for u in range(4)
-            ]
-            for u in cutlass.range_constexpr(4):
-                c = Int32(0)
-                for word in words[u]:
-                    c = c + Int32(cute.arch.popc(word))
-                in_run = blk + u < b_hi
-                if in_run:
-                    sPrefix[blk + u] = c
-                local = local + select_i32(in_run, c, 0)
-        incl = local
-        for off in cutlass.range_constexpr(5):
-            up = cute.arch.shuffle_sync_up(incl, 1 << off, mask_and_clamp=0)
-            if lane >= (1 << off):
-                incl = incl + up
-        if lane == 31:
-            sCounts[1 + gw] = incl
-        cute.arch.barrier(barrier_id=GATHER_BARRIER, number_of_threads=GATHER_THREADS)
-        base = Int32(0)
-        total = Int32(0)
-        for i in cutlass.range_constexpr(4):
-            v = sCounts[1 + i]
-            base = base + select_i32(i < gw, v, 0)
-            total = total + v
-        running = base + incl - local
-        for blk in cutlass.range(b_lo, b_hi, unroll=1):
-            c = sPrefix[blk]
-            sPrefix[blk] = running
-            running = running + c
-        if gt == 0:
-            sPrefix[nb] = total
-        cute.arch.barrier(barrier_id=GATHER_BARRIER, number_of_threads=GATHER_THREADS)
-        if gt == 0:
-            # Review fix (changes codegen): sCounts[0] is written only after the second
-            # barrier, so it no longer races (WAR) with the other gather threads' reads
-            # of sCounts[1..4] above. The math warps read it after waiting on count_bar,
-            # which this arrive publishes it with.
-            sCounts[0] = total
-            cute.arch.mbarrier_arrive(count_bar)
-
-        tiles = (total + TILE_KEYS - 1) // TILE_KEYS
-        tile_bytes = TILE_KEYS * ROW_BYTES
-        smem_base = sTile.iterator.toint()
-        scale_smem = sMetaScale.iterator.toint()
-        kv_base = mKV.iterator.toint()
-        scale_base = mScales.iterator.toint()
-        i0, i1 = Int32(0), Int32(0)
-        if gw < tiles:
-            i0, i1 = self._locate(gw, lane, nb, kv_start, total, mask_base, sPrefix)
-        for t in cutlass.range(gw, tiles, RING_STAGES, unroll=1):
-            s = t % RING_STAGES
-            cute.arch.mbarrier_wait(empty_tile + s, (t // RING_STAGES) % 2 ^ 1)
-            keys = (i0, i1)
-            for j in cutlass.range_constexpr(2):
-                slot = j * 32 + lane
-                if t * TILE_KEYS + slot < total:
-                    src = kv_base + cutlass.Int64(keys[j]) * ROW_BYTES
-                    dst = smem_base + s * tile_bytes
-                    for chunk in cutlass.range_constexpr(ROW_BYTES // 16):
-                        cp_async_16(dst + _swizzled(slot, chunk), src + chunk * 16)
-                    sMetaIdx[(s, slot)] = keys[j]
-                    cp_async_4(
-                        scale_smem + (s * TILE_KEYS + slot) * 4,
-                        scale_base + cutlass.Int64(keys[j]) * 4,
-                    )
-            cute.arch.cp_async_commit_group()
-            cute.arch.cp_async_wait_group(0)
-            cute.arch.fence_view_async_shared()
-            cute.arch.sync_warp()
-            if lane == 0:
-                cute.arch.mbarrier_arrive(full_tile + s)
-            if t + RING_STAGES < tiles:
-                i0, i1 = self._locate(
-                    t + RING_STAGES, lane, nb, kv_start, total, mask_base, sPrefix
-                )
-
-    @cute.jit
-    def _locate(self, t, lane, nb, kv_start, total, mask_base, sPrefix):
-        """The keys of tile t's slots 32j + lane: the last block whose prefix is at most
-        the survivor's rank (ranks past the last survivor clamped to it), then the
-        rank's bit in the block's mask. The two searches interleave."""
-        g0 = min(t * TILE_KEYS + lane, total - 1)
-        g1 = min(t * TILE_KEYS + 32 + lane, total - 1)
-        b0, b1 = Int32(0), Int32(0)
-        length = nb
-        while length > 1:
-            half = length // 2
-            b0 = select_i32(sPrefix[b0 + half] <= g0, b0 + half, b0)
-            b1 = select_i32(sPrefix[b1 + half] <= g1, b1 + half, b1)
-            length = length - half
-        blks = (b0, b1)
-        words = [load_global_v4_b32(mask_base + cutlass.Int64(b) * 16) for b in blks]
-        keys = []
-        for j, g in enumerate((g0, g1)):
-            r = g - sPrefix[blks[j]]
-            w = words[j]
-            part = Int32(0)
-            word = w[0]
-            for i in cutlass.range_constexpr(3):
-                cnt = Int32(cute.arch.popc(word))
-                step = (part == i) & (r >= cnt)
-                r = select_i32(step, r - cnt, r)
-                part = select_i32(step, part + 1, part)
-                word = select_i32(step, w[i + 1], word)
-            keys.append(
-                kv_start + blks[j] * BLOCK_KV + part * 32 + find_nth_set(word, r + 1)
-            )
-        return keys[0], keys[1]
 
     @cute.jit
     def _math(
@@ -600,9 +446,7 @@ class RefineSm90:
                 scale0 = select_f32(valid0, sMetaScale[(s, key_lo)], Float32(0.0))
                 scale1 = select_f32(valid1, sMetaScale[(s, key_lo + 8)], Float32(0.0))
                 # The tile's operands and metadata are used: it may be refilled.
-                cute.arch.sync_warp()
-                if lane == 0:
-                    cute.arch.mbarrier_arrive(empty_tile + s)
+                cute.arch.mbarrier_arrive(empty_tile + s)
                 raws = score_owned(acc, sWq, lane, scale0, scale1)
                 takes, ballots = owned_hits(raws, key0, key1, gates, win_lo, win_len)
                 if c + 1 < count:
