@@ -177,3 +177,110 @@ def test_block_rows_from_fp8_config():
     assert _weight_block_rows(blocked, "x") == BLOCK
     assert _weight_block_rows(Fp8Config(is_checkpoint_fp8_serialized=True), "x") == 1
     assert _weight_block_rows(None, "x") == 1
+
+
+_SHARDS = ("q_a_proj", "kv_a_proj_with_mqa", "g_proj")
+
+
+class _FusedModel(torch.nn.Module):
+    """The fused projection loaded from per-projection checkpoint names, as
+    the Kimi-K3 model's stacked-params mapping does."""
+
+    def __init__(self, shape, quant_config):
+        super().__init__()
+        self.proj = _build(shape, quant_config)
+
+    def load_weights(self, weights):
+        for name, tensor in weights:
+            shard, suffix = name.split(".")
+            param = getattr(self.proj, suffix)
+            param.weight_loader(param, tensor.cuda(), _SHARDS.index(shard))
+        return {"proj.weight", "proj.weight_scale_inv"}
+
+
+def _named_checkpoint(shape, seed):
+    hidden, q_lora, kv_lora, rope, heads, v_head = shape
+    gen = torch.Generator().manual_seed(seed)
+    out = {}
+    for shard, rows in zip(_SHARDS, (q_lora, kv_lora + rope, heads * v_head)):
+        w, scale = _fp8_checkpoint_tensor(rows, hidden, gen)
+        out[f"{shard}.weight"], out[f"{shard}.weight_scale_inv"] = w, scale
+    return out
+
+
+@requires_cuda
+@pytest.mark.parametrize("planned", [False, True], ids=["direct", "load-plan"])
+@torch.inference_mode()
+def test_aligned_layout_survives_weight_reload(
+    dist_init, bf16_model, monkeypatch, planned
+):
+    """An in-place weight update (direct reload, with or without a load plan)
+    must leave the layer byte-identical to a cold start on the new weights,
+    padding rows included, at the same addresses."""
+    from vllm.distributed.weight_transfer.base import ParamMeta
+    from vllm.model_executor.model_loader.reload import (
+        finish_reload,
+        lifecycle,
+        load_planned,
+        plan_loads,
+        start_reload,
+    )
+    from vllm.model_executor.model_loader.reload.direct import track_loaded_params
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    monkeypatch.setattr(lifecycle, "_weight_update_active", False)
+    shape = SHAPES[0].values[0]
+    quant_config = Fp8Config(
+        is_checkpoint_fp8_serialized=True, weight_block_size=[BLOCK, BLOCK]
+    )
+    model_config = SimpleNamespace(
+        word_embeddings_untied_by_checkpoint=False,
+        quantization="fp8",
+        dtype=torch.bfloat16,
+    )
+    device = torch.device("cuda")
+
+    def cold_start(weights):
+        model = _FusedModel(shape, quant_config)
+        track_loaded_params(model)
+        model.load_weights(weights.items())
+        process_weights_after_loading(model, model_config, device)
+        return model
+
+    def state(model):
+        return {
+            n: (t.detach().clone(), t.data_ptr())
+            for n, t in [*model.named_parameters(), *model.named_buffers()]
+        }
+
+    model = cold_start(_named_checkpoint(shape, 0))
+    assert model.proj.latent_padding
+    ptrs = {n: p for n, (_, p) in state(model).items()}
+    plan = None
+    for seed in (1, 2):
+        weights = _named_checkpoint(shape, seed)
+        start_reload(model)
+        # Stale padding bytes must not survive the update (a load plan skips
+        # constant fills a loader makes).
+        proj = model.proj
+        proj.weight.data[proj.latent_rows : proj.gate_row_offset].view(
+            torch.uint8
+        ).fill_(0x7E)
+        if planned:
+            if plan is None:
+                meta = [
+                    ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in weights.items()
+                ]
+                plan = plan_loads(model, meta)
+            load_planned(model, plan, list(weights.items()))
+        else:
+            model.load_weights(weights.items())
+        finish_reload(model, model_config, device)
+        actual, expected = state(model), state(cold_start(weights))
+        assert actual.keys() == expected.keys()
+        for name, (data, ptr) in actual.items():
+            assert ptr == ptrs[name], f"{name} moved"
+            assert torch.equal(data, expected[name][0]), name
+        x = torch.randn(4, shape[0], device=device, dtype=torch.bfloat16)
+        torch.testing.assert_close(model.proj(x)[0], cold_start(weights).proj(x)[0])
