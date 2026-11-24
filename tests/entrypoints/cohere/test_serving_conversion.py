@@ -37,10 +37,12 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.renderers.chat_utils import parse_chat_messages
 from vllm.renderers.cohere import (
     MESSAGES_CITATIONS_KEY,
     POSITION_TO_SOURCE_KEY,
     TOOL_MESSAGE_V2_CONTENT_KEY,
+    _build_render_config,
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
@@ -1086,7 +1088,7 @@ class TestToolMessageV2ContentForwarding:
     forwards the *original* v2 content blocks -- as `model_dump`'d
     dicts -- to the renderer under
     `TOOL_MESSAGE_V2_CONTENT_KEY`. These tests pin the
-    forwarding contract (presence, dict-shape, index-alignment); the
+    forwarding contract (presence, dict-shape, call-ID alignment); the
     v2 → melody mapping the renderer applies to these blocks lives in
     `tests/renderers/test_cohere.py`.
     """
@@ -1140,10 +1142,9 @@ class TestToolMessageV2ContentForwarding:
                 },
             ]
         )
-        blocks_by_index = _forwarded_v2_content(req)
-        # Index 2 = the tool message (user=0, assistant=1, tool=2).
-        assert list(blocks_by_index.keys()) == [2]
-        assert blocks_by_index[2] == [
+        blocks_by_id = _forwarded_v2_content(req)
+        assert list(blocks_by_id) == ["c1"]
+        assert blocks_by_id["c1"][0] == [
             {"type": "text", "text": "K2 is 8611m."},
             {
                 "type": "document",
@@ -1157,7 +1158,9 @@ class TestToolMessageV2ContentForwarding:
         # the forwarded map -- msgpack can't serialize them, and even
         # for keys filtered out of the engine-core payload we want the
         # renderer to see plain data.
-        for block in blocks_by_index[2]:
+        blocks = blocks_by_id["c1"][0]
+        assert blocks is not None
+        for block in blocks:
             assert isinstance(block, dict)
 
     def test_forwarded_blocks_preserve_input_order(self):
@@ -1177,18 +1180,45 @@ class TestToolMessageV2ContentForwarding:
                 {"type": "text", "text": '{"parsed": "yes"}'},
             ]
         )
-        blocks = _forwarded_v2_content(req)[2]
+        blocks = _forwarded_v2_content(req)["c1"][0]
+        assert blocks is not None
         assert [b["type"] for b in blocks] == ["text", "document", "text"]
 
-    def test_index_matches_original_request_position(self):
-        # Entries are keyed by *request-message* index so the renderer,
-        # walking the OpenAI-shaped conversation with the same
-        # enumeration, resolves the right slot. If ``_convert_messages``
-        # ever splits or merges messages this invariant breaks, so pin
-        # the current 1-to-1 behavior with a two-tool-message request.
+    @pytest.mark.parametrize("repeat_id", [False, True])
+    def test_tool_documents_follow_call_ids_after_reordering(self, tmp_path, repeat_id):
+        from transformers import LlamaConfig
+
+        from vllm.config import ModelConfig
+
+        LlamaConfig(
+            architectures=["LlamaForCausalLM"], max_position_embeddings=128
+        ).save_pretrained(tmp_path)
+        model_config = ModelConfig(str(tmp_path), max_model_len=128)
         req = _make_request(
             messages=[
                 {"role": "user", "content": "hi"},
+                *(
+                    [
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "c1",
+                                    "type": "function",
+                                    "function": {"name": "f", "arguments": "{}"},
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "c1",
+                            "content": "earlier result",
+                        },
+                        {"role": "user", "content": "again"},
+                    ]
+                    if repeat_id
+                    else []
+                ),
                 {
                     "role": "assistant",
                     "tool_calls": [
@@ -1204,27 +1234,43 @@ class TestToolMessageV2ContentForwarding:
                         },
                     ],
                 },
-                {
-                    "role": "tool",
-                    "tool_call_id": "c1",
-                    "content": [{"type": "text", "text": "first result"}],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": "c2",
-                    "content": [{"type": "text", "text": "second result"}],
-                },
+                *[
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": [
+                            {"type": "document", "document": {"data": {"city": city}}}
+                        ],
+                    }
+                    for call_id, city in [("c2", "Rome"), ("c1", "Paris")]
+                ],
             ]
         )
-        blocks_by_index = _forwarded_v2_content(req)
-        assert sorted(blocks_by_index.keys()) == [2, 3]
-        assert blocks_by_index[2] == [{"type": "text", "text": "first result"}]
-        assert blocks_by_index[3] == [{"type": "text", "text": "second result"}]
+        converted = _convert(req)
+        conversation, _, _ = parse_chat_messages(
+            converted.messages, model_config, content_format="openai"
+        )
+        _, config = _build_render_config(
+            conversation, converted.chat_template_kwargs or {}
+        )
+        assert [
+            (msg["tool_call_id"], msg["content"])
+            for msg in config["messages"]
+            if msg["role"] == "tool"
+        ] == [
+            *(
+                [("c1", [{"type": "text", "text": "earlier result"}])]
+                if repeat_id
+                else []
+            ),
+            ("c1", [{"type": "document", "document": {"city": "Paris"}}]),
+            ("c2", [{"type": "document", "document": {"city": "Rome"}}]),
+        ]
 
 
 def _forwarded_v2_content(
     request: CohereChatV2Request,
-) -> dict[int, list[dict[str, Any]]]:
+) -> dict[str, list[list[dict[str, Any]] | None]]:
     """Extract the forwarded v2 tool-message content from a converted
     request, or fail the test if the key isn't present.
     """
