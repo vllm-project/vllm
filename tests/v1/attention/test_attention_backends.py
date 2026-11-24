@@ -2740,3 +2740,44 @@ def test_non_causal_backend_correctness(
             causal=False,
             block_size=128,
         )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA FlashAttention")
+def test_static_sink_preserves_batch_lengths():
+    from vllm.model_executor.layers.attention.static_sink_attention import (
+        create_static_sink_attention_backend,
+    )
+    from vllm.v1.attention.backends.flash_attn_diffkv import FlashAttentionDiffKVBackend
+
+    device = torch.device("cuda")
+    block_size = 16
+    config = create_vllm_config(
+        model_name="vllm-project/tiny-random-LlamaForCausalLM",
+        block_size=block_size,
+        max_model_len=32,
+        max_num_batched_tokens=64,
+        max_num_seqs=2,
+    )
+    backend = create_static_sink_attention_backend(
+        FlashAttentionDiffKVBackend, block_size
+    )
+    builder = backend.get_builder_cls()(
+        create_standard_kv_cache_spec(config), [], config, device
+    )
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[32, 0], query_lens=[16, 0]), block_size, device
+    )
+    original_block_table = common.block_table_tensor.clone()
+    metadata = builder.build(0, common)
+    assert common.seq_lens.tolist() == [32, 0]
+    assert common.seq_lens_cpu_upper_bound is not None
+    assert common.seq_lens_cpu_upper_bound.tolist() == [32, 0]
+    assert common.max_seq_len == 32
+    assert torch.equal(common.block_table_tensor, original_block_table)
+    assert metadata.seq_lens.tolist() == [48, 0]
+    assert metadata.max_seq_len == 48
+    assert builder.supports_draft_decode_metadata_update is False
+    # A graph captured on the first build must see the next batch's lengths.
+    common.seq_lens[0] = 17
+    builder.build(0, common)
+    assert metadata.seq_lens.tolist() == [33, 0]

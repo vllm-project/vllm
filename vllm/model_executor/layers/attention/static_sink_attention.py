@@ -62,6 +62,12 @@ def create_static_sink_attention_backend(
             self.max_num_blocks = cdiv(
                 model_config.max_model_len, vllm_config.cache_config.block_size
             )
+            # Captured attention graphs keep a reference to this buffer.
+            self.seq_lens_with_sink = torch.empty(
+                scheduler_config.max_num_seqs, device=device, dtype=torch.int32
+            )
+            # Draft graph replay would skip the sink-specific buffer updates.
+            self.supports_draft_decode_metadata_update = False
             self.block_table_with_sink = torch.zeros(
                 (
                     scheduler_config.max_num_seqs,
@@ -83,24 +89,29 @@ def create_static_sink_attention_backend(
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
         ) -> AttentionMetadata:
-            common_attn_metadata.seq_lens[:] = (
-                common_attn_metadata.seq_lens + self.sink_len
-            )
-            common_attn_metadata.seq_lens[
-                common_attn_metadata.seq_lens == self.sink_len
-            ] = 0
-            common_attn_metadata.max_seq_len = (
-                common_attn_metadata.max_seq_len + self.sink_len
-            )
-            max_num_blocks = cdiv(common_attn_metadata.max_seq_len, self.block_size)
             num_reqs = common_attn_metadata.num_reqs
+            seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+            seq_lens_with_sink = self.seq_lens_with_sink[:num_reqs]
+            torch.add(seq_lens, self.sink_len, out=seq_lens_with_sink)
+            seq_lens_with_sink.masked_fill_(seq_lens == 0, 0)
+
+            max_num_blocks = cdiv(common_attn_metadata.max_seq_len, self.block_size)
             self.block_table_with_sink[
                 :num_reqs, self.num_sink_blocks : self.num_sink_blocks + max_num_blocks
             ] = common_attn_metadata.block_table_tensor[:, :max_num_blocks]
-            common_attn_metadata.block_table_tensor = self.block_table_with_sink[
-                :num_reqs
-            ]
 
+            upper_bound = common_attn_metadata.seq_lens_cpu_upper_bound
+            common_attn_metadata = common_attn_metadata.replace(
+                seq_lens=seq_lens_with_sink,
+                seq_lens_cpu_upper_bound=(
+                    torch.where(upper_bound > 0, upper_bound + self.sink_len, 0)
+                    if upper_bound is not None
+                    else None
+                ),
+                max_seq_len=common_attn_metadata.max_seq_len + self.sink_len,
+                block_table_tensor=self.block_table_with_sink[:num_reqs],
+                _num_computed_tokens_cache=None,
+            )
             return super().build(common_prefix_len, common_attn_metadata, fast_build)
 
     attn_backend = subclass_attention_backend(
