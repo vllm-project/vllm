@@ -265,9 +265,18 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TurboQuantMetadata:
         attn_metadata = self.build(0, common_attn_metadata)
-        # Set seq_lens to 1 so CUDA graph capture is fast
-        # (real seq_lens are filled at replay time).
-        attn_metadata.seq_lens.fill_(1)
+        if attn_metadata.max_query_len > 1:
+            # Speculative verification must capture attention over cached KV.
+            # First-chunk prefill branches would ignore that cache at replay.
+            attn_metadata.max_seq_len = max(
+                attn_metadata.max_seq_len, attn_metadata.max_query_len + 1
+            )
+            attn_metadata.seq_lens_cpu = torch.full_like(
+                attn_metadata.seq_lens_cpu, attn_metadata.max_seq_len
+            )
+            attn_metadata.seq_lens.fill_(attn_metadata.max_query_len + 1)
+        else:
+            attn_metadata.seq_lens.fill_(1)
         return attn_metadata
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
@@ -353,6 +362,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Fixed NUM_KV_SPLITS (grid dims must be constant for cudagraph,
         # and benchmarks show no regression vs dynamic in eager mode).
         vllm_config = get_current_vllm_config()
+        # Verification lengths can exceed the throughput-oriented prefill
+        # threshold. Their CPU lengths may still include rejected drafts.
+        self._continuation_decode_threshold = max(
+            _CONTINUATION_DECODE_THRESHOLD, vllm_config.num_speculative_tokens + 1
+        )
         self.max_num_kv_splits = (
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
@@ -829,11 +843,16 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 # avoid O(cached_len) full-dequant per continuation.
                 # For large continuations, fall back to _continuation_prefill.
                 cached_len = seq_len - q_len
-                if q_len <= _CONTINUATION_DECODE_THRESHOLD:
+                if q_len <= self._continuation_decode_threshold:
                     # Fast path: treat each query as a decode request
                     # with incremental seq_lens for causal masking.
-                    # Slice from pre-built arange (no kernel launch)
-                    synth_seq_lens = _arange_cache[cached_len + 1 : seq_len + 1]
+                    # CPU sequence lengths may include rejected draft tokens.
+                    # Build exact causal lengths from the GPU-resident lengths.
+                    synth_seq_lens = (
+                        attn_metadata.seq_lens[i : i + 1]
+                        - q_len
+                        + _arange_cache[1 : q_len + 1]
+                    )
                     synth_bt = attn_metadata.block_table[i : i + 1].expand(q_len, -1)
                     if self._soa_store:
                         # The cache was written in SoA layout (always, for FlyDSL),
