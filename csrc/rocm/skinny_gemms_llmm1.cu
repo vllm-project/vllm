@@ -28,6 +28,17 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
 
   int NUM_BLOCKS = M / rows_per_block;
 
+  // Both launch dimensions are derived from runtime shapes, so both can be
+  // invalid for inputs this function otherwise accepts: NUM_THREADS grows as
+  // K/8 and passes the 1024-thread block limit once K > 8192, and NUM_BLOCKS
+  // is zero when M < rows_per_block. Check them here so the caller gets a
+  // clear error instead of the launch failing below.
+  TORCH_CHECK(NUM_THREADS <= 1024, "LLMM1: K=", K, " needs ", NUM_THREADS,
+              " threads per block, above the 1024 limit.");
+  TORCH_CHECK(NUM_BLOCKS > 0, "LLMM1: M=", M,
+              " is smaller than rows_per_block=", rows_per_block,
+              ", giving an empty grid.");
+
   const at::cuda::OptionalCUDAGuard device_guard(device_of(in_b));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
@@ -53,6 +64,9 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
       LLGemm1_kernel<scalar_t, 4>
           <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
     }
+    // out_c comes from torch::empty(), so a launch that silently fails would
+    // return uninitialised memory to the caller rather than raising.
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
   });
 
   return out_c;

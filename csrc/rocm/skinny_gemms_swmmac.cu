@@ -211,6 +211,9 @@ torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
     } else {
       VLLM_DISPATCH_SWMMAC_SPLITK_BY_N(false);
     }
+    // out_c comes from torch::empty(), so a launch that silently failed
+    // would return uninitialised memory to the caller rather than raising.
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
   });
 
 #undef VLLM_LAUNCH_SWMMAC_REGULAR

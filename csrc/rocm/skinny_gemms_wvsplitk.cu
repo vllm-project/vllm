@@ -161,6 +161,9 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
             "Unsupported N value: " + std::to_string(M_in) + "," +
             std::to_string(K_in) + "," + std::to_string(N_in));
     }
+    // out_c comes from torch::empty(), so a launch that silently failed
+    // would return uninitialised memory to the caller rather than raising.
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
   });
   return out_c;
 }
