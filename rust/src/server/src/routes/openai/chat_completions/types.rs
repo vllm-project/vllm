@@ -10,17 +10,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::{DefaultOnNull, SerializeDisplay};
 use validator::Validate;
+use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::TruncationSide;
 
+use crate::routes::inference::generate::MmPayload;
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, FunctionCallResponse, Normalizable, PromptLogprobs, ReasoningEffort,
-    StreamOptions, StreamResponseEnvelope, StringOrArray, Tool, ToolCall, ToolCallDelta,
-    ToolChoice, Usage, default_true, deserialize_request_top_k, validate_messages, validate_stop,
-    validate_top_p_value,
+    ChatLogProbs, ChatMessage, ContentPart, FunctionCallResponse, Normalizable, PromptLogprobs,
+    ReasoningEffort, StreamOptions, StreamResponseEnvelope, StringOrArray, Tool, ToolCall,
+    ToolCallDelta, ToolChoice, Usage, default_true, deserialize_request_top_k, validate_messages,
+    validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -70,7 +72,6 @@ pub struct ChatCompletionRequest {
     pub max_completion_tokens: Option<u32>,
 
     /// How many chat completion choices to generate for each input message
-    #[validate(range(min = 1, max = 10))]
     pub n: Option<u32>,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based
@@ -159,11 +160,13 @@ pub struct ChatCompletionRequest {
     /// Minimum number of tokens to generate
     pub min_tokens: Option<u32>,
 
-    /// Skip special tokens during detokenization
-    #[serde(default = "default_true")]
-    pub skip_special_tokens: bool,
+    /// Skip special tokens during detokenization; unset takes the model's
+    /// generation-config default
+    pub skip_special_tokens: Option<bool>,
 
-    /// Add spaces between special tokens during detokenization
+    /// Add spaces between special tokens during detokenization. Accepted as a
+    /// no-op: the detokenizers of the served tokenizers already emit adjacent
+    /// added tokens without a separator, which is what `false` asks for.
     #[serde(default = "default_true")]
     pub spaces_between_special_tokens: bool,
 
@@ -259,6 +262,9 @@ pub struct ChatCompletionRequest {
     /// tokens.
     pub return_weight_versions: Option<bool>,
 
+    /// Skip the first N prompt tokens from the returned routed-expert rows.
+    pub routed_experts_prompt_start: Option<u32>,
+
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
@@ -275,6 +281,13 @@ pub struct ChatCompletionRequest {
 
     /// Parameters for detecting repetitive N-gram patterns in output tokens
     pub repetition_detection: Option<RepetitionDetectionParams>,
+
+    /// Which multimodal payload chat render returns. Other routes ignore it.
+    pub mm_payload: Option<MmPayload>,
+
+    /// Deprecated alias: `false` is the same as `mm_payload: "none"`. Ignored
+    /// when `mm_payload` is set.
+    pub return_mm_kwargs: Option<bool>,
 
     /// Number of tokens to batch into each streamed chunk. Raises the server's
     /// `--stream-interval` for this request. Values below the server setting
@@ -321,7 +334,7 @@ impl Default for ChatCompletionRequest {
             include_stop_str_in_output: false,
             ignore_eos: false,
             min_tokens: None,
-            skip_special_tokens: true,
+            skip_special_tokens: None,
             spaces_between_special_tokens: true,
             truncate_prompt_tokens: None,
             truncation_side: None,
@@ -346,13 +359,27 @@ impl Default for ChatCompletionRequest {
             return_token_ids: None,
             return_prompt_text: None,
             return_weight_versions: None,
+            routed_experts_prompt_start: None,
             cache_salt: None,
             kv_transfer_params: None,
             ec_transfer_params: None,
             vllm_xargs: None,
             repetition_detection: None,
+            mm_payload: None,
+            return_mm_kwargs: None,
             stream_interval: None,
         }
+    }
+}
+
+impl ChatCompletionRequest {
+    /// The modality of each media part in the request's messages, in any
+    /// role.
+    pub fn media_modalities(&self) -> impl Iterator<Item = MmModality> + '_ {
+        self.messages
+            .iter()
+            .flat_map(ChatMessage::content_parts)
+            .filter_map(ContentPart::modality)
     }
 }
 
@@ -401,8 +428,8 @@ pub(super) struct ChatCompletionChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
-    /// Always `None`.
-    /// TODO: return routed experts when `--enable-return-routed-experts` is set.
+    /// The request's routed-expert rows as a base64 NumPy `.npy`, when
+    /// `--enable-return-routed-experts` is set.
     pub routed_experts: Option<String>,
     /// Contiguous weight-version spans over output-token indexes.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
@@ -426,6 +453,9 @@ pub(super) struct ChatCompletionMessage {
     pub content: Option<String>,
     // OpenAI fields the Rust frontend never produces; always `None`.
     pub refusal: Option<String>,
+    /// Omitted rather than `null`, like Python: the OpenAI spec types it as an
+    /// array, not nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Value>,
     pub audio: Option<Value>,
     pub function_call: Option<FunctionCallResponse>,
@@ -443,6 +473,8 @@ pub(super) struct ChatCompletionStreamResponse {
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub metrics: Option<StreamPerRequestMetrics>,
+    /// Set only on the last chunk.
+    pub system_fingerprint: Option<String>,
     /// Set only on the first chunk.
     #[serde(flatten)]
     pub prompt: Option<ChatCompletionStreamPrompt>,
@@ -458,6 +490,7 @@ impl ChatCompletionStreamResponse {
             choices: Vec::new(),
             usage: None,
             metrics: None,
+            system_fingerprint: None,
             prompt: None,
             kv_transfer_params: None,
         }
@@ -481,6 +514,8 @@ pub(super) struct ChatCompletionStreamChoice {
     pub index: u32,
     pub delta: ChatMessageDelta,
     pub logprobs: Option<ChatLogProbs>,
+    /// Sent as `null` until the choice finishes, as Python and OpenAI do.
+    #[serialize_always]
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
@@ -518,22 +553,15 @@ fn validate_chat_cross_parameters(
         return Err(e);
     }
 
-    // 3. Validate token limits - min <= max
+    // 3. Validate token limits - min <= max. `normalize` has already moved a
+    // lone `max_tokens` into `max_completion_tokens`, so this is the effective
+    // limit; a `max_tokens` left beside it is overridden, as in Python.
     if let (Some(min_tokens), Some(max_completion_tokens)) =
         (req.min_tokens, req.max_completion_tokens)
         && min_tokens > max_completion_tokens
     {
         let mut e = validator::ValidationError::new("min_tokens_exceeds_max_completion_tokens");
         e.message = Some("min_tokens cannot be greater than max_completion_tokens".into());
-        return Err(e);
-    }
-
-    #[expect(deprecated, reason = "Local type still mirrors legacy upstream field")]
-    if let (Some(min_tokens), Some(max_tokens)) = (req.min_tokens, req.max_tokens)
-        && min_tokens > max_tokens
-    {
-        let mut e = validator::ValidationError::new("min_tokens_exceeds_max_tokens");
-        e.message = Some("min_tokens cannot be greater than max_tokens".into());
         return Err(e);
     }
 

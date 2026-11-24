@@ -20,11 +20,11 @@ _DEFAULT_PACKAGE = "vllm.v1.kv_offload.tiering.backpressure"
 def _import_class(name: str) -> type:
     """Import a class by name.
 
-    If ``name`` contains a dot it is treated as a fully qualified path
-    (e.g. ``'my_package.MyDetector'``).  Otherwise it is looked up in
+    If `name` contains a dot it is treated as a fully qualified path
+    (e.g. `'my_package.MyDetector'`).  Otherwise it is looked up in
     the default backpressure module
-    (``vllm.v1.kv_offload.tiering.backpressure``), so short names like
-    ``'DropStorePolicy'`` or ``'EMABackpressureDetector'`` work out of
+    (`vllm.v1.kv_offload.tiering.backpressure`), so short names like
+    `'DropStorePolicy'` or `'EMABackpressureDetector'` work out of
     the box.
     """
     if "." in name:

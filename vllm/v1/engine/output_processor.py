@@ -30,6 +30,7 @@ from vllm.tracing import (
     instrument_manual,
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.gc_utils import gc_untrack
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -160,13 +161,13 @@ class StreamingInputOutputCollector(RequestOutputCollector):
         return output
 
 
-@dataclass
+@dataclass(slots=True)
 class OutputProcessorOutput:
     request_outputs: list[RequestOutput | PoolingRequestOutput]
     reqs_to_abort: list[str]
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamingUpdate:
     """Streaming input update data for output processor.
 
@@ -197,7 +198,7 @@ class RequestState:
         max_tokens_param: int | None,
         arrival_time: float,
         queue: RequestOutputCollector | None,
-        log_stats: bool,
+        collect_stats: bool,
         stream_interval: int,
         top_p: float | None = None,
         n: int | None = None,
@@ -213,7 +214,9 @@ class RequestState:
         self.lora_name = lora_request.lora_name if lora_request is not None else None
         self.output_kind = output_kind
         self.prompt = prompt
-        self.prompt_token_ids = prompt_token_ids
+        # The same list as every other holder of this prompt, and only extended
+        # in place, so hiding it from the cyclic GC here covers them all.
+        self.prompt_token_ids = gc_untrack(prompt_token_ids)
         self.prompt_embeds = prompt_embeds
         self.prompt_len = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds
@@ -233,7 +236,9 @@ class RequestState:
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
-        self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
+        self.stats = (
+            RequestStateStats(arrival_time=arrival_time) if collect_stats else None
+        )
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
@@ -263,7 +268,7 @@ class RequestState:
         if self.prompt_token_ids:
             self.prompt_token_ids.extend(update.prompt_token_ids or ())
         else:
-            self.prompt_token_ids = update.prompt_token_ids or []
+            self.prompt_token_ids = gc_untrack(update.prompt_token_ids or [])
         assert self.prompt_token_ids is not None
         self.prompt_len = len(self.prompt_token_ids)
         if self.stats is not None:
@@ -279,7 +284,7 @@ class RequestState:
         parent_req: ParentRequest | None,
         request_index: int,
         queue: RequestOutputCollector | None,
-        log_stats: bool,
+        collect_stats: bool,
         stream_interval: int,
     ) -> "RequestState":
         remote_prefill_cached_tokens = None
@@ -341,7 +346,7 @@ class RequestState:
             temperature=temperature,
             arrival_time=request.arrival_time,
             queue=queue,
-            log_stats=log_stats,
+            collect_stats=collect_stats,
             stream_interval=stream_interval,
             stream_input=request.resumable,
             remote_prefill_cached_tokens=remote_prefill_cached_tokens,
@@ -555,18 +560,18 @@ class OutputProcessor:
         self,
         tokenizer: TokenizerLike | None,
         *,
-        log_stats: bool,
+        collect_stats: bool,
         stream_interval: int = 1,
         tracing_enabled: bool = False,
         admission_stats: "SharedAdmissionStats | None" = None,
     ):
-        self.log_stats = log_stats
+        self.collect_stats = collect_stats
         self.tokenizer = tokenizer
         self.stream_interval = stream_interval
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
-        self.lora_states = LoRARequestStates(log_stats)
+        self.lora_states = LoRARequestStates(collect_stats)
         self.tracing_enabled = tracing_enabled
         self.admission_stats = admission_stats
 
@@ -579,9 +584,9 @@ class OutputProcessor:
     def get_num_queued_tokens(self) -> int:
         """Total prompt tokens of requests currently in the prefill phase.
 
-        Uses ``prompt_len`` rather than remaining prefill work because the
-        scheduler's ``num_computed_tokens`` is not propagated to the API
-        server until prefill completes.  See ``SchedulerConfig`` docs.
+        Uses `prompt_len` rather than remaining prefill work because the
+        scheduler's `num_computed_tokens` is not propagated to the API
+        server until prefill completes.  See `SchedulerConfig` docs.
         """
         return sum(
             req.prompt_len for req in self.request_states.values() if req.is_prefilling
@@ -681,7 +686,7 @@ class OutputProcessor:
             parent_req=parent_req,
             request_index=request_index,
             queue=queue,
-            log_stats=self.log_stats,
+            collect_stats=self.collect_stats,
             stream_interval=self.stream_interval,
         )
         self.request_states[request_id] = req_state
