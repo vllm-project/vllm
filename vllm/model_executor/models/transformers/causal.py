@@ -75,6 +75,11 @@ class _OpaqueBaseModel(nn.Module):
     def forward(self, *args, inputs_embeds: torch.Tensor, **kwargs):
         return _BaseModelOutput(last_hidden_state=inputs_embeds)
 
+    def get_input_embeddings(self) -> nn.Module:
+        # Read by `PreTrainedModel.get_output_embeddings`, which returns `None` if
+        # this fails
+        return self.__dict__["_base_model"].get_input_embeddings()
+
     def __getattr__(self, name: str):
         base_model = self.__dict__.get("_base_model")
         if base_model is not None and name in base_model._modules:
