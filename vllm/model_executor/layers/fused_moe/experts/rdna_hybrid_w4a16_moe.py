@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import _TRITON_GE_3_9
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -177,32 +178,36 @@ class RDNAHybridW4A16Experts(mk.FusedMoEExpertsModular):
 
     def _triton_config(self, K: int, N: int, M_routed: int) -> dict:
         """Triton tile config for a GEMM with contraction `K` and output width
-        `N` over `M_routed` routed rows, tuned on gfx1151 for the Qwen3.5-A3B
-        shapes (gemm1 K=2048, gemm2 K=512)."""
+        `N` over `M_routed` routed rows, tuned on gfx1151."""
         if K < 1024:
-            # Short contraction: wider BN/BK amortize the short K loop.
+            # Short contraction: wide tiles amortize the short K loop.
+            if M_routed <= 32768:
+                block_n, num_warps = 128, 4
+            else:
+                block_n, num_warps = 64, 2
             return {
                 "BLOCK_SIZE_M": self.TRITON_BLOCK_SIZE_M,
-                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_N": block_n,
                 "BLOCK_SIZE_K": 64,
                 "GROUP_SIZE_M": 1,
-                "num_warps": 2,
+                "num_warps": num_warps,
                 "num_stages": 1,
             }
-        # Measured on gfx1151: few routed rows favor narrow tiles; beyond that
-        # 64-wide tiles lose when N is a power of two, where 32 with 4 warps wins.
+        # Few routed rows favor narrow tiles. Beyond that, 32-wide tiles beat
+        # 64-wide ones when N is a power of two, or with the Triton >= 3.9
+        # layout barrier (see invoke_fused_moe_kernel_hybrid_triton).
         if M_routed < self.TRITON_WIDE_TILE_MIN_ROWS:
-            block_n, num_warps, group_m = 16, 2, 4
-        elif N & (N - 1) == 0:
-            block_n, num_warps, group_m = 32, 4, 1
+            block_n, group_m = 16, 4
+        elif N & (N - 1) == 0 or _TRITON_GE_3_9:
+            block_n, group_m = 32, 1
         else:
-            block_n, num_warps, group_m = 64, 2, 1
+            block_n, group_m = 64, 1
         return {
             "BLOCK_SIZE_M": self.TRITON_BLOCK_SIZE_M,
             "BLOCK_SIZE_N": block_n,
             "BLOCK_SIZE_K": self._group_size,
             "GROUP_SIZE_M": group_m,
-            "num_warps": num_warps,
+            "num_warps": 2,
             "num_stages": 1,
         }
 

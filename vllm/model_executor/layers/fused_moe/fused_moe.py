@@ -8,6 +8,7 @@ import os
 from typing import Any
 
 import torch
+from packaging.version import Version
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -43,6 +44,28 @@ from vllm.utils.platform_utils import get_device_name_as_file_name
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
+
+
+_TRITON_GE_3_9 = Version(triton.__version__).release[:2] >= (3, 9)
+
+
+@triton.jit
+def _layout_barrier(x):
+    """Return `x` unchanged through an opaque, non-pure op.
+
+    Emits no instructions (empty asm, output tied to input), but Triton does not
+    rematerialize the op (triton-lang/triton#11001), so layout conversions are
+    not hoisted across it.
+    """
+    tl.static_assert(x.dtype.primitive_bitwidth == 16)
+    return tl.inline_asm_elementwise(
+        asm="",
+        constraints="=v,0",
+        args=[x],
+        dtype=x.dtype,
+        is_pure=False,
+        pack=2,
+    )
 
 
 @triton.jit
@@ -116,6 +139,8 @@ def fused_moe_kernel_gptq_awq(
     # int4_w4a16 only.
     USE_TD: tl.constexpr = False,
     use_shuffle_w4a16: tl.constexpr = False,
+    LAYOUT_BARRIER: tl.constexpr = False,
+    NO_NAN_BF16_SCALING: tl.constexpr = False,
 ):
     """Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
@@ -303,7 +328,23 @@ def fused_moe_kernel_gptq_awq(
                 + g_idx * stride_bsk
             )
             b_scale = tl.load(b_scale_ptrs).to(tl.float32)
-            b = ((b.to(tl.float32) - b_zp_num) * b_scale[None, :]).to(compute_type)
+            b_fp32 = (b.to(tl.float32) - b_zp_num) * b_scale[None, :]
+            if NO_NAN_BF16_SCALING:
+                tl.static_assert(compute_type == tl.bfloat16)
+                # Triton 3.9 lowers the conversion to a rounding sequence that
+                # handles NaN. Round to nearest even without that, assuming the
+                # scales are not NaN.
+                b_u = b_fp32.to(tl.uint32, bitcast=True)
+                b_u = b_u + 0x7FFF + ((b_u >> 16) & 1)
+                b = (b_u >> 16).to(tl.uint16).to(tl.bfloat16, bitcast=True)
+            else:
+                b = b_fp32.to(compute_type)
+            if LAYOUT_BARRIER:
+                # Triton 3.9's RemoveLayoutConversions would otherwise hoist the
+                # dot-operand conversion above the unpack and dequant, so they
+                # run in the WMMA operand layout, where the B tile is duplicated
+                # across warps and lanes.
+                b = _layout_barrier(b)
         else:
             if USE_TD:
                 a = a_desc.gather(gather_idx, k * BLOCK_SIZE_K)
@@ -976,6 +1017,15 @@ def invoke_fused_moe_kernel_hybrid_triton(
         f"group_size {group_size} must be a multiple of 8 for shuffle kernel"
     )
 
+    from vllm.platforms.rocm import on_gfx1x
+
+    # Triton < 3.9 neither hoists the conversion that the barrier blocks nor
+    # lowers the bf16 conversion to a NaN-aware rounding sequence.
+    layout_barrier = (
+        _TRITON_GE_3_9 and A.dtype in (torch.bfloat16, torch.float16) and on_gfx1x()
+    )
+    no_nan_bf16_scaling = _TRITON_GE_3_9 and A.dtype == torch.bfloat16 and on_gfx1x()
+
     fused_moe_kernel_gptq_awq[grid](
         A,
         B,
@@ -1012,6 +1062,8 @@ def invoke_fused_moe_kernel_hybrid_triton(
         use_int4_w4a16=True,
         use_int8_w8a16=False,
         use_shuffle_w4a16=True,
+        LAYOUT_BARRIER=layout_barrier,
+        NO_NAN_BF16_SCALING=no_nan_bf16_scaling,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         **config,
     )
