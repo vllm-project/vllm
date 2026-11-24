@@ -56,17 +56,6 @@ class DSparkSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
-        # Whether to sample from the anchor position. When True, uses anchor-as-first
-        # (N slots, each position predicts the next token). When False, uses 1+N
-        # fill-in block (anchor is a bonus token).
-        self.sample_from_anchor = getattr(
-            self.draft_model_config.hf_config, "sample_from_anchor", True
-        )
-        if self.sample_from_anchor:
-            self.num_query_per_req = self.num_speculative_steps
-        else:
-            self.num_query_per_req = 1 + self.num_speculative_steps
-
         # DSpark consumes mean-pooled target aux hidden states at the target
         # layers, combined to hidden_size via main_proj. Store that combined
         # main_x (hidden_size wide). DSpark does not use the same pre-allocated buffer

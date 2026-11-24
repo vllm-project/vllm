@@ -41,6 +41,7 @@ from vllm.v1.core.kv_cache_planning import (
     check_enough_kv_cache_memory,
     estimate_max_model_len,
     get_kv_cache_groups,
+    get_pipeline_stages,
     kv_cache_groups_tp_replicas,
 )
 from vllm.v1.core.kv_cache_utils import (
@@ -121,7 +122,6 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             decode_context_parallel_size=1,
             world_size=2 if shared_host_pool else 1,
             distributed_executor_backend="mp",
-            nnodes_within_dp=1,
         ),
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=7,
@@ -246,12 +246,11 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(monkeypatch)
             decode_context_parallel_size=1,
             world_size=2,
             distributed_executor_backend="mp",
-            nnodes_within_dp=1,
         ),
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=7,
             prefix_cache_retention_interval=None,
-            mamba_cache_mode="none",
+            enable_prefix_caching=False,
             kv_cache_layout=KVCacheLayout.BLNHC.name,
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLNHC,
         ),
@@ -793,6 +792,29 @@ def test_project_kv_cache_groups_to_worker():
     }
 
 
+def test_pipeline_stages_describe_every_stage():
+    """Every worker learns each PP stage's block size in bytes, draft layers on
+    the last stage included."""
+    layer = new_kv_cache_layer()
+    stage0 = {"layer0": layer, "layer1": layer}
+    stage1 = {
+        "layer2": layer,
+        "layer3": layer,
+        "draft.layer0": replace(layer, is_draft=True),
+    }
+    # Two TP ranks per stage.
+    layer_configs = [stage0, stage0, stage1, stage1]
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=512))
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    vllm_config.parallel_config.pipeline_parallel_size = 2
+    kv_cache_configs = get_kv_cache_configs(vllm_config, layer_configs, [2**30] * 4)
+
+    stages = get_pipeline_stages(vllm_config, kv_cache_configs)
+
+    page = kv_cache_planning._get_layer_block_stride(layer.spec)
+    assert [stage.bytes_per_block for stage in stages] == [2 * page, 3 * page]
+
+
 @pytest.mark.parametrize("stage_layers", [["other"], ["mixed_mla", "attn1"]])
 def test_group_on_pp_stage_keeps_the_whole_groups_specs(stage_layers):
     """A PP stage holding none or only some of a group's layers answers what
@@ -954,7 +976,12 @@ def test_layers_group_by_manager_policy_not_layout():
         },
     )
     assert [g.layer_names for g in groups] == [["swa8.0"], ["swa16.0"]]
-    assert [g.manager_config.params.sliding_window for g in groups] == [8, 16]
+    windows = []
+    for group in groups:
+        params = group.manager_config.params
+        assert isinstance(params, SlidingWindowManager.Params)
+        windows.append(params.sliding_window)
+    assert windows == [8, 16]
 
     # Same policy, different layouts: one group keeping each layer's spec.
     groups = get_kv_cache_groups(
@@ -1569,7 +1596,7 @@ def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
         _grouping_config(),
         {
             "model.full_attn": full_layer(full_spec),
-            "model.mamba": mamba_layer(mamba_spec, mamba_cache_mode="align"),
+            "model.mamba": mamba_layer(mamba_spec, enable_prefix_caching=True),
             "cache_only_layers.0": full_layer(hidden_spec),
         },
     )
@@ -1768,6 +1795,7 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm, d
     assert groups[0].manager_cls is FullAttentionManager
     assert groups[0].block_size == 64
     promoted_draft = groups[0].kv_cache_specs["draft.0"]
+    assert isinstance(promoted_draft, AttentionSpec)
     assert promoted_draft == replace(
         draft.spec,
         block_size=64,
@@ -1864,6 +1892,8 @@ def test_auto_fit_max_model_len_with_hybrid():
     model_config.original_max_model_len = -1
     vllm_config = VllmConfig(model_config=model_config)
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    # Without prefix caching a Mamba layer holds 1 + gamma blocks.
+    vllm_config.cache_config.enable_prefix_caching = False
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
     gamma = 2
@@ -1982,6 +2012,7 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
 
     assert unified_specs["target_attn"].spec == target_spec
     unified_draft_spec = unified_specs["draft_attn"].spec
+    assert isinstance(unified_draft_spec, AttentionSpec)
     assert unified_draft_spec.block_size == draft_spec.block_size
     assert unified_draft_spec.real_page_size_bytes == draft_spec.real_page_size_bytes
     assert unified_draft_spec.page_size_padded == target_spec.page_size_bytes
@@ -2004,7 +2035,6 @@ def test_unify_hybrid_kv_cache_specs():
     kv_cache_spec["draft_layer_2"] = replace(
         before_spec_2,
         spec=replace(before_spec_2.spec, dcp_sharded=False),
-        is_draft=True,
     )
     kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_layer(block_size=64)
@@ -2015,7 +2045,6 @@ def test_unify_hybrid_kv_cache_specs():
     assert kv_cache_spec["draft_layer_2"] == replace(
         expected_spec_2, spec=replace(expected_spec_2.spec, dcp_sharded=False)
     )
-    assert kv_cache_spec["draft_layer_2"].is_draft
 
     # 2. has_full_attention and has_chunked_local_attention
     before_spec_1 = new_kv_cache_layer()
@@ -2113,13 +2142,17 @@ def test_unify_kv_cache_spec_page_size_mamba():
         }
     )
     # Mamba page is padded; block_size (caching granularity) is unchanged.
-    assert unified["mamba_layer"].spec.page_size_bytes == 32768
-    assert unified["mamba_layer"].spec.page_size_padded == 32768
-    assert unified["mamba_layer"].spec.block_size == mamba_spec.block_size
+    unified_mamba = unified["mamba_layer"].spec
+    assert isinstance(unified_mamba, MambaSpec)
+    assert unified_mamba.page_size_bytes == 32768
+    assert unified_mamba.page_size_padded == 32768
+    assert unified_mamba.block_size == mamba_spec.block_size
     # Attention layer with smaller page still unifies by scaling block_size.
-    assert unified["main_attn_layer"].spec.page_size_bytes == 32768
-    assert unified["main_attn_layer"].spec.block_size == 2 * main_attn_spec.block_size
-    assert unified["main_attn_layer"].spec.page_size_padded is None
+    unified_main = unified["main_attn_layer"].spec
+    assert isinstance(unified_main, AttentionSpec)
+    assert unified_main.page_size_bytes == 32768
+    assert unified_main.block_size == 2 * main_attn_spec.block_size
+    assert unified_main.page_size_padded is None
     # Layer already at max page size is unchanged.
     assert unified["draft_attn_layer"].spec == draft_attn_spec
 
@@ -2135,8 +2168,10 @@ def test_unify_kv_cache_spec_page_size_mamba():
             "draft_attn_layer": full_layer(draft_attn_spec),
         }
     )
-    assert unified["mamba_layer"].spec.page_size_bytes == 32768
-    assert unified["mamba_layer"].spec.page_size_padded == 32768
+    unified_mamba = unified["mamba_layer"].spec
+    assert isinstance(unified_mamba, MambaSpec)
+    assert unified_mamba.page_size_bytes == 32768
+    assert unified_mamba.page_size_padded == 32768
 
     # 3. Mamba page that does not evenly divide the maximum page size is
     # padded as well (the divisibility constraint only applies to block_size
@@ -2161,9 +2196,11 @@ def test_unify_kv_cache_spec_page_size_mamba():
             "draft_attn_layer": full_layer(draft_attn_spec),  # 32768
         }
     )
-    assert unified["attn_layer"].spec.page_size_padded == 32768
-    assert unified["attn_layer"].spec.page_size_bytes == 32768
-    assert unified["attn_layer"].spec.block_size == 24
+    unified_attn = unified["attn_layer"].spec
+    assert isinstance(unified_attn, AttentionSpec)
+    assert unified_attn.page_size_padded == 32768
+    assert unified_attn.page_size_bytes == 32768
+    assert unified_attn.block_size == 24
 
     # 5. Uniform page sizes are returned unchanged.
     specs = {
@@ -2247,104 +2284,6 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
     )
 
 
-def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
-    config = VllmConfig(model_config=ModelConfig(max_model_len=64))
-    config.cache_config.kv_cache_layout = "BLHNC"
-    config.speculative_config = fake_speculative_config(
-        method="dflash",
-        use_eagle=lambda: True,
-        use_eagle_block_drop=lambda: use_eagle_block_drop,
-        use_multi_module_mtp=lambda: False,
-        draft_model_config=SimpleNamespace(architectures=[]),
-    )
-    configs = get_kv_cache_configs(config, worker_specs, [2**30] * len(worker_specs))
-    return generate_scheduler_kv_cache_config(configs).kv_cache_groups
-
-
-def _as_draft(spec):
-    return replace(spec, is_draft=True)
-
-
-def _hybrid_specs(draft=True):
-    """Qwen3.5-shaped [GDN x3, full-attn] x2, plus an MTP full-attn layer."""
-    specs = {}
-    for i in range(8):
-        specs[f"layers.{i}"] = (
-            new_kv_cache_layer()
-            if i % 4 == 3
-            else new_mamba_layer(mamba_cache_mode="align")
-        )
-    if draft:
-        specs["mtp.0"] = _as_draft(new_kv_cache_layer())
-    return specs
-
-
-_DRAFT_SPEC_SHAPES = {
-    "uniform": lambda: {
-        "layers.0": new_kv_cache_layer(),
-        "draft.0": _as_draft(new_kv_cache_layer()),
-    },
-    "hybrid": _hybrid_specs,
-    "draft_spans_groups": lambda: {
-        "layers.0": new_mla_layer(),
-        "layers.1": new_swa_mla_layer(head_size=1024),
-        "mtp.0": _as_draft(new_mla_layer()),
-        "mtp.1": _as_draft(new_swa_mla_layer(head_size=1024)),
-    },
-}
-
-
-@pytest.mark.parametrize(
-    "make_specs", _DRAFT_SPEC_SHAPES.values(), ids=list(_DRAFT_SPEC_SHAPES)
-)
-@pytest.mark.parametrize("pp", [1, 2])
-def test_eagle_groups_are_the_groups_holding_draft_layers(make_specs, pp):
-    specs = make_specs()
-    draft_layers = {name for name, spec in specs.items() if spec.is_draft}
-    untagged = {name: replace(spec, is_draft=False) for name, spec in specs.items()}
-    groups = _spec_decode_kv_cache_groups([specs])
-    assert [(g.kv_cache_specs, g.manager_config) for g in groups] == [
-        (g.kv_cache_specs, g.manager_config)
-        for g in _spec_decode_kv_cache_groups([untagged])
-    ]
-
-    worker_specs = [
-        {n: s for n, s in specs.items() if n not in draft_layers},
-        {n: s for n, s in specs.items() if n in draft_layers},
-    ]
-    scheduler_groups = _spec_decode_kv_cache_groups(
-        [specs] if pp == 1 else worker_specs
-    )
-    assert [g.is_eagle_group for g in scheduler_groups] == [
-        bool(draft_layers & set(g.layer_names)) for g in groups
-    ]
-
-
-def test_no_eagle_groups_without_eagle_block_drop():
-    groups = _spec_decode_kv_cache_groups([_hybrid_specs()], use_eagle_block_drop=False)
-    assert not any(g.is_eagle_group for g in groups)
-
-
-@pytest.mark.parametrize(
-    "make_specs,warns",
-    [
-        (lambda: _hybrid_specs(draft=False), True),
-        (
-            lambda: {
-                "layers.0": new_kv_cache_layer(),
-                "draft.0": new_kv_cache_layer(),
-            },
-            False,
-        ),
-    ],
-    ids=["untagged_hybrid", "untagged_uniform_attention"],
-)
-def test_warns_only_when_untagged_draft_meets_mamba(make_specs, warns, caplog_vllm):
-    _spec_decode_kv_cache_groups([make_specs()])
-    warned = "could be identified as the draft model's" in caplog_vllm.text
-    assert warned == warns
-
-
 @pytest.mark.parametrize(
     ("method", "num_lookahead_tokens"),
     [("dflash", 4), ("dspark", 3), ("eagle", None)],
@@ -2366,9 +2305,6 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
         draft_model_config=SimpleNamespace(
             hf_config=SimpleNamespace(), architectures=[]
         ),
-        use_eagle=lambda: True,
-        use_eagle_block_drop=lambda: method == "eagle",
-        use_dflash=lambda: method == "dflash",
         use_dspark=lambda: method == "dspark",
         use_multi_module_mtp=lambda: False,
         parallel_drafting=False,
@@ -2400,7 +2336,7 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
     layers = {
         "layers.0": full_layer(new_kv_cache_spec()),
         "layers.1": target_layer,
-        "draft.0": _as_draft(draft_layer),
+        "draft.0": draft_layer,
     }
     configs = get_kv_cache_configs(config, [layers], [2**30])
     manager_config_by_layer = {

@@ -285,19 +285,23 @@ def _hisparse_parallel_config(**overrides):
         "decode_context_parallel_size": 1,
         "world_size": 2,
         "distributed_executor_backend": "mp",
-        "nnodes_within_dp": 1,
+        "local_world_size": 2,
         "data_parallel_index": 3,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
 
 
-def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
+def test_hisparse_shares_host_pool_only_for_tp(monkeypatch):
     monkeypatch.setattr(
         hisparse_runtime_module, "get_hisparse_backend", CUDAHiSparseBackend
     )
     config = SimpleNamespace(parallel_config=_hisparse_parallel_config())
 
+    assert hisparse_runtime_module.use_shared_hisparse_host_pool(config)
+    config.parallel_config = _hisparse_parallel_config(
+        tensor_parallel_size=8, world_size=8, local_world_size=4
+    )
     assert hisparse_runtime_module.use_shared_hisparse_host_pool(config)
 
     unsupported = (
@@ -307,18 +311,70 @@ def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
         {"decode_context_parallel_size": 2},
         {"world_size": 4},
         {"distributed_executor_backend": "ray"},
-        {"nnodes_within_dp": 2},
     )
     for overrides in unsupported:
         config.parallel_config = _hisparse_parallel_config(**overrides)
         assert not hisparse_runtime_module.use_shared_hisparse_host_pool(config)
 
 
+def test_hisparse_host_leader_is_each_nodes_lowest_tp_rank(monkeypatch):
+    config = SimpleNamespace(
+        parallel_config=_hisparse_parallel_config(
+            tensor_parallel_size=4, world_size=4, local_world_size=2
+        )
+    )
+    leaders = []
+    for tp_rank in range(4):
+        monkeypatch.setattr(
+            hisparse_runtime_module,
+            "get_tensor_model_parallel_rank",
+            lambda r=tp_rank: r,
+        )
+        leaders.append(hisparse_runtime_module.get_hisparse_host_leader_rank(config))
+
+    assert leaders == [0, 0, 2, 2]
+
+
+def test_hisparse_host_events_come_from_node_leader(monkeypatch):
+    gathered = [("a0", "b0"), None, ("a2", "b2"), None]
+    gathered_inputs = []
+
+    def all_gather_object(out, obj, group):
+        gathered_inputs.append(obj)
+        out[:] = gathered
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", all_gather_object)
+    monkeypatch.setattr(
+        hisparse_worker_module,
+        "get_tp_group",
+        lambda: SimpleNamespace(world_size=4, cpu_group=object()),
+    )
+    backend = MagicMock()
+    backend.import_event.side_effect = lambda device, handle: handle
+    monkeypatch.setattr(hisparse_worker_module, "get_hisparse_backend", lambda: backend)
+
+    events = hisparse_worker_module._create_hisparse_host_events(
+        object(), False, 2, torch.device("cpu")
+    )
+
+    assert events == ("a2", "b2")
+    assert gathered_inputs == [None]
+
+
 @pytest.mark.skip_global_cleanup
-def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
+@pytest.mark.parametrize(
+    "tp_rank, local_world_size, leader_rank, populate_shard",
+    [(1, 2, 0, (1, 2)), (5, 4, 4, (1, 4))],
+)
+def test_hisparse_shared_host_pool_uses_one_replicated_mmap(
+    monkeypatch, tp_rank, local_world_size, leader_rank, populate_shard
+):
     page = mmap.PAGESIZE
-    tp_group = MagicMock(rank_in_group=1, world_size=2)
+    tp_group = MagicMock(rank_in_group=tp_rank, world_size=8)
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(
+        hisparse_runtime_module, "get_tensor_model_parallel_rank", lambda: tp_rank
+    )
 
     class FakeSharedOffloadRegion:
         BLOCK_SIZE_ALIGNMENT = page
@@ -352,7 +408,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pin_tensor)
     config = SimpleNamespace(
         instance_id="instance",
-        parallel_config=_hisparse_parallel_config(),
+        parallel_config=_hisparse_parallel_config(local_world_size=local_world_size),
     )
 
     pinned_pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
@@ -365,14 +421,14 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     assert isinstance(region, FakeSharedOffloadRegion)
     assert [t.data_ptr() for t in pinned_pools] == [t.data_ptr() for t in pinned]
     assert region.kwargs == {
-        "engine_id": "hisparse_instance_dp3",
+        "engine_id": f"hisparse_instance_dp3_tp{leader_rank}",
         "num_chunks": 1,
         "rank": 0,
         "kv_bytes_per_chunk": 4 * page,
         "cpu_page_size": 64,
         "barrier": tp_group.barrier,
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
-        "populate_shard": (1, 2),
+        "populate_shard": populate_shard,
         "num_segments": hisparse_runtime_module.REGION_SEGMENTS,
     }
     registration_ranges.assert_called_once_with([24, 40], 4, 4 * page)
@@ -395,6 +451,9 @@ def test_shared_host_pool_tracks_successful_registrations(
     page = mmap.PAGESIZE
     tp_group = MagicMock(rank_in_group=0, world_size=2)
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(
+        hisparse_runtime_module, "get_tensor_model_parallel_rank", lambda: 0
+    )
     backing = torch.empty(3 * page, dtype=torch.uint8)
     region = MagicMock(base_tensor=backing, pinned_addresses=[], is_pinned=False)
     monkeypatch.setattr(
@@ -412,7 +471,8 @@ def test_shared_host_pool_tracks_successful_registrations(
     cudart.cudaHostUnregister.return_value = SimpleNamespace(value=0)
     monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
     config = SimpleNamespace(
-        instance_id="test", parallel_config=SimpleNamespace(data_parallel_index=0)
+        instance_id="test",
+        parallel_config=SimpleNamespace(data_parallel_index=0, local_world_size=1),
     )
     context = (
         pytest.raises(RuntimeError, match="cudaHostRegister failed")
@@ -1484,6 +1544,7 @@ class _TestReplaySSMMixer(MambaMixer2):
         self.use_replayssm_trackers = self.use_flashinfer_replayssm
         self.state_alignment = 16
         self.mamba_config = MambaConfig(backend=backend)
+        self.cache_config = SimpleNamespace(enable_prefix_caching=True)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
 

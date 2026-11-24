@@ -6,6 +6,7 @@ import json
 import openai
 import pytest
 import pytest_asyncio
+from PIL import Image
 
 from tests.entrypoints.multimodal.conftest import TEST_IMAGE_ASSETS
 from tests.utils import RemoteOpenAIServer
@@ -163,3 +164,24 @@ async def test_multi_image_input(
             input=messages,
         )
         assert len(response.output_text) > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_hf_processor_error_reason(client: openai.AsyncOpenAI, model_name: str):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_image",
+                    "image_url": encode_image_url(Image.new("RGB", (3, 900))),
+                    "detail": "auto",
+                },
+                {"type": "input_text", "text": "What's in this image?"},
+            ],
+        }
+    ]
+
+    with pytest.raises(openai.BadRequestError, match="aspect ratio must be smaller"):
+        await client.responses.create(model=model_name, input=messages)
