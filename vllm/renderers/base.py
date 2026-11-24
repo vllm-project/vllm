@@ -1049,6 +1049,11 @@ class BaseRenderer(ABC, Generic[_T]):
         ):
             engine_input["prompt_token_offsets"] = offsets
 
+        if engine_input["type"] == "token" and (
+            (echo_mask := prompt.get("prompt_echo_mask")) is not None
+        ):
+            engine_input["prompt_echo_mask"] = echo_mask
+
         return engine_input
 
     def _process_embeds(self, prompt: EmbedsPrompt) -> EmbedsInput:
@@ -1115,6 +1120,11 @@ class BaseRenderer(ABC, Generic[_T]):
             (offsets := prompt.get("prompt_token_offsets")) is not None
         ):
             engine_input["prompt_token_offsets"] = offsets
+
+        if engine_input["type"] == "token" and (
+            (echo_mask := prompt.get("prompt_echo_mask")) is not None
+        ):
+            engine_input["prompt_echo_mask"] = echo_mask
 
         return engine_input
 

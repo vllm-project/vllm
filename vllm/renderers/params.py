@@ -33,6 +33,7 @@ ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "
 _PARALLEL_TO_PROMPT_TOKENS = (
     "prompt_token_offsets",
     "prompt_is_token_ids",
+    "prompt_echo_mask",
 )
 
 

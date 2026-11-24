@@ -325,6 +325,14 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 model_name,
                 tokenizer,
                 request_metadata,
+                prompt_echo_masks=(
+                    [
+                        p.get("prompt_echo_mask") if p["type"] == "token" else None
+                        for p in engine_inputs
+                    ]
+                    if request.echo and request.logprobs is not None
+                    else None
+                ),
             )
 
             if self.enable_log_outputs and self.request_logger:
@@ -414,6 +422,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
+                    prompt_echo_mask = None
                     finish_reason = output.finish_reason
                     self._raise_if_error(finish_reason, request_id)
 
@@ -425,6 +434,12 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     assert request.max_tokens is not None
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
+                        engine_input = engine_inputs[prompt_idx]
+                        if (
+                            not request.return_token_ids
+                            and engine_input["type"] == "token"
+                        ):
+                            prompt_echo_mask = engine_input.get("prompt_echo_mask")
                         prompt_text = "" if request.return_token_ids else res.prompt
                         if prompt_text is None:
                             prompt_text = self._extract_prompt_text(
@@ -491,6 +506,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             logprob_token_ids=request.logprob_token_ids,
                             initial_text_offset=next_text_offsets[i],
                             return_as_token_id=request.return_tokens_as_token_ids,
+                            prompt_echo_mask=prompt_echo_mask,
                         )
                         # Advance by the tokens just reported, not by delta_text:
                         # text held back for stop strings lags the tokens.
@@ -657,6 +673,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
         model_name: str,
         tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
+        *,
+        prompt_echo_masks: list[list[bool] | None] | None = None,
     ) -> CompletionResponse:
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
@@ -664,7 +682,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         kv_transfer_params = None
         ec_transfer_params = None
         last_final_res = None
-        for final_res in final_res_batch:
+        for prompt_idx, final_res in enumerate(final_res_batch):
             last_final_res = final_res
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
@@ -721,6 +739,13 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         num_output_top_logprobs=request.logprobs,
                         logprob_token_ids=request.logprob_token_ids,
                         return_as_token_id=request.return_tokens_as_token_ids,
+                        prompt_echo_mask=(
+                            prompt_echo_masks[prompt_idx]
+                            if request.echo
+                            and not request.return_token_ids
+                            and prompt_echo_masks is not None
+                            else None
+                        ),
                     )
                 else:
                     logprobs = None
@@ -818,6 +843,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         logprob_token_ids: list[int] | None = None,
         initial_text_offset: int = 0,
         return_as_token_id: bool | None = None,
+        prompt_echo_mask: list[bool] | None = None,
     ) -> CompletionLogProbs:
         """Create logprobs for OpenAI Completion API."""
         out_text_offset: list[int] = []
@@ -833,6 +859,12 @@ class OpenAIServingCompletion(GenerateBaseServing):
             else self.return_tokens_as_token_ids
         )
         for i, token_id in enumerate(token_ids):
+            if (
+                prompt_echo_mask is not None
+                and i < len(prompt_echo_mask)
+                and not prompt_echo_mask[i]
+            ):
+                continue
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 if should_return_as_token_id:

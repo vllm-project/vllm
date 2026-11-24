@@ -1109,15 +1109,16 @@ def _get_detokenization_tokens(prompt: TokensPrompt) -> list[int]:
     special_tokens_mask = cast(HfTokensPrompt, prompt).pop(
         "prompt_special_tokens_mask", None
     )
-    if special_tokens_mask is None:
+    if special_tokens_mask is None or not any(special_tokens_mask):
         return token_ids
     # The mask already follows truncation; TokenizeParams pads only token_ids.
     # IDs beyond the mask are therefore padding tokens.
-    return [
-        token_id
-        for index, token_id in enumerate(token_ids)
-        if index >= len(special_tokens_mask) or not special_tokens_mask[index]
+    echo_mask = [
+        index >= len(special_tokens_mask) or not special_tokens_mask[index]
+        for index in range(len(token_ids))
     ]
+    prompt["prompt_echo_mask"] = echo_mask
+    return [token_id for token_id, visible in zip(token_ids, echo_mask) if visible]
 
 
 def detokenize_prompt(tokenizer: TokenizerLike, prompt: TokensPrompt) -> TokensPrompt:
