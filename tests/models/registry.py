@@ -990,6 +990,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer_mode="inkling",
         max_model_len=4096,
     ),
+    "Inkling2LoopForConditionalGeneration": _HfExamplesInfo(
+        "thinkingmachines/Inkling-2-Mini",
+        tokenizer_mode="inkling",
+        max_model_len=4096,
+        is_available_online=False,
+    ),
     "IsaacForConditionalGeneration": _HfExamplesInfo(
         "PerceptronAI/Isaac-0.1",
         extras={"0.2-2B-Preview": "PerceptronAI/Isaac-0.2-2B-Preview"},
@@ -1216,6 +1222,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "MuseSparkForConditionalGeneration": _HfExamplesInfo(
         "meta-models/Muse-Spark-Open-816B-A42B-NVFP4",
+        is_available_online=False,
+    ),
+    "Nemotron4ForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/NemotronShortcut",
+        trust_remote_code=True,
         is_available_online=False,
     ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
@@ -1860,6 +1871,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Nemotron3_5TranscribeMTPModel": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
         speculative_model="nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
+        is_available_online=False,
+    ),
+    "NemotronShortcutMTPModel": _HfExamplesInfo(
+        "nvidia/NemotronShortcut",
+        speculative_model="nvidia/NemotronShortcut",
+        trust_remote_code=True,
         is_available_online=False,
     ),
     "OpenPanguMTPModel": _HfExamplesInfo(

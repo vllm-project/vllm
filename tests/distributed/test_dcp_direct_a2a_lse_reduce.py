@@ -345,8 +345,8 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
 
     group = MagicMock(world_size=2)
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: group)
-    direct_a2a = MagicMock()
-    direct_query = MagicMock()
+    direct_a2a = MagicMock(max_num_tokens=16)
+    direct_query = MagicMock(max_num_tokens=16)
     direct_kv = MagicMock()
     monkeypatch.setattr(
         dcp_manager, "get_direct_dcp_a2a_workspace", MagicMock(return_value=direct_a2a)
@@ -377,7 +377,11 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     workspace = torch.empty(96, 8)
 
     assert manager.v_up_proj_combine is None
-    assert manager.query_gather == direct_query.gather
+    # Queries that fit the direct workspace go through it.
+    query = torch.empty(1, 2, 8)
+    assert manager.query_gather is not None
+    assert manager.query_gather(query) is direct_query.gather.return_value
+    direct_query.gather.assert_called_once_with(query)
     manager.init_kv_gather(workspace, 64)
     gathered_kv, local_kv = torch.empty(4, 8), torch.empty(2, 8)
     manager.kv_gather(gathered_kv, local_kv)
@@ -392,11 +396,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
         query_start_loc=query_start_loc,
     )
     direct_a2a.lse_reduce.assert_called_once_with(
-        output,
-        lse,
-        seq_lens=seq_lens,
-        query_start_loc=query_start_loc,
-        is_lse_base_on_e=False,
+        output, lse, False, seq_lens, query_start_loc
     )
 
 
@@ -477,7 +477,9 @@ def test_dcp_workspace_covers_decode_width(with_spec_config):
     config.scheduler_config.max_num_batched_tokens = 128
     config.num_speculative_tokens = 3
     if with_spec_config:
-        config.speculative_config = MagicMock(num_speculative_tokens=3)
+        config.speculative_config = MagicMock(
+            num_speculative_tokens=3, max_num_new_slots_for_drafting=0
+        )
 
     assert dcp.get_dcp_workspace_max_num_tokens(config) == 16
 
@@ -543,11 +545,11 @@ def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch):
 
     manager = object.__new__(dcp.MLADCPManager)
     manager.init_kv_gather = MagicMock()
-    layer = MagicMock(dcp_manager=manager)
+    layer = MagicMock(dcp_manager=manager, use_shardq=False)
     config = MagicMock()
     config.model_config.dtype = torch.bfloat16
     config.model_config.max_model_len = 64
-    config.model_config.hf_config.index_topk = 8
+    config.model_config.hf_text_config.index_topk = 8
     config.scheduler_config.max_num_batched_tokens = 64
     config.scheduler_config.max_num_seqs = 2
     config.cache_config.block_size = 4
@@ -577,7 +579,7 @@ def test_sparse_mla_workspace_preserves_non_dcp_size():
 
     config = MagicMock()
     config.model_config.max_model_len = 1
-    config.model_config.hf_config.index_topk = 7
+    config.model_config.hf_text_config.index_topk = 7
     config.scheduler_config.max_num_seqs = 3
     config.cache_config.block_size = 4
     config.parallel_config.decode_context_parallel_size = 1
@@ -831,6 +833,263 @@ def test_distributed_direct_kv_gather_matches_reference(world_size: int):
     )
 
 
+# CuTe DSL direct A2A on one GPU: every simulated DCP rank owns ordinary device
+# buffers laid out like DirectDCPA2AWorkspace's symmetric memory, and the peer
+# pointer tables point at each other's buffers. The CuTe kernels run rank by
+# rank (all pushes, then all combines); the CUDA op runs one stream per rank,
+# at sizes where every spinning combine CTA stays resident.
+
+_requires_cutedsl_a2a = pytest.mark.skipif(
+    not dcp._use_cutedsl_direct_a2a(2, 1, 512, torch.bfloat16),
+    reason="CuTe DSL direct DCP A2A requires SM100 and CuTe DSL",
+)
+_A2A_HEAD_DIM = 512
+_A2A_MAX_NUM_TOKENS = 256
+# GPU cycles (tens of ms) that hold the simulated ranks' CUDA op streams
+# while the host queues their launches.
+_LAUNCH_GATE_CYCLES = 50_000_000
+
+
+class _SimulatedA2ARanks:
+    def __init__(self, world_size: int, heads_per_rank: int) -> None:
+        self.world_size = world_size
+        self.heads_per_rank = heads_per_rank
+        shape = (2, world_size, _A2A_MAX_NUM_TOKENS, heads_per_rank)
+
+        def zeros(*size, dtype):
+            return [
+                torch.zeros(*size, dtype=dtype, device="cuda")
+                for _ in range(world_size)
+            ]
+
+        self.received_output = zeros(*shape, _A2A_HEAD_DIM, dtype=torch.bfloat16)
+        self.received_lse = zeros(*shape, dtype=torch.float32)
+        self.received_signal = zeros(2, world_size, dtype=torch.int32)
+        self.epoch = zeros(1, dtype=torch.int64)
+        self.counters = zeros(world_size + 1, dtype=torch.int32)
+
+        def table(buffers: list[torch.Tensor]) -> torch.Tensor:
+            return torch.tensor(
+                [buffer.data_ptr() for buffer in buffers],
+                dtype=torch.int64,
+                device="cuda",
+            )
+
+        self.peer_output_ptrs = table(self.received_output)
+        self.peer_lse_ptrs = table(self.received_lse)
+        self.peer_signal_ptrs = table(self.received_signal)
+
+    def outputs(self, num_tokens: int) -> list[torch.Tensor]:
+        return [
+            torch.full(
+                (num_tokens, self.heads_per_rank, _A2A_HEAD_DIM),
+                float("nan"),
+                dtype=torch.bfloat16,
+                device="cuda",
+            )
+            for _ in range(self.world_size)
+        ]
+
+    def cutedsl(
+        self, outputs, partial_outputs, partial_lses, base_e, seq_lens=None, qsl=None
+    ):
+        from vllm.v1.attention.ops import dcp_direct_a2a_cutedsl as kernels
+
+        # The push of every rank completes before any combine waits on it.
+        for rank in range(self.world_size):
+            counters = self.counters[rank]
+            rank_seq_lens = None if seq_lens is None else seq_lens[rank]
+            kernels.DIRECT_DCP_A2A_PUSH_KERNEL(
+                partial_outputs[rank],
+                partial_lses[rank],
+                counters[:1] if rank_seq_lens is None else rank_seq_lens,
+                counters[:1] if qsl is None else qsl,
+                0 if rank_seq_lens is None else rank_seq_lens.shape[0],
+                self.peer_output_ptrs,
+                self.peer_lse_ptrs,
+                self.peer_signal_ptrs,
+                counters,
+                self.epoch[rank],
+                world_size=self.world_size,
+                rank=rank,
+                max_num_tokens=_A2A_MAX_NUM_TOKENS,
+            )
+        for rank in range(self.world_size):
+            kernels.DIRECT_DCP_A2A_COMBINE_KERNEL(
+                self.received_output[rank],
+                self.received_lse[rank],
+                self.received_signal[rank],
+                self.epoch[rank],
+                self.counters[rank][self.world_size :],
+                outputs[rank],
+                world_size=self.world_size,
+                max_num_tokens=_A2A_MAX_NUM_TOKENS,
+                lse_scale=kernels._LOG2_E if base_e else 1.0,
+            )
+
+    def cuda(
+        self, outputs, partial_outputs, partial_lses, base_e, seq_lens=None, qsl=None
+    ):
+        # One stream per rank. All ranks share one GPU, so a rank queued after
+        # the others' spinning combines could find no free SM: hold every
+        # stream until all launches are queued.
+        current = torch.cuda.current_stream()
+        torch.cuda._sleep(_LAUNCH_GATE_CYCLES)
+        streams = [torch.cuda.Stream() for _ in range(self.world_size)]
+        for rank, stream in enumerate(streams):
+            stream.wait_stream(current)
+            with torch.cuda.stream(stream):
+                torch.ops._C.direct_dcp_a2a_lse_reduce(
+                    partial_outputs[rank],
+                    partial_lses[rank],
+                    None if seq_lens is None else seq_lens[rank],
+                    qsl,
+                    self.peer_output_ptrs,
+                    self.peer_lse_ptrs,
+                    self.peer_signal_ptrs,
+                    self.received_output[rank],
+                    self.received_lse[rank],
+                    self.received_signal[rank],
+                    self.epoch[rank],
+                    outputs[rank],
+                    self.world_size,
+                    rank,
+                    _A2A_MAX_NUM_TOKENS,
+                    base_e,
+                )
+        for stream in streams:
+            current.wait_stream(stream)
+
+
+def _a2a_inputs(
+    world_size, heads_per_rank, num_tokens, lse_dtype, padded, transposed, seed
+):
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    total_heads = world_size * heads_per_rank
+    storage_heads = max(128, total_heads) if padded else total_heads
+    partial_outputs, partial_lses = [], []
+    for _ in range(world_size):
+        output = torch.randn(
+            num_tokens,
+            storage_heads,
+            _A2A_HEAD_DIM,
+            dtype=torch.bfloat16,
+            device="cuda",
+            generator=generator,
+        )[:, :total_heads]
+        lse = 4 * torch.randn(
+            num_tokens, storage_heads, device="cuda", generator=generator
+        )
+        lse = lse.to(lse_dtype)[:, :total_heads]
+        if transposed:
+            # FlashAttention MLA returns [H, T], viewed as [T, H].
+            storage = torch.empty(
+                total_heads, num_tokens, dtype=lse_dtype, device="cuda"
+            )
+            storage.copy_(lse.t())
+            lse = storage.t()
+        # Undefined rows (NaN or +inf LSE) get zero weight, so their partials
+        # (NaN here) must never be read.
+        lse[0, 0] = float("nan")
+        lse[-1, -1] = float("inf")
+        output[0, 0] = float("nan")
+        output[-1, -1] = float("nan")
+        partial_outputs.append(output)
+        partial_lses.append(lse)
+    return partial_outputs, partial_lses
+
+
+@_requires_cutedsl_a2a
+@pytest.mark.parametrize("world_size,heads_per_rank", [(8, 12), (2, 64)])
+@pytest.mark.parametrize(
+    "num_tokens,lse_dtype,padded,transposed,base_e",
+    [
+        (1, torch.float32, False, False, False),
+        (13, torch.bfloat16, True, True, True),
+        (16, torch.float16, False, True, False),
+    ],
+)
+def test_cutedsl_a2a_bit_exact_vs_cuda_op(
+    world_size, heads_per_rank, num_tokens, lse_dtype, padded, transposed, base_e
+):
+    ranks_cute = _SimulatedA2ARanks(world_size, heads_per_rank)
+    ranks_cuda = _SimulatedA2ARanks(world_size, heads_per_rank)
+    for call in range(3):
+        partial_outputs, partial_lses = _a2a_inputs(
+            world_size,
+            heads_per_rank,
+            num_tokens,
+            lse_dtype,
+            padded,
+            transposed,
+            seed=call,
+        )
+        expected = ranks_cuda.outputs(num_tokens)
+        actual = ranks_cute.outputs(num_tokens)
+        ranks_cuda.cuda(expected, partial_outputs, partial_lses, base_e)
+        ranks_cute.cutedsl(actual, partial_outputs, partial_lses, base_e)
+        torch.accelerator.synchronize()
+        for rank in range(world_size):
+            torch.testing.assert_close(actual[rank], expected[rank], rtol=0, atol=0)
+    # Two launches per call leave the protocol state exactly as the CUDA op.
+    for rank in range(world_size):
+        assert ranks_cute.epoch[rank].item() == 3
+        assert torch.equal(
+            ranks_cute.received_signal[rank], ranks_cuda.received_signal[rank]
+        )
+        assert not ranks_cute.counters[rank].any()
+
+
+@_requires_cutedsl_a2a
+def test_cutedsl_a2a_empty_shards_get_zero_weight():
+    world_size, heads_per_rank = 8, 12
+    query_lens = [1, 3, 2, *([1] * (world_size - 1))]
+    num_seqs, num_tokens = len(query_lens), sum(query_lens)
+    query_lens_t = torch.tensor(query_lens, dtype=torch.int32, device="cuda")
+    query_start_loc = torch.cat(
+        (query_lens_t.new_zeros(1), query_lens_t.cumsum(0, dtype=torch.int32))
+    )
+
+    # Sequence 0 is empty everywhere; sequence 1 + r is empty on rank r only.
+    def is_empty(seq_idx: int, rank: int) -> bool:
+        return seq_idx == 0 or seq_idx == 1 + rank
+
+    seq_lens = [
+        torch.tensor(
+            [0 if is_empty(s, rank) else s + 3 for s in range(num_seqs)],
+            dtype=torch.int32,
+            device="cuda",
+        )
+        for rank in range(world_size)
+    ]
+    empty_rows = [
+        torch.repeat_interleave(lengths == 0, query_lens_t) for lengths in seq_lens
+    ]
+    partial_outputs, partial_lses = _a2a_inputs(
+        world_size, heads_per_rank, num_tokens, torch.float32, False, False, seed=3
+    )
+    for rows, output, lse in zip(empty_rows, partial_outputs, partial_lses):
+        # Garbage the kernels must mask from seq_lens alone.
+        output[rows] = float("nan")
+        lse[rows] = 30.0
+
+    ranks_cute = _SimulatedA2ARanks(world_size, heads_per_rank)
+    ranks_cuda = _SimulatedA2ARanks(world_size, heads_per_rank)
+    actual = ranks_cute.outputs(num_tokens)
+    expected = ranks_cuda.outputs(num_tokens)
+    ranks_cute.cutedsl(
+        actual, partial_outputs, partial_lses, True, seq_lens, query_start_loc
+    )
+    ranks_cuda.cuda(
+        expected, partial_outputs, partial_lses, True, seq_lens, query_start_loc
+    )
+    torch.accelerator.synchronize()
+    for rank in range(world_size):
+        torch.testing.assert_close(actual[rank], expected[rank], rtol=0, atol=0)
+        # Sequence 0 is empty on every rank: all weights are zero.
+        assert not actual[rank][: query_lens[0]].any()
+
+
 def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
     update_environment_variables(env)
     local_rank = int(env["LOCAL_RANK"])
@@ -859,6 +1118,18 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             dtype,
             num_ubatches=2,
         )
+        # "mixed" alternates the CUDA op and the CuTe DSL kernels on the same
+        # symmetric buffers: both follow one epoch and signal protocol.
+        impl = env["TEST_IMPL"]
+        cutedsl_counters = workspace.cutedsl_counters
+        assert impl == "cuda" or cutedsl_counters is not None
+        num_calls = [0]
+
+        def lse_reduce(*args, **kwargs):
+            use_cutedsl = impl == "cutedsl" or (impl == "mixed" and num_calls[0] % 2)
+            workspace.cutedsl_counters = cutedsl_counters if use_cutedsl else None
+            num_calls[0] += 1
+            return workspace.lse_reduce(*args, **kwargs)
 
         def lse_layout(value: torch.Tensor) -> torch.Tensor:
             if env["TEST_LSE_LAYOUT"] == "transposed":
@@ -898,11 +1169,11 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
                 assert not partial_lse.is_contiguous()
             partial_lse = lse_layout(partial_lse)
             active_ubatch[0] = iteration % 2
-            actual = workspace.lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
+            actual = lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
             torch.accelerator.synchronize()
 
             # Layout alone must not alter even one output bit.
-            packed = workspace.lse_reduce(
+            packed = lse_reduce(
                 partial_output, partial_lse.contiguous(), is_lse_base_on_e
             )
             torch.testing.assert_close(actual, packed, rtol=0, atol=0)
@@ -988,7 +1259,7 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             partial_lse[empty_rows] = float("nan")
 
             active_ubatch[0] = iteration % 2
-            actual = workspace.lse_reduce(
+            actual = lse_reduce(
                 partial_output,
                 partial_lse,
                 is_lse_base_on_e,
@@ -1065,14 +1336,12 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         active_ubatch[0] = 1
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            actual = workspace.lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
+            actual = lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
         for _ in range(3):
             graph.replay()
         torch.accelerator.synchronize()
 
-        packed = workspace.lse_reduce(
-            partial_output, partial_lse.contiguous(), is_lse_base_on_e
-        )
+        packed = lse_reduce(partial_output, partial_lse.contiguous(), is_lse_base_on_e)
         torch.testing.assert_close(actual, packed, rtol=0, atol=0)
 
         reference_output = partial_output.contiguous()
@@ -1117,8 +1386,16 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
     "lse_layout,lse_dtype,lse_base_e",
     [("packed", "bfloat16", "0"), ("transposed", "float32", "1")],
 )
+@pytest.mark.parametrize(
+    "impl",
+    [
+        "cuda",
+        pytest.param("cutedsl", marks=_requires_cutedsl_a2a),
+        pytest.param("mixed", marks=_requires_cutedsl_a2a),
+    ],
+)
 def test_distributed_direct_a2a_matches_reference(
-    world_size: int, lse_layout: str, lse_dtype: str, lse_base_e: str
+    world_size: int, lse_layout: str, lse_dtype: str, lse_base_e: str, impl: str
 ):
     """Combine packed and FlashAttention MLA LSE, including graph replay."""
     _distributed_run(
@@ -1129,6 +1406,7 @@ def test_distributed_direct_a2a_matches_reference(
             "TEST_LSE_DTYPE": lse_dtype,
             "TEST_LSE_LAYOUT": lse_layout,
             "LSE_BASE_E": lse_base_e,
+            "TEST_IMPL": impl,
         },
     )
 
