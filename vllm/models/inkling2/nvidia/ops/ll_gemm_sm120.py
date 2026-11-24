@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Low-M BF16 tensor-core projections for SM120/SM121: batched `x @ w.T` with
-deterministic split-K for narrow outputs, and a grouped q/k/v projection."""
+"""Low-M BF16 tensor-core projections for SM120/SM121 and SM80: batched
+`x @ w.T` with deterministic split-K for narrow outputs, and a grouped q/k/v
+projection."""
 
 import functools
 from typing import NamedTuple
@@ -40,12 +41,14 @@ def _ll_gemm_kernel(
     K_PER_SPLIT: tl.constexpr,
     SPLIT: tl.constexpr,
     MP: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     """Program `(n, b, s)` computes column tile `n` of batch `b` over K range
     `s`. With `SPLIT > 1` it writes fp32 partials to `P` `[SPLIT, B, MP, N]`;
     the last of the tile's programs to finish (counted in `C`, reset to 0
     after) sums them in split order, so results are deterministic."""
-    tl.extra.cuda.gdc_wait()
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
     pid_n = tl.program_id(0)
     b = tl.program_id(1)
     s = tl.program_id(2)
@@ -90,7 +93,8 @@ def _ll_gemm_kernel(
             acc.to(Y.dtype.element_ty),
             (rows[:, None] < M) & (cols[None, :] < N),
         )
-    tl.extra.cuda.gdc_launch_dependents()
+    if launch_pdl:
+        tl.extra.cuda.gdc_launch_dependents()
 
 
 @triton.jit
@@ -124,11 +128,13 @@ def _qkv_bmm_kernel(
     BN: tl.constexpr,
     BK: tl.constexpr,
     MP: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     """Columns `[0, S1)` of `Y` are `XQ @ W.T`, `[S1, S2)` `XK` and `[S2, N)`
     `XV`. A tile spanning a boundary runs both inputs' dots and picks per
     column (the second input's loads hit L2)."""
-    tl.extra.cuda.gdc_wait()
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
     n0 = tl.program_id(0) * BN
     n1 = tl.minimum(n0 + BN, N) - 1
     b_lo = (n0 >= S1).to(tl.int32) + (n0 >= S2).to(tl.int32)
@@ -159,7 +165,8 @@ def _qkv_bmm_kernel(
         acc.to(Y.dtype.element_ty),
         (rows[:, None] < M) & (cols[None, :] < N),
     )
-    tl.extra.cuda.gdc_launch_dependents()
+    if launch_pdl:
+        tl.extra.cuda.gdc_launch_dependents()
 
 
 class _Config(NamedTuple):
@@ -186,7 +193,17 @@ def _config(nb: int, n: int, k: int) -> _Config:
             split = triton.cdiv(k_tiles, tiles_per_split)
             return _Config(bn, bk, split, tiles_per_split * bk, 4, 4)
     bk = min(256, max(16, triton.next_power_of_2(k)))
-    return _Config(32, bk, 1, triton.cdiv(k, bk) * bk, 4, 3)
+    # On SM80, a grid of less than one wave reads faster with one more stage.
+    small_grid = nb * triton.cdiv(n, 32) < num_sms
+    stages = 4 if small_grid and current_platform.is_device_capability(80) else 3
+    return _Config(32, bk, 1, triton.cdiv(k, bk) * bk, 4, stages)
+
+
+@functools.cache
+def _supported() -> bool:
+    """SM120/SM121, and SM80 (measured on A100; SM86/SM89 are untested)."""
+    sm120 = current_platform.is_device_capability_family(120)
+    return sm120 or current_platform.is_device_capability(80)
 
 
 @functools.cache
@@ -237,7 +254,7 @@ def _ll_gemm(
         MP=_MP,
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,
-        launch_pdl=True,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
 
 
@@ -252,7 +269,7 @@ def use_qkv_bmm(
         and x_q.shape == x_k.shape == x_v.shape
         and x_q.dtype == x_k.dtype == x_v.dtype == w.dtype == torch.bfloat16
         and x_q.stride(1) == x_k.stride(1) == x_v.stride(1) == w.stride(1) == 1
-        and current_platform.is_device_capability_family(120)
+        and _supported()
     )
 
 
@@ -301,7 +318,7 @@ def qkv_bmm(
         MP=_MP,
         num_warps=4,
         num_stages=4,
-        launch_pdl=True,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return out
 
@@ -358,5 +375,5 @@ def use_sm12x_bf16_ll_gemm(
                 and bias.stride(0) == 1
             )
         )
-        and current_platform.is_device_capability_family(120)
+        and _supported()
     )

@@ -609,7 +609,11 @@ def test_attention_prologue_stores_low_precision_kv_without_touching_padding(
 
 
 @pytest.mark.parametrize(
-    "tokens", [1, 4, 8, 16] if current_platform.is_device_capability_family(120) else []
+    "tokens",
+    [1, 4, 8, 16]
+    if current_platform.is_device_capability_family(120)
+    or current_platform.is_device_capability(80)
+    else [],
 )
 @pytest.mark.parametrize("shape", [(131, 130), (6552, 2304)])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
@@ -629,13 +633,22 @@ def test_sm12x_ll_gemm_projection_and_graph(tokens, shape, dtype):
         return sm12x_bf16_ll_gemm(x, weight, bias, out=out)
 
     def check():
-        if k == 2304:
+        if k == 2304 and current_platform.is_device_capability_family(120):
             # Match the existing tensor-core accumulation, including its
             # rounding. Four rows select that path for the one-row reference.
             inputs = x.repeat(4, 1) if tokens == 1 else x
             reference = torch.mm(inputs, weight.t(), out_dtype=torch.float32)
             reference = (reference[:tokens] + bias.float()).to(dtype)
             torch.testing.assert_close(out, reference, atol=0, rtol=0)
+        elif k == 2304:
+            # SM80's cuBLAS sums in another order. Allow fp32 accumulation
+            # error, which can also move an output to the neighboring value.
+            reference = x.double() @ weight.double().T + bias.double()
+            rounding = (reference.to(dtype).double() - reference).abs()
+            magnitude = x.double().abs() @ weight.double().abs().T
+            accumulation = k**0.5 * 2**-24 * magnitude
+            error = (out.double() - reference).abs()
+            assert (error <= rounding + 2 * accumulation).all()
         else:
             reference = x.double() @ weight.double().T + bias.double()
             rounding = (reference.to(dtype).double() - reference).abs()
