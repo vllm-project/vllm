@@ -770,11 +770,6 @@ class ModelConfig:
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
-        self._transformers_backend = self.using_transformers_backend()
-        if self._transformers_backend:
-            # MLA detection depends on the model implementation
-            self.model_arch_config = self.get_model_arch_config()
-
         # Backend pooling classes wrap encoders and decoders, so default per model
         if (
             model_info.is_pooling_model
@@ -1092,7 +1087,6 @@ class ModelConfig:
             self.hf_text_config,
             revision=getattr(self, "revision", None),
         )
-        convertor.transformers_backend = getattr(self, "_transformers_backend", False)
         return convertor.convert(
             supports_multimodal=self._supports_multimodal_for_mm_prefix()
         )
@@ -2271,6 +2265,11 @@ class ModelConfig:
     def use_mla(self) -> bool:
         if envs.VLLM_MLA_DISABLE:
             return False
+        if self.using_transformers_backend():
+            # kv_lora_rank indicates that a Transformers model implementation uses MLA
+            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
+        # Manually maintained list of model types for vLLM model implementations
+
         # Bidirectional DeepSeek variants (is_causal=False, used by some
         # embedding models) must use the non-MLA attention path, since the
         # MLA kernels only support causal attention.
