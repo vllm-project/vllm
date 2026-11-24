@@ -12,7 +12,7 @@ from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
 from functools import partial
 from types import NoneType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 
 import torch
 import torch.nn as nn
@@ -170,6 +170,12 @@ def _num_workspace_lanes(vllm_config: VllmConfig) -> int:
     return (
         2 if spec_config is not None and spec_config.uses_separate_workspace_lane else 1
     )
+
+
+def _validate_weight_checker_model(model: object) -> str | None:
+    if model not in get_args(WeightCheckerModel):
+        return f"Invalid Weight Checker model selection: {model!r}"
+    return None
 
 
 def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int | None:
@@ -462,8 +468,8 @@ class Worker(WorkerBase):
     def compute_weight_checksums(
         self, model: WeightCheckerModel = "target"
     ) -> dict[str, str] | str:
-        if model not in ("target", "draft", "both"):
-            return f"Invalid Weight Checker model selection: {model!r}"
+        if error := _validate_weight_checker_model(model):
+            return error
         draft = None
         if model != "target":
             draft, error = self._resolve_weight_checker_draft()
@@ -489,8 +495,8 @@ class Worker(WorkerBase):
     def _weight_reset_plan(
         self, model: WeightCheckerModel
     ) -> tuple[torch.Tensor, ...] | str:
-        if model not in ("target", "draft", "both"):
-            return f"Invalid Weight Checker model selection: {model!r}"
+        if error := _validate_weight_checker_model(model):
+            return error
         if model != "target" and self.parallel_config.pipeline_parallel_size > 1:
             return "Cannot reset draft weights with pipeline parallelism."
 
