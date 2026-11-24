@@ -427,6 +427,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def fused_qk_norm_mrope_kvcache_supported(self) -> bool:
         return IS_AITER_FOUND
 
+    def fused_v_norm_kvcache_supported(self) -> bool:
+        # Decoder attention reads V only from the cache, never the V argument.
+        return True
+
     def set_interleaved_v_cache(self):
         # No-op override of RocmAttentionImpl: this backend
         # decodes with the AITER triton unified-attention kernel
@@ -448,6 +452,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         layer_slot_mapping: torch.Tensor,
         q_out_fp8: torch.Tensor | None = None,
         q_scale: torch.Tensor | None = None,
+        v_norm: bool = False,
     ):
         key_cache, value_cache = self._split_kv_cache(kv_cache)
         rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
@@ -473,6 +478,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             return_kv=False,
             q_out_fp8=q_out_fp8,
             q_scale=q_scale,
+            v_norm=v_norm,
         )
 
     def do_qk_norm_mrope_kvcache_update(

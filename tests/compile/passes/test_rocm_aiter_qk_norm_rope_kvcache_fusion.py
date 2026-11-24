@@ -106,6 +106,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         rotary_dim: int | None = None,
         prefix: str = "model.layers.0.self_attn.attn",
         expected_query_quant_group_shape: GroupShape | None = None,
+        has_v_norm: bool = False,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -122,6 +123,12 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
 
         self.q_norm = RMSNorm(head_size, eps=rms_norm_eps)
         self.k_norm = RMSNorm(head_size, eps=rms_norm_eps)
+        # Gemma4 applies a weightless V-norm on every attention layer.
+        self.v_norm = (
+            RMSNorm(head_size, eps=rms_norm_eps, has_weight=False)
+            if has_v_norm
+            else None
+        )
 
         self.rotary_emb = RotaryEmbedding(
             head_size,
@@ -258,6 +265,8 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         q = q.view(-1, self.num_heads, self.head_size)
         k = k.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size)
+        if self.v_norm is not None:
+            v = self.v_norm(v)
         kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
             k, v, _encode_layer_name(self.layer_name)
         )
@@ -270,6 +279,38 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
 
     def ops_in_model_after(self) -> list[torch._ops.OpOverload]:
         return [torch.ops.vllm.fused_qk_norm_rope_and_unified_kv_cache_update.default]
+
+
+class QKNormRoPEVNormKVCacheTestModel(QKNormRoPEKVCacheTestModel):
+    """Gemma4-style layer: weightless V-norm, normed V feeds only attention."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, has_v_norm=True)
+
+    def forward(
+        self, qkv: torch.Tensor, positions: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        q, k, v, kv_cache_dummy_dep = super().forward(qkv, positions)
+        output = torch.empty(
+            q.shape[0],
+            self.num_heads * self.head_size,
+            device=q.device,
+            dtype=self.dtype,
+        )
+        torch.ops.vllm.unified_attention_with_output(
+            q,
+            k,
+            v,
+            output,
+            _encode_layer_name(self.layer_name),
+            kv_cache_dummy_dep=kv_cache_dummy_dep,
+        )
+        # The fused graph keeps un-normed V, so return the attention output
+        # (which reads normed V from the cache) in V's place.
+        return q, k, output, kv_cache_dummy_dep
+
+    def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
+        return [*super().ops_in_model_before(), torch.ops.vllm_ir.rms_norm.default]
 
 
 class QKNormMRoPEKVCacheTestModel(QKNormRoPEKVCacheTestModel):
@@ -461,6 +502,9 @@ def _run_qk_norm_rope_kvcache_fusion_test(
     mrope_section: tuple[int, int, int] | None = None,
     mrope_interleaved: bool = False,
     observe_mrope_k: bool = False,
+    has_v_norm: bool = False,
+    observe_v_norm: bool = False,
+    extra_layer_shape: tuple[int, int, int] | None = None,
     expect_fusion: bool = True,
     use_quark_scalar_query_scale: bool = False,
 ) -> None:
@@ -534,8 +578,28 @@ def _run_qk_norm_rope_kvcache_fusion_test(
             "device": torch.get_default_device(),
             "expected_query_quant_group_shape": expected_query_quant_group_shape,
         }
+        if extra_layer_shape is not None:
+            # A second attention shape in the model (e.g. Gemma4's sliding and
+            # full layers), created first so its patterns are tried first.
+            extra_heads, extra_kv_heads, extra_head_size = extra_layer_shape
+            QKNormRoPEKVCacheTestModel(
+                **{
+                    **model_kwargs,
+                    "num_heads": extra_heads,
+                    "num_kv_heads": extra_kv_heads,
+                    "head_size": extra_head_size,
+                    "rotary_dim": extra_head_size,
+                    "has_v_norm": has_v_norm,
+                }
+            )
+            model_kwargs["prefix"] = "model.layers.1.self_attn.attn"
         if mrope_section is None:
-            model = QKNormRoPEKVCacheTestModel(**model_kwargs)
+            if has_v_norm and not observe_v_norm:
+                model = QKNormRoPEVNormKVCacheTestModel(**model_kwargs)
+            else:
+                model = QKNormRoPEKVCacheTestModel(
+                    **model_kwargs, has_v_norm=has_v_norm
+                )
         else:
             alternate_section = (8, 8, 8)
             m.setattr(
@@ -664,8 +728,15 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         if attn_backend != AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
             torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
 
-        # Should be bit exact since no processing had been done on v for both paths
-        torch.testing.assert_close(v_unfused, v_fused, atol=0.0, rtol=0.0)
+        if has_v_norm and not observe_v_norm:
+            # V's slot holds the attention output, which reads normed V from
+            # the cache (decode: each token attends only to itself).
+            torch.testing.assert_close(
+                v_unfused, v_fused, atol=cache_atol, rtol=cache_rtol
+            )
+        else:
+            # Bit exact since no processing had been done on v for both paths.
+            torch.testing.assert_close(v_unfused, v_fused, atol=0.0, rtol=0.0)
 
         # Whole cache, so the interleaved V write (ROCM_ATTN kv_cache[1]) is checked.
         torch.testing.assert_close(
@@ -854,6 +925,105 @@ def test_qk_norm_rope_kvcache_fusion_k_out_unquantized_and_q_out_fp8(
     )
 
 
+# Gemma4 sliding (head_dim 256) and full (head_dim 512) layers, each built
+# alongside the other shape as in the real model.
+_GEMMA4_CONFIGS = [
+    pytest.param((32, 16, 256), (32, 4, 512), id="gemma4_sliding"),
+    pytest.param((32, 4, 512), (32, 16, 256), id="gemma4_full"),
+]
+
+# Only unified attention reads V solely from the cache, so only it fuses V-norm.
+_UNIFIED_LAYOUTS = [p for p in _BACKEND_LAYOUTS if p.id.startswith("unified")]
+
+
+@pytest.mark.parametrize("layer_shape, other_layer_shape", _GEMMA4_CONFIGS)
+@pytest.mark.parametrize(
+    "attn_backend, use_shuffle_kv_layout, kv_layout", _UNIFIED_LAYOUTS
+)
+@pytest.mark.parametrize("num_tokens", [5, 2048])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.skipif(
+    not IS_AITER_FOUND,
+    reason="Requires AITER",
+)
+def test_qk_norm_rope_kvcache_fusion_gemma4_v_norm(
+    layer_shape: tuple[int, int, int],
+    other_layer_shape: tuple[int, int, int],
+    attn_backend: AttentionBackendEnum,
+    use_shuffle_kv_layout: str,
+    kv_layout: KVCacheLayout,
+    num_tokens: int,
+    kv_cache_dtype: CacheDType,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    num_heads, num_kv_heads, head_size = layer_shape
+    _run_qk_norm_rope_kvcache_fusion_test(
+        attn_backend=attn_backend,
+        enable_aiter_triton_rope=False,
+        num_tokens=num_tokens,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        rotary_dim=head_size,
+        block_size=16,
+        is_neox=True,
+        use_shuffle_kv_layout=use_shuffle_kv_layout,
+        kv_layout=kv_layout,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=kv_cache_dtype,
+        rms_norm_eps=1e-6,
+        custom_op="+rotary_embedding",
+        monkeypatch=monkeypatch,
+        has_v_norm=True,
+        extra_layer_shape=other_layer_shape,
+    )
+
+
+# The fused graph keeps un-normed V, so V-norm must not fuse when anything but
+# cache-reading attention consumes the normed V.
+@pytest.mark.parametrize(
+    "attn_backend, observe_v_norm",
+    [
+        # Their prefill paths read the V argument directly.
+        pytest.param(AttentionBackendEnum.ROCM_AITER_FA, False, id="fa"),
+        pytest.param(AttentionBackendEnum.ROCM_ATTN, False, id="rocm_attn"),
+        pytest.param(
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN, True, id="observable_v"
+        ),
+    ],
+)
+@pytest.mark.skipif(
+    not IS_AITER_FOUND,
+    reason="Requires AITER",
+)
+def test_v_norm_fusion_rejects_uncached_v_consumers(
+    attn_backend: AttentionBackendEnum,
+    observe_v_norm: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _run_qk_norm_rope_kvcache_fusion_test(
+        attn_backend=attn_backend,
+        enable_aiter_triton_rope=False,
+        num_tokens=5,
+        num_heads=32,
+        num_kv_heads=16,
+        head_size=256,
+        rotary_dim=256,
+        block_size=16,
+        is_neox=True,
+        use_shuffle_kv_layout="0",
+        kv_layout=KVCacheLayout.LBHNC,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        rms_norm_eps=1e-6,
+        custom_op="+rotary_embedding",
+        monkeypatch=monkeypatch,
+        has_v_norm=True,
+        observe_v_norm=observe_v_norm,
+        expect_fusion=False,
+    )
+
+
 @pytest.mark.parametrize(
     "mrope_section",
     [
@@ -997,6 +1167,32 @@ def test_mrope_fusion_rejects_unaligned_rotary_dim(
     )
 
 
+def test_mrope_fusion_rejects_unsupported_head_size(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The AITER RoPE writer supports head_dim 512, but the MRoPE writer aborts.
+    _run_qk_norm_rope_kvcache_fusion_test(
+        attn_backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        enable_aiter_triton_rope=False,
+        num_tokens=5,
+        num_heads=8,
+        num_kv_heads=2,
+        head_size=512,
+        rotary_dim=128,
+        block_size=16,
+        is_neox=True,
+        use_shuffle_kv_layout="0",
+        kv_layout=KVCacheLayout.LBHNC,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        rms_norm_eps=1e-6,
+        custom_op="+rotary_embedding",
+        monkeypatch=monkeypatch,
+        mrope_section=(16, 24, 24),
+        expect_fusion=False,
+    )
+
+
 @pytest.mark.skipif(not _USE_LAYERNAME, reason="requires opaque LayerName")
 def test_opaque_layer_name_patterns_register_once(monkeypatch: pytest.MonkeyPatch):
     device = os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda")
@@ -1037,7 +1233,7 @@ def test_opaque_layer_name_patterns_register_once(monkeypatch: pytest.MonkeyPatc
         fusion_pass = QkNormRopeKvCacheFusionPass(vllm_config)
 
     assert models
-    assert fusion_pass.patterns
+    assert len(fusion_pass.patterns_by_shape) == 1
 
 
 def _call_fused_mrope_impl(q_out: torch.Tensor) -> None:

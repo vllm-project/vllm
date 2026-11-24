@@ -38,9 +38,10 @@ logger = init_logger(__name__)
 
 P = ParamSpec("P")
 
-# Head sizes the fused kernel fused_qk_norm_rope_cache_pts_quant_shuffle() supports
+# Head sizes the fused AITER RoPE and MRoPE cache writers support.
 # Other sizes hard-abort, so skip those layers.
-SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS: tuple[int, ...] = (64, 128, 256)
+SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS: tuple[int, ...] = (64, 128, 256, 512)
+SUPPORTED_FUSED_QK_NORM_MROPE_KVCACHE_HEAD_DIMS: tuple[int, ...] = (64, 128, 256)
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +62,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
     layer_name: LayerNameType,
     q_out_fp8: torch.Tensor | None = None,
     q_scale: torch.Tensor | None = None,
+    v_norm: bool = False,
 ) -> torch.Tensor:
     layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
@@ -80,6 +82,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
             layer_slot_mapping,
             q_out_fp8=q_out_fp8,
             q_scale=q_scale,
+            v_norm=v_norm,
         )
     else:
         # Profiling/dummy run: define q_out/k_out/q_out_fp8 (consumed by attention).
@@ -104,6 +107,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_fake(
     layer_name: LayerNameType,
     q_out_fp8: torch.Tensor | None = None,
     q_scale: torch.Tensor | None = None,
+    v_norm: bool = False,
 ) -> torch.Tensor:
     return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
 
@@ -200,6 +204,7 @@ class QkNormRopeKvCachePattern:
       q = q.view(num_heads, head_dim)
       k = k.view(num_kv_heads, head_dim)
       v = v.view(num_kv_heads, head_dim)
+      v = rms_norm(v, None)  # only with v_norm (weightless, e.g. Gemma4)
       dummy = unified_kv_cache_update(k, v, layer_name)
 
     Replace with:
@@ -219,6 +224,7 @@ class QkNormRopeKvCachePattern:
         eps: float,
         is_neox: bool,
         quant_query: bool,
+        v_norm: bool = False,
     ) -> None:
         self.layer_name = layer.layer_name
         self.num_heads = layer.num_heads
@@ -228,6 +234,7 @@ class QkNormRopeKvCachePattern:
         self.eps = eps
         self.is_neox = is_neox
         self.quant_query = quant_query
+        self.v_norm = v_norm
         self.encoded_layer_name = _encode_layer_name(self.layer_name)
         self.query_quant_group_shape = (
             layer.query_quant.group_shape
@@ -295,10 +302,19 @@ class QkNormRopeKvCachePattern:
         q_rope = q_rope.view(-1, self.num_heads, self.head_size)
         k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size_v)
+        if self.v_norm:
+            v = vllm.ir.ops.rms_norm(v, None, self.eps)
         dummy = torch.ops.vllm.unified_kv_cache_update(
             k_rope, v, self._get_layer_name(layer_name)
         )
         return dummy, q_rope, k_rope, v
+
+    def _unfused_v_view(self, qkv: torch.Tensor) -> torch.Tensor:
+        # With v_norm the kernel norms V only on its cache write, so this V
+        # stays un-normed; v_norm patterns are registered only for backends
+        # that read V from the cache, and _extra_check rejects other V users.
+        _, _, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+        return v.view(qkv.shape[0], self.num_kv_heads, self.head_size_v)
 
     def replacement_non_fp8_quant_query(
         self,
@@ -323,8 +339,7 @@ class QkNormRopeKvCachePattern:
             device=qkv.device,
             dtype=qkv.dtype,
         )
-        _, _, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
-        v = v.view(qkv.shape[0], self.num_kv_heads, self.head_size_v)
+        v = self._unfused_v_view(qkv)
         results = auto_functionalized(
             self.FUSED_OP,
             q_out=q_out,
@@ -339,6 +354,7 @@ class QkNormRopeKvCachePattern:
             layer_name=self._get_layer_name(layer_name),
             q_out_fp8=None,
             q_scale=None,
+            v_norm=self.v_norm,
         )
         return results[0], results[1], results[2], v
 
@@ -406,6 +422,8 @@ class QkNormRopeKvCachePattern:
 
         k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size_v)
+        if self.v_norm:
+            v = vllm.ir.ops.rms_norm(v, None, self.eps)
         dummy = torch.ops.vllm.unified_kv_cache_update(
             k_rope, v, self._get_layer_name(layer_name)
         )
@@ -437,8 +455,7 @@ class QkNormRopeKvCachePattern:
             device=qkv.device,
             dtype=qkv.dtype,
         )
-        _, _, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
-        v = v.view(qkv.shape[0], self.num_kv_heads, self.head_size_v)
+        v = self._unfused_v_view(qkv)
         q_out_fp8 = (
             torch.empty(
                 qkv.shape[0],
@@ -463,6 +480,7 @@ class QkNormRopeKvCachePattern:
             layer_name=self._get_layer_name(layer_name),
             q_out_fp8=q_out_fp8,
             q_scale=q_scale if self.fold_query_quant else None,
+            v_norm=self.v_norm,
         )
         if self.fold_query_quant:
             op_return, _, k_out, q_out_fp8 = results
@@ -500,8 +518,43 @@ class QkNormRopeKvCachePattern:
 
         view_to_reshape(gm)
 
+    def _matches_shape(self, match: pm.Match) -> bool:
+        # The search pattern ignores ints, so pin this layer's QKV split sizes
+        # and head size here.
+        split_op = torch.ops.aten.split_with_sizes.default
+        split = next((n for n in match.nodes if n.target == split_op), None)
+        return (
+            split is not None
+            and list(split.args[1]) == [self.q_size, self.k_size, self.v_size]
+            and match.kwargs["q_weight"].meta["val"].shape[-1] == self.head_size
+        )
+
+    @staticmethod
+    def _only_feeds_unified_attention(match: pm.Match, output_index: int) -> bool:
+        """Whether the pattern output is used only inside the match or by
+        decoder unified attention, which reads K/V from the cache."""
+        output_nodes = match.output_nodes()
+        if len(output_nodes) <= output_index or output_nodes[output_index] is None:
+            return False
+        matched_nodes = set(match.nodes)
+        attention_op = torch.ops.vllm.unified_attention_with_output.default
+
+        def is_unified_attention_user(user: fx.Node) -> bool:
+            return user.op == "call_function" and (
+                user.target == attention_op
+                or (user.args and user.args[0] == attention_op)
+            )
+
+        return all(
+            user in matched_nodes or is_unified_attention_user(user)
+            for user in output_nodes[output_index].users
+        )
+
     def _extra_check(self, match: pm.Match) -> bool:
-        return True
+        if not self._matches_shape(match):
+            return False
+        # The replacement returns un-normed V (see _unfused_v_view).
+        return not self.v_norm or self._only_feeds_unified_attention(match, 3)
 
     def _register(self, pattern, replacement, pm_pass) -> None:
         trace_fn = QkNormRopeKvCachePattern.wrap_trace_fn(
@@ -783,6 +836,8 @@ class QkNormMRopeKvCachePattern(QkNormRopeKvCachePattern):
         return results[0], q_fp8, k, v, q_scale_out
 
     def _extra_check(self, match: pm.Match) -> bool:
+        if not self._matches_shape(match):
+            return False
         expected = {
             "head_size": self.head_size,
             "rotary_dim": self.rotary_dim,
@@ -805,22 +860,7 @@ class QkNormMRopeKvCachePattern(QkNormRopeKvCachePattern):
         # cache and does not expose a BF16 K result. Returning the raw K view is
         # valid only for decoder unified attention, whose backend consumes K
         # from that cache. Reject graphs that observe K in any other way.
-        output_nodes = match.output_nodes()
-        if len(output_nodes) < 3 or output_nodes[2] is None:
-            return False
-        matched_nodes = set(match.nodes)
-        attention_op = torch.ops.vllm.unified_attention_with_output.default
-
-        def is_unified_attention_user(user: fx.Node) -> bool:
-            return user.op == "call_function" and (
-                user.target == attention_op
-                or (user.args and user.args[0] == attention_op)
-            )
-
-        return all(
-            user in matched_nodes or is_unified_attention_user(user)
-            for user in output_nodes[2].users
-        )
+        return self._only_feeds_unified_attention(match, 2)
 
 
 def _discover_mrope_configs(
@@ -877,9 +917,10 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
 
-        self.patterns: PatternMatcherPass = PatternMatcherPass(
-            pass_name="qk_norm_rope_kvcache_fusion_pass"
-        )
+        # One pass per attention shape: the search patterns ignore ints (and
+        # the layer name under _USE_LAYERNAME), so different shapes would
+        # otherwise collide as duplicates. _extra_check pins the shape.
+        self.patterns_by_shape: dict[tuple[int, int, int], PatternMatcherPass] = {}
 
         cc = config.compilation_config
         self.max_token_num = cc.pass_config.rope_kvcache_fusion_max_token_num
@@ -899,24 +940,21 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
 
-        patterns_registered = False
         for _, layer in attn_layers.items():
-            supports_rope = layer.impl.fused_qk_norm_rope_kvcache_supported()
+            supports_rope = (
+                layer.impl.fused_qk_norm_rope_kvcache_supported()
+                and self._head_size_supported(
+                    layer, "RoPE", SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS
+                )
+            )
             supports_mrope = (
                 bool(self.mrope_configs)
                 and layer.impl.fused_qk_norm_mrope_kvcache_supported()
+                and self._head_size_supported(
+                    layer, "MRoPE", SUPPORTED_FUSED_QK_NORM_MROPE_KVCACHE_HEAD_DIMS
+                )
             )
             if not supports_rope and not supports_mrope:
-                continue
-            if layer.head_size not in SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS:
-                logger.warning_once(
-                    "QK Norm+RoPE/MRoPE+KVCache fusion not enabled for a layer: "
-                    "head_size=%d is not supported by the "
-                    "fused_qk_norm_rope_cache_pts_quant_shuffle kernel "
-                    "(supported: %s). Falling back to the unfused path.",
-                    layer.head_size,
-                    SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS,
-                )
                 continue
             if layer.head_size_v != layer.head_size:
                 # The fused kernel uses a single head_dim for q/k/v.
@@ -932,23 +970,30 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
             # interleaved V cache, including layers whose patterns are not
             # registered separately below.
             layer.impl.set_interleaved_v_cache()
-            # Opaque LayerName is a pattern wildcard on torch >= 2.11, so
-            # homogeneous attention layers produce duplicate search patterns.
-            # As in the other LayerName-aware fusion passes, one supported
-            # layer registers all shape/style variants for the model.
-            if _USE_LAYERNAME and patterns_registered:
+            # Opaque LayerName is a pattern wildcard on torch >= 2.11, so one
+            # layer per shape registers all style variants for that shape.
+            shape = (layer.num_heads, layer.num_kv_heads, layer.head_size)
+            if _USE_LAYERNAME and shape in self.patterns_by_shape:
                 continue
-            patterns_registered = True
+            patterns = self.patterns_by_shape.setdefault(
+                shape,
+                PatternMatcherPass(pass_name="qk_norm_rope_kvcache_fusion_pass"),
+            )
             if supports_rope:
+                v_norms = [False]
+                if layer.impl.fused_v_norm_kvcache_supported():
+                    v_norms.append(True)
                 for epsilon in [1e-5, 1e-6]:
                     for neox in [True, False]:
                         for quant_q in [False, True]:
-                            QkNormRopeKvCachePattern(
-                                layer=layer,
-                                eps=epsilon,
-                                is_neox=neox,
-                                quant_query=quant_q,
-                            ).register(self.patterns)
+                            for v_norm in v_norms:
+                                QkNormRopeKvCachePattern(
+                                    layer=layer,
+                                    eps=epsilon,
+                                    is_neox=neox,
+                                    quant_query=quant_q,
+                                    v_norm=v_norm,
+                                ).register(patterns)
             if supports_mrope:
                 for section, is_interleaved in self.mrope_configs:
                     rotary_dim = 2 * sum(section)
@@ -988,13 +1033,32 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                                     rotary_dim=rotary_dim,
                                     mrope_section=section,
                                     is_interleaved=is_interleaved,
-                                ).register(self.patterns)
+                                ).register(patterns)
 
-        self.dump_patterns(config, self.patterns)
+        for patterns in self.patterns_by_shape.values():
+            self.dump_patterns(config, patterns)
+
+    @staticmethod
+    def _head_size_supported(
+        layer: Attention, rope_kind: str, head_sizes: tuple[int, ...]
+    ) -> bool:
+        if layer.head_size in head_sizes:
+            return True
+        logger.warning_once(
+            "QK Norm+%s+KVCache fusion not enabled for a layer: head_size=%d "
+            "is not supported by the fused kernel (supported: %s). Falling "
+            "back to the unfused path.",
+            rope_kind,
+            layer.head_size,
+            head_sizes,
+        )
+        return False
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
-        self.matched_count = self.patterns.apply(graph)
+        self.matched_count = sum(
+            patterns.apply(graph) for patterns in self.patterns_by_shape.values()
+        )
         logger.info(
             "QK-Norm+RoPE/MRoPE+KVCache fusion: replaced %s pattern(s) "
             "with an AITER fused attention-prologue kernel",
