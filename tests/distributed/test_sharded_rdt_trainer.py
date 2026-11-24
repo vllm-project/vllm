@@ -549,6 +549,31 @@ class TestSyncIndexPlumbing:
         ] == [0, 1]
         assert engine.client.updates == []
 
+    def test_gather_loop_error_does_not_deadlock_on_blocked_update_rpc(self):
+        import threading
+
+        started = threading.Event()
+        release = threading.Event()
+
+        class _BlockingClient(RecordingClient):
+            def update_weights(self, update_info):
+                started.set()
+                release.wait(timeout=5.0)
+
+        engine, _ = self._trainer(is_sender=True)
+        engine.client = _BlockingClient()
+
+        def _failing_gather(*, update_future, live_count, live_ids=None):
+            assert started.wait(timeout=2.0)
+            raise RuntimeError("gather failed")
+
+        engine._run_gather_loop = _failing_gather
+        try:
+            with pytest.raises(RuntimeError, match="gather failed"):
+                engine.send_weights()
+        finally:
+            release.set()
+
 
 def test_sharded_rdt_worker_init_info_carries_the_ownership_table(monkeypatch):
     import json
