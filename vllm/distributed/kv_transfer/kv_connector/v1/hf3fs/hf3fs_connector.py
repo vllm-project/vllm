@@ -30,7 +30,7 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -58,7 +58,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
-from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
+from vllm.distributed.parallel_state import (
+    get_pp_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
@@ -466,6 +470,12 @@ class AsyncOperationManager:
 class HF3FSKVConnector(KVConnectorBase_V1):
     """HF3FS KV Connector implementation."""
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -574,7 +584,12 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     def _setup_storage_clients(self):
         os.makedirs(self._storage_path, exist_ok=True)
 
-        self._rank = get_tensor_model_parallel_rank()
+        # Pipeline stages hold different layers, so each (PP, TP) rank needs its
+        # own data file and metadata rank.
+        self._rank = (
+            get_pp_group().rank_in_group * get_tensor_model_parallel_world_size()
+            + get_tensor_model_parallel_rank()
+        )
         file_path = os.path.join(
             self._storage_path, f"hf3fs_vllm_data_file_{self._rank}"
         )
