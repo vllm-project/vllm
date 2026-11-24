@@ -10,7 +10,7 @@ import secrets
 import threading
 import time
 from collections import OrderedDict, defaultdict
-from collections.abc import Collection
+from collections.abc import Collection, Coroutine
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
@@ -1456,6 +1456,7 @@ class MooncakeConnectorWorker:
 
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
+        self._receive_tasks: set[asyncio.Task[Any]] = set()
         self.side_channel_port: int = 0  # we will bind it in register_kv_caches()
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -2732,20 +2733,22 @@ class MooncakeConnectorWorker:
         # Each pass either returns or breaks out of the recv loop to resend
         # the layout after a LAYOUT_MISS.
         while True:
-            metadata = self._build_pull_metadata(
-                pull_metas, include_layout=include_layout
-            )
-            encoded_data = self._encoder.encode(metadata)
-            logger.debug(
-                "MooncakeXferMetadata to %s is %d bytes (%s).",
-                worker_addr,
-                len(encoded_data),
-                "layout" if include_layout else "blocks",
-            )
-            logger.debug(
-                "Sending kv transfer request for %s on path: %s", req_ids, worker_addr
-            )
             try:
+                metadata = self._build_pull_metadata(
+                    pull_metas, include_layout=include_layout
+                )
+                encoded_data = self._encoder.encode(metadata)
+                logger.debug(
+                    "MooncakeXferMetadata to %s is %d bytes (%s).",
+                    worker_addr,
+                    len(encoded_data),
+                    "layout" if include_layout else "blocks",
+                )
+                logger.debug(
+                    "Sending kv transfer request for %s on path: %s",
+                    req_ids,
+                    worker_addr,
+                )
                 with (
                     make_zmq_socket(
                         self.async_zmq_ctx,
@@ -2821,7 +2824,11 @@ class MooncakeConnectorWorker:
                 )
                 return
             except Exception as e:
-                self._handle_failed_recv(pull_metas, req_ids, f"transfer failed: {e}")
+                self._handle_failed_recv(
+                    pull_metas,
+                    req_ids,
+                    f"transfer to {worker_addr} failed ({type(e).__name__}): {e}",
+                )
                 return
 
     def _handle_failed_recv(
@@ -2943,10 +2950,9 @@ class MooncakeConnectorWorker:
                 type(e).__name__,
                 e,
             )
-
-        # Always notify others regardless of connection success or failure.
-        self._pending_bootstrap_queries[remote_bootstrap_addr].set()
-        del self._pending_bootstrap_queries[remote_bootstrap_addr]
+        finally:
+            # Cancellation must also wake requests sharing this query.
+            self._pending_bootstrap_queries.pop(remote_bootstrap_addr).set()
 
     def _select_remote_workers(
         self, remote_engine_id: EngineId
@@ -2979,8 +2985,21 @@ class MooncakeConnectorWorker:
         remote_engine_id: EngineId,
         pull_metas: dict[ReqId, PullReqMeta],
     ):
-        selected_remote_pp = self._select_remote_workers(remote_engine_id)
-        worker_addrs = self._remote_worker_addrs(remote_engine_id, selected_remote_pp)
+        try:
+            selected_remote_pp = self._select_remote_workers(remote_engine_id)
+            worker_addrs = self._remote_worker_addrs(
+                remote_engine_id, selected_remote_pp
+            )
+            if not worker_addrs:
+                raise ValueError("no producer workers selected")
+        except Exception as e:
+            self._handle_failed_recv(
+                pull_metas.copy(),
+                list(pull_metas),
+                f"preparing pull from engine {remote_engine_id} failed "
+                f"({type(e).__name__}): {e}",
+            )
+            return
 
         count = len(worker_addrs)
         logger.debug(
@@ -2993,9 +3012,19 @@ class MooncakeConnectorWorker:
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
         for worker_addr in worker_addrs:
-            asyncio.create_task(
+            self._create_receive_task(
                 self.receive_kv_from_single_worker(worker_addr, pull_metas)
             )
+
+    def _create_receive_task(self, coro: Coroutine[Any, Any, Any]) -> None:
+        task = asyncio.create_task(coro)
+        self._receive_tasks.add(task)
+        task.add_done_callback(self._receive_task_done)
+
+    def _receive_task_done(self, task: asyncio.Task[Any]) -> None:
+        self._receive_tasks.discard(task)
+        if not task.cancelled() and (exc := task.exception()):
+            logger.error("Unexpected Mooncake receiver task failure", exc_info=exc)
 
     async def _query_bootstrap(self, remote_bootstrap_addr: str):
         """Query a bootstrap server, or wait for the query already running."""
@@ -3084,7 +3113,7 @@ class MooncakeConnectorWorker:
     ):
         for remote_engine_id, pull_metas in reqs_to_recv.items():
             if remote_engine_id not in self._remote_agents:
-                asyncio.create_task(
+                self._create_receive_task(
                     self.handle_new_engine_id(remote_engine_id, pull_metas)
                 )
             else:
