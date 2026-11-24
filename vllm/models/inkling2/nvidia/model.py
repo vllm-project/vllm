@@ -61,12 +61,6 @@ from ..processing import (
 )
 from ..quant_config import Inkling2QuantConfig
 from .attention import Inkling2Attention
-from .lora import (
-    LORA_NAME_PREFIXES,
-    LORA_NAME_SUBSTRINGS,
-    PACKED_MODULES_MAPPING,
-)
-from .lora import register as register_lora
 from .moe import Inkling2MoE, QuantFormat
 from .ops.allreduce import Inkling2AllReduceWorkspace
 from .ops.attention import compute_log_scaling_tau
@@ -502,9 +496,6 @@ class Inkling2Model(nn.Module):
         return layer.attn.kv_cache.shape[2]
 
 
-register_lora()
-
-
 @MULTIMODAL_REGISTRY.register_processor(
     Inkling2MultiModalProcessor,
     info=Inkling2ProcessingInfo,
@@ -517,12 +508,12 @@ class Inkling2ForConditionalGeneration(
     SupportsEncoderCudaGraph,
     SupportsLoRA,
 ):
-    # LoRA (``lora.py``): adapters use the checkpoint's module names.
-    packed_modules_mapping = PACKED_MODULES_MAPPING
+    packed_modules_mapping = {
+        "qkvr": ["wq_du", "wr_du", "gate_attn", "attn_sink_proj", "wk_dv", "wv_dv"],
+    }
     embedding_modules: dict[str, str] = {}
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr=LORA_NAME_SUBSTRINGS,
-        orig_to_new_prefix=LORA_NAME_PREFIXES,
+        orig_to_new_prefix={"model.llm.": "model."},
     )
 
     # Weights mirror the checkpoint names after these substitutions, except for

@@ -1155,23 +1155,25 @@ def test_column_parallel_packed(
 @pytest.mark.parametrize(
     "present_groups", [(True, True), (True, False), (False, True), (False, False)]
 )
-def test_expand_packed_lora_with_missing_group(present_groups) -> None:
-    layer = MergedColumnParallelLinearWithLoRA.__new__(
-        MergedColumnParallelLinearWithLoRA
-    )
-    layer.output_sizes = [2, 3, 4, 5]
-    layer.output_slices = tuple(layer.output_sizes)
-    layer.n_slices = len(layer.output_sizes)
-    layer.tp_size = 1
-
-    rank = 2
+@pytest.mark.parametrize("padding_size", [0, 7])
+def test_expand_packed_lora_with_missing_group(
+    default_vllm_config, dist_init, present_groups, padding_size
+) -> None:
+    # Exercise real layer metadata, including the alignment-only output slice.
+    with torch.device("cpu"):
+        base = MergedColumnParallelLinear(
+            3,
+            [2, 3, 4, 5],
+            bias=False,
+            padding_size=padding_size,
+            params_dtype=torch.float32,
+        )
+        layer = MergedColumnParallelLinearWithLoRA(base)
+        layer.create_lora_weights(
+            1, LoRAConfig(max_lora_rank=8, lora_dtype=torch.float32)
+        )
+    rank = 8
     input_size = 3
-    layer.lora_a_stacked = tuple(
-        torch.zeros(1, 1, rank, input_size) for _ in layer.output_sizes
-    )
-    layer.lora_b_stacked = tuple(
-        torch.zeros(1, 1, output_size, rank) for output_size in layer.output_sizes
-    )
 
     qkv_a = torch.full((rank, input_size), 2.0)
     qkv_b = torch.cat(
@@ -1195,6 +1197,10 @@ def test_expand_packed_lora_with_missing_group(present_groups) -> None:
         else:
             assert torch.count_nonzero(actual_a) == 0
             assert torch.count_nonzero(actual_b) == 0
+
+    if padding_size:
+        assert torch.count_nonzero(layer.lora_a_stacked[-1]) == 0
+        assert torch.count_nonzero(layer.lora_b_stacked[-1]) == 0
 
 
 @torch.inference_mode()

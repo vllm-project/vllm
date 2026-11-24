@@ -657,3 +657,125 @@ def test_sm12x_linear_large_batch_fallback():
     weight = torch.randn(129, 256, device=DEVICE).bfloat16()
     expected = torch.nn.functional.linear(x, weight)
     torch.testing.assert_close(linear(x, weight), expected, atol=0, rtol=0)
+
+
+def test_importing_inkling2_preserves_global_lora_dispatch():
+    """Import order must not replace LoRA discovery functions or wrappers."""
+    import subprocess
+    import sys
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import vllm.lora.utils as utils
+import vllm.lora.model_manager as manager
+
+before = (
+    utils._all_lora_classes,
+    utils.get_supported_lora_modules,
+    utils.is_supported_lora_module,
+    manager.get_supported_lora_modules,
+    manager.is_supported_lora_module,
+)
+import vllm.models.inkling2.nvidia.model
+after = (
+    utils._all_lora_classes,
+    utils.get_supported_lora_modules,
+    utils.is_supported_lora_module,
+    manager.get_supported_lora_modules,
+    manager.is_supported_lora_module,
+)
+assert all(old is new for old, new in zip(before, after))
+""",
+        ],
+        check=True,
+    )
+
+
+@pytest.mark.parametrize("shared_input", [False, True])
+@pytest.mark.parametrize("tokens", [1, 7, 33])
+def test_inkling2_projection_lora_matches_slice_reference(
+    dist_init, shared_input, tokens
+):
+    """Preserve Q/K/V input selection, padding and mixed adapter slots."""
+    from vllm.config.lora import LoRAConfig
+    from vllm.lora.layers import (
+        Inkling2QKVRWithLoRA,
+        LoRAMapping,
+    )
+    from vllm.lora.punica_wrapper import get_punica_wrapper
+    from vllm.lora.utils import from_layer
+    from vllm.models.inkling2.nvidia.attention import Inkling2QKVR
+    from vllm.models.inkling2.nvidia.model import Inkling2ForConditionalGeneration
+
+    packed = Inkling2ForConditionalGeneration.packed_modules_mapping["qkvr"]
+
+    torch.manual_seed(73)
+    config = LoRAConfig(max_loras=2, max_lora_rank=8, lora_dtype=torch.bfloat16)
+    sizes = [128, 16, 128, 1, 128, 128, 7]
+    with torch.device("cuda"), torch.inference_mode():
+
+        def values(*shape):
+            return (torch.randint(-2, 3, shape) / 16).bfloat16()
+
+        base = Inkling2QKVR(
+            128,
+            sizes[:6],
+            padding_size=sizes[6],
+            bias=False,
+            params_dtype=torch.bfloat16,
+        )
+        base.weight.copy_(values(*base.weight.shape))
+        sharded_config = LoRAConfig(max_lora_rank=8, fully_sharded_loras=True)
+        assert from_layer(base, 2, sharded_config, packed) is base
+        layer = from_layer(base, 2, config, packed)
+        assert isinstance(layer, Inkling2QKVRWithLoRA)
+        punica = get_punica_wrapper(tokens, tokens, "cuda", lora_config=config)
+        layer.set_mapping(punica)
+        ids = [(i + 1) % 3 for i in range(tokens)]
+        punica.update_metadata(LoRAMapping(ids, ids, is_prefill=True), [1, 2], 3, 128)
+        adapters = []
+        for slot in range(2):
+            a = [values(8, 128) for _ in sizes[:6]]
+            b = [values(size, 8) for size in sizes[:6]]
+            layer.set_lora(slot, a, b)
+            adapters.append((a, b))
+        xq = values(tokens, 128)
+        xk, xv = (
+            (xq, xq) if shared_input else (values(tokens, 128), values(tokens, 128))
+        )
+
+        def reference():
+            outputs = []
+            start = 0
+            for i, (size, x) in enumerate(zip(sizes[:6], [xq] * 4 + [xk, xv])):
+                y = torch.nn.functional.linear(x, base.weight[start : start + size])
+                for row, adapter_id in enumerate(ids):
+                    if adapter_id:
+                        a, b = adapters[adapter_id - 1]
+                        delta = x[row].float() @ a[i].float().T @ b[i].float().T
+                        y[row] += delta.bfloat16()
+                outputs.append(y)
+                start += size
+            return outputs
+
+        actual = layer(xq, xk, xv)
+        for got, expected in zip(actual, reference()):
+            torch.testing.assert_close(got, expected, atol=0, rtol=0)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = layer(xq, xk, xv)
+        xq.copy_(values(tokens, 128))
+        graph.replay()
+        for got, expected in zip(actual, reference()):
+            torch.testing.assert_close(got, expected, atol=0, rtol=0)
+        layer.reset_lora(0)
+        layer.reset_lora(1)
+        actual = layer(xq, xk, xv)
+        start = 0
+        for got, size, x in zip(actual, sizes[:6], [xq] * 4 + [xk, xv]):
+            expected = torch.nn.functional.linear(x, base.weight[start : start + size])
+            torch.testing.assert_close(got, expected, atol=0, rtol=0)
+            start += size

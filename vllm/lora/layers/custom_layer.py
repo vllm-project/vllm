@@ -19,6 +19,7 @@ from .base_linear import BaseLinearLayerWithLoRA
 from .column_parallel_linear import (
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
+    MergedColumnParallelLinearVariableSliceWithLoRA,
     MergedColumnParallelLinearWithLoRA,
 )
 
@@ -331,4 +332,52 @@ class Glm5NextIndexerWkWeightsWithLoRA(MergedColumnParallelLinearWithLoRA):
         return (
             type(source_layer).__name__ == "Glm5NextIndexerWkWeightsLinear"
             and len(packed_modules_list) == 2
+        )
+
+
+class Inkling2QKVRWithLoRA(MergedColumnParallelLinearVariableSliceWithLoRA):
+    """Apply packed adapters to the Q/R/gate/sink, K and V input streams."""
+
+    def forward(self, x_q, x_k=None, x_v=None):
+        x_k = x_q if x_k is None else x_k
+        x_v = x_q if x_v is None else x_v
+        outputs = self.base_layer(x_q, x_k, x_v)
+        # TODO optimize this logic
+        if x_k is x_q and x_v is x_q:
+            self._add_lora(x_q, outputs, range(6))
+        else:
+            self._add_lora(x_q, outputs[:4], range(4))
+            self._add_lora(x_k, outputs[4:5], range(4, 5))
+            self._add_lora(x_v, outputs[5:6], range(5, 6))
+        return outputs
+
+    def _add_lora(
+        self, x: torch.Tensor, outputs: list[torch.Tensor], slices: range
+    ) -> None:
+        sizes = tuple(self.output_slices[i] for i in slices)
+        delta = x.new_zeros(x.shape[0], sum(sizes))
+        self.punica_wrapper.add_lora_linear(
+            delta,
+            x,
+            tuple(self.lora_a_stacked[i] for i in slices),
+            tuple(self.lora_b_stacked[i] for i in slices),
+            1.0,
+            sizes,
+        )
+        for output, update in zip(outputs, delta.split(sizes, dim=-1)):
+            output.add_(update)
+
+    @classmethod
+    def can_replace_layer(
+        cls,
+        source_layer,
+        lora_config,
+        packed_modules_list,
+        model_config=None,
+        decorate: bool = True,
+    ) -> bool:
+        return (
+            type(source_layer).__name__ == "Inkling2QKVR"
+            and len(packed_modules_list) == 6
+            and not lora_config.fully_sharded_loras
         )
