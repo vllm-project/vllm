@@ -21,7 +21,10 @@ from typing import TYPE_CHECKING
 import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.model_executor.models.transformers.base import VLLM_ATTN_ATTR
+from vllm.model_executor.models.transformers.base import (
+    VLLM_ATTN_ATTR,
+    VLLM_ATTN_KWARG,
+)
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
 from vllm.model_executor.models.transformers.moe import MoEMixin
@@ -77,7 +80,7 @@ def vllm_attention_forward(
     attention_mask: "torch.Tensor",
     **kwargs,
 ):
-    self_attn = getattr(module, VLLM_ATTN_ATTR)
+    self_attn = kwargs.get(VLLM_ATTN_KWARG, getattr(module, VLLM_ATTN_ATTR))
     check_sinks(module, self_attn, kwargs.get("s_aux"))
     hidden = query.shape[-2]
     head_dim_qk = query.shape[-1]

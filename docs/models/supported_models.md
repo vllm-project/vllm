@@ -20,7 +20,7 @@ vLLM also supports model implementations that are available in Transformers. We 
 Currently, the Transformers modeling backend works for the following:
 
 - Modalities: embedding models, language models, vision-language models, audio-language models and omni models
-- Architectures: encoder-only, decoder-only, mixture-of-experts
+- Architectures: encoder-only, decoder-only, mixture-of-experts, looped (layers run more than once per forward pass, each pass with its own KV cache; not with pipeline parallelism)
 - Attention types: full attention and/or sliding attention
 - [Speculative decoding](../features/speculative_decoding/README.md) methods: EAGLE-3, DFlash, DFlash2, DSpark, XPress and MTP (for models following the Transformers MTP standard)
 
