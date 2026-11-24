@@ -344,6 +344,10 @@ vLLM enforces several configurable limits to prevent this:
 
 Connections that fail (ZMQ socket errors, handshake failures) are handled gracefully — the request falls back to local prefill instead of crashing the engine.
 
+A `kv_request_id` identifies one live request per peer. If a frontend fans the
+same ID out to multiple engine requests, only the first uses remote KV and the
+others fall back to local prefill.
+
 **Recommendations:**
 
 - **Public-facing deployments with P2P enabled:** Lower `VLLM_P2P_MAX_PEERS` to the expected number of legitimate peers (e.g., `16` or `32`).

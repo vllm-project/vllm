@@ -146,6 +146,7 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._finished_jobs = []
     mgr._failed_req_ids = set()
     mgr._sessions = {}
+    mgr._source_owners = {}
     mgr._reconnect_backoff = {}
     mgr._data_plane_faults = {}
     mgr._kv_to_session = {}
@@ -368,6 +369,49 @@ def test_on_new_request_policy(monkeypatch, kv_params, expected):
     mgr = _make_manager()
     monkeypatch.setattr(mgr, "_get_or_create_session", lambda peer_id: None)
     assert mgr.on_new_request(_req_context(kv_params=kv_params)).policy is expected
+
+
+def test_duplicate_source_id_falls_back_without_finishing_owner(monkeypatch):
+    """A shared transfer ID must not share mutable state across requests."""
+    mgr = _make_manager()
+    peer_id = "10.0.0.1:8000"
+    session = _FakeSession(peer_id=peer_id)
+    mgr._sessions[peer_id] = session
+    monkeypatch.setattr(mgr, "_get_or_create_session", lambda _: session)
+    params = _remote_kv_source_kv_params(kv_request_id="shared")
+    owner = ReqContext(req_id="batch-0", kv_transfer_params=params)
+    duplicate = ReqContext(req_id="batch-1", kv_transfer_params=params)
+
+    mgr.on_new_request(owner)
+    mgr.on_new_request(duplicate)
+
+    owner_source = owner.get_state(P2PSourceInfo)
+    duplicate_source = duplicate.get_state(P2PSourceInfo)
+    assert owner_source is not None and owner_source.remote_load_enabled
+    assert duplicate_source is not None and not duplicate_source.remote_load_enabled
+    assert mgr.lookup(OffloadKey(b"key"), duplicate) is LookupResult.MISS
+    duplicate_job = TransferJob(
+        job_id=1,
+        keys=[OffloadKey(b"key")],
+        chunk_ids=np.array([0]),
+        is_promotion=True,
+        req_context=duplicate,
+    )
+    mgr.submit_load(duplicate_job)
+    assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+    assert session.requests == []
+
+    mgr.on_request_finished(duplicate)
+    assert session.finishes == []
+
+    mgr.on_request_finished(owner)
+    assert session.finishes == ["shared"]
+    assert mgr._source_owners == {}
+
+    later = ReqContext(req_id="later", kv_transfer_params=params)
+    mgr.on_new_request(later)
+    later_source = later.get_state(P2PSourceInfo)
+    assert later_source is not None and later_source.remote_load_enabled
 
 
 # ---------------------------------------------------------------------------
