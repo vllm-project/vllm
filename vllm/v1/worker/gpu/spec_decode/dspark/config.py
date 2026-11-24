@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 from vllm.config.speculative import (
     _MINIMAX_M3_MODEL_TYPES,
     _QWEN3_OMNI_DSPARK_ARCHITECTURE,
-    _get_minimax_m3_dspark_draft,
     _validate_qwen3_omni_dspark,
 )
 from vllm.platforms import current_platform
@@ -91,10 +90,8 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
         if target is None:
             raise ValueError("target_model_config must be present for dspark")
         if target.hf_config.model_type in _MINIMAX_M3_MODEL_TYPES:
-            load_config = spec.draft_load_config
-            return _get_minimax_m3_dspark_draft(
-                target, load_config.download_dir if load_config else None
-            )
+            # MiniMax-M3 ships the draft as a standalone checkpoint
+            return spec.get_subfolder_checkpoint("dspark")
         # DeepSeek DSpark can ship the weights inside the target checkpoint.
         # Mistral Large 4 DSpark drafts ship in BF16.
         if (
