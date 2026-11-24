@@ -39,6 +39,8 @@ BASE_MODELS_TO_TEST = [
     # "databricks/dbrx-instruct",
     "tiiuae/falcon-7b",
     "tiiuae/falcon-40b",
+    # Layer-wise scaling: per-layer head counts are reported as the max
+    "apple/OpenELM-270M-Instruct",
     "vllm-project/deepseek_mtp_main_random",
     "Qwen/Qwen3-Next-80B-A3B-Instruct",
     "tiny-random/qwen3-next-moe",

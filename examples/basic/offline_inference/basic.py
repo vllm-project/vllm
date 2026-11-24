@@ -16,7 +16,12 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 def main():
     # Create an LLM.
-    llm = LLM(model="facebook/opt-125m")
+    llm = LLM(
+        model="apple/OpenELM-3B-Instruct",
+        tokenizer="hf-internal-testing/llama-tokenizer",
+        gpu_memory_utilization=0.5,
+        enforce_eager=True,  # 调试时先关闭编译和 CUDA Graph
+    )
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.

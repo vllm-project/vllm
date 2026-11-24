@@ -67,6 +67,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "NemotronLabsDiffusionConfig": (
         "vllm.transformers_utils.configs.nemotron_labs_diffusion"
     ),
+    "OpenELMConfig": "vllm.transformers_utils.configs.openelm",
     "OpenVLAConfig": "vllm.transformers_utils.configs.openvla",
     "OvisConfig": "vllm.transformers_utils.configs.ovis",
     "PixelShuffleSiglip2VisionConfig": "vllm.transformers_utils.configs.isaac",
@@ -141,6 +142,7 @@ __all__ = [
     "MuseSparkConfig",
     "KimiK3Config",
     "KimiK3VisionConfig",
+    "OpenELMConfig",
     "OpenVLAConfig",
     "OvisConfig",
     "PixelShuffleSiglip2VisionConfig",

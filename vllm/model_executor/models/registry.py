@@ -190,6 +190,7 @@ _TEXT_GENERATION_MODELS = {
     ),
     "MuseGlimmerForCausalLM": ("muse_glimmer", "MuseGlimmerForCausalLM"),
     "OlmoHybridForCausalLM": ("olmo_hybrid", "OlmoHybridForCausalLM"),
+    "OpenELMForCausalLM": ("openelm", "OpenELMForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "PanguEmbeddedForCausalLM": ("openpangu", "PanguEmbeddedForCausalLM"),

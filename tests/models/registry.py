@@ -494,6 +494,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Olmo3ForCausalLM": _HfExamplesInfo("allenai/Olmo-3-7B-Instruct"),
     "OlmoHybridForCausalLM": _HfExamplesInfo("allenai/Olmo-Hybrid-7B"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
+    "OpenELMForCausalLM": _HfExamplesInfo(
+        "apple/OpenELM-270M-Instruct",
+        {"1_1b": "apple/OpenELM-1_1B-Instruct"},
+        # OpenELM checkpoints reuse the Llama-2 tokenizer without shipping it
+        tokenizer="hf-internal-testing/llama-tokenizer",
+    ),
     "OPTForCausalLM": _HfExamplesInfo(
         "facebook/opt-125m",
         {"350m": "facebook/opt-350m", "1b": "facebook/opt-iml-max-1.3b"},

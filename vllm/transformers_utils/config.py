@@ -223,6 +223,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     nemo_speechlm="Nemotron3_5TranscribeConfig",
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
+    openelm="OpenELMConfig",  # Hub remote code is incompatible with transformers v5
     openvla="OpenVLAConfig",
     ovis="OvisConfig",
     ultravox="UltravoxConfig",
