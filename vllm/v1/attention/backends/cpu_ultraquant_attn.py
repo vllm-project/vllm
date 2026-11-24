@@ -10,7 +10,7 @@ K/V it was handed, and a continuation chunk stages the dequantized prefix
 into a bf16 page so vLLM's own CPU attention kernel can run over it.
 """
 
-from dataclasses import replace
+from dataclasses import dataclass, field, fields, replace
 from typing import ClassVar
 
 import torch
@@ -19,7 +19,11 @@ from vllm import _cpu_ops as ops
 from vllm import envs
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionLayer, AttentionType
+from vllm.v1.attention.backend import (
+    AttentionLayer,
+    AttentionType,
+    CommonAttentionMetadata,
+)
 from vllm.v1.attention.backends.cpu_attn import (
     CPUAttentionBackend,
     CPUAttentionBackendImpl,
@@ -97,8 +101,105 @@ class CPUUltraQuantAttentionBackend(CPUAttentionBackend):
         return CPUUltraQuantAttentionImpl
 
     @staticmethod
-    def get_builder_cls() -> type[CPUAttentionMetadataBuilder]:
-        return CPUAttentionMetadataBuilder
+    def get_builder_cls() -> type["CPUUltraQuantAttentionMetadataBuilder"]:
+        return CPUUltraQuantAttentionMetadataBuilder
+
+
+@dataclass
+class CPUUltraQuantAttentionMetadata(CPUAttentionMetadata):
+    """CPU attention's metadata, plus the batch split and the staging page.
+
+    Which of the impl's three routes a request takes follows from the batch
+    alone, so it is resolved once here instead of once per layer.
+    """
+
+    # Row indices into the batch, by route. Empty on a pure-decode step, which
+    # the impl recognizes from max_query_len and serves without them.
+    prefill_rows: list[int] = field(default_factory=list)
+    cont_rows: list[int] = field(default_factory=list)
+    decode_rows: list[int] = field(default_factory=list)
+    # The two metadata tensors the impl indexes by row, as host lists.
+    query_start_loc_list: list[int] = field(default_factory=list)
+    seq_lens_list: list[int] = field(default_factory=list)
+    # Staged K/V for the prefill and continuation routes; None when neither
+    # runs. Shared by every layer in the group, which is safe because CPU
+    # layers run one at a time and each stages what it reads before reading it.
+    scratch: torch.Tensor | None = None
+
+
+class CPUUltraQuantAttentionMetadataBuilder(CPUAttentionMetadataBuilder):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._scratch: torch.Tensor | None = None
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> CPUUltraQuantAttentionMetadata:
+        md = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        base = {f.name: getattr(md, f.name) for f in fields(CPUAttentionMetadata)}
+        if md.max_query_len == 1:
+            return CPUUltraQuantAttentionMetadata(**base)
+
+        qsl = md.query_start_loc.tolist()
+        seq_lens = md.seq_lens.tolist()
+        prefill_rows: list[int] = []
+        cont_rows: list[int] = []
+        decode_rows: list[int] = []
+        for req, ctx in enumerate(seq_lens):
+            start, end = qsl[req], qsl[req + 1]
+            if start >= md.num_actual_tokens:
+                break
+            q_len = end - start
+            if q_len == ctx:
+                prefill_rows.append(req)
+            elif q_len == 1:
+                decode_rows.append(req)
+            else:
+                cont_rows.append(req)
+
+        return CPUUltraQuantAttentionMetadata(
+            **base,
+            prefill_rows=prefill_rows,
+            cont_rows=cont_rows,
+            decode_rows=decode_rows,
+            query_start_loc_list=qsl,
+            seq_lens_list=seq_lens,
+            scratch=self._staging_page(prefill_rows, cont_rows, qsl, seq_lens),
+        )
+
+    def _staging_page(
+        self,
+        prefill_rows: list[int],
+        cont_rows: list[int],
+        qsl: list[int],
+        seq_lens: list[int],
+    ) -> torch.Tensor | None:
+        """One bf16 paged buffer for the group's staged K/V, grown as needed.
+
+        Zero-filled because the CPU kernel reads the unwritten tail of a
+        prompt's last block before masking it; stale finite values a previous
+        layer or request left there are masked out and so are harmless.
+        """
+        bs = self.block_size
+        # A scattered prefill group is staged a request at a time, so the
+        # contiguous case bounds both; a continuation stages its whole context.
+        blocks = max(
+            sum((qsl[r + 1] - qsl[r] + bs - 1) // bs for r in prefill_rows),
+            max(((seq_lens[r] + bs - 1) // bs for r in cont_rows), default=0),
+        )
+        if not blocks:
+            return None
+        buf = self._scratch
+        if buf is None or buf.size(0) < blocks:
+            buf = torch.zeros(
+                (blocks, self.num_kv_heads, bs, 2 * self.head_dim),
+                dtype=torch.bfloat16,
+            )
+            self._scratch = buf
+        return buf[:blocks]
 
 
 class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
@@ -146,14 +247,14 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
             key, value, kv_cache, slot_mapping, self.rotation, DEFAULT_CONSTANT_C
         )
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: CPUAttentionMetadata | None,
+        attn_metadata: CPUUltraQuantAttentionMetadata | None,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
@@ -179,22 +280,14 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
             )
             return output
 
-        qsl = attn_metadata.query_start_loc.tolist()
-        ctx_lens = attn_metadata.seq_lens.tolist()
-        decode_rows: list[int] = []
-        prefill_rows: list[int] = []
-        cont_rows: list[int] = []
-        for req, ctx in enumerate(ctx_lens):
-            start, end = qsl[req], qsl[req + 1]
-            if start >= num_tokens:
-                break
-            q_len = end - start
-            if q_len == ctx:
-                prefill_rows.append(req)
-            elif q_len == 1:
-                decode_rows.append(req)
-            else:
-                cont_rows.append(req)
+        qsl = attn_metadata.query_start_loc_list
+        ctx_lens = attn_metadata.seq_lens_list
+        prefill_rows = attn_metadata.prefill_rows
+        cont_rows = attn_metadata.cont_rows
+        decode_rows = attn_metadata.decode_rows
+        scratch = attn_metadata.scratch
+        if prefill_rows or cont_rows:
+            assert scratch is not None
 
         if prefill_rows:
             lo, hi = qsl[prefill_rows[0]], qsl[prefill_rows[-1] + 1]
@@ -209,7 +302,7 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
                     value[lo:hi],
                     output[lo:hi],
                     lens,
-                    kv_cache.size(2),
+                    scratch,
                 )
             else:
                 for r in prefill_rows:
@@ -221,7 +314,7 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
                         value[s:e],
                         output[s:e],
                         [e - s],
-                        kv_cache.size(2),
+                        scratch,
                     )
 
         for r in cont_rows:
@@ -235,6 +328,7 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
                 kv_cache,
                 attn_metadata.block_table[r],
                 ctx_lens[r],
+                scratch,
             )
 
         if decode_rows:
@@ -253,21 +347,6 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
             )
             output.index_copy_(0, tok, out.to(output.dtype))
         return output
-
-    def _scratch_cache(self, num_blocks: int, block_size: int) -> torch.Tensor:
-        """A bf16 paged cache for staged K/V, grown as needed and reused.
-
-        The kernel still reads the unwritten tail of each prompt's last block
-        before masking it, so the buffer has to start finite: uninitialized
-        memory there turns the whole request's output into NaN. Stale finite
-        values left by an earlier request are masked out and so are harmless.
-        """
-        tail = (self.num_kv_heads, block_size, 2 * self.head_size)
-        buf = getattr(self, "_scratch", None)
-        if buf is None or buf.shape[1:] != tail or buf.size(0) < num_blocks:
-            buf = torch.zeros((num_blocks, *tail), dtype=torch.bfloat16)
-            self._scratch = buf
-        return buf[:num_blocks]
 
     @staticmethod
     def _split_scratch(scratch: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -288,7 +367,7 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
         value: torch.Tensor,
         output: torch.Tensor,
         lens: list[int],
-        block_size: int,
+        scratch: torch.Tensor,
     ) -> None:
         """Attend the unquantized K/V of prompts that have no prior context.
 
@@ -296,6 +375,7 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
         raw tensors are the exact inputs. Staging them into a bf16 scratch page
         buys vLLM's own CPU attention kernel, which beats per-request SDPA.
         """
+        block_size = scratch.size(2)
         lens_t = torch.tensor(lens, dtype=torch.int32)
         blocks = (lens_t + block_size - 1) // block_size
         start_blk = torch.zeros_like(blocks)
@@ -313,8 +393,7 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
             lens_t
         ) + offs
 
-        scratch = self._scratch_cache(int(blocks.sum()), block_size)
-        kc, vc = self._split_scratch(scratch)
+        kc, vc = self._split_scratch(scratch[: int(blocks.sum())])
         ops.cpu_attn_reshape_and_cache(key, value, kc, vc, slot_mapping, layer.isa)  # type: ignore
         self._attend(layer, query, kc, vc, output, qsl, lens_t, block_table)
 
@@ -388,6 +467,7 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
         kv_cache: torch.Tensor,
         block_table: torch.Tensor,
         ctx_len: int,
+        scratch: torch.Tensor,
     ) -> None:
         """Attend a chunk whose prefix is already in the 4-bit cache.
 
@@ -420,9 +500,7 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
         k_all = torch.cat([k_pre.to(key.dtype), key @ rot])
         v_all = torch.cat([v_pre.to(value.dtype), value])
 
-        scratch = self._scratch_cache(
-            (ctx_len + block_size - 1) // block_size, block_size
-        )
+        scratch = scratch[: (ctx_len + block_size - 1) // block_size]
         kc, vc = self._split_scratch(scratch)
         ops.cpu_attn_reshape_and_cache(
             k_all,
