@@ -241,7 +241,10 @@ class MonoProbe:
             if ls is not None:
                 self._large[i] = 0
 
-                def counted(*a, _f=ls.forward, _i=i, **kw):
+                assert ls is not None  # mypy keeps the narrowing only so
+                fwd = ls.forward
+
+                def counted(*a, _f=fwd, _i=i, **kw):
                     self._large[_i] += 1
                     return _f(*a, **kw)
 
