@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -137,7 +137,7 @@ class KVCacheManager:
         max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
         num_hash_lookahead_tokens: int = 0,
-        log_stats: bool = False,
+        collect_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -154,12 +154,12 @@ class KVCacheManager:
 
         self.enable_caching = enable_caching
         self.enable_kv_cache_events = enable_kv_cache_events
-        self.log_stats = log_stats
+        self.collect_stats = collect_stats
         self.metrics_collector = metrics_collector
-        # FIXME: make prefix cache stats conditional on log_stats. We still need
+        # FIXME: make prefix cache stats conditional on collect_stats. We still need
         # this comment because when the log stats is enabled there are still
         # potential configs we could expose in the future.
-        self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
+        self.prefix_cache_stats = PrefixCacheStats() if collect_stats else None
 
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
@@ -187,6 +187,8 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        # Called when an allocation is short; returns True only if it can now proceed.
+        self.reclaim_blocks: Callable[[str, int, int], bool] | None = None
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers
@@ -232,7 +234,7 @@ class KVCacheManager:
             The current prefix caching stats, or None if logging is disabled.
 
         """
-        if not self.log_stats:
+        if not self.collect_stats:
             return None
         stats = self.prefix_cache_stats
         self.prefix_cache_stats = PrefixCacheStats()
@@ -266,7 +268,7 @@ class KVCacheManager:
 
     def record_prefix_cache_stats(self, request: Request, num_hits: int) -> None:
         # Don't count a request that skipped the cache lookup.
-        if not self.log_stats or not self.prefix_cache_lookup_enabled(request):
+        if not self.collect_stats or not self.prefix_cache_lookup_enabled(request):
             return
         assert self.prefix_cache_stats is not None
         self.prefix_cache_stats.record(
@@ -539,8 +541,9 @@ class KVCacheManager:
         # extends it to resumed requests replaying their output tokens.
         prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
 
+        full_sequence_shortfall = 0
         if full_sequence_must_fit:
-            # First check and fail if the full request sequence won't fit.
+            # First check whether the full request sequence fits.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
 
             num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
@@ -555,7 +558,10 @@ class KVCacheManager:
                 prefill_end=prefill_end,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
-            if required_blocks > self.block_pool.get_num_free_blocks():
+            full_sequence_shortfall = (
+                required_blocks - self.block_pool.get_num_free_blocks()
+            )
+            if full_sequence_shortfall > 0 and self.reclaim_blocks is None:
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -594,8 +600,19 @@ class KVCacheManager:
         # additional watermark of headroom for waiting/preempted admissions.
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
-        if required_blocks > available_blocks:
-            # Cannot allocate new blocks
+        deficit = required_blocks - available_blocks
+        if full_sequence_shortfall > 0:
+            deficit = max(deficit, full_sequence_shortfall)
+        # Blocks taken by the hook could evict this request's untouched hits.
+        if deficit > 0 and (
+            self.reclaim_blocks is None
+            or any(new_computed_block_list)
+            or not self.reclaim_blocks(
+                request.request_id,
+                deficit,
+                available_blocks - watermark_blocks,
+            )
+        ):
             return None
 
         if (
@@ -704,7 +721,7 @@ class KVCacheManager:
         """
         if not self.coordinator.reset_prefix_cache():
             return False
-        if self.log_stats:
+        if self.collect_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True
         return True
