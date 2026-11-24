@@ -36,6 +36,26 @@ def record_bytes(record: StorageRecord, nbytes: int) -> torch.Tensor:
     ]
 
 
+def materialize_tensor_storages(
+    storages: list[torch.UntypedStorage],
+) -> list[StorageRecord]:
+    from .memfd_ipc import MemfdStorageEntry
+
+    records = []
+    for index in range(len(storages)):
+        storage = storages[index]
+        if storage.device.type == "cpu" and storage.nbytes() and storage.is_pinned():
+            record = MemfdStorageEntry.from_storage(storage)
+            # Release the old pinned allocation before copying the next table.
+            storages[index] = record.storage
+            del storage
+            torch.accelerator.empty_host_cache()
+        else:
+            record = StorageRecord(owner=storage, storage=storage)
+        records.append(record)
+    return records
+
+
 def rebuild_entries(
     entries: Iterable[StorageEntry], device_index: int
 ) -> list[StorageRecord]:
@@ -58,9 +78,9 @@ def rebuild_entries(
 class IPCBackendBase(ABC):
     """Materialize shared storage and export rebuildable entries."""
 
+    @abstractmethod
     def materialize(self, storages: list[torch.UntypedStorage]) -> list[StorageRecord]:
-        """Return records for the canonical storages after warmup."""
-        return [StorageRecord(owner=storage, storage=storage) for storage in storages]
+        """Return records in manifest order. Copied inputs may be replaced in place."""
 
     @abstractmethod
     def export_storage(self, record: StorageRecord) -> StorageEntry:

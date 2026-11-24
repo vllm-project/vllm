@@ -11,6 +11,7 @@ from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
     IPCBackendBase,
     StorageEntry,
     StorageRecord,
+    materialize_tensor_storages,
     storage_bytes,
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.memfd_ipc import (
@@ -48,24 +49,15 @@ class TensorEntry:
         return StorageRecord(owner=buffer, storage=storage)
 
 
+def export_tensor(record: StorageRecord) -> StorageEntry:
+    if isinstance(record.owner, MemfdStorageEntry):
+        return record.owner
+    return TensorEntry.from_storage(record.storage)
+
+
 class TorchIPCBackend(IPCBackendBase):
     def materialize(self, storages: list[torch.UntypedStorage]) -> list[StorageRecord]:
-        records = super().materialize(storages)
-        for index in range(len(storages)):
-            storage = storages[index]
-            if (
-                storage.device.type == "cpu"
-                and storage.nbytes()
-                and storage.is_pinned()
-            ):
-                records[index] = MemfdStorageEntry.from_storage(storage)
-                # Release the old pinned allocation before copying the next table.
-                storages[index] = records[index].storage
-                del storage
-                torch.accelerator.empty_host_cache()
-        return records
+        return materialize_tensor_storages(storages)
 
     def export_storage(self, record: StorageRecord) -> StorageEntry:
-        if isinstance(record.owner, MemfdStorageEntry):
-            return record.owner
-        return TensorEntry.from_storage(record.storage)
+        return export_tensor(record)

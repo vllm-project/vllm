@@ -443,6 +443,12 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             if engram_config is not None and engram_config.cpu_offload
             else Qwen4ExpPLEDeviceEmbedding
         )
+        # Disk shard FDs and DP-shared mappings are owned by the loading process.
+        if embedding_cls in (
+            Qwen4ExpPLEDiskOffloadEmbedding,
+            Qwen4ExpPLESharedHostEmbedding,
+        ):
+            embedding_quant_method.supports_pre_processed_weights = False
         # A TP reduce-scatter covers all vocabulary owners only when ETP=TP.
         # Disk-offload ranks hold full rows, so they only shard tokens.
         self.use_reduce_scatter = (

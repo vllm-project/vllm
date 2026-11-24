@@ -300,6 +300,10 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
             isinstance(layer, Qwen4ExpPLEPinnedHostEmbedding)
             and is_weights_pre_processed()
         ):
+            if layer.weight.numel() and not layer.weight.is_pinned():
+                raise ValueError(
+                    "A cached host PLE table must be pinned for UVA lookup."
+                )
             layer._uva_weight = get_accelerator_view_from_cpu_tensor(layer.weight)
         if isinstance(layer, Qwen4ExpPLEEmbedding):
             layer.bind_file_shards()

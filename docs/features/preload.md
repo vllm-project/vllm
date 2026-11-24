@@ -150,7 +150,10 @@ until the last tensor view releases its storage. The loader's existing
 `fallback` setting applies to the whole model.
 
 Private pinned PLE uses `ipc_cache` with either local GPU sharing backend.
-Shared DP tables, explicit THP, disk offload, and HiSparse are unsupported.
+Disk-backed tables need open checkpoint files, and DP-shared tables need their
+group mappings. Both require state outside the manifest. The memfd path
+guarantees pinned memory only. Qwen4Exp HiSparse and peer seeding of
+CPU-offloaded PLE tables are outside the supported configurations.
 
 ## Preloading the FlashInfer autotune cache
 

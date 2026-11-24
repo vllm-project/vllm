@@ -26,7 +26,6 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
 from vllm.config import CacheConfig, KernelConfig, ModelConfig, VllmConfig
-from vllm.config.engram import model_has_engram_layers
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
@@ -99,55 +98,10 @@ def check_ipc_platform_support() -> None:
     )
 
 
-def _check_engram_cache_support(
-    vllm_config: VllmConfig, model_config: ModelConfig
-) -> None:
-    if vllm_config.attention_config.hisparse_config is not None:
-        raise ValueError(
-            "The weight cache loader does not support HiSparse QSA runtime "
-            "state yet; disable HiSparse or use the default loader."
-        )
-    if not model_has_engram_layers(model_config):
-        return
-    engram_config = vllm_config.engram_config
-    if engram_config is None:
-        return
-    if engram_config.cpu_offload and model_config.architecture not in (
-        "Qwen4ExpForCausalLM",
-        "Qwen4ExpForConditionalGeneration",
-    ):
-        raise ValueError(
-            "The weight cache supports pinned Engram offload only for Qwen4Exp."
-        )
-    unsupported = [
-        name
-        for name in ("dp_shared_memory", "use_thp", "disk_offload")
-        if getattr(engram_config, name)
-    ]
-    private_pinned = (
-        "private pinned CPU offload (cpu_offload=True, "
-        "dp_shared_memory=False, use_thp=False, disk_offload=False)"
-    )
-    if unsupported:
-        raise ValueError(
-            f"The weight cache loader does not support Engram "
-            f"{', '.join(unsupported)}. Use {private_pinned}."
-        )
-    if (
-        vllm_config.load_config.load_format == "peer_cache"
-        and engram_config.cpu_offload
-    ):
-        raise ValueError(
-            "peer_cache does not support Engram CPU offload. Use "
-            "cpu_offload=False for peer_cache, or ipc_cache with "
-            f"{private_pinned}."
-        )
-
-
 def check_weight_cache_loader_support(
     vllm_config: VllmConfig, model_config: ModelConfig, *, is_draft: bool
 ) -> None:
-    """Reject deployments a weight cache loader cannot serve."""
+    """Reject deployments a weight cache loader cannot serve (platform, EPLB, role)."""
     check_ipc_platform_support()
     if vllm_config.parallel_config.enable_eplb:
         raise ValueError("The weight cache loader does not support EPLB.")
@@ -159,7 +113,6 @@ def check_weight_cache_loader_support(
             f"{'draft' if inferred else 'target'} model but the loader was "
             f"configured for the {'draft' if is_draft else 'target'} group"
         )
-    _check_engram_cache_support(vllm_config, model_config)
 
 
 # The daemon transfers post processed weights directly

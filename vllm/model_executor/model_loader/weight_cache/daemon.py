@@ -126,7 +126,6 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     WeightCacheState,
     WeightCacheUnavailableError,
     check_ipc_quant_support,
-    check_weight_cache_loader_support,
     ensure_private_socket_dir,
     get_current_device_uuid,
     get_socket_path,
@@ -272,9 +271,6 @@ class WeightCacheDaemon:
             cache.warmup(self, self.d2d)
 
     def load_model(self) -> None:
-        check_weight_cache_loader_support(
-            self.vllm_config, self.model_config, is_draft=self.is_draft
-        )
         torch.accelerator.set_device_index(self.device_index)
         # Outside the config context so the daemon keeps its own rendezvous
         # instead of the engine's; model parallel groups (TP/DP/EP) are then
