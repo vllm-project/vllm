@@ -11,7 +11,7 @@ REPO=$2
 BUILDKITE_COMMIT=$3
 
 # image_build_cpu_arm64.sh sets CPU_ARCH=arm64: a native build, without
-# sccache or the torch nightly lane.
+# the torch nightly lane.
 CPU_ARCH=${CPU_ARCH:-x86}
 TAG_SUFFIX="cpu"
 CACHE_SUFFIX="x86_cpu"
@@ -19,7 +19,7 @@ BUILD_ARGS=(--build-arg VLLM_CPU_X86=true --build-arg USE_SCCACHE=1)
 if [[ "$CPU_ARCH" == "arm64" ]]; then
   TAG_SUFFIX="arm64-cpu"
   CACHE_SUFFIX="arm64_cpu"
-  BUILD_ARGS=()
+  BUILD_ARGS=(--build-arg USE_SCCACHE=1)
 # When TORCH_NIGHTLY=1, build the CPU image against torch nightly and tag it
 # with the -torch-nightly-cpu suffix the test steps pull on the nightly lane.
 # Its cache gets its own ref: it resolves a different torch, so sharing one
