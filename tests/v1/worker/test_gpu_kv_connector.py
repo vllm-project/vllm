@@ -351,3 +351,28 @@ def test_output_polls_only_on_model_thread(
     assert output.kv_connector_output.finished_recving == (
         {"a"} if on_model_thread else None
     )
+
+
+def test_uncollected_outputs_do_not_strand_results(monkeypatch: pytest.MonkeyPatch):
+    """Warmup outputs, and ones lost to a failed step, are never collected."""
+    connector = _polling_connector(
+        monkeypatch, KVConnectorTransferResults(finished_recving={"a"})
+    )
+    connector.set_disabled(True)
+    assert connector.transfer_results_taker() is None
+    connector.set_disabled(False)
+    output = connector.no_forward(_scheduler_output(False))
+    assert output.kv_connector_output is not None
+    assert output.kv_connector_output.finished_recving == {"a"}
+
+    lost, take = connector.transfer_results_taker(), connector.transfer_results_taker()
+    assert lost is not None and take is not None
+    take(_empty_output())
+    backend = connector.kv_connector
+    assert isinstance(backend, Mock)
+    backend.get_transfer_results.side_effect = [
+        KVConnectorTransferResults(finished_recving={"b"})
+    ]
+    output = connector.no_forward(_scheduler_output(False))
+    assert output.kv_connector_output is not None
+    assert output.kv_connector_output.finished_recving == {"b"}

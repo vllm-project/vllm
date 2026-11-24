@@ -47,6 +47,9 @@ class KVConnector:
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         return EMPTY_MODEL_RUNNER_OUTPUT
 
+    def next_poll_time(self) -> float | None:
+        return None
+
     def set_disabled(self, disabled: bool) -> None:
         pass
 

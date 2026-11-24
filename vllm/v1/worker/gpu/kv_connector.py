@@ -129,11 +129,11 @@ class ActiveKVConnector(KVConnector):
         )
         self._results_lock = threading.Lock()
         self._held_results = KVConnectorOutput()
-        # Outputs that will take held results once their GPU work is done.
-        self._num_pending_takers = 0
-        # Takers are numbered in step order. Those before _first_taker leave
-        # the results of a later step's synchronous loads to that step.
+        # Outputs that take held results once their GPU work is done are numbered
+        # in step order. Those before _first_taker leave the results of a later
+        # step's synchronous loads to that step.
         self._last_taker = 0
+        self._last_taken = 0
         self._first_taker = 0
         self._has_sync_loads = False
         # From an output's take until the next post_forward(), which finds the
@@ -310,10 +310,10 @@ class ActiveKVConnector(KVConnector):
             _merge_transfer_results(self._held_results, results)
 
     def transfer_results_taker(self) -> Callable[[ModelRunnerOutput], None] | None:
-        if not self._polls:
+        # Warmup outputs are never collected.
+        if not self._polls or self._disabled:
             return None
         with self._results_lock:
-            self._num_pending_takers += 1
             self._last_taker += 1
             return partial(self._take_transfer_results, taker=self._last_taker)
 
@@ -329,11 +329,11 @@ class ActiveKVConnector(KVConnector):
             self.poll()
         with self._results_lock:
             if taker is not None:
-                self._num_pending_takers -= 1
+                self._last_taken = taker
                 self._polls_paused = True
                 if taker < self._first_taker:
                     return
-            elif self._num_pending_takers:
+            elif self._last_taken < self._last_taker:
                 return
             if self._held_results.is_empty():
                 return
