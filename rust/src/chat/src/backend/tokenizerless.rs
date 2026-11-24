@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::HashMap;
 use std::sync::Arc;
+
+use serde_json::Value;
 
 use crate::backend::{ChatBackend, NewChatOutputProcessorOptions};
 use crate::error::Result;
@@ -34,6 +37,10 @@ impl ChatBackend for TokenizerlessChatBackend {
 
 impl ChatRenderer for TokenizerlessChatBackend {
     fn render(&self, _request: &ChatRequest) -> Result<RenderedPrompt> {
+        Err(tokenizer_unavailable())
+    }
+
+    fn template_kwargs(&self, _request: &ChatRequest) -> Result<HashMap<String, Value>> {
         Err(tokenizer_unavailable())
     }
 }

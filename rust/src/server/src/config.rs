@@ -109,6 +109,10 @@ pub struct ApiServerOptions {
     /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`, default 16384).
     #[educe(Default(expression = DEFAULT_MAX_N_SEQUENCES))]
     pub max_n_sequences: i64,
+    /// Submit chat `kv_transfer_params.prompt_token_ids` in place of rendering
+    /// `messages`: set with a non-offload KV transfer connector or
+    /// `--enable-prompt-token-ids`.
+    pub trust_forwarded_prompt_token_ids: bool,
 }
 
 /// Which generated outputs to log, like Python's `--enable-log-outputs` and

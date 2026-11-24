@@ -322,6 +322,13 @@ impl ChatRenderer for HfChatRenderer {
         self.apply_chat_template(request)
     }
 
+    fn template_kwargs(&self, request: &ChatRequest) -> Result<HashMap<String, JsonValue>> {
+        Ok(effective_template_kwargs(
+            &self.default_template_kwargs,
+            request,
+        ))
+    }
+
     fn renders_request_chat_template(&self) -> bool {
         true
     }
@@ -726,6 +733,7 @@ mod tests {
     use super::developer::tests::ALTERNATING_TURNS;
     use super::{ChatTemplateContentFormatOption, HfChatRenderer, MultimodalRenderInfo};
     use crate::EffortValue;
+    use crate::renderer::test_utils::render_checking_template_kwargs;
     use crate::request::{
         ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
         GenerationPromptMode, ResolvedToolContext,
@@ -1668,7 +1676,7 @@ mod tests {
         )
         .unwrap();
 
-        let rendered = renderer.render(&request).unwrap();
+        let rendered = render_checking_template_kwargs(&renderer, &request);
 
         assert_eq!(rendered.prompt, Prompt::Text("max".to_string()));
         assert_eq!(
@@ -1698,7 +1706,7 @@ mod tests {
         )
         .unwrap();
 
-        let rendered = renderer.render(&request).unwrap();
+        let rendered = render_checking_template_kwargs(&renderer, &request);
 
         assert_eq!(rendered.prompt, Prompt::Text("none|True".to_string()));
         assert_eq!(

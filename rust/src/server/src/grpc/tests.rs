@@ -278,6 +278,13 @@ impl ChatBackend for FakeTextBackend {
 }
 
 impl ChatRenderer for FakeTextBackend {
+    fn template_kwargs(
+        &self,
+        _request: &ChatRequest,
+    ) -> vllm_chat::Result<std::collections::HashMap<String, serde_json::Value>> {
+        Ok(Default::default())
+    }
+
     fn render(&self, _request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
         Ok(RenderedPrompt {
             prompt: Prompt::Text(String::new()),
@@ -3102,6 +3109,13 @@ impl ChatBackend for FakeRenderBackend {
 }
 
 impl ChatRenderer for FakeRenderBackend {
+    fn template_kwargs(
+        &self,
+        request: &ChatRequest,
+    ) -> vllm_chat::Result<std::collections::HashMap<String, serde_json::Value>> {
+        Ok(request.chat_options.template_kwargs.clone())
+    }
+
     fn render(&self, request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
         let mut prompt = String::new();
         for message in &request.messages {
@@ -3446,6 +3460,13 @@ impl ChatBackend for FakeMultimodalRenderBackend {
 struct FakeImagePadRenderer;
 
 impl ChatRenderer for FakeImagePadRenderer {
+    fn template_kwargs(
+        &self,
+        _request: &ChatRequest,
+    ) -> vllm_chat::Result<std::collections::HashMap<String, serde_json::Value>> {
+        Ok(Default::default())
+    }
+
     fn render(&self, request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
         let mut prompt = String::new();
         for message in &request.messages {

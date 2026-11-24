@@ -12,7 +12,8 @@ use crate::ChatRenderer;
 use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{
-    FixtureRequestOptions, fixture_chat_request, tool, tool_search_request,
+    FixtureRequestOptions, fixture_chat_request, render_checking_template_kwargs, tool,
+    tool_search_request,
 };
 use crate::request::{
     ChatContent, ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode,
@@ -361,7 +362,7 @@ fn enabling_with_none_inherits_deployment_effort_and_reports_numeric_control() {
         .chat_options
         .template_kwargs
         .insert("enable_thinking".into(), json!(true));
-    let rendered = renderer.render(&request).unwrap();
+    let rendered = render_checking_template_kwargs(&renderer, &request);
     let prompt = rendered.prompt.into_text().unwrap();
     assert!(prompt.contains("Reasoning Effort: 37 (range 1-100"));
     assert!(prompt.ends_with("<think>"));

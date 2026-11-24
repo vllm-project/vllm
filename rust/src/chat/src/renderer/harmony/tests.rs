@@ -12,7 +12,9 @@ use crate::ChatRenderer;
 use crate::EffortValue;
 use crate::error::Error;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::renderer::test_utils::{
+    FixtureRequestOptions, fixture_chat_request, render_checking_template_kwargs,
+};
 use crate::request::{ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode};
 
 const PINNED_DATE: &str = "2025-06-28";
@@ -160,7 +162,7 @@ fn normalized_reasoning_respects_harmony_capability_and_deployment_effort() {
         .chat_options
         .template_kwargs
         .insert("enable_thinking".into(), serde_json::json!(true));
-    let rendered = renderer.render(&request).unwrap();
+    let rendered = render_checking_template_kwargs(&renderer, &request);
     let prompt = harmony_encoding()
         .unwrap()
         .tokenizer()

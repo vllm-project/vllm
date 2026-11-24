@@ -10,7 +10,9 @@ use thiserror_ext::AsReport;
 use vllm_text::tokenizer::Tokenizer;
 
 use crate::EffortValue;
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::renderer::test_utils::{
+    FixtureRequestOptions, fixture_chat_request, render_checking_template_kwargs,
+};
 
 use super::{
     AUDIO_END, CONTENT_AUDIO_INPUT, CONTENT_IMAGE, CONTENT_INVOKE_TOOL_JSON, CONTENT_TEXT,
@@ -329,7 +331,7 @@ fn normalized_mode_and_scalar_are_reflected_in_prompt_and_kwargs() {
     ] {
         let mut request = ChatRequest::for_test();
         request.chat_options.template_kwargs = serde_json::from_value(kwargs).unwrap();
-        let rendered = renderer().render(&request).unwrap();
+        let rendered = render_checking_template_kwargs(&renderer(), &request);
         let prompt = render_symbolic_tokens(&rendered.prompt.into_token_ids().unwrap());
         assert!(prompt.contains(&format!("Thinking effort level: {expected}<|end_message|>")));
         assert_eq!(

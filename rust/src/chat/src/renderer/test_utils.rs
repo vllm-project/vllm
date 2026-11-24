@@ -8,6 +8,7 @@ use std::path::Path;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::{ChatRenderer, RenderedPrompt};
 use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::request::{
@@ -347,4 +348,19 @@ pub(crate) fn tool_search_request(references: &[&str]) -> ChatRequest {
         .template_kwargs
         .insert("thinking".into(), Value::Bool(false));
     request
+}
+
+/// Render `request`, asserting that [`ChatRenderer::template_kwargs`] reports
+/// the same kwargs, since requests with forwarded prompt IDs use it in place
+/// of rendering.
+pub(crate) fn render_checking_template_kwargs(
+    renderer: &dyn ChatRenderer,
+    request: &ChatRequest,
+) -> RenderedPrompt {
+    let rendered = renderer.render(request).unwrap();
+    assert_eq!(
+        renderer.template_kwargs(request).unwrap(),
+        rendered.effective_template_kwargs
+    );
+    rendered
 }

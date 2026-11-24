@@ -83,6 +83,14 @@ pub trait ChatRenderer: Send + Sync {
     /// backend.
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt>;
 
+    /// Effective chat-template kwargs for one request, the same value
+    /// [`render`](Self::render) reports in
+    /// [`RenderedPrompt::effective_template_kwargs`], without rendering.
+    ///
+    /// Requests with forwarded prompt token IDs skip [`render`](Self::render)
+    /// but still pass these kwargs to the engine's reasoning parser.
+    fn template_kwargs(&self, request: &ChatRequest) -> Result<HashMap<String, Value>>;
+
     /// Whether [`render`](Self::render) renders a request's `chat_template`
     /// override. Requests carrying one are rejected for other renderers.
     fn renders_request_chat_template(&self) -> bool {

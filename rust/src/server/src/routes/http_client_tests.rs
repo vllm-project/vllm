@@ -175,6 +175,13 @@ impl ChatBackend for FakeChatBackend {
 }
 
 impl ChatRenderer for FakeChatBackend {
+    fn template_kwargs(
+        &self,
+        _request: &ChatRequest,
+    ) -> vllm_chat::Result<std::collections::HashMap<String, serde_json::Value>> {
+        Ok(Default::default())
+    }
+
     fn render(&self, request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
         let mut prompt = String::new();
         for message in &request.messages {

@@ -15,6 +15,7 @@ use vllm_text::tokenizer::DynTokenizer;
 
 use super::{ChatRenderer, RenderedPrompt, RendererSelection};
 use crate::Result;
+use crate::reasoning::ReasoningControl;
 use crate::request::ChatRequest;
 
 /// Kimi K3 checkpoint generation rendered by [`KimiK3ChatRenderer`].
@@ -73,15 +74,7 @@ impl ChatRenderer for KimiK3ChatRenderer {
         request.validate()?;
         let reasoning =
             encoding::resolve_reasoning(request, &self.default_template_kwargs, self.variant)?;
-        let mut effective_template_kwargs = reasoning.template_kwargs(request);
-        // Export K3's native effort key from the resolved standard controls.
-        // Input `thinking_effort` is ignored; clear it when reasoning is disabled.
-        if let Some(effort) = reasoning.effort() {
-            effective_template_kwargs
-                .insert("thinking_effort".to_string(), serde_json::json!(effort));
-        } else {
-            effective_template_kwargs.remove("thinking_effort");
-        }
+        let effective_template_kwargs = k3_template_kwargs(request, &reasoning);
         let (token_ids, media_order) = encoding::render_request_with_media_order(
             request,
             self.tokenizer.as_ref(),
@@ -94,4 +87,25 @@ impl ChatRenderer for KimiK3ChatRenderer {
             effective_template_kwargs,
         })
     }
+
+    fn template_kwargs(&self, request: &ChatRequest) -> Result<HashMap<String, Value>> {
+        let reasoning =
+            encoding::resolve_reasoning(request, &self.default_template_kwargs, self.variant)?;
+        Ok(k3_template_kwargs(request, &reasoning))
+    }
+}
+
+fn k3_template_kwargs(
+    request: &ChatRequest,
+    reasoning: &ReasoningControl,
+) -> HashMap<String, Value> {
+    let mut effective_template_kwargs = reasoning.template_kwargs(request);
+    // Export K3's native effort key from the resolved standard controls.
+    // Input `thinking_effort` is ignored; clear it when reasoning is disabled.
+    if let Some(effort) = reasoning.effort() {
+        effective_template_kwargs.insert("thinking_effort".to_string(), serde_json::json!(effort));
+    } else {
+        effective_template_kwargs.remove("thinking_effort");
+    }
+    effective_template_kwargs
 }

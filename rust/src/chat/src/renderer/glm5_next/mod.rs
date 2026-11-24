@@ -46,11 +46,7 @@ impl Glm5NextChatRenderer {
 impl ChatRenderer for Glm5NextChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         request.validate()?;
-        let mut kwargs = self.default_template_kwargs.clone();
-        kwargs.extend(request.chat_options.template_kwargs.clone());
-        if let Some(effort) = &request.chat_options.reasoning_effort {
-            kwargs.insert("reasoning_effort".into(), serde_json::json!(effort));
-        }
+        let kwargs = self.template_kwargs(request)?;
         let messages = encoding::messages(&request.messages);
         let tools = encoding::tools(request.tools());
         let mut out = writer::Glm5PromptWriter::new(self.tokenizer.as_deref());
@@ -67,6 +63,15 @@ impl ChatRenderer for Glm5NextChatRenderer {
             media_order: Some(media_order),
             effective_template_kwargs: kwargs,
         })
+    }
+
+    fn template_kwargs(&self, request: &ChatRequest) -> Result<HashMap<String, Value>> {
+        let mut kwargs = self.default_template_kwargs.clone();
+        kwargs.extend(request.chat_options.template_kwargs.clone());
+        if let Some(effort) = &request.chat_options.reasoning_effort {
+            kwargs.insert("reasoning_effort".into(), serde_json::json!(effort));
+        }
+        Ok(kwargs)
     }
 }
 

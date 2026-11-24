@@ -234,16 +234,45 @@ impl ChatRequestProcessor {
         {
             return Err(Error::UnsupportedRequestChatTemplate);
         }
-        let (mut rendered, request) = tokio::task::spawn_blocking(move || {
-            renderer.render(&request).map(|rendered| (rendered, request))
-        })
-        .await
-        .map_err(|e| Error::ChatTemplate(format!("render task join error: {e}")))??;
-        let chat_template_kwargs = std::mem::take(&mut rendered.effective_template_kwargs);
-        // Taken before media placeholders are expanded, like Python.
-        let prompt_text =
-            request.return_prompt_text.then(|| rendered.prompt.as_text().cloned()).flatten();
-        let (prompt, mm_features) = self.finalize_rendered_prompt(&request, rendered).await?;
+        let (prompt, mm_features, chat_template_kwargs, prompt_text, request) =
+            match request.forwarded_prompt_token_ids.take() {
+                // Like Python, only templating and tokenization are skipped:
+                // tools, output processors, and the reasoning parser kwargs
+                // are still derived from the request.
+                Some(token_ids) => {
+                    let chat_template_kwargs = renderer.template_kwargs(&request)?;
+                    (
+                        Prompt::TokenIds(token_ids),
+                        None,
+                        chat_template_kwargs,
+                        None,
+                        request,
+                    )
+                }
+                None => {
+                    let (mut rendered, request) = tokio::task::spawn_blocking(move || {
+                        renderer.render(&request).map(|rendered| (rendered, request))
+                    })
+                    .await
+                    .map_err(|e| Error::ChatTemplate(format!("render task join error: {e}")))??;
+                    let chat_template_kwargs =
+                        std::mem::take(&mut rendered.effective_template_kwargs);
+                    // Taken before media placeholders are expanded, like Python.
+                    let prompt_text = request
+                        .return_prompt_text
+                        .then(|| rendered.prompt.as_text().cloned())
+                        .flatten();
+                    let (prompt, mm_features) =
+                        self.finalize_rendered_prompt(&request, rendered).await?;
+                    (
+                        prompt,
+                        mm_features,
+                        chat_template_kwargs,
+                        prompt_text,
+                        request,
+                    )
+                }
+            };
         let text_request = TextRequest {
             request_id: request.request_id,
             prompt,

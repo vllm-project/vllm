@@ -457,6 +457,7 @@ struct FakeChatBackend {
     sampling_hints: vllm_text::SamplingHints,
     /// Serve without a tokenizer, like `--skip-tokenizer-init`.
     skip_tokenizer_init: bool,
+    model_vocab_size: usize,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -483,6 +484,14 @@ impl FakeChatBackend {
             multimodal_model_info: None,
             sampling_hints: Default::default(),
             skip_tokenizer_init: false,
+            model_vocab_size: usize::MAX,
+        }
+    }
+
+    fn with_model_vocab_size(self, model_vocab_size: usize) -> Self {
+        Self {
+            model_vocab_size,
+            ..self
         }
     }
 
@@ -499,6 +508,7 @@ impl FakeChatBackend {
             multimodal_model_info: None,
             sampling_hints: Default::default(),
             skip_tokenizer_init: false,
+            model_vocab_size: usize::MAX,
         }
     }
 
@@ -510,6 +520,7 @@ impl FakeChatBackend {
             multimodal_model_info: Some(multimodal_model_info),
             sampling_hints: Default::default(),
             skip_tokenizer_init: false,
+            model_vocab_size: usize::MAX,
         }
     }
 }
@@ -536,6 +547,10 @@ impl TextBackend for FakeChatBackend {
 
     fn has_tokenizer(&self) -> bool {
         !self.skip_tokenizer_init
+    }
+
+    fn model_vocab_size(&self) -> usize {
+        self.model_vocab_size
     }
 
     fn model_id(&self) -> &str {
@@ -569,6 +584,13 @@ impl ChatBackend for FakeChatBackend {
 }
 
 impl ChatRenderer for FakeChatBackend {
+    fn template_kwargs(
+        &self,
+        request: &ChatRequest,
+    ) -> vllm_chat::Result<std::collections::HashMap<String, serde_json::Value>> {
+        Ok(request.chat_options.template_kwargs.clone())
+    }
+
     fn render(&self, request: &ChatRequest) -> vllm_chat::Result<vllm_chat::RenderedPrompt> {
         let placeholder = self
             .multimodal_model_info
@@ -4614,6 +4636,200 @@ async fn skip_model_name_validation_serves_unknown_model_with_base_model() {
     assert_eq!(status, StatusCode::OK, "{json}");
 
     engine_task.await.expect("mock engine task");
+}
+
+async fn test_app_with_forwarded_prompt_token_ids(
+    backend: FakeChatBackend,
+    trusted: bool,
+    check_request: impl FnOnce(&EngineCoreRequest) + Send + 'static,
+) -> (axum::Router, MockEngineTask) {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+        b"engine-openai-forwarded-prompt-ids",
+        |request_id| engine_outputs_for_request(request_id, default_stream_output_specs()),
+        check_request,
+        Arc::new(backend),
+    )
+    .await;
+    let app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                trust_forwarded_prompt_token_ids: trusted,
+                ..Default::default()
+            },
+        ),
+    ));
+    (app, engine_task)
+}
+
+fn engine_kv_transfer_params(request: &EngineCoreRequest) -> Option<&serde_json::Value> {
+    request
+        .sampling_params
+        .as_ref()
+        .and_then(|params| params.extra_args.as_ref())
+        .and_then(|extra_args| extra_args.get("kv_transfer_params"))
+}
+
+/// A trusted server submits forwarded ids instead of rendering `messages`,
+/// keeps the reasoning parser kwargs, and strips the ids and their features
+/// from the transfer params the engine sees.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_submit_trusted_forwarded_prompt_token_ids() {
+    let (mut app, engine_task) =
+        test_app_with_forwarded_prompt_token_ids(FakeChatBackend::new(), true, |request| {
+            assert_eq!(decode_prompt_token_ids(request), Some(vec![10, 20, 30]));
+            assert_eq!(
+                engine_kv_transfer_params(request),
+                Some(&json!({"do_remote_prefill": true}))
+            );
+            assert_eq!(
+                request
+                    .reasoning_parser_kwargs
+                    .as_ref()
+                    .map(|kwargs| &kwargs.chat_template_kwargs["enable_thinking"]),
+                Some(&json!(false))
+            );
+        })
+        .await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "chat_template_kwargs": {"enable_thinking": false},
+            "kv_transfer_params": {
+                "prompt_token_ids": [10, 20, 30],
+                "prompt_features": {"mm_hashes": []},
+                "do_remote_prefill": true
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["usage"]["prompt_tokens"], 3, "{json}");
+    engine_task.await.expect("mock engine task");
+}
+
+/// Without a KV connector or `--enable-prompt-token-ids`, forwarded ids are
+/// dropped and `messages` are rendered, as in Python.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_render_messages_when_forwarded_ids_untrusted() {
+    let (mut app, engine_task) =
+        test_app_with_forwarded_prompt_token_ids(FakeChatBackend::new(), false, |request| {
+            assert_ne!(decode_prompt_token_ids(request), Some(vec![10, 20, 30]));
+            assert_eq!(
+                engine_kv_transfer_params(request),
+                Some(&json!({"do_remote_prefill": true}))
+            );
+        })
+        .await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "kv_transfer_params": {
+                "prompt_token_ids": [10, 20, 30],
+                "do_remote_prefill": true
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_ne!(json["usage"]["prompt_tokens"], 3, "{json}");
+    engine_task.await.expect("mock engine task");
+}
+
+/// `return_prompt_text` needs the rendered prompt, so even a trusted server
+/// renders it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_render_messages_for_prompt_text_with_forwarded_ids() {
+    let (mut app, engine_task) =
+        test_app_with_forwarded_prompt_token_ids(FakeChatBackend::new(), true, |request| {
+            assert_ne!(decode_prompt_token_ids(request), Some(vec![10, 20, 30]));
+            assert_eq!(engine_kv_transfer_params(request), Some(&json!({})));
+        })
+        .await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "return_prompt_text": true,
+            "kv_transfer_params": {"prompt_token_ids": [10, 20, 30]}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(json["prompt_text"].is_string(), "{json}");
+    engine_task.await.expect("mock engine task");
+}
+
+/// `kv_transfer_params` is untyped, so a trusted server checks the ids'
+/// shape before submitting them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_reject_malformed_forwarded_prompt_token_ids() {
+    let (mut app, _engine_task) =
+        test_app_with_forwarded_prompt_token_ids(FakeChatBackend::new(), true, |_| {}).await;
+    for ids in [
+        json!([]),
+        json!([-1]),
+        json!([1.5]),
+        json!([1.0]),
+        json!(["1"]),
+        json!([true]),
+        json!([u64::from(u32::MAX) + 1]),
+        json!("abc"),
+        json!(5),
+    ] {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": "hello"}],
+                "kv_transfer_params": {"prompt_token_ids": ids}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{ids} {json}");
+        assert_eq!(
+            json["error"]["param"], "kv_transfer_params.prompt_token_ids",
+            "{ids} {json}"
+        );
+    }
+}
+
+/// Forwarded ids skip tokenization, but not the vocabulary check every token
+/// prompt gets when lowering. The message names `prompt` and `param` is unset,
+/// where Python sets `param` to `kv_transfer_params.prompt_token_ids`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_reject_out_of_vocab_forwarded_prompt_token_ids() {
+    let backend = FakeChatBackend::new().with_model_vocab_size(1000);
+    let (mut app, _engine_task) =
+        test_app_with_forwarded_prompt_token_ids(backend, true, |_| {}).await;
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "kv_transfer_params": {"prompt_token_ids": [10, 1_000_000]}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    expect_test::expect![[r#"{"message":"token_id(s) [1000000] in prompt are out of vocabulary. Vocabulary size: 151656","type":"BadRequestError","param":null,"code":400}"#]].assert_eq(&json["error"].to_string());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

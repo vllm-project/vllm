@@ -363,6 +363,13 @@ impl InklingChatRenderer {
         }
         Ok(())
     }
+
+    fn reasoning(&self, request: &ChatRequest) -> Result<ReasoningControl> {
+        resolve_reasoning(ReasoningControl::resolve(
+            request,
+            &self.default_template_kwargs,
+        )?)
+    }
 }
 
 impl ChatRenderer for InklingChatRenderer {
@@ -379,10 +386,7 @@ impl ChatRenderer for InklingChatRenderer {
 
         let mut out = Vec::new();
         let mut tool_call_id_to_name = HashMap::new();
-        let reasoning = resolve_reasoning(ReasoningControl::resolve(
-            request,
-            &self.default_template_kwargs,
-        )?)?;
+        let reasoning = self.reasoning(request)?;
         let effective_template_kwargs = reasoning.template_kwargs(request);
         self.write_tool_declarations(&mut out, request.tools())?;
         let mut reasoning_effort = if reasoning.is_enabled() {
@@ -443,6 +447,10 @@ impl ChatRenderer for InklingChatRenderer {
             media_order: None,
             effective_template_kwargs,
         })
+    }
+
+    fn template_kwargs(&self, request: &ChatRequest) -> Result<HashMap<String, Value>> {
+        Ok(self.reasoning(request)?.template_kwargs(request))
     }
 }
 
