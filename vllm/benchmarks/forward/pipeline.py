@@ -40,7 +40,7 @@ class ForwardPipelineExecutor(ExecutorWithExternalLauncher):
 
     supports_pp = True
 
-    def collective_rpc(
+    def collective_rpc(  # type: ignore[override]
         self,
         method: str | Callable,
         timeout: float | None = None,
@@ -48,26 +48,21 @@ class ForwardPipelineExecutor(ExecutorWithExternalLauncher):
         kwargs: dict | None = None,
         non_block: bool = False,
         single_value: bool = False,
-    ) -> Any:
-        result = super().collective_rpc(
-            method, timeout, args, kwargs, non_block, single_value
-        )
-        if method in (
-            "get_kv_cache_layer_configs",
-            "get_supported_kv_cache_layouts",
-            "extensible_kv_cache_unsupported_reason",
-            "compile_or_warm_up_model",
-        ):
-            assert not non_block and not single_value
-            (local_result,) = result
-            world = get_world_group()
-            result = [local_result] * world.world_size
-            dist.all_gather_object(result, local_result, group=world.cpu_group)
-        return result
+    ) -> list[Any]:
+        """Return every worker's result in world-rank order on every process."""
+        if non_block or single_value:
+            raise NotImplementedError(
+                "ForwardPipelineExecutor requires synchronous, all-worker RPC results."
+            )
+        (local_result,) = super().collective_rpc(method, timeout, args, kwargs)
+        world = get_world_group()
+        results: list[Any] = [None] * world.world_size
+        dist.all_gather_object(results, local_result, group=world.cpu_group)
+        return results
 
     def determine_available_memory(self) -> list[int]:
-        (memory,) = super().determine_available_memory()
-        return [memory] * get_world_group().world_size
+        available_memory = self.collective_rpc("determine_available_memory")
+        return [min(available_memory)] * len(available_memory)
 
     def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
         local_config = kv_cache_configs[get_world_group().rank]
