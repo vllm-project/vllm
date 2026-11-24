@@ -185,13 +185,6 @@ def test_hipb_mm_kernel_can_implement_success(enable_hipb_mm_kernel):
             _make_config(out_dtype=torch.float16),
             "requires bfloat16 output dtype.",
         ),
-        (
-            _make_config(weight_shape=(8, 4090)),
-            (
-                "requires N >= 16 and both N and K divisible by 16, "
-                "received N=8 and K=4090."
-            ),
-        ),
     ],
 )
 def test_hipb_mm_kernel_can_implement_rejects_unsupported_configs(
@@ -205,6 +198,32 @@ def test_hipb_mm_kernel_can_implement_rejects_unsupported_configs(
 
     assert not can_implement
     assert reason == expected_reason
+
+
+@pytest.mark.parametrize(("cdna_version", "k_align"), [(3, 64), (4, 32)])
+@pytest.mark.parametrize("weight_shape", [(8, 4096), (512, 4112), (512, 4128)])
+def test_hipb_mm_kernel_can_implement_k_alignment(
+    enable_hipb_mm_kernel,
+    monkeypatch: pytest.MonkeyPatch,
+    cdna_version: int,
+    k_align: int,
+    weight_shape: tuple[int, int],
+):
+    import vllm.platforms.rocm as rocm_mod
+
+    monkeypatch.setattr(rocm_mod, "get_cdna_version", lambda: cdna_version)
+    N, K = weight_shape
+    can_implement, reason = AiterHipbMMPerTokenFp8ScaledMMLinearKernel.can_implement(
+        _make_config(weight_shape=weight_shape)
+    )
+
+    expected = N >= 16 and K % k_align == 0
+    assert can_implement == expected
+    if not expected:
+        assert reason == (
+            "requires N >= 16, N divisible by 16 and K divisible by "
+            f"{k_align}, received N={N} and K={K}."
+        )
 
 
 def test_hipb_mm_kernel_process_weights_after_loading_shuffles_weights(

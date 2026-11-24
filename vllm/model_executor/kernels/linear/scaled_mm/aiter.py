@@ -279,12 +279,18 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 "requires per token activation scales and per channel weight scales.",
             )
 
-        if not (N >= 16 and N % 16 == 0 and K % 16 == 0):
+        from vllm.platforms.rocm import get_cdna_version
+
+        # shuffle_weight asserts K % 32 == 0. On CDNA3 the bpreshuffle FP8
+        # GEMM also returns NaN or wrong values at K % 64 == 32:
+        # https://github.com/ROCm/aiter/issues/8523
+        k_align = 64 if get_cdna_version() == 3 else 32
+        if not (N >= 16 and N % 16 == 0 and K % k_align == 0):
             return (
                 False,
                 (
-                    "requires N >= 16 and both N and K divisible by 16, "
-                    f"received N={N} and K={K}."
+                    "requires N >= 16, N divisible by 16 and K divisible by "
+                    f"{k_align}, received N={N} and K={K}."
                 ),
             )
 
