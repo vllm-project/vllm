@@ -98,6 +98,13 @@ def _sparse_pa_ok(layers) -> bool:
     )
 
 
+def _caches_ok(kv_dtype: str, index_dtype: str, layers) -> bool:
+    """FP8 K/V and index caches on the AITER sparse PA pages, or both NVFP4."""
+    if kv_dtype == "nvfp4":
+        return index_dtype == "nvfp4"
+    return kv_dtype.startswith("fp8") and index_dtype == "fp8" and _sparse_pa_ok(layers)
+
+
 def _compute_units() -> int:
     device = torch.accelerator.current_device_index()
     return current_platform.get_device_properties(device).multi_processor_count
@@ -118,8 +125,13 @@ def config_refusal(vllm_config: VllmConfig, model) -> str | None:
         (pc.data_parallel_size == 1, "DP > 1"),
         (pc.pipeline_parallel_size == 1, "PP > 1"),
         (not pc.enable_expert_parallel, "EP"),
-        (str(cc.cache_dtype).startswith("fp8"), f"kv cache {cc.cache_dtype}"),
-        (index_dtype == "fp8", f"index cache {index_dtype}"),
+        (
+            _caches_ok(str(cc.cache_dtype), str(index_dtype), model.layers),
+            (
+                f"kv cache {cc.cache_dtype} / index cache {index_dtype} (both fp8 "
+                "with VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1, or both nvfp4)"
+            ),
+        ),
         (cc.block_size == SPARSE_BLOCK, f"block size {cc.block_size}"),
         (max_len <= MAX_CONTEXT, f"max_model_len {max_len} > {MAX_CONTEXT}"),
         (cg is None or not cg.requires_piecewise_compilation(), "piecewise cudagraph"),
@@ -139,10 +151,6 @@ def config_refusal(vllm_config: VllmConfig, model) -> str | None:
         ),
         (_dense_prefix_ok(model.layers), "layer mix"),
         (_mxfp8_attention_ok(model.layers), "attention projections not MXFP8"),
-        (
-            _sparse_pa_ok(model.layers),
-            "AITER sparse PA off (needs VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1)",
-        ),
     )
     for ok, why in checks:
         if not ok:

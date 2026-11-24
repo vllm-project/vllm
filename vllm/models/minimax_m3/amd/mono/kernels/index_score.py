@@ -7,7 +7,9 @@
 
 The Triton decode scorer's math, one 128-key block of index-K per task: bf16(fp8
 K) x bf16 index q on the MFMA, max over the causal keys, times fp32(sm_scale *
-log2 e). A context of <= TOPK_BLOCKS blocks keeps every block and is not scored;
+log2 e). Under `mono_config.NVFP4` (NVFP4 index pages) the NVFP4 scorer's: K =
+e4m3(e2m1 x scale) and q e4m3, one fp8 16x16x128 MFMA a tile.
+A context of <= TOPK_BLOCKS blocks keeps every block and is not scored;
 nor are the blocks the selector pins (the first `init_blocks`, the last
 `local_blocks`): their keys are forced. A scored block waits for the index keys
 K1 inserts this step only when it may hold one (`wait_new_keys`).
@@ -29,6 +31,7 @@ from aiter.ops.flydsl.kernels.kernels_common import LOG2E
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import T
 
+from vllm.models.minimax_m3.amd.mono import config as mono_config
 from vllm.models.minimax_m3.amd.mono.config import (
     BLOCKS,
     HEAD_DIM,
@@ -55,6 +58,12 @@ from vllm.models.minimax_m3.amd.mono.kernels.common import (
     uniform,
     unlikely,
 )
+from vllm.models.minimax_m3.amd.mono.kernels.nvfp4 import (
+    INDEX_SCALE_AT,
+    e2m1_dword_e4m3x8,
+    q_e4m3,
+)
+from vllm.models.minimax_m3.amd.ops.flydsl_utils import mfma_fp8_16x16x128
 
 INDEX_BLOCK_BYTES = SPARSE_BLOCK * HEAD_DIM  # one fp8 index-K block
 KEY_TILES = SPARSE_BLOCK // 16  # MFMA row tiles of a block
@@ -149,8 +158,13 @@ def emit_index_scores(
     pair k * MAX_INDEX_BLOCKS + h * (MAX_INDEX_BLOCKS / TP) + b / TP <- the score
     of token k's block b for head h. `q_frag_head(k, s, h)`: head h's B operand
     (every lane its own h); `prepare_heads()` (with CTA barriers, on every CTA)
-    makes those requests' rows' heads first. The other requests score as above."""
+    makes those requests' rows' heads first. The other requests score as above.
+
+    NVFP4 index pages (`mono_config.NVFP4`): a lane's key operand is dims 32 g4 ..
+    + 31 of its key (its own 16 data bytes, no transpose), so `q_frag` /
+    `q_frag_head` return the same dims (chunk s = dims 32 g4 + 8 s .. + 7)."""
     assert local_blocks >= 1, "the block of the current token must be pinned"
+    nvfp4 = mono_config.NVFP4
     l16 = lane % 16
     g4 = lane // 16
     r_ic = rsrc(index_cache)
@@ -206,8 +220,31 @@ def emit_index_scores(
         lane / 16 reads its key's bytes 32 g4 .. 32 g4 + 32 with two 16 B loads
         (half the load instructions of eight-byte operand reads, scattered over
         the rows: 1M context, S = 16, scores 125 -> 100 us); `split_tiles`
-        makes them MFMA operands."""
+        makes them MFMA operands. NVFP4: per tile the lane's 16 data bytes (dims
+        32 g4 .. + 31) and the 2 scale bytes of their groups 2 g4, 2 g4 + 1."""
         words = []
+        if const_expr(nvfp4):
+            base = page * mono_config.NVFP4_INDEX_BLOCK_BYTES
+            for i in tiles:
+                key = 16 * i + l16
+                w = fx.Vector(
+                    bo.buffer_load(
+                        r_ic,
+                        (base + key * (HEAD_DIM // 2) + 16 * g4) // 4,
+                        vec_width=4,
+                        dtype=T.i32,
+                    )
+                )
+                sc = fx.Int32(
+                    bo.buffer_load(
+                        r_ic,
+                        (base + INDEX_SCALE_AT + key * 8 + 2 * g4) // 2,
+                        vec_width=1,
+                        dtype=T.i16,
+                    )
+                )
+                words += [w[e] for e in range(4)] + [sc]
+            return fx.Vector.from_elements(words, fx.Int32)
         for i in tiles:
             row = (page * INDEX_BLOCK_BYTES + (16 * i + l16) * HEAD_DIM + 32 * g4) // 4
             for h in range_constexpr(2):
@@ -221,8 +258,18 @@ def emit_index_scores(
         """`load_raw`'s words -> per tile the MFMA A operands: tile i holds keys
         16 i + lane % 16, k = 32 s + 8 (lane / 16). A 4 x 4 transpose of the 8 B
         parts across the key's four lanes (permlane swaps) gives each lane part
-        g4 of every chunk s."""
+        g4 of every chunk s. NVFP4: per tile the 16x16x128 MFMA's e4m3 A operand
+        (8 dwords, dims 32 g4 .. + 31)."""
         out = []
+        if const_expr(nvfp4):
+            for n in range_constexpr(len(tiles)):
+                words = []
+                for s in range_constexpr(4):
+                    words += e2m1_dword_e4m3x8(
+                        raw[5 * n + s], raw[5 * n + 4] >> (8 * (s // 2))
+                    )
+                out.append(fx.Vector.from_elements(words, fx.Int32))
+            return out
         for n in range_constexpr(len(tiles)):
             d = [raw[8 * n + e] for e in range(8)]
             # part j = dwords 2 j, 2 j + 1; lanes g4 and g4 ^ 2, then g4 ^ 1, trade
@@ -247,13 +294,20 @@ def emit_index_scores(
         v = fx.Float32(float("-inf"))
         for n, i in enumerate(tiles):
             c = fx.Vector.filled(4, 0.0, fx.Float32)
-            for s in range_constexpr(HEAD_DIM // 32):
-                c = mfma_bf16(fp8x8_bf16_pk(kw[n][s]), qb[s], c)
+            if const_expr(nvfp4):  # K and q e4m3: one fp8 MFMA over the 128 dims
+                c = fx.Vector(mfma_fp8_16x16x128(kw[n], qb, c))
+            else:
+                for s in range_constexpr(HEAD_DIM // 32):
+                    c = mfma_bf16(fp8x8_bf16_pk(kw[n][s]), qb[s], c)
             # lane holds keys 16 i + 4 (lane / 16) + e of column lane % 16
             key0 = b * SPARSE_BLOCK + 16 * i + 4 * g4
             for e in range_constexpr(4):
                 v = fx.max(v, (key0 + e < col_seq).select(c[e], float("-inf")))
         return butterfly(v, (32, 16), fx.max)
+
+    def q_operand(frags):
+        """A column's B operand(s) from its `q_frag` fragments."""
+        return q_e4m3(frags) if nvfp4 else frags
 
     def put(b, col, v):
         if (lane < 16) & (l16 < q_len):
@@ -282,7 +336,9 @@ def emit_index_scores(
                     f = p * 16 + l16
                     head = fx.min(f // q_len, TP - 1)
                     col = tk - (q_len - 1) + f % q_len
-                    qb = [q_frag_head(col, s, head) for s in range(HEAD_DIM // 32)]
+                    qb = q_operand(
+                        [q_frag_head(col, s, head) for s in range(HEAD_DIM // 32)]
+                    )
                     v = tiles_max(b, qb, lane_gather(seq_lane, col), tiles, kw)
                     if (lane < 16) & (f < n_cols):
                         mb_put(
@@ -323,7 +379,7 @@ def emit_index_scores(
             if const_expr(prepare is not None):
                 prepare(tk - (q_len - 1), tk)
             col, col_seq = cols_of(tk)
-            qb = [q_frag(col, s) for s in range(HEAD_DIM // 32)]
+            qb = q_operand([q_frag(col, s) for s in range(HEAD_DIM // 32)])
             v = tiles_max(b, qb, col_seq, [wave], split_tiles(raw, [wave]))
             if lane < 16:
                 fx.ptr_store(v, red + (wave * 16 + l16))
@@ -347,7 +403,7 @@ def emit_index_scores(
             raw = load_raw(page, tiles)
             col = tk - (q_len - 1) + fx.min(l16, q_len - 1)
             col_seq = lane_gather(seq_lane, col)
-            qb = [q_frag(col, s) for s in range(HEAD_DIM // 32)]
+            qb = q_operand([q_frag(col, s) for s in range(HEAD_DIM // 32)])
             put(b, col, tiles_max(b, qb, col_seq, tiles, split_tiles(raw, tiles)))
 
         # Every wave the same task count: task u on wave

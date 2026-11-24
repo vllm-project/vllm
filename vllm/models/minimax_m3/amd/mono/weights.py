@@ -67,7 +67,9 @@ class SparseMoeLayer:
 
     layer_id: int
     attn: object  # MiniMaxM3SparseAttention: layer name, KV cache views, scales
-    index_cache: torch.Tensor  # [blocks, block, head_dim] fp8, shared block ids
+    # [blocks, block, head_dim] fp8 or NVFP4 pages [blocks, block, 72] uint8,
+    # shared block ids
+    index_cache: torch.Tensor
     g_in: torch.Tensor
     w_qkv: torch.Tensor
     s_qkv: torch.Tensor
@@ -256,6 +258,7 @@ def build_sparse_layer(
     heads: IndexHeads = ONE_INDEX_HEAD,
     rank: int = 0,
     tp_group=None,
+    nvfp4: bool = False,
 ) -> SparseMoeLayer:
     attn = layer.self_attn
     _need(
@@ -277,19 +280,29 @@ def build_sparse_layer(
         == (TOPK_BLOCKS, 0, 1, False),
         f"layer {layer_id}: sparse selection config",
     )
-    _need(
-        attn.use_aiter_sparse_pa and str(attn.kv_cache_dtype).startswith("fp8"),
-        f"layer {layer_id}: needs the AITER sparse PA path with an fp8 KV cache",
-    )
     index_cache = attn.indexer.index_cache.kv_cache
-    _need(
-        index_cache.numel() > 0
-        and index_cache.dtype == dtypes.fp8
-        and index_cache.dim() == 3
-        and index_cache.shape[2] == HEAD_DIM
-        and index_cache.is_contiguous(),
-        f"layer {layer_id}: index cache {index_cache.dtype} {tuple(index_cache.shape)}",
-    )
+    if nvfp4:
+        # the page geometry is checked with the strides (runner._configure_nvfp4)
+        _need(
+            getattr(attn, "use_nvfp4_kv", False)
+            and attn.indexer.index_cache.indexer_kv_dtype == "nvfp4",
+            f"layer {layer_id}: needs NVFP4 K/V and index caches",
+        )
+        _need(index_cache.numel() > 0, f"layer {layer_id}: index cache unbound")
+    else:
+        _need(
+            attn.use_aiter_sparse_pa and str(attn.kv_cache_dtype).startswith("fp8"),
+            f"layer {layer_id}: needs the AITER sparse PA path with an fp8 KV cache",
+        )
+        _need(
+            index_cache.numel() > 0
+            and index_cache.dtype == dtypes.fp8
+            and index_cache.dim() == 3
+            and index_cache.shape[2] == HEAD_DIM
+            and index_cache.is_contiguous(),
+            f"layer {layer_id}: index cache {index_cache.dtype} "
+            f"{tuple(index_cache.shape)}",
+        )
 
     if heads.count > 1:
         _need(tp_group is not None, f"layer {layer_id}: CP requires tp_group")

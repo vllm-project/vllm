@@ -147,13 +147,13 @@ features:
         args: []
   mono_decode:
     label: "Mono decode"
-    description: "AMD MI355X single node, MXFP4 (Quark) checkpoint, low concurrency: a decode step of up to 16 tokens (4 requests with DSpark 3) runs each layer as one fused kernel; larger steps and steps with prefill run on the normal path. Uses FP8 KV and indexer K caches (fewer KV tokens than NVFP4) and FULL_DECODE_ONLY graphs, so prefill and mixed steps run eager. With a seven-token DSpark draft, `--monokernel` also runs the draft steps as fused kernels."
+    description: "AMD MI355X single node, MXFP4 (Quark) checkpoint, low concurrency: a decode step of up to 16 tokens (4 requests with DSpark 3) runs each layer as one fused kernel; larger steps and steps with prefill run on the normal path. Uses FP8 KV and indexer K caches and FULL_DECODE_ONLY graphs, so prefill and mixed steps run eager; without the FP8 cache overrides, `--monokernel` runs over the default NVFP4 caches instead (about 1.7x the KV tokens, 5-8% slower decode steps). With a seven-token DSpark draft, `--monokernel` also runs the draft steps as fused kernels."
     strategies: [single_node_tp]
     modes:
       # The kernels read the experts as AITER MXFP4 tables, which only the
-      # Quark export loads as; they need the AITER sparse PA path, i.e. FP8 KV
-      # and FP8 indexer K caches in the shuffled KV layout, and no piecewise
-      # graphs.
+      # Quark export loads as, and need no piecewise graphs. They read FP8 KV
+      # and FP8 indexer K caches in the shuffled KV layout (as here) or NVFP4
+      # KV and NVFP4 indexer K caches.
       mono:
         variants: [mxfp4]
         args:
