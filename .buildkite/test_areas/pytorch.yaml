@@ -40,9 +40,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ":amd: (MI300) PyTorch Compilation"
+      label: ":amd: (MI300 DPX) PyTorch Compilation"
       dind: false
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd

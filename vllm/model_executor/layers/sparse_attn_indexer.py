@@ -3,10 +3,12 @@
 """Custom Sparse Attention Indexer layers."""
 
 import math
+from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+from torch import nn
 
 import vllm.envs as envs
 from vllm import _cpu_ops as cpu_ops
@@ -38,15 +40,24 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     get_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
+from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
     deep_select_topk,
     get_indexer_topk,
     is_deep_select_supported,
 )
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.dequant_linear import bf16_linear
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_and_maybe_dequant_weights,
     get_fp8_min_max,
 )
+from vllm.model_executor.utils import storage_view
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -72,6 +83,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
     dense_logits_rows,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -80,6 +92,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.kernels.attention.dsa.dcp_topk_direct import (
         DirectDCPTopKWorkspace,
     )
+    from vllm.v1.attention.ops.dcp_shardq.context import DcpShardQContext
 
 logger = init_logger(__name__)
 
@@ -550,6 +563,23 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+def dcp_shardq_context(
+    forward_context, k_cache_prefix: str
+) -> "tuple[str, DcpShardQContext] | None":
+    """The MLA layer and gathered context of a DCP ShardQ step whose MLA
+    layer this indexer cache follows (`shardq_layer_name`), or None."""
+    k_cache = forward_context.no_compile_layers.get(k_cache_prefix)
+    mla_layer_name = getattr(k_cache, "shardq_layer_name", "")
+    if not mla_layer_name:
+        return None
+    mla_metadata = forward_context.attn_metadata[mla_layer_name]
+    assert isinstance(mla_metadata, MLACommonMetadata)
+    gathered_context = mla_metadata.dcp_gathered_context
+    if gathered_context is None:
+        return None
+    return mla_layer_name, gathered_context
+
+
 def should_skip_indexer_scoring(
     mla_metadata: object, cudagraph_runtime_mode: CUDAGraphMode
 ) -> bool:
@@ -563,7 +593,7 @@ def should_skip_indexer_scoring(
     prefill = getattr(mla_metadata, "prefill", None)
     return (
         cudagraph_runtime_mode != CUDAGraphMode.FULL
-        and getattr(prefill, "use_dense_mha", False)
+        and getattr(prefill, "route", None) is SparseMLAPrefillRoute.DENSE_MHA
         and getattr(mla_metadata, "num_decode_tokens", -1) == 0
         and not torch.cuda.is_current_stream_capturing()
     )
@@ -793,6 +823,27 @@ def sparse_attn_indexer(
     if has_prefill:
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
+        prefill_chunks = prefill_metadata.chunks
+        prefill_kv_cache = kv_cache
+        prefill_dcp_world_size = dcp_world_size
+        indices = prefill_metadata.shardq_gather_indices
+        if dcp_world_size > 1 and (
+            dcp_shardq := dcp_shardq_context(forward_context, k_cache_prefix)
+        ):
+            # A DCP ShardQ step scores its prefill tokens over a gathered copy
+            # of their keys, as a non-DCP ShardQ step does: no top-k merge
+            # across ranks. Its decode tokens keep the DCP decode path.
+            mla_layer_name, gathered_context = dcp_shardq
+            assert num_decode_tokens == gathered_context.num_decode_tokens
+            prefill_kv_cache = gathered_context.gather(
+                forward_context.no_compile_layers[mla_layer_name].kv_cache,
+                attn_metadata[mla_layer_name].block_table,  # type: ignore[attr-defined]
+                kv_cache,
+                attn_metadata_narrowed.block_table,
+            )
+            prefill_chunks = gathered_context.indexer_chunks
+            prefill_dcp_world_size = 1
+            indices = gathered_context.gather_indices
 
         # Get the shared workspace buffers once, sized for this batch's largest
         # chunk rather than the profiled bound (total_seq_lens), so the scratch
@@ -802,7 +853,7 @@ def sparse_attn_indexer(
         # scales) based on use_fp4_cache.
         workspace_manager = current_workspace_manager()
         values_spec, scales_spec = _gather_workspace_shapes(
-            max(c.max_local_total_seq_lens for c in prefill_metadata.chunks),
+            max(c.max_local_total_seq_lens for c in prefill_chunks),
             head_dim,
             fp8_dtype,
             use_fp4_cache,
@@ -811,7 +862,7 @@ def sparse_attn_indexer(
         # and the de-interleaved result.
         pcp_chunks = [
             (c, c.pcp_deinterleave_idx)
-            for c in prefill_metadata.chunks
+            for c in prefill_chunks
             if c.pcp_deinterleave_idx is not None
         ]
         gather_specs: list[tuple[tuple[int, int], torch.dtype]] = []
@@ -832,13 +883,12 @@ def sparse_attn_indexer(
         # Under ShardQ the chunks index the shardq_gather_indices tokens. The
         # caller may have computed the query and weights of just those.
         prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
-        indices = prefill_metadata.shardq_gather_indices
         assert indices is None or candidate_blocks is None
         if indices is not None and q_quant.shape[0] != indices.shape[0]:
             prefill_q, prefill_weights = q_quant[indices], weights[indices]
             if q_scale is not None:
                 prefill_q_scale = q_scale[indices]
-        for chunk in prefill_metadata.chunks:
+        for chunk in prefill_chunks:
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke
             assert chunk.local_cu_seq_lens is not None
@@ -846,7 +896,7 @@ def sparse_attn_indexer(
             k_scale = k_scale_full[: chunk.max_local_total_seq_lens]
             if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
                 ops.cp_gather_indexer_k_quant_cache(
-                    kv_cache,
+                    prefill_kv_cache,
                     k_quant,
                     k_scale,
                     chunk.block_table,
@@ -921,9 +971,12 @@ def sparse_attn_indexer(
                     ).squeeze(-1)
                 # Chunks planned for fused_mqa_topk are not bounded by the logits
                 # budget: split their rows (budget-planned chunks, the only ones
-                # under DCP, are one window, so the merge below sees all the
-                # rows).
+                # under pure DCP, are one window, so the merge below sees all
+                # the rows).
                 for sub in range(0, q_slice.shape[0], dense_rows):
+                    if sub:
+                        # Startup reserves logits for one window at a time.
+                        del logits
                     rows = slice(sub, min(sub + dense_rows, q_slice.shape[0]))
                     tokens = slice(row_start + rows.start, row_start + rows.stop)
                     if current_platform.is_xpu():
@@ -963,7 +1016,7 @@ def sparse_attn_indexer(
                         use_deep_select = (
                             topk_backend == "deep_select"
                             and logits.dtype == torch.bfloat16
-                            and dcp_world_size == 1
+                            and prefill_dcp_world_size == 1
                             and is_deep_select_supported(logits, topk_tokens)
                         )
                         if not use_deep_select:
@@ -1015,7 +1068,7 @@ def sparse_attn_indexer(
                     topk_indices,
                     topk_tokens,
                     dcp_rank,
-                    dcp_world_size,
+                    prefill_dcp_world_size,
                     cp_kv_cache_interleave_size,
                     row_starts=row_starts,
                     logits_dtype=logits_dtype,
@@ -1728,3 +1781,77 @@ class SparseAttnIndexer(CustomOp):
                 )
 
         return topk_indices_buffer
+
+
+def init_indexer_wk_weights_proj(
+    indexer: nn.Module,
+    hidden_size: int,
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+    *,
+    fused_linear_cls: type[MergedColumnParallelLinear] = MergedColumnParallelLinear,
+) -> None:
+    """Build the indexer's checkpoint layers `wk` (BF16, or FP8 as the
+    checkpoint stores it and run in BF16: `bf16_linear`) and
+    `weights_proj` (BF16), and `wk_weights_proj`, the BF16 linear that runs
+    both as one GEMM. Its weight is not a parameter: it holds `wk` and
+    `weights_proj`'s rows and is refilled after every load and every in-place
+    reload of the runtime weights (`fuse_indexer_wk_weights_proj` from the
+    indexer's post-load hook)."""
+    # wk stays exact (e.g. under online quantization): the fused GEMM is BF16
+    indexer.wk = bf16_linear(
+        partial(
+            ReplicatedLinear,
+            hidden_size,
+            indexer.head_dim,
+            bias=False,
+            prefix=f"{prefix}.wk",
+        ),
+        quant_config,
+    )
+    indexer.refresh_derived_weights = indexer.process_weights_after_loading
+    indexer.weights_proj = ReplicatedLinear(
+        hidden_size, indexer.n_head, bias=False, prefix=f"{prefix}.weights_proj"
+    )
+    fused = fused_linear_cls(
+        hidden_size,
+        [indexer.head_dim, indexer.n_head],
+        bias=False,
+        disable_tp=True,
+        prefix=f"{prefix}.wk_weights_proj",
+    )
+    weight = fused.weight.data
+    del fused.weight
+    fused.weight = weight  # a plain attribute: loaders and reloads skip it
+    indexer.wk_weights_proj = fused
+    # wk and weights_proj own no storage: their weights are views of the fused
+    # one. weights_proj's is its rows after wk's. wk's starts at offset 0 in
+    # the dtype it loads: FP8 bytes occupy the first half of wk's rows until
+    # post-load processing dequantizes them (through a temporary) into those
+    # rows; a direct reload views them back to FP8 at the same address.
+    indexer.weights_proj.weight.data = weight[indexer.head_dim :]
+    wk_weight = indexer.wk.weight
+    indexer.wk.weight.data = storage_view(
+        weight.untyped_storage(),
+        0,
+        wk_weight.shape,
+        wk_weight.stride(),
+        wk_weight.dtype,
+    )
+
+
+def fuse_indexer_wk_weights_proj(indexer: nn.Module) -> None:
+    """Fill the fused BF16 `wk_weights_proj` weight in place (captured CUDA
+    graphs keep its address) from `wk` and `weights_proj`, copying only a
+    part that is not already a view of its rows (e.g. dots3's own
+    `weights_proj`)."""
+    proj = indexer.wk_weights_proj
+    if proj.weight.is_meta:  # weight cache IPC load: only parameters arrive
+        proj.weight = torch.empty_like(proj.weight, device=indexer.wk.weight.device)
+    row = 0
+    for layer in (indexer.wk, indexer.weights_proj):
+        part = get_and_maybe_dequant_weights(layer, out_dtype=proj.weight.dtype)
+        rows = proj.weight[row : row + part.shape[0]]
+        row += part.shape[0]
+        if part.data_ptr() != rows.data_ptr() or part.stride() != rows.stride():
+            rows.copy_(part)

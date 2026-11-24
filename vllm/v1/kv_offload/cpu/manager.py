@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from collections import OrderedDict
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
@@ -273,10 +274,14 @@ class CPUOffloadingManager(OffloadingManager):
         *,
         trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
-        return self._prepare_store(keys, req_context)
+        return self._prepare_store(keys, req_context, allow_partial=True)
 
     def _prepare_store(
-        self, keys: Collection[OffloadKey], req_context: ReqContext
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        *,
+        allow_partial: bool = False,
     ) -> PrepareStoreOutput | None:
         keys = list(keys)
         state = self._get_request_cache_access(req_context)
@@ -287,6 +292,7 @@ class CPUOffloadingManager(OffloadingManager):
         # aged out; the threshold applies only to new store candidates.
         keys_to_store: list[OffloadKey] = []
         ready_existing_keys: list[OffloadKey] = []
+        evictable_existing_keys: set[OffloadKey] = set()
         for key in keys:
             chunk = self._policy.get(key)
             if chunk is None:
@@ -294,6 +300,8 @@ class CPUOffloadingManager(OffloadingManager):
             else:
                 if chunk.is_ready:
                     ready_existing_keys.append(key)
+                if chunk.ref_cnt == 0:
+                    evictable_existing_keys.add(key)
 
         if self.counts is not None:
             admitted_keys: list[OffloadKey] = []
@@ -330,6 +338,48 @@ class CPUOffloadingManager(OffloadingManager):
                 store_spec=self._get_load_store_spec([], []),
                 evicted_keys=[],
             )
+
+        keys_to_retry: list[OffloadKey] = []
+        if allow_partial:
+            # Offered chunks are not evicted, so they are not room for the offer.
+            num_storable_keys = (
+                self._get_num_free_chunks()
+                + self._num_evictable_cache_chunks
+                - len(evictable_existing_keys)
+            )
+            if len(keys_to_store) > num_storable_keys:
+                # Store the lowest positions, so that the groups stay aligned.
+                order = {
+                    key: (
+                        math.inf
+                        if (position := req_context.get_offload_key_position(key))
+                        is None
+                        else position,
+                        offer_idx,
+                    )
+                    for offer_idx, key in enumerate(keys)
+                }
+                keys_by_position = sorted(keys_to_store, key=order.__getitem__)
+                # Retry each group from its first key that does not fit, resident
+                # keys included, as the connector offers all of them again.
+                group_cuts: dict[int, tuple[float, int]] = {}
+                for key in keys_by_position[num_storable_keys:]:
+                    group_cuts.setdefault(get_offload_group_idx(key), order[key])
+                keys_to_retry = [
+                    key
+                    for key in keys
+                    if (cut := group_cuts.get(get_offload_group_idx(key))) is not None
+                    and order[key] >= cut
+                ]
+                retried_keys = set(keys_to_retry)
+                keys_to_store = [k for k in keys_to_store if k not in retried_keys]
+                if not keys_to_store:
+                    return PrepareStoreOutput(
+                        keys_to_store=[],
+                        store_spec=self._get_load_store_spec([], []),
+                        evicted_keys=[],
+                        keys_to_retry=keys_to_retry,
+                    )
 
         self.allocation_sizes_in_current_batch.append(len(keys_to_store))
         num_chunks_to_evict = len(keys_to_store) - self._get_num_free_chunks()
@@ -383,6 +433,7 @@ class CPUOffloadingManager(OffloadingManager):
             keys_to_store=keys_to_store,
             store_spec=store_spec,
             evicted_keys=to_evict,
+            keys_to_retry=keys_to_retry,
         )
 
     @override
