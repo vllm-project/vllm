@@ -399,14 +399,17 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         if grouped_input:
             assert align_used is not None
             assert topk_ids.size(1) == 1
+            assert expert_tokens_meta is not None
+            assert expert_tokens_meta.expert_num_tokens is not None
             M_sum = a1q.size(0)
-            ids = topk_ids[:, 0]
-            mapped_ids = ids if expert_map is None else expert_map[ids.clamp_min(0)]
-            expert_ids = torch.where(ids >= 0, mapped_ids, -1).to(torch.int32)
-            a1q_scale = torch.where((expert_ids >= 0)[:, None], a1q_scale, 1)
-            grouped_layout = expert_ids
-            if use_psum_layout:
-                grouped_layout = _expanded_expert_ends(expert_tokens_meta, align_used)
+            a1q_scale, expert_ids, expert_ends = prepare_expanded_deepgemm_input(
+                topk_ids,
+                a1q_scale,
+                expert_tokens_meta.expert_num_tokens,
+                expert_map,
+                align_used,
+            )
+            grouped_layout = expert_ends if use_psum_layout else expert_ids
         else:
             M_sum, _ = compute_aligned_M_and_alignment(
                 M=topk_ids.size(0),
