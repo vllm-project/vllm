@@ -22,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    GET_META_MSG,
     LookupPinReply,
     LookupPinRequest,
     NixlConnectorMetadata,
@@ -34,6 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.peer_lookup_client import
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 
+from .test_nixl_peer_lookup_client import OldListener
 from .test_nixl_peer_lookup_listener import cycle, served, wait_for  # noqa: F401
 from .test_nixl_peer_pins import (
     COMPAT,
@@ -60,9 +62,13 @@ class FakeLookupClient:
         self.cancelled: list[str] = []
         self.orphans: list[tuple[str, int, LookupPinReply]] = []
         self.polls = 0
+        self.engine_ids: list[str | None] = []
 
-    def submit(self, key, host, port, request) -> None:
+    max_latency_s = 4.0
+
+    def submit(self, key, host, port, request, engine_id=None) -> None:
         self.submits.append((key, host, port, request))
+        self.engine_ids.append(engine_id)
         self.live.add(key)
 
     def poll(self, key):
@@ -177,6 +183,9 @@ def test_submit_once_then_none_while_pending():
     assert sent.identity.hash_algo == "sha256"
     assert sent.identity.cache_salt == "salty"
     assert sent.lease_duration == sched._kv_lease_duration
+    # A fresh correlation id per lookup, and the engine id for the probe cache.
+    assert sent.lookup_id
+    assert client.engine_ids == [ENGINE]
     assert sched.peer_lookup_stats.lookups == 1
     assert request.kv_transfer_params["peer_lookup"] is True
     # An idle engine must keep stepping while the lookup is out.
@@ -200,6 +209,10 @@ def test_router_block_hashes_are_ignored():
         (None, "timeout", "timeout"),
         (None, "send_failed", "send_failed"),
         (None, "bad_reply", "bad_reply"),
+        # The peer's probe said it serves no lookups (an older or disabled
+        # engine): counted apart from every other miss.
+        (None, "peer_unsupported", "peer_unsupported"),
+        (None, "lookup_id_mismatch", "lookup_id_mismatch"),
     ],
 )
 def test_miss_computes_locally(reply, error, reason):
@@ -666,6 +679,11 @@ def test_real_client_against_a_real_producer(served):  # noqa: F811
 
         wait_for(answered)
 
+        # B probed A first (A advertises lookups), and the reply echoed B's id.
+        verdict = b._lookup_client._caps[
+            (a_sched.side_channel_host, a_sched.side_channel_port)
+        ]
+        assert verdict.error is None
         assert b.get_num_new_matched_tokens(request, 0) == (3 * BLOCK_SIZE, True)
         params = request.kv_transfer_params
         pin = next(iter(a_manager._pins))
@@ -678,3 +696,27 @@ def test_real_client_against_a_real_producer(served):  # noqa: F811
         assert not b.has_pending_push_work()
     finally:
         b._lookup_client.close()
+
+
+def test_real_client_against_an_old_producer_computes_locally():
+    old = OldListener()
+    b = make_consumer(client=PeerLookupClient(timeout_s=10.0))
+    try:
+        request = peer_request(remote_host="127.0.0.1", remote_port=old.port)
+        assert b.get_num_new_matched_tokens(request, 0) == (None, False)
+
+        def answered():
+            return b.get_num_new_matched_tokens(request, 0) != (None, False)
+
+        wait_for(answered)
+
+        params = request.kv_transfer_params
+        assert params["do_remote_prefill"] is False
+        assert params["peer_miss_reason"] == "peer_unsupported"
+        assert b.peer_lookup_stats.misses == {"peer_unsupported": 1}
+        # The old engine only ever saw the probe: its listener lives on.
+        assert old.frames == [(GET_META_MSG, 0, 0)]
+        assert old.thread.is_alive()
+    finally:
+        b._lookup_client.close()
+        old.close()

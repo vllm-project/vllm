@@ -6,12 +6,26 @@ The scheduler thread must never block on the network, so lookups run on one
 background thread. The scheduler submits a lookup under a key, polls for the
 result on later steps, and cancels it if the request goes away.
 
+Capability probe. A `LOOKUP_PIN_MSG` frame sent to an engine that predates it
+ends that engine's handshake listener (it decodes every frame as a 3-tuple
+outside any try), which also breaks its ordinary P/D handshakes. So no lookup is
+sent unprobed. The first lookup for a peer sends the one frame every engine
+answers safely, `(GET_META_MSG, 0, 0)`, and reads `NixlHandshakePayload
+.peer_lookup` from the reply (an engine that predates the field decodes as
+False). Only a peer that advertises it gets the lookup; any other fails the
+lookup with "peer_unsupported" and the request computes locally. The verdict is
+cached per peer address and engine id (`cap_ttl_s` for a yes, `negative_ttl_s`
+for a no, `failure_ttl_s` when the probe itself failed) and lookups that arrive
+while a probe is out wait for it instead of probing again. The probe runs on the
+background thread like everything else, so the scheduler never waits for it.
+
 Every lookup gets its own REQ socket. The producer's replies are not FIFO (a
 miss is answered at once while an earlier hit waits for the producer's step
-fence) and a `LookupPinReply` carries no correlation id, so a socket shared
-per peer could hand a reply to the wrong lookup. A REQ socket per in-flight
-lookup correlates by construction and needs no wire change. The cost is one
-TCP connect per lookup.
+fence), so a socket shared per peer could hand a reply to the wrong lookup. A REQ
+socket per in-flight lookup correlates by construction, at the cost of one TCP
+connect per lookup. `LookupPinRequest.lookup_id` is echoed in the reply and
+checked here (a mismatch fails the lookup), so a later client could instead share
+one DEALER socket per peer and route replies by that id.
 """
 
 import contextlib
@@ -26,9 +40,11 @@ import msgspec
 import zmq
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    GET_META_MSG,
     LOOKUP_PIN_MSG,
     LookupPinReply,
     LookupPinRequest,
+    NixlHandshakePayload,
 )
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
@@ -37,13 +53,17 @@ logger = init_logger(__name__)
 
 _POLL_MS = 50
 _JOIN_TIMEOUT_S = 5.0
+# Any rank's handshake payload carries the engine-wide `peer_lookup` flag.
+_PROBE_FRAME = msgspec.msgpack.encode((GET_META_MSG, 0, 0))
 
 
 @dataclass(frozen=True)
 class LookupResult:
     # None when the lookup failed.
     reply: LookupPinReply | None
-    # "timeout", "bad_reply", "send_failed" or "closed" when reply is None.
+    # When reply is None: "timeout", "bad_reply", "send_failed", "closed",
+    # "peer_unsupported" (the peer does not serve lookups; none was sent) or
+    # "lookup_id_mismatch".
     error: str | None = None
 
 
@@ -54,12 +74,28 @@ class _Job:
     host: str
     port: int
     frame: bytes
+    # Identifies the peer's incarnation in the capability cache.
+    engine_id: str | None = None
+    # The id the reply must echo; None skips the check.
+    lookup_id: str | None = None
 
 
 @dataclass
 class _Active:
     job: _Job
     deadline: float
+    # "probe" (GET_META for the capability check) or "lookup".
+    kind: str = "lookup"
+
+
+@dataclass
+class _Capability:
+    """What the probe learned about one peer; thread-private."""
+
+    engine_id: str | None
+    # None: serves lookups. Otherwise the error lookups to it fail with.
+    error: str | None
+    expires_at: float
 
 
 def _holds_pin(reply: LookupPinReply | None) -> bool:
@@ -79,9 +115,23 @@ class PeerLookupClient:
         self,
         timeout_s: float = 2.0,
         clock: Callable[[], float] = time.monotonic,
+        probe_timeout_s: float | None = None,
+        cap_ttl_s: float = 60.0,
+        negative_ttl_s: float = 30.0,
+        failure_ttl_s: float = 5.0,
     ) -> None:
         self._timeout_s = timeout_s
+        self._probe_timeout_s = (
+            min(timeout_s, 2.0) if probe_timeout_s is None else probe_timeout_s
+        )
+        self._cap_ttl_s = cap_ttl_s
+        self._negative_ttl_s = negative_ttl_s
+        self._failure_ttl_s = failure_ttl_s
         self._clock = clock
+        # Lookup thread only: (host, port) -> probe verdict, and the jobs
+        # waiting on a probe that is out, per peer.
+        self._caps: dict[tuple[str, int], _Capability] = {}
+        self._probing: dict[tuple[str, int], list[_Job]] = {}
         self._lock = threading.Lock()
         self._jobs: queue.Queue[_Job] = queue.Queue()
         self._next_job_id = 0
@@ -104,17 +154,41 @@ class PeerLookupClient:
         )
         self._thread.start()
 
+    @property
+    def max_latency_s(self) -> float:
+        """Longest a lookup takes to resolve: a probe, then the lookup."""
+        return self._probe_timeout_s + self._timeout_s
+
     # ---- scheduler thread -------------------------------------------------
 
-    def submit(self, key: str, host: str, port: int, request: LookupPinRequest) -> None:
-        """Start a lookup. A no-op while `key` is in flight or untaken."""
+    def submit(
+        self,
+        key: str,
+        host: str,
+        port: int,
+        request: LookupPinRequest,
+        engine_id: str | None = None,
+    ) -> None:
+        """Start a lookup. A no-op while `key` is in flight or untaken.
+
+        `engine_id` names the peer's incarnation: a verdict cached for another
+        engine at the same address is not reused.
+        """
         frame = msgspec.msgpack.encode(
             (LOOKUP_PIN_MSG, msgspec.msgpack.encode(request))
         )
         with self._lock:
             if self._closed or key in self._live:
                 return
-            job = _Job(self._next_job_id, key, host, port, frame)
+            job = _Job(
+                self._next_job_id,
+                key,
+                host,
+                port,
+                frame,
+                engine_id=engine_id,
+                lookup_id=request.lookup_id,
+            )
             self._next_job_id += 1
             self._live[key] = job
             self._jobs.put(job)
@@ -203,10 +277,27 @@ class PeerLookupClient:
             return job.job_id in self._cancelled
 
     def _start(self, job: _Job, active: dict[zmq.Socket, _Active], poller) -> None:
+        """Begin `job`: probe the peer first unless its verdict is cached."""
         with self._lock:
             if job.job_id in self._cancelled:
                 self._cancelled.discard(job.job_id)  # Never sent: nothing to lose.
                 return
+        cap = self._caps.get((job.host, job.port))
+        if cap is not None and (
+            cap.expires_at <= self._clock() or cap.engine_id != job.engine_id
+        ):
+            cap = None
+        if cap is None:
+            self._probe(job, active, poller)
+        elif cap.error is not None:
+            self._complete(job, LookupResult(None, cap.error))
+        else:
+            self._send_lookup(job, active, poller)
+
+    def _open(
+        self, job: _Job, frame: bytes, kind: str, timeout_s: float, active, poller
+    ):
+        """Send `frame` on a fresh REQ socket and track it; raises on failure."""
         sock = None
         try:
             sock = make_zmq_socket(
@@ -216,16 +307,63 @@ class PeerLookupClient:
                 bind=False,
                 linger=0,
             )
-            sock.send(job.frame, flags=zmq.NOBLOCK)
+            sock.send(frame, flags=zmq.NOBLOCK)
             poller.register(sock, zmq.POLLIN)
-            active[sock] = _Active(job, self._clock() + self._timeout_s)
+            active[sock] = _Active(job, self._clock() + timeout_s, kind)
+        except Exception:
+            if sock is not None:
+                sock.close(linger=0)
+            raise
+
+    def _send_lookup(self, job: _Job, active, poller) -> None:
+        try:
+            self._open(job, job.frame, "lookup", self._timeout_s, active, poller)
         except Exception:
             logger.warning(
                 "Peer lookup could not reach %s:%s", job.host, job.port, exc_info=True
             )
-            if sock is not None:
-                sock.close(linger=0)
             self._complete(job, LookupResult(None, "send_failed"))
+
+    def _probe(self, job: _Job, active, poller) -> None:
+        addr = (job.host, job.port)
+        if addr in self._probing:
+            self._probing[addr].append(job)  # Wait for the probe already out.
+            return
+        self._probing[addr] = [job]
+        try:
+            self._open(
+                job, _PROBE_FRAME, "probe", self._probe_timeout_s, active, poller
+            )
+        except Exception:
+            logger.warning(
+                "Peer lookup could not reach %s:%s", job.host, job.port, exc_info=True
+            )
+            self._resolve_probe(job, "send_failed", active, poller)
+
+    def _resolve_probe(self, job: _Job, error: str | None, active, poller) -> None:
+        """Record the verdict for `job`'s peer and release the jobs waiting on it."""
+        addr = (job.host, job.port)
+        ttl = (
+            self._cap_ttl_s
+            if error is None
+            else self._negative_ttl_s
+            if error == "peer_unsupported"
+            else self._failure_ttl_s
+        )
+        previous = self._caps.get(addr)
+        self._caps[addr] = _Capability(job.engine_id, error, self._clock() + ttl)
+        if previous is None or previous.error != error:
+            if error is None:
+                logger.info("Peer %s:%s serves prefix lookups", *addr)
+            else:
+                logger.info(
+                    "Peer %s:%s will not get prefix lookups (%s); its requests "
+                    "compute locally",
+                    *addr,
+                    error,
+                )
+        for waiting in self._probing.pop(addr, [job]):
+            self._start(waiting, active, poller)
 
     def _finish(self, sock, active, poller, result: LookupResult | None) -> None:
         """Close `sock`; deliver `result` unless it is None (cancelled)."""
@@ -263,12 +401,12 @@ class PeerLookupClient:
         # Cancelled in flight: take a reply that is already here (so a hit is
         # recorded as an orphan), else close and count the pin as lost.
         for sock, entry in list(active.items()):
-            if not self._is_cancelled(entry.job):
+            if entry.kind != "lookup" or not self._is_cancelled(entry.job):
                 continue
             arrived: LookupResult | None = None
             with contextlib.suppress(Exception):
                 if sock.poll(0, zmq.POLLIN):
-                    arrived = self._read(sock)
+                    arrived = self._read(sock, entry.job)
             if arrived is not None:
                 # _complete sees the cancel and records the orphan.
                 self._finish(sock, active, poller, arrived)
@@ -291,9 +429,14 @@ class PeerLookupClient:
 
         now = self._clock()
         for sock, entry in list(active.items()):
+            if sock not in active:  # Resolved by an earlier iteration.
+                continue
+            if entry.kind == "probe":
+                self._step_probe(sock, entry, sock in events, now, active, poller)
+                continue
             try:
                 if sock in events:
-                    result = self._read(sock)
+                    result = self._read(sock, entry.job)
                 elif now >= entry.deadline:
                     result = LookupResult(None, "timeout")
                 else:
@@ -305,11 +448,53 @@ class PeerLookupClient:
                 result = LookupResult(None, "bad_reply")
             self._finish(sock, active, poller, result)
 
+    def _step_probe(
+        self, sock, entry: _Active, readable: bool, now: float, active, poller
+    ):
+        error: str | None
+        if readable:
+            try:
+                error = None if self._read_probe(sock) else "peer_unsupported"
+            except zmq.Again:
+                return
+            except Exception:
+                logger.warning("Peer capability probe failed", exc_info=True)
+                error = "bad_reply"
+        elif now >= entry.deadline:
+            error = "timeout"
+        else:
+            return
+        self._finish(sock, active, poller, None)
+        self._resolve_probe(entry.job, error, active, poller)
+
     @staticmethod
-    def _read(sock: zmq.Socket) -> LookupResult:
+    def _read_probe(sock: zmq.Socket) -> bool:
+        """Whether the peer's handshake payload advertises lookups.
+
+        A payload from an engine that predates the field decodes as False. The
+        reply has a second frame (the peer's clock) that is ignored.
+        """
+        frames = sock.recv_multipart(flags=zmq.NOBLOCK)
+        payload = msgspec.msgpack.decode(frames[0], type=NixlHandshakePayload)
+        return payload.peer_lookup
+
+    @staticmethod
+    def _read(sock: zmq.Socket, job: _Job) -> LookupResult:
         frame = sock.recv(flags=zmq.NOBLOCK)
         try:
             reply = msgspec.msgpack.decode(frame, type=LookupPinReply)
         except (msgspec.DecodeError, msgspec.ValidationError):
             return LookupResult(None, "bad_reply")
+        if job.lookup_id is not None and reply.lookup_id != job.lookup_id:
+            # Cannot happen with a socket per lookup unless the peer is broken.
+            # The reply is not ours, so any pin it names is not ours to free.
+            logger.warning(
+                "Peer lookup reply from %s:%s answers lookup %r, expected %r; "
+                "dropping it",
+                job.host,
+                job.port,
+                reply.lookup_id,
+                job.lookup_id,
+            )
+            return LookupResult(None, "lookup_id_mismatch")
         return LookupResult(reply)

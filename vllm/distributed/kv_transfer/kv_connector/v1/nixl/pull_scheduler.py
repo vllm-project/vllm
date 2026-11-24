@@ -3,6 +3,7 @@
 """Pull-specific scheduler-side logic for the NIXL connector."""
 
 import time
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
@@ -185,6 +186,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                 cache_salt=request.cache_salt,
             ),
             lease_duration=self._kv_lease_duration,
+            lookup_id=uuid.uuid4().hex,
         )
         host, port = params["remote_host"], params["remote_port"]
         self._peer_endpoints[(host, port)] = PeerEndpoint(
@@ -194,10 +196,18 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             pp_size=params.get("pp_size", 1),
         )
         self.peer_lookup_stats.lookups += 1
+        client = self._get_lookup_client()
+        # The client probes the peer before the lookup, so allow for both.
         params["_peer_lookup_deadline"] = (
-            time.monotonic() + self._peer_lookup_timeout + _LOOKUP_GRACE_S
+            time.monotonic() + client.max_latency_s + _LOOKUP_GRACE_S
         )
-        self._get_lookup_client().submit(request.request_id, host, port, lookup)
+        client.submit(
+            request.request_id,
+            host,
+            port,
+            lookup,
+            engine_id=params["remote_engine_id"],
+        )
 
     def _peer_reply_is_consistent(
         self, request: "Request", reply: LookupPinReply

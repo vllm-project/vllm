@@ -78,7 +78,9 @@ class PeerLookupStats:
     full_hits: int = 0
     partial_hits: int = 0
     # PeerMissReason values, plus the local reasons "timeout", "bad_reply",
-    # "send_failed", "closed" and "local_precondition".
+    # "send_failed", "closed", "local_precondition", "peer_unsupported" (the
+    # peer's capability probe says it does not serve lookups, so none was sent)
+    # and "lookup_id_mismatch".
     misses: dict[str, int] = field(default_factory=dict)
     # Lookups cancelled because the request went away.
     cancelled: int = 0
@@ -410,7 +412,10 @@ class NixlBaseConnectorScheduler:
             if self._peer_pins is None:
                 # Not bound to a cache manager (yet): nothing to look up in.
                 self._lookup.outbox.put(
-                    (identity, miss_reply(PeerMissReason.IDENTITY_MISMATCH))
+                    (
+                        identity,
+                        miss_reply(PeerMissReason.IDENTITY_MISMATCH, request.lookup_id),
+                    )
                 )
                 self._lookup.wake()
                 continue
@@ -562,6 +567,10 @@ class NixlBaseConnectorScheduler:
                     "NixlConnectorScheduler expects NixlHandshakePayload for "
                     "handshake metadata."
                 )
+            # Advertise whether this engine serves lookups: the consumer's
+            # capability probe reads it from the GET_META reply.
+            if rank_metadata.peer_lookup != self._lookup.enabled:
+                rank_metadata = replace(rank_metadata, peer_lookup=self._lookup.enabled)
             encoded = encoder.encode(rank_metadata)
             if self._handshake_data.get((pp_rank, tp_rank)) != encoded:
                 # Peers must handshake again to load the changed registration.
@@ -623,10 +632,15 @@ class NixlBaseConnectorScheduler:
 
         NIXL_CONNECTOR_VERSION is deliberately not bumped for the lookup
         message, since a bump would fail the handshake of every mixed-version
-        pair, stock P/D included. Listeners are robust to unknown messages
-        instead, and a lookup must only be sent to an engine that was started
-        with `peer_lookup` (any other engine answers with a miss, or an old
-        one not at all).
+        pair, stock P/D included. Listeners of this version skip unknown
+        messages, but an older engine does not: its listener decodes every
+        frame as `(msg, pp_rank, tp_rank)` outside any try, so a
+        `LOOKUP_PIN_MSG` 2-tuple raises and ends the thread for good, which
+        also breaks that engine's ordinary P/D handshakes. A consumer must
+        therefore never send a lookup unprobed. It first sends
+        `GET_META_MSG`, which every engine answers, and sends the lookup only
+        if the payload's `peer_lookup` is set (see PeerLookupClient). An engine
+        started without `peer_lookup`, or an older one, never advertises it.
         """
         # NOTE(rob): this is a simple implementation. We will move
         # to a better approach via HTTP endpoint soon.
@@ -719,7 +733,9 @@ class NixlBaseConnectorScheduler:
                         identity,
                         b"",
                         msgspec.msgpack.encode(
-                            miss_reply(PeerMissReason.IDENTITY_MISMATCH)
+                            miss_reply(
+                                PeerMissReason.IDENTITY_MISMATCH, request.lookup_id
+                            )
                         ),
                     )
                 )

@@ -62,12 +62,13 @@ def hashes_not_reproducible(hash_algo: str) -> bool:
     )
 
 
-def miss_reply(reason: PeerMissReason) -> LookupPinReply:
+def miss_reply(reason: PeerMissReason, lookup_id: str | None = None) -> LookupPinReply:
     return LookupPinReply(
         hit_tokens=0,
         remote_block_ids=[],
         remote_request_id="",
         miss_reason=reason,
+        lookup_id=lookup_id,
     )
 
 
@@ -76,6 +77,8 @@ class _PendingPin:
     token: Any
     pin: PrefixPin
     pin_id: str
+    # Echoed in the reply.
+    lookup_id: str | None
     # The pin may be exposed once this many steps have been processed.
     fence: int
     lease: float
@@ -195,12 +198,16 @@ class PeerPinServer:
         mismatch = self._identity_mismatch(request)
         if mismatch is not None:
             logger.debug("Peer lookup refused: %s", mismatch)
-            self._ready.append((token, miss_reply(PeerMissReason.IDENTITY_MISMATCH)))
+            self._ready.append(
+                (token, miss_reply(PeerMissReason.IDENTITY_MISMATCH, request.lookup_id))
+            )
             return
 
         budget = self._max_pinned_blocks - self._manager.num_pinned_blocks
         if budget <= 0:
-            self._ready.append((token, miss_reply(PeerMissReason.PIN_REFUSED)))
+            self._ready.append(
+                (token, miss_reply(PeerMissReason.PIN_REFUSED, request.lookup_id))
+            )
             return
 
         pin = self._manager.lookup_and_pin(
@@ -212,7 +219,7 @@ class PeerPinServer:
         if pin.num_blocks == 0:
             self._manager.release_pin(pin)
             logger.debug("Peer lookup_pin missed: %s", reason.value)
-            self._ready.append((token, miss_reply(reason)))
+            self._ready.append((token, miss_reply(reason, request.lookup_id)))
             return
 
         pin_id = f"{PEER_PIN_ID_PREFIX}{uuid.uuid4().hex}"
@@ -228,6 +235,7 @@ class PeerPinServer:
             token=token,
             pin=pin,
             pin_id=pin_id,
+            lookup_id=request.lookup_id,
             fence=self._steps_scheduled + 1,
             lease=lease,
             created_at=self._clock(),
@@ -272,7 +280,10 @@ class PeerPinServer:
                     self._max_pending_seconds,
                 )
                 self._ready.append(
-                    (timed_out.token, miss_reply(PeerMissReason.PIN_REFUSED))
+                    (
+                        timed_out.token,
+                        miss_reply(PeerMissReason.PIN_REFUSED, timed_out.lookup_id),
+                    )
                 )
         for pin_id in [
             pid for pid, p in self._pending.items() if p.fence <= self._steps_processed
@@ -293,6 +304,7 @@ class PeerPinServer:
                         miss_reason=_MISS_REASONS[pending.pin.miss],
                         remote_blocks_expiry_time=expiry,
                         remote_lease_extension=kv_lease_extension(int(pending.lease)),
+                        lookup_id=pending.lookup_id,
                     ),
                 )
             )
@@ -338,7 +350,10 @@ class PeerPinServer:
                 pending = self._pending.pop(pending_id)
                 self._manager.release_pin(pin)
                 self._ready.append(
-                    (pending.token, miss_reply(PeerMissReason.NOT_CACHED))
+                    (
+                        pending.token,
+                        miss_reply(PeerMissReason.NOT_CACHED, pending.lookup_id),
+                    )
                 )
                 continue
             if any(s.pin is pin for s in self._shipped.values()):

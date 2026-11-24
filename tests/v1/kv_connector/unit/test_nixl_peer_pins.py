@@ -5,6 +5,7 @@
 import threading
 from types import SimpleNamespace
 
+import msgspec
 import pytest
 
 from tests.v1.core.test_prefix_pin import (
@@ -85,11 +86,13 @@ def lookup(
     block_size: int = BLOCK_SIZE,
     hash_algo: str = "sha256",
     lease: float | None = None,
+    lookup_id: str | None = None,
 ) -> LookupPinRequest:
     return LookupPinRequest(
         block_hashes=list(hashes),
         identity=PeerKVIdentity(compat, block_size, hash_algo),
         lease_duration=lease,
+        lookup_id=lookup_id,
     )
 
 
@@ -129,7 +132,7 @@ def test_full_hit_is_held_until_the_fence_async():
     server = make_server(manager, clock=clock)
     free_before = manager.block_pool.get_num_free_blocks()
 
-    server.serve("tok", lookup(hashes))
+    server.serve("tok", lookup(hashes, lookup_id="id-1"))
 
     # Pinned right away, but not exposed and no reply yet.
     assert manager.num_pinned_blocks == 3
@@ -159,6 +162,7 @@ def test_full_hit_is_held_until_the_fence_async():
     assert reply.remote_lease_extension == kv_lease_extension(int(LEASE))
     assert reply.hit_tokens == 3 * BLOCK_SIZE
     assert reply.miss_reason is PeerMissReason.NONE
+    assert reply.lookup_id == "id-1"
     pin = next(iter(manager._pins))
     assert reply.remote_block_ids == pin.get_block_ids()
     assert all(b.ref_cnt == 1 for b in pin.blocks[0])
@@ -186,10 +190,13 @@ def test_miss_replies_immediately_and_holds_nothing():
     manager = make_manager()
     server = make_server(manager)
     free_before = manager.block_pool.get_num_free_blocks()
-    server.serve("tok", lookup(make_request("x", tokens(2)).block_hashes))
+    server.serve(
+        "tok", lookup(make_request("x", tokens(2)).block_hashes, lookup_id="id-2")
+    )
 
     _, reply = only_reply(server)
     assert reply.miss_reason is PeerMissReason.NOT_CACHED
+    assert reply.lookup_id == "id-2"
     assert reply.hit_tokens == 0
     assert reply.remote_block_ids == []
     assert reply.remote_request_id == ""
@@ -343,7 +350,7 @@ def test_duplicate_finished_sending_is_harmless():
 def test_invalid_blocks_before_ship_revoke_with_a_miss_reply():
     manager, hashes = cached_manager()
     server = make_server(manager)
-    server.serve("tok", lookup(hashes))
+    server.serve("tok", lookup(hashes, lookup_id="id-3"))
     block_id = next(iter(manager._pins)).get_block_ids()[0][1]
 
     server.on_invalid_blocks({block_id})
@@ -353,6 +360,7 @@ def test_invalid_blocks_before_ship_revoke_with_a_miss_reply():
     token, reply = only_reply(server)
     assert token == "tok"
     assert reply.miss_reason is PeerMissReason.NOT_CACHED and reply.hit_tokens == 0
+    assert reply.lookup_id == "id-3"  # Every reply path echoes the id.
     assert step(server) == {}
 
 
@@ -558,10 +566,17 @@ def test_handshake_metadata_sets_compat_hash():
     sched._nixl_handshake_listener_t = object()  # skip starting the listener
     make_wired_connector(sched).bind_kv_cache_manager(manager)
 
-    sched.set_xfer_handshake_metadata({(0, 0): NixlHandshakePayload(COMPAT, b"x")})
+    payload = NixlHandshakePayload(COMPAT, b"x")
+    assert payload.peer_lookup is False
+    sched.set_xfer_handshake_metadata({(0, 0): payload})
 
     sched.serve_peer_lookup("tok", lookup(hashes))
     assert sched._peer_pins is not None and sched._peer_pins.num_pending == 1
+    # The served payload advertises lookups for the consumer's capability probe.
+    served_payload = msgspec.msgpack.decode(
+        sched._handshake_data[(0, 0)], type=NixlHandshakePayload
+    )
+    assert served_payload.peer_lookup is True
 
 
 # ---------------------------------------------------------------------------

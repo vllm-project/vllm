@@ -11,6 +11,7 @@ own heartbeats kept the lease alive, which it models exactly.
 """
 
 import time
+from dataclasses import dataclass
 from unittest.mock import patch
 
 import msgspec
@@ -28,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     HeartbeatInfo,
     LookupPinReply,
     LookupPinRequest,
+    NixlHandshakePayload,
     PeerKVIdentity,
     PeerMissReason,
 )
@@ -506,7 +508,14 @@ def test_decode_scheduler_ships_the_lease_with_heartbeats():
                 "abc123", 16, hash_algo="sha256", cache_salt="salt"
             ),
             lease_duration=30.0,
+            lookup_id="id-1",
         ),
+        # From a consumer or producer that sends no id.
+        LookupPinRequest(
+            block_hashes=[b"\x03" * 32],
+            identity=PeerKVIdentity("abc123", 16, hash_algo="sha256"),
+        ),
+        NixlHandshakePayload("abc123", b"agent", peer_lookup=True),
         LookupPinReply(
             hit_tokens=32,
             remote_block_ids=[[3, 4], [5, 6]],
@@ -514,6 +523,7 @@ def test_decode_scheduler_ships_the_lease_with_heartbeats():
             miss_reason=PeerMissReason.NONE,
             remote_blocks_expiry_time=1234.5,
             remote_lease_extension=20,
+            lookup_id="id-1",
         ),
         LookupPinReply(
             hit_tokens=0,
@@ -527,3 +537,27 @@ def test_lookup_pin_wire_roundtrip(msg):
     """Lookup-and-pin messages survive the side channel's msgpack encoding."""
     decoded = msgspec.msgpack.Decoder(type(msg)).decode(msgspec.msgpack.encode(msg))
     assert decoded == msg
+
+
+def test_handshake_payload_peer_lookup_is_compatible_both_ways():
+    """`peer_lookup` is optional on the wire, so mixed versions interoperate.
+
+    An engine that predates it must keep decoding a new engine's payload (its
+    handshake would otherwise break), and a new consumer must read an old
+    engine's payload as "serves no lookups".
+    """
+
+    @dataclass
+    class OldPayload:  # NixlHandshakePayload before `peer_lookup`
+        compatibility_hash: str
+        agent_metadata_bytes: bytes
+
+    new = NixlHandshakePayload("abc123", b"agent", peer_lookup=True)
+    seen_by_old = msgspec.msgpack.decode(msgspec.msgpack.encode(new), type=OldPayload)
+    assert seen_by_old == OldPayload("abc123", b"agent")
+
+    old = OldPayload("abc123", b"agent")
+    seen_by_new = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(old), type=NixlHandshakePayload
+    )
+    assert seen_by_new == NixlHandshakePayload("abc123", b"agent", peer_lookup=False)

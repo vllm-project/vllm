@@ -6,14 +6,17 @@ import os
 import socket
 import threading
 import time
+from dataclasses import dataclass
 
 import msgspec
 import pytest
 import zmq
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    GET_META_MSG,
     LOOKUP_PIN_MSG,
     LookupPinReply,
+    LookupPinRequest,
     NixlHandshakePayload,
     PeerMissReason,
 )
@@ -52,25 +55,97 @@ def miss(reason: PeerMissReason = PeerMissReason.NOT_CACHED) -> LookupPinReply:
 
 
 class FakeProducer:
-    """A ROUTER on a free port. Tests call recv() / reply() from their thread."""
+    """A ROUTER on a free port. Tests call recv() / reply() from their thread.
 
-    def __init__(self) -> None:
+    recv() answers the client's capability probes itself (counted in `probes`),
+    advertising `peer_lookup` as `advertise` says, and returns the first lookup.
+    """
+
+    def __init__(self, advertise: bool = True) -> None:
+        self.advertise = advertise
+        self.probes = 0
         self.ctx = zmq.Context()
         self.sock = self.ctx.socket(zmq.ROUTER)
         self.port = self.sock.bind_to_random_port(f"tcp://{HOST}")
 
-    def recv(self, timeout_ms: int = 5000) -> tuple[bytes, object]:
-        assert self.sock.poll(timeout_ms), "no request"
-        identity, _, raw = self.sock.recv_multipart()
-        msg, body = msgspec.msgpack.decode(raw)
-        assert msg == LOOKUP_PIN_MSG
-        return identity, msgspec.msgpack.decode(body, type=type(REQ))
+    def recv(self, timeout_ms: int = 5000) -> tuple[bytes, LookupPinRequest]:
+        while True:
+            assert self.sock.poll(timeout_ms), "no request"
+            identity, _, raw = self.sock.recv_multipart()
+            decoded = msgspec.msgpack.decode(raw)
+            if decoded[0] == GET_META_MSG:
+                self.probes += 1
+                payload = NixlHandshakePayload(COMPAT, b"x", peer_lookup=self.advertise)
+                self.sock.send_multipart(
+                    (
+                        identity,
+                        b"",
+                        msgspec.msgpack.encode(payload),
+                        msgspec.msgpack.encode(time.perf_counter()),
+                    )
+                )
+                continue
+            assert decoded[0] == LOOKUP_PIN_MSG
+            return identity, msgspec.msgpack.decode(decoded[1], type=LookupPinRequest)
 
     def reply(self, identity: bytes, reply: LookupPinReply | bytes) -> None:
         raw = reply if isinstance(reply, bytes) else msgspec.msgpack.encode(reply)
         self.sock.send_multipart((identity, b"", raw))
 
     def close(self) -> None:
+        self.ctx.destroy(linger=0)
+
+
+@dataclass
+class OldHandshakePayload:
+    """NixlHandshakePayload as engines wrote it before `peer_lookup` existed."""
+
+    compatibility_hash: str
+    agent_metadata_bytes: bytes
+
+
+class OldListener:
+    """The side-channel listener of an engine that predates lookups.
+
+    It decodes every frame as `(msg, pp_rank, tp_rank)` outside any try, so a
+    LOOKUP_PIN 2-tuple raises and ends its thread for good, ordinary P/D
+    handshakes included. It answers GET_META with a payload that has no
+    `peer_lookup` field.
+    """
+
+    def __init__(self) -> None:
+        self.ctx = zmq.Context()
+        self.sock = self.ctx.socket(zmq.ROUTER)
+        self.port = self.sock.bind_to_random_port(f"tcp://{HOST}")
+        self.frames: list[tuple] = []
+        self.get_metas = 0
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self) -> None:
+        while not self.stop.is_set():
+            if not self.sock.poll(50):
+                continue
+            identity, _, raw = self.sock.recv_multipart()
+            decoded = msgspec.msgpack.decode(raw)
+            self.frames.append(tuple(decoded))
+            msg, target_pp_rank, target_tp_rank = decoded  # Raises on a 2-tuple.
+            assert msg == GET_META_MSG
+            self.get_metas += 1
+            payload = OldHandshakePayload(COMPAT, b"x")
+            self.sock.send_multipart(
+                (
+                    identity,
+                    b"",
+                    msgspec.msgpack.encode(payload),
+                    msgspec.msgpack.encode(time.perf_counter()),
+                )
+            )
+
+    def close(self) -> None:
+        self.stop.set()
+        self.thread.join(5)
         self.ctx.destroy(linger=0)
 
 
@@ -156,9 +231,14 @@ def test_timeout_when_peer_never_replies(peer):
 def test_timeout_when_nothing_listens():
     client = PeerLookupClient(timeout_s=0.2)
     try:
-        client.submit("a", HOST, get_open_port(), REQ)
+        port = get_open_port()
+        client.submit("a", HOST, port, REQ)
         assert wait_result(client, "a") == LookupResult(None, "timeout")
         assert not client.has_in_flight()
+        # The failed probe is cached briefly: the next lookup does not wait out
+        # another timeout.
+        client.submit("b", HOST, port, REQ)
+        assert wait_result(client, "b", timeout=0.15) == LookupResult(None, "timeout")
     finally:
         client.close()
 
@@ -344,7 +424,7 @@ def test_bad_peer_address_fails_that_lookup_only(client, peer):
     assert wait_result(client, "ok").reply == miss()
 
 
-def test_real_listener_disabled_engine_answers_miss(client):
+def test_real_listener_disabled_engine_is_not_sent_a_lookup(client):
     manager, _ = cached_manager()
     sched = make_wired_scheduler(manager, peer_lookup=False)
     port = get_open_port()
@@ -357,12 +437,113 @@ def test_real_listener_disabled_engine_answers_miss(client):
     try:
         client.submit("a", HOST, port, REQ)
         result = wait_result(client, "a")
+        # The probe said no, so the listener never saw a lookup.
+        assert sched._lookup.inbox.empty()
     finally:
         sched.shutdown()
-    assert result.error is None
-    assert result.reply is not None
-    assert result.reply.miss_reason == PeerMissReason.IDENTITY_MISMATCH
-    assert result.reply.remote_request_id == ""
+    assert result == LookupResult(None, "peer_unsupported")
+
+
+def test_probe_comes_first_is_shared_and_cached(client, peer):
+    client.submit("a", HOST, peer.port, REQ)
+    client.submit("b", HOST, peer.port, REQ)  # Waits for a's probe.
+    id_a, _ = peer.recv()
+    id_b, _ = peer.recv()
+    assert peer.probes == 1
+    peer.reply(id_a, miss())
+    peer.reply(id_b, miss())
+    wait_result(client, "a")
+    wait_result(client, "b")
+    # The verdict is cached: no second probe.
+    client.submit("c", HOST, peer.port, REQ)
+    identity, _ = peer.recv()
+    assert peer.probes == 1
+    peer.reply(identity, hit())
+    assert wait_result(client, "c").reply == hit()
+
+
+def test_probe_is_repeated_when_the_verdict_expires_or_the_engine_changes(peer):
+    now = [0.0]
+    client = PeerLookupClient(timeout_s=5.0, clock=lambda: now[0], cap_ttl_s=60.0)
+    try:
+
+        def one_lookup(key: str, engine_id: str) -> None:
+            client.submit(key, HOST, peer.port, REQ, engine_id=engine_id)
+            identity, _ = peer.recv()
+            peer.reply(identity, miss())
+            wait_result(client, key)
+
+        one_lookup("a", "e1")
+        one_lookup("b", "e1")
+        assert peer.probes == 1
+        now[0] = 61.0  # The yes expired.
+        one_lookup("c", "e1")
+        assert peer.probes == 2
+        one_lookup("d", "e2")  # Another engine at the same address.
+        assert peer.probes == 3
+    finally:
+        client.close()
+
+
+def test_old_listener_gets_no_lookup_and_keeps_serving():
+    old = OldListener()
+    now = [0.0]
+    client = PeerLookupClient(timeout_s=5.0, clock=lambda: now[0], negative_ttl_s=30.0)
+    try:
+        client.submit("a", HOST, old.port, REQ)
+        assert wait_result(client, "a") == LookupResult(None, "peer_unsupported")
+        # Only the probe was sent, so the old listener is alive and still
+        # answers an ordinary handshake request.
+        assert old.frames == [(GET_META_MSG, 0, 0)]
+        assert old.thread.is_alive()
+        # A no is cached: no second probe, still no lookup.
+        client.submit("b", HOST, old.port, REQ)
+        assert wait_result(client, "b") == LookupResult(None, "peer_unsupported")
+        assert old.get_metas == 1
+        # After the negative TTL the peer is probed again (it may have upgraded).
+        now[0] = 31.0
+        client.submit("c", HOST, old.port, REQ)
+        assert wait_result(client, "c") == LookupResult(None, "peer_unsupported")
+        assert old.get_metas == 2
+        assert all(frame[0] == GET_META_MSG for frame in old.frames)
+        assert old.thread.is_alive()
+    finally:
+        client.close()
+        old.close()
+
+
+def test_peer_not_advertising_gets_no_lookup(client):
+    silent = FakeProducer(advertise=False)
+    try:
+        client.submit("a", HOST, silent.port, REQ)
+        with pytest.raises(AssertionError, match="no request"):
+            silent.recv(timeout_ms=300)  # Answers the probe, then sees no lookup.
+        assert silent.probes == 1
+        assert wait_result(client, "a") == LookupResult(None, "peer_unsupported")
+    finally:
+        silent.close()
+
+
+def test_lookup_id_is_sent_echoed_and_checked(client, peer):
+    request = LookupPinRequest(REQ.block_hashes, REQ.identity, lookup_id="want")
+    client.submit("ok", HOST, peer.port, request)
+    identity, seen = peer.recv()
+    assert seen.lookup_id == "want"
+    echoed = hit("pin-ok")
+    echoed.lookup_id = "want"
+    peer.reply(identity, echoed)
+    assert wait_result(client, "ok").reply == echoed
+
+    # A reply for another lookup, or one that echoes nothing, fails the lookup
+    # and is not handed out as a hit.
+    for key, wrong in (("other", "someone-else"), ("none", None)):
+        client.submit(key, HOST, peer.port, request)
+        identity, _ = peer.recv()
+        bad = hit(f"pin-{key}")
+        bad.lookup_id = wrong
+        peer.reply(identity, bad)
+        assert wait_result(client, key) == LookupResult(None, "lookup_id_mismatch")
+        assert client.take_orphaned_pins() == []
 
 
 def test_scheduler_lazily_creates_and_closes_client():

@@ -91,7 +91,7 @@ def get_meta(sock):
 def test_lookup_round_trip(served):
     sched, connector, manager, hashes, path = served
     with zmq_ctx(zmq.REQ, path) as sock:
-        send_lookup(sock, lookup(hashes))
+        send_lookup(sock, lookup(hashes, lookup_id="id-1"))
         wait_for(lambda: connector.has_pending_push_work())
         meta = cycle(connector)  # drains, fences this step, ships nothing yet
         assert meta.reqs_to_send == {}
@@ -100,6 +100,7 @@ def test_lookup_round_trip(served):
         reply = recv_reply(sock)
     assert reply.hit_tokens == len(hashes) * BLOCK_SIZE
     assert reply.miss_reason == PeerMissReason.NONE
+    assert reply.lookup_id == "id-1"
     assert len(reply.remote_block_ids) == 1
     assert len(reply.remote_block_ids[0]) == len(hashes)
     (pin_id,) = meta.reqs_to_send
@@ -113,7 +114,10 @@ def test_get_meta_survives_bad_messages(served):
     with zmq_ctx(zmq.REQ, path) as sock:
         sock.setsockopt(zmq.RCVTIMEO, 5000)
         frames = get_meta(sock)
-        assert frames[0] == b"x" or len(frames) == 2
+        assert len(frames) == 2  # payload, then the listener's clock
+        # The capability probe: this engine serves lookups.
+        payload = msgspec.msgpack.decode(frames[0], type=NixlHandshakePayload)
+        assert payload.peer_lookup is True
 
     # Each bad message on its own socket: a REQ cannot send twice unanswered.
     for bad in (
@@ -143,9 +147,18 @@ def test_lookup_disabled_gets_immediate_miss():
     make_wired_connector(sched).bind_kv_cache_manager(manager)
     sched.set_xfer_handshake_metadata({(0, 0): NixlHandshakePayload(COMPAT, b"x")})
     try:
-        with zmq_ctx(zmq.REQ, make_zmq_path("tcp", HOST, port)) as sock:
-            send_lookup(sock, lookup(hashes))
+        path = make_zmq_path("tcp", HOST, port)
+        with zmq_ctx(zmq.REQ, path) as sock:
+            # A disabled engine does not advertise lookups to the probe...
+            payload = msgspec.msgpack.decode(
+                get_meta(sock)[0], type=NixlHandshakePayload
+            )
+            assert payload.peer_lookup is False
+        # ...and refuses a lookup that is sent anyway, echoing its id.
+        with zmq_ctx(zmq.REQ, path) as sock:
+            send_lookup(sock, lookup(hashes, lookup_id="id-2"))
             reply = recv_reply(sock)
+        assert reply.lookup_id == "id-2"
         assert reply.hit_tokens == 0
         assert reply.remote_block_ids == []
         assert reply.remote_request_id == ""
@@ -203,12 +216,13 @@ def test_miss_is_answered_in_the_first_cycle(served):
 def test_lookup_before_binding_is_refused_not_stuck():
     manager, hashes = cached_manager()
     sched = make_wired_scheduler(manager)
-    sched._lookup.inbox.put((b"id", lookup(hashes)))
+    sched._lookup.inbox.put((b"id", lookup(hashes, lookup_id="id-3")))
     assert sched.has_pending_push_work()
     make_wired_connector(sched).build_connector_meta(SchedulerOutput.make_empty())
     identity, reply = sched._lookup.outbox.get_nowait()
     assert identity == b"id"
     assert reply.miss_reason == PeerMissReason.IDENTITY_MISMATCH
+    assert reply.lookup_id == "id-3"
     sched._lookup.close()
 
 
@@ -224,7 +238,7 @@ def test_pending_pin_times_out_with_pin_refused():
     server._max_pending_seconds = 5.0
     server.set_compatibility_hash(COMPAT)
 
-    sched._lookup.inbox.put((b"id", lookup(hashes)))
+    sched._lookup.inbox.put((b"id", lookup(hashes, lookup_id="id-4")))
     # Scheduled but never processed (a stalled step): the fence cannot pass.
     connector.build_connector_meta(SchedulerOutput.make_empty())
     assert manager.num_pinned_blocks == len(hashes)
@@ -242,6 +256,7 @@ def test_pending_pin_times_out_with_pin_refused():
     assert identity == b"id"
     assert reply.hit_tokens == 0
     assert reply.miss_reason == PeerMissReason.PIN_REFUSED
+    assert reply.lookup_id == "id-4"
     assert not connector.has_pending_push_work() or not sched._lookup.outbox.empty()
     sched._lookup.close()
 
