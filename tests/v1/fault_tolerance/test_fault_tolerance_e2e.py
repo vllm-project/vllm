@@ -376,15 +376,22 @@ def _drive_to_faulted(
 
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("busy", [False, True], ids=["idle", "busy"])
-def test_pause_retry_recovers_healthy_engines(busy):
+@pytest.mark.parametrize(
+    "policy", [None, "fail", "recompute"], ids=["idle", "busy", "busy-recompute"]
+)
+def test_pause_retry_recovers_healthy_engines(policy):
     """Pause closes admission and enables recovery without a detected fault."""
-    with _ft_manager() as servers:
+    extra_args = (
+        ["--fault-tolerance-config.request_failure_policy", policy]
+        if policy == "recompute"
+        else []
+    )
+    with _ft_manager(extra_args) as servers:
         engines = list(_servers_by_rank(servers, 2).values())
         _assert_serving_and_healthy(engines)
         stream = None
         try:
-            if busy:
+            if policy is not None:
                 client = engines[0].get_client()
                 stream = client.completions.create(
                     model=MODEL_NAME,
@@ -394,7 +401,7 @@ def test_pause_retry_recovers_healthy_engines(busy):
                     stream=True,
                     extra_body={"ignore_eos": True},
                 )
-                next(stream)
+                assert next(stream).choices[0].finish_reason is None
             for server in engines:
                 _apply_ft(server, "pause")
             unavailable = _wait_for_engines(
@@ -412,7 +419,7 @@ def test_pause_retry_recovers_healthy_engines(busy):
                 engines, match_key="status", match_values={"unhealthy"}
             )
             assert all(paused), paused
-            if not busy:
+            if stream is None:
                 # A rejected pause must preserve a failed recovery's details.
                 for server in engines:
                     _apply_ft(server, "scale_down", params={"removed_dp_ranks": []})
@@ -429,6 +436,9 @@ def test_pause_retry_recovers_healthy_engines(busy):
             for server in engines:
                 _apply_ft(server, "retry", request_id=round_id)
             _assert_serving_and_healthy(engines)
+            if stream is not None:
+                expected = "length" if policy == "recompute" else "abort"
+                assert list(stream)[-1].choices[0].finish_reason == expected
         finally:
             if stream is not None:
                 stream.close()

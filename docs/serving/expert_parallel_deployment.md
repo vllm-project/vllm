@@ -501,6 +501,8 @@ recovery after the current step and outstanding device work finish. It does not
 interrupt an in-flight collective; a failed peer may still require the backend's
 fault timeout. Pause is accepted only while the engine is healthy; other states
 are rejected without changing the last recovery result.
+By default, pause aborts running requests. With `request_failure_policy="recompute"`,
+they resume after successful recovery.
 
 Scale-down restores service with fewer ranks; it does not restart the removed
 engines or restore their capacity. The previous `/fault_tolerance/apply`
