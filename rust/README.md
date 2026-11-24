@@ -215,12 +215,7 @@ output: unspecified and `MM_PAYLOAD_TENSORS` include inline tensors;
 `mm_payload` and `return_mm_kwargs` do not select the gRPC output mode.
 
 The response includes prompt token IDs, the structured-output constraint,
-reasoning gate, and preprocessed media. **It does not yet return lowered
-sampling or stopping parameters**, including temperature, max_tokens, stop,
-bad_words, or n. Supply equivalent generation parameters separately; copying
-only the response fields into `vllm.GenerateRequest` does not preserve those
-settings. This remaining work is tracked in
-[#65503](https://github.com/vllm-project/vllm/issues/65503).
+reasoning gate, and preprocessed media.
 See [the renderer documentation](../docs/serving/online_serving/renderer.md#rust-raw-json-grpc-rendering)
 and [`render.proto`](proto/render.proto) for the contract.
 

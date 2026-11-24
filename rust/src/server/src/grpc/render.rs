@@ -14,7 +14,6 @@ use tonic::{Request, Response, Status};
 use tracing::{info_span, warn};
 use tracing_futures::Instrument as _;
 use uuid::Uuid;
-use validator::Validate as _;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage,
     ChatOptions, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode, ResolvedToolContext,
@@ -30,10 +29,8 @@ use super::pb;
 use super::pb::render_server::{Render, RenderServer};
 use crate::error::ApiError;
 use crate::render::RenderContext;
-use crate::routes::openai::utils::types::Normalizable as _;
-use crate::routes::openai::utils::validate_max_output_tokens;
-use crate::routes::openai::{ChatCompletionRequest, lower_chat_request};
-use crate::utils::ResolvedRequestContext;
+use crate::routes::openai::ChatCompletionRequest;
+use crate::routes::render::{LoweredChatRender, lower_chat_render_request};
 
 pub(crate) type RenderGrpcService<S> = RenderServer<RenderServiceImpl<S>>;
 
@@ -116,32 +113,17 @@ async fn render(
         };
 
     let mut deserializer = serde_json::Deserializer::from_slice(&request.body);
-    let mut body: ChatCompletionRequest = serde_path_to_error::deserialize(&mut deserializer)
-        .map_err(|error| {
+    let body: ChatCompletionRequest =
+        serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
             Status::invalid_argument(format!("failed to parse chat completion request: {error}"))
         })?;
+    deserializer.end().map_err(|error| {
+        Status::invalid_argument(format!("failed to parse chat completion request: {error}"))
+    })?;
 
-    body.normalize();
-    body.validate().map_err(|errors| Status::invalid_argument(errors.to_string()))?;
-
-    let model = body.model.as_deref().filter(|m| !m.is_empty());
-    let lora_resolution = state.resolve_model(model).await;
-
-    let request_id = body.request_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
-    let request_context = ResolvedRequestContext {
-        request_id,
-        ..Default::default()
-    };
-
-    let chat_request =
-        lower_chat_request(body, &lora_resolution, request_context).map_err(api_error_to_status)?;
-
-    validate_max_output_tokens(
-        "max_completion_tokens",
-        chat_request.sampling_params.max_tokens,
-        state.text_processor().max_model_len(),
-    )
-    .map_err(api_error_to_status)?;
+    let LoweredChatRender { chat_request, .. } = lower_chat_render_request(state, body, None)
+        .await
+        .map_err(api_error_to_status)?;
 
     let RenderedChat {
         prompt_token_ids,
@@ -210,6 +192,11 @@ async fn prepare_and_render_chat(
         .map_err(chat_error_to_status)?
         .text_request;
     let prepared = state.text_processor().prepare(text_request).map_err(text_error_to_status)?;
+    if prepared.generate_request.prompt_token_ids.is_empty() {
+        return Err(Status::invalid_argument(
+            "token_ids must contain at least one token ID.",
+        ));
+    }
     let text_request = prepared.text_request;
     let media: Vec<pb::MediaItem> = (prepared.generate_request.mm_features.into_iter().flatten())
         .map(|feature| media::feature_to_proto(feature, !omit_media_kwargs))

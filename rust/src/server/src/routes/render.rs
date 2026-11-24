@@ -13,24 +13,31 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
+use validator::Validate as _;
+use vllm_chat::ChatRequest;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::TextRequest;
 
 use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
 use crate::error::{ApiError, text_submit_error};
+use crate::lora::LoraModelResolution;
 use crate::model_names::ServedModelNames;
 use crate::render::{RenderContext, RenderState};
 use crate::routes::inference::generate::{
     GenerateRequest, GenerateSamplingParams, MmPayload, MultiModalFeatures,
     validate_request_compat as validate_generate_request,
 };
-use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
+use crate::routes::openai::utils::types::{
+    ListModelsResponse, ModelObject, Normalizable as _, StreamOptions,
+};
 use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::{
     ChatCompletionRequest, CompletionRequest, lower_chat_request, lower_completion_request,
 };
-use crate::utils::{resolve_request_context, unix_timestamp};
+use crate::utils::{
+    ResolvedRequestContext, resolve_base_request_id, resolve_request_context, unix_timestamp,
+};
 
 pub(crate) fn build_router(state: Arc<RenderState>) -> Router {
     Router::new()
@@ -166,6 +173,47 @@ fn hoist_transfer_params(
     Some(params)
 }
 
+pub(crate) struct LoweredChatRender {
+    pub(crate) chat_request: ChatRequest,
+    pub(crate) model: String,
+    pub(crate) lora_resolution: LoraModelResolution,
+}
+
+pub(crate) async fn lower_chat_render_request<S: RenderContext>(
+    state: &S,
+    mut body: ChatCompletionRequest,
+    headers: Option<&HeaderMap>,
+) -> Result<LoweredChatRender, ApiError> {
+    body.normalize();
+    body.validate()
+        .map_err(|errors| ApiError::invalid_request(errors.to_string(), None))?;
+
+    let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
+    let lora_resolution = state.resolve_model(requested_model).await;
+    let model = requested_model.unwrap_or(lora_resolution.model_names.primary()).to_string();
+
+    let request_context = match headers {
+        Some(headers) => resolve_request_context(headers, body.request_id.as_deref())?,
+        None => ResolvedRequestContext {
+            request_id: resolve_base_request_id(None, body.request_id.as_deref()),
+            ..Default::default()
+        },
+    };
+
+    let chat_request = lower_chat_request(body, &lora_resolution, request_context)?;
+    validate_max_output_tokens(
+        "max_completion_tokens",
+        chat_request.sampling_params.max_tokens,
+        state.text_processor().max_model_len(),
+    )?;
+
+    Ok(LoweredChatRender {
+        chat_request,
+        model,
+        lora_resolution,
+    })
+}
+
 /// `/v1/chat/completions/render` on both the render-only server and, with
 /// `--enable-scale-out`, the engine-backed server.
 pub(crate) async fn render_chat<S: RenderContext>(
@@ -173,9 +221,6 @@ pub(crate) async fn render_chat<S: RenderContext>(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Result<Json<GenerateRequest>, ApiError> {
-    let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
-    let lora_resolution = state.resolve_model(requested_model).await;
-    let model = requested_model.unwrap_or(lora_resolution.model_names.primary()).to_string();
     let n = body.n;
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
@@ -184,13 +229,11 @@ pub(crate) async fn render_chat<S: RenderContext>(
         Some(false) => MmPayload::None,
         _ => MmPayload::Tensors,
     });
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
-    let chat_request = lower_chat_request(body, &lora_resolution, request_context)?;
-    validate_max_output_tokens(
-        "max_completion_tokens",
-        chat_request.sampling_params.max_tokens,
-        state.text_processor().max_model_len(),
-    )?;
+    let LoweredChatRender {
+        chat_request,
+        model,
+        lora_resolution,
+    } = lower_chat_render_request(state.as_ref(), body, Some(&headers)).await?;
     let text_request = state
         .chat_processor()
         // The parallel samples of `n` are the generate request's to fan out;

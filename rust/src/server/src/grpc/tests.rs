@@ -47,6 +47,7 @@ use vllm_engine_core_client::protocol::output::{
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
@@ -3745,27 +3746,42 @@ async fn render_raw_chat_parity_with_http_render_route() {
             .unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let http: crate::routes::inference::generate::GenerateRequest =
-            serde_json::from_slice(&bytes).expect("HTTP render response");
-        assert_eq!(raw.prompt_token_ids, http.token_ids);
+        let http: serde_json::Value = serde_json::from_slice(&bytes).expect("HTTP render response");
+        let http_token_ids: Vec<u32> = http["token_ids"]
+            .as_array()
+            .expect("token_ids array")
+            .iter()
+            .map(|id| id.as_u64().expect("token id u64") as u32)
+            .collect();
+        assert_eq!(raw.prompt_token_ids, http_token_ids);
+        let structured_output: Option<StructuredOutputsParams> =
+            serde_json::from_value(http["sampling_params"]["structured_outputs"].clone()).unwrap();
         assert_eq!(
             raw.structured_output,
-            http.sampling_params
-                .inner
-                .structured_outputs
-                .as_ref()
-                .map(super::convert::structured_output_to_proto)
+            structured_output.as_ref().map(super::convert::structured_output_to_proto)
         );
         let gate = raw.engine_reasoning_gate.expect("reasoning gate");
-        assert_eq!(gate.reasoning_ended, http.reasoning_ended);
-        let kwargs = http.reasoning_parser_kwargs.expect("HTTP reasoning parser kwargs");
-        assert_eq!(
-            gate.chat_template_kwargs,
-            json_to_proto_struct(&serde_json::json!(kwargs.chat_template_kwargs))
-        );
+        assert_eq!(gate.reasoning_ended, http["reasoning_ended"].as_bool());
+        let kwargs = &http["reasoning_parser_kwargs"]["chat_template_kwargs"];
+        assert_eq!(gate.chat_template_kwargs, json_to_proto_struct(kwargs));
         assert!(raw.media.is_empty());
-        assert!(http.features.is_none());
+        assert!(http.get("features").is_none());
     }
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_trailing_bytes() {
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: b"{\"model\":\"render-model\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]} trailing".to_vec(),
+        ..Default::default()
+    };
+    let status = render_raw(&render_service(), request)
+        .await
+        .expect_err("trailing bytes should fail");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("failed to parse chat completion request"));
 }
 
 #[tokio::test]
@@ -4005,7 +4021,7 @@ async fn render_raw_chat_rejects_unknown_mm_payload() {
 #[tokio::test]
 async fn render_raw_chat_enforces_output_token_limits() {
     let service = render_service();
-    let mut body = serde_json::json!({
+    let body = serde_json::json!({
         "model": "render-model",
         "messages": [{"role": "user", "content": "Hi"}],
         "max_completion_tokens": 1025
