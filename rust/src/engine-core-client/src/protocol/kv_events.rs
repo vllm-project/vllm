@@ -147,3 +147,48 @@ impl TryFrom<rmpv::Value> for ExtraKeyValue {
         .ok_or("expected text, bytes, a 64-bit integer, or a sequence of them")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ExternalBlockHash::{Digest, Signed, Unsigned};
+    use super::ExtraKeyValue::{Data, Integer, Text, Tuple};
+    use super::*;
+
+    #[test]
+    fn decodes_a_batch_as_the_engine_encodes_it() {
+        // msgspec.msgpack.encode(KVEventBatch(1.5, [BlockStored([2**64 - 1, -7, b"\xab\xcd"], None,
+        // [1, 70000], 1, None, "GPU", None, [("salt", b"digest", ("img", 3)), None, None]),
+        // BlockRemoved([7], "GPU"), AllBlocksCleared()], 0)).hex()
+        let payload = "93cb3ff800000000000093de0009a474797065ab426c6f636b53746f726564ac626c6f636b5f\
+            68617368657393cffffffffffffffffff9c402abcdb1706172656e745f626c6f636b5f68617368c0a9746f6\
+            b656e5f6964739201ce00011170aa626c6f636b5f73697a6501a76c6f72615f6964c0a66d656469756da347\
+            5055a96c6f72615f6e616d65c0aa65787472615f6b6579739393a473616c74c40664696765737492a3696d6\
+            703c0c083a474797065ac426c6f636b52656d6f766564ac626c6f636b5f6861736865739107a66d65646975\
+            6da347505581a474797065b0416c6c426c6f636b73436c656172656400";
+        let image = Tuple(vec![Text("img".to_string()), Integer(3)]);
+        let keys = vec![Text("salt".to_string()), Data(b"digest".to_vec()), image];
+        let stored = BlockStored {
+            block_hashes: vec![Unsigned(u64::MAX), Signed(-7), Digest(vec![0xab, 0xcd])],
+            token_ids: vec![1, 70000],
+            block_size: 1,
+            medium: Some("GPU".to_string()),
+            extra_keys: Some(vec![Some(keys), None, None]),
+            ..Default::default()
+        };
+        let removed = BlockRemoved {
+            block_hashes: vec![Unsigned(7)],
+            medium: Some("GPU".to_string()),
+            ..Default::default()
+        };
+        let events = vec![
+            KvCacheEvent::BlockStored(stored),
+            KvCacheEvent::BlockRemoved(removed),
+            KvCacheEvent::AllBlocksCleared,
+        ];
+        let batch = KvEventBatch::decode(&hex::decode(payload).unwrap()).unwrap();
+        assert_eq!(
+            (batch.ts, batch.events, batch.data_parallel_rank),
+            (1.5, events, Some(0))
+        );
+    }
+}

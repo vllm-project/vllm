@@ -6,8 +6,9 @@ import importlib
 from collections.abc import Callable
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, get_args, get_type_hints
 
+import msgspec
 import numpy as np
 import pytest
 import torch
@@ -35,6 +36,7 @@ from vllm.config import (
 from vllm.config.attention import HiSparseConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.distributed.kv_events import KVEventBatch
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -1117,6 +1119,48 @@ def test_to_event_extra_keys_keeps_untagged_event_format():
     assert to_event_extra_keys([extra_keys, None]) == [event_keys, None]
     assert to_event_extra_keys([]) is None
     assert to_event_extra_keys(None) is None
+
+
+def test_kv_event_fields_are_the_ones_the_rust_frontend_forwards():
+    """The Rust frontend decodes KV events field by field to serve them over
+    gRPC, so it does not forward an event type or field it does not know."""
+    (events,) = get_args(get_type_hints(KVEventBatch)["events"])
+    fields = {
+        struct.__name__: [field.encode_name for field in msgspec.structs.fields(struct)]
+        for struct in (KVEventBatch, *get_args(events))
+    }
+    assert fields == {
+        "KVEventBatch": ["ts", "events", "data_parallel_rank"],
+        "BlockStored": [
+            "block_hashes",
+            "parent_block_hash",
+            "token_ids",
+            "block_size",
+            "lora_id",
+            "medium",
+            "lora_name",
+            "extra_keys",
+            "group_idx",
+            "kv_cache_spec_kind",
+            "kv_cache_spec_sliding_window",
+            "locality",
+            "ownership",
+            "session_id",
+            "lookahead_token_ids",
+        ],
+        "BlockRemoved": [
+            "block_hashes",
+            "medium",
+            "group_idx",
+            "locality",
+            "ownership",
+        ],
+        "AllBlocksCleared": [],
+    }, (
+        "KV cache events changed: update the decoder in "
+        "rust/src/engine-core-client/src/protocol/kv_events.rs and the messages "
+        "in rust/proto/kv_events.proto, then this list."
+    )
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

@@ -431,7 +431,7 @@ An attacker who can reach the gRPC port can:
 - Ensure the gRPC port is only accessible from trusted hosts or services
 - Use firewall rules to block external access to the gRPC port
 - Consider deploying the gRPC interface on a dedicated internal network interface
-- With KV cache events enabled, the Rust frontend also has each engine publish them on private addresses: IPC sockets for engines on the frontend's node, and two TCP ports on the node's IP for engines on other nodes. Restrict those ports like the gRPC port; they carry the same token IDs
+- With KV cache events enabled, the Rust frontend also has each engine publish them on private addresses: IPC sockets when every engine it connects to runs on its node, and otherwise two TCP ports on each engine's node IP (under `VLLM_USE_RUST_FRONTEND=1 vllm serve`, only for the engines on other nodes). Restrict those ports like the gRPC port; they carry the same token IDs
 
 ## Cache Directory Security
 

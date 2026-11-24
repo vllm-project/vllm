@@ -36,21 +36,15 @@ pub(super) enum ReadError {
     RelayStopped,
 }
 
-/// The sequence numbers a relay has forwarded.
-#[derive(Clone, Copy)]
-struct Forwarded {
-    first: u64,
-    next: u64,
-}
-
 /// Forwards one engine's KV event batches, as its PUB socket delivers them,
 /// to any number of readers. It keeps no history: readers fill gaps and catch
 /// up from the engine's own replay buffer.
 pub(super) struct KvEventRelay {
     live: broadcast::Sender<Arc<pb::KvEventBatch>>,
     stream_id: Arc<str>,
-    forwarded: watch::Receiver<Option<Forwarded>>,
-    replay_endpoint: Option<String>,
+    /// The sequence number after the last batch forwarded.
+    forwarded: watch::Receiver<Option<u64>>,
+    replay_endpoint: String,
     _task: AbortOnDropHandle<()>,
 }
 
@@ -82,7 +76,7 @@ impl KvEventRelay {
             replay_endpoint: self.replay_endpoint.clone(),
             stream_id: self.stream_id.clone(),
             // Live from the next batch the relay forwards.
-            next: self.forwarded.borrow().map(|forwarded| forwarded.next),
+            next: *self.forwarded.borrow(),
             forwarded: self.forwarded.clone(),
             pending: VecDeque::new(),
         };
@@ -91,7 +85,7 @@ impl KvEventRelay {
                 return Err(ReadError::OutOfRange);
             }
             reader.next = Some(cursor.next_sequence_number);
-            reader.catch_up(ReadError::OutOfRange).await?;
+            reader.catch_up(cursor.next_sequence_number, ReadError::OutOfRange).await?;
         }
         Ok(reader)
     }
@@ -100,7 +94,7 @@ impl KvEventRelay {
 async fn follow(
     mut subscriber: KvEventSubscriber,
     live: broadcast::Sender<Arc<pb::KvEventBatch>>,
-    forwarded: watch::Sender<Option<Forwarded>>,
+    forwarded: watch::Sender<Option<u64>>,
 ) {
     loop {
         let (sequence_number, payload) = match subscriber.next().await {
@@ -115,13 +109,7 @@ async fn follow(
         let Some(batch) = decode_batch(sequence_number, &payload) else {
             continue;
         };
-        forwarded.send_modify(|forwarded| {
-            let first = forwarded.map_or(sequence_number, |forwarded| forwarded.first);
-            *forwarded = Some(Forwarded {
-                first,
-                next: sequence_number + 1,
-            });
-        });
+        forwarded.send_replace(Some(sequence_number + 1));
         // No receiver is not an error: readers come and go.
         let _ = live.send(Arc::new(batch_to_proto(sequence_number, batch)));
     }
@@ -130,12 +118,12 @@ async fn follow(
 /// One subscriber's position in a relay's stream.
 pub(super) struct KvEventReader {
     live: broadcast::Receiver<Arc<pb::KvEventBatch>>,
-    replay_endpoint: Option<String>,
+    replay_endpoint: String,
     stream_id: Arc<str>,
     /// Sequence number of the next batch to yield; `None` until the relay
     /// forwards its first batch.
     next: Option<u64>,
-    forwarded: watch::Receiver<Option<Forwarded>>,
+    forwarded: watch::Receiver<Option<u64>>,
     /// Replayed batches to yield before live ones.
     pending: VecDeque<Arc<pb::KvEventBatch>>,
 }
@@ -152,54 +140,44 @@ impl KvEventReader {
                 self.next = Some(batch.sequence_number + 1);
                 return Ok(batch);
             }
-            let batch = match self.live.recv().await {
-                Ok(batch) => batch,
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    // A reader that started before the relay's first batch
-                    // missed everything from that one on.
-                    let first = self.forwarded.borrow().map(|forwarded| forwarded.first);
-                    self.next = self.next.or(first);
-                    self.catch_up(ReadError::DataLoss).await?;
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => return Err(ReadError::RelayStopped),
-            };
-            let sequence_number = batch.sequence_number;
-            match self.next {
-                Some(next) if sequence_number < next => {}
-                Some(next) if sequence_number > next => {
-                    self.catch_up(ReadError::DataLoss).await?;
-                    if self.pending.back().is_none_or(|last| last.sequence_number < sequence_number)
-                    {
-                        self.pending.push_back(batch);
+            match self.live.recv().await {
+                Ok(batch) => match self.next {
+                    // Already yielded from a replay.
+                    Some(next) if batch.sequence_number < next => continue,
+                    // The PUB socket dropped batches; the replay holds this one too.
+                    Some(next) if batch.sequence_number > next => {}
+                    _ => {
+                        self.next = Some(batch.sequence_number + 1);
+                        return Ok(batch);
                     }
-                }
-                _ => {
-                    self.next = Some(sequence_number + 1);
-                    return Ok(batch);
-                }
+                },
+                // This reader fell more than `LIVE_CAPACITY` batches behind.
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return Err(ReadError::RelayStopped),
             }
+            // A reader that fell behind before its first batch has no position to refill from.
+            let next = self.next.ok_or(ReadError::DataLoss)?;
+            self.catch_up(next, ReadError::DataLoss).await?;
         }
     }
 
     /// Queue the engine's buffered batches from `next` on. `missing` is the
-    /// error when the buffer no longer holds `next` although it was published.
-    async fn catch_up(&mut self, missing: ReadError) -> Result<(), ReadError> {
-        let next = self.next.expect("catch-up needs a position");
-        let Some(endpoint) = &self.replay_endpoint else {
-            return Err(missing);
-        };
-        let batches = replay(endpoint, next)
+    /// error when the buffer does not hold every batch published from `next`.
+    async fn catch_up(&mut self, next: u64, missing: ReadError) -> Result<(), ReadError> {
+        // Read before the replay: a batch published after its answer is not missing from it.
+        let published = self.forwarded.borrow().is_some_and(|forwarded| next < forwarded);
+        let batches = replay(&self.replay_endpoint, next)
             .await
             .map_err(|error| ReadError::ReplayFailed(error.to_report_string()))?;
-        let published = self.forwarded.borrow().is_some_and(|forwarded| next < forwarded.next);
-        match batches.first() {
-            Some((sequence_number, _)) if *sequence_number != next => return Err(missing),
-            None if published => return Err(missing),
-            _ => {}
+        // An engine with `buffer_steps` 0 buffers nothing.
+        if batches.is_empty() && published {
+            return Err(missing);
         }
-        self.pending.clear();
-        for (sequence_number, payload) in batches {
+        for (expected, (sequence_number, payload)) in (next..).zip(batches) {
+            // The buffer has moved past `next`, or the engine failed to encode a batch.
+            if sequence_number != expected {
+                return Err(missing);
+            }
             let Some(batch) = decode_batch(sequence_number, &payload) else {
                 return Err(missing);
             };

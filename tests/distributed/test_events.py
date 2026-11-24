@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 import time
-from typing import get_args, get_type_hints
 
 import msgspec
 import pytest
@@ -10,7 +9,6 @@ import pytest
 from vllm.distributed.kv_events import (
     EventBatch,
     EventPublisherFactory,
-    KVEventBatch,
     NullEventPublisher,
     ZmqEventPublisher,
 )
@@ -508,45 +506,3 @@ def test_frontend_endpoints_carry_the_same_stream(random_port, tmp_path):
     config._frontend_endpoint = f"ipc://{tmp_path}/kv-off"
     assert isinstance(EventPublisherFactory.create(config, DP_RANK), NullEventPublisher)
     assert not (tmp_path / "kv-off").exists()
-
-
-def test_kv_event_fields_are_the_ones_the_rust_frontend_forwards():
-    """The Rust frontend decodes KV events field by field to serve them over
-    gRPC, so it does not forward an event type or field it does not know."""
-    (events,) = get_args(get_type_hints(KVEventBatch)["events"])
-    fields = {
-        struct.__name__: [field.encode_name for field in msgspec.structs.fields(struct)]
-        for struct in (KVEventBatch, *get_args(events))
-    }
-    assert fields == {
-        "KVEventBatch": ["ts", "events", "data_parallel_rank"],
-        "BlockStored": [
-            "block_hashes",
-            "parent_block_hash",
-            "token_ids",
-            "block_size",
-            "lora_id",
-            "medium",
-            "lora_name",
-            "extra_keys",
-            "group_idx",
-            "kv_cache_spec_kind",
-            "kv_cache_spec_sliding_window",
-            "locality",
-            "ownership",
-            "session_id",
-            "lookahead_token_ids",
-        ],
-        "BlockRemoved": [
-            "block_hashes",
-            "medium",
-            "group_idx",
-            "locality",
-            "ownership",
-        ],
-        "AllBlocksCleared": [],
-    }, (
-        "KV cache events changed: update the decoder in "
-        "rust/src/engine-core-client/src/protocol/kv_events.rs and the messages "
-        "in rust/proto/kv_events.proto, then this list."
-    )

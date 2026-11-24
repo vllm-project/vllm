@@ -66,10 +66,11 @@ publishing credentials.
 with `--kv-events-config '{"enable_kv_cache_events": true}'`, one stream per
 data-parallel rank, with the same batches and sequence numbers as the engine's
 ZMQ publisher. Nothing else needs configuring: at startup the frontend gives
-each engine a private events address and replay address (IPC for engines on its
-node, TCP on the engine's own node otherwise), which the publisher binds in
-addition to its configured endpoints. `Control.GetKvEventSources` lists the
-stream as a source with transport `grpc`.
+each engine a private events address and replay address, which the publisher
+binds in addition to its configured endpoints: IPC when every engine it connects
+to runs on its node, and TCP on each engine's own node otherwise (under
+`VLLM_USE_RUST_FRONTEND=1 vllm serve`, only for the engines on other nodes).
+`Control.GetKvEventSources` lists the stream as a source with transport `grpc`.
 
 A subscriber without `resume` receives live batches. With `resume`, the
 frontend first replays the batches the engine still buffers (`buffer_steps`)

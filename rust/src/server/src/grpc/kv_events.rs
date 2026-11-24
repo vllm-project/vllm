@@ -37,19 +37,19 @@ pub struct KvEventsServiceImpl {
 /// Where an engine publishes its KV events for this frontend.
 pub(super) struct PublisherAddresses {
     endpoint: String,
-    replay_endpoint: Option<String>,
+    replay_endpoint: String,
     topic: String,
 }
 
 impl PublisherAddresses {
     /// The private addresses of an engine that publishes KV events to this
-    /// frontend.
+    /// frontend: its ZMQ publisher reports the two it bound.
     pub(super) fn of(config: Option<&KvEventsConfig>) -> Option<Self> {
         let config =
             config.filter(|config| config.enable_kv_cache_events && config.publisher == "zmq")?;
         Some(Self {
             endpoint: config.frontend_endpoint.clone()?,
-            replay_endpoint: config.frontend_replay_endpoint.clone(),
+            replay_endpoint: config.frontend_replay_endpoint.clone()?,
             topic: config.topic.clone(),
         })
     }

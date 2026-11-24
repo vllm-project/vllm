@@ -252,6 +252,8 @@ pub struct MockKvEventPublisher {
     pub config: KvEventsConfig,
     /// Batches served on the replay socket.
     retained: Arc<Mutex<BTreeMap<u64, Bytes>>>,
+    /// Held by a test to delay replay answers after they are collected.
+    pub replay_gate: Arc<tokio::sync::Mutex<()>>,
     _replay: AbortOnDropHandle<()>,
 }
 
@@ -264,7 +266,12 @@ impl MockKvEventPublisher {
         let mut replay = RouterSocket::new();
         replay.bind(&replay_endpoint).await.expect("bind KV event replay socket");
         let retained = Arc::new(Mutex::new(BTreeMap::new()));
-        let replay = tokio::spawn(serve_kv_event_replays(replay, retained.clone()));
+        let replay_gate = Arc::new(tokio::sync::Mutex::new(()));
+        let replay = tokio::spawn(serve_kv_event_replays(
+            replay,
+            retained.clone(),
+            replay_gate.clone(),
+        ));
 
         Self {
             events,
@@ -282,6 +289,7 @@ impl MockKvEventPublisher {
                 frontend_replay_endpoint: Some(replay_endpoint),
             },
             retained,
+            replay_gate,
             _replay: AbortOnDropHandle::new(replay),
         }
     }
@@ -320,6 +328,7 @@ fn kv_event_frames(sequence_number: u64, payload: Bytes) -> ZmqMessage {
 async fn serve_kv_event_replays(
     mut socket: RouterSocket,
     retained: Arc<Mutex<BTreeMap<u64, Bytes>>>,
+    gate: Arc<tokio::sync::Mutex<()>>,
 ) {
     while let Ok(request) = socket.recv().await {
         let frames = request.into_vec();
@@ -332,6 +341,7 @@ async fn serve_kv_event_replays(
             .collect();
         // `ZmqEventPublisher.END_SEQ` ends a replay.
         replies.push((u64::MAX, Bytes::new()));
+        let _open = gate.lock().await;
         for (sequence_number, payload) in replies {
             let mut reply = kv_event_frames(sequence_number, payload);
             reply.push_front(Bytes::new());

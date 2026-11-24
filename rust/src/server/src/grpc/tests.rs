@@ -3989,6 +3989,39 @@ async fn kv_events_fill_a_gap_from_the_engine_buffer_or_end_the_stream() {
     publisher.publish(4, &kv_event_batch(vec![])).await;
     let status = next_kv_event_batch(&mut stream).await.unwrap_err();
     assert_eq!(status.code(), Code::DataLoss);
+    // A cursor before the hole is refused, not served across it.
+    let status = subscribe_kv_events(&service, Some(("", 2))).await.err().unwrap();
+    assert_eq!(status.code(), Code::OutOfRange);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_events_resume_at_the_head_keeps_a_batch_published_during_the_replay() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let mut publisher = MockKvEventPublisher::bind(&ipc).await;
+    let (service, _engine_task) = kv_events_service(Some(publisher.config.clone())).await;
+    let (stream_id, mut live) = subscribe_kv_events(&service, None).await.unwrap();
+    publish_kv_events_until_received(&mut publisher, 0, &mut live).await;
+
+    // The engine answers the resume from 1 with an empty replay, held until
+    // the relay has forwarded batch 1, which the resumed stream yields once.
+    let gate = publisher.replay_gate.clone();
+    let held = gate.lock().await;
+    let resume = subscribe_kv_events(&service, Some((&stream_id, 1)));
+    tokio::pin!(resume);
+    assert!(tokio::time::timeout(Duration::from_millis(300), &mut resume).await.is_err());
+    publisher.publish(1, &kv_event_batch(vec![])).await;
+    assert_eq!(
+        next_kv_event_batch(&mut live).await.unwrap().sequence_number,
+        1
+    );
+    drop(held);
+
+    let (_, mut resumed) = resume.await.unwrap();
+    publisher.publish(2, &kv_event_batch(vec![])).await;
+    for sequence_number in [1, 2] {
+        let batch = next_kv_event_batch(&mut resumed).await.unwrap();
+        assert_eq!(batch.sequence_number, sequence_number);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

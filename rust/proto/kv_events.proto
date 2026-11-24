@@ -79,7 +79,7 @@ message BlockHash {
   oneof value {
     // vLLM with VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES (the default).
     uint64 unsigned_value = 1;
-    // SGLang.
+    // SGLang, and a vLLM connector that publishes a negative integer hash.
     int64 signed_value = 2;
     // vLLM without VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES.
     bytes digest = 3;
