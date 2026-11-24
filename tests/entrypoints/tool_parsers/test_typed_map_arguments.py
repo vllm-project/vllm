@@ -13,6 +13,7 @@ MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct"
 def test_gemma4_typed_map_argument_reaches_client():
     class Inventory(BaseModel):
         counts: dict[str, int] | None
+        parts: dict[str, list[int] | None]
 
     args = [
         "--enforce-eager",
@@ -25,7 +26,10 @@ def test_gemma4_typed_map_argument_reaches_client():
         "1",
     ]
     # Pin SmolLM2 to a native Gemma call so the test isolates argument parsing.
-    output = "<|tool_call>call:inventory{counts:{bolts:7}}<tool_call|>"
+    output = (
+        "<|tool_call>call:inventory{counts:{bolts:7},"
+        'parts:{tray:[<|"|>2<|"|>,<|"|>3<|"|>]}}<tool_call|>'
+    )
     tool = {"name": "inventory", "parameters": Inventory.model_json_schema()}
     with RemoteOpenAIServer(MODEL, args) as server, server.get_client() as client:
         response = client.chat.completions.create(
@@ -38,4 +42,7 @@ def test_gemma4_typed_map_argument_reaches_client():
             extra_body={"structured_outputs": {"regex": re.escape(output)}},
         )
     (call,) = response.choices[0].message.tool_calls
-    assert json.loads(call.function.arguments) == {"counts": {"bolts": 7}}
+    assert json.loads(call.function.arguments) == {
+        "counts": {"bolts": 7},
+        "parts": {"tray": [2, 3]},
+    }

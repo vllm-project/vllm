@@ -331,18 +331,21 @@ class ParserEngine(Parser):
     # ── Schema-aware type correction ─────────────────────────────────
 
     @staticmethod
-    def _typed_map_schema(schema: dict) -> dict | None:
-        """Return the object schema with typed `additionalProperties`, if supported.
-
-        Unwrap Pydantic's nullable-map `anyOf` before checking the value schema.
-        """
+    def _unwrap_nullable_schema(schema: dict) -> dict:
+        """Return the inline non-null branch of a two-branch nullable schema."""
         if schema.keys() <= {"anyOf", "title", "description", "default", "examples"}:
             match schema.get("anyOf"):
                 case [dict() as branch, {"type": "null"}] | [
                     {"type": "null"},
                     dict() as branch,
-                ]:
-                    schema = branch
+                ] if "$ref" not in branch:
+                    return branch
+        return schema
+
+    @staticmethod
+    def _typed_map_schema(schema: dict) -> dict | None:
+        """Return the object schema with typed `additionalProperties`, if supported."""
+        schema = ParserEngine._unwrap_nullable_schema(schema)
         additional = schema.get("additionalProperties")
         if not isinstance(additional, dict) or schema.get("patternProperties"):
             return None
@@ -364,12 +367,17 @@ class ParserEngine(Parser):
 
     @staticmethod
     def _coerce_value(
-        value: object, schema: dict, *, preserve_strings: bool = False
+        value: object,
+        schema: dict,
+        *,
+        preserve_strings: bool = False,
+        preserve_native_scalars: bool = False,
     ) -> tuple[object, bool]:
         """Coerce a value to its schema and return `(coerced_value, changed)`.
 
         With `preserve_strings`, keep strings allowed by their schema,
-        including those in nested objects and arrays.
+        including those in nested objects and arrays. With `preserve_native_scalars`,
+        keep JSON numbers, booleans and nulls when visiting those containers.
         """
         if preserve_strings and ("$ref" in schema or not schema):
             return value, False
@@ -382,7 +390,10 @@ class ParserEngine(Parser):
             if isinstance(coerced, dict) and ParserEngine._typed_map_schema(schema):
                 # XML parameters can carry the entire dictionary as JSON text.
                 ParserEngine._coerce_value(
-                    coerced, schema, preserve_strings=preserve_strings
+                    coerced,
+                    schema,
+                    preserve_strings=preserve_strings,
+                    preserve_native_scalars=preserve_native_scalars,
                 )
             if coerced is not value:
                 return coerced, True
@@ -397,15 +408,26 @@ class ParserEngine(Parser):
                 properties if isinstance(properties, dict) else {},
                 additional,
                 preserve_strings=preserve_strings,
+                preserve_native_scalars=preserve_native_scalars,
             )
 
         if isinstance(value, list):
-            items_schema = schema.get("items")
+            array_schema = ParserEngine._unwrap_nullable_schema(schema)
+            if array_schema is not schema:
+                if array_schema.get("type") != "array":
+                    return value, False
+                # Recurse into nullable arrays to correct string leaves while
+                # preserving existing JSON numbers, booleans and nulls at any depth.
+                preserve_native_scalars = True
+            items_schema = array_schema.get("items")
             if isinstance(items_schema, dict):
                 changed = False
                 for i, item in enumerate(value):
                     coerced, item_changed = ParserEngine._coerce_value(
-                        item, items_schema, preserve_strings=preserve_strings
+                        item,
+                        items_schema,
+                        preserve_strings=preserve_strings,
+                        preserve_native_scalars=preserve_native_scalars,
                     )
                     if item_changed:
                         value[i] = coerced
@@ -413,6 +435,8 @@ class ParserEngine(Parser):
                 return value, changed
             return value, False
 
+        if preserve_native_scalars:
+            return value, False
         types = extract_types_from_schema(schema)
         as_str = json.dumps(value, ensure_ascii=False)
         coerced = coerce_to_schema_type(as_str, types)
@@ -427,6 +451,7 @@ class ParserEngine(Parser):
         additional: dict | None = None,
         *,
         preserve_strings: bool = False,
+        preserve_native_scalars: bool = False,
     ) -> tuple[dict, bool]:
         """Coerce `args` in place using `additional` for keys absent from `properties`.
 
@@ -440,7 +465,10 @@ class ParserEngine(Parser):
             if not isinstance(prop, dict):
                 continue
             coerced, val_changed = ParserEngine._coerce_value(
-                value, prop, preserve_strings=preserve_strings or key not in properties
+                value,
+                prop,
+                preserve_strings=preserve_strings or key not in properties,
+                preserve_native_scalars=preserve_native_scalars,
             )
             if val_changed:
                 args[key] = coerced

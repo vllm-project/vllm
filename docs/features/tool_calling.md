@@ -179,6 +179,8 @@ Parsers that use the shared parser engine's argument type correction, such as
 Gemma 4 and Qwen3 XML, use the `additionalProperties` schema to interpret values
 under dynamic keys. For example, a parameter declared as `dict[str, int] | None`
 returns `{"bolts": 7}` when the tool call contains `{"bolts": "7"}`.
+With `dict[str, list[int] | None]`, `{"tray": ["2", "3"], "pending": null}`
+becomes `{"tray": [2, 3], "pending": null}`.
 If the schema allows a string, a value such as `"002"` is preserved under a
 dynamic key, including in named fields of an object stored at that key.
 

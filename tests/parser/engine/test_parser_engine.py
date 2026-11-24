@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import regex as re
+from pydantic import TypeAdapter
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.generate.base.protocol import (
@@ -807,16 +808,31 @@ class TestFixArgTypes:
         parsed = json.loads(result)
         assert parsed["inner"]["count"] == 42
 
-    def test_declared_and_additional_object_properties(self):
+    @pytest.mark.parametrize(
+        "value_type, parts, expected",
+        [
+            (list[int], ["2", "3"], [2, 3]),
+            (list[int] | None, ["2", "3"], [2, 3]),
+            (list[int] | None, None, None),
+            (list[list[int]] | None, [["2"]], [[2]]),
+            (list[dict[str, int]] | None, [{"a": "2"}], [{"a": 2}]),
+            (list | None, [1, True, None], [1, True, None]),
+            (list[str] | None, [42], [42]),
+            (list[int] | list[str] | None, ["2", "3"], ["2", "3"]),
+        ],
+    )
+    def test_declared_and_additional_object_properties(
+        self, value_type, parts, expected
+    ):
         schema = {
             "type": "object",
             "properties": {"id": {"type": "string"}},
-            "additionalProperties": {"type": "array", "items": {"type": "integer"}},
+            "additionalProperties": TypeAdapter(value_type).json_schema(),
         }
         engine = _make_engine(tools=[_make_tool("f", {"inventory": schema})])
-        args = '{"inventory":{"id":"002","parts":["2","3"]}}'
+        args = json.dumps({"inventory": {"id": "002", "parts": parts}})
         assert json.loads(engine._fix_arg_types(args, "f")) == {
-            "inventory": {"id": "002", "parts": [2, 3]}
+            "inventory": {"id": "002", "parts": expected}
         }
 
     @pytest.mark.parametrize(
@@ -873,20 +889,19 @@ class TestFixArgTypes:
             "items": {"x": {"qty": "002", "count": 7}},
         }
 
-    def test_array_item_coercion(self):
-        tool = _make_tool(
-            "f",
-            {
-                "nums": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                },
-            },
-        )
+    @pytest.mark.parametrize(
+        "annotation, nums, expected",
+        [
+            (list[int], ["42", "5"], [42, 5]),
+            (list[int] | None, ["42", "5"], [42, 5]),
+            (list[list] | None, [[1, True, None]], [[1, True, None]]),
+        ],
+    )
+    def test_array_item_coercion(self, annotation, nums, expected):
+        tool = _make_tool("f", {"nums": TypeAdapter(annotation).json_schema()})
         engine = _make_engine(tools=[tool])
-        result = engine._fix_arg_types('{"nums": ["42", "5"]}', "f")
-        parsed = json.loads(result)
-        assert parsed["nums"] == [42, 5]
+        result = engine._fix_arg_types(json.dumps({"nums": nums}), "f")
+        assert json.loads(result)["nums"] == expected
 
     def test_array_mixed_item_types(self):
         tool = _make_tool(

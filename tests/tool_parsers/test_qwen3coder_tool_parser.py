@@ -1235,6 +1235,8 @@ def test_typed_maps_in_json_parameter_text(qwen3_tokenizer, streaming):
     class Inventory(BaseModel):
         counts: dict[str, int]
         codes: dict[str, int | str]
+        parts: dict[str, list[int] | None]
+        samples: list
 
     tool = ChatCompletionToolsParam(
         type="function",
@@ -1246,12 +1248,16 @@ def test_typed_maps_in_json_parameter_text(qwen3_tokenizer, streaming):
         "<tool_call>\n<function=inventory>\n"
         '<parameter=counts>{"bolts":"7"}</parameter>\n'
         '<parameter=codes>{"padded":"002","plain":"2"}</parameter>\n'
+        '<parameter=parts>{"tray":["2","3"],"pending":null}</parameter>\n'
+        "<parameter=samples>[1,true]</parameter>\n"
         "</function>\n</tool_call>"
     )
     _, (call,) = run_tool_extraction(parser, output, request, streaming=streaming)
     assert json.loads(call.function.arguments) == {
         "counts": {"bolts": 7},
         "codes": {"padded": "002", "plain": "2"},
+        "parts": {"tray": [2, 3], "pending": None},
+        "samples": [1, True],
     }
 
 
