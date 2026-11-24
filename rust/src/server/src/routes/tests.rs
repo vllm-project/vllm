@@ -457,6 +457,8 @@ struct FakeChatBackend {
     sampling_hints: vllm_text::SamplingHints,
     /// Serve without a tokenizer, like `--skip-tokenizer-init`.
     skip_tokenizer_init: bool,
+    /// A model's own renderer replacing the fake chat format.
+    chat_renderer: Option<DynChatRenderer>,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -474,6 +476,9 @@ fn fake_chat_tokenizer() -> TestTokenizer {
         .with_regular_token("<|END_THINKING|>", 0xF004)
         .with_regular_token("◁think▷", 0xF005)
         .with_regular_token("◁/think▷", 0xF006)
+        .with_regular_token("<｜fim▁hole｜>", 128800)
+        .with_regular_token("<｜fim▁begin｜>", 128801)
+        .with_regular_token("<｜fim▁end｜>", 128802)
 }
 
 impl FakeChatBackend {
@@ -483,6 +488,14 @@ impl FakeChatBackend {
             multimodal_model_info: None,
             sampling_hints: Default::default(),
             skip_tokenizer_init: false,
+            chat_renderer: None,
+        }
+    }
+
+    fn with_chat_renderer(chat_renderer: DynChatRenderer) -> Self {
+        Self {
+            chat_renderer: Some(chat_renderer),
+            ..Self::new()
         }
     }
 
@@ -496,9 +509,7 @@ impl FakeChatBackend {
     fn with_model_id(model_id: impl Into<String>) -> Self {
         Self {
             model_id: model_id.into(),
-            multimodal_model_info: None,
-            sampling_hints: Default::default(),
-            skip_tokenizer_init: false,
+            ..Self::new()
         }
     }
 
@@ -506,10 +517,8 @@ impl FakeChatBackend {
         multimodal_model_info: vllm_chat::multimodal::MultimodalModelInfo,
     ) -> Self {
         Self {
-            model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
-            sampling_hints: Default::default(),
-            skip_tokenizer_init: false,
+            ..Self::new()
         }
     }
 }
@@ -545,7 +554,7 @@ impl TextBackend for FakeChatBackend {
 
 impl ChatBackend for FakeChatBackend {
     fn chat_renderer(&self) -> DynChatRenderer {
-        Arc::new(self.clone())
+        (self.chat_renderer.clone()).unwrap_or_else(|| Arc::new(self.clone()))
     }
 
     fn multimodal_model_info(&self) -> Option<&vllm_chat::multimodal::MultimodalModelInfo> {
@@ -2805,6 +2814,107 @@ async fn completions_render_checks_prompt_presence() {
         {"model":"render-model","prompt":""} -> 200 OK [256]
         {"model":"render-model","prompt":"","add_special_tokens":false} -> 400 Bad Request {"error":{"message":"token_ids must contain at least one token ID.","type":"BadRequestError","param":"token_ids","code":400}}
         {"model":"render-model","prompt":"hello","prompt_embeds":[]} -> 200 OK [256,104,101,108,108,111]"#]].assert_eq(&results.join("\n"));
+}
+
+fn completion_suffix_render_app(chat_renderer: DynChatRenderer) -> axum::Router {
+    let backend = Arc::new(FakeChatBackend::with_chat_renderer(chat_renderer));
+    build_render_router(Arc::new(RenderState {
+        model: "backend-model".to_string(),
+        served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
+        max_model_len: Some(128),
+        text: TextRequestProcessor::new(backend.clone(), 128),
+        chat: ChatRequestProcessor::new(backend, None, None),
+        lora_modules: Vec::new(),
+    }))
+}
+
+/// Like Python's DeepSeek V4 and V4.1 renderers, a completions `suffix` turns
+/// each text prompt into a fill-in-the-middle prompt before tokenization; an
+/// empty prompt is an empty prefix.
+#[tokio::test]
+async fn completions_render_suffix_as_fill_in_the_middle_prompt() {
+    let renderers: [DynChatRenderer; 2] = [
+        Arc::new(vllm_chat::DeepSeekV4ChatRenderer::default()),
+        Arc::new(vllm_chat::DeepSeekV41ChatRenderer::default()),
+    ];
+    for chat_renderer in renderers {
+        let mut app = completion_suffix_render_app(chat_renderer);
+        let mut results = Vec::new();
+        for body in [
+            json!({"model": "render-model", "prompt": "a", "suffix": "z"}),
+            json!({"model": "render-model", "prompt": ["a", ""], "suffix": "z", "add_special_tokens": false}),
+        ] {
+            let (status, json) = post_json(&mut app, "/v1/completions/render", body.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{body} -> {json}");
+            let token_ids = (json.as_array().unwrap().iter())
+                .map(|request| request["token_ids"].to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            results.push(format!("{body} -> {token_ids}"));
+        }
+        expect_test::expect![[r#"
+            {"model":"render-model","prompt":"a","suffix":"z"} -> [256,128801,97,128800,122,128802]
+            {"model":"render-model","prompt":["a",""],"suffix":"z","add_special_tokens":false} -> [128801,97,128800,122,128802] [128801,128800,122,128802]"#]]
+        .assert_eq(&results.join("\n"));
+    }
+}
+
+/// Like Python, a `suffix` is rejected with `echo`, prompt truncation, which
+/// could cut off the fill-in-the-middle markers, token-ID prompts, and models
+/// without a fill-in-the-middle format.
+#[tokio::test]
+async fn completions_render_suffix_rejects_unsupported_inputs() {
+    let mut fim_app =
+        completion_suffix_render_app(Arc::new(vllm_chat::DeepSeekV4ChatRenderer::default()));
+    let mut results = Vec::new();
+    for body in [
+        json!({"model": "render-model", "prompt": "a", "suffix": "z", "echo": true}),
+        json!({"model": "render-model", "prompt": "a", "suffix": "z", "truncate_prompt_tokens": 4}),
+        json!({"model": "render-model", "prompt": [97], "suffix": "z"}),
+    ] {
+        let (status, json) = post_json(&mut fim_app, "/v1/completions/render", body.clone()).await;
+        results.push(format!("{body} -> {status} {}", json["error"]));
+    }
+    let body = json!({"model": "render-model", "prompt": "a", "suffix": "z"});
+    let (status, json) = post_json(
+        &mut test_render_app(),
+        "/v1/completions/render",
+        body.clone(),
+    )
+    .await;
+    results.push(format!("{body} without FIM -> {status} {}", json["error"]));
+    expect_test::expect![[r#"
+        {"model":"render-model","prompt":"a","suffix":"z","echo":true} -> 400 Bad Request {"message":"Echo is unsupported with suffix.","type":"BadRequestError","param":"suffix","code":400}
+        {"model":"render-model","prompt":"a","suffix":"z","truncate_prompt_tokens":4} -> 400 Bad Request {"message":"suffix is not supported with truncate_prompt_tokens","type":"BadRequestError","param":"suffix","code":400}
+        {"model":"render-model","prompt":[97],"suffix":"z"} -> 400 Bad Request {"message":"suffix requires text prompt input for FIM completion rendering","type":"BadRequestError","param":"suffix","code":400}
+        {"model":"render-model","prompt":"a","suffix":"z"} without FIM -> 400 Bad Request {"message":"suffix is only supported for models with FIM completion rendering","type":"BadRequestError","param":"suffix","code":400}"#]].assert_eq(&results.join("\n"));
+}
+
+/// `/v1/completions` lowers a `suffix` like the render route and submits the
+/// fill-in-the-middle prompt to the engine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_suffix_submits_fill_in_the_middle_prompt() {
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+        Arc::new(FakeChatBackend::with_chat_renderer(Arc::new(
+            vllm_chat::DeepSeekV4ChatRenderer::default(),
+        ))),
+        |request| {
+            assert_eq!(
+                decode_prompt_token_ids(request),
+                Some(vec![256, 128801, 97, 128800, 122, 128802])
+            );
+        },
+    )
+    .await;
+    let (status, json) = post_json(
+        &mut app.clone(),
+        "/v1/completions",
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "a", "suffix": "z"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    engine_task.await.expect("mock engine task");
 }
 
 /// Like Python's `TokenizeParams` check, a requested output budget above the
@@ -7031,7 +7141,7 @@ async fn happy_path_returns_sse_stream() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("content-type").and_then(|value| value.to_str().ok()),
-        Some("text/event-stream")
+        Some("text/event-stream; charset=utf-8")
     );
 
     let after_headers = METRICS.render().unwrap();
@@ -9230,7 +9340,7 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("content-type").and_then(|value| value.to_str().ok()),
-        Some("text/event-stream")
+        Some("text/event-stream; charset=utf-8")
     );
 
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
@@ -9747,7 +9857,7 @@ async fn completions_happy_path_returns_sse_stream() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("content-type").and_then(|value| value.to_str().ok()),
-        Some("text/event-stream")
+        Some("text/event-stream; charset=utf-8")
     );
 
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
