@@ -28,17 +28,20 @@ from vllm.platforms import current_platform
 E, TOPK, HID = R.EXPERTS, R.TOPK, R.HIDDEN
 
 # Tolerances, as relative L2 error against the float64 reference, each about
-# 1.3x the error measured on MI300X (24 Nov 2026, every M and TP alike to 2%).
+# 1.3x the largest error measured on MI300X (24 Nov 2026, TP4 and TP8, M 16 to
+# 256, uniform and skewed routing, weight scale codes 119..124).
 # MXFP8 (e4m3, 3 mantissa bits, one power-of-two scale per 32 values) gives a
 # relative error of a few percent per value, and on random data a GEMM output
 # keeps about the relative error of its quantized input. A wrong expert, row or
 # scale gives a relative error near 1, so every bound is far from a real bug.
-STAGE1_RTOL = 5e-2  # x to MXFP8, swiglu, h to bf16: measured 3.8e-2
+STAGE1_RTOL = 5e-2  # x to MXFP8, swiglu, h to bf16: measured 4.0e-2
 STAGE2_RTOL = 3.5e-2  # h to MXFP8, down projection, a pick to bf16: 2.7e-2
 COMBINE_RTOL = 2.5e-3  # bf16 picks summed in f32, the token to bf16: 1.7e-3
-BLOCK_RTOL = 6.5e-2  # all of the above, x and h both quantized: 4.7e-2
-# The worst single row may sit above the global error: a row's error is the
-# mean of 5120 values, so its spread is small, and 1.5x the global bound holds.
+BLOCK_RTOL = 6.5e-2  # all of the above, x and h both quantized: 5.0e-2
+# The worst single row sits above the global error (measured: block 5.8e-2,
+# stage 1 6.1e-2, stage 2 3.3e-2). A row's error averages its 5120 values, so
+# its spread is small, and 1.5x the global bound holds it. One wrong pick
+# moves its row by about 1 / sqrt(6) of the row or more (`_worst_row`).
 ROW_FACTOR = 1.5
 
 ROWS = [
