@@ -11,10 +11,8 @@ own heartbeats kept the lease alive, which it models exactly.
 """
 
 import time
-from dataclasses import dataclass
 from unittest.mock import patch
 
-import msgspec
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -25,14 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     _KV_BLOCKS_EXPIRY_SAFETY_MARGIN,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-    HeartbeatInfo,
-    LookupPinReply,
-    LookupPinRequest,
-    NixlHandshakePayload,
-    PeerKVIdentity,
-    PeerMissReason,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import HeartbeatInfo
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     kv_lease_extension,
 )
@@ -497,67 +488,3 @@ def test_decode_scheduler_ships_the_lease_with_heartbeats():
     scheduler._stop_heartbeat(req.request_id)
     assert info.req_ids == {"prefill-2"}
     assert info.leases == {}
-
-
-@pytest.mark.parametrize(
-    "msg",
-    [
-        LookupPinRequest(
-            block_hashes=[b"\x01" * 32, b"\x02" * 32],
-            identity=PeerKVIdentity(
-                "abc123", 16, hash_algo="sha256", cache_salt="salt"
-            ),
-            lease_duration=30.0,
-            lookup_id="id-1",
-        ),
-        # From a consumer or producer that sends no id.
-        LookupPinRequest(
-            block_hashes=[b"\x03" * 32],
-            identity=PeerKVIdentity("abc123", 16, hash_algo="sha256"),
-        ),
-        NixlHandshakePayload("abc123", b"agent", peer_lookup=True),
-        LookupPinReply(
-            hit_tokens=32,
-            remote_block_ids=[[3, 4], [5, 6]],
-            remote_request_id="pin-1",
-            miss_reason=PeerMissReason.NONE,
-            remote_blocks_expiry_time=1234.5,
-            remote_lease_extension=20,
-            lookup_id="id-1",
-        ),
-        LookupPinReply(
-            hit_tokens=0,
-            remote_block_ids=[],
-            remote_request_id="pin-2",
-            miss_reason=PeerMissReason.IDENTITY_MISMATCH,
-        ),
-    ],
-)
-def test_lookup_pin_wire_roundtrip(msg):
-    """Lookup-and-pin messages survive the side channel's msgpack encoding."""
-    decoded = msgspec.msgpack.Decoder(type(msg)).decode(msgspec.msgpack.encode(msg))
-    assert decoded == msg
-
-
-def test_handshake_payload_peer_lookup_is_compatible_both_ways():
-    """`peer_lookup` is optional on the wire, so mixed versions interoperate.
-
-    An engine that predates it must keep decoding a new engine's payload (its
-    handshake would otherwise break), and a new consumer must read an old
-    engine's payload as "serves no lookups".
-    """
-
-    @dataclass
-    class OldPayload:  # NixlHandshakePayload before `peer_lookup`
-        compatibility_hash: str
-        agent_metadata_bytes: bytes
-
-    new = NixlHandshakePayload("abc123", b"agent", peer_lookup=True)
-    seen_by_old = msgspec.msgpack.decode(msgspec.msgpack.encode(new), type=OldPayload)
-    assert seen_by_old == OldPayload("abc123", b"agent")
-
-    old = OldPayload("abc123", b"agent")
-    seen_by_new = msgspec.msgpack.decode(
-        msgspec.msgpack.encode(old), type=NixlHandshakePayload
-    )
-    assert seen_by_new == NixlHandshakePayload("abc123", b"agent", peer_lookup=False)

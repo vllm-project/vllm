@@ -229,6 +229,9 @@ class NixlBaseConnectorScheduler:
         self._stop_event = threading.Event()
         # Payloads the listener serves; a republish after a wake-up updates them.
         self._handshake_data: dict[tuple[int, int], bytes] = {}
+        # The payloads as given, so they can be re-encoded once lookups can be
+        # served (see bind_kv_cache_manager).
+        self._handshake_payloads: dict[tuple[int, int], Any] = {}
         self._registration_generation = 0
 
         # Requests that need to start recv/send.
@@ -381,6 +384,20 @@ class NixlBaseConnectorScheduler:
         )
         if self._compatibility_hash is not None:
             self._peer_pins.set_compatibility_hash(self._compatibility_hash)
+        if self._handshake_payloads:
+            # The handshake metadata came first: re-encode it now that whether
+            # lookups can be served is known.
+            self.set_xfer_handshake_metadata(self._handshake_payloads)
+
+    def _serves_peer_lookups(self) -> bool:
+        """What the handshake payload advertises: lookups are enabled and a bound
+        cache manager can actually pin and hash the way peers need. An engine that
+        would refuse every lookup must not attract them."""
+        return (
+            self._lookup.enabled
+            and self._peer_pins is not None
+            and self._peer_pins.can_serve()
+        )
 
     def on_step_processed(self) -> None:
         """One scheduled step's output has been processed."""
@@ -410,10 +427,12 @@ class NixlBaseConnectorScheduler:
             except queue.Empty:
                 return
             if self._peer_pins is None:
-                # Lookups are enabled but no cache manager is bound yet (startup,
-                # or a layout that cannot pin). This is transient, unlike the
-                # disabled engine, which answers IDENTITY_MISMATCH for good: the
-                # peer should compute locally now and may ask again later.
+                # Defensive: lookups are enabled but no cache manager is bound.
+                # In production the scheduler binds before the engine core starts
+                # the listener, so this is not expected; if it happens it is
+                # transient, unlike a disabled engine, which answers
+                # IDENTITY_MISMATCH for good. A layout that cannot pin is
+                # answered IDENTITY_MISMATCH by the pin server instead.
                 self._lookup.outbox.put(
                     (
                         identity,
@@ -572,8 +591,10 @@ class NixlBaseConnectorScheduler:
                 )
             # Advertise whether this engine serves lookups: the consumer's
             # capability probe reads it from the GET_META reply.
-            if rank_metadata.peer_lookup != self._lookup.enabled:
-                rank_metadata = replace(rank_metadata, peer_lookup=self._lookup.enabled)
+            self._handshake_payloads[(pp_rank, tp_rank)] = rank_metadata
+            serves = self._serves_peer_lookups()
+            if rank_metadata.peer_lookup != serves:
+                rank_metadata = replace(rank_metadata, peer_lookup=serves)
             encoded = encoder.encode(rank_metadata)
             if self._handshake_data.get((pp_rank, tp_rank)) != encoded:
                 # Peers must handshake again to load the changed registration.

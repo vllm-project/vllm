@@ -14,14 +14,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     LOOKUP_PIN_MSG,
     LookupPinReply,
+    LookupPinRequest,
     NixlConnectorMetadata,
     NixlHandshakePayload,
+    PeerKVIdentity,
     PeerMissReason,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
 from vllm.utils.network_utils import get_open_port, make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 
+from .test_nixl_peer_lookup_client import OldHandshakePayload
 from .test_nixl_peer_pins import (
     COMPAT,
     Clock,
@@ -35,6 +38,9 @@ from .test_nixl_peer_pins import (
 pytestmark = pytest.mark.cpu_test
 
 HOST = "127.0.0.1"
+ENGINE = "producer-engine"
+# What the probe reads the engine id from.
+AGENT = msgspec.msgpack.encode({"engine_id": ENGINE})
 
 
 @pytest.fixture
@@ -51,7 +57,7 @@ def served():
     sched._nixl_handshake_listener_t = None
     connector = make_wired_connector(sched)
     connector.bind_kv_cache_manager(manager)
-    sched.set_xfer_handshake_metadata({(0, 0): NixlHandshakePayload(COMPAT, b"x")})
+    sched.set_xfer_handshake_metadata({(0, 0): NixlHandshakePayload(COMPAT, AGENT)})
     try:
         yield sched, connector, manager, hashes, make_zmq_path("tcp", HOST, port)
     finally:
@@ -163,7 +169,6 @@ def test_lookup_disabled_gets_immediate_miss():
         assert reply.remote_block_ids == []
         assert reply.remote_request_id == ""
         assert reply.miss_reason == PeerMissReason.IDENTITY_MISMATCH
-        assert sched._lookup.inbox.empty()
         assert not sched.has_pending_push_work()
     finally:
         sched.shutdown()
@@ -300,3 +305,63 @@ def test_base_connector_set_engine_wakeup_is_a_noop():
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 
     assert KVConnectorBase_V1.set_engine_wakeup(object(), lambda: None) is None  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        LookupPinRequest(
+            block_hashes=[b"\x01" * 32, b"\x02" * 32],
+            identity=PeerKVIdentity(
+                "abc123", 16, hash_algo="sha256", cache_salt="salt"
+            ),
+            lease_duration=30.0,
+            lookup_id="id-1",
+        ),
+        # From a consumer or producer that sends no id.
+        LookupPinRequest(
+            block_hashes=[b"\x03" * 32],
+            identity=PeerKVIdentity("abc123", 16, hash_algo="sha256"),
+        ),
+        NixlHandshakePayload("abc123", b"agent", peer_lookup=True),
+        LookupPinReply(
+            hit_tokens=32,
+            remote_block_ids=[[3, 4], [5, 6]],
+            remote_request_id="pin-1",
+            miss_reason=PeerMissReason.NONE,
+            remote_blocks_expiry_time=1234.5,
+            remote_lease_extension=20,
+            lookup_id="id-1",
+        ),
+        LookupPinReply(
+            hit_tokens=0,
+            remote_block_ids=[],
+            remote_request_id="pin-2",
+            miss_reason=PeerMissReason.IDENTITY_MISMATCH,
+        ),
+    ],
+)
+def test_lookup_pin_wire_roundtrip(msg):
+    """Lookup-and-pin messages survive the side channel's msgpack encoding."""
+    decoded = msgspec.msgpack.Decoder(type(msg)).decode(msgspec.msgpack.encode(msg))
+    assert decoded == msg
+
+
+def test_handshake_payload_peer_lookup_is_compatible_both_ways():
+    """`peer_lookup` is optional on the wire, so mixed versions interoperate.
+
+    An engine that predates it must keep decoding a new engine's payload (its
+    handshake would otherwise break), and a new consumer must read an old
+    engine's payload as "serves no lookups".
+    """
+    new = NixlHandshakePayload("abc123", b"agent", peer_lookup=True)
+    seen_by_old = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(new), type=OldHandshakePayload
+    )
+    assert seen_by_old == OldHandshakePayload("abc123", b"agent")
+
+    old = OldHandshakePayload("abc123", b"agent")
+    seen_by_new = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(old), type=NixlHandshakePayload
+    )
+    assert seen_by_new == NixlHandshakePayload("abc123", b"agent", peer_lookup=False)

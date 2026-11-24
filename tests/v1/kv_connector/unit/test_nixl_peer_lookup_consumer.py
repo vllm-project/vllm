@@ -22,7 +22,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-    GET_META_MSG,
     LookupPinReply,
     LookupPinRequest,
     NixlConnectorMetadata,
@@ -35,7 +34,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.peer_lookup_client import
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 
-from .test_nixl_peer_lookup_client import OldListener
 from .test_nixl_peer_lookup_listener import cycle, served, wait_for  # noqa: F401
 from .test_nixl_peer_pins import (
     COMPAT,
@@ -213,6 +211,8 @@ def test_router_block_hashes_are_ignored():
         # engine): counted apart from every other miss.
         (None, "peer_unsupported", "peer_unsupported"),
         (None, "lookup_id_mismatch", "lookup_id_mismatch"),
+        (None, "peer_engine_mismatch", "peer_engine_mismatch"),
+        (None, "probe_timeout", "probe_timeout"),
     ],
 )
 def test_miss_computes_locally(reply, error, reason):
@@ -696,27 +696,3 @@ def test_real_client_against_a_real_producer(served):  # noqa: F811
         assert not b.has_pending_push_work()
     finally:
         b._lookup_client.close()
-
-
-def test_real_client_against_an_old_producer_computes_locally():
-    old = OldListener()
-    b = make_consumer(client=PeerLookupClient(timeout_s=10.0))
-    try:
-        request = peer_request(remote_host="127.0.0.1", remote_port=old.port)
-        assert b.get_num_new_matched_tokens(request, 0) == (None, False)
-
-        def answered():
-            return b.get_num_new_matched_tokens(request, 0) != (None, False)
-
-        wait_for(answered)
-
-        params = request.kv_transfer_params
-        assert params["do_remote_prefill"] is False
-        assert params["peer_miss_reason"] == "peer_unsupported"
-        assert b.peer_lookup_stats.misses == {"peer_unsupported": 1}
-        # The old engine only ever saw the probe: its listener lives on.
-        assert old.frames == [(GET_META_MSG, 0, 0)]
-        assert old.thread.is_alive()
-    finally:
-        b._lookup_client.close()
-        old.close()

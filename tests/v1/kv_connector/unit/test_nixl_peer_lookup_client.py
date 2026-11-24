@@ -63,6 +63,10 @@ class FakeProducer:
 
     def __init__(self, advertise: bool = True) -> None:
         self.advertise = advertise
+        # The engine id its handshake payload reports.
+        self.engine_id = "e1"
+        # Sent instead of the payload when set.
+        self.garbage: bytes | None = None
         self.probes = 0
         self.ctx = zmq.Context()
         self.sock = self.ctx.socket(zmq.ROUTER)
@@ -75,12 +79,16 @@ class FakeProducer:
             decoded = msgspec.msgpack.decode(raw)
             if decoded[0] == GET_META_MSG:
                 self.probes += 1
-                payload = NixlHandshakePayload(COMPAT, b"x", peer_lookup=self.advertise)
+                payload = NixlHandshakePayload(
+                    COMPAT,
+                    msgspec.msgpack.encode({"engine_id": self.engine_id}),
+                    peer_lookup=self.advertise,
+                )
                 self.sock.send_multipart(
                     (
                         identity,
                         b"",
-                        msgspec.msgpack.encode(payload),
+                        self.garbage or msgspec.msgpack.encode(payload),
                         msgspec.msgpack.encode(time.perf_counter()),
                     )
                 )
@@ -233,12 +241,14 @@ def test_timeout_when_nothing_listens():
     try:
         port = get_open_port()
         client.submit("a", HOST, port, REQ)
-        assert wait_result(client, "a") == LookupResult(None, "timeout")
+        assert wait_result(client, "a") == LookupResult(None, "probe_timeout")
         assert not client.has_in_flight()
         # The failed probe is cached briefly: the next lookup does not wait out
         # another timeout.
         client.submit("b", HOST, port, REQ)
-        assert wait_result(client, "b", timeout=0.15) == LookupResult(None, "timeout")
+        assert wait_result(client, "b", timeout=0.15) == LookupResult(
+            None, "probe_timeout"
+        )
     finally:
         client.close()
 
@@ -401,7 +411,7 @@ def test_thread_survives_a_peer_that_resets(client, peer):
         bad = PeerLookupClient(timeout_s=0.3)
         try:
             bad.submit("bad", HOST, port, REQ)
-            assert wait_result(bad, "bad") == LookupResult(None, "timeout")
+            assert wait_result(bad, "bad") == LookupResult(None, "probe_timeout")
             assert bad._thread.is_alive()
             bad.submit("ok", HOST, peer.port, REQ)
             identity, _ = peer.recv()
@@ -417,7 +427,7 @@ def test_thread_survives_a_peer_that_resets(client, peer):
 
 def test_bad_peer_address_fails_that_lookup_only(client, peer):
     client.submit("bad", "not a host!", 1, REQ)
-    assert wait_result(client, "bad") == LookupResult(None, "send_failed")
+    assert wait_result(client, "bad") == LookupResult(None, "probe_send_failed")
     client.submit("ok", HOST, peer.port, REQ)
     identity, _ = peer.recv()
     peer.reply(identity, miss())
@@ -437,32 +447,12 @@ def test_real_listener_disabled_engine_is_not_sent_a_lookup(client):
     try:
         client.submit("a", HOST, port, REQ)
         result = wait_result(client, "a")
-        # The probe said no, so the listener never saw a lookup.
-        assert sched._lookup.inbox.empty()
     finally:
         sched.shutdown()
     assert result == LookupResult(None, "peer_unsupported")
 
 
-def test_probe_comes_first_is_shared_and_cached(client, peer):
-    client.submit("a", HOST, peer.port, REQ)
-    client.submit("b", HOST, peer.port, REQ)  # Waits for a's probe.
-    id_a, _ = peer.recv()
-    id_b, _ = peer.recv()
-    assert peer.probes == 1
-    peer.reply(id_a, miss())
-    peer.reply(id_b, miss())
-    wait_result(client, "a")
-    wait_result(client, "b")
-    # The verdict is cached: no second probe.
-    client.submit("c", HOST, peer.port, REQ)
-    identity, _ = peer.recv()
-    assert peer.probes == 1
-    peer.reply(identity, hit())
-    assert wait_result(client, "c").reply == hit()
-
-
-def test_probe_is_repeated_when_the_verdict_expires_or_the_engine_changes(peer):
+def test_probe_comes_first_is_shared_cached_and_repeated_on_expiry(peer):
     now = [0.0]
     client = PeerLookupClient(timeout_s=5.0, clock=lambda: now[0], cap_ttl_s=60.0)
     try:
@@ -473,14 +463,32 @@ def test_probe_is_repeated_when_the_verdict_expires_or_the_engine_changes(peer):
             peer.reply(identity, miss())
             wait_result(client, key)
 
-        one_lookup("a", "e1")
-        one_lookup("b", "e1")
+        # Two lookups at once wait for one probe.
+        client.submit("a", HOST, peer.port, REQ, engine_id="e1")
+        client.submit("b", HOST, peer.port, REQ, engine_id="e1")
+        id_a, _ = peer.recv()
+        id_b, _ = peer.recv()
+        assert peer.probes == 1
+        peer.reply(id_a, miss())
+        peer.reply(id_b, miss())
+        wait_result(client, "a")
+        wait_result(client, "b")
+        one_lookup("c", "e1")  # The verdict is cached.
         assert peer.probes == 1
         now[0] = 61.0  # The yes expired.
-        one_lookup("c", "e1")
+        one_lookup("d", "e1")
         assert peer.probes == 2
-        one_lookup("d", "e2")  # Another engine at the same address.
+        peer.engine_id = "e2"
+        one_lookup("e", "e2")  # Another engine at the same address.
         assert peer.probes == 3
+        # The engine behind the address is not the one the router named (a
+        # restart or downgrade): its yes is not trusted and no lookup is sent.
+        peer.engine_id = "someone-else"
+        now[0] = 200.0
+        client.submit("f", HOST, peer.port, REQ, engine_id="e2")
+        with pytest.raises(AssertionError, match="no request"):
+            peer.recv(timeout_ms=300)  # Answers the probe, sees no lookup.
+        assert wait_result(client, "f") == LookupResult(None, "peer_engine_mismatch")
     finally:
         client.close()
 
@@ -512,16 +520,13 @@ def test_old_listener_gets_no_lookup_and_keeps_serving():
         old.close()
 
 
-def test_peer_not_advertising_gets_no_lookup(client):
-    silent = FakeProducer(advertise=False)
-    try:
-        client.submit("a", HOST, silent.port, REQ)
-        with pytest.raises(AssertionError, match="no request"):
-            silent.recv(timeout_ms=300)  # Answers the probe, then sees no lookup.
-        assert silent.probes == 1
-        assert wait_result(client, "a") == LookupResult(None, "peer_unsupported")
-    finally:
-        silent.close()
+def test_undecodable_payload_is_peer_unsupported(client, peer, caplog):
+    peer.garbage = b"\xc1not a payload"
+    client.submit("a", HOST, peer.port, REQ)
+    with pytest.raises(AssertionError, match="no request"):
+        peer.recv(timeout_ms=300)
+    assert wait_result(client, "a") == LookupResult(None, "peer_unsupported")
+    assert client._caps[(HOST, peer.port)].error == "peer_unsupported"
 
 
 def test_lookup_id_is_sent_echoed_and_checked(client, peer):

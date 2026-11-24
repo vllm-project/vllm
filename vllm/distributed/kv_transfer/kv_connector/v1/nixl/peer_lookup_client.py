@@ -13,10 +13,12 @@ sent unprobed. The first lookup for a peer sends the one frame every engine
 answers safely, `(GET_META_MSG, 0, 0)`, and reads `NixlHandshakePayload
 .peer_lookup` from the reply (an engine that predates the field decodes as
 False). Only a peer that advertises it gets the lookup; any other fails the
-lookup with "peer_unsupported" and the request computes locally. The verdict is
-cached per peer address and engine id (`cap_ttl_s` for a yes, `negative_ttl_s`
-for a no, `failure_ttl_s` when the probe itself failed) and lookups that arrive
-while a probe is out wait for it instead of probing again. The probe runs on the
+lookup with "peer_unsupported" and the request computes locally. A peer whose
+engine id (from the payload's agent metadata) is not the one the router named
+gets no lookup either ("peer_engine_mismatch"). The verdict is cached per peer
+address and engine id (`cap_ttl_s` for a yes, `negative_ttl_s` for a no,
+`failure_ttl_s` when the probe failed or the engine differed), and lookups that
+arrive while a probe is out wait for it instead of probing again. The probe runs on the
 background thread like everything else, so the scheduler never waits for it.
 
 Every lookup gets its own REQ socket. The producer's replies are not FIFO (a
@@ -62,8 +64,10 @@ class LookupResult:
     # None when the lookup failed.
     reply: LookupPinReply | None
     # When reply is None: "timeout", "bad_reply", "send_failed", "closed",
-    # "peer_unsupported" (the peer does not serve lookups; none was sent) or
-    # "lookup_id_mismatch".
+    # "lookup_id_mismatch", or one of the probe's, where no lookup was sent:
+    # "peer_unsupported" (the peer does not serve lookups, or its payload did not
+    # decode), "peer_engine_mismatch" (another engine answers at that address),
+    # "probe_timeout", "probe_bad_reply" or "probe_send_failed".
     error: str | None = None
 
 
@@ -78,6 +82,12 @@ class _Job:
     engine_id: str | None = None
     # The id the reply must echo; None skips the check.
     lookup_id: str | None = None
+
+
+class _EngineId(msgspec.Struct):
+    """The one field of NixlAgentMetadata the probe reads."""
+
+    engine_id: str
 
 
 @dataclass
@@ -132,6 +142,7 @@ class PeerLookupClient:
         # waiting on a probe that is out, per peer.
         self._caps: dict[tuple[str, int], _Capability] = {}
         self._probing: dict[tuple[str, int], list[_Job]] = {}
+        self._warned_payload: set[tuple[str, int]] = set()
         self._lock = threading.Lock()
         self._jobs: queue.Queue[_Job] = queue.Queue()
         self._next_job_id = 0
@@ -338,7 +349,7 @@ class PeerLookupClient:
             logger.warning(
                 "Peer lookup could not reach %s:%s", job.host, job.port, exc_info=True
             )
-            self._resolve_probe(job, "send_failed", active, poller)
+            self._resolve_probe(job, "probe_send_failed", active, poller)
 
     def _resolve_probe(self, job: _Job, error: str | None, active, poller) -> None:
         """Record the verdict for `job`'s peer and release the jobs waiting on it."""
@@ -349,7 +360,7 @@ class PeerLookupClient:
             else self._negative_ttl_s
             if error == "peer_unsupported"
             else self._failure_ttl_s
-        )
+        )  # A mismatch or failed probe is retried soon.
         previous = self._caps.get(addr)
         self._caps[addr] = _Capability(job.engine_id, error, self._clock() + ttl)
         if previous is None or previous.error != error:
@@ -448,35 +459,71 @@ class PeerLookupClient:
                 result = LookupResult(None, "bad_reply")
             self._finish(sock, active, poller, result)
 
-    def _step_probe(
-        self, sock, entry: _Active, readable: bool, now: float, active, poller
-    ):
+    def _step_probe(self, sock, entry: _Active, readable: bool, now, active, poller):
         error: str | None
+        job = entry.job
         if readable:
             try:
-                error = None if self._read_probe(sock) else "peer_unsupported"
+                advertises, engine_id = self._read_probe(sock)
+                if not advertises:
+                    error = "peer_unsupported"
+                elif job.engine_id is not None and engine_id != job.engine_id:
+                    # A restart or downgrade at this address, or a router that
+                    # is wrong: the engine here is not the one we were told.
+                    logger.warning(
+                        "Peer %s:%s answers as engine %r, expected %r; no lookup",
+                        job.host,
+                        job.port,
+                        engine_id,
+                        job.engine_id,
+                    )
+                    error = "peer_engine_mismatch"
+                else:
+                    error = None
             except zmq.Again:
                 return
-            except Exception:
-                logger.warning("Peer capability probe failed", exc_info=True)
-                error = "bad_reply"
+            except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+                # Not a payload this version can read: treat the peer as one
+                # that does not serve lookups, and say so once per peer.
+                addr = (job.host, job.port)
+                if addr not in self._warned_payload:
+                    self._warned_payload.add(addr)
+                    logger.warning(
+                        "Peer %s:%s sent a handshake payload that does not "
+                        "decode (%s); it gets no lookups",
+                        *addr,
+                        exc,
+                    )
+                error = "peer_unsupported"
+            except Exception as exc:
+                logger.warning("Peer capability probe failed: %s", exc)
+                error = "probe_bad_reply"
         elif now >= entry.deadline:
-            error = "timeout"
+            error = "probe_timeout"
         else:
             return
         self._finish(sock, active, poller, None)
-        self._resolve_probe(entry.job, error, active, poller)
+        self._resolve_probe(job, error, active, poller)
 
     @staticmethod
-    def _read_probe(sock: zmq.Socket) -> bool:
-        """Whether the peer's handshake payload advertises lookups.
+    def _read_probe(sock: zmq.Socket) -> tuple[bool, str | None]:
+        """The handshake payload's `peer_lookup` and the replying engine's id.
 
         A payload from an engine that predates the field decodes as False. The
-        reply has a second frame (the peer's clock) that is ignored.
+        reply has a second frame (the peer's clock) that is ignored. The id is
+        None when the agent metadata cannot be read.
         """
         frames = sock.recv_multipart(flags=zmq.NOBLOCK)
         payload = msgspec.msgpack.decode(frames[0], type=NixlHandshakePayload)
-        return payload.peer_lookup
+        if not payload.peer_lookup:
+            return False, None
+        try:
+            engine = msgspec.msgpack.decode(
+                payload.agent_metadata_bytes, type=_EngineId
+            )
+        except (msgspec.DecodeError, msgspec.ValidationError):
+            return True, None
+        return True, engine.engine_id
 
     @staticmethod
     def _read(sock: zmq.Socket, job: _Job) -> LookupResult:

@@ -555,7 +555,7 @@ def test_peer_lookup_disabled_by_default():
     assert sched.take_peer_lookup_replies() == []
 
 
-def test_handshake_metadata_sets_compat_hash():
+def test_handshake_metadata_sets_compat_hash_and_advertises_lookups():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlHandshakePayload,
     )
@@ -577,6 +577,30 @@ def test_handshake_metadata_sets_compat_hash():
         sched._handshake_data[(0, 0)], type=NixlHandshakePayload
     )
     assert served_payload.peer_lookup is True
+
+    def advertised(sched) -> bool:
+        return msgspec.msgpack.decode(
+            sched._handshake_data[(0, 0)], type=NixlHandshakePayload
+        ).peer_lookup
+
+    # Handshake metadata set before the cache manager is bound: advertised
+    # once the bind makes the engine able to serve.
+    early = make_wired_scheduler(manager)
+    early._handshake_data = {}
+    early._nixl_handshake_listener_t = object()
+    early.set_xfer_handshake_metadata({(0, 0): NixlHandshakePayload(COMPAT, b"x")})
+    assert not advertised(early)
+    make_wired_connector(early).bind_kv_cache_manager(manager)
+    assert advertised(early)
+
+    # A layout that cannot pin refuses every lookup, so it must not advertise.
+    unpinnable = make_wired_scheduler(manager)
+    unpinnable._handshake_data = {}
+    unpinnable._nixl_handshake_listener_t = object()
+    manager._supports_prefix_pinning = False
+    make_wired_connector(unpinnable).bind_kv_cache_manager(manager)
+    unpinnable.set_xfer_handshake_metadata({(0, 0): NixlHandshakePayload(COMPAT, b"x")})
+    assert not advertised(unpinnable)
 
 
 # ---------------------------------------------------------------------------

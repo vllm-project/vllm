@@ -164,6 +164,13 @@ class PeerPinServer:
     def num_shipped(self) -> int:
         return len(self._shipped)
 
+    def can_serve(self) -> bool:
+        """Whether a lookup can ever hit here: the layout can be pinned and block
+        hashes are reproducible by peers. False means every lookup is refused."""
+        return self._manager.supports_prefix_pinning() and not hashes_not_reproducible(
+            self._hash_algo
+        )
+
     def set_compatibility_hash(self, compat_hash: str) -> None:
         self._check_thread()
         self._compat_hash = compat_hash
