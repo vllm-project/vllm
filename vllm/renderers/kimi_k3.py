@@ -69,6 +69,29 @@ def _apply_k3_thinking_kwargs(
         )
 
 
+def _keep_k3_image_parts_in_place(conversation: list[ConversationMessage]) -> None:
+    """Flatten parsed message content, keeping image messages as part lists.
+
+    K3's encoder renders a part list in order with no separators, which is
+    where the checkpoint expects images. Messages without images keep the
+    newline-joined string.
+    """
+    for message in conversation:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        parts = [
+            {"type": "text", "text": part["name"]}
+            if part["type"] == "tool_reference"
+            else part
+            for part in content
+        ]
+        if all(part["type"] == "text" for part in parts):
+            message["content"] = "\n".join(part["text"] for part in parts)
+        else:
+            message["content"] = parts  # type: ignore[typeddict-item]
+
+
 def _normalize_k3_tool_messages(
     conversation: list[ConversationMessage],
 ) -> list[dict[str, Any]]:
@@ -207,11 +230,12 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
             self.model_config,
-            content_format="string",
+            content_format="openai",
             media_io_kwargs=_merge_k3_media_io_kwargs(params.media_io_kwargs),
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
+        _keep_k3_image_parts_in_place(conversation)
         rendered_conversation = _normalize_k3_tool_messages(conversation)
         prompt = parse_dec_only_prompt(
             self._apply_chat_template(rendered_conversation, params)
@@ -231,11 +255,12 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             self.model_config,
-            content_format="string",
+            content_format="openai",
             media_io_kwargs=_merge_k3_media_io_kwargs(params.media_io_kwargs),
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
+        _keep_k3_image_parts_in_place(conversation)
         rendered_conversation = _normalize_k3_tool_messages(conversation)
         token_ids = await self._apply_chat_template_async(rendered_conversation, params)
         prompt = parse_dec_only_prompt(token_ids)

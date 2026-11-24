@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
-from transformers import AutoImageProcessor
+from transformers import AutoImageProcessor, AutoProcessor
 
 from vllm.config import (
     CacheConfig,
@@ -162,6 +162,126 @@ def test_image_metadata_only_chat():
     raw, remote = results
     assert remote["prompt_token_ids"] == raw["prompt_token_ids"]
     assert remote["mm_placeholders"] == raw["mm_placeholders"]
+
+
+_CHAT_IMAGES = [_noise_image(31, 47), _noise_image(73, 30)]
+
+
+def _image_part(index: int) -> dict:
+    return {"type": "image", "image": _CHAT_IMAGES[index]}
+
+
+def _render_chat(messages: list[dict]) -> tuple[dict, int]:
+    """Render HF-processor-style messages as a chat request with image URLs."""
+    config = VllmConfig(
+        model_config=ModelConfig(
+            _MODEL_ID,
+            tokenizer_mode="kimi_k3",
+            trust_remote_code=True,
+            limit_mm_per_prompt={"image": 2},
+            mm_processor_cache_gb=0,
+        ),
+        cache_config=CacheConfig(enable_prefix_caching=False),
+        device_config=DeviceConfig(device="cpu"),
+    )
+
+    def to_request(content):
+        if isinstance(content, str):
+            return content
+        return [
+            {"type": "image_url", "image_url": {"url": encode_image_url(p["image"])}}
+            if p["type"] == "image"
+            else p
+            for p in content
+        ]
+
+    renderer = renderer_from_config(config)
+    try:
+        _, prompts = renderer.render_chat(
+            [[{**m, "content": to_request(m["content"])} for m in messages]],
+            ChatParams(),
+        )
+    finally:
+        renderer.shutdown()
+    return prompts[0], config.model_config.hf_config.media_placeholder_token_id
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        pytest.param(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Compare "},
+                        _image_part(0),
+                        {"type": "text", "text": " with "},
+                        _image_part(1),
+                        {"type": "text", "text": " briefly."},
+                        {"type": "text", "text": " Thanks."},
+                    ],
+                }
+            ],
+            id="interleaved",
+        ),
+        pytest.param(
+            [
+                {"role": "user", "content": "What does <|sep|> mean in XTML?"},
+                {"role": "assistant", "content": "It ends a tag."},
+                {
+                    "role": "user",
+                    "content": [
+                        _image_part(0),
+                        {"type": "text", "text": "Is it in this image?"},
+                    ],
+                },
+            ],
+            id="markup_text_in_history",
+        ),
+    ],
+)
+def test_chat_prompt_matches_hf_processor(messages: list[dict]):
+    """A chat request with images gives the model the checkpoint's own prompt:
+    parts in request order, no separators, message text tokenized as text."""
+    prompt, pad = _render_chat(messages)
+
+    hf = AutoProcessor.from_pretrained(_MODEL_ID, trust_remote_code=True)
+    reference_ids = hf(messages=messages, return_tensors="pt")["input_ids"]
+    # The HF processor leaves one pad per image for the model to expand.
+    num_pads = (
+        hf.image_processor.media_tokens_calculator(_image_part(i))
+        for i in range(len(_CHAT_IMAGES))
+    )
+    expected_ids: list[int] = []
+    for token_id in reference_ids.flatten().tolist():
+        expected_ids += [pad] * next(num_pads) if token_id == pad else [token_id]
+    assert prompt["prompt_token_ids"] == expected_ids
+
+
+def test_chat_placeholder_text_is_not_an_image_slot():
+    """Text that spells the image placeholder stays text next to an image."""
+    literal, _ = _render_chat(
+        [
+            {
+                "role": "user",
+                "content": [
+                    _image_part(0),
+                    {"type": "text", "text": "Is <|kimi_image_placeholder|> a word?"},
+                ],
+            }
+        ]
+    )
+    plain, _ = _render_chat(
+        [
+            {
+                "role": "user",
+                "content": [_image_part(0), {"type": "text", "text": "Is it a word?"}],
+            }
+        ]
+    )
+    assert literal["mm_placeholders"] == plain["mm_placeholders"]
+    assert len(literal["prompt_token_ids"]) > len(plain["prompt_token_ids"])
 
 
 @pytest.mark.parametrize(

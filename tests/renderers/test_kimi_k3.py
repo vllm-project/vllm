@@ -344,6 +344,35 @@ def test_render_messages_returns_token_prompt():
     assert conversation[0]["role"] == "user"
 
 
+@pytest.mark.asyncio
+async def test_render_messages_keeps_text_only_content_as_string():
+    """Messages without images reach K3's encoder as the same strings as
+    before image parts were kept in place."""
+    tokenizer = StubTokenizer([1, 2, 3])
+    renderer = _make_renderer(tokenizer)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "second"},
+            ],
+        },
+        {"role": "assistant", "content": None, "refusal": "I cannot help."},
+        {"role": "user", "content": []},
+    ]
+
+    renderer.render_messages(messages, ChatParams())
+    await renderer.render_messages_async(messages, ChatParams())
+
+    for conversation in tokenizer.conversations:
+        assert [message["content"] for message in conversation] == [
+            "first\nsecond",
+            "I cannot help.",
+            "",
+        ]
+
+
 def test_render_messages_derives_private_xtml_tool_attrs():
     tokenizer = StubTokenizer([1, 2, 3])
     renderer = _make_renderer(tokenizer)
