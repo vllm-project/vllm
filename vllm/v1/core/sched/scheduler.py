@@ -950,6 +950,9 @@ class Scheduler(SchedulerInterface):
                                 preempted_req_id, None
                             )
                             if preempted_encoder_inputs:
+                                self.encoder_cache_manager.discard_store_events(
+                                    preempted_req, preempted_encoder_inputs
+                                )
                                 # Restore encoder compute budget if the preempted
                                 # request had encoder inputs scheduled in this step.
                                 num_embeds_to_restore = sum(

@@ -115,6 +115,22 @@ class EncoderCacheManager:
         if self.enable_events:
             self.events.append(event)
 
+    def discard_store_events(self, request: Request, input_ids: list[int]) -> None:
+        """Discard store events for encoder inputs removed from this step."""
+        if not self.enable_events:
+            return
+
+        cancelled = {(request.mm_features[i].identifier,) for i in input_ids}
+        self.events = [
+            event
+            for event in self.events
+            if not (
+                isinstance(event, ECStored)
+                and event.medium == MEDIUM_GPU
+                and tuple(event.mm_hashes) in cancelled
+            )
+        ]
+
     def take_events(self) -> list[ECCacheEvent]:
         """Take the encoder cache events collected since the last call.
 
@@ -359,6 +375,17 @@ class EncoderCacheManager:
         # An entry evicted early in the scheduling pass can be allocated again
         # later in the same pass. Keep its worker-side tensor in that case.
         freed = [mm_hash for mm_hash in self.freed if mm_hash not in self.cached]
+        if self.enable_events and len(freed) != len(self.freed):
+            retained = {(mm_hash,) for mm_hash in self.freed if mm_hash in self.cached}
+            self.events = [
+                event
+                for event in self.events
+                if not (
+                    isinstance(event, ECRemoved)
+                    and event.medium == MEDIUM_GPU
+                    and tuple(event.mm_hashes) in retained
+                )
+            ]
         self.freed = []
         return freed
 
