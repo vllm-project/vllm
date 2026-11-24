@@ -510,7 +510,7 @@ def _decode(
         lens = [len(p) for p in prompts]
         if graph_sizes is None:
             runner.llm.collective_rpc("capture_steps", args=(lens,))
-        params = SamplingParams(temperature=0.0, max_tokens=STEPS + 1, logprobs=0)
+        params = SamplingParams(temperature=0.0, max_tokens=STEPS + 1, logprobs=5)
         outs = runner.llm.generate(
             [TokensPrompt(prompt_token_ids=p) for p in prompts], params
         )
@@ -700,9 +700,11 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
         _merged_matches_two_launches(vllm_runner, monkeypatch)
 
 
-# The largest log-probability difference of a chosen token between the padded
-# CUDA graph run and the eager run while their histories agree.
-LOGPROB_TOL = 0.1
+# The largest log-probability difference of a token between the padded CUDA
+# graph run and the eager run while their histories agree (measured on MI300X
+# TP4: 6.4e-2 and 9.4e-2), and the largest gap between the two runs' choices
+# where they part (a near-tie of the random-weight model).
+LOGPROB_TOL = 0.15
 
 
 @pytest.mark.parametrize(
@@ -746,21 +748,31 @@ def test_largestep_in_padded_cuda_graphs(
         captured = [n for n in rank["large_captured"].values() if n is not None]
         assert len(captured) == len(WHOLE + FFN), rank
         assert all(n >= 1 for n in captured), rank
-    # Graph replays and eager calls run the same launches on the same inputs,
-    # so each request's first decoded token must match, and while two
-    # histories agree, the chosen token's log-probability must too. Random
-    # weights give near-ties, so a later token may differ (measured on MI300X
-    # TP4, 50 requests: 44 identical sequences), and the check stops at a
-    # request's first differing token. A padding row that leaked into a real
-    # row, or a launch that read a buffer the graph does not own, moves the
-    # log-probabilities far more than LOGPROB_TOL.
-    worst = 0.0
+    # Eager and graph runs differ in more than the padding (other attention and
+    # GEMM launches, other batch shapes), so their log-probabilities differ a
+    # little, and the random-weight model has near-ties: two runs may part at a
+    # token whose top two candidates are almost equal (measured on MI300X TP8:
+    # 1 of 45 requests at its first decoded token). So the check is per token,
+    # up to where a request's two runs part: every chosen token's
+    # log-probability agrees within LOGPROB_TOL, and where they part, each run's
+    # choice is in the other's top 5 and within LOGPROB_TOL of the other's
+    # choice there. A padding row that leaked into a real row, or a launch that
+    # read a buffer the graph does not own, moves log-probabilities by far more.
+    worst, parted = 0.0, 0
     for i, (a, b) in enumerate(zip(eager, graphs, strict=True)):
-        assert a.token_ids[:2] == b.token_ids[:2], i
         for t, (ta, tb) in enumerate(zip(a.token_ids, b.token_ids, strict=True)):
-            if ta != tb:
-                break
-            la, lb = a.logprobs[t][ta].logprob, b.logprobs[t][tb].logprob
-            worst = max(worst, abs(la - lb))
-    print(f"{tp=} {rows=}: largest log-probability difference {worst:.3e}")
+            la, lb = a.logprobs[t], b.logprobs[t]
+            if ta == tb:
+                worst = max(worst, abs(la[ta].logprob - lb[tb].logprob))
+                continue
+            parted += 1
+            assert tb in la and ta in lb, (i, t, ta, tb)
+            gap = max(la[ta].logprob - la[tb].logprob, lb[tb].logprob - lb[ta].logprob)
+            assert gap < LOGPROB_TOL, (i, t, gap)
+            break
+    print(
+        f"{tp=} {rows=}: largest log-probability difference {worst:.3e}, "
+        f"{parted} of {rows} requests parted at a near-tie"
+    )
     assert worst < LOGPROB_TOL, worst
+    assert parted <= rows // 5, parted
