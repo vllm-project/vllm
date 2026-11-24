@@ -614,11 +614,20 @@ def kernel_unified_attention(
                 other=0.0,
             )
             # V : (TILE_SIZE, HEAD_SIZE)
-            V_load = tl.load(
-                value_cache_ptr + v_offset,
-                mask=dim_mask[None, :] & tile_mask[:, None],
-                other=0.0,
-            )
+            v_mask = dim_mask[None, :] & tile_mask[:, None]
+            if (
+                SLIDING_WINDOW
+                and USE_CAUSAL
+                and not USE_PER_SEQ_CAUSAL
+                and HEAD_SIZE_PADDED >= 256
+            ):
+                # Zero V outside the window in the load: P is 0 there, but
+                # stale blocks may hold inf/NaN. At head size 256, masking the
+                # loaded tile with tl.where keeps a second V tile in shared
+                # memory and lowers occupancy.
+                v_dist = context_len + q_block_local_idx * BLOCK_Q - seq_offset
+                v_mask = v_mask & (v_dist < SLIDING_WINDOW)[:, None]
+            V_load = tl.load(value_cache_ptr + v_offset, mask=v_mask, other=0.0)
         K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
         V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
 
@@ -691,7 +700,10 @@ def kernel_unified_attention(
         M, L, P, alpha = softmax_step(S, M, L)
         acc = acc * alpha[:, None]
 
-        if SLIDING_WINDOW:
+        # Otherwise the window was applied in the V load above.
+        if SLIDING_WINDOW and (
+            USE_TD or USE_PER_SEQ_CAUSAL or not USE_CAUSAL or HEAD_SIZE_PADDED < 256
+        ):
             qpos_lo = q_block_local_idx * BLOCK_Q
             dist = context_len + qpos_lo - seq_offset[:, None]
             if USE_PER_SEQ_CAUSAL:

@@ -956,6 +956,102 @@ def test_triton_unified_attn(
     )
 
 
+@pytest.mark.parametrize("num_heads", [(16, 8), (8, 2)])
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("sliding_window", [64, 1024])
+@pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
+@torch.inference_mode()
+def test_triton_unified_attn_sliding_window_ignores_nan_outside_window(
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int,
+    seq_threshold_3D: int,
+) -> None:
+    """Cached K/V outside a causal sliding window must not reach the output,
+    even when it holds NaN (stale blocks)."""
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    seq_lens = [(1, 1328), (1, 37), (5, 600), (129, 2011)]
+    query_lens = [q for q, _ in seq_lens]
+    kv_lens = torch.tensor([k for _, k in seq_lens], dtype=torch.int32)
+    num_query_heads, num_kv_heads = num_heads
+    block_size = 16
+    max_blocks = (int(kv_lens.max()) + block_size - 1) // block_size
+    num_blocks = len(seq_lens) * max_blocks
+    scale = head_size**-0.5
+
+    query = torch.randn(
+        sum(query_lens), num_query_heads, head_size, dtype=torch.bfloat16
+    )
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=torch.bfloat16
+    )
+    value_cache = torch.randn_like(key_cache)
+    # Distinct blocks per sequence: each cached token belongs to one window.
+    block_tables = torch.randperm(num_blocks, dtype=torch.int32).view(
+        len(seq_lens), max_blocks
+    )
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    ref_output = ref_paged_attn(
+        query=query.clone(),
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        sliding_window=sliding_window,
+        soft_cap=None,
+    )
+    for i, (query_len, kv_len) in enumerate(seq_lens):
+        pos = torch.arange(max(kv_len - query_len + 1 - sliding_window, 0))
+        blocks = block_tables[i, pos // block_size].long()
+        key_cache[blocks, pos % block_size] = float("nan")
+        value_cache[blocks, pos % block_size] = float("nan")
+
+    num_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+    scratch_rows = seq_threshold_3D * (
+        max(query_lens) if max(query_lens) <= MAX_3D_QUERY_LEN else 1
+    )
+    output = torch.empty_like(query)
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens,
+        max_seqlen_q=max(query_lens),
+        max_seqlen_k=int(kv_lens.max()),
+        softmax_scale=scale,
+        causal=True,
+        window_size=(sliding_window - 1, 0),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_segments,
+        softmax_segm_output=torch.empty(
+            (scratch_rows, num_query_heads, num_segments, head_size_padded),
+            dtype=torch.float32,
+        ),
+        softmax_segm_max=torch.empty(
+            (scratch_rows, num_query_heads, num_segments), dtype=torch.float32
+        ),
+        softmax_segm_expsum=torch.empty(
+            (scratch_rows, num_query_heads, num_segments), dtype=torch.float32
+        ),
+        kv_quant_mode=KVQuantMode.NONE,
+    )
+    assert torch.isfinite(output).all()
+    torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)
+
+
 @pytest.mark.parametrize(
     "seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]]
 )
