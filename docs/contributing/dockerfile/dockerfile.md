@@ -18,7 +18,8 @@ The edges of the build graph represent:
 - `RUN --mount=(.\*)from=...` dependencies (with a dotted line and an empty diamond arrow head)
 
 The stages are cut by how often their inputs change, so that a build reruns,
-and a host pulls, only what a commit changed.
+and a host pulls, only what a commit changed. The stage map at the top of the
+Dockerfile lists every stage with what makes it rerun.
 
 The `requirement-pins` stage cuts the PyTorch and FlashInfer pins out of
 `requirements/cuda.txt` into one small file each. `base` installs only the

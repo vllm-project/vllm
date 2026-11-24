@@ -6,6 +6,56 @@
 # docs/assets/contributing/dockerfile-stages-dependency.png
 
 # =============================================================================
+# STAGE MAP
+# =============================================================================
+# The file is five phases, in this order. A `# ====` banner opens each phase
+# and a `####` banner opens each stage, so searching for `STAGE: <name>` or
+# `PHASE <n>` jumps to it. Stages appear in the order listed here.
+#
+# PHASE 1, build environment (FROM the manylinux image; nothing from phases 1-2
+# ships in a final image, only the wheels they build):
+#   toolchain            compilers, sccache, uv venv           (no Python packages)
+#   ├─ requirement-pins  PyTorch/FlashInfer/Rubin pins plus [tool.uv]
+#   │                    cut out of pyproject.toml (each cached by content)
+#   └─ base              + PyTorch                             (changes only with the pins)
+#
+# PHASE 2, build artifacts (each top-level stage names its phase 1 parent):
+#   hybrid-test-wheels  [base]       mamba-ssm / causal-conv1d wheels for the test image
+#   rust-build-cache    [toolchain]  compiles the Rust frontend           (changes with rust/)
+#   └─ rust-build                    relinks it with the commit's version (reruns on every commit)
+#   build-deps          [base]       + build requirements
+#   ├─ csrc-build                    compiles the C++/CUDA extensions     (slow; changes with csrc/, cmake/)
+#   │  └─ kernel-symbol-map-build → kernel-symbol-map  CI artifact, only built by its own bake target
+#   └─ build                         packages the vLLM wheel              (reruns on every commit)
+#   extensions-build    [base]       DeepEP wheels
+#   dev                 [base]       + all runtime and dev requirements   (not used by CI)
+#
+# PHASE 3, runtime base (FROM the nvidia/cuda image):
+#   vllm-runtime-base    Python, CUDA JIT tools, PyTorch, FlashInfer kernels, runtime requirements
+#
+# PHASE 4, CI test image (`--target test`):
+#   test-deps  [vllm-runtime-base]  + every test requirement, DeepEP  (changes with requirements/)
+#   ├─ test-wheel     helper: installs the vLLM wheel, sorts its files by how often they change
+#   ├─ test-src [toolchain]  helper: lays out the source tree
+#   └─ test           CI image: test-deps + one layer per tree from the two helpers
+#
+# PHASE 5, release image (`--target vllm-openai`):
+#   vllm-base  [vllm-runtime-base]  + DeepEP, vLLM wheel
+#   └─ vllm-openai-base  + optional KV connectors, labels
+#      ├─ vllm-sagemaker
+#      └─ vllm-openai          release image (default `docker-bake.hcl` target)
+#         └─ vllm-openai-nonroot  opt-in non-root variant (last stage in file)
+#
+# To follow one image, read phase 3 and then only its own phase: 4 for the CI
+# test image, 5 for the release image. Both install the wheel that `build`
+# packages from csrc-build and rust-build in phase 2.
+#
+# Ordering rule: within a stage, steps that change rarely come first. A step
+# reruns when its own inputs change or when any step above it reran, so keep
+# per-commit inputs (the wheel, `COPY .`, `.git`) at the bottom.
+# =============================================================================
+
+# =============================================================================
 # VERSION MANAGEMENT
 # =============================================================================
 # ARG defaults in this Dockerfile are the source of truth for pinned versions.
@@ -94,7 +144,13 @@ ARG UV_KEYRING_PROVIDER=${PIP_KEYRING_PROVIDER}
 # Flag enables built-in KV-connector dependency libs into docker images
 ARG INSTALL_KV_CONNECTORS=false
 
-#################### TOOLCHAIN IMAGE ####################
+# =============================================================================
+# PHASE 1 of 5: BUILD ENVIRONMENT
+# Stages: toolchain, requirement-pins, base.
+# The compilers and the pinned PyTorch that every phase 2 stage starts from.
+# =============================================================================
+
+#################### STAGE: toolchain ####################
 # Compilers, sccache and the uv-managed /opt/venv. No Python packages yet, so
 # nothing here changes with requirements/.
 FROM ${BUILD_BASE_IMAGE} AS toolchain
@@ -192,7 +248,7 @@ ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 
 WORKDIR /workspace
 
-#################### REQUIREMENT PINS ####################
+#################### STAGE: requirement-pins ####################
 # Pins cut out of requirements/ and pyproject.toml into one small file each.
 # A stage that COPYs one of these files reruns only when that pin changes,
 # because BuildKit keys `COPY --from` on the copied file's content.
@@ -234,7 +290,7 @@ RUN { echo '[tool.uv]'; \
         uv_stub = tomllib.load(open('/pins/uv-pyproject.toml', 'rb')); \
         assert full.get('tool', {}).get('uv', {}) == uv_stub.get('tool', {}).get('uv', {}), '[tool.uv] extraction mismatch'"
 
-#################### BASE BUILD IMAGE ####################
+#################### STAGE: base ####################
 # toolchain + PyTorch: all that the native builds (csrc-build, extensions-build,
 # hybrid-test-wheels) compile against. Deliberately not the full runtime
 # requirements, so a dependency bump does not recompile them.
@@ -290,9 +346,16 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # kernel needs PTX, add +PTX to that kernel's CMake arch list instead.
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
-#################### BUILD BASE IMAGE ####################
 
-#################### HYBRID TEST WHEELS IMAGE ####################
+# =============================================================================
+# PHASE 2 of 5: BUILD ARTIFACTS
+# Stages: hybrid-test-wheels, rust-build-cache, rust-build, build-deps,
+# csrc-build, kernel-symbol-map-build, kernel-symbol-map, build,
+# extensions-build, dev.
+# Everything compiled or packaged: the wheels that phases 3-5 install.
+# =============================================================================
+
+#################### STAGE: hybrid-test-wheels ####################
 # mamba-ssm and causal-conv1d for the hybrid-model tests, built from pinned
 # commits against base's torch. It rebuilds with base, in parallel with the
 # longer csrc-build, so it adds no time to the image build. No arm64 or Rubin
@@ -301,9 +364,6 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # warns, and only the hybrid jobs fail (in check-hybrid-test-deps.py) instead
 # of the whole nightly run.
 FROM base AS hybrid-test-wheels
-ARG TARGETPLATFORM
-ARG INSTALL_RUBIN_PRERELEASE
-ARG PYTORCH_NIGHTLY
 ARG max_jobs=2
 WORKDIR /workspace
 COPY requirements/build/hybrid-test-deps.txt requirements/build/hybrid-test-deps.txt
@@ -317,16 +377,13 @@ RUN --mount=type=cache,target=/opt/uv/cache \
          || { [ "${PYTORCH_NIGHTLY}" = "1" ] \
               && echo "WARNING: mamba-ssm/causal-conv1d failed to build against torch nightly" \
               && rm -rf /wheels/*; }; }
-#################### HYBRID TEST WHEELS IMAGE ####################
 
-#################### RUST BUILD IMAGE ####################
+#################### STAGE: rust-build-cache ####################
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main wheel
 # build stage doesn't need the rust toolchain or the rust source.
 # This stage reuses the Python environment from toolchain (it needs no PyTorch)
 # and runs in parallel with csrc-build/extensions-build.
 FROM toolchain AS rust-build-cache
-ARG USE_SCCACHE
-ARG SCCACHE_ENDPOINT
 
 # Install native tools needed only for Rust builds.
 RUN dnf install -y --setopt=install_weak_deps=False make perl-core \
@@ -369,6 +426,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
         sccache --show-stats; \
     fi
 
+#################### STAGE: rust-build ####################
 # Relink with the exact Git-derived package version.
 FROM rust-build-cache AS rust-build
 
@@ -376,9 +434,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     --mount=type=bind,source=.git,target=.git \
     SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash tools/build_rust.sh
-#################### RUST BUILD IMAGE ####################
 
-#################### BUILD DEPS IMAGE ####################
+#################### STAGE: build-deps ####################
 # Build requirements shared by csrc-build and build. Reruns only when base or
 # requirements/build/cuda.txt changes.
 FROM base AS build-deps
@@ -411,7 +468,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         --index-strategy unsafe-first-match; \
     fi
 
-#################### CSRC BUILD IMAGE ####################
+#################### STAGE: csrc-build ####################
+# Compiles the C++/CUDA extensions into a wheel with a fixed dummy version, so
+# this slow stage is keyed only by the native sources copied below.
 FROM build-deps AS csrc-build
 
 WORKDIR /workspace
@@ -429,9 +488,6 @@ ENV MAX_JOBS=${max_jobs}
 # number of threads used by nvcc
 ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
-
-ARG USE_SCCACHE
-ARG SCCACHE_ENDPOINT
 
 # Flag to control whether to use pre-built vLLM wheels
 ARG VLLM_USE_PRECOMPILED=""
@@ -480,9 +536,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
-#################### CSRC BUILD IMAGE ####################
-
-#################### KERNEL SYMBOL MAP ####################
+#################### STAGE: kernel-symbol-map-build, kernel-symbol-map ####################
 # Kernel symbol map for CI test selection: which source file produced each GPU
 # kernel symbol, read from the objects csrc-build compiled. Only when
 # VLLM_KERNEL_SYMBOL_MAP=1 (nightly). Exported on its own by the CI bake target
@@ -506,57 +560,9 @@ RUN if [ "${VLLM_KERNEL_SYMBOL_MAP}" = "1" ]; then \
 FROM scratch AS kernel-symbol-map
 COPY --from=kernel-symbol-map-build /kernel_symbol_map.json.gz /kernel_symbol_map.json.gz
 
-#################### EXTENSIONS BUILD IMAGE ####################
-# Build DeepEP - runs in PARALLEL with csrc-build
-# This stage is independent and doesn't affect csrc cache
-FROM base AS extensions-build
-ARG CUDA_VERSION
-ARG INSTALL_RUBIN_PRERELEASE
-
-# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
-ENV UV_HTTP_TIMEOUT=500
-ENV UV_INDEX_STRATEGY="unsafe-best-match"
-ENV UV_LINK_MODE=copy
-
-WORKDIR /workspace
-
-# Build DeepEP wheels
-COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
-COPY tools/ep_kernels/patches /tmp/patches
-# Defaults moved here from tools/ep_kernels/install_python_libraries.sh for centralized version management
-ARG DEEPEP_COMMIT_HASH=a56d6156febcd9976e55adc85b5155bfac9f28f8
-ARG NVSHMEM_VER
-ARG NCCL_VERSION
-RUN --mount=type=cache,target=/opt/uv/cache \
-    mkdir -p /tmp/ep_kernels_workspace/dist && \
-    CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
-    if [ -n "$NCCL_VERSION" ]; then \
-        echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
-            > /tmp/nccl-override.txt && \
-        export UV_OVERRIDE=/tmp/nccl-override.txt; \
-    fi && \
-    DEEPEP_ARCH_LIST='9.0a 10.0a' && \
-    if [ "$(printf '%s\n' 12.9 "$CUDA_VERSION" | sort -V | head -n1)" = 12.9 ]; then \
-        DEEPEP_ARCH_LIST="$DEEPEP_ARCH_LIST 10.3a"; \
-    fi && \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        DEEPEP_ARCH_LIST="$DEEPEP_ARCH_LIST 10.7a"; \
-    fi && \
-    export TORCH_CUDA_ARCH_LIST="$DEEPEP_ARCH_LIST" && \
-    /tmp/install_python_libraries.sh \
-        --workspace /tmp/ep_kernels_workspace \
-        --mode wheel \
-        ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} \
-        ${NVSHMEM_VER:+--nvshmem-ver "$NVSHMEM_VER"} && \
-    find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
-
-# Checksum for the stages that install these wheels: they COPY it to rerun when
-# a wheel changes, and bind-mount the wheels so those never become a layer.
-RUN sha256sum /tmp/ep_kernels_workspace/dist/*.whl \
-    > /tmp/ep_kernels_workspace/dist/wheels.sha256
-#################### EXTENSIONS BUILD IMAGE ####################
-
-#################### WHEEL BUILD IMAGE ####################
+#################### STAGE: build ####################
+# Packages the vLLM wheel from the source tree plus the prebuilt native and
+# Rust artifacts. `COPY . .` makes everything below it rerun on every commit.
 FROM build-deps AS build
 
 WORKDIR /workspace
@@ -613,21 +619,53 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ] && \
         echo "Skipping wheel size check."; \
     fi
 
-#################### WHEEL BUILD IMAGE ####################
+#################### STAGE: extensions-build ####################
+# DeepEP wheels. Runs in parallel with csrc-build.
+FROM base AS extensions-build
 
-#################### DEV IMAGE ####################
+# Build DeepEP wheels
+COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
+COPY tools/ep_kernels/patches /tmp/patches
+# Defaults moved here from tools/ep_kernels/install_python_libraries.sh for centralized version management
+ARG DEEPEP_COMMIT_HASH=a56d6156febcd9976e55adc85b5155bfac9f28f8
+ARG NVSHMEM_VER
+ARG NCCL_VERSION
+RUN --mount=type=cache,target=/opt/uv/cache \
+    mkdir -p /tmp/ep_kernels_workspace/dist && \
+    CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
+    if [ -n "$NCCL_VERSION" ]; then \
+        echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
+            > /tmp/nccl-override.txt && \
+        export UV_OVERRIDE=/tmp/nccl-override.txt; \
+    fi && \
+    DEEPEP_ARCH_LIST='9.0a 10.0a' && \
+    if [ "$(printf '%s\n' 12.9 "$CUDA_VERSION" | sort -V | head -n1)" = 12.9 ]; then \
+        DEEPEP_ARCH_LIST="$DEEPEP_ARCH_LIST 10.3a"; \
+    fi && \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+        DEEPEP_ARCH_LIST="$DEEPEP_ARCH_LIST 10.7a"; \
+    fi && \
+    export TORCH_CUDA_ARCH_LIST="$DEEPEP_ARCH_LIST" && \
+    /tmp/install_python_libraries.sh \
+        --workspace /tmp/ep_kernels_workspace \
+        --mode wheel \
+        ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} \
+        ${NVSHMEM_VER:+--nvshmem-ver "$NVSHMEM_VER"} && \
+    find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
+
+# Checksum for the stages that install these wheels: they COPY it to rerun when
+# a wheel changes, and bind-mount the wheels so those never become a layer.
+RUN sha256sum /tmp/ep_kernels_workspace/dist/*.whl \
+    > /tmp/ep_kernels_workspace/dist/wheels.sha256
+
+
+#################### STAGE: dev ####################
+# Development image: base plus all runtime and dev requirements. On the path
+# to neither shipped image.
 FROM base AS dev
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
-ARG PYTORCH_CUDA_INDEX_BASE_URL
-
-# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
-# Reference: https://github.com/astral-sh/uv/pull/1694
-ENV UV_HTTP_TIMEOUT=500
-ENV UV_INDEX_STRATEGY="unsafe-best-match"
-# Use copy mode to avoid hardlink failures with Docker cache mounts
-ENV UV_LINK_MODE=copy
 
 # Install libnuma-dev, required by fastsafetensors (fixes #20384)
 RUN dnf install -y numactl-devel \
@@ -688,9 +726,14 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         --index-strategy unsafe-first-match; \
     fi
 
-#################### DEV IMAGE ####################
-#################### vLLM installation IMAGE ####################
-# image with vLLM installed
+# =============================================================================
+# PHASE 3 of 5: RUNTIME BASE
+# Stage: vllm-runtime-base.
+# What the release image and the CI test image share: OS packages, Python,
+# CUDA JIT tools and the runtime Python requirements. No vLLM code yet.
+# =============================================================================
+
+#################### STAGE: vllm-runtime-base ####################
 FROM ${FINAL_BASE_IMAGE} AS vllm-runtime-base
 
 ARG INSTALL_RUBIN_PRERELEASE
@@ -705,7 +748,6 @@ ARG GET_PIP_URL
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /vllm-workspace
-
 
 # Python version string for paths (e.g., "314" for 3.14)
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
@@ -963,69 +1005,20 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # LD_LIBRARY_PATH via CUDA_HOME above) to allow override.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
 
-# ============================================================
-# VLLM INSTALLATION (depends on build stage)
-# ============================================================
+# =============================================================================
+# PHASE 4 of 5: CI TEST IMAGE
+# Stages: test-deps, test-wheel, test-src, test.
+# The per-commit CI image (`--target test`). Nothing in the release image
+# comes from this phase.
+# =============================================================================
 
-FROM vllm-runtime-base AS vllm-base
-
-ARG PIP_INDEX_URL UV_INDEX_URL
-ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
-ARG PYTORCH_CUDA_INDEX_BASE_URL
-ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
-
-# We can specify the standard or nightly build of PyTorch
-ARG PYTORCH_NIGHTLY
-
-# Install EP kernels wheels (DeepEP) built in `extensions-build` before the
-# per-commit vLLM wheel so wheel rebuilds do not rerun DeepEP. Copy only the
-# checksum to bust the layer cache and bind-mount the wheels to keep them out
-# of the image.
-COPY --from=extensions-build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
-RUN --mount=type=bind,from=extensions-build,src=/tmp/ep_kernels_workspace/dist,target=/tmp/ep-kernels-dist \
-    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
-    --mount=type=cache,target=/opt/uv/cache \
-    /tmp/uv_install_cuda.sh 0 "${CUDA_VERSION}" "${PYTORCH_CUDA_INDEX_BASE_URL}" /tmp/ep-kernels-dist/*.whl
-
-# Install the vLLM wheel, with the same checksum-plus-bind-mount pattern.
-COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
-COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
-RUN --mount=type=bind,from=build,src=/workspace/dist,target=/tmp/vllm-dist \
-    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
-    --mount=type=cache,target=/opt/uv/cache \
-    /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" "${CUDA_VERSION}" "${PYTORCH_CUDA_INDEX_BASE_URL}" /tmp/vllm-dist/*.whl
-
-# Expose the Rust frontend bundled in the wheel on the container's PATH.
-RUN ln -s "$(python3 -c 'import sysconfig; print(sysconfig.get_path("platlib"))')/vllm/vllm-rs" /usr/local/bin/vllm-rs \
-    && vllm-rs --version
-
-RUN --mount=type=cache,target=/opt/uv/cache \
-. /etc/environment && \
-uv pip list
-
-# Copy examples and benchmarks at the end to minimize cache invalidation
-COPY examples examples
-COPY benchmarks benchmarks
-COPY ./vllm/collect_env.py .
-#################### vLLM installation IMAGE ####################
-#################### TEST IMAGE ####################
+#################### STAGE: test-deps ####################
 # Stable dependencies for the unit testing image
 FROM vllm-runtime-base AS test-deps
 
-ARG PYTHON_VERSION
-ARG TARGETPLATFORM
-
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
-ARG PYTORCH_CUDA_INDEX_BASE_URL
 ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
-
-# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
-# Reference: https://github.com/astral-sh/uv/pull/1694
-ENV UV_HTTP_TIMEOUT=500
-ENV UV_INDEX_STRATEGY="unsafe-best-match"
-# Use copy mode to avoid hardlink failures with Docker cache mounts
-ENV UV_LINK_MODE=copy
 
 RUN apt-get update -y \
     && apt-get install -y git \
@@ -1153,6 +1146,7 @@ RUN --mount=type=bind,from=extensions-build,src=/tmp/ep_kernels_workspace/dist,t
     --mount=type=cache,target=/opt/uv/cache \
     /tmp/uv_install_cuda.sh 0 "${CUDA_VERSION}" "${PYTORCH_CUDA_INDEX_BASE_URL}" /tmp/ep-kernels-dist/*.whl
 
+#################### STAGE: test-wheel ####################
 # Helper, not shipped: pip-installs the vLLM wheel on top of test-deps, then
 # sorts the installed files into /split/{native,rust,python} for the test stage.
 FROM test-deps AS test-wheel
@@ -1180,6 +1174,7 @@ RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
         python3 tools/kv_connector_lock.py verify requirements/test/kv_connectors_cuda.txt; \
     fi
 
+#################### STAGE: test-src ####################
 # Helper, not shipped: the source tree as the test image lays it out.
 # Branches from toolchain rather than test-deps so this stage runs in parallel
 # with vllm-runtime-base/test-deps and does not invalidate on requirements/ edits.
@@ -1190,6 +1185,7 @@ COPY . /src
 # will not be imported by other tests
 RUN cd /src && mkdir src && mv vllm src/vllm
 
+#################### STAGE: test ####################
 # image to run unit testing suite
 # note that this uses vllm installed by `pip` (in the test-wheel stage)
 #
@@ -1213,24 +1209,59 @@ ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 
 # Catch GPU<->CPU syncs in execute_model/sample_tokens
 ENV VLLM_GPU_SYNC_CHECK=error
-#################### TEST IMAGE ####################
 
-#################### OPENAI API SERVER ####################
-# base openai image with additional requirements, for any subsequent openai-style images
-FROM vllm-base AS vllm-openai-base
-ARG TARGETPLATFORM
-ARG INSTALL_KV_CONNECTORS=false
-ARG EFA_INSTALLER_VERSION
-ARG EFA_INSTALLER_SHA256
-ARG INSTALL_RUBIN_PRERELEASE
-ARG CUDA_VERSION
+# =============================================================================
+# PHASE 5 of 5: RELEASE IMAGE
+# Stages: vllm-base, vllm-openai-base, vllm-sagemaker, vllm-openai,
+# vllm-openai-nonroot.
+# From here to the end of the file: the image users run
+# (`--target vllm-openai`).
+# =============================================================================
+
+#################### STAGE: vllm-base ####################
+FROM vllm-runtime-base AS vllm-base
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
 
-# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
-# Reference: https://github.com/astral-sh/uv/pull/1694
-ENV UV_HTTP_TIMEOUT=500
+# We can specify the standard or nightly build of PyTorch
+ARG PYTORCH_NIGHTLY
+
+# The DeepEP wheels: see the same install at the end of test-deps.
+COPY --from=extensions-build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
+RUN --mount=type=bind,from=extensions-build,src=/tmp/ep_kernels_workspace/dist,target=/tmp/ep-kernels-dist \
+    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
+    --mount=type=cache,target=/opt/uv/cache \
+    /tmp/uv_install_cuda.sh 0 "${CUDA_VERSION}" "${PYTORCH_CUDA_INDEX_BASE_URL}" /tmp/ep-kernels-dist/*.whl
+
+# Install the vLLM wheel, with the same checksum-plus-bind-mount pattern.
+COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
+COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/tmp/vllm-dist \
+    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
+    --mount=type=cache,target=/opt/uv/cache \
+    /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" "${CUDA_VERSION}" "${PYTORCH_CUDA_INDEX_BASE_URL}" /tmp/vllm-dist/*.whl
+
+# Expose the Rust frontend bundled in the wheel on the container's PATH.
+RUN ln -s "$(python3 -c 'import sysconfig; print(sysconfig.get_path("platlib"))')/vllm/vllm-rs" /usr/local/bin/vllm-rs \
+    && vllm-rs --version
+
+RUN --mount=type=cache,target=/opt/uv/cache \
+. /etc/environment && \
+uv pip list
+
+# Copy examples and benchmarks at the end to minimize cache invalidation
+COPY examples examples
+COPY benchmarks benchmarks
+COPY ./vllm/collect_env.py .
+
+#################### STAGE: vllm-openai-base ####################
+# base openai image with additional requirements, for any subsequent openai-style images
+FROM vllm-base AS vllm-openai-base
+ARG INSTALL_KV_CONNECTORS=false
+ARG EFA_INSTALLER_VERSION
+ARG EFA_INSTALLER_SHA256
 
 # install kv_connectors if requested
 # Do not add +PTX here; see the main TORCH_CUDA_ARCH_LIST comment above.
@@ -1285,6 +1316,7 @@ LABEL org.opencontainers.image.source="https://github.com/vllm-project/vllm" \
       ai.vllm.build.url="${VLLM_BUILD_URL}" \
       ai.vllm.image.tag="${VLLM_IMAGE_TAG}"
 
+#################### STAGE: vllm-sagemaker ####################
 # define sagemaker first, so it is not default from `docker build`
 FROM vllm-openai-base AS vllm-sagemaker
 
@@ -1292,24 +1324,24 @@ COPY examples/deployment/sagemaker-entrypoint.sh .
 RUN chmod +x sagemaker-entrypoint.sh
 ENTRYPOINT ["./sagemaker-entrypoint.sh"]
 
+#################### STAGE: vllm-openai ####################
 FROM vllm-openai-base AS vllm-openai
 
 # To run the image as non-root, either build the `vllm-openai-nonroot` target
 # below, or in a derived Dockerfile uncomment the following line and ensure
 # any additional layers chgrp-0 / chmod-g+rwX paths they write to. The `vllm`
-# user (UID 2000, GID 0) is already created in the `vllm-base` stage.
+# user (UID 2000, GID 0) is already created in the `vllm-runtime-base` stage.
 # See docs/deployment/docker.md.
 # USER vllm
 ENTRYPOINT ["vllm", "serve"]
-#################### OPENAI API SERVER ####################
 
-#################### OPENAI API SERVER (NON-ROOT, OPT-IN) ####################
+#################### STAGE: vllm-openai-nonroot ####################
 # Non-root-ready variant of `vllm-openai`. Built via:
 #   docker build --target vllm-openai-nonroot -t vllm:openai-nonroot \
 #       -f docker/Dockerfile .
 #
 # Runtime behavior:
-#   * Default USER is `vllm` (UID 2000, GID 0) created in `vllm-base`.
+#   * Default USER is `vllm` (UID 2000, GID 0) created in `vllm-runtime-base`.
 #   * HOME is /home/vllm, pre-created group-0-writable so arbitrary UIDs in
 #     group 0 (OpenShift / `--user <uid>:0`) can also use the image.
 #   * Entrypoint wrapper handles the "UID not in /etc/passwd" case for truly
@@ -1322,4 +1354,3 @@ FROM vllm-openai AS vllm-openai-nonroot
 USER vllm
 WORKDIR /home/vllm
 ENTRYPOINT ["/usr/local/bin/vllm-nonroot-entrypoint.sh"]
-#################### OPENAI API SERVER (NON-ROOT, OPT-IN) ####################
