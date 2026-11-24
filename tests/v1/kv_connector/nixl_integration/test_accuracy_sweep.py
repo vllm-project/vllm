@@ -115,7 +115,7 @@ GRANITE = {
     "VLLM_SSM_CONV_STATE_LAYOUT": "DS",
     "GPU_MEMORY_UTILIZATION": "0.8",
     "MODEL_NAMES": "ibm-granite/granite-4.0-h-tiny",
-    "VLLM_SERVE_EXTRA_ARGS": "--max-model-len,8192,--trust-remote-code",
+    "VLLM_SERVE_EXTRA_ARGS": "--max-model-len,8192",
 }
 QWEN35 = {
     "VLLM_SSM_CONV_STATE_LAYOUT": "DS",

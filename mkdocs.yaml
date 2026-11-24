@@ -61,6 +61,7 @@ plugins:
         - docs/mkdocs/gen_files/generate_argparse.py
         - docs/mkdocs/gen_files/generate_metrics.py
         - docs/mkdocs/gen_files/generate_attention_backends.py
+        - docs/mkdocs/gen_files/generate_quantization_tables.py
   - autorefs
   - awesome-nav
   - glightbox
@@ -106,7 +107,21 @@ plugins:
         examples/features/pause_resume.md: examples/rl/pause_resume.md
         serving/online_serving/decisions.md: models/structured_decisions_models.md
         serving/online_serving/structured_decisions.md: models/structured_decisions_models.md
-        training/routed_experts_replay.md: training/routed_experts.md
+        training/routed_experts_replay.md: training/rollout_artifacts/routed_experts.md
+        training/rlhf.md: training/README.md
+        training/direct_reload.md: training/weight_updates/direct_reload.md
+        training/layerwise.md: training/weight_updates/layerwise.md
+        training/weight_checker.md: training/weight_updates/weight_checker.md
+        training/weight_transfer/README.md: training/weight_updates/README.md
+        training/weight_transfer/base.md: training/weight_updates/engines/base.md
+        training/weight_transfer/ipc.md: training/weight_updates/engines/ipc.md
+        training/weight_transfer/m2n.md: training/weight_updates/engines/m2n.md
+        training/weight_transfer/modelexpress.md: training/weight_updates/engines/modelexpress.md
+        training/weight_transfer/nccl.md: training/weight_updates/engines/nccl.md
+        training/weight_transfer/sharded_rdt.md: training/weight_updates/engines/sharded_rdt.md
+        training/routed_experts.md: training/rollout_artifacts/routed_experts.md
+        training/sampling_mask.md: training/rollout_artifacts/sampling_mask.md
+        training/prompt_token_id_logprobs.md: training/rollout_artifacts/prompt_token_id_logprobs.md
 
 markdown_extensions:
   - attr_list
@@ -147,6 +162,7 @@ extra_css:
   - mkdocs/stylesheets/extra.css
 
 extra_javascript:
+  - mkdocs/javascript/ask_ai_widget.js
   - mkdocs/javascript/mathjax.js
   - https://unpkg.com/mathjax@3.2.2/es5/tex-mml-chtml.js
   - mkdocs/javascript/edit_and_feedback.js
