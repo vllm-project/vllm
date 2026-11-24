@@ -43,34 +43,40 @@ class LoadablePairs:
         self._blob = blob
         self._hash_len = hash_len
         self._loadable = loadable
-        # Hashes loadable in every group of a group-id combination.
-        self._hits: dict[tuple[int, ...], set[bytes]] = {}
+        # Built on first use: each hash's position, and per group-id
+        # combination whether every group can load the hash at each position.
+        self._index: dict[bytes, int] | None = None
+        self._hits: dict[tuple[int, ...], list[bool]] = {}
 
-    def _hash(self, i: int) -> bytes:
-        return bytes(self._blob[i * self._hash_len : (i + 1) * self._hash_len])
+    def _positions(self) -> dict[bytes, int]:
+        if self._index is None:
+            hashes = np.frombuffer(self._blob, dtype=f"V{self._hash_len}").tolist()
+            self._index = dict(zip(hashes, range(len(hashes))))
+        return self._index
 
     def contains_all(self, group_ids: Sequence[int], block_hash: bytes) -> bool:
         """Whether every group in `group_ids` can load `block_hash`."""
+        index = self._index if self._index is not None else self._positions()
+        i = index.get(block_hash)
+        if i is None:
+            return False
         key = tuple(group_ids)
         hits = self._hits.get(key)
         if hits is None:
             arrays = [self._loadable.get(g) for g in key]
             hits = self._hits[key] = (
-                set()
+                [False] * (len(self._blob) // self._hash_len)
                 if any(a is None for a in arrays)
-                else {
-                    self._hash(i)
-                    for i in np.flatnonzero(np.logical_and.reduce(arrays)).tolist()
-                }
+                else np.logical_and.reduce(arrays).tolist()
             )
-        return block_hash in hits
+        return hits[i]
 
     def __contains__(self, pair: tuple[int, bytes]) -> bool:
         return self.contains_all((pair[0],), pair[1])
 
     def __sub__(self, pairs: Iterable[tuple[int, bytes]]) -> "LoadablePairs":
         """These pairs without `pairs`, e.g. keys evicted since the probe."""
-        index = {self._hash(i): i for i in range(len(self._blob) // self._hash_len)}
+        index = self._positions()
         loadable = {g: a.copy() for g, a in self._loadable.items()}
         for group_id, block_hash in pairs:
             if group_id in loadable and block_hash in index:
