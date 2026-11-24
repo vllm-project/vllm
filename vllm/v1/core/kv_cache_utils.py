@@ -906,10 +906,9 @@ def resolve_kv_cache_block_sizes(
     ):
         if unsupported_managers:
             raise ValueError(
-                f"Invalid prefix_match_unit={requested}; fine-grained "
-                "prefix-cache hits would be disabled because these KV cache "
-                "managers require block-aligned lookups: "
-                f"{', '.join(unsupported_managers)}. "
+                f"Invalid prefix_match_unit={requested}; partial cache hits "
+                "would be disabled because these KV cache managers require "
+                f"block-aligned lookups: {', '.join(unsupported_managers)}. "
                 f"Got group block sizes={group_block_sizes}."
             )
         if not connector_enabled:
