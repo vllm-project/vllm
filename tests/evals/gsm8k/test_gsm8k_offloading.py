@@ -17,7 +17,7 @@ configs with `assert_reload`, so elsewhere a silently skipped reload
 
 Covers both KV offloading connectors (OffloadingConnector and
 SimpleCPUOffloadConnector) across five architecture families, plus
-UMBPStoreConnector on ROCm for Gemma 4:
+UMBPStoreConnector on ROCm for Gemma 4 and Qwen 3.8:
   - Hybrid Mamba (NemotronH: attention + Mamba)
   - Heterogeneous head dim (Gemma 4)
   - Hybrid GDN (Qwen 3.5: attention + GatedDeltaNet)
@@ -149,6 +149,9 @@ class OffloadingModelConfig:
     spec_name: str = "CPUOffloadingSpec"
     assert_reload: bool = False
     num_shots: int = NUM_FEWSHOT
+    max_tokens: int = 256
+    use_chat_completions: bool = False
+    chat_template_kwargs: dict[str, object] | None = None
 
 
 MODELS = [
@@ -278,6 +281,36 @@ MODELS = [
             reason="requires ROCm and MORI built with UMBP",
         ),
     ),
+    pytest.param(
+        OffloadingModelConfig(
+            id="umbp-qwen3.8-flash-next-fp8",
+            model="Qwen/Qwen3.8-Flash-Next-FP8",
+            connector="UMBPStoreConnector",
+            # Block size is 832 (Mamba align): 5-shot prompts (~750 tokens)
+            # rarely fill a block, so 12 shots are used as for Nemotron-H.
+            # The model needs the chat template with thinking off; in
+            # completions mode it scores 0.
+            # Scores 0.985-0.990 on 4x MI350X.
+            num_shots=12,
+            accuracy_threshold=0.90,
+            assert_reload=True,
+            max_tokens=1024,
+            use_chat_completions=True,
+            chat_template_kwargs={"enable_thinking": False},
+            extra_server_args=["--tensor-parallel-size", "4"],
+            env_dict={
+                "VLLM_ROCM_USE_AITER": "1",
+                "VLLM_ROCM_USE_AITER_MOE": "0",
+            },
+            cpu_offload_gib=16,
+            startup_timeout=2400,
+        ),
+        id="umbp-qwen3.8-flash-next-fp8",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_rocm() and mori_has_umbp()),
+            reason="requires ROCm and MORI built with UMBP",
+        ),
+    ),
 ]
 
 
@@ -318,6 +351,9 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
             results = evaluate_gsm8k(
                 num_questions=NUM_QUESTIONS,
                 num_shots=cfg.num_shots,
+                max_tokens=cfg.max_tokens,
+                use_chat_completions=cfg.use_chat_completions,
+                chat_template_kwargs=cfg.chat_template_kwargs,
                 host=f"http://{server.host}",
                 port=server.port,
             )
