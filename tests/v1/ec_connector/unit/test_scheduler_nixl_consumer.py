@@ -91,7 +91,7 @@ class _FakeTransport:
 _MISSING = object()
 
 
-def _consumer_sched(monkeypatch):
+def _consumer_sched(monkeypatch, allowed_peers=("h:1",)):
     def _region(cfg):
         return ECSharedRegion(
             engine_id="eng-" + str(uuid.uuid4()), num_blocks=_N, block_size_bytes=_BS
@@ -102,9 +102,11 @@ def _consumer_sched(monkeypatch):
     # ec_enable_nixl defaults to False, so this builds gate-off; the fields
     # below flip on the NIXL consumer state directly.
     # No measured widths: a consumer takes each shape from the announcement.
-    s = ECCPUScheduler(
-        create_ec_vllm_config(ec_role="ec_consumer", encoder_output_widths={})
+    cfg = create_ec_vllm_config(ec_role="ec_consumer", encoder_output_widths={})
+    cfg.ec_transfer_config.ec_connector_extra_config["ec_allowed_peers"] = list(
+        allowed_peers
     )
+    s = ECCPUScheduler(cfg)
     # Turn on NIXL consumer state without constructing real transports.
     s._nixl_enabled = True
     s._transport = _FakeTransport()
@@ -123,6 +125,42 @@ def _params(mm_hash, length):
             "shape": [length, _HID],
         }
     }
+
+
+@pytest.mark.parametrize(
+    "peer",
+    [
+        {"peer_host": "127.0.0.1", "peer_port": 12345},
+        {"peer_host": "h", "peer_port": 2},
+        {"peer_host": ["h"], "peer_port": 1},
+        {"peer_host": "h", "peer_port": True},
+        {"peer_host": "h", "peer_port": "1"},
+        {"peer_host": "h", "peer_port": None},
+    ],
+)
+def test_unapproved_producer_cannot_populate_cache(monkeypatch, peer):
+    s = _consumer_sched(monkeypatch)
+    params = _params("h1", 4)
+    params["h1"].update(peer)
+    req = _Request([_Feature("h1", 4)], params=params)
+
+    assert s.ensure_cache_available(req, 0) is False
+    assert s.take_unavailable_requests() == {"r1"}
+    assert s._sessions == {}
+    assert s._cache.get("h1") is None
+    assert not s._in_flight
+    s.shutdown()
+
+
+def test_remote_reads_denied_without_allowed_peers(monkeypatch):
+    s = _consumer_sched(monkeypatch, allowed_peers=())
+    req = _Request([_Feature("h1")], params=_params("h1", 1))
+
+    assert s.ensure_cache_available(req, 0) is False
+    assert s.take_unavailable_requests() == {"r1"}
+    assert s._cache.get("h1") is None
+    assert s._sessions == {}
+    s.shutdown()
 
 
 def test_new_remote_read_defers_then_completes(monkeypatch):
