@@ -1174,20 +1174,7 @@ class FTOnlyCommunicator(CudaCommunicator):
 
     def __init__(self, original: CudaCommunicator):
         self.unique_name = original.unique_name
-        self.device = original.device
-        self.cpu_group = original.cpu_group
-        self.device_group = original.device_group
-        self.rank = original.rank
-        self.world_size = original.world_size
-        self.ranks = original.ranks
-        self.global_rank = original.global_rank
-        self.global_world_size = original.global_world_size
-        self.rank_in_group = original.rank_in_group
-        self.is_ep_communicator = original.is_ep_communicator
-        self.use_all2all = original.use_all2all
-        self.all2all_backend = original.all2all_backend
         self.all2all_manager: All2AllManagerBase | None = original.all2all_manager
-        self.pynccl_comm = None
 
     def __getattribute__(self, name: str) -> Any:
         value = super().__getattribute__(name)
