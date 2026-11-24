@@ -948,14 +948,16 @@ def test_triton_mla_sparse_cuda_graph_capture_and_replay(monkeypatch):
 
     # Warmup before capture.
     fp8_paged_mqa_logits_triton(q_idx, kv_idx, w_idx, ctx_lens, bt, max_model_len)
-    triton_mla_sparse_fwd(q_mla, kv_mla, topk_idx, sm_scale=576**-0.5)
+    triton_mla_sparse_fwd(q_mla, kv_mla, topk_idx, sm_scale=576**-0.5, return_lse=True)
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         logits_out = fp8_paged_mqa_logits_triton(
             q_idx, kv_idx, w_idx, ctx_lens, bt, max_model_len
         )
-        attn_out, _ = triton_mla_sparse_fwd(q_mla, kv_mla, topk_idx, sm_scale=576**-0.5)
+        attn_out, lse_out = triton_mla_sparse_fwd(
+            q_mla, kv_mla, topk_idx, sm_scale=576**-0.5, return_lse=True
+        )
 
     # Replay with different device-side lengths and indices.
     ctx_lens.copy_(torch.tensor([[140], [30]], dtype=torch.int32, device=device))
@@ -968,7 +970,7 @@ def test_triton_mla_sparse_cuda_graph_capture_and_replay(monkeypatch):
     ref_logits = _ref_fp8_paged_mqa_logits(
         q_idx, kv_idx, w_idx, ctx_lens, bt, max_model_len
     )
-    ref_attn, _ = _ref_mla_sparse_fwd(q_mla, kv_mla, topk_idx, 576**-0.5, 512)
+    ref_attn, ref_lse = _ref_mla_sparse_fwd(q_mla, kv_mla, topk_idx, 576**-0.5, 512)
     torch.testing.assert_close(
         logits_out[0, :140], ref_logits[0, :140], rtol=1e-2, atol=1e-2
     )
@@ -976,3 +978,5 @@ def test_triton_mla_sparse_cuda_graph_capture_and_replay(monkeypatch):
         logits_out[1, :30], ref_logits[1, :30], rtol=1e-2, atol=1e-2
     )
     torch.testing.assert_close(attn_out, ref_attn, rtol=2e-2, atol=2e-2)
+    assert lse_out is not None
+    torch.testing.assert_close(lse_out, ref_lse, rtol=1e-2, atol=1e-2)

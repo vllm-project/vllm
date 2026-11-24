@@ -37,6 +37,7 @@ def _triton_mla_sparse_fwd_kernel(
     BLOCK_H: tl.constexpr,
     BLOCK_N: tl.constexpr,
     RETURN_LSE: tl.constexpr,
+    LOGE2: tl.constexpr,
 ):
     cur_q = tl.program_id(0).to(tl.int64)
     head_block = tl.program_id(1)
@@ -245,6 +246,7 @@ def _triton_mla_sparse_reduce_kernel(
     NUM_KV_SPLITS: tl.constexpr,
     KV_LORA_RANK: tl.constexpr,
     RETURN_LSE: tl.constexpr,
+    LOGE2: tl.constexpr,
 ):
     cur_q = tl.program_id(0).to(tl.int64)
     cur_h = tl.program_id(1).to(tl.int64)
@@ -399,6 +401,7 @@ def triton_mla_sparse_fwd(
             BLOCK_H=block_h,
             BLOCK_N=block_n,
             RETURN_LSE=return_lse,
+            LOGE2=LOGE2,
             num_warps=4,
             num_stages=1,
         )
@@ -457,6 +460,7 @@ def triton_mla_sparse_fwd(
         NUM_KV_SPLITS=splits,
         KV_LORA_RANK=kv_lora_rank,
         RETURN_LSE=return_lse,
+        LOGE2=LOGE2,
         num_warps=4,
     )
     return out, lse
