@@ -34,10 +34,12 @@ class ModelArchConfigConvertorBase:
         hf_config: PreTrainedConfig,
         hf_text_config: PreTrainedConfig,
         revision: str | None = None,
+        transformers_backend: bool = False,
     ):
         self.hf_config = hf_config
         self.hf_text_config = hf_text_config
         self.revision = revision
+        self.transformers_backend = transformers_backend
 
     def get_per_layer_hf_configs(
         self,
@@ -294,6 +296,22 @@ class ModelArchConfigConvertorBase:
         return quant_cfg
 
     def is_deepseek_mla(self) -> bool:
+        if self.transformers_backend:
+            config = self.hf_text_config
+            if (kv_lora_rank := getattr(config, "kv_lora_rank", None)) is None:
+                return False
+            from vllm.model_executor.layers.attention.mla_attention import (
+                MLACommonBackend,
+            )
+
+            head_size = kv_lora_rank + self._get_qk_rope_head_dim()
+            if not MLACommonBackend.supports_head_size(head_size):
+                logger.info_once(
+                    "MLA does not support latent size %d, using full attention.",
+                    head_size,
+                )
+                return False
+            return True
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in (
@@ -568,6 +586,7 @@ class DeepseekV4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         hf_config: PreTrainedConfig,
         hf_text_config: PreTrainedConfig,
         revision: str | None = None,
+        transformers_backend: bool = False,
     ):
         # DeepSeek-V4-Flash-Vision-Exp ships the same architectures/model_type
         # as the text-only DeepSeek-V4-Flash; route to the VL wrapper class
@@ -584,7 +603,7 @@ class DeepseekV4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
             and not getattr(hf_config, "_dsv4_vl_inner", False)
         ):
             hf_config.architectures = ["DeepseekV4ForConditionalGeneration"]
-        super().__init__(hf_config, hf_text_config, revision)
+        super().__init__(hf_config, hf_text_config, revision, transformers_backend)
 
     def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
         # The vision variant needs the mm-prefix plumbing: it makes the
@@ -618,10 +637,11 @@ class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         hf_config: PreTrainedConfig,
         hf_text_config: PreTrainedConfig,
         revision: str | None = None,
+        transformers_backend: bool = False,
     ):
         if getattr(hf_config, "vision_config", None):
             hf_config.architectures = ["MiMoV2OmniForCausalLM"]
-        super().__init__(hf_config, hf_text_config, revision)
+        super().__init__(hf_config, hf_text_config, revision, transformers_backend)
         _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
 
 
@@ -631,6 +651,7 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         hf_config: PreTrainedConfig,
         hf_text_config: PreTrainedConfig,
         revision: str | None = None,
+        transformers_backend: bool = False,
     ):
         if getattr(hf_config, "architectures", None) == [
             "Qwen3_5ForConditionalGeneration"
@@ -656,7 +677,7 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
                 hf_config.decision_config = get_hf_file_to_dict(
                     "decision_config.json", model_path, revision
                 )
-        super().__init__(hf_config, hf_text_config, revision)
+        super().__init__(hf_config, hf_text_config, revision, transformers_backend)
 
 
 class Qwen3OmniMoeModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -665,6 +686,7 @@ class Qwen3OmniMoeModelArchConfigConvertor(ModelArchConfigConvertorBase):
         hf_config: PreTrainedConfig,
         hf_text_config: PreTrainedConfig,
         revision: str | None = None,
+        transformers_backend: bool = False,
     ):
         # Clef-Omni keeps Qwen3-Omni's config and adds a joint schema head;
         # route to its wrapper class when the head's config file is present.
@@ -681,7 +703,7 @@ class Qwen3OmniMoeModelArchConfigConvertor(ModelArchConfigConvertorBase):
                 hf_config.joint_head_config = get_hf_file_to_dict(
                     "joint_head_config.json", model_path, revision
                 )
-        super().__init__(hf_config, hf_text_config, revision)
+        super().__init__(hf_config, hf_text_config, revision, transformers_backend)
 
 
 class MimoV2MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -690,8 +712,9 @@ class MimoV2MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         hf_config: PreTrainedConfig,
         hf_text_config: PreTrainedConfig,
         revision: str | None = None,
+        transformers_backend: bool = False,
     ):
-        super().__init__(hf_config, hf_text_config, revision)
+        super().__init__(hf_config, hf_text_config, revision, transformers_backend)
         _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
 
     def get_num_hidden_layers(self) -> int:
