@@ -363,7 +363,7 @@ _INTEGER_MULTIPLE_OF_KEYS = frozenset(
 
 
 def _xgrammar_enforces_integer_multiple_of(schema: dict[str, Any]) -> bool:
-    """Return whether xgrammar (pinned 0.2.8) enforces integer multipleOf.
+    """Return whether xgrammar (pinned 0.2.9) enforces integer multipleOf.
 
     It only does so for integer values in [1, 1024] on a node whose other keys
     are annotations. Bounds, enum, const, $ref or allOf/anyOf/oneOf on the
