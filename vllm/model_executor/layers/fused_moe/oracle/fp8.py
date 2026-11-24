@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from enum import Enum
-from typing import Any, get_args
+from typing import Any
 
 import torch
 
@@ -10,7 +10,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
-from vllm.config.kernel import InTreeMoEBackend, MoEBackend
+from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -293,15 +293,6 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown FP8 MoE backend: {backend.value}")
 
 
-def _get_oot_backends() -> dict[str, type[mk.FusedMoEExperts]]:
-    backends = current_platform.get_moe_backends()
-    if collisions := backends.keys() & set(get_args(InTreeMoEBackend)):
-        raise ValueError(
-            f"Platform MoE backends use reserved names: {sorted(collisions)}"
-        )
-    return backends
-
-
 def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
     """Map a user-facing name to its FP8 backend enum value."""
     backend, _ = _resolve_fp8_backend(runner_backend)
@@ -326,7 +317,7 @@ def _resolve_fp8_backend(
     }
     if backend := mapping.get(runner_backend):
         return backend, None
-    oot_backends = _get_oot_backends()
+    oot_backends = Fp8MoEKernelOracle.get_oot_backends()
     if experts_cls := oot_backends.get(runner_backend):
         return Fp8MoeBackend.OOT, experts_cls
     raise ValueError(
@@ -459,34 +450,12 @@ class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
 
     name = "Fp8"
     placeholder_backend = Fp8MoeBackend.NONE
+    oot_backend = Fp8MoeBackend.OOT
 
     def backend_to_kernel_cls(
         self, backend: Fp8MoeBackend
     ) -> list[type[mk.FusedMoEExperts]]:
         return backend_to_kernel_cls(backend)
-
-    def probe_oot_backend(
-        self, name: str, experts_cls: type[mk.FusedMoEExperts]
-    ) -> tuple[type[mk.FusedMoEExperts] | None, str | None]:
-        kernel_cls, rejected = self.try_backend(Fp8MoeBackend.OOT, [experts_cls])
-        if kernel_cls is not None:
-            logger.debug_once("Using %s FP8 MoE backend.", name)
-        return kernel_cls, rejected[-1][1] if rejected else None
-
-    def select_oot_backend(self) -> type[mk.FusedMoEExperts] | None:
-        rejections = []
-        for name, experts_cls in _get_oot_backends().items():
-            kernel_cls, reason = self.probe_oot_backend(name, experts_cls)
-            if kernel_cls is not None:
-                return kernel_cls
-            rejections.append(f"{name}: {reason or 'unsupported configuration'}")
-        if rejections:
-            logger.warning_once(
-                "None of the platform's MoE backends support this FP8 MoE "
-                "configuration: %s.",
-                "; ".join(rejections),
-            )
-        return None
 
 
 def select_fp8_moe_backend(
@@ -513,22 +482,14 @@ def select_fp8_moe_backend(
     activation_format = config.activation_format
     oracle = Fp8MoEKernelOracle(config, weight_key, activation_key)
 
-    # Handle explicit moe_backend from user.
+    oot_selection = oracle.select_oot_backend()
+    if oot_selection is not None:
+        return oot_selection
+
+    # Handle explicit in-tree moe_backend from user.
     runner_backend = config.moe_backend
     if runner_backend != "auto":
-        requested_backend, requested_experts = _resolve_fp8_backend(runner_backend)
-        if requested_experts is not None:
-            kernel_cls, reason = oracle.probe_oot_backend(
-                runner_backend, requested_experts
-            )
-            if kernel_cls is None:
-                since = f" since {reason}" if reason else ""
-                raise ValueError(
-                    f"FP8 MoE backend '{runner_backend}' does not support the "
-                    f"deployment configuration{since}."
-                )
-            return requested_backend, kernel_cls
-
+        requested_backend = map_fp8_backend(runner_backend)
         # For batched activation format, use batched variants if available.
         if activation_format.is_batched:
             if requested_backend == Fp8MoeBackend.DEEPGEMM:
@@ -551,10 +512,6 @@ def select_fp8_moe_backend(
             )
 
         return oracle.return_or_raise(requested_backend, AVAILABLE_BACKENDS)
-
-    oot_experts = oracle.select_oot_backend()
-    if oot_experts is not None:
-        return Fp8MoeBackend.OOT, oot_experts
 
     # Handle explicit DeepGEMM FP8 configuration.
     if envs.is_set("VLLM_USE_DEEP_GEMM") or envs.is_set("VLLM_MOE_USE_DEEP_GEMM"):
