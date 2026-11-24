@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
-from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
     CompileFactors,
     Range,
@@ -600,8 +599,8 @@ class CompilationConfig:
     names to enable (prefixed with a '+'), or disable (prefixed with a '-').
     Examples:
 
-    - 'all,-op1' to enable all except op1
-    - 'none,+op1,+op2' to enable only op1 and op2
+    - ['all', '-op1'] to enable all except op1
+    - ['none', '+op1', '+op2'] to enable only op1 and op2
 
     By default, all custom ops are enabled when running without Inductor and
     disabled when running with Inductor: mode>CompilationMode.NONE and
@@ -974,8 +973,11 @@ class CompilationConfig:
         "vllm::linear_attention",
         "vllm::qwen_gdn_attention_core",
         "vllm::qwen_gdn_attention_core_fused_norm_packed",
+        "vllm::qwen_gdn_attention_core_fused_norm_rocm",
         "vllm::gdn_attention_core_xpu",
         "vllm::olmo_hybrid_gdn_full_forward",
+        "vllm::nemotron_shortcut_gdp",
+        "vllm::nemotron_shortcut_sdsa_indexer",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
         "vllm::deepseek_v4_attention",
@@ -1131,6 +1133,11 @@ class CompilationConfig:
             ):
                 self.inductor_compile_config.setdefault(key, enable_asserts)
 
+        if self.inductor_passes:
+            from vllm.compilation.passes.inductor_pass import (
+                CallableInductorPass,
+                InductorPass,
+            )
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
                 assert callable(v), f"pass {k} should be callable or a qualified name"
@@ -1572,6 +1579,15 @@ class CompilationConfig:
             # (e.g. platform priority defaults in tests) only has explicit ops.
             return "+rotary_embedding" in self.custom_ops
         return self.is_custom_op_enabled("rotary_embedding")
+
+    def enable_custom_op_by_default(self, op: str) -> None:
+        """Enable `op` unless `custom_ops` already enables or disables it.
+
+        Idempotent, because `VllmConfig.__post_init__` runs again on every
+        `replace()` and shares this config with the original.
+        """
+        if f"+{op}" not in self.custom_ops and f"-{op}" not in self.custom_ops:
+            self.custom_ops.append(f"+{op}")
 
     def resolve_cudagraph_mode_and_sizes(
         self,
