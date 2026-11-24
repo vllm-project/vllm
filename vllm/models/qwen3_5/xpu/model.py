@@ -112,6 +112,8 @@ from .specialized_decode.hooks import initialize_specialized_decode
 if TYPE_CHECKING:
     from vllm_xpu_kernels.moe_shared_fused_interface import XpuFusedMoeWithSharedExpert
 
+    from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
+
     from .specialized_decode.moe import FusedMoeDecode
 
 logger = init_logger(__name__)
@@ -400,6 +402,11 @@ class Qwen3_5ForCausalLMBase(
     def process_weights_after_loading(self) -> None:
         initialize_specialized_decode(self)
 
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from vllm.model_executor.warmup.qwen_triton_warmup import QwenGDNKernelWarmup
+
+        return QwenGDNKernelWarmup
+
     def get_model_state_cls(self) -> type:
         from .specialized_decode import is_requested
 
@@ -582,6 +589,11 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from vllm.model_executor.warmup.qwen_triton_warmup import QwenGDNKernelWarmup
+
+        return QwenGDNKernelWarmup
+
     def get_model_state_cls(self) -> type:
         return self.language_model.get_model_state_cls()
 

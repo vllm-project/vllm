@@ -290,7 +290,7 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
         (True, 2, 0, ["fp4_gemm", "bmm_fp8"], None),
         (False, 2, 1, ["fp4_gemm"], "dummy"),
         (False, 2, 1, [], "replayssm"),
-        (True, 2, 0, [], "kimi"),
+        (True, 2, 0, [], "model"),
     ],
 )
 def test_flashinfer_autotune_lifecycle(
@@ -309,7 +309,6 @@ def test_flashinfer_autotune_lifecycle(
     runner = _make_runner([])
     runner.vllm_config.parallel_config.enable_elastic_ep = elastic_ep
     runner.vllm_config.attention_config.hisparse_config = object() if hisparse else None
-    model = runner.get_model()
     cache_path = tmp_path / "autotune.json"
     rank_cache_path = cache_path.with_name(f"autotune_dp0_rank{rank}.json")
     # A matching cache lets every rank skip the tuning sweep, so the dummy
@@ -377,16 +376,15 @@ def test_flashinfer_autotune_lifecycle(
     monkeypatch.setattr(torch.distributed, "all_gather_object", gather)
     monkeypatch.setattr(warmup, "_run_flashinfer_autotune_dummy_runs", events.dummy)
     monkeypatch.setattr(warmup, "replayssm_autotune_warmup", events.replayssm)
-    monkeypatch.setattr(warmup, "_autotune_kimi_k3_kda_qkvg", events.kimi)
     monkeypatch.setattr(
         warmup, "autotune_hisparse_flashinfer_attention", events.hisparse
     )
 
     if failure is None:
-        warmup.flashinfer_autotune(runner)
+        warmup.flashinfer_autotune(runner, autotune_kernels=events.model)
     else:
         with pytest.raises(RuntimeError, match="warmup failed"):
-            warmup.flashinfer_autotune(runner)
+            warmup.flashinfer_autotune(runner, autotune_kernels=events.model)
 
     kwargs = {"skip_ops": set(skip_ops)} if skip_ops else {}
     expected = []
@@ -405,14 +403,14 @@ def test_flashinfer_autotune_lifecycle(
     )
     if hisparse:
         expected.append(call.hisparse(runner))
-    warmup_calls: list[tuple[str, object, dict]] = [
-        ("replayssm", runner, {}),
-        ("kimi", model, {}),
+    warmup_calls: list[tuple[str, tuple, dict]] = [
+        ("replayssm", (runner,), {}),
+        ("model", (), {}),
     ]
     if use_v2 or not cache_hit:
-        warmup_calls.insert(0, ("dummy", runner, {"skip_attn": hisparse}))
-    for name, arg, kwargs in warmup_calls:
-        expected.append(getattr(call, name)(arg, **kwargs))
+        warmup_calls.insert(0, ("dummy", (runner,), {"skip_attn": hisparse}))
+    for name, args, kwargs in warmup_calls:
+        expected.append(getattr(call, name)(*args, **kwargs))
         if failure == name:
             break
     expected.append(call.exit())
@@ -714,7 +712,6 @@ def autotune_run(monkeypatch, tmp_path):
             warmup, "_run_flashinfer_autotune_dummy_runs", run.dummy_runs
         )
         monkeypatch.setattr(warmup, "replayssm_autotune_warmup", lambda runner: None)
-        monkeypatch.setattr(warmup, "_autotune_kimi_k3_kda_qkvg", lambda model: None)
         return run
 
     return make_run

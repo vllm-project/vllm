@@ -9,7 +9,7 @@ import gc
 import json
 import sys
 import time
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -35,13 +35,6 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
-from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
-    kimi_k3_triton_warmup,
-)
-from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
-    qwen4_exp_qsa_triton_warmup,
-)
-from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warmup
 from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
@@ -241,12 +234,6 @@ def _warmup_gemm_rs_ar() -> None:
         logger.info_once("Warmed up %d GEMM-RS/AR variants.", compiled)
 
 
-def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
-    module = sys.modules.get("vllm.models.kimi_k3.nvidia.low_latency_gemm")
-    if module is not None:
-        module.autotune_kda_qkvg(model)
-
-
 def _aiter_gemm_m_buckets(max_m: int) -> list[int]:
     """One token count per AITER tuned-GEMM bucket up to `max_m`.
 
@@ -290,121 +277,150 @@ def _rocm_aiter_gemm_warmup(worker: "Worker") -> None:
     )
 
 
-def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
-    from vllm.model_executor.warmup.step5_dsa_warmup import step5_dsa_warmup
+class KernelWarmup:
+    """Warms up the kernels a model compiles or autotunes while serving.
 
-    enable_jit_warmup = worker.vllm_config.kernel_config.enable_jit_warmup
-    if enable_jit_warmup:
-        logger.info("JIT kernel warmup starting.")
-        jit_warmup_start = time.perf_counter()
-        try:
-            worker.model_runner.jit_warmup_registry.warmup()
-        except Exception:
-            logger.exception(
-                "JIT kernel warmup failed after %.2fs.",
+    Like `ModelState`, a model can return a subclass from
+    `get_kernel_warmup_cls()` that adds warmups for the kernels only it uses.
+    This class warms the kernels models share (JIT registry, DeepGEMM,
+    FlashInfer, ...), so a subclass extends a phase by calling `super()`.
+    """
+
+    def __init__(self, runner: "GPUModelRunner") -> None:
+        self.runner = runner
+        self.vllm_config = runner.vllm_config
+        self.model = runner.get_model()
+
+    def warmup_jit_kernels(self, worker: "Worker") -> None:
+        """Compile kernels by launching them directly.
+
+        Process-local: must not communicate with other ranks.
+        """
+        enable_jit_warmup = self.vllm_config.kernel_config.enable_jit_warmup
+        if enable_jit_warmup:
+            logger.info("JIT kernel warmup starting.")
+            jit_warmup_start = time.perf_counter()
+            try:
+                self.runner.jit_warmup_registry.warmup()
+            except Exception:
+                logger.exception(
+                    "JIT kernel warmup failed after %.2fs.",
+                    time.perf_counter() - jit_warmup_start,
+                )
+                raise
+            logger.info(
+                "JIT kernel warmup finished in %.2fs.",
                 time.perf_counter() - jit_warmup_start,
             )
-            raise
-        logger.info(
-            "JIT kernel warmup finished in %.2fs.",
-            time.perf_counter() - jit_warmup_start,
+
+        qwen_vl_triton_warmup(self.runner)
+        replayssm_lifecycle_warmup(self.runner)
+        if enable_jit_warmup and self.vllm_config.cache_config.enable_prefix_caching:
+            # Copy-on-write first copies blocks mid-serving.
+            blocks = torch.zeros(2, 1, dtype=torch.int64, device=worker.device)
+            copy_kv_cache_blocks_inplace([blocks], 2, [KVCacheBlockCopy(0, 1)])
+
+        # Run next so input-prep kernels JIT against pristine runner state.
+        if enable_jit_warmup:
+            watermark_sample_warmup(worker)
+
+        if enable_jit_warmup and current_platform.is_device_capability_family(100):
+            _warmup_bf16x3_router_gemm(
+                self.model,
+                worker.scheduler_config.max_num_batched_tokens,
+            )
+
+        if current_platform.has_device_capability(90):
+            _warmup_ll_bf16_router_gemm(self.model)
+
+        _warmup_gemm_rs_ar()
+
+        if self.vllm_config.kernel_config.enable_cutedsl_warmup:
+            # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
+            # to the shared JIT warmup infrastructure.
+            # https://github.com/vllm-project/vllm/pull/47451
+            _warmup_skinny_gemm(self.model)
+            cutedsl_warmup()
+
+    def warmup_model_runs(self, worker: "Worker") -> None:
+        """Warm kernels through dummy steps. Every rank runs this in lockstep."""
+        if current_platform.is_rocm():
+            from vllm.model_executor.warmup.rocm_segmented_attn_autotune_warmup import (
+                rocm_segmented_attn_autotune_warmup,
+            )
+
+            rocm_segmented_attn_autotune_warmup(worker)
+            _rocm_aiter_gemm_warmup(worker)
+
+        flashinfer_sparse_mla_decode_autotune_warmup(worker)
+        deepseek_v4_sparse_mla_attention_warmup(worker)
+
+        # Deep GEMM warmup
+        do_deep_gemm_warmup = (
+            is_deep_gemm_supported() and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
         )
+        if do_deep_gemm_warmup:
+            max_tokens = worker.scheduler_config.max_num_batched_tokens
+            # The drafter is outside the target's module tree and its o_proj can
+            # land on a different einsum kernel than the target's.
+            for model in (self.model, worker.get_draft_model()):
+                if model is not None:
+                    deep_gemm_warmup(model, max_tokens)
 
-    qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
-    qwen_vl_triton_warmup(worker.model_runner)
-    replayssm_lifecycle_warmup(worker.model_runner)
-    if enable_jit_warmup and worker.vllm_config.cache_config.enable_prefix_caching:
-        # Copy-on-write first copies blocks mid-serving.
-        blocks = torch.zeros(2, 1, dtype=torch.int64, device=worker.device)
-        copy_kv_cache_blocks_inplace([blocks], 2, [KVCacheBlockCopy(0, 1)])
+        compilation_config = self.vllm_config.compilation_config
+        cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])
+        b12x_warmup(worker, cudagraph_capture_sizes)
 
-    compilation_config = worker.vllm_config.compilation_config
-    cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])
+    def autotune(self, worker: "Worker") -> None:
+        """Autotune kernels, then finish warmup before CUDA graph capture.
 
-    # Run next so input-prep kernels JIT against pristine runner state.
-    if enable_jit_warmup:
-        kimi_k3_triton_warmup(worker)
-        watermark_sample_warmup(worker)
-        qwen4_exp_qsa_triton_warmup(worker)
+        Every rank runs this in lockstep.
+        """
+        # Allocate the exact decode-sized workspace, autotune cache misses, and
+        # resolve every CUDA Graph bucket before capture begins.
+        # Lazy import: flashinfer_pcie_ipc_all_reduce imports flashinfer.comm,
+        # which initializes CUDA at import time and must not run at module scope.
+        if envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC:
+            from vllm.distributed.device_communicators import (
+                flashinfer_pcie_ipc_all_reduce,
+            )
 
-    if enable_jit_warmup and current_platform.is_device_capability_family(100):
-        _warmup_bf16x3_router_gemm(
-            worker.get_model(),
-            worker.scheduler_config.max_num_batched_tokens,
+            flashinfer_pcie_ipc_all_reduce.warmup_flashinfer_pcie_ipc_allreduce(worker)
+
+        enable_flashinfer_autotune = (
+            self.vllm_config.kernel_config.enable_flashinfer_autotune
         )
+        # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
+        if enable_flashinfer_autotune is False:
+            logger.info_once("Skipping FlashInfer autotune because it is disabled.")
+        elif has_flashinfer() and current_platform.has_device_capability(90):
+            with _outside_kv_cache_transient_window(worker):
+                flashinfer_autotune(self.runner, autotune_kernels=self.autotune_kernels)
 
-    if current_platform.has_device_capability(90):
-        _warmup_ll_bf16_router_gemm(worker.get_model())
+        _warmup_flashinfer_attention(worker)
 
-    _warmup_gemm_rs_ar()
+    def autotune_kernels(self) -> None:
+        """Autotune the model's own kernels inside the FlashInfer autotune
+        context.
 
-    if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
-        # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
-        # to the shared JIT warmup infrastructure.
-        # https://github.com/vllm-project/vllm/pull/47451
-        _warmup_skinny_gemm(worker.get_model())
-        cutedsl_warmup()
+        Also run by the weight-cache daemon, which has no worker.
+        """
 
+
+def get_kernel_warmup(runner: "GPUModelRunner") -> KernelWarmup:
+    model = runner.get_model()
+    if hasattr(model, "get_kernel_warmup_cls"):
+        return model.get_kernel_warmup_cls()(runner)
+    return KernelWarmup(runner)
+
+
+def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
+    warmup = get_kernel_warmup(worker.model_runner)
+    warmup.warmup_jit_kernels(worker)
     if process_local_only:
         return
-
-    if current_platform.is_rocm():
-        from vllm.model_executor.warmup.rocm_segmented_attn_autotune_warmup import (
-            rocm_segmented_attn_autotune_warmup,
-        )
-
-        rocm_segmented_attn_autotune_warmup(worker)
-        _rocm_aiter_gemm_warmup(worker)
-
-    flashinfer_sparse_mla_decode_autotune_warmup(worker)
-    deepseek_v4_sparse_mla_attention_warmup(worker)
-    step5_dsa_warmup(worker)
-
-    # Deep GEMM warmup
-    do_deep_gemm_warmup = (
-        is_deep_gemm_supported() and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
-    )
-    if do_deep_gemm_warmup:
-        max_tokens = worker.scheduler_config.max_num_batched_tokens
-        # The drafter is outside the target's module tree and its o_proj can
-        # land on a different einsum kernel than the target's.
-        for model in (worker.get_model(), worker.get_draft_model()):
-            if model is not None:
-                deep_gemm_warmup(model, max_tokens)
-
-    b12x_warmup(worker, cudagraph_capture_sizes)
-
-    # The MSA kernels, and the CuTe DSL their modules import, are CUDA-only.
-    # Only MiniMax-M3 has MSA layers, and its package is loaded iff it is served.
-    if current_platform.is_cuda() and "vllm.models.minimax_m3" in sys.modules:
-        from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
-            minimax_m3_msa_warmup,
-        )
-
-        minimax_m3_msa_warmup(worker)
-
-    # Allocate the exact decode-sized workspace, autotune cache misses, and
-    # resolve every CUDA Graph bucket before capture begins.
-    # Lazy import: flashinfer_pcie_ipc_all_reduce imports flashinfer.comm,
-    # which initializes CUDA at import time and must not run at module scope.
-    if envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC:
-        from vllm.distributed.device_communicators import (
-            flashinfer_pcie_ipc_all_reduce,
-        )
-
-        flashinfer_pcie_ipc_all_reduce.warmup_flashinfer_pcie_ipc_allreduce(worker)
-
-    enable_flashinfer_autotune = (
-        worker.vllm_config.kernel_config.enable_flashinfer_autotune
-    )
-    # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
-    if enable_flashinfer_autotune is False:
-        logger.info_once("Skipping FlashInfer autotune because it is disabled.")
-    elif has_flashinfer() and current_platform.has_device_capability(90):
-        with _outside_kv_cache_transient_window(worker):
-            flashinfer_autotune(worker.model_runner)
-
-    _warmup_flashinfer_attention(worker)
+    warmup.warmup_model_runs(worker)
+    warmup.autotune(worker)
 
 
 def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
@@ -604,7 +620,12 @@ def _load_shared_autotune_cache(cache_path: Path, tuner, tune_group) -> bool:
     return loaded
 
 
-def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) -> None:
+def flashinfer_autotune(
+    runner: "GPUModelRunner",
+    *,
+    skip_attn: bool = False,
+    autotune_kernels: Callable[[], None] | None = None,
+) -> None:
     """Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
     autotuning runs benchmarks for each implementation and stores
@@ -616,6 +637,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     Args:
         runner: The model runner to tune.
         skip_attn: Additionally skip attention in the tuning dummy runs.
+        autotune_kernels: The model's `KernelWarmup.autotune_kernels`.
 
     With PP > 1, stages run different layers and may profile different ops,
     so each stage's TP group tunes separately with its own cache file;
@@ -696,7 +718,8 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
                 _run_flashinfer_autotune_mm_encoder(runner)
             replayssm_autotune_warmup(runner)
-            _autotune_kimi_k3_kda_qkvg(runner.get_model())
+            if autotune_kernels is not None:
+                autotune_kernels()
     finally:
         set_autotune_process_group(None)
 

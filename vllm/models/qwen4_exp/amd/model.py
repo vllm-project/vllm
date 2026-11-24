@@ -4,6 +4,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -81,6 +82,9 @@ from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
+
+if TYPE_CHECKING:
+    from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
 
 # Transformers v5.18 renamed `qwen_sparse_attention` to `indexed_attention`
 # TODO: Delete qwen_... once Transformers 5.18.0 is the minimum required version.
@@ -706,6 +710,11 @@ class Qwen4ExpForCausalLM(
         self.set_moe_parameters(self.model.layers)
         enable_qwen4_exp_low_latency_gemm(self, self.model_config.dtype)
 
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from vllm.model_executor.warmup.qwen_triton_warmup import QwenGDNKernelWarmup
+
+        return QwenGDNKernelWarmup
+
     @staticmethod
     def get_model_state_cls():
         from .model_state import Qwen4ExpModelState
@@ -907,6 +916,11 @@ class Qwen4ExpForConditionalGeneration(
             "_input_mix_padding",
         ],
     }
+
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from vllm.model_executor.warmup.qwen_triton_warmup import QwenGDNKernelWarmup
+
+        return QwenGDNKernelWarmup
 
     @staticmethod
     def get_model_state_cls():

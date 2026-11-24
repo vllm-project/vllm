@@ -5,7 +5,7 @@
 import copy
 import typing
 from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
@@ -98,6 +98,9 @@ from .layernorm import (
 )
 from .ops.add import add_fp32
 from .ops.attention_gate import headwise_sigmoid_gate
+
+if TYPE_CHECKING:
+    from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
 
 logger = init_logger(__name__)
 
@@ -2363,6 +2366,11 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
         )
         | STEP5_SHARE_EXPERT_MAPPER
     )
+
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from .warmup import Step5KernelWarmup
+
+        return Step5KernelWarmup
 
     def __init__(
         self,

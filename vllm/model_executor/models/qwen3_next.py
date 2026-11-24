@@ -4,6 +4,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -89,6 +90,9 @@ from .utils import (
     maybe_prefix,
     spec_decode_needs_target_embed,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
@@ -867,6 +871,11 @@ class Qwen3NextForCausalLM(
         "in_proj_qkvz": ["in_proj_qkvz"],
         "in_proj_ba": ["in_proj_ba"],
     }
+
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from vllm.model_executor.warmup.qwen_triton_warmup import QwenGDNKernelWarmup
+
+        return QwenGDNKernelWarmup
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_text_config

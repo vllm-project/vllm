@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn.functional as F
@@ -90,6 +90,9 @@ from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
 
 logger = init_logger(__name__)
 
@@ -1280,6 +1283,11 @@ class KimiLinearForCausalLM(
     IsHybrid,
     SpecializedDecodeMixin,
 ):
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from .warmup import KimiK3KernelWarmup
+
+        return KimiK3KernelWarmup
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # raises for an unsupported deployment before any weight is allocated
         decode_config = specialized_decode_config(vllm_config)

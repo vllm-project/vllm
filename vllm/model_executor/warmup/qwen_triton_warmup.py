@@ -8,25 +8,15 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
-
-_QWEN_MODEL_TYPES = frozenset(
-    {
-        "qwen3_next",
-        "qwen3_5",
-        "qwen3_5_text",
-        "qwen3_5_moe",
-        "qwen3_5_moe_text",
-        "qwen4_exp",
-        "qwen4_exp_text",
-    }
-)
 
 # Covers L=1 constexpr, non-divisible runtime L, and divisible runtime L.
 _FLA_POST_CONV_WARMUP_LENGTHS = (1, 2, 16)
@@ -398,14 +388,8 @@ def qwen_triton_warmup(
     model_config: "ModelConfig",
 ) -> None:
     """Warm Qwen GDN Triton kernels reported by the JIT monitor."""
-    model_type = getattr(model_config.hf_text_config, "model_type", "") or getattr(
-        model_config.hf_config, "model_type", ""
-    )
-    if model_type not in _QWEN_MODEL_TYPES:
-        return
-
     device = runner.device
-    logger.info("Warming up Qwen GDN Triton kernels for model_type=%s.", model_type)
+    logger.info("Warming up Qwen GDN Triton kernels.")
 
     gdn_config = _qwen_gdn_warmup_config(
         runner.compilation_config.static_forward_context
@@ -436,3 +420,11 @@ def qwen_triton_warmup(
             runner.max_num_reqs,
         )
     _synchronize_device(device)
+
+
+class QwenGDNKernelWarmup(KernelWarmup):
+    """Kernel warmup for models built on Qwen GDN layers."""
+
+    def warmup_jit_kernels(self, worker: "Worker") -> None:
+        super().warmup_jit_kernels(worker)
+        qwen_triton_warmup(self.runner, self.vllm_config.model_config)

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Kernel warmup for MiniMax-M3 on NVIDIA GPUs."""
 
 from typing import TYPE_CHECKING, Any
 
@@ -9,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.warmup.attention_warmup import (
     mixed_batch_attention_warmup,
 )
+from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
 from vllm.models.minimax_m3.nvidia.indexer_msa import MiniMaxM3IndexerMSAImpl
 from vllm.models.minimax_m3.nvidia.indexer_nvfp4 import MiniMaxM3IndexerNvfp4Impl
 from vllm.models.minimax_m3.nvidia.model import MiniMaxM3SparseAttention
@@ -79,18 +81,23 @@ def _msa_prebuild_kwargs(
     )
 
 
+class MiniMaxM3KernelWarmup(KernelWarmup):
+    def warmup_model_runs(self, worker: "Worker") -> None:
+        super().warmup_model_runs(worker)
+        sparse_module = next(
+            (
+                m
+                for m in self.model.modules()
+                if isinstance(m, MiniMaxM3SparseAttention)
+            ),
+            None,
+        )
+        if sparse_module is not None:
+            _warmup_msa(sparse_module, worker)
+
+
 @instrument(span_name="MiniMax M3 MSA warmup")
-def minimax_m3_msa_warmup(worker: "Worker") -> None:
-    sparse_module = next(
-        (
-            module
-            for module in worker.get_model().modules()
-            if isinstance(module, MiniMaxM3SparseAttention)
-        ),
-        None,
-    )
-    if sparse_module is None:
-        return
+def _warmup_msa(sparse_module: MiniMaxM3SparseAttention, worker: "Worker") -> None:
     if not (
         current_platform.is_cuda() and current_platform.is_device_capability_family(100)
     ):

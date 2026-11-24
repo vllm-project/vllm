@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Connect loaded Qwen4Exp QSA modules to their kernel-owned warmup."""
+"""Kernel warmup for Qwen4Exp on NVIDIA GPUs."""
 
-import sys
 from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.qwen_triton_warmup import QwenGDNKernelWarmup
+
+from .qsa import Qwen4ExpQSAAttention
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
@@ -15,23 +17,21 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
+class Qwen4ExpKernelWarmup(QwenGDNKernelWarmup):
+    def warmup_jit_kernels(self, worker: "Worker") -> None:
+        super().warmup_jit_kernels(worker)
+        owner = next(
+            (m for m in self.model.modules() if isinstance(m, Qwen4ExpQSAAttention)),
+            None,
+        )
+        if owner is not None and self.vllm_config.kernel_config.enable_jit_warmup:
+            _warm_qsa_kernels(owner, worker)
+
+
+def _warm_qsa_kernels(owner: Qwen4ExpQSAAttention, worker: "Worker") -> None:
     """Warm every reachable QSA specialization: indexer decode-query-length
     profiles plus the sparse attention split-K/merge configs."""
-    qsa_module = sys.modules.get("vllm.models.qwen4_exp.nvidia.qsa_indexer")
-    attn_module = sys.modules.get("vllm.models.qwen4_exp.nvidia.qsa")
-    if qsa_module is None or attn_module is None:
-        return
-    indexer = None
-    owner = None
-    for layer in worker.get_model().modules():
-        if indexer is None and isinstance(layer, qsa_module.QSAIndexer):
-            indexer = layer
-        elif owner is None and isinstance(layer, attn_module.Qwen4ExpQSAAttention):
-            owner = layer
-    if indexer is None or owner is None:
-        return
-
+    indexer = owner.indexer
     runner = worker.model_runner
 
     def block_table_for(prefix: str) -> torch.Tensor:

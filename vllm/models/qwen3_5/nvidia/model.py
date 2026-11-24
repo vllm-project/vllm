@@ -26,7 +26,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 from torch import nn
@@ -136,6 +136,9 @@ from .ops.fused_norm_quant import (
     gemma_add_rms_norm,
     gemma_add_rms_norm_quant,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
 
 logger = init_logger(__name__)
 
@@ -689,6 +692,11 @@ class Qwen3_5ForCausalLMBase(
         orig_to_new_prefix={"model.language_model.": "model.", "mtp.": None},
     )
 
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from vllm.model_executor.warmup.qwen_triton_warmup import QwenGDNKernelWarmup
+
+        return QwenGDNKernelWarmup
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
@@ -844,6 +852,11 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
+
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from vllm.model_executor.warmup.qwen_triton_warmup import QwenGDNKernelWarmup
+
+        return QwenGDNKernelWarmup
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__

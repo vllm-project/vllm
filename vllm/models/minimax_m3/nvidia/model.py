@@ -143,6 +143,7 @@ from .specialized_decode import specialized_decode_config
 
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
+    from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
 
     from .specialized_decode.runtime.decode import DecodeStep, SpecializedDecode
 
@@ -1690,6 +1691,11 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         },
     )
 
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from .warmup import MiniMaxM3KernelWarmup
+
+        return MiniMaxM3KernelWarmup
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_text_config
@@ -1826,6 +1832,11 @@ class MiniMaxM3SparseForConditionalGeneration(
         if modality == "video":
             return MiniMaxM3VLProcessingInfo.VIDEO_TOKEN
         raise ValueError(f"Unsupported modality: {modality!r}")
+
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from .warmup import MiniMaxM3KernelWarmup
+
+        return MiniMaxM3KernelWarmup
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
