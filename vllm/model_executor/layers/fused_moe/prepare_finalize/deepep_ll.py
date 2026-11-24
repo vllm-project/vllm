@@ -201,6 +201,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                     "Using DeepEP bfloat16 dispatch for FlashInfer CUTEDSL as "
                     "VLLM_DEEPEPLL_NVFP4_DISPATCH==0"
                 )
+            elif q_dtype == "mxfp8":
+                # Dispatch in bfloat16; the experts quantize only the valid
+                # rows.
+                q_dtype = None
             assert isinstance(x, torch.Tensor)
             num_experts, max_tokens, hidden_dim = x.size()
 
