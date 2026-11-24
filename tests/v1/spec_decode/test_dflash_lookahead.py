@@ -33,10 +33,7 @@ def _dflash_speculative_config(
     num_speculative_tokens: int, **kwargs
 ) -> SpeculativeConfig:
     model_config = ModelConfig(
-        model=DFLASH_TARGET_DIR,
-        runner="generate",
-        max_model_len=100,
-        trust_remote_code=True,
+        model=DFLASH_TARGET_DIR, runner="generate", max_model_len=100
     )
     kwargs.setdefault("model", DFLASH_DRAFT_DIR)
     kwargs.setdefault("method", "dflash")
@@ -100,7 +97,7 @@ def _create_dflash_scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         block_size=BLOCK_SIZE,
-        log_stats=True,
+        collect_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
 

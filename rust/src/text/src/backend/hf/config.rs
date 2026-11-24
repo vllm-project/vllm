@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use serde_with::{DefaultOnError, serde_as};
 use thiserror_ext::AsReport as _;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -168,11 +169,20 @@ pub struct ModelConfig {
     text_config: Option<Box<ModelConfig>>,
 }
 
-/// Minimal subset of `generation_config.json`.
+/// `generation_config.json`: EOS ids typed, everything else kept raw so
+/// overrides can merge over it before [`SamplingDefaults`] parses the result.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub(super) struct GenerationConfig {
     pub eos_token_id: Option<OneOrManyTokenIds>,
+    #[serde(flatten)]
+    pub sampling: Map<String, Value>,
+}
+
+/// Sampling keys of a merged generation config.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub(super) struct SamplingDefaults {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     #[serde(deserialize_with = "deserialize_top_k")]
@@ -182,6 +192,7 @@ pub(super) struct GenerationConfig {
     pub presence_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
     pub max_new_tokens: Option<u32>,
+    pub skip_special_tokens: Option<bool>,
 }
 
 /// Deserialize a generation-config `top_k` into the text sampling model.
@@ -348,9 +359,19 @@ pub fn load_tokenizer_config(path: Option<&Path>) -> Result<HfTokenizerConfig> {
     read_json_file(path)
 }
 
-/// Load the generation-side EOS metadata if a config file is present.
+/// Load `generation_config.json`, if present.
 pub(super) fn load_generation_config(path: Option<&Path>) -> Result<GenerationConfig> {
     read_json_file(path)
+}
+
+/// Parse merged generation-config JSON into its sampling defaults.
+pub(super) fn parse_sampling_defaults(config: Map<String, Value>) -> Result<SamplingDefaults> {
+    serde_json::from_value(Value::Object(config)).map_err(|error| {
+        Error::Tokenizer(format!(
+            "failed to parse generation config: {}",
+            error.as_report()
+        ))
+    })
 }
 
 /// Load the model-side config (`config.json`) if present.
@@ -372,7 +393,7 @@ where
             error.as_report()
         ))
     })?;
-    serde_json::from_str(&content).map_err(|error| {
+    json5::from_str(&content).map_err(|error| {
         Error::Tokenizer(format!(
             "failed to parse {}: {}",
             path.display(),
@@ -383,7 +404,30 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{GenerationConfig, HfTokenizerConfig, ModelConfig, ModelDtype};
+    use super::{HfTokenizerConfig, ModelConfig, ModelDtype, SamplingDefaults};
+
+    #[test]
+    fn config_json_reads_bare_constants_as_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"time_step_limit": [0.0, Infinity], "low": -Infinity, "nan": NaN,
+                "max": {"__float__": "Infinity"}, "text": "a \"NaN\" b"}"#,
+        )
+        .unwrap();
+        let config: serde_json::Value = super::read_json_file(Some(&path)).unwrap();
+        assert_eq!(
+            config,
+            serde_json::json!({
+                "time_step_limit": [0.0, null],
+                "low": null,
+                "nan": null,
+                "max": {"__float__": "Infinity"},
+                "text": "a \"NaN\" b",
+            })
+        );
+    }
 
     #[test]
     fn tokenizer_config_reads_single_and_named_chat_templates() {
@@ -425,12 +469,12 @@ mod tests {
             (r#"{"top_k":0}"#, None),
             (r#"{"top_k":20}"#, Some(20)),
         ] {
-            let config: GenerationConfig = serde_json::from_str(input).unwrap();
+            let config: SamplingDefaults = serde_json::from_str(input).unwrap();
             assert_eq!(config.top_k, expected, "input={input}");
         }
 
         for input in [r#"{"top_k":-2}"#, r#"{"top_k":4294967296}"#] {
-            assert!(serde_json::from_str::<GenerationConfig>(input).is_err());
+            assert!(serde_json::from_str::<SamplingDefaults>(input).is_err());
         }
     }
 
