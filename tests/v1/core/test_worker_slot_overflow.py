@@ -20,6 +20,8 @@ faithful model of the worker's slot accounting.
 
 import pytest
 
+from vllm.config import LoRAConfig
+from vllm.lora.request import LoRARequest
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
@@ -207,3 +209,76 @@ def test_reset_prefix_cache_same_step_resume_purges_then_re_adds():
     # it. No overflow, A still occupies its single slot afterward.
     slots.apply(out)
     assert slots.occupied == {"A"}
+
+
+def test_resumed_streaming_session_keeps_worker_slot_against_lora_skip():
+    """A resumed streaming session that a step skips still holds its worker
+    slot, so the LoRA limit must not let another request take that slot.
+
+    max_num_seqs=2, max_loras=1:
+
+    1. session S (LoRA 2) runs and parks in WAITING_FOR_STREAMING_REQ; it keeps
+       its worker slot.
+    2. request A (LoRA 1) is admitted: 0 running + 1 parked < 2.
+    3. S receives its next input and returns to WAITING; it still holds the
+       slot, but is now counted nowhere.
+    4. request B arrives. The step skips S (LoRA 1 already fills max_loras) and
+       admits B, so the worker holds slots for S, A and B with only two.
+    """
+    STOP_TOKEN = 7
+    scheduler = create_scheduler(max_num_seqs=2, lora_config=LoRAConfig(max_loras=1))
+    slots = WorkerSlots(max_num_reqs=2)
+
+    # 1. Resumable session S with LoRA 2 runs, emits its stop token, parks.
+    (session,) = create_requests(
+        num_requests=1,
+        num_tokens=4,
+        req_ids=["session"],
+        stop_token_ids=[STOP_TOKEN],
+        max_tokens=16,
+    )
+    session.resumable = True
+    session.lora_request = LoRARequest("lora-2", 2, "/path/2")
+    scheduler.add_request(session)
+
+    out = scheduler.schedule()
+    slots.apply(out)
+    assert [r.req_id for r in out.scheduled_new_reqs] == ["session"]
+
+    scheduler.update_from_output(out, _model_runner_output(["session"], [[STOP_TOKEN]]))
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert scheduler.num_waiting_for_streaming_input == 1
+
+    # 2. Request A with LoRA 1 fills the other slot.
+    (req_a,) = create_requests(
+        num_requests=1, num_tokens=4, req_ids=["a"], ignore_eos=True, max_tokens=100
+    )
+    req_a.lora_request = LoRARequest("lora-1", 1, "/path/1")
+    scheduler.add_request(req_a)
+
+    out = scheduler.schedule()
+    slots.apply(out)
+    assert [r.req_id for r in out.scheduled_new_reqs] == ["a"]
+    scheduler.update_from_output(out, _model_runner_output(["a"], [[42]]))
+    assert req_a.status == RequestStatus.RUNNING
+
+    # 3. S receives its next input chunk and returns to WAITING.
+    (session_update,) = create_requests(
+        num_requests=1, num_tokens=2, req_ids=["session"], max_tokens=16
+    )
+    session_update.resumable = True
+    scheduler.add_request(session_update)
+    assert session.status == RequestStatus.WAITING
+
+    # 4. Request B arrives without a LoRA. The step skips S on the LoRA limit;
+    # admitting B on top of S's still-held slot over-admits the worker.
+    (req_b,) = create_requests(
+        num_requests=1, num_tokens=4, req_ids=["b"], ignore_eos=True, max_tokens=100
+    )
+    scheduler.add_request(req_b)
+
+    out = scheduler.schedule()
+    # WorkerSlots.apply raises "No free indices" before the fix.
+    slots.apply(out)
+    assert "b" not in [r.req_id for r in out.scheduled_new_reqs]
+    assert req_b in scheduler.waiting
