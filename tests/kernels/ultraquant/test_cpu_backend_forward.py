@@ -20,6 +20,11 @@ from typing import NamedTuple
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
+if not current_platform.is_cpu():
+    pytest.skip("skipping CPU-only tests", allow_module_level=True)
+
 from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,

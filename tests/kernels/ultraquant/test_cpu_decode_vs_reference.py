@@ -15,6 +15,11 @@ from __future__ import annotations
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
+if not current_platform.is_cpu():
+    pytest.skip("skipping CPU-only tests", allow_module_level=True)
+
 from vllm import _cpu_ops as ops
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.ultraquant.format import DEFAULT_CONSTANT_C, slot_size
