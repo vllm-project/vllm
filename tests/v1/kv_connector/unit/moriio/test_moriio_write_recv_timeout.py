@@ -109,6 +109,7 @@ def _make_consumer_worker() -> MoRIIOConnectorWorker:
         pop_failed_write_req_ids=pop_failed_write_req_ids, shutdown=lambda: None
     )
     worker._unmatched_write_failures = OrderedDict()
+    worker.moriio_config = SimpleNamespace(write_recv_timeout=TIMEOUT_S)
     worker._write_recv_timed_out = set()
     worker._write_recv_reported = set()
     worker.write_done = set()

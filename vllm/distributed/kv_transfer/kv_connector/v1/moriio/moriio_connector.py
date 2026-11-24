@@ -52,13 +52,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     TransferId,
     WriteTask,
     WriteTransferState,
-    _positive_finite_timeout,
     fill_remote_pod_from_config,
     fold_local_rank,
     get_moriio_mode,
     get_peer_zmq_from_request_id,
     get_port_offset,
     get_role,
+    get_write_recv_timeout,
     parse_moriio_zmq_address,
     pod_index,
     resolve_host_ip,
@@ -804,27 +804,18 @@ class MoRIIOConnectorScheduler:
         # For chunked prefill, we perform layer-wise access within the final chunk.
         # TODO: Perform transfer at end chunk.
         self._reqs_need_pending_save: dict[ReqId, tuple[Request, BlockIds]] = {}
-        write_recv_timeout = _positive_finite_timeout(
-            "kv_connector_extra_config.write_recv_timeout",
-            self.kv_transfer_config.kv_connector_extra_config.get(
-                "write_recv_timeout", MoRIIOConstants.DEFAULT_WRITE_RECV_TIMEOUT
-            ),
-        )
         # WRITE consumer: seconds a receive waits for its write_done; None while
-        # the timer is off. Only a pure consumer runs it: a kv_both worker runs
-        # as a producer.
-        self._write_recv_timeout: float | None = None
+        # the timer is off.
+        self._write_recv_timeout = get_write_recv_timeout(self.kv_transfer_config)
         if (
             self.mode == MoRIIOMode.WRITE
             and self.kv_transfer_config.kv_role == "kv_consumer"
+            and self._write_recv_timeout is None
         ):
-            if self.kv_transfer_config.kv_load_failure_policy == "fail":
-                self._write_recv_timeout = write_recv_timeout
-            else:
-                logger.warning(
-                    "MoRI-IO WRITE-mode consumer: write_recv_timeout is disabled; "
-                    "it requires kv_load_failure_policy='fail'."
-                )
+            logger.warning(
+                "MoRI-IO WRITE-mode consumer: write_recv_timeout is disabled; "
+                "it requires kv_load_failure_policy='fail'."
+            )
 
         if self.is_producer:
             set_role(ROLE.PRODUCER)
@@ -3278,9 +3269,10 @@ class MoRIIOConnectorWorker:
             while len(pending) > _MAX_UNMATCHED_WRITE_FAILURES:
                 pending.popitem(last=False)
             done_recving |= failed_recving
-            done_sending |= self._report_write_recv_timeouts(
-                done_recving, failed_recving
-            )
+            if self.moriio_config.write_recv_timeout is not None:
+                done_sending |= self._report_write_recv_timeouts(
+                    done_recving, failed_recving
+                )
 
         return KVConnectorTransferResults(
             finished_sending=done_sending,
