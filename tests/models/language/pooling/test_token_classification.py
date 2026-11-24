@@ -25,6 +25,7 @@ def seed_everything():
     "model",
     [
         "vllm-project/NeuroBERT-NER",
+        "dslim/distilbert-NER",
     ],
 )
 # The float32 is required for this tiny model to pass the test.
