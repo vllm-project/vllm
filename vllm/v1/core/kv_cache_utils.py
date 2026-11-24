@@ -288,7 +288,7 @@ class FreeKVCacheBlockQueue:
         self.fake_free_list_tail = KVCacheBlock(block_id=-1)
         # First block inserted via append/append_n (the cached/evict-last tail).
         # Maintained so middle-tier blocks can be spliced before it in O(1).
-        self._append_head: KVCacheBlock | None = None
+        self._cached_head: KVCacheBlock | None = None
         if self.num_free_blocks > 0:
             # Connect fake_head and fake_tail to the first and last block
             # respectively.
@@ -331,8 +331,8 @@ class FreeKVCacheBlockQueue:
         head.next_free_block = next_block
         next_block.prev_free_block = head
 
-        if first_block is self._append_head:
-            self._append_head = (
+        if first_block is self._cached_head:
+            self._cached_head = (
                 next_block if next_block is not self.fake_free_list_tail else None
             )
 
@@ -366,8 +366,8 @@ class FreeKVCacheBlockQueue:
             if next_block is not None:
                 self.fake_free_list_head.next_free_block = next_block
                 next_block.prev_free_block = self.fake_free_list_head
-            if curr_block is self._append_head:
-                self._append_head = (
+            if curr_block is self._cached_head:
+                self._cached_head = (
                     next_block if next_block is not self.fake_free_list_tail else None
                 )
             return [curr_block]
@@ -388,8 +388,8 @@ class FreeKVCacheBlockQueue:
             # the new first block.
             self.fake_free_list_head.next_free_block = curr_block
             curr_block.prev_free_block = self.fake_free_list_head
-        if self._append_head is not None and self._append_head.prev_free_block is None:
-            self._append_head = (
+        if self._cached_head is not None and self._cached_head.prev_free_block is None:
+            self._cached_head = (
                 curr_block if curr_block is not self.fake_free_list_tail else None
             )
         return ret
@@ -413,8 +413,8 @@ class FreeKVCacheBlockQueue:
         # Link the next block to the previous block.
         next_block.prev_free_block = prev_block
 
-        if block is self._append_head:
-            self._append_head = (
+        if block is self._cached_head:
+            self._cached_head = (
                 next_block if next_block is not self.fake_free_list_tail else None
             )
 
@@ -444,8 +444,8 @@ class FreeKVCacheBlockQueue:
         block.next_free_block = tail
         tail.prev_free_block = block
 
-        if self._append_head is None:
-            self._append_head = block
+        if self._cached_head is None:
+            self._cached_head = block
 
         self.num_free_blocks += 1
 
@@ -495,19 +495,19 @@ class FreeKVCacheBlockQueue:
         last_block.next_free_block = tail
         tail.prev_free_block = last_block
 
-        if self._append_head is None:
-            self._append_head = blocks[0]
+        if self._cached_head is None:
+            self._cached_head = blocks[0]
 
         self.num_free_blocks += len(blocks)
 
-    def insert_before_append_head(self, blocks: list[KVCacheBlock]) -> None:
+    def insert_before_cached(self, blocks: list[KVCacheBlock]) -> None:
         """Insert blocks right before the first appended block (or at the tail
         if none exist), preserving FIFO order among inserted blocks."""
         if not blocks:
             return
         target = (
-            self._append_head
-            if self._append_head is not None
+            self._cached_head
+            if self._cached_head is not None
             else self.fake_free_list_tail
         )
         prev_block = target.prev_free_block
@@ -520,8 +520,8 @@ class FreeKVCacheBlockQueue:
         target.prev_free_block = prev_block
         self.num_free_blocks += len(blocks)
 
-    def reset_append_head(self) -> None:
-        self._append_head = None
+    def reset_cached_head(self) -> None:
+        self._cached_head = None
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.

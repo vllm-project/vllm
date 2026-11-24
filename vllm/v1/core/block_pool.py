@@ -760,7 +760,7 @@ class BlockPool:
             if block.ref_cnt == 0 and block.prev_free_block is not None:
                 self.free_block_queue.remove(block)
                 moved.append(block)
-        self.free_block_queue.insert_before_append_head(moved)
+        self.free_block_queue.insert_before_cached(moved)
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """If a block is cached in `cached_block_hash_to_block`, we reset its hash
@@ -903,7 +903,7 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
-        self.free_block_queue.reset_append_head()
+        self.free_block_queue.reset_cached_head()
 
         if self.metrics_collector:
             self.metrics_collector.reset()
