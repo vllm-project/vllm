@@ -28,6 +28,18 @@ rng = random.Random(0)
 PROMPTS = [[rng.randrange(VOCAB - 1) for _ in range(n)] for n in (300, K - 8, 3000)]
 
 
+def refit_weight_buckets(model: torch.nn.Module) -> None:
+    """A validated sparse model accepts later buckets without indexer weights."""
+    parameters = dict(model.named_parameters())
+    indexer = next(name for name in parameters if ".indexer." in name)
+    other = next(name for name in parameters if ".qkv_proj." in name)
+    for name in (indexer, other):
+        value = parameters[name].detach().clone()
+        assert name in model.load_weights([(name, value)])
+        torch.testing.assert_close(parameters[name], value, atol=0, rtol=0)
+    assert model.load_weights([]) == set()
+
+
 def run(path, index_topk, **kwargs) -> tuple[list, dict]:
     """Greedy outputs for PROMPTS at TP2, with SDSA (`index_topk`) or full
     attention (None), and the engine's metrics."""
@@ -48,6 +60,8 @@ def run(path, index_topk, **kwargs) -> tuple[list, dict]:
         **kwargs,
     ) as vllm:
         vllm.llm.apply_model(realistic_weights)
+        if index_topk is not None:
+            vllm.llm.apply_model(refit_weight_buckets)
         params = SamplingParams(
             temperature=0, max_tokens=256, logprobs=5, prompt_logprobs=0
         )
