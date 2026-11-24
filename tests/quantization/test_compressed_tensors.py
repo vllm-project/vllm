@@ -23,6 +23,8 @@ from vllm.config.kernel import KernelConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
+    HummingLinearKernel,
+    MarlinLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
@@ -43,6 +45,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
+    CompressedTensorsWNA8Int,
     CompressedTensorsWNA8O8Int,
     CompressedTensorsWNA16,
 )
@@ -315,6 +318,70 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
 
             assert qkv_proj.scheme.pack_factor == pack_factor
             assert qkv_proj.scheme.symmetric == symmetric
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
+
+
+# int4 group-128 weights from the checkpoint, plus int8 dynamic per-token
+# activations, which make every Linear a CompressedTensorsWNA8Int layer.
+_W4A8_INT_QUANT_CONFIG = {
+    "quant_method": "compressed-tensors",
+    "format": "pack-quantized",
+    "quantization_status": "compressed",
+    "ignore": ["lm_head"],
+    "config_groups": {
+        "group_0": {
+            "targets": ["Linear"],
+            "weights": {
+                "num_bits": 4,
+                "type": "int",
+                "strategy": "group",
+                "group_size": 128,
+                "symmetric": True,
+                "dynamic": False,
+            },
+            "input_activations": {
+                "num_bits": 8,
+                "type": "int",
+                "strategy": "token",
+                "symmetric": True,
+                "dynamic": True,
+            },
+        }
+    },
+}
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_humming(),
+    reason="Requires CUDA and humming",
+)
+@pytest.mark.parametrize("linear_backend", ["auto", "marlin"])
+def test_compressed_tensors_wNa8_int_runs_declared_activations(
+    vllm_runner, linear_backend
+):
+    model_path = "nm-testing/tinyllama-oneshot-w4a16-group128-v2"
+    with vllm_runner(
+        model_path,
+        enforce_eager=True,
+        hf_overrides={"quantization_config": _W4A8_INT_QUANT_CONFIG},
+        kernel_config=KernelConfig(linear_backend=linear_backend),
+    ) as llm:
+
+        def check_model(model):
+            proj = model.model.layers[0].mlp.down_proj
+            assert isinstance(proj.scheme, CompressedTensorsWNA8Int)
+            kernel = proj.scheme.kernel
+            if linear_backend == "marlin":
+                assert isinstance(kernel, MarlinLinearKernel)
+                return
+            assert isinstance(kernel, HummingLinearKernel)
+            # From SM100, Humming may run int8 activations as 16-bit.
+            if not current_platform.has_device_capability(100):
+                assert str(kernel.layer_config.a_dtype) == "int8"
 
         llm.apply_model(check_model)
 

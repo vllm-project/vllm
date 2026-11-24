@@ -132,6 +132,7 @@ def prepare_humming_linear_layer_config(
     *,
     input_schema: "BaseInputSchema | None" = None,
     allow_input_schema_fallback: bool = True,
+    allow_groupwise_fallback: bool = True,
 ) -> "LayerConfig":
     from vllm.utils.humming import (
         BaseInputSchema,
@@ -193,6 +194,7 @@ def prepare_humming_linear_layer_config(
         input_schema=input_schema,
         param_dtype=layer.params_dtype,
         allow_fallback=allow_input_schema_fallback,
+        allow_groupwise_fallback=allow_groupwise_fallback,
     )
     for name in ("input_scale", "input_scale_2"):
         if name != input_schema.static_tensor_scale_name:

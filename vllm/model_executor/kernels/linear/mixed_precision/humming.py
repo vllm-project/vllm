@@ -5,6 +5,7 @@
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kFp8DynamicTokenSym,
     kInt8DynamicTokenSym,
 )
@@ -35,6 +36,18 @@ class HummingLinearKernel(MPLinearKernel):
         if c.act_type.itemsize == 1 and c.act_type not in _ACT_QUANT_KEYS:
             return False, f"Activation type ({c.act_type}) not supported by Humming"
         return True, None
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        # Humming reads the layer's input quant config (_humming_input_quant_config).
+        if activation_quant_key is not None and activation_quant_key.dtype in (
+            torch.int8,
+            torch.float8_e4m3fn,
+        ):
+            return activation_quant_key
+        return None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         from vllm.model_executor.layers.quantization.utils.humming import (
@@ -70,6 +83,7 @@ class HummingLinearKernel(MPLinearKernel):
             quant_config,
             input_quant_config=input_quant_config,
             input_schema=input_schema,
+            allow_groupwise_fallback=input_quant_config is None,
         )
         self.compute_config = get_humming_linear_compute_config()
         self.locks = create_humming_locks(layer.weight.device)

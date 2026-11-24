@@ -289,6 +289,7 @@ def check_and_fallback_input_schema(
     allow_fallback: bool = True,
     allow_fp8_sm100: bool = True,
     warn: bool = True,
+    allow_groupwise_fallback: bool = True,
 ) -> "HummingInputSchema":
     """Resolve *input_schema* against *weight_schema*, falling back if needed.
 
@@ -302,6 +303,8 @@ def check_and_fallback_input_schema(
             MoE grouped-GEMM path is not (the tuner can emit invalid two-CTA
             configs), so the MoE call sites pass False.
         warn: whether to log fallbacks; False when only probing the result.
+        allow_groupwise_fallback: run 8-bit activations on groupwise weights
+            or inputs as 16-bit. False when the checkpoint declared them.
 
     """
     from vllm.utils.humming import HummingInputSchema, InputQuantizationMode
@@ -404,7 +407,12 @@ def check_and_fallback_input_schema(
                 and sm_version >= (100 if allow_fp8_sm100 else 120)
             )
             is_groupwise = input_group_size > 0 or weight_group_size > 0
-            if input_bits == 8 and is_groupwise and not is_mxfp8:
+            if (
+                allow_groupwise_fallback
+                and input_bits == 8
+                and is_groupwise
+                and not is_mxfp8
+            ):
                 # prefer wna16 for groupwise weight or groupwise input
                 if warn:
                     _warn_input_fallback(a_dtype, None)

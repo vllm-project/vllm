@@ -33,6 +33,12 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_repeat_scales_on_all_ranks,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    ScaleDesc,
+    kInt8DynamicTokenSym,
+)
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     ChannelQuantScaleParameter,
@@ -160,7 +166,16 @@ class CompressedTensorsWNA8Int(CompressedTensorsScheme):
             zero_points=not self.symmetric,
         )
 
-        kernel_type = choose_mp_linear_kernel(mp_config)
+        activation_quant_key = None
+        if self.input_quant is not None:
+            activation_quant_key = kInt8DynamicTokenSym
+            if self.input_quant.strategy == QuantizationStrategy.GROUP.value:
+                group = GroupShape(1, self.input_quant.group_size)
+                scale = ScaleDesc(torch.float32, False, group)
+                activation_quant_key = QuantKey(torch.int8, scale, True)
+        kernel_type = choose_mp_linear_kernel(
+            mp_config, activation_quant_key=activation_quant_key
+        )
         if kernel_type.__name__ not in self._kernel_backends_being_used:
             logger.debug("Using %s for CompressedTensorsWNA8Int", kernel_type.__name__)
             self._kernel_backends_being_used.add(kernel_type.__name__)
