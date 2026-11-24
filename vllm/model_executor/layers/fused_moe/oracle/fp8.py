@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from enum import Enum
-from typing import Any
+from typing import Any, get_args
 
 import torch
 
@@ -10,7 +10,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
-from vllm.config.kernel import MoEBackend
+from vllm.config.kernel import InTreeMoEBackend, MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -20,8 +20,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.base import (
     MoEKernelOracle,
-    OOTMoEBackend,
-    get_oot_moe_backend,
     make_moe_kernel,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
@@ -61,6 +59,8 @@ class Fp8MoeBackend(Enum):
     # - requantization sources (checkpoint methods that only dequantize weights
     #   for an online method), see `MoEKernelOracle.placeholder_backend`.
     NONE = "NONE"
+    # A registered platform backend; the selected experts class carries behavior.
+    OOT = "OOT"
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
     FLASHINFER_CUTLASS = "FLASHINFER_CUTLASS"
     FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
@@ -293,10 +293,25 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown FP8 MoE backend: {backend.value}")
 
 
-def map_fp8_backend(
+def _get_oot_backends() -> dict[str, type[mk.FusedMoEExperts]]:
+    backends = current_platform.get_moe_backends()
+    if collisions := backends.keys() & set(get_args(InTreeMoEBackend)):
+        raise ValueError(
+            f"Platform MoE backends use reserved names: {sorted(collisions)}"
+        )
+    return backends
+
+
+def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
+    """Map a user-facing name to its FP8 backend enum value."""
+    backend, _ = _resolve_fp8_backend(runner_backend)
+    return backend
+
+
+def _resolve_fp8_backend(
     runner_backend: MoEBackend,
-) -> Fp8MoeBackend | OOTMoEBackend:
-    """Map user's MoEBackend to an in-tree or out-of-tree FP8 backend."""
+) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
+    """Resolve an explicit name, including its experts class for OOT names."""
     mapping = {
         "triton": Fp8MoeBackend.TRITON,
         "deep_gemm": Fp8MoeBackend.DEEPGEMM,
@@ -310,12 +325,13 @@ def map_fp8_backend(
         "hpc": Fp8MoeBackend.HPC,
     }
     if backend := mapping.get(runner_backend):
-        return backend
-    if oot_backend := get_oot_moe_backend(runner_backend):
-        return oot_backend
+        return backend, None
+    oot_backends = _get_oot_backends()
+    if experts_cls := oot_backends.get(runner_backend):
+        return Fp8MoeBackend.OOT, experts_cls
     raise ValueError(
         f"moe_backend='{runner_backend}' is not supported for FP8 MoE. "
-        f"Expected one of {[*mapping, *current_platform.get_moe_backends()]}."
+        f"Expected one of {[*mapping, *oot_backends]}."
     )
 
 
@@ -398,8 +414,9 @@ def resolve_fp8_moe_weight_block_shape(
         and config.moe_backend != "auto"
         and Fp8MoEKernelOracle.maybe_skip_for_requantization_source() is None
     ):
-        kernel_classes = Fp8MoEKernelOracle(config).candidate_kernel_classes(
-            map_fp8_backend(config.moe_backend)
+        backend, experts_cls = _resolve_fp8_backend(config.moe_backend)
+        kernel_classes = (
+            [experts_cls] if experts_cls is not None else backend_to_kernel_cls(backend)
         )
         refined_key = (
             None
@@ -448,13 +465,36 @@ class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
     ) -> list[type[mk.FusedMoEExperts]]:
         return backend_to_kernel_cls(backend)
 
+    def probe_oot_backend(
+        self, name: str, experts_cls: type[mk.FusedMoEExperts]
+    ) -> tuple[type[mk.FusedMoEExperts] | None, str | None]:
+        kernel_cls, rejected = self.try_backend(Fp8MoeBackend.OOT, [experts_cls])
+        if kernel_cls is not None:
+            logger.debug_once("Using %s FP8 MoE backend.", name)
+        return kernel_cls, rejected[-1][1] if rejected else None
+
+    def select_oot_backend(self) -> type[mk.FusedMoEExperts] | None:
+        rejections = []
+        for name, experts_cls in _get_oot_backends().items():
+            kernel_cls, reason = self.probe_oot_backend(name, experts_cls)
+            if kernel_cls is not None:
+                return kernel_cls
+            rejections.append(f"{name}: {reason or 'unsupported configuration'}")
+        if rejections:
+            logger.warning_once(
+                "None of the platform's MoE backends support this FP8 MoE "
+                "configuration: %s.",
+                "; ".join(rejections),
+            )
+        return None
+
 
 def select_fp8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
     allow_vllm_cutlass: bool = False,
-) -> tuple[Fp8MoeBackend | OOTMoEBackend, type[mk.FusedMoEExperts] | None]:
+) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     Returns `NONE` and a placeholder experts class for requantization sources.
@@ -476,7 +516,19 @@ def select_fp8_moe_backend(
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend
     if runner_backend != "auto":
-        requested_backend = map_fp8_backend(runner_backend)
+        requested_backend, requested_experts = _resolve_fp8_backend(runner_backend)
+        if requested_experts is not None:
+            kernel_cls, reason = oracle.probe_oot_backend(
+                runner_backend, requested_experts
+            )
+            if kernel_cls is None:
+                since = f" since {reason}" if reason else ""
+                raise ValueError(
+                    f"FP8 MoE backend '{runner_backend}' does not support the "
+                    f"deployment configuration{since}."
+                )
+            return requested_backend, kernel_cls
+
         # For batched activation format, use batched variants if available.
         if activation_format.is_batched:
             if requested_backend == Fp8MoeBackend.DEEPGEMM:
@@ -500,9 +552,9 @@ def select_fp8_moe_backend(
 
         return oracle.return_or_raise(requested_backend, AVAILABLE_BACKENDS)
 
-    oot_selection = oracle.select_oot_backend()
-    if oot_selection is not None:
-        return oot_selection
+    oot_experts = oracle.select_oot_backend()
+    if oot_experts is not None:
+        return Fp8MoeBackend.OOT, oot_experts
 
     # Handle explicit DeepGEMM FP8 configuration.
     if envs.is_set("VLLM_USE_DEEP_GEMM") or envs.is_set("VLLM_MOE_USE_DEEP_GEMM"):
@@ -595,7 +647,7 @@ def _humming_fp8_weight_schema(
 
 
 def convert_to_fp8_moe_kernel_format(
-    fp8_backend: Fp8MoeBackend | OOTMoEBackend,
+    fp8_backend: Fp8MoeBackend,
     # TODO(bnell): replace layer with weight_block_size
     layer: RoutedExperts,
     w13: torch.Tensor,
@@ -604,9 +656,15 @@ def convert_to_fp8_moe_kernel_format(
     w2_scale: torch.Tensor,
     w13_input_scale: torch.Tensor | None,
     w2_input_scale: torch.Tensor | None,
+    *,
+    experts_cls: type[mk.FusedMoEExperts] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if isinstance(fp8_backend, OOTMoEBackend):
-        return fp8_backend.experts_cls.convert_fp8_weights(
+    if fp8_backend == Fp8MoeBackend.OOT:
+        if experts_cls is None:
+            raise ValueError(
+                "OOT FP8 weight conversion requires the selected experts class."
+            )
+        return experts_cls.convert_fp8_weights(
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
     block_quant = hasattr(layer, "weight_block_size")
@@ -744,7 +802,7 @@ def convert_to_fp8_moe_kernel_format(
 
 
 def make_fp8_moe_quant_config(
-    fp8_backend: Fp8MoeBackend | OOTMoEBackend,
+    fp8_backend: Fp8MoeBackend,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     a1_scale: torch.Tensor | None,
@@ -880,7 +938,7 @@ def make_fp8_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
-    fp8_backend: Fp8MoeBackend | OOTMoEBackend,
+    fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
     return make_moe_kernel(
