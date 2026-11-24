@@ -425,6 +425,7 @@ class InputProcessingContext:
         except Exception as exc:
             msg = (
                 f"Failed to apply {type(hf_processor).__name__} "
+                f"({type(exc).__name__}: {exc}) "
                 f"on data={data} with kwargs={allowed_kwargs}"
             )
 
