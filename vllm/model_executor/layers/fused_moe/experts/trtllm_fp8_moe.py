@@ -133,6 +133,7 @@ class TrtLlmFp8ExpertsBase:
         self.hidden_dim = moe_config.hidden_dim
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+        self.local_expert_offset = moe_config.local_expert_offset
 
         self.moe_config = moe_config
         self.quant_config = quant_config
@@ -337,7 +338,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             n_group=None,
             topk_group=None,
             intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_expert_offset=self.local_expert_offset,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
             routing_method_type=1,  # not used
@@ -508,7 +509,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale,
             intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_expert_offset=self.local_expert_offset,
             local_num_experts=self.local_num_experts,
             use_shuffled_weight=True,
             weight_layout=WeightLayout.MajorK if is_mxfp8 else WeightLayout.BlockMajorK,
@@ -620,7 +621,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             n_group=num_expert_group or 0,
             topk_group=topk_group or 0,
             intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_expert_offset=self.local_expert_offset,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             use_routing_scales_on_input=apply_router_weight_on_input,

@@ -186,6 +186,7 @@ def flashinfer_trtllm_mxint4_moe(
     intermediate_size_per_partition: int,
     local_num_experts: int,
     ep_rank: int = 0,
+    local_expert_offset: int | None = None,
     num_expert_group: int | None = None,
     topk_group: int | None = None,
     e_score_correction_bias: torch.Tensor | None = None,
@@ -206,6 +207,9 @@ def flashinfer_trtllm_mxint4_moe(
         intermediate_size_per_partition: Intermediate size per partition
         local_num_experts: Number of experts on this rank
         ep_rank: Expert parallelism rank (default: 0)
+        local_expert_offset: Global id of this rank's first expert. Defaults
+            to ep_rank * local_num_experts, which is only correct when EP
+            divides global_num_experts (default: None)
         num_expert_group: Number of expert groups (default: None -> 0)
         topk_group: Top-k within groups (default: None -> 0)
         routing_replay_out: Optional buffer receiving the routing decisions
@@ -257,7 +261,11 @@ def flashinfer_trtllm_mxint4_moe(
         n_group=num_expert_group if num_expert_group is not None else 0,
         topk_group=topk_group if topk_group is not None else 0,
         intermediate_size=intermediate_size_per_partition,
-        local_expert_offset=ep_rank * local_num_experts,
+        local_expert_offset=(
+            ep_rank * local_num_experts
+            if local_expert_offset is None
+            else local_expert_offset
+        ),
         local_num_experts=local_num_experts,
         routed_scaling_factor=None,
         routing_method_type=routing_method_type,

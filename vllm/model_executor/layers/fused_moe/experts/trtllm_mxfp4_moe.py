@@ -59,6 +59,7 @@ class TrtLlmMxfp4ExpertsBase:
         )
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+        self.local_expert_offset = moe_config.local_expert_offset
 
         # MXFP4-specific TRTLLM parameters from quant_config
         device = torch.accelerator.current_device_index()
@@ -264,7 +265,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
             n_group=(num_expert_group or 0),
             topk_group=(topk_group or 0),
             intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_expert_offset=self.local_expert_offset,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
@@ -445,7 +446,7 @@ class TrtLlmMxfp4ExpertsModularBase(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsMo
 
         topk = topk_ids.size(-1)
         local_num_experts = w1.size(0)
-        local_expert_offset = self.moe_config.ep_rank * local_num_experts
+        local_expert_offset = self.moe_config.local_expert_offset
 
         if a1q_scale is not None:
             x_quant = hidden_states

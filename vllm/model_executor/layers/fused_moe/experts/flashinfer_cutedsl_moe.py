@@ -78,7 +78,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         self.local_num_experts = moe_config.num_local_experts
         self.global_num_experts = moe_config.num_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
-        self.local_expert_offset = self.ep_rank * self.local_num_experts
+        self.local_expert_offset = moe_config.local_expert_offset
         self.gemm1_alpha = quant_config.gemm1_alpha
         self.gemm1_beta = quant_config.gemm1_beta
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit

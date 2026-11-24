@@ -136,6 +136,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         self.hidden_dim = moe_config.hidden_dim
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+        self.local_expert_offset = moe_config.local_expert_offset
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -561,7 +562,7 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
             n_group=None,
             topk_group=None,
             intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_expert_offset=self.local_expert_offset,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
             routing_method_type=self.routing_method_type,
@@ -675,7 +676,7 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
         if self.w1_bias is not None:
             bias = self.w1_bias.reshape(self.local_num_experts, -1)
             bias = bias[:, self._w13_bias_up_gate_index].float()
-            local_ids = topk_ids.long() - self.ep_rank * self.local_num_experts
+            local_ids = topk_ids.long() - self.local_expert_offset
             local_ids = local_ids.clamp_(0, self.local_num_experts - 1)
             delta = (delta.float() + bias[local_ids]).to(torch.bfloat16)
         return delta.contiguous()
@@ -721,7 +722,7 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
             n_group=None,
             topk_group=None,
             intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_expert_offset=self.local_expert_offset,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
             # Routing is already done; Renormalize is a safe default.

@@ -75,7 +75,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             moe_config.intermediate_size_per_partition
         )
         self.max_num_tokens = moe_config.max_num_tokens
-        self.local_expert_offset = self.ep_rank * self.num_local_experts
+        self.local_expert_offset = moe_config.local_expert_offset
 
         activation = moe_config.activation
         if activation not in self._ACTIVATION_MAP:

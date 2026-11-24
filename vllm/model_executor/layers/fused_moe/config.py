@@ -1560,6 +1560,17 @@ class FusedMoEConfig:
         return self.moe_parallel_config.ep_rank
 
     @property
+    def local_expert_offset(self) -> int:
+        """Global id of this rank's first expert under the "linear" expert
+        placement of ``determine_expert_map``. The first
+        ``num_experts % ep_size`` ranks hold one extra expert, so
+        ``ep_rank * num_local_experts`` is wrong when EP does not divide the
+        number of experts (e.g. 128 experts on EP7: rank 2 starts at 38, not
+        36)."""
+        base, remainder = divmod(self.num_experts, self.ep_size)
+        return self.ep_rank * base + min(self.ep_rank, remainder)
+
+    @property
     def use_ep(self):
         return self.moe_parallel_config.use_ep
 
