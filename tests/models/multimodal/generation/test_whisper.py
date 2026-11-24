@@ -6,9 +6,12 @@ from typing import Any
 
 import pytest
 import torch
-from transformers import AutoModelForSpeechSeq2Seq
+from transformers import AutoModelForSpeechSeq2Seq, AutoTokenizer
 
+from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
+from vllm.config.speech_to_text import SpeechToTextConfig, SpeechToTextParams
+from vllm.model_executor.models.whisper import WhisperForConditionalGeneration
 from vllm.multimodal.audio import AudioResampler
 from vllm.platforms import current_platform
 
@@ -310,7 +313,7 @@ def test_parse_language_detection_output():
 
 
 def test_create_fake_bias_for_k_proj_injects_out_features():
-    """Packed k_proj weights get a zeros bias of length ``out_features``."""
+    """Packed k_proj weights get a zeros bias of length `out_features`."""
     from vllm.model_executor.models.whisper import _create_fake_bias_for_k_proj
 
     packed = torch.ones(2, 16)
@@ -460,3 +463,56 @@ def test_encoder_cache_cleanup(
             f"but has {cache_size} entries. This indicates encoder cache "
             f"entries are not being properly freed."
         )
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
+def test_decoder_prompt_layout(
+    vllm_runner,
+    model: str,
+    resampled_assets,
+) -> None:
+    """A transcription prompt must reach the decoder in the reference layout,
+    `get_prompt_ids(prompt)` followed by the SOT sequence, with no extra
+    decoder start token in front. Any other decoder prompt still gets
+    `<|startoftranscript|>` prepended when it lacks it."""
+    check_model_available(model)
+    request_prompt = "Hello. See you on Wednesday."
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    sot_sequence = tokenizer.encode(VLLM_PROMPT, add_special_tokens=False)
+    encoder_prompt = {
+        "prompt": "",
+        "multi_modal_data": {"audio": resampled_assets[0]},
+    }
+
+    with vllm_runner(
+        model, dtype="half", max_model_len=448, enforce_eager=True
+    ) as vllm_model:
+        llm = vllm_model.llm
+        prompts = [
+            WhisperForConditionalGeneration.get_generation_prompt(
+                SpeechToTextParams(
+                    audio=resampled_assets[0][0],
+                    stt_config=SpeechToTextConfig(),
+                    model_config=llm.model_config,
+                    language="en",
+                    task_type="transcribe",
+                    request_prompt=request_prompt,
+                )
+            ),
+            {
+                "encoder_prompt": encoder_prompt,
+                "decoder_prompt": {"prompt_token_ids": []},
+            },
+            {
+                "encoder_prompt": encoder_prompt,
+                "decoder_prompt": "<|en|><|transcribe|><|notimestamps|>",
+            },
+        ]
+        outputs = llm.generate(prompts, SamplingParams(temperature=0, max_tokens=1))
+
+    assert [output.prompt_token_ids for output in outputs] == [
+        tokenizer.get_prompt_ids(request_prompt).tolist() + sot_sequence,
+        sot_sequence[:1],
+        sot_sequence,
+    ]

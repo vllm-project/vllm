@@ -16,7 +16,6 @@ from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
@@ -24,6 +23,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
+    fuse_indexer_wk_weights_proj,
+    init_indexer_wk_weights_proj,
     sparse_attn_indexer,
 )
 from vllm.model_executor.models.deepseek_v2 import (
@@ -82,14 +83,8 @@ class DeepseekV32Indexer(nn.Module):
             prefix=f"{prefix}.wq_b",
         )
 
-        self.wk_weights_proj = MergedColumnParallelLinear(
-            hidden_size,
-            [self.head_dim, self.n_head],
-            bias=False,
-            quant_config=None,
-            disable_tp=True,
-            prefix=f"{prefix}.wk_weights_proj",
-        )
+        # wk + weights_proj run as one BF16 GEMM (wk_weights_proj)
+        init_indexer_wk_weights_proj(self, hidden_size, quant_config, prefix)
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
         self.softmax_scale = self.head_dim**-0.5
 
@@ -122,6 +117,9 @@ class DeepseekV32Indexer(nn.Module):
             self.max_total_seq_len,
             self.topk_indices_buffer,
         )
+
+    def process_weights_after_loading(self) -> None:
+        fuse_indexer_wk_weights_proj(self)
 
 
 class DeepseekV32Attention(MLAAttention):
@@ -217,13 +215,17 @@ class DeepseekV32Attention(MLAAttention):
             shardq_eligible=not is_mtp_layer,
         )
 
+        parallel_config = vllm_config.parallel_config
+        self.sequence_parallel_moe = (
+            current_platform.is_cuda() and parallel_config.use_sequence_parallel_moe
+        )
         self.num_local_heads = num_local_heads
         self.use_sp_shardq = (
             self.use_shardq
             and vllm_config.attention_config.sparse_mla_shard_q_mode == "fuse_sp"
-            and current_platform.is_cuda()
-            and vllm_config.parallel_config.use_sequence_parallel_moe
-            and vllm_config.parallel_config.pipeline_parallel_size == 1
+            and self.sequence_parallel_moe
+            and parallel_config.pipeline_parallel_size == 1
+            and parallel_config.decode_context_parallel_size == 1
         )
         self.num_query_heads = num_heads if self.use_sp_shardq else num_local_heads
         if indexer is not None:
@@ -237,7 +239,7 @@ class DeepseekV32Attention(MLAAttention):
             not is_mtp_layer
             and not skip_topk
             and not self.use_pcp
-            and current_platform.is_cuda()
+            and current_platform.is_cuda_alike()
             and self.supports_dense_mha_prefill
         )
         self._dense_mha_metadata_layer_name = (
@@ -293,15 +295,6 @@ class DeepseekV32Attention(MLAAttention):
             is_neox_style=not getattr(config, "indexer_rope_interleave", False),
         )
 
-    def process_weights_after_loading(self) -> None:
-        super().process_weights_after_loading()
-        if self.use_sp_shardq:
-            replace_parameter(
-                self,
-                "W_UK_T_sp",
-                get_tp_group().all_gather(self.W_UK_T.contiguous(), dim=0),
-            )
-
     def uses_fused_sp_shardq(self) -> bool:
         if not self.use_sp_shardq:
             return False
@@ -321,6 +314,19 @@ class DeepseekV32Attention(MLAAttention):
             or torch.cuda.is_current_stream_capturing()
         )
 
+    def process_weights_after_loading(self) -> None:
+        super().process_weights_after_loading()
+        if self.use_sp_shardq:
+            replace_parameter(
+                self,
+                "W_UK_T_sp",
+                get_tp_group().all_gather(self.W_UK_T.contiguous(), dim=0),
+            )
+        # `finalize_model_weights` skips the children of a layer with a quant
+        # method (here a KV-cache one, e.g. ModelOpt), so fuse the indexer here
+        if self.indexer is not None:
+            self.indexer.process_weights_after_loading()
+
     def forward(  # type: ignore[override]
         self,
         positions: torch.Tensor,
@@ -333,12 +339,30 @@ class DeepseekV32Attention(MLAAttention):
             positions = sp_shard(positions)
         # Captured: A-projections (+ indexer A-GEMM on indexer layers).
         qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+        if self.indexer is not None and not self.skip_topk:
+            kw = self.indexer.wk_weights_proj(hidden_states)[0]
+        else:
+            kw = None
+
+        # SP-MoE also shards one-token batches, whose row counts are equal.
+        if not sequence_parallel and (
+            self.sequence_parallel_moe or hidden_states.shape[0] < full_num_tokens
+        ):
+            # Gather the smaller replicated projections, keeping TP weights intact.
+            projected = qkv_lora if kw is None else torch.cat((qkv_lora, kw), dim=-1)
+            projected = sp_all_gather(projected.contiguous())[:full_num_tokens]
+            if kw is None:
+                qkv_lora = projected
+            else:
+                qkv_lora, kw = projected.split(
+                    [qkv_lora.shape[-1], kw.shape[-1]], dim=-1
+                )
+
         q_c, kv_c, k_pe = qkv_lora.split(
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
-
-        if self.indexer is not None and not self.skip_topk:
-            kw = self.indexer.wk_weights_proj(hidden_states)[0]
+        if kw is not None:
+            assert self.indexer is not None
             index_k = kw[:, : self.indexer.head_dim]
             index_weights = kw[:, self.indexer.head_dim :]
         else:
@@ -358,7 +382,7 @@ class DeepseekV32Attention(MLAAttention):
             kv_c, k_pe = cache_parts[:2]
             index_k = cache_parts[2] if index_k is not None else None
 
-        num_tokens = full_num_tokens if sequence_parallel else hidden_states.shape[0]
+        num_tokens = full_num_tokens if sequence_parallel else qkv_lora.shape[0]
         output = torch.empty(
             (num_tokens, self.num_local_heads * self.v_head_dim),
             dtype=hidden_states.dtype,
@@ -638,7 +662,7 @@ class DeepseekV32Attention(MLAAttention):
         else:
             mqa_q_arg = (ql_nope[:num_query_tokens], mqa_q[:num_query_tokens])
 
-        shardq = getattr(attn_metadata, "shardq", None)
+        shardq = attn_metadata.shardq
         mqa_metadata = attn_metadata
         if self.use_pcp and self.impl.dcp_world_size > self.impl.pcp_world_size:
             if isinstance(mqa_q_arg, tuple):

@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for ``MistralCommonFeatureExtractor.fetch_audio``.
+"""Unit tests for `MistralCommonFeatureExtractor.fetch_audio`.
 
-``transformers>=5.10`` adds a ``ProcessorMixin.prepare_inputs_layout`` helper
-that calls ``self.feature_extractor.fetch_audio(...)`` unconditionally. The
-duck-typed :class:`MistralCommonFeatureExtractor` previously did not implement
+`transformers>=5.10` adds a `ProcessorMixin.prepare_inputs_layout` helper
+that calls `self.feature_extractor.fetch_audio(...)` unconditionally. The
+duck-typed `MistralCommonFeatureExtractor` previously did not implement
 that method, so loading any voxtral model under transformers 5.10.x raised
-``AttributeError: 'MistralCommonFeatureExtractor' object has no attribute
-'fetch_audio'``. These tests pin the new ``fetch_audio`` method to the same
-contract as ``transformers.SequenceFeatureExtractor.fetch_audio``.
+`AttributeError: 'MistralCommonFeatureExtractor' object has no attribute
+'fetch_audio'`. These tests pin the new `fetch_audio` method to the same
+contract as `transformers.SequenceFeatureExtractor.fetch_audio`.
 """
 
 import numpy as np
@@ -58,7 +58,7 @@ def test_fetch_audio_recurses_over_list_of_arrays(
 def test_fetch_audio_uses_self_sampling_rate_when_none(
     monkeypatch, feature_extractor: MistralCommonFeatureExtractor
 ):
-    """If ``sampling_rate`` is None, ``self.sampling_rate`` must be used.
+    """If `sampling_rate` is None, `self.sampling_rate` must be used.
 
     Verified indirectly via the recursion path: when we pass a list of arrays
     without sampling_rate, recursive calls receive the resolved rate.
@@ -104,9 +104,9 @@ def test_fetch_audio_rejects_unsupported_type(
 def test_fetch_audio_str_delegates_to_load_audio(
     monkeypatch, feature_extractor: MistralCommonFeatureExtractor
 ):
-    """A str input must round-trip through ``transformers.audio_utils.load_audio``.
+    """A str input must round-trip through `transformers.audio_utils.load_audio`.
 
-    We monkey-patch ``load_audio`` so the test stays offline (no real URL/path
+    We monkey-patch `load_audio` so the test stays offline (no real URL/path
     fetched) and still asserts the delegation contract.
     """
     sentinel = np.array([0.5, -0.5], dtype=np.float32)

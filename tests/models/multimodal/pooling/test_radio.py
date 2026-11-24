@@ -12,9 +12,8 @@ from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.model_executor.models.radio import RadioModel
+from vllm.model_executor.models.radio import RadioModel, radio_config_from_args
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.radio import RadioConfig
 from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
@@ -85,10 +84,7 @@ def run_radio_test(
         hf_model(pixel_value.to(DEVICE_TYPE)) for pixel_value in pixel_values
     ]
 
-    vllm_config = RadioConfig(
-        model_name=hf_config.args["model"],
-        **hf_config.args,
-    )
+    vllm_config = radio_config_from_args(hf_config.args)
     vllm_model = RadioModel(vllm_config)
     loaded = vllm_model.load_weights(hf_model.state_dict())
     # Guard the remote-code -> vLLM key remap: every parameter must be loaded
@@ -144,10 +140,12 @@ def test_radio(
 def _radio_summary(*, teachers, cls_token_per_teacher):
     """Summary tensor from a tiny RadioModel with no encoder layers, so it
     builds no parallel layers and needs neither a GPU nor a checkpoint."""
-    config = RadioConfig(
-        model_name="vit_small_patch16_224",
-        teachers=teachers,
-        cls_token_per_teacher=cls_token_per_teacher,
+    config = radio_config_from_args(
+        {
+            "model": "vit_small_patch16_224",
+            "teachers": teachers,
+            "cls_token_per_teacher": cls_token_per_teacher,
+        }
     )
     model = RadioModel(config, num_hidden_layers_override=0)
     # Synthetic encoder output: [batch, num_skip + num_patches, hidden].
@@ -157,7 +155,7 @@ def _radio_summary(*, teachers, cls_token_per_teacher):
 
 
 def test_summary_idxs_no_teachers_keeps_class_tokens():
-    # No teachers -> summary_idxs is None -> keep the class-token summary.
+    # No teachers -> keep every class token in the summary.
     summary = _radio_summary(teachers=[], cls_token_per_teacher=False)
     assert summary.shape[1] > 0
 
@@ -173,8 +171,8 @@ def test_summary_idxs_all_use_summary_false_is_empty():
 
 def _native_state_dict_from_model(model: RadioModel) -> dict[str, torch.Tensor]:
     """Reverse-map a model's parameters onto native Transformers checkpoint keys
-    (``encoder.layer.N.*`` with split ``attention.attention.{query,key,value}``
-    and ``attention.output.dense``), so loading it must round-trip back to the
+    (`encoder.layer.N.*` with split `attention.attention.{query,key,value}`
+    and `attention.output.dense`), so loading it must round-trip back to the
     original parameters."""
     state_dict: dict[str, torch.Tensor] = {}
     for name, param in model.named_parameters():
@@ -202,7 +200,7 @@ def test_native_format_weight_loading(default_vllm_config, dist_init):
     # with split attention projections; loading must fuse q/k/v into the packed
     # ``qkv`` in the right order and land every other tensor in place, matching
     # the legacy layout the integration test covers.
-    config = RadioConfig(model_name="vit_small_patch16_224")
+    config = radio_config_from_args({"model": "vit_small_patch16_224"})
     model = RadioModel(config, num_hidden_layers_override=2)
     # Uninitialized parameters may hold NaN, which never compares equal.
     with torch.no_grad():
@@ -272,7 +270,7 @@ def test_native_format_from_transformers(default_vllm_config, dist_init):
     assert not any(name.startswith("radio_model.") for name in native_weights)
 
     hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-    vllm_config = RadioConfig(model_name=hf_config.args["model"], **hf_config.args)
+    vllm_config = radio_config_from_args(hf_config.args)
     vllm_model = RadioModel(vllm_config)
     loaded = vllm_model.load_weights(native_weights)
 

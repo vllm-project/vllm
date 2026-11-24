@@ -13,6 +13,7 @@ class StandaloneARSpeculatorConfig(DraftModelSpeculatorConfig):
         "vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator.StandaloneARSpeculator"
     )
     draft_has_own_vocab = True
+    one_token_draft_decodes = True
     # An independent model with its own positional limit.
     shares_target_positions = False
 
@@ -22,9 +23,5 @@ class StandaloneARSpeculatorConfig(DraftModelSpeculatorConfig):
 
     @property
     def max_num_new_slots_for_drafting(self) -> int:
-        if self.spec_config.parallel_drafting:
-            # PARD does not shift the existing input, so all K query positions
-            # require additional slots.
-            return self.num_speculative_tokens
         # The autoregressive draft-model input retains one unsliced token.
         return 1
