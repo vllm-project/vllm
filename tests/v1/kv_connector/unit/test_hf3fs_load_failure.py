@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_metadata_server im
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client import (
     Hf3fsClient as MockHf3fsClient,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -285,6 +286,127 @@ class TestHF3FSSchedulerLoadFailure:
             num_hit_tokens,
             True,
         )
+
+    def test_only_a_request_with_a_save_waits_for_finished_sending(
+        self, tmp_path, storage_services
+    ):
+        metadata, _ = storage_services
+        # Nothing is stored, so both requests are computed and none loads.
+        metadata.batch_key_exists = lambda keys: [False] * len(keys)
+        _, scheduler = _hf3fs_scheduler(tmp_path, "recompute")
+        saved = create_request(num_tokens=4 * BLOCK_SIZE + 1, block_size=BLOCK_SIZE)
+        # Shorter than one block, so there is nothing to save.
+        unsaved = create_request(num_tokens=BLOCK_SIZE - 1, block_size=BLOCK_SIZE)
+        scheduler.add_request(saved)
+        scheduler.add_request(unsaved)
+        scheduler_output = scheduler.schedule()
+        assert set(scheduler_output.num_scheduled_tokens) == {
+            saved.request_id,
+            unsaved.request_id,
+        }
+
+        scheduler.finish_requests(
+            [saved.request_id, unsaved.request_id], RequestStatus.FINISHED_ABORTED
+        )
+        # Only the request with a save keeps its blocks until finished sending.
+        assert saved.request_id in scheduler.requests
+        assert unsaved.request_id not in scheduler.requests
+        scheduler_output = scheduler.schedule()
+        assert scheduler_output.kv_connector_metadata.unowned_finished_req_ids == {
+            unsaved.request_id
+        }
+
+    def test_abort_during_load_with_two_hf3fs_connectors(
+        self, tmp_path, storage_services, dist_init
+    ):
+        # A request aborted while one HF3FS connector loads it.
+        # The other connector saved nothing, so it must not report the
+        # request as finished sending after the load already freed it.
+        connectors = [
+            {
+                "kv_connector": "HF3FSKVConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": _hf3fs_extra_config(tmp_path / name),
+            }
+            for name in ("a", "b")
+        ]
+        config = create_vllm_config(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            block_size=BLOCK_SIZE,
+            max_num_batched_tokens=256,
+            kv_load_failure_policy="recompute",
+            kv_connector_extra_config={"connectors": connectors},
+        )
+        with patch("signal.signal"):
+            scheduler = create_scheduler(config, num_blocks=NUM_SCHEDULER_BLOCKS)
+            worker = MultiConnector(
+                config, KVConnectorRole.WORKER, scheduler.kv_cache_config
+            )
+        for connector in scheduler.connector.sub_connectors + worker.sub_connectors:
+            atexit.unregister(connector.close)
+        _, device = storage_services
+        worker.register_kv_caches(
+            {
+                "layer.0": torch.zeros(
+                    NUM_SCHEDULER_BLOCKS, NUM_HEADS, BLOCK_SIZE, HEAD_DIM, device=device
+                )
+            }
+        )
+
+        def run_worker(scheduler_output, wait_for_recving=None):
+            worker.bind_connector_metadata(scheduler_output.kv_connector_metadata)
+            worker.start_load_kv(None)
+            finished_sending: set[str] = set()
+            finished_recving: set[str] = set()
+            deadline = time.monotonic() + 10.0
+            while True:
+                results = worker.get_transfer_results(scheduler_output.finished_req_ids)
+                finished_sending |= results.finished_sending
+                finished_recving |= results.finished_recving
+                if wait_for_recving is None or wait_for_recving in finished_recving:
+                    break
+                assert time.monotonic() < deadline, "load never finished"
+                time.sleep(0.01)
+            invalid_block_ids = worker.get_block_ids_with_load_errors()
+            worker.clear_connector_metadata()
+            return create_model_runner_output(
+                [],
+                finished_sending=finished_sending,
+                finished_recving=finished_recving,
+                invalid_block_ids=invalid_block_ids,
+            )
+
+        try:
+            request = create_request(
+                num_tokens=4 * BLOCK_SIZE + 1, block_size=BLOCK_SIZE
+            )
+            scheduler.add_request(request)
+            scheduler_output = scheduler.schedule()
+            assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            # Abort while the load is outstanding.
+            scheduler.finish_requests(
+                request.request_id, RequestStatus.FINISHED_ABORTED
+            )
+            scheduler.update_from_output(scheduler_output, run_worker(scheduler_output))
+
+            # The next pass carries the finished request id to the worker.
+            # Only the connector that loaded it reports it, as finished receiving.
+            scheduler_output = scheduler.schedule()
+            assert request.request_id in scheduler_output.finished_req_ids
+            model_runner_output = run_worker(
+                scheduler_output, wait_for_recving=request.request_id
+            )
+            assert not model_runner_output.kv_connector_output.finished_sending
+            scheduler.update_from_output(scheduler_output, model_runner_output)
+
+            scheduler_output = scheduler.schedule()
+            scheduler.update_from_output(scheduler_output, run_worker(scheduler_output))
+            assert_scheduler_empty(scheduler)
+        finally:
+            for connector in worker.sub_connectors:
+                connector.close()
+            scheduler.connector.shutdown()
 
 
 # ===========================================================================

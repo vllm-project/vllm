@@ -559,6 +559,8 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             # Block ids of each load sent to the worker and not yet reported finished.
             self._loading_block_ids: dict[str, list[int]] = {}
             self._unowned_finished_req_ids: set[str] = set()
+            # Requests that sent at least one block to save.
+            self._saving_req_ids: set[str] = set()
             self._metadata_client = Hf3fsMetadataClient(self._metadata_server_url)
             self._metadata_client.initialize(0, role="scheduler")
 
@@ -782,9 +784,14 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
-        if request.request_id in self._loading_block_ids:
-            # The scheduler frees the blocks once the load is reported finished.
-            self._unowned_finished_req_ids.add(request.request_id)
+        request_id = request.request_id
+        saving = request_id in self._saving_req_ids
+        self._saving_req_ids.discard(request_id)
+        if request_id in self._loading_block_ids or not saving:
+            # With a load outstanding, the scheduler frees the blocks once the
+            # load is reported finished. With no save, nothing is sent.
+            # Either way the worker must not report it as finished sending.
+            self._unowned_finished_req_ids.add(request_id)
             return False, None
         return True, None
 
@@ -898,6 +905,12 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         self._process_waiting_to_load_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
         self._process_cached_requests(scheduler_output, metadata)
+
+        for request_metadata in metadata.requests:
+            save_op = request_metadata.save_block_op
+            num_blocks = len(request_metadata.token_ids) // self._block_size
+            if save_op is not None and num_blocks > save_op.skip_leading_blocks:
+                self._saving_req_ids.add(request_metadata.request_id)
 
         return metadata
 
