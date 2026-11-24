@@ -12,6 +12,7 @@ import argparse
 import json
 import multiprocessing
 import os
+import re
 import shlex
 import shutil
 import tempfile
@@ -96,6 +97,33 @@ def _collect_phase_metrics(
     return metrics
 
 
+def _phase_metric_suffix(span_name: str) -> str:
+    """Turn a span name into a metric key, e.g. ``Warmup (GPU)`` -> warmup_gpu."""
+    return re.sub(r"[^a-z0-9]+", "_", span_name.lower()).strip("_")
+
+
+def _per_phase_metrics(
+    phase: str, iterations: list[dict[str, Any]]
+) -> list[MetricStats]:
+    """One metric per span name, from the spans collected in each iteration.
+
+    Names come from whatever ``@instrument`` spans the run emitted; an
+    iteration that did not emit a name is left out of that name's samples
+    instead of counting as zero.
+    """
+    names = sorted({name for it in iterations for name in it.get("per_phase", {})})
+    metrics: list[MetricStats] = []
+    for name in names:
+        samples = [
+            {"value": it["per_phase"][name]}
+            for it in iterations
+            if name in it.get("per_phase", {})
+        ]
+        desc = MetricDesc("value", _phase_metric_suffix(name), f"{name} phase")
+        metrics.append(_compute_metric(phase, desc, samples))
+    return metrics
+
+
 def _print_phase(phase_name: str, metrics: list[MetricStats]) -> None:
     print(f"\n{phase_name}:")
     for m in metrics:
@@ -139,13 +167,16 @@ def cold_startup():
             os.environ.pop("VLLM_CACHE_ROOT", None)
 
 
-def run_startup_in_subprocess(engine_args, result_queue):
+def run_startup_in_subprocess(engine_args, result_queue, otlp_endpoint=None):
     """Run LLM startup in a subprocess and return timing metrics via a queue.
     This ensures complete isolation between iterations.
     """
     try:
         # Import inside the subprocess to avoid issues with forking
         from vllm import LLM
+
+        if otlp_endpoint is not None:
+            engine_args.otlp_traces_endpoint = otlp_endpoint
 
         # Measure total startup time
         start_time = time.perf_counter()
@@ -412,6 +443,14 @@ def add_cli_args(parser: FlexibleArgumentParser):
     )
 
     parser.add_argument(
+        "--per-phase",
+        action="store_true",
+        default=False,
+        help="Report cold and warm startup time per emitted OTEL startup span "
+        "as one metric per span name. Requires opentelemetry.",
+    )
+
+    parser.add_argument(
         "--serve-cmd",
         help="Time a server command from launch to readiness and to the first "
         "non-empty text in a streamed completion. Put all engine arguments inside "
@@ -429,15 +468,8 @@ def add_cli_args(parser: FlexibleArgumentParser):
     return parser
 
 
-def main(args: argparse.Namespace):
-    if args.serve_cmd:
-        return _bench_server(args)
-
-    # Set multiprocessing start method to 'spawn' for clean process isolation
-    # This ensures each subprocess starts fresh without inheriting state
-    multiprocessing.set_start_method("spawn", force=True)
-
-    engine_args = EngineArgs.from_cli_args(args)
+def _bench_engine(args, engine_args, sink, spans_module):
+    """Run the cold and warm iterations, collecting spans when a sink is given."""
 
     def create_llm_and_measure_startup():
         """Create LLM instance in a subprocess and measure startup time.
@@ -450,22 +482,27 @@ def main(args: argparse.Namespace):
             args=(
                 engine_args,
                 result_queue,
+                sink.address if sink is not None else None,
             ),
         )
+        if sink is not None:
+            sink.clear()
         process.start()
         process.join()
 
-        if not result_queue.empty():
-            result = result_queue.get()
-            if result is None:
-                if not result_queue.empty():
-                    error_msg = result_queue.get()
-                    raise RuntimeError(f"Subprocess failed: {error_msg}")
-                else:
-                    raise RuntimeError("Subprocess failed with unknown error")
-            return result
-        else:
+        if result_queue.empty():
             raise RuntimeError("Subprocess did not return a result")
+
+        result = result_queue.get()
+        if result is None:
+            if not result_queue.empty():
+                error_msg = result_queue.get()
+                raise RuntimeError(f"Subprocess failed: {error_msg}")
+            raise RuntimeError("Subprocess failed with unknown error")
+        if sink is not None:
+            spans = spans_module.collect_startup_spans(sink)
+            result["per_phase"] = spans_module.phase_durations(spans)
+        return result
 
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     print("Setting VLLM_ENABLE_V1_MULTIPROCESSING=0 to collect startup metrics.\n")
@@ -488,6 +525,40 @@ def main(args: argparse.Namespace):
     for _ in tqdm(range(args.num_iters_warm), desc="Warm startup iterations"):
         warm_iterations.append(create_llm_and_measure_startup())
 
+    return cold_iterations, warm_iterations
+
+
+def main(args: argparse.Namespace):
+    if args.serve_cmd:
+        if args.per_phase:
+            raise ValueError("--per-phase cannot be combined with --serve-cmd")
+        return _bench_server(args)
+
+    # Set multiprocessing start method to 'spawn' for clean process isolation
+    # This ensures each subprocess starts fresh without inheriting state
+    multiprocessing.set_start_method("spawn", force=True)
+
+    engine_args = EngineArgs.from_cli_args(args)
+
+    spans_module: Any = None
+    if args.per_phase:
+        try:
+            # Imported lazily so a total-only run does not need OpenTelemetry.
+            from vllm.benchmarks import startup_spans as spans_module
+        except ImportError as exc:
+            raise ValueError("--per-phase requires the OpenTelemetry packages") from exc
+        if engine_args.otlp_traces_endpoint:
+            raise ValueError(
+                "--per-phase collects its own startup spans; remove "
+                "--otlp-traces-endpoint."
+            )
+        with spans_module.span_sink() as sink:
+            cold_iterations, warm_iterations = _bench_engine(
+                args, engine_args, sink, spans_module
+            )
+    else:
+        cold_iterations, warm_iterations = _bench_engine(args, engine_args, None, None)
+
     # Determine if encoder compilation occurred in any iteration
     has_encoder = any(
         m["encoder_compilation_time"] > 0 for m in cold_iterations + warm_iterations
@@ -495,6 +566,9 @@ def main(args: argparse.Namespace):
 
     cold_metrics = _collect_phase_metrics("cold", cold_iterations, has_encoder)
     warm_metrics = _collect_phase_metrics("warm", warm_iterations, has_encoder)
+    if spans_module is not None:
+        cold_metrics += _per_phase_metrics("cold", cold_iterations)
+        warm_metrics += _per_phase_metrics("warm", warm_iterations)
     all_metrics = cold_metrics + warm_metrics
 
     # Print results
