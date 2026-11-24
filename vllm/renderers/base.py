@@ -988,10 +988,9 @@ class BaseRenderer(ABC, Generic[_T]):
             mm_data, mm_data_items, mm_uuid_items, mm_req_id
         )
 
-        # Note:
-        # `skip_mm_cache` used only in the render API to switch to _mm_processor_only_cache
-        # without touching the mirror's sender/receiver caches, preventing P0/P1 multimodal
-        # processor cache drift.
+        # Note: skip_mm_cache is only used in the render API, indicating that _mm_processor_only_cache
+        # should be used without touching the sender or receiver caches on the mirror, in order to avoid
+        # P0/P1 multimodal processor cache drift. In most cases, it can be left unset.
         mm_processor_inputs = MMProcessorInputs(
             prompt,
             mm_data_items,
