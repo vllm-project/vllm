@@ -322,7 +322,8 @@ def test_manual_fusion_nvfp4_dynamic(
 def test_manual_fusion_nvfp4_exact_gelu_falls_back():
     """GeluAndMul(approximate="none") has no fused NVFP4 kernel: the registry
     row is keyed on the GeluAndMul type, so the support predicate must send the
-    exact GELU down the unfused path."""
+    exact GELU (and inputs the kernel cannot read, e.g. non-contiguous) down
+    the unfused path."""
     if (GeluAndMul, kNvfp4Dynamic) not in _FUSED_ACT_QUANT:
         pytest.skip("kNvfp4Dynamic fusion not available for gelu_tanh")
 
@@ -346,6 +347,13 @@ def test_manual_fusion_nvfp4_exact_gelu_falls_back():
 
         fused = maybe_fused_act_quant(GeluAndMul(approximate="tanh"), x, mock_linear)
         assert isinstance(fused, QuantizedActivation)
+
+        x_strided = torch.rand(8, 1024)[:, :512]
+        result = maybe_fused_act_quant(
+            GeluAndMul(approximate="tanh"), x_strided, mock_linear
+        )
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == (8, 256)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])

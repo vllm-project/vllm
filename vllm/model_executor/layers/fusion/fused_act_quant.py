@@ -182,11 +182,20 @@ def _gelu_tanh_and_mul_nvfp4_supported(
     """The fused kernel implements the tanh approximation only and needs
     d = x.shape[-1] // 2 to be a multiple of 16; anything else keeps the
     unfused path."""
+    scale = getattr(linear, "input_global_scale_inv", None)
     return (
         isinstance(act_fn, GeluAndMul)
         and act_fn.approximate == "tanh"
+        and x.is_cuda
+        and x.dtype in (torch.float16, torch.bfloat16)
         and x.ndim == 2
+        and x.shape[-1] > 0
         and x.shape[-1] % 32 == 0
+        and x.is_contiguous()
+        and isinstance(scale, torch.Tensor)
+        and scale.dtype == torch.float32
+        and scale.device == x.device
+        and scale.numel() == 1
     )
 
 
