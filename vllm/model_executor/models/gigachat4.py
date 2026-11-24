@@ -801,7 +801,7 @@ def _packed_hybrid_block_size(
     )
 
     single_page_alignment = max(128, cache_config.block_size)
-    if cache_config.mamba_cache_mode == "align":
+    if cache_config.enable_prefix_caching:
         single_page_alignment = math.lcm(single_page_alignment, alignment)
     generic = single_page_alignment * cdiv(
         state_bytes, single_page_alignment * mla_bytes_per_token
@@ -817,7 +817,7 @@ def _packed_hybrid_block_size(
         config.cache_config.block_size = block_size
         mamba_block_size = (
             block_size
-            if cache_config.mamba_cache_mode == "align"
+            if cache_config.enable_prefix_caching
             else cache_config.mamba_block_size or config.model_config.max_model_len
         )
         config.cache_config.mamba_block_size = mamba_block_size
@@ -953,7 +953,7 @@ class GigaChat4ForCausalLM(
             or vllm_config.cache_config.kv_cache_dtype_skip_layers
             or (
                 vllm_config.speculative_config is not None
-                and vllm_config.speculative_config.uses_extract_hidden_states()
+                and vllm_config.speculative_config.method == "extract_hidden_states"
             )
         ):
             return None

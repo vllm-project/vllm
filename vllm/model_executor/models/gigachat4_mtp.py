@@ -155,8 +155,6 @@ class GigaChat4MTP(nn.Module):
             ".self_attn.kv_a_proj_with_mqa.": (".self_attn.fused_qkv_a_proj.", 1),
             ".mlp.gate_proj.": (".mlp.gate_up_proj.", 0),
             ".mlp.up_proj.": (".mlp.gate_up_proj.", 1),
-            ".indexer.wk.": (".indexer.wk_weights_proj.", 0),
-            ".indexer.weights_proj.": (".indexer.wk_weights_proj.", 1),
         }
     )
 
