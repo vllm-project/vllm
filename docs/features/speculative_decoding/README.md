@@ -190,6 +190,8 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `fly_window_size` | `integer >= 1` | `min(6, num_speculative_tokens - 1)` | Number of subsequent native acceptance decisions checked by FLy. FLy requires at least two speculative tokens, and the window must be smaller than `num_speculative_tokens`. With `synthetic`, runs FLy's entropy computation without deferring rejections (see [FLy](fly.md#measuring-fly-cost-with-synthetic-acceptance)). |
 | `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum normalized top-k entropy, in `[0, 1]`, required for FLy to defer a native rejection. |
 | `fly_entropy_top_k` | `integer >= 1` | `3` | Number of largest processed target scores renormalized for FLy's entropy gate, capped at the vocabulary size. |
+| `draft_token_map_static_rows` | `integer >= 1` | `None` | Restricts an `mtp` drafter's shared lm_head to an NVFP4 copy of its first N rows; verification is unchanged. See [Reduced draft vocabulary](mtp.md#reduced-draft-vocabulary). |
+| `draft_token_map_dynamic_rows` | `integer >= 1` | `None` | Rows added per draft token on top of `draft_token_map_static_rows`, picked by a rank-256 projection of the lm_head. SM12x only. |
 
 For an EPLB-backed MoE draft, set its redundant expert count with
 `eplb_config.draft_num_redundant_experts` in addition to configuring
