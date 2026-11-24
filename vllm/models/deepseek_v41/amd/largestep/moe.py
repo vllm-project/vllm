@@ -80,7 +80,11 @@ class LargeStepMoE:
         self, x: torch.Tensor, topk_ids: torch.Tensor, topk_weights: torch.Tensor
     ) -> torch.Tensor:
         s = x.shape[0]
-        assert 1 <= s <= MAX_ROWS, s
+        # A raise, not an assert, so python -O keeps it: moe_sort keeps its
+        # pick ids in an LDS array of MAX_ROWS * TOPK, and more picks would
+        # overwrite its scan and counts and give a wrong table without an error.
+        if not 1 <= s <= MAX_ROWS:
+            raise ValueError(f"large-step MoE takes 1 to {MAX_ROWS} rows, got {s}")
         p = s * TOPK
         # The current stream, so a CUDA graph captures the launches.
         st = torch.cuda.current_stream()

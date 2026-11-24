@@ -207,6 +207,21 @@ def test_block_padding_rows_change_nothing(tp: int, rows: int, pad: int):
 
 
 @needs_gfx942
+def test_block_rejects_more_than_max_rows():
+    """More rows than MAX_ROWS would overflow moe_sort's pick array in LDS and
+    give a wrong table without an error, so the call raises instead (also
+    under python -O)."""
+    from vllm.models.deepseek_v41.amd.largestep.moe_sort import MAX_ROWS
+
+    c = _Case(4, 16, seed=7)
+    n = MAX_ROWS + 1
+    x = torch.zeros(n, HID, dtype=torch.bfloat16, device=c.dev)
+    ids = torch.zeros(n, TOPK, dtype=c.topk.dtype, device=c.dev)
+    with pytest.raises(ValueError, match="large-step MoE takes"):
+        c.block(x, ids, torch.zeros(n, TOPK, device=c.dev))
+
+
+@needs_gfx942
 @pytest.mark.parametrize("tp", TPS)
 @pytest.mark.parametrize("rows", ROWS)
 @pytest.mark.parametrize("routing", ROUTING)
