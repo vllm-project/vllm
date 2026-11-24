@@ -960,10 +960,8 @@ def test_hisparse_aborted_promotion_keeps_pages_until_restored():
 
 
 @pytest.mark.parametrize("enable_caching", [False, True])
-def test_hisparse_reused_pages_require_hot_buffer_before_next_step(enable_caching):
-    """A request that asks for a hot buffer releases its clean pages at once.
-    If later admissions reuse them, it cannot run again until it holds a hot
-    buffer to read them from host."""
+def test_hisparse_keeps_resident_pages_until_hot_buffer_is_allocated(enable_caching):
+    """Later admissions must not remove a scheduled request's only readable tier."""
     manager = make_hisparse_kv_cache_manager(
         32, 32, max_model_len=256, enable_caching=enable_caching
     )
@@ -972,25 +970,25 @@ def test_hisparse_reused_pages_require_hot_buffer_before_next_step(enable_cachin
     _publish_hisparse_pages(manager)
     first.num_computed_tokens = 128
     pool = manager.block_pool
-    pool.get_new_blocks(pool.get_num_free_blocks() - 3)
+    held = pool.get_new_blocks(pool.get_num_free_blocks() - 3)
 
     assert _allocate_scheduled(manager, first, num_new_tokens=1) is not None
-    coordinator = get_hisparse_coordinator(manager)
-    assert all(not m.has_hot("first") for m in coordinator.hot_managers)
     second = make_request("second", [1000] * 16, HISPARSE_BLOCK_SIZE, sha256)
-    assert _allocate_scheduled(manager, second, num_new_tokens=16) is not None
-    assert not coordinator.all_context_pages_resident((("first", 128, 1),))
+    _allocate_scheduled(manager, second, num_new_tokens=16)
+    coordinator = get_hisparse_coordinator(manager)
+    scheduled = (("first", 128, 1),)
+    assert coordinator.all_context_pages_resident(scheduled)
+    assert all(not m.has_hot("first") for m in coordinator.hot_managers)
 
-    third = make_request("third", [2000] * 48, HISPARSE_BLOCK_SIZE, sha256)
-    assert _allocate_scheduled(manager, third, num_new_tokens=48) is not None
-    assert manager.allocate_slots(first, 1) is None
-
-    manager.free(third)
+    # Once another allocation finishes, A can acquire its hot buffer and
+    # safely release its clean pages for other requests to reuse.
+    pool.free_blocks(held)
     assert _allocate_scheduled(manager, first, num_new_tokens=1) is not None
     assert all(m.has_hot("first") for m in coordinator.hot_managers)
-    update = coordinator.take_residency_updates(["first"])["first"]
-    null_block_id = pool.null_block.block_id
-    assert null_block_id in update.block_ids[0]
+    coordinator.take_residency_updates(["first"])
+    pool.get_new_blocks(pool.get_num_free_blocks())
+    assert not coordinator.all_context_pages_resident(scheduled)
+    assert "first" in coordinator.take_residency_updates(["first"])
 
 
 def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk():

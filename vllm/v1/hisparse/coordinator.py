@@ -570,9 +570,8 @@ class HiSparseCoordinator:
         A request that can read from host releases every clean sealed block to
         the pool. One that cannot keeps its blocks pinned until the shared pool
         runs low, or until it holds the resident blocks admission reserved for
-        it, then releases its clean blocks and asks for a hot region. Released
-        blocks stay readable until reused, and the next scheduling pass
-        allocates the hot region before the request runs again.
+        it, then asks for a hot region. Blocks remain pinned until that region
+        is allocated on a subsequent scheduling pass.
         """
         if not self.resident_managers:
             return
@@ -586,6 +585,7 @@ class HiSparseCoordinator:
                 return
             for manager in self.hot_managers:
                 manager.require_hot(request_id)
+            return
         self._unpin_clean_blocks(request_id, state)
 
     # ------------------------------------------------------------------
