@@ -195,7 +195,7 @@ def _mamba_group(
     enable_kv_transfer: bool = True,
 ) -> KVCacheGroup:
     config = MambaManager.config(
-        mamba_cache_mode="align", num_speculative_blocks=num_speculative_blocks
+        enable_prefix_caching=True, num_speculative_blocks=num_speculative_blocks
     )
     layer = KVCacheLayerConfig(config, spec or _mamba_spec())
     return KVCacheGroup.from_layers(
@@ -214,7 +214,6 @@ def _gate_vllm_config(
     block_size: int = 16,
     num_lookahead_tokens: int = 0,
     num_speculative_tokens: int = 0,
-    mamba_cache_mode: str = "align",
     dcp_size: int = 1,
 ):
     return SimpleNamespace(
@@ -228,10 +227,7 @@ def _gate_vllm_config(
             kv_role="kv_consumer",
         ),
         speculative_config=speculative_config,
-        cache_config=SimpleNamespace(
-            block_size=block_size,
-            mamba_cache_mode=mamba_cache_mode,
-        ),
+        cache_config=SimpleNamespace(block_size=block_size),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         num_lookahead_tokens=num_lookahead_tokens,
         num_speculative_tokens=num_speculative_tokens,
@@ -346,12 +342,14 @@ def test_scheduler_rejects_hybrid_without_attention_group():
         moriio_connector.MoRIIOConnectorScheduler(_gate_vllm_config(), "engine", config)
 
 
-def _glm5_next_mtp_kv_cache_config(mamba_cache_mode: str = "align") -> KVCacheConfig:
+def _glm5_next_mtp_kv_cache_config(
+    enable_prefix_caching: bool = True,
+) -> KVCacheConfig:
     """GLM-5.3-Flash-shaped groups from the real grouping, with an MTP layer."""
     kpool, num_spec = 4, 1
     mamba = MambaManager.layer_config(
         _mamba_spec(),
-        mamba_cache_mode=mamba_cache_mode,
+        enable_prefix_caching=enable_prefix_caching,
         num_speculative_blocks=num_spec,
     )
     layers: dict[str, KVCacheLayerConfig] = {}
@@ -415,17 +413,16 @@ def _group_kv_cache_layers(layers: dict[str, KVCacheLayerConfig]) -> KVCacheConf
 
 
 def _glm5_next_mtp_scheduler(
-    kv_role: str = "kv_consumer", mamba_cache_mode: str = "align"
+    kv_role: str = "kv_consumer", enable_prefix_caching: bool = True
 ):
     vllm_config = _gate_vllm_config(
         speculative_config=_spec_config("mtp"),
         block_size=1024,
         num_lookahead_tokens=1,
         num_speculative_tokens=1,
-        mamba_cache_mode=mamba_cache_mode,
     )
     vllm_config.kv_transfer_config.kv_role = kv_role
-    config = _glm5_next_mtp_kv_cache_config(mamba_cache_mode)
+    config = _glm5_next_mtp_kv_cache_config(enable_prefix_caching)
     return moriio_connector.MoRIIOConnectorScheduler(vllm_config, "engine", config)
 
 
@@ -767,6 +764,8 @@ def test_plain_write_notify_skips_blocks_of_the_local_prefix_hit(
 ):
     sched = _FakeScheduler(
         mode=MoRIIOMode.WRITE,
+        is_producer=False,
+        _write_recvs_in_flight={},
         _has_mamba=False,
         block_size=16,
         tp_size=1,
@@ -1224,21 +1223,21 @@ def test_read_meta_orders_reads_after_stream_work(
 
 @pytest.mark.usefixtures("restore_moriio_role")
 @pytest.mark.parametrize(
-    ("mamba_cache_mode", "num_computed_tokens", "num_scheduled_tokens", "expected"),
+    ("prefix_caching", "num_computed_tokens", "num_scheduled_tokens", "expected"),
     [
-        pytest.param("align", 1504, 1, True, id="align-crosses-block"),
-        pytest.param("align", 1500, 1, False, id="align-within-block"),
-        pytest.param("align", 1503, 1, False, id="align-fills-block"),
-        pytest.param("align", 1500, 5, True, id="align-chunk-crosses-block"),
-        pytest.param("align", 1500, 4, False, id="align-chunk-fills-block"),
-        pytest.param("none", 1504, 1, False, id="no-prefix-caching"),
+        pytest.param(True, 1504, 1, True, id="crosses-block"),
+        pytest.param(True, 1500, 1, False, id="within-block"),
+        pytest.param(True, 1503, 1, False, id="fills-block"),
+        pytest.param(True, 1500, 5, True, id="chunk-crosses-block"),
+        pytest.param(True, 1500, 4, False, id="chunk-fills-block"),
+        pytest.param(False, 1504, 1, False, id="no-prefix-caching"),
     ],
 )
 def test_hybrid_read_waits_only_when_state_is_copied_into_its_destination(
-    mamba_cache_mode, num_computed_tokens, num_scheduled_tokens, expected
+    prefix_caching, num_computed_tokens, num_scheduled_tokens, expected
 ):
     assert _mamba_spec().block_size == 16
-    scheduler = _glm5_next_mtp_scheduler(mamba_cache_mode=mamba_cache_mode)
+    scheduler = _glm5_next_mtp_scheduler(enable_prefix_caching=prefix_caching)
     request = _make_read_request([[10, 11], [50], [90]])
     request.num_computed_tokens = num_computed_tokens
     scheduler.update_state_after_alloc(

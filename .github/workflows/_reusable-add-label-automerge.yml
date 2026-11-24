@@ -1,0 +1,25 @@
+name: Reusable add label on auto-merge enabled
+
+on:
+  workflow_call:
+
+permissions:
+  pull-requests: write
+
+jobs:
+  add-label-on-auto-merge:
+    if: github.repository == 'vllm-project/vllm' && github.event_name == 'pull_request_target'
+    runs-on: [self-hosted, linux, x64, vllm-runners]
+    steps:
+      - name: Add label
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['ready']
+            })
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

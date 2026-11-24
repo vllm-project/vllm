@@ -418,7 +418,7 @@ guide: |
 
   ## Troubleshooting
 
-  - **FP8 performance:** DeepGEMM is required — install via `install_deepgemm.sh`.
+  - **FP8 performance:** DeepGEMM is required — it is bundled in vLLM wheels, so no separate install is needed.
 
   ## References
 
