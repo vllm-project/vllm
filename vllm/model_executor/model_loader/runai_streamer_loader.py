@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import inspect
 import json
 import os
 import posixpath
@@ -20,7 +19,6 @@ from vllm.distributed import get_world_group, in_single_pp_stage
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
-    SafetensorsStreamer,
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
     filter_safetensors_files_by_weight_name,
@@ -172,17 +170,6 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                     or cpu_limit <= 0
                 ):
                     raise ValueError("cpu_memory_limit must be a positive integer")
-                if not self._is_distributed:
-                    raise ValueError("cpu_weight_files requires distributed=true")
-                if (
-                    "owned"
-                    not in inspect.signature(
-                        SafetensorsStreamer.stream_files
-                    ).parameters
-                ):
-                    raise RuntimeError(
-                        "CPU shard loading requires runai-model-streamer>=0.17.0"
-                    )
                 self._cpu_weight_files = frozenset(cpu_files)
                 self._cpu_memory_limit = cpu_limit
 

@@ -314,41 +314,36 @@ def test_runai_invalid_extra_config_leaves_environ_untouched():
         assert "RUNAI_STREAMER_CONCURRENCY" not in os.environ
 
 
-@pytest.mark.parametrize(
-    "model_config,expected_source",
-    [
-        # Object storage: model_weights holds the URI, model the pulled config dir.
-        (
-            types.SimpleNamespace(
-                model="/tmp/pulled-config-files",
-                model_weights="s3://bucket/weights",
-                revision="myrev",
-            ),
-            "s3://bucket/weights",
-        ),
-        # HF repo or local path: model_weights is empty, model is the source.
-        (
-            types.SimpleNamespace(
-                model="org/model", model_weights="", revision="myrev"
-            ),
-            "org/model",
-        ),
-    ],
-    ids=["object_storage", "hf_repo"],
-)
-def test_runai_get_all_weights_resolves_source(model_config, expected_source):
-    def iterator(path, revision, is_unused_weight=None, can_borrow_weight=None):
-        return iter([(f"{path}@{revision}", None)])
+@pytest.mark.parametrize("override", [False, True])
+def test_runai_get_all_weights_resolves_source(tmp_path, override):
+    from transformers import GPT2Config
 
-    fake_self = types.SimpleNamespace(_get_weights_iterator=iterator)
+    from vllm.config import ModelConfig
 
-    weights = list(
-        rsl.RunaiModelStreamerLoader.get_all_weights(
-            fake_self, model_config, model=None
-        )
+    model_dir = tmp_path / "model"
+    weights_dir = tmp_path / "weights"
+    model_dir.mkdir()
+    weights_dir.mkdir()
+    GPT2Config(
+        n_layer=1,
+        n_head=1,
+        n_embd=8,
+        n_positions=32,
+        vocab_size=16,
+        bos_token_id=0,
+        eos_token_id=1,
+        architectures=["GPT2LMHeadModel"],
+    ).save_pretrained(model_dir)
+    save_file({"weight": torch.tensor([1.0])}, model_dir / "model.safetensors")
+    save_file({"weight": torch.tensor([2.0])}, weights_dir / "model.safetensors")
+    config = ModelConfig(
+        model=str(model_dir),
+        model_weights=str(weights_dir) if override else "",
+        skip_tokenizer_init=True,
+        max_model_len=32,
     )
-
-    assert weights == [(f"{expected_source}@myrev", None)]
+    weights = dict(_runai_loader({}).get_all_weights(config, torch.nn.Module()))
+    assert torch.equal(weights["weight"], torch.tensor([2.0 if override else 1.0]))
 
 
 @pytest.mark.parametrize("selection", ["draft", "unadapted", "reject_all"])

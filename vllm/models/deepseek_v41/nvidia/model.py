@@ -2040,7 +2040,8 @@ class DeepseekV41LLMForCausalLM(
 
     def can_borrow_checkpoint_weight(self, name: str) -> bool:
         # Engram copies these tables before requesting the next checkpoint tensor.
-        return ".engram.embed." in name
+        mapped = self.hf_to_vllm_mapper.map_name(name)
+        return mapped is not None and ".engram.embed." in mapped
 
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mhc_broadcast_weights()

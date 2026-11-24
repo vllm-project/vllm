@@ -102,8 +102,8 @@ vllm serve /home/meta-llama/Llama-3.2-3B-Instruct \
 ## CPU staging for oversized checkpoint shards
 
 `runai_streamer` can keep ordinary checkpoint files on distributed GPU streaming
-and read named oversized files through a separate CPU ring. This is opt-in and
-requires `runai-model-streamer>=0.17.0`. For DeepSeek V4.1 Flash 1017:
+and read named oversized files through a separate CPU ring. This is opt-in;
+CPU shard staging also works with `distributed=false`. For DeepSeek V4.1 Flash 1017:
 
 ```bash
 uv pip install runai-model-streamer==0.17.1
