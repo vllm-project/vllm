@@ -878,6 +878,103 @@ def test_free_kv_cache_block_queue_get_all_free_blocks():
     assert queue.get_all_free_blocks() == blocks[1:2] + blocks[3:] + [block_to_remove]
 
 
+def test_free_kv_cache_block_queue_insert_before_append_head():
+    """Middle-tier blocks sit after prepended blocks and before appended ones."""
+    blocks = [KVCacheBlock(block_id=i) for i in range(8)]
+    queue = FreeKVCacheBlockQueue(blocks[:2])  # [0, 1] (uncached)
+
+    # Inserting before any append places blocks at the tail without setting
+    # _append_head, so subsequent appends still follow them.
+    queue.insert_before_append_head([blocks[2]])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [0, 1, 2]
+
+    queue.append_n([blocks[3], blocks[4]])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [0, 1, 2, 3, 4]
+
+    # Repeated middle-tier inserts preserve FIFO order before _append_head (3).
+    queue.insert_before_append_head([blocks[5], blocks[6]])
+    queue.prepend_n([blocks[7]])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [
+        7,
+        0,
+        1,
+        2,
+        5,
+        6,
+        3,
+        4,
+    ]
+    assert queue.num_free_blocks == 8
+
+    # Removing _append_head (3) advances it to 4.
+    queue.remove(blocks[3])
+    queue.insert_before_append_head([blocks[3]])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [
+        7,
+        0,
+        1,
+        2,
+        5,
+        6,
+        3,
+        4,
+    ]
+
+    # Removing the last appended block (4) clears _append_head to None.
+    queue.remove(blocks[4])
+    queue.append(blocks[4])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [
+        7,
+        0,
+        1,
+        2,
+        5,
+        6,
+        3,
+        4,
+    ]
+
+
+@pytest.mark.parametrize("pop_mode", ["popleft", "popleft_1", "popleft_n"])
+def test_free_kv_cache_block_queue_append_head_across_pops(pop_mode):
+    """Popping past _append_head updates it so later middle-tier inserts stay
+    ahead of remaining appended blocks (and clear it when drained)."""
+    blocks = [KVCacheBlock(block_id=i) for i in range(5)]
+    queue = FreeKVCacheBlockQueue([blocks[0]])
+    queue.append_n([blocks[1], blocks[2], blocks[3]])
+
+    if pop_mode == "popleft":
+        popped = [queue.popleft(), queue.popleft()]
+    elif pop_mode == "popleft_1":
+        popped = queue.popleft_n(1) + queue.popleft_n(1)
+    else:
+        popped = queue.popleft_n(2)
+    assert [b.block_id for b in popped] == [0, 1]
+
+    # Remaining queue is [2, 3] with _append_head at 2.
+    queue.insert_before_append_head([blocks[4]])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [4, 2, 3]
+
+    # Draining the queue clears _append_head cleanly.
+    drained = queue.popleft_n(queue.num_free_blocks)
+    assert [b.block_id for b in drained] == [4, 2, 3]
+    queue.insert_before_append_head([blocks[0]])
+    queue.append(blocks[1])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [0, 1]
+
+
+def test_free_kv_cache_block_queue_reset_append_head():
+    blocks = [KVCacheBlock(block_id=i) for i in range(4)]
+    queue = FreeKVCacheBlockQueue([])
+    queue.append_n([blocks[0], blocks[1]])
+    queue.reset_append_head()
+    # After reset, all existing blocks act as uncached; middle-tier inserts go
+    # after them and before new appends.
+    queue.insert_before_append_head([blocks[2]])
+    queue.append(blocks[3])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [0, 1, 2, 3]
+
+
 def test_generate_block_hash_extra_keys():
     request = make_request(
         request_id="0",
