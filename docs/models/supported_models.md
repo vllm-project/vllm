@@ -850,7 +850,13 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `OmniASRForConditionalGeneration` | Omnilingual ASR | `hf-audio/omniasr-llm-300m-v2` | ✅︎ | ✅︎ |
 | `VibeVoiceAsrForConditionalGeneration` | VibeVoice-ASR | `microsoft/VibeVoice-ASR-HF` | ✅︎ | ✅︎ |
+
+!!! note
+    The Transformers modeling backend can't tell how many audios per prompt a model's processor accepts.
+    For models that take one audio per prompt, such as `OmniASRForConditionalGeneration`, pass
+    `--limit-mm-per-prompt.audio 1` so that extra audios are rejected up front.
 
 #### Realtime Transcription
 
