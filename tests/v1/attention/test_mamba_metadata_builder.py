@@ -4,8 +4,15 @@
 
 from types import SimpleNamespace
 
-from tests.v1.attention.utils import MockMambaBuilder
+import torch
+
+from tests.v1.attention.utils import (
+    BatchSpec,
+    MockMambaBuilder,
+    create_common_attn_metadata,
+)
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 def _make_vllm_config(
@@ -59,3 +66,48 @@ def test_mamba_single_token_prompt_runs_as_prefill():
     assert metadata.num_prefills == 1
     assert metadata.has_initial_states_p is not None
     assert metadata.has_initial_states_p.tolist() == [False]
+
+
+def test_num_single_chunk_seqs_counts_prefill_rows_with_one_chunk():
+    """The host count of prefill rows with exactly one chunk, which picks the
+    Mamba2 SSD kernels, against a reference from the chunk grid: a row covers
+    the chunk_size-aligned chunks its new tokens touch, so a prefix-cached row
+    may fit in its partial first chunk or spill into the next one."""
+    chunk_size = block_size = 16
+    # (seq_len, query_len, is_prefilling): two decode rows, then prefill rows.
+    rows = [
+        (9, 1, False),
+        (5, 1, False),
+        (8, 8, True),  # fresh, one chunk
+        (40, 40, True),  # fresh, three chunks
+        (16, 16, True),  # fresh, exactly one chunk
+        (20, 4, True),  # prefix-cached on a chunk boundary, one chunk
+        (13, 3, True),  # inside its partial first chunk, one chunk
+        (30, 25, True),  # partial first chunk, then one more
+    ]
+    seq_lens, query_lens, is_prefilling = map(list, zip(*rows))
+    config = _make_vllm_config(256, len(rows), block_size=block_size)
+    spec = MambaSpec(
+        block_size=block_size, shapes=((1,), (1,)), dtypes=(torch.float32,)
+    )
+    builder = MockMambaBuilder(spec, ["layer0"], config, torch.device("cpu"))
+    common_attn = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        block_size=block_size,
+        device=torch.device("cpu"),
+        arange_block_indices=True,
+    ).replace(is_prefilling=torch.tensor(is_prefilling, dtype=torch.bool))
+    common = builder.build(0, common_attn)
+    assert common.num_decodes == 2
+
+    def num_chunks(seq_len, query_len):
+        computed = seq_len - query_len
+        return -(-seq_len // chunk_size) - computed // chunk_size
+
+    reference = sum(num_chunks(s, q) == 1 for s, q, _ in rows[common.num_decodes :])
+    *_, last_chunk_indices, _, num_single = builder._build_chunk_metadata_tensors(
+        chunk_size, common, common_attn
+    )
+    assert num_single == reference == 4
+    lengths = torch.diff(last_chunk_indices, prepend=torch.tensor([-1]))
+    assert num_single == int((lengths == 1).sum())

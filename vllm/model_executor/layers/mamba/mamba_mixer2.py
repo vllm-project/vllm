@@ -706,23 +706,37 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         final_state_indices = torch.zeros(batch, device=device, dtype=torch.int32)
 
+        # The short-sequence path runs kernel variants that reuse the configs
+        # tuned on the main path, warmed first, except _state_passing_fwd's,
+        # which tunes on its own: on a one-chunk sequence, which it skips,
+        # followed by the rest of the chunks.
+        ends = sorted({chunk_size, seqlen})
+        short_batch = (
+            torch.tensor([0, *ends], device=device, dtype=torch.int32),
+            torch.tensor(sorted({0, nchunks - 1}), device=device, dtype=torch.int32),
+            torch.tensor(
+                [0] + [len(ends) - 1] * (nchunks - 1), device=device, dtype=torch.int32
+            ),
+        )
+
         # Two kernels (_state_passing_fwd, _chunk_scan_fwd) use
         # HAS_INITSTATES as a constexpr, and _state_passing_fwd also
-        # HAS_FINAL_STATES, producing separate compiled binaries. Warm up
-        # all code paths so none triggers JIT compilation during inference.
-        for use_initial_states, write_final_states in itertools.product(
-            (False, True), repeat=2
+        # HAS_FINAL_STATES, producing separate compiled binaries (three on
+        # the short-sequence path). Warm up all code paths so none triggers
+        # JIT compilation during inference.
+        for (
+            short_seq_path,
+            (cu, last, sidx),
+        ), use_init, write_final in itertools.product(
+            ((False, (cu_seqlens, last_chunk_indices, seq_idx)), (True, short_batch)),
+            (False, True),
+            (False, True),
         ):
+            n = cu.shape[0] - 1
+            state_shape = (n, nheads, headdim, dstate)
             initial_states = (
-                torch.randn(
-                    batch,
-                    nheads,
-                    headdim,
-                    dstate,
-                    device=device,
-                    dtype=ssm_state_dtype,
-                )
-                if use_initial_states
+                torch.randn(state_shape, device=device, dtype=ssm_state_dtype)
+                if use_init
                 else None
             )
             try:
@@ -733,10 +747,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     B=B,
                     C=C,
                     chunk_size=chunk_size,
-                    cu_seqlens=cu_seqlens,
+                    cu_seqlens=cu,
                     cu_chunk_seqlens=cu_chunk_seqlens,
-                    last_chunk_indices=last_chunk_indices,
-                    seq_idx=seq_idx,
+                    last_chunk_indices=last,
+                    seq_idx=sidx,
                     out=out,
                     D=self.D,
                     z=None,
@@ -745,19 +759,28 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     dt_softplus=True,
                     dt_limit=(0.0, float("inf")),
                     state_dtype=ssm_state_dtype,
-                    final_states_out=final_states if write_final_states else None,
-                    final_state_indices=(
-                        final_state_indices if write_final_states else None
+                    final_states_out=(
+                        torch.empty(state_shape, device=device, dtype=ssm_state_dtype)
+                        if write_final
+                        else None
                     ),
+                    final_state_indices=(
+                        torch.arange(n, device=device, dtype=torch.int32)
+                        if write_final
+                        else None
+                    ),
+                    short_seq_path=short_seq_path,
                 )
             except Exception:
                 logger.warning(
                     "Mamba2 SSD kernel warmup failed for layer %s "
-                    "(initial_states=%s, final_states=%s). First inference may "
-                    "experience latency spike or OOM due to autotuner.",
+                    "(initial_states=%s, final_states=%s, short_seq_path=%s). "
+                    "First inference may experience latency spike or OOM due "
+                    "to autotuner.",
                     self.prefix,
-                    use_initial_states,
-                    write_final_states,
+                    use_init,
+                    write_final,
+                    short_seq_path,
                     exc_info=True,
                 )
 
@@ -970,6 +993,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     final_state_indices=None
                     if has_checkpoints
                     else state_indices_tensor_p,
+                    num_single_chunk_seqs=attn_metadata.num_single_chunk_seqs_p,
                 )
 
             if has_checkpoints:
