@@ -7,6 +7,7 @@ import pytest
 import torch
 from PIL import Image
 
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing import ProcessorInputs, TimingContext
 
@@ -49,7 +50,9 @@ def test_rust_engine_processor_rejects_python_media(monkeypatch, modality):
 
 
 @pytest.mark.parametrize("modality,count", [("image", 2), ("video", 1)])
-def test_rust_engine_profiles_synthetic_patches(monkeypatch, modality, count):
+def test_rust_engine_profiles_synthetic_patches(
+    monkeypatch, modality, count, default_vllm_config
+):
     """Synthetic patch rows and placeholder lengths agree without HF media IO."""
     monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
     ctx = build_model_context(
@@ -59,6 +62,7 @@ def test_rust_engine_profiles_synthetic_patches(monkeypatch, modality, count):
         mm_processor_kwargs={"max_pixels": 1568 * 100},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    input_norm = build_mm_input_norm(ctx.model_config)
     inputs = processor.get_dummy_mm_inputs({modality: count})
     items = inputs["mm_kwargs"][modality]
     assert len(items) == count
@@ -78,7 +82,7 @@ def test_rust_engine_profiles_synthetic_patches(monkeypatch, modality, count):
             * vision_config.temporal_patch_size
             * vision_config.patch_size**2,
         )
-        assert pixels.dtype == torch.float32
+        assert pixels.dtype == input_norm.input_dtype == torch.uint8
         assert torch.count_nonzero(pixels) == 0
         assert placeholder.length == num_patches // vision_config.spatial_merge_size**2
         assert placeholder.length <= 100

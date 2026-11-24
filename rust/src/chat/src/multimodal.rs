@@ -290,9 +290,37 @@ struct VisionModalitySupport {
     /// Built by the spec with this modality's preprocessor config resolved
     /// into it; reused across requests.
     processor: Arc<dyn VisionPreProcessor>,
-    /// The modality's preprocessor config, consulted per request by the
+    /// The original modality preprocessor config, consulted per request by the
     /// video sampling policy and media-aware prompt replacements.
     config: PreProcessorConfig,
+}
+
+impl VisionModalitySupport {
+    fn with_mm_device_do_normalize(
+        &self,
+        context: &MultimodalModelContext,
+        enabled: bool,
+    ) -> Result<Self> {
+        let mut config = self.config.clone();
+        if enabled {
+            config.do_normalize = Some(false);
+            config.do_rescale = Some(false);
+        }
+        let modality = self.spec.modality;
+        let processor = context
+            .resolve_vision_processor(self.spec.raw, &config, modality)?
+            .ok_or_else(|| multimodal!("{modality} processor no longer resolves"))?;
+        if enabled && !processor.emits_pixel_bytes() {
+            bail_multimodal!(
+                "model `{}` does not support device normalization for {modality} inputs: processor does not emit raw pixel bytes",
+                context.model_id
+            );
+        }
+
+        let mut updated = self.clone();
+        updated.processor = processor;
+        Ok(updated)
+    }
 }
 
 /// Model-owned audio preprocessor plus the resolved model contract for its output.
@@ -664,6 +692,22 @@ impl MultimodalModelInfo {
             placeholder: ResolvedPlaceholder::resolve(raw_spec, context, Modality::Audio)?,
             processor,
         }))
+    }
+
+    pub fn set_mm_device_do_normalize(&mut self, enabled: bool) -> Result<()> {
+        let image = self
+            .image
+            .as_ref()
+            .map(|support| support.with_mm_device_do_normalize(&self.context, enabled))
+            .transpose()?;
+        let video = self
+            .video
+            .as_ref()
+            .map(|support| support.with_mm_device_do_normalize(&self.context, enabled))
+            .transpose()?;
+        self.image = image;
+        self.video = video;
+        Ok(())
     }
 
     /// Return the template-visible placeholder token for one modality, when
@@ -1439,6 +1483,40 @@ mod tests {
         .expect("GLM-5.3-Flash multimodal support")
     }
 
+    pub(super) fn glm53_flash_info_from_paths(
+        preprocessor_config: serde_json::Value,
+        kwargs: HashMap<String, serde_json::Value>,
+    ) -> MultimodalModelInfo {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        let preprocessor = dir.path().join("preprocessor_config.json");
+        fs::write(
+            &config,
+            json!({
+                "model_type": "glm53_flash",
+                "image_token_id": GLM53_IMAGE_ID,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(&preprocessor, preprocessor_config.to_string()).unwrap();
+
+        MultimodalModelInfo::from_paths(
+            "zai-org/GLM-5.3-Flash".to_string(),
+            Some("glm53_flash".to_string()),
+            MultimodalConfigFiles {
+                config: Some(&config),
+                preprocessor_config: Some(&preprocessor),
+                ..Default::default()
+            },
+            Arc::new(glm53_flash_tokenizer()),
+            HashMap::new(),
+            &kwargs,
+        )
+        .unwrap()
+        .expect("GLM-5.3-Flash multimodal support")
+    }
+
     #[test]
     fn request_video_fps_scopes_the_uuid_and_needs_a_rate_based_sampling() {
         let part = |fps| MediaContentPart::VideoUrl {
@@ -1940,6 +2018,24 @@ mod tests {
 
         assert_eq!(info.placeholder_token(Modality::Image), Some("<|image|>"));
         assert_eq!(info.placeholder_token(Modality::Video), None);
+    }
+
+    #[test]
+    fn device_normalization_rejects_float_only_processors() {
+        let mut info = llama4_info();
+        let processor = Arc::clone(&info.image.as_ref().unwrap().processor);
+        let error = info.set_mm_device_do_normalize(true).unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Multimodal(message)
+                if message.contains("does not support device normalization for image inputs")
+                    && message.contains("does not emit raw pixel bytes")
+        ));
+        assert!(Arc::ptr_eq(
+            &processor,
+            &info.image.as_ref().unwrap().processor
+        ));
     }
 
     // Token IDs from the Muse Spark Open checkpoint's `tokenizer_config.json`.

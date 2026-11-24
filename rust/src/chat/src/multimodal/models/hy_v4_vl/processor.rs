@@ -25,18 +25,17 @@
 //!   kwarg and as the fallback when no sampling info is available.
 //!
 //! Pixels are emitted NORMALIZED (rescale by 1/255, then CLIP mean/std) as
-//! f32: the Rust frontend always launches the engine with
-//! `VLLM_USE_RUST_FRONTEND=1`, which forces `mm_device_do_normalize=False`, so
-//! the model builds `IdentityInputNorm` and pixels would otherwise pass
-//! through unnormalized. Both lanes use the CLIP stats (OPENAI_CLIP_MEAN /
-//! OPENAI_CLIP_STD): in the Python serving path the on-device
-//! `FusedMMInputNorm` is built from the image processor config and applies to
-//! `pixel_values` and `pixel_values_videos` alike
+//! f32 by default. When the model normalizes on device, the frontend clears
+//! `do_normalize` and `do_rescale`, and the processors emit the image's own
+//! bytes instead; any other flag combination remains f32 with the requested
+//! rescale and normalization applied in the processor. Both lanes use the
+//! CLIP stats (OPENAI_CLIP_MEAN / OPENAI_CLIP_STD): in the Python serving path
+//! the on-device `FusedMMInputNorm` is built from the image processor config
+//! and applies to `pixel_values` and `pixel_values_videos` alike
 //! (`models/hy_v4/nvidia/vision.py`, `vl_model.py`), and the video
-//! processor's own 0.5/0.5 class defaults are never exercised in serving
-//! (`do_normalize` is forced off, `config/multimodal.py`). A checkpoint's
-//! `image_mean`/`image_std`/`rescale_factor` still override the defaults,
-//! read from the preprocessor config.
+//! processor's own 0.5/0.5 class defaults are never exercised in serving.
+//! A checkpoint's `image_mean`/`image_std`/`rescale_factor` still override the
+//! defaults, read from the preprocessor config.
 //!
 //! Resampling note: the reference image processor is torchvision-backed and
 //! its resize is `torch.nn.functional.interpolate(mode="bicubic",
@@ -50,8 +49,8 @@ use llm_multimodal::vision::transforms::{
     resize_bicubic_torch_aa, resize_bicubic_torch_aa_rgb, round_half_to_even,
 };
 use llm_multimodal::{
-    ModelSpecificValue, PixelNorm, PreProcessorConfig, PreprocessedEncoderInputs, RgbFrameRef,
-    TransformError, VideoClipOptions, VisionPreProcessor,
+    EncoderInput, ModelSpecificValue, PixelNorm, PreProcessorConfig, PreprocessedEncoderInputs,
+    RgbFrameRef, TransformError, VideoClipOptions, VisionPreProcessor,
 };
 
 const DEFAULT_PATCH_SIZE: usize = 16;
@@ -104,6 +103,8 @@ pub struct HyV4VisionParams {
     pub image_mean: [f64; 3],
     pub image_std: [f64; 3],
     pub rescale_factor: f64,
+    pub do_normalize: bool,
+    pub do_rescale: bool,
 }
 
 impl HyV4VisionParams {
@@ -125,6 +126,8 @@ impl HyV4VisionParams {
             image_mean: PreProcessorConfig::CLIP_MEAN,
             image_std: PreProcessorConfig::CLIP_STD,
             rescale_factor: 1.0 / 255.0,
+            do_normalize: true,
+            do_rescale: true,
         }
     }
 
@@ -183,21 +186,40 @@ impl HyV4VisionParams {
         params.image_mean = config.get_image_mean();
         params.image_std = config.get_image_std();
         params.rescale_factor = config.get_rescale_factor();
+        params.do_normalize = config.do_normalize.unwrap_or(params.do_normalize);
+        params.do_rescale = config.do_rescale.unwrap_or(params.do_rescale);
         params
     }
 }
 
-/// The per-channel map from a pixel byte to its normalized f32, with rescale
-/// and normalize fused by scaling the mean and std into byte units — the
-/// arithmetic of llm-multimodal's `pixel_norm` (`pub(super)` there, so
-/// rebuilt here from the same public pieces) and of the reference processors'
+/// The per-channel map from a pixel byte to its output f32. Rescale and
+/// normalize each apply only when their flag is on; with both on they fuse by
+/// scaling the mean and std into byte units — the arithmetic of
+/// llm-multimodal's `pixel_norm` (`pub(super)` there, so rebuilt here from the
+/// same public pieces) and of the reference processors'
 /// `rescale_and_normalize`, so a byte maps to the same `f32` everywhere.
 fn pixel_norm(params: &HyV4VisionParams) -> PixelNorm {
-    let into_bytes = (1.0 / params.rescale_factor) as f32;
+    let (scale, offset, divisor) = match (params.do_rescale, params.do_normalize) {
+        (true, true) => {
+            let into_bytes = (1.0 / params.rescale_factor) as f32;
+            (
+                1.0,
+                std::array::from_fn(|channel| params.image_mean[channel] as f32 * into_bytes),
+                std::array::from_fn(|channel| params.image_std[channel] as f32 * into_bytes),
+            )
+        }
+        (true, false) => (params.rescale_factor as f32, [0.0; 3], [1.0; 3]),
+        (false, true) => (
+            1.0,
+            std::array::from_fn(|channel| params.image_mean[channel] as f32),
+            std::array::from_fn(|channel| params.image_std[channel] as f32),
+        ),
+        (false, false) => (1.0, [0.0; 3], [1.0; 3]),
+    };
     PixelNorm {
-        scale: 1.0,
-        offset: std::array::from_fn(|channel| params.image_mean[channel] as f32 * into_bytes),
-        divisor: std::array::from_fn(|channel| params.image_std[channel] as f32 * into_bytes),
+        scale,
+        offset,
+        divisor,
         channel_block: params.patch_size * params.patch_size,
     }
 }
@@ -297,13 +319,13 @@ fn adaptive_resize(
 /// Mirrors `patchify` in `transformers_utils/processors/hy_v4.py`: patches in
 /// row-major (h, w) order, channel-first within each `patch_size` square —
 /// row `ph * (w/p) + pw` holds `frame[c][ph*p + y][pw*p + x]` at
-/// `c*p*p + y*p + x`. Bytes map to normalized f32 through `table` (see the
-/// module docs: the frontend normalizes, the engine's norm is an identity).
-fn append_patchified(
+/// `c*p*p + y*p + x`. Bytes map to output values through `table`: normalized
+/// f32 by default, or the unchanged bytes when both transforms are disabled.
+fn append_patchified<T: Copy>(
     rgb: &RgbImage,
     patch_size: usize,
-    table: &[[f32; 256]; 3],
-    out: &mut Vec<f32>,
+    table: &[[T; 256]; 3],
+    out: &mut Vec<T>,
 ) {
     let (w, h) = (rgb.width() as usize, rgb.height() as usize);
     debug_assert!(
@@ -374,10 +396,11 @@ fn vision_token_count(
 ///
 /// Per image: `smart_resize` within the pixel budgets, torchvision-exact
 /// bicubic resize, then `patchify` into a flat `(n_patches, 3 * patch^2)`
-/// normalized f32 tensor. Emits `image_grid_thw` rows `[1, H/patch, W/patch]`,
-/// `image_patch_counts` (per-image patch rows, the flat-slicing sizes of the
-/// spec's `FieldLayout::Flat` primary), and the per-image embed-token count
-/// of [`vision_token_count`].
+/// tensor. Pixels are normalized f32 unless both rescale and normalization are
+/// disabled, in which case they are raw u8. Emits `image_grid_thw` rows
+/// `[1, H/patch, W/patch]`, `image_patch_counts` (per-image patch rows, the
+/// flat-slicing sizes of the spec's `FieldLayout::Flat` primary), and the
+/// per-image embed-token count of [`vision_token_count`].
 #[derive(Debug, Clone)]
 pub struct HyV4VLImageProcessor {
     params: HyV4VisionParams,
@@ -401,6 +424,10 @@ impl HyV4VLImageProcessor {
 }
 
 impl VisionPreProcessor for HyV4VLImageProcessor {
+    fn emits_pixel_bytes(&self) -> bool {
+        !self.params.do_normalize && !self.params.do_rescale
+    }
+
     fn default_mean(&self) -> [f64; 3] {
         // Reference `HYV4VLImageProcessor.image_mean` (OPENAI_CLIP_MEAN), the
         // stats `preprocess` normalizes with unless the checkpoint overrides
@@ -422,9 +449,13 @@ impl VisionPreProcessor for HyV4VLImageProcessor {
         let params = &self.params;
         let factor = params.patch_size * params.merge_size;
         let patch_elems = 3 * params.patch_size * params.patch_size;
+        let raw = self.emits_pixel_bytes();
         let table = self.norm.table_f32();
+        let raw_table: [[u8; 256]; 3] =
+            std::array::from_fn(|_| std::array::from_fn(|value| value as u8));
 
         let mut pixels = Vec::new();
+        let mut pixel_bytes = Vec::new();
         let mut grids = Vec::with_capacity(images.len() * 3);
         let mut feature_token_counts = Vec::with_capacity(images.len());
         let mut item_sizes = Vec::with_capacity(images.len());
@@ -437,7 +468,11 @@ impl VisionPreProcessor for HyV4VLImageProcessor {
             let (width, height) = rgb.dimensions();
             let (h, w) = smart_resize(height, width, factor, params.min_pixels, params.max_pixels)?;
             let resized = resize_bicubic_torch_aa(&DynamicImage::ImageRgb8(rgb), w, h).to_rgb8();
-            append_patchified(&resized, params.patch_size, &table, &mut pixels);
+            if raw {
+                append_patchified(&resized, params.patch_size, &raw_table, &mut pixel_bytes);
+            } else {
+                append_patchified(&resized, params.patch_size, &table, &mut pixels);
+            }
 
             let grid_h = h as usize / params.patch_size;
             let grid_w = w as usize / params.patch_size;
@@ -448,12 +483,26 @@ impl VisionPreProcessor for HyV4VLImageProcessor {
             item_sizes.push((width, height));
         }
 
-        let encoder_input = ndarray::Array2::from_shape_vec((total_patches, patch_elems), pixels)
+        let encoder_input = if raw {
+            let patches = ndarray::Array2::from_shape_vec(
+                (total_patches, patch_elems),
+                pixel_bytes,
+            )
             .map_err(|error| {
-            TransformError::ShapeError(format!(
-                "failed to build HY4-VL image patches [{total_patches}, {patch_elems}]: {error}"
-            ))
-        })?;
+                TransformError::ShapeError(format!(
+                    "failed to build HY4-VL image patches [{total_patches}, {patch_elems}]: {error}"
+                ))
+            })?;
+            EncoderInput::bytes(patches, self.norm)
+        } else {
+            ndarray::Array2::from_shape_vec((total_patches, patch_elems), pixels)
+                .map_err(|error| {
+                    TransformError::ShapeError(format!(
+                        "failed to build HY4-VL image patches [{total_patches}, {patch_elems}]: {error}"
+                    ))
+                })?
+                .into()
+        };
 
         Ok(
             PreprocessedEncoderInputs::new(encoder_input, feature_token_counts, item_sizes)
@@ -595,24 +644,46 @@ impl HyV4VLVideoProcessor {
             )));
         }
 
-        let mut pixels = Vec::new();
+        let raw = self.emits_pixel_bytes();
         let table = self.norm.table_f32();
+        let raw_table: [[u8; 256]; 3] =
+            std::array::from_fn(|_| std::array::from_fn(|value| value as u8));
+        let mut pixels = Vec::new();
+        let mut pixel_bytes = Vec::new();
         for frame in frames {
             let resized =
                 resize_bicubic_torch_aa_rgb(frame.as_raw(), frame.width(), frame.height(), w, h)?;
-            append_patchified(&resized, params.patch_size, &table, &mut pixels);
+            if raw {
+                append_patchified(&resized, params.patch_size, &raw_table, &mut pixel_bytes);
+            } else {
+                append_patchified(&resized, params.patch_size, &table, &mut pixels);
+            }
         }
 
         let grid_h = h as usize / params.patch_size;
         let grid_w = w as usize / params.patch_size;
         let patch_elems = 3 * params.patch_size * params.patch_size;
         let total_patches = t * grid_h * grid_w;
-        let encoder_input = ndarray::Array2::from_shape_vec((total_patches, patch_elems), pixels)
+        let encoder_input = if raw {
+            let patches = ndarray::Array2::from_shape_vec(
+                (total_patches, patch_elems),
+                pixel_bytes,
+            )
             .map_err(|error| {
-            TransformError::ShapeError(format!(
-                "failed to build HY4-VL video patches [{total_patches}, {patch_elems}]: {error}"
-            ))
-        })?;
+                TransformError::ShapeError(format!(
+                    "failed to build HY4-VL video patches [{total_patches}, {patch_elems}]: {error}"
+                ))
+            })?;
+            EncoderInput::bytes(patches, self.norm)
+        } else {
+            ndarray::Array2::from_shape_vec((total_patches, patch_elems), pixels)
+                .map_err(|error| {
+                    TransformError::ShapeError(format!(
+                        "failed to build HY4-VL video patches [{total_patches}, {patch_elems}]: {error}"
+                    ))
+                })?
+                .into()
+        };
 
         // `video_timestamps` ships as a real 1-D tensor (not a `FloatVec`
         // passthrough) so the spec can declare it `FieldLayout::Flat`,
@@ -649,6 +720,10 @@ impl HyV4VLVideoProcessor {
 }
 
 impl VisionPreProcessor for HyV4VLVideoProcessor {
+    fn emits_pixel_bytes(&self) -> bool {
+        !self.params.do_normalize && !self.params.do_rescale
+    }
+
     fn default_mean(&self) -> [f64; 3] {
         // The reference `HYV4VLVideoProcessor.image_mean` is 0.5/0.5, but
         // serving normalizes both lanes with the image processor's CLIP stats
@@ -910,6 +985,31 @@ mod tests {
         let row = &flat[..768];
         assert!(row[..256].iter().all(|&v| v == expected));
         assert!(row[256..512].iter().all(|&v| v == (30.0_f32 - 0.5 * 255.0) / (0.25 * 255.0)));
+    }
+
+    #[test]
+    fn rescale_only_and_normalize_only_remain_f32_with_the_requested_transform() {
+        let cases = [
+            (true, false, 120.0_f32 * (1.0_f64 / 255.0) as f32),
+            (
+                false,
+                true,
+                (120.0_f32 - PreProcessorConfig::CLIP_MEAN[0] as f32)
+                    / PreProcessorConfig::CLIP_STD[0] as f32,
+            ),
+        ];
+        for (do_rescale, do_normalize, expected) in cases {
+            let config = PreProcessorConfig {
+                do_rescale: Some(do_rescale),
+                do_normalize: Some(do_normalize),
+                ..Default::default()
+            };
+            let processor = image_processor_from(&config);
+            assert!(!processor.emits_pixel_bytes());
+            let out = processor.preprocess(&[&solid(512, 512)]).unwrap();
+            assert!(matches!(out.encoder_input, EncoderInput::F32(_)));
+            assert!(out.encoder_input.flat_f32()[..256].iter().all(|&value| value == expected));
+        }
     }
 
     #[test]

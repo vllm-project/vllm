@@ -1385,7 +1385,7 @@ class Glm5NextForConditionalGeneration(
     # cache); the mamba-state classmethods delegate to the text model.
     has_inner_state: ClassVar[Literal[True]] = True
     is_hybrid: ClassVar[Literal[True]] = True
-    supports_mm_device_do_normalize = False
+    supports_mm_device_do_normalize = True
 
     # Fused projections for LoRA
     packed_modules_mapping = {

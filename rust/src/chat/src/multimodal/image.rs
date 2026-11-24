@@ -83,3 +83,171 @@ impl MultimodalModelInfo {
         .map_err(|error| multimodal!("image preprocessing task failed: {error}"))?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use image::{DynamicImage, Rgb, RgbImage};
+    use llm_multimodal::{ImageDetail, ImageSource};
+    use vllm_engine_core_client::protocol::dtype::TensorDtype;
+    use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
+
+    use super::super::tests::{glm53_flash_info, glm53_flash_info_from_paths, qwen3_vl_info};
+    use super::*;
+
+    fn solid_frame(pixel: [u8; 3]) -> Arc<ImageFrame> {
+        Arc::new(ImageFrame::new(
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(28, 28, Rgb(pixel))),
+            bytes::Bytes::new(),
+            ImageDetail::Auto,
+            ImageSource::InlineBytes,
+            "image".to_string(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn engine_capability_selects_raw_u8_or_float_images() {
+        let mut glm = glm53_flash_info(Default::default());
+        glm.set_mm_device_do_normalize(true).unwrap();
+        let prepared = glm
+            .prepare_images(
+                vec![solid_frame([255, 128, 7])],
+                vec![None],
+                ModelDtype::Float32,
+                VisionPreprocessingContext::default(),
+            )
+            .await
+            .unwrap();
+        let Some(MmKwargValue::Tensor(primary)) =
+            prepared.items[0].data[IMAGE_PRIMARY_KEY].data.as_ref()
+        else {
+            panic!("GLM image primary input should be a tensor");
+        };
+        assert_eq!(primary.dtype, TensorDtype::U8);
+        assert_eq!(primary.shape, [64, 3 * 2 * 14 * 14]);
+        let row = [
+            vec![255; 2 * 14 * 14],
+            vec![128; 2 * 14 * 14],
+            vec![7; 2 * 14 * 14],
+        ]
+        .concat();
+        assert_eq!(
+            primary.data.as_raw_view().unwrap().as_ref(),
+            row.repeat(64).as_slice()
+        );
+
+        let mut qwen = qwen3_vl_info();
+        qwen.set_mm_device_do_normalize(false).unwrap();
+        let prepared = qwen
+            .prepare_images(
+                vec![solid_frame([255, 128, 7])],
+                vec![None],
+                ModelDtype::Float32,
+                VisionPreprocessingContext::default(),
+            )
+            .await
+            .unwrap();
+        let Some(MmKwargValue::Tensor(primary)) =
+            prepared.items[0].data[IMAGE_PRIMARY_KEY].data.as_ref()
+        else {
+            panic!("Qwen image primary input should be a tensor");
+        };
+        assert_eq!(primary.dtype, TensorDtype::F32);
+    }
+
+    #[tokio::test]
+    async fn device_normalization_rebuilds_preserve_startup_processor_kwargs() {
+        const PIXELS_PER_TOKEN: usize = 2 * 14 * 14;
+
+        let mut glm = glm53_flash_info_from_paths(
+            serde_json::json!({
+                "do_resize": false,
+                "patch_size": 14,
+                "merge_size": 2,
+                "temporal_patch_size": 2,
+                "patch_expand_factor": 1,
+                "min_pixels": 16 * PIXELS_PER_TOKEN,
+                "max_pixels": 128 * PIXELS_PER_TOKEN,
+                "resample": 3,
+            }),
+            serde_json::from_value(serde_json::json!({
+                "do_resize": true,
+                "do_normalize": true,
+                "do_rescale": true,
+                "min_pixels": 8 * PIXELS_PER_TOKEN,
+                "max_pixels": 32 * PIXELS_PER_TOKEN,
+                "resample": 2,
+                "images_kwargs": {
+                    "min_pixels": PIXELS_PER_TOKEN,
+                    "max_pixels": 4 * PIXELS_PER_TOKEN,
+                    "image_mean": [0.0, 0.0, 0.0],
+                    "image_std": [1.0, 1.0, 1.0],
+                },
+                "videos_kwargs": {"max_pixels": 8 * PIXELS_PER_TOKEN},
+            }))
+            .unwrap(),
+        );
+        let image = glm.image.as_ref().unwrap();
+        assert_eq!(image.config.do_resize, Some(true));
+        assert_eq!(image.config.resampling, Some(2));
+        assert_eq!(image.config.min_pixels, Some(PIXELS_PER_TOKEN));
+        assert_eq!(image.config.max_pixels, Some(4 * PIXELS_PER_TOKEN));
+        let video = glm.video.as_ref().unwrap();
+        assert_eq!(video.config.min_pixels, Some(8 * PIXELS_PER_TOKEN));
+        assert_eq!(video.config.max_pixels, Some(8 * PIXELS_PER_TOKEN));
+        let startup_configs =
+            [image, video].map(|support| serde_json::to_value(&support.config).unwrap());
+
+        glm.set_mm_device_do_normalize(true).unwrap();
+        glm.set_mm_device_do_normalize(true).unwrap();
+        let prepared = glm
+            .prepare_images(
+                vec![solid_frame([255, 128, 7])],
+                vec![None],
+                ModelDtype::Float32,
+                VisionPreprocessingContext::default(),
+            )
+            .await
+            .unwrap();
+        let Some(MmKwargValue::Tensor(primary)) =
+            prepared.items[0].data[IMAGE_PRIMARY_KEY].data.as_ref()
+        else {
+            panic!("GLM image primary input should be a tensor");
+        };
+        assert_eq!(primary.dtype, TensorDtype::U8);
+        assert_eq!(primary.shape, [4, 3 * PIXELS_PER_TOKEN]);
+
+        glm.set_mm_device_do_normalize(false).unwrap();
+        glm.set_mm_device_do_normalize(false).unwrap();
+        for (support, startup) in [glm.image.as_ref().unwrap(), glm.video.as_ref().unwrap()]
+            .into_iter()
+            .zip(startup_configs)
+        {
+            assert_eq!(serde_json::to_value(&support.config).unwrap(), startup);
+        }
+
+        let prepared = glm
+            .prepare_images(
+                vec![solid_frame([255, 128, 7])],
+                vec![None],
+                ModelDtype::Float32,
+                VisionPreprocessingContext::default(),
+            )
+            .await
+            .unwrap();
+        let Some(MmKwargValue::Tensor(primary)) =
+            prepared.items[0].data[IMAGE_PRIMARY_KEY].data.as_ref()
+        else {
+            panic!("GLM image primary input should be a tensor");
+        };
+        assert_eq!(primary.dtype, TensorDtype::F32);
+        assert_eq!(primary.shape, [4, 3 * PIXELS_PER_TOKEN]);
+        let bytes = primary.data.as_raw_view().unwrap();
+        let pixel = |index| {
+            let offset = index * size_of::<f32>();
+            f32::from_ne_bytes(bytes[offset..offset + size_of::<f32>()].try_into().unwrap())
+        };
+        assert_eq!(pixel(0), 1.0);
+        assert!((pixel(PIXELS_PER_TOKEN) - 128.0 / 255.0).abs() < 1e-6);
+        assert!((pixel(2 * PIXELS_PER_TOKEN) - 7.0 / 255.0).abs() < 1e-6);
+    }
+}

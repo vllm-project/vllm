@@ -145,6 +145,10 @@ pub struct EngineCoreReadyResponse {
     /// Whether expert parallelism is enabled.
     #[serde(default)]
     pub enable_expert_parallel: bool,
+    /// Whether multimodal encoder inputs are normalized on the engine device.
+    /// Older engines omit this field and require frontend normalization.
+    #[serde(default)]
+    pub mm_device_do_normalize: bool,
     /// Whether the engine computes prompt logprobs. `false` under
     /// `--kv-sharing-fast-prefill`, which skips prompt tokens in some layers.
     #[serde(default = "supports_prompt_logprobs_default")]

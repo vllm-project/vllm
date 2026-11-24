@@ -28,14 +28,14 @@
 //!   them (`prompt_replacements_with_media`), falling back to the
 //!   processor-synthesized `video_timestamps` otherwise.
 //!
-//! The engine consumes flat normalized patch rows (`pixel_values`,
-//! `pixel_values_videos`) with per-item grids kept on CPU, mirroring
-//! `_get_mm_fields_config`. Normalization happens in the processor: the Rust
-//! frontend always launches the engine with `VLLM_USE_RUST_FRONTEND=1`, which
-//! forces `mm_device_do_normalize=False`, so the model builds
-//! `IdentityInputNorm` and pixels would otherwise pass through unnormalized.
-//! Both lanes use the image processor's CLIP stats — what the Python serving
-//! path's on-device `FusedMMInputNorm` applies to `pixel_values` and
+//! The engine consumes flat patch rows (`pixel_values`, `pixel_values_videos`)
+//! with per-item grids kept on CPU, mirroring `_get_mm_fields_config`. By
+//! default normalization happens in the processor and rows are f32. When the
+//! model normalizes on device, the frontend clears `do_normalize` and
+//! `do_rescale`, and the processor emits raw u8 rows instead; other flag
+//! combinations remain f32 with the configured transforms applied. Both lanes
+//! use the image processor's CLIP stats — what the Python serving path's
+//! on-device `FusedMMInputNorm` applies to `pixel_values` and
 //! `pixel_values_videos` alike. The frontend's flat
 //! slicing reads per-item sizes from a companion tensor (the
 //! `FieldLayout::Flat` contract, as in `muse_spark`), so the processor emits
@@ -1423,6 +1423,92 @@ mod tests {
 
     fn solid_rgb(width: u32, height: u32) -> DynamicImage {
         DynamicImage::ImageRgb8(RgbImage::from_pixel(width, height, Rgb([120, 30, 200])))
+    }
+
+    fn hy4_info() -> MultimodalModelInfo {
+        let context = MultimodalModelContext {
+            model_id: "hy4-vl-test".to_string(),
+            model_type: Some("hy_v4_vl".to_string()),
+            config: hy4_config(),
+            tokenizer: TokenizerResolver(Arc::new(WireTestTokenizer::new())),
+        };
+        MultimodalModelInfo::from_loaded(
+            context,
+            PreProcessorConfig::default(),
+            PreProcessorConfig::default(),
+            PreProcessorConfig::default(),
+            HashMap::new(),
+        )
+        .unwrap()
+        .expect("hy_v4_vl multimodal support should resolve")
+    }
+
+    #[test]
+    fn image_device_normalization_emits_raw_bytes_and_restores_default() {
+        let mut info = hy4_info();
+        let image = solid_rgb(512, 512);
+        info.set_mm_device_do_normalize(true).unwrap();
+        {
+            let processor = &info.image.as_ref().unwrap().processor;
+            assert!(processor.emits_pixel_bytes());
+            let raw = processor.preprocess(&[&image]).unwrap();
+            let llm_multimodal::EncoderInput::U8 { patches, .. } = &raw.encoder_input else {
+                panic!("device normalization must receive raw pixel bytes");
+            };
+            assert_eq!(patches.shape(), &[1024, 768]);
+            for row in patches.rows() {
+                let row = row.as_slice().unwrap();
+                assert!(row[..256].iter().all(|&value| value == 120));
+                assert!(row[256..512].iter().all(|&value| value == 30));
+                assert!(row[512..].iter().all(|&value| value == 200));
+            }
+        }
+
+        info.set_mm_device_do_normalize(false).unwrap();
+        let processor = &info.image.as_ref().unwrap().processor;
+        assert!(!processor.emits_pixel_bytes());
+        let restored = processor.preprocess(&[&image]).unwrap();
+        let expected = HyV4VLImageProcessor::default().preprocess(&[&image]).unwrap();
+        assert!(matches!(
+            &restored.encoder_input,
+            llm_multimodal::EncoderInput::F32(_)
+        ));
+        assert_eq!(restored.encoder_input, expected.encoder_input);
+    }
+
+    #[test]
+    fn video_device_normalization_emits_raw_bytes_and_restores_default() {
+        let mut info = hy4_info();
+        let frames =
+            vec![DynamicImage::ImageRgb8(RgbImage::from_pixel(512, 512, Rgb([10, 20, 30]))); 2];
+        let clip = llm_multimodal::VideoClipOptions::sampled_at(2.0);
+        info.set_mm_device_do_normalize(true).unwrap();
+        {
+            let processor = &info.video.as_ref().unwrap().processor;
+            assert!(processor.emits_pixel_bytes());
+            let raw = processor.preprocess_video(&frames, &clip).unwrap();
+            let llm_multimodal::EncoderInput::U8 { patches, .. } = &raw.encoder_input else {
+                panic!("device normalization must receive raw pixel bytes");
+            };
+            assert_eq!(patches.shape(), &[2048, 768]);
+            for row in patches.rows() {
+                let row = row.as_slice().unwrap();
+                assert!(row[..256].iter().all(|&value| value == 10));
+                assert!(row[256..512].iter().all(|&value| value == 20));
+                assert!(row[512..].iter().all(|&value| value == 30));
+            }
+        }
+
+        info.set_mm_device_do_normalize(false).unwrap();
+        let processor = &info.video.as_ref().unwrap().processor;
+        assert!(!processor.emits_pixel_bytes());
+        let restored = processor.preprocess_video(&frames, &clip).unwrap();
+        let expected = HyV4VLVideoProcessor::default().preprocess_video(&frames, &clip).unwrap();
+        assert!(matches!(
+            &restored.encoder_input,
+            llm_multimodal::EncoderInput::F32(_)
+        ));
+        assert_eq!(restored.encoder_input, expected.encoder_input);
     }
 
     /// The image lane's primary is declared `Flat` with sizes key

@@ -53,7 +53,7 @@ use tonic::transport::Server as TonicServer;
 use tonic_health::server::health_reporter;
 use tower::ServiceExt as _;
 use tracing::{info, trace, warn};
-use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
+use vllm_chat::{ChatLlm, DynChatBackend, LoadModelBackendsOptions, load_model_backends};
 pub use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
 };
@@ -149,7 +149,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     .await
     .context("failed to create chat/text backends")?;
     let text_backend = loaded.text_backend;
-    let chat_backend = loaded.chat_backend;
+    let mut chat_backend = loaded.chat_backend;
 
     let coordinator_mode = config.effective_coordinator_mode(text_backend.is_moe());
     info!(
@@ -168,6 +168,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     })
     .await
     .context("failed to connect to engine core")?;
+    configure_mm_device_do_normalize(&mut chat_backend, client.mm_device_do_normalize())?;
     let server_info = ServerInfoSnapshot::new(config, &client);
     let system_fingerprint = config
         .fingerprint_mode
@@ -213,6 +214,16 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     lora::load_static_loras(&state, &config.lora_modules, &config.default_mm_loras).await?;
 
     Ok(state)
+}
+
+fn configure_mm_device_do_normalize(
+    chat_backend: &mut DynChatBackend,
+    enabled: bool,
+) -> Result<()> {
+    Arc::get_mut(chat_backend)
+        .context("chat backend is already shared before multimodal normalization setup")?
+        .set_mm_device_do_normalize(enabled)
+        .context("failed to configure multimodal normalization from engine handshake")
 }
 
 /// Run the OpenAI-compatible HTTP server until the supplied shutdown token is
@@ -502,9 +513,57 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::Poll;
 
     use super::*;
+
+    struct RecordingChatBackend {
+        enabled: Arc<AtomicBool>,
+    }
+
+    impl vllm_chat::ChatBackend for RecordingChatBackend {
+        fn chat_renderer(&self) -> vllm_chat::DynChatRenderer {
+            unreachable!()
+        }
+
+        fn new_chat_output_processor(
+            &self,
+            _request: &mut vllm_chat::ChatRequest,
+            _options: vllm_chat::NewChatOutputProcessorOptions<'_>,
+        ) -> vllm_chat::Result<vllm_chat::DynChatOutputProcessor> {
+            unreachable!()
+        }
+
+        fn set_mm_device_do_normalize(&mut self, enabled: bool) -> vllm_chat::Result<()> {
+            self.enabled.store(enabled, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn mm_device_do_normalize_is_forwarded_to_exclusive_chat_backend() {
+        let enabled = Arc::new(AtomicBool::new(false));
+        let mut backend: DynChatBackend = Arc::new(RecordingChatBackend {
+            enabled: enabled.clone(),
+        });
+
+        configure_mm_device_do_normalize(&mut backend, true).unwrap();
+
+        assert!(enabled.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn mm_device_do_normalize_rejects_shared_chat_backend() {
+        let mut backend: DynChatBackend = Arc::new(RecordingChatBackend {
+            enabled: Arc::new(AtomicBool::new(false)),
+        });
+        let _shared = backend.clone();
+
+        let error = configure_mm_device_do_normalize(&mut backend, true).unwrap_err();
+
+        assert!(format!("{error:#}").contains("chat backend is already shared"));
+    }
 
     #[test]
     fn effective_served_model_names_falls_back_to_backend_model() {

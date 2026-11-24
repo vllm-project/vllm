@@ -38,6 +38,11 @@ pub trait ChatBackend: Send + Sync {
         None
     }
 
+    /// Set whether the engine normalizes multimodal encoder inputs on device.
+    fn set_mm_device_do_normalize(&mut self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
+
     /// Create a request-scoped output processor after request-level adjustments
     /// are applied.
     fn new_chat_output_processor(

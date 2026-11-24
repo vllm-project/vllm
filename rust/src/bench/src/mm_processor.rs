@@ -217,6 +217,7 @@ async fn run_mm_processor_with_engine(
             args.model
         );
     }
+    let mut chat_backend = backends.chat_backend;
 
     // Connect to the engine over the same transport the serving frontend uses.
     let engine_count =
@@ -239,10 +240,13 @@ async fn run_mm_processor_with_engine(
     })
     .await
     .context("failed to connect to engine core")?;
-
+    Arc::get_mut(&mut chat_backend)
+        .context("chat backend is already shared before multimodal normalization setup")?
+        .set_mm_device_do_normalize(client.mm_device_do_normalize())
+        .context("failed to configure multimodal normalization from engine handshake")?;
     let chat = ChatLlm::new(
         TextLlm::new(EngineCoreLlm::new(client), backends.text_backend),
-        backends.chat_backend,
+        chat_backend,
     );
 
     let semaphore = Arc::new(Semaphore::new(args.max_concurrency));
