@@ -33,10 +33,13 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.outputs import RepairResultReport
 from vllm.v1.worker.gpu.repair_executor import (
     _repair_cache_views,
+    _repair_geometry_from_binding,
     _repair_sync_profile_enabled,
     _slots_cover_span,
     _slots_owned_by_request,
+    core_logical_repair_binding,
     execute_repair_only,
+    per_kv_repair_binding,
 )
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
@@ -252,8 +255,7 @@ def _run_repair(model, works, tokens, positions, input_ids, meta):
             input_ids,
             positions,
             list(works),
-            resolved_layout_name="LBNHC",
-            spec_block_size=BS,
+            view_binding=per_kv_repair_binding(BS, 1, "LBNHC"),
         )
 
 
@@ -843,9 +845,13 @@ def test_repair_executes_over_falcon_style_stack():
     model = _FalconStyleModel(2)
     ctx = {"transformer.h.0": meta, "transformer.h.1": meta}
     with set_forward_context(ctx, create_vllm_config(model="facebook/opt-125m")):
-        results = execute_repair_only(model, sub, input_ids, positions, list(works),
-            resolved_layout_name="LBNHC",
-            spec_block_size=BS,
+        results = execute_repair_only(
+            model,
+            sub,
+            input_ids,
+            positions,
+            list(works),
+            view_binding=per_kv_repair_binding(BS, 1, "LBNHC"),
         )
 
     (result,) = results
@@ -896,10 +902,12 @@ def test_aliased_authorization_refused():
         {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
     ):
         results = execute_repair_only(
-            model, sub, positions, positions.clone(), ["req-a"]
-        ,
-            resolved_layout_name="LBNHC",
-            spec_block_size=BS,
+            model,
+            sub,
+            positions,
+            positions.clone(),
+            ["req-a"],
+            view_binding=per_kv_repair_binding(BS, 1, "LBNHC"),
         )
 
     ra = results[0]
@@ -943,10 +951,12 @@ def test_unaligned_span_grid_range_authorization_accepted():
         {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
     ):
         results = execute_repair_only(
-            model, sub, positions, positions.clone(), ["req-a"]
-        ,
-            resolved_layout_name="LBNHC",
-            spec_block_size=BS,
+            model,
+            sub,
+            positions,
+            positions.clone(),
+            ["req-a"],
+            view_binding=per_kv_repair_binding(BS, 1, "LBNHC"),
         )
 
     ra = results[0]
@@ -1013,10 +1023,12 @@ def test_single_work_positions_failure_returns_failed_verdict():
         create_vllm_config(model="facebook/opt-125m"),
     ):
         results = execute_repair_only(
-            model, sub, mismatched, mismatched.clone(), ["req-a"]
-        ,
-            resolved_layout_name="LBNHC",
-            spec_block_size=BS,
+            model,
+            sub,
+            mismatched,
+            mismatched.clone(),
+            ["req-a"],
+            view_binding=per_kv_repair_binding(BS, 1, "LBNHC"),
         )
 
     assert len(results) == 1
@@ -1056,10 +1068,12 @@ def test_zero_width_window_refused():
         create_vllm_config(model="facebook/opt-125m"),
     ):
         results = execute_repair_only(
-            model, sub, positions, positions.clone(), ["req-a"]
-        ,
-            resolved_layout_name="LBNHC",
-            spec_block_size=BS,
+            model,
+            sub,
+            positions,
+            positions.clone(),
+            ["req-a"],
+            view_binding=per_kv_repair_binding(BS, 1, "LBNHC"),
         )
 
     ra = results[0]
@@ -1093,10 +1107,12 @@ def test_single_work_ambiguous_cache_contained():
         create_vllm_config(model="facebook/opt-125m"),
     ):
         results = execute_repair_only(
-            SimpleNamespace(model=inner), sub, positions, positions.clone(), ["req-a"]
-        ,
-            resolved_layout_name="LBNHC",
-            spec_block_size=BS,
+            SimpleNamespace(model=inner),
+            sub,
+            positions,
+            positions.clone(),
+            ["req-a"],
+            view_binding=per_kv_repair_binding(BS, 1, "LBNHC"),
         )
 
     assert len(results) == 1
@@ -1154,32 +1170,35 @@ def test_block_size_derivation_core_vs_ascend_layout():
     spec block size through the explicit geometry derivation (from the
     resolved layout + spec, not from shape); a per-layer verification
     confirms each bound view conforms."""
-    from vllm.v1.worker.gpu.repair_executor import (
-        _derive_repair_geometry,
-        _verify_repair_layer_geometry,
-    )
+    from vllm.v1.worker.gpu.repair_executor import _verify_repair_layer_geometry
 
     core = _CoreLayoutLayer("model.layers.0")
     ascend = _FakeLayer("model.layers.0")
-    # Core layout: the shared 4D [B,H,N,C] view; token axis dim 2.
-    geo_core = _derive_repair_geometry([core], "LBNHC", BS)
+    # Core logical [B, H, N, C] shared view (a row-major binding here:
+    # the LBHNC physical form); token axis dim 2.
+    binding_core = core_logical_repair_binding(BS, "LBHNC")
+    geo_core = _repair_geometry_from_binding(binding_core, _repair_cache_views(core))
     assert geo_core.block_size == BS
     assert geo_core.token_axis == 2
     assert geo_core.is_core_shared is True
-    _verify_repair_layer_geometry(core, geo_core)
+    _verify_repair_layer_geometry(core, geo_core, binding_core)
     # Ascend flat per-K/V: token axis dim 1.
-    geo_asc = _derive_repair_geometry([ascend], "LBNHC", BS)
+    binding_asc = per_kv_repair_binding(BS, 1, "LBNHC")
+    geo_asc = _repair_geometry_from_binding(binding_asc, _repair_cache_views(ascend))
     assert geo_asc.block_size == BS
     assert geo_asc.token_axis == 1
     assert geo_asc.is_core_shared is False
-    _verify_repair_layer_geometry(ascend, geo_asc)
-    # The block size comes from the spec, not the shape: a view whose
-    # shape does not carry the spec value on the token axis is refused.
+    _verify_repair_layer_geometry(ascend, geo_asc, binding_asc)
+    # The block size comes from the binding (the KV cache spec), not
+    # the shape: a view whose shape does not carry the spec value on
+    # the token axis is refused.
     try:
-        _derive_repair_geometry([ascend], "LBNHC", BS * 2)
+        _repair_geometry_from_binding(
+            per_kv_repair_binding(BS * 2, 1, "LBNHC"), _repair_cache_views(ascend)
+        )
         raise AssertionError("expected refusal for mismatched spec block size")
     except ValueError as exc:
-        assert "spec block size" in str(exc)
+        assert "block size" in str(exc)
 
 
 def test_block_table_row_accepts_cuda_and_ascend_spelling():
@@ -1202,15 +1221,14 @@ def test_rezero_indexes_core_layout_cache():
     zeroed at [bidx, :, oidx, :], an Ascend per-K/V view at [bidx,
     oidx]. A dim-1-only implementation would corrupt or miss rows on
     the core layout."""
-    from vllm.v1.worker.gpu.repair_executor import (
-        _derive_repair_geometry,
-        _rezero_repair_span,
-    )
+    from vllm.v1.worker.gpu.repair_executor import _rezero_repair_span
 
     layer = _CoreLayoutLayer("model.layers.0", num_blocks=16)
     layer.self_attn.attn.kv_cache.fill_(1.0)
     meta = _cpu_meta(block_rows=[torch.tensor([7])], slot_mapping=_span_slots(7))
-    geometry = _derive_repair_geometry([layer], "LBNHC", BS)
+    geometry = _repair_geometry_from_binding(
+        core_logical_repair_binding(BS, "LBHNC"), _repair_cache_views(layer)
+    )
     _rezero_repair_span([layer], meta, geometry)
     cache = layer.self_attn.attn.kv_cache
     # Rows of block 7 are zeroed across heads and channels...
@@ -1598,10 +1616,12 @@ def test_short_block_table_row_is_refused_not_raised():
         {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
     ):
         results = execute_repair_only(
-            model, sub, positions.clone(), positions, ["req-r"]
-        ,
-            resolved_layout_name="LBNHC",
-            spec_block_size=BS,
+            model,
+            sub,
+            positions.clone(),
+            positions,
+            ["req-r"],
+            view_binding=per_kv_repair_binding(BS, 1, "LBNHC"),
         )
 
     (result,) = results
@@ -1948,9 +1968,13 @@ def test_replayed_layer_missing_slot_mapping_refused():
         slot_mapping={"model.layers.0": meta.slot_mapping},  # layer 1 absent
     ):
         sub = _sub_output(works, tokens)
-        results = execute_repair_only(model, sub, input_ids, positions, list(works),
-            resolved_layout_name="LBNHC",
-            spec_block_size=BS,
+        results = execute_repair_only(
+            model,
+            sub,
+            input_ids,
+            positions,
+            list(works),
+            view_binding=per_kv_repair_binding(BS, 1, "LBNHC"),
         )
     ra = results[0]
     assert ra.executed_layers == 0
@@ -1973,9 +1997,13 @@ def test_named_layers_with_shared_metadata_still_commit():
         },
     ):
         sub = _sub_output(works, tokens)
-        results = execute_repair_only(model, sub, input_ids, positions, list(works),
-            resolved_layout_name="LBNHC",
-            spec_block_size=BS,
+        results = execute_repair_only(
+            model,
+            sub,
+            input_ids,
+            positions,
+            list(works),
+            view_binding=per_kv_repair_binding(BS, 1, "LBNHC"),
         )
     ra = results[0]
     assert ra.executed_layers == 2
@@ -1989,9 +2017,13 @@ def _run_repair_ctx(model, works, tokens, positions, input_ids, attn_meta):
     the forward context carries a dict)."""
     sub = _sub_output(works, tokens)
     with set_forward_context(attn_meta, create_vllm_config(model="facebook/opt-125m")):
-        return execute_repair_only(model, sub, input_ids, positions, list(works),
-            resolved_layout_name="LBNHC",
-            spec_block_size=BS,
+        return execute_repair_only(
+            model,
+            sub,
+            input_ids,
+            positions,
+            list(works),
+            view_binding=per_kv_repair_binding(BS, 1, "LBNHC"),
         )
 
 
@@ -2013,7 +2045,7 @@ def test_replayed_layer_divergent_cache_layout_refused():
     ra = results[0]
     assert ra.executed_layers == 0
     assert ra.aborted
-    assert "spec block size" in (ra.error_detail or "")
+    assert "the binding's block size" in (ra.error_detail or "")
     assert ra.commit_check["preflight_agree"] is False
 
 

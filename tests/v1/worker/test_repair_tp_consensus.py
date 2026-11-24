@@ -432,7 +432,12 @@ def _parity_worker(rank, world_size, port, result_queue, mode):
             create_vllm_config(model="facebook/opt-125m"),
         ):
             results = repair_executor.execute_repair_only(
-                model, sub, positions.clone(), positions, batch
+                model,
+                sub,
+                positions.clone(),
+                positions,
+                batch,
+                view_binding=repair_executor.per_kv_repair_binding(8, 1, "LBNHC"),
             )
         verdicts = [(r.request_id, r.aborted, r.structural_check) for r in results]
         result_queue.put((rank, None, (len(calls), verdicts)))
@@ -649,7 +654,12 @@ def _preflight_worker(rank, world_size, port, result_queue, refuse_rank, corrupt
             create_vllm_config(model="facebook/opt-125m"),
         ):
             results = repair_executor.execute_repair_only(
-                model, sub, positions.clone(), positions, ["req-a"]
+                model,
+                sub,
+                positions.clone(),
+                positions,
+                ["req-a"],
+                view_binding=repair_executor.per_kv_repair_binding(8, 1, "LBNHC"),
             )
         verdicts = [
             (

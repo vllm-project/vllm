@@ -163,6 +163,8 @@ from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.repair_executor import (
+    RepairViewBinding,
+    core_logical_repair_binding,
     execute_repair_only,
     repair_capability,
 )
@@ -913,6 +915,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.model, self.vllm_config
                     )
                 self.aux_output_connector.initialize_output_storage(kv_cache_config)
+
+    def _repair_view_binding(self) -> RepairViewBinding | None:
+        """The binding contract of the KV views this runner binds.
+
+        The views `initialize_kv_cache` allocates and binds
+        (`allocate_kv_cache` -> `create_kv_cache_views`) are logical
+        `[B, H, N, C]` per layer under EVERY physical layout, shared by
+        K and V (split along the channel dim). A backend whose runner
+        binds a different view convention overrides this to declare its
+        own contract; the repair executor validates every replayed
+        layer's actual views against the binding (shape and strides)
+        before the first write and refuses on any disagreement (a
+        missing binding refuses the repair).
+        """
+        spec_block_size = (
+            self.kv_cache_config.kv_cache_groups[0].block_size
+            if self.kv_cache_config is not None and self.kv_cache_config.kv_cache_groups
+            else None
+        )
+        if spec_block_size is None:
+            return None
+        return core_logical_repair_binding(
+            spec_block_size, self.cache_config.kv_cache_layout
+        )
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -2249,27 +2275,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # scheduled request is a repair work (eager mode only).
                     # The replay's output is discarded; the verdicts ride
                     # the step's connector output.
-                    # The repair geometry inputs come from the runner's
-                    # own resolved configuration: the layout the engine
-                    # core resolved and the spec block size of the first
-                    # attention group (repair steps are single-KV-group
-                    # by the scheduler's init guard, so the first group
-                    # covers the replayed layers).
-                    _repair_layout_name = self.cache_config.kv_cache_layout
-                    _repair_spec_bs = (
-                        self.kv_cache_config.kv_cache_groups[0].block_size
-                        if self.kv_cache_config is not None
-                        and self.kv_cache_config.kv_cache_groups
-                        else None
-                    )
+                    # The write geometry comes from this runner's view
+                    # binding: the binding contract of the KV views it
+                    # allocated and bound (see _repair_view_binding).
                     repair_results = execute_repair_only(
                         self.model,
                         scheduler_output,
                         model_inputs["input_ids"],
                         model_inputs["positions"],
                         list(input_batch.req_ids),
-                        resolved_layout_name=_repair_layout_name,
-                        spec_block_size=_repair_spec_bs,
+                        view_binding=self._repair_view_binding(),
                     )
                     model_output = None
                 else:

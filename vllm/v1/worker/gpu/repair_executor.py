@@ -228,7 +228,7 @@ def find_repair_fence_layer(model: Any) -> tuple[Any, Any]:
 
     The repair executor reaches every layer's cache through
     layer.self_attn.attn.kv_cache and derives the block size from that
-    cache's geometry (_derive_repair_geometry), but model zoos name the
+    cache's geometry (_repair_geometry_from_binding), but model zoos name the
     decoder stack differently (ChatGLM transformer.encoder.layers,
     Falcon transformer.h, MPT transformer.blocks) and multimodal
     wrappers nest the backbone below language_model. Discover the first
@@ -405,6 +405,9 @@ class _RepairPreflight:
             fence flags (the commit check reuses them verbatim).
         peer_reasons: all-gathered refusal codes (filled by the
             consensus helper; None before it).
+        geometry: the validated write geometry of the authorized work
+            (ONE geometry serves the fence, the abort cleanup, and the
+            readback); None on every refused path.
 
     """
 
@@ -425,6 +428,7 @@ class _RepairPreflight:
     auth_distinct_ok: bool = False
     pre_write_ok: bool = False
     peer_reasons: list[int] | None = None
+    geometry: "_RepairGeometry | None" = None
 
     def summary(self) -> torch.Tensor:
         """The all-gatherable int64 identity summary."""
@@ -545,8 +549,7 @@ def _execute_preflight(
     hi: int,
     work_row: int,
     *,
-    resolved_layout_name: str | None = None,
-    spec_block_size: int | None = None,
+    view_binding: "RepairViewBinding | None" = None,
 ) -> _RepairPreflight:
     """The rank-local pre-execution checks, WITHOUT side effects.
 
@@ -610,8 +613,8 @@ def _execute_preflight(
         attn_metadata = get_forward_context().attn_metadata
         assert isinstance(attn_metadata, dict) and attn_metadata
         meta = next(iter(attn_metadata.values()))
-        geometry = _derive_repair_geometry(
-            layers, resolved_layout_name, spec_block_size
+        geometry = _repair_geometry_from_binding(
+            view_binding, _repair_cache_views(layers[0])
         )
         block_size = geometry.block_size
 
@@ -684,7 +687,7 @@ def _execute_preflight(
         # SAME slot numbers with a different block/offset split and write
         # outside the authorized rows.
         for layer in layers[: work.layer_end]:
-            _verify_repair_layer_geometry(layer, geometry)
+            _verify_repair_layer_geometry(layer, geometry, view_binding)
 
         slots_host = _tolist_timed(
             meta.slot_mapping[lo:hi], "pre_write.slot_mapping.tolist"
@@ -738,6 +741,7 @@ def _execute_preflight(
             auth_table_ok=auth_table_ok,
             auth_distinct_ok=auth_distinct_ok,
             pre_write_ok=pre_write_ok,
+            geometry=geometry,
         )
         if capability != 0:
             pf.reason = _REPAIR_PF_CAPABILITY
@@ -880,8 +884,7 @@ def execute_repair_only(
     positions: torch.Tensor,
     batch_req_ids: list[str],
     *,
-    resolved_layout_name: str | None = None,
-    spec_block_size: int | None = None,
+    view_binding: "RepairViewBinding | None" = None,
 ) -> list[RepairResultReport]:
     """Execute the repair works of one exclusive repair-only step.
 
@@ -899,6 +902,12 @@ def execute_repair_only(
     work's rows are its own window of the step's batch (batch_req_ids is
     the row order), and the validation battery (positions, slot
     ownership, write coverage, layer coverage) applies per work item.
+
+    The write geometry comes from the caller's RepairViewBinding -- the
+    binding contract of the KV views the model runner bound -- and is
+    validated against every replayed layer's actual views (shape and
+    strides) before the first write; a missing or contradictory binding
+    refuses the step.
     """
     works = scheduler_output.repair_works
     assert works is not None
@@ -932,6 +941,14 @@ def execute_repair_only(
             f"requests, each once ({batch_req_ids!r} vs "
             f"{sorted(scheduler_output.num_scheduled_tokens)})"
         )
+        if view_binding is None:
+            raise ValueError(
+                "hole repair: the model runner did not supply the "
+                "repair view binding (the binding contract of the KV "
+                "views the repair writes through); the write geometry "
+                "is never derived from shape coincidences -- see the "
+                "model runner's _repair_view_binding"
+            )
     except Exception as exc:
         step_error = _format_repair_exception(exc)
         logger.exception(
@@ -1043,6 +1060,7 @@ def execute_repair_only(
         error_detail: str | None = None
         meta: Any = None
         layers: Any = None
+        work_geometry: _RepairGeometry | None = None
         try:
             work = works[req_id]
             span_start, span_end = work.repair_span
@@ -1079,8 +1097,7 @@ def execute_repair_only(
                 lo,
                 hi,
                 work_row,
-                resolved_layout_name=resolved_layout_name,
-                spec_block_size=spec_block_size,
+                view_binding=view_binding,
             )
         # The fence flags the commit check reports come from the
         # preflight verbatim: the same ordered battery the loop used to
@@ -1093,6 +1110,7 @@ def execute_repair_only(
         auth_distinct_ok = pf.auth_distinct_ok
         pre_write_ownership = pf.pre_write_ownership
         pre_write_coverage = pf.pre_write_coverage
+        work_geometry = pf.geometry
         if error_detail is None:
             error_detail = pf.error_detail
 
@@ -1261,10 +1279,14 @@ def execute_repair_only(
             )
             if depth > 0:
                 try:
-                    abort_geometry = _derive_repair_geometry(
-                        layers, resolved_layout_name, spec_block_size
-                    )
-                    _rezero_repair_span(layers[:depth], meta, abort_geometry, lo, hi)
+                    if work_geometry is None:
+                        raise RuntimeError(
+                            "hole repair: the aborted work carries no "
+                            "validated geometry; the scheduler-side "
+                            "eviction remains the authoritative "
+                            "invalidation"
+                        )
+                    _rezero_repair_span(layers[:depth], meta, work_geometry, lo, hi)
                 except Exception as exc:
                     if error_detail is None:
                         error_detail = _format_repair_exception(exc)
@@ -1599,13 +1621,16 @@ def _slots_cover_span(
 class _RepairGeometry(typing.NamedTuple):
     """The explicit indexing contract for repair writes to bound KV views.
 
-    The block size comes from the KV cache spec (authoritative, not derived
-    from shape); the token axis comes from the binding convention the
-    resolved layout implies (Core logical [B,H,N,C] always carries the
-    token axis at dim 2 for every physical layout; Ascend per-K/V views
-    carry it at dim 1 for the flat LBNHC form and dim 2 for the head-major
-    LBHNC form). Shape is used to VERIFY this contract, never to
-    determine it: a matching shape is a confirmation, not a definition.
+    The geometry is VALIDATED FROM THE BINDING, never derived from shape:
+    the block size comes from the KV cache spec (authoritative, not
+    guessed from a dimension), and the token axis from the binding
+    convention the view's owner declared when it bound the view (Core
+    logical [B, H, N, C] carries the token axis at dim 2 for every
+    physical layout; Ascend per-K/V views carry it at dim 2 for the
+    head-major LBHNC form and dim 1 for the token-major LBNHC form).
+    Shape and strides VERIFY this contract against the actual bound
+    view, never determine it: a matching shape is a confirmation, not a
+    definition.
     """
 
     block_size: int
@@ -1618,105 +1643,257 @@ class _RepairGeometry(typing.NamedTuple):
     False: separate per-K/V views (Ascend binding)."""
 
 
-def _derive_repair_geometry(
-    layers,
-    resolved_layout_name: str | None,
-    spec_block_size: int | None,
-) -> _RepairGeometry:
-    """Derive the repair write geometry from the resolved layout and spec.
+class RepairViewBinding(typing.NamedTuple):
+    """The binding contract of the KV views a worker binds.
 
-    The resolved layout and the spec block size come from the model
-    runner's kv_cache_config at the entry point (execute_repair_only);
-    they identify the binding convention so the repair never guesses the
-    view's indexing from shape, rank, or a leading-dim coincidence. Any
-    mismatch between the contract and the actual bound view's shape is
-    a fail-closed refusal BEFORE the first write.
+    Supplied by the code that creates and binds the actual views -- the
+    model runner, which allocates the caches and hands every layer its
+    view (allocate_kv_cache / create_kv_cache_views, or a backend's own
+    unpacking). Repair needs exactly three facts about those views: how
+    K and V are represented (one shared Core tensor, or separate
+    per-K/V views), which axis indexes within-block tokens, and how an
+    authorized slot maps onto the view (slot = block_id * block_size +
+    offset indexes the leading block dim and the token axis).
+
+    The binding is AUTHORITATIVE for the token axis: shape alone cannot
+    identify it when num_kv_heads == block_size (the two readings are
+    then the same tensor), so the executor never guesses -- it validates
+    every replayed layer's views against the binding (shape AND strides)
+    before the first write and refuses on any missing or contradictory
+    fact. A binding that disagrees with the views it describes is the
+    one failure mode inspection cannot catch; the runner that supplies
+    both derives them from the same resolved CacheConfig, which is the
+    construction guarantee the contract rests on.
     """
-    if spec_block_size is None or spec_block_size <= 0:
+
+    kind: str
+    """CORE_LOGICAL_VIEW_BINDING or PER_KV_VIEW_BINDING."""
+    block_size: int
+    """Manager block size (tokens per block) of the KV cache spec."""
+    token_axis: int
+    """View dim that indexes within-block tokens."""
+    blocks_axis: int
+    """View dim that indexes blocks (the leading dim, 0)."""
+    layout_name: str | None
+    """The resolved physical layout the binding was created for."""
+
+
+CORE_LOGICAL_VIEW_BINDING = "core_logical"
+PER_KV_VIEW_BINDING = "per_kv"
+
+
+def core_logical_repair_binding(
+    block_size: int, layout_name: str | None = None
+) -> RepairViewBinding:
+    """The binding of vLLM Core's KV views: one logical [B, H, N, C]
+    tensor per layer, shared by K and V (split along the channel dim C),
+    under EVERY physical layout (LBNHC and LBHNC differ in strides
+    only)."""
+    return RepairViewBinding(
+        kind=CORE_LOGICAL_VIEW_BINDING,
+        block_size=block_size,
+        token_axis=2,
+        blocks_axis=0,
+        layout_name=layout_name,
+    )
+
+
+def per_kv_repair_binding(
+    block_size: int, token_axis: int, layout_name: str | None = None
+) -> RepairViewBinding:
+    """The binding of a per-K/V backend: separate K and V views whose
+    axes follow the backend's own convention (the token axis by the
+    resolved layout: head-major LBHNC/HND views carry it at dim 2,
+    token-major LBNHC views and flat [num_blocks, block_size, ...] views
+    at dim 1)."""
+    if token_axis not in (1, 2):
         raise ValueError(
-            f"hole repair: the KV cache spec block size is not available "
-            f"or invalid ({spec_block_size}); the repair geometry cannot "
-            "be derived without the authoritative block size"
+            f"per-K/V repair view binding: token_axis {token_axis} is not "
+            "a known per-K/V convention (expected dim 1 or dim 2)"
         )
-    caches = _repair_cache_views(layers[0])
-    cache = caches[0]
-    dim = cache.dim()
-    if len(caches) == 1 and dim == 4:
-        # Core logical [B,H,N,C]: the binding convention carries the
-        # token axis at dim 2 for EVERY physical layout (the strides
-        # differ, the logical shape does not). K and V share the tensor
-        # (split along the channel dim C).
-        if int(cache.shape[2]) != spec_block_size:
+    return RepairViewBinding(
+        kind=PER_KV_VIEW_BINDING,
+        block_size=block_size,
+        token_axis=token_axis,
+        blocks_axis=0,
+        layout_name=layout_name,
+    )
+
+
+def _row_major_strides(view: torch.Tensor) -> bool:
+    """Strides equal a contiguous row-major tensor of this shape."""
+    expected = 1
+    for dim in range(view.dim() - 1, -1, -1):
+        if view.stride(dim) != expected:
+            return False
+        expected *= max(int(view.shape[dim]), 1)
+    return True
+
+
+def _core_logical_strides_ok(view: torch.Tensor, layout_name: str | None) -> bool:
+    """Strides consistent with the binding contract of a logical
+    [B, H, N, C] view under the declared physical layout.
+
+    A head-major (LBHNC) physical allocation viewed as-is is row-major;
+    a token-major (LBNHC) allocation is viewed through the permuted
+    logical form (dims 1 and 2 swapped). When the physical layout is
+    declared, the strides must match THAT form exactly -- a raw
+    un-permuted LBNHC physical tensor bound where a logical view was
+    promised is refused even when its shapes coincide. An undeclared
+    binding accepts either form.
+    """
+    if layout_name in ("LBHNC", "HND"):
+        return _row_major_strides(view)
+    permuted = (
+        view.stride(3) == 1
+        and view.stride(1) == int(view.shape[3])
+        and view.stride(2) == int(view.shape[1]) * view.stride(1)
+        and view.stride(0) == int(view.shape[2]) * view.stride(2)
+    )
+    if layout_name in ("LBNHC", "NHD"):
+        return permuted
+    return _row_major_strides(view) or permuted
+
+
+def _repair_geometry_from_binding(
+    binding: "RepairViewBinding | None", views: list[torch.Tensor]
+) -> _RepairGeometry:
+    """Validate the binding against the actual bound views; the geometry.
+
+    ONE geometry serves the fence, the abort cleanup, and the readback.
+    Every check is fail-closed BEFORE the first write: a missing or
+    contradictory binding fact refuses the repair with a named error
+    instead of guessing an axis from a shape coincidence.
+    """
+    if binding is None:
+        raise ValueError(
+            "hole repair: no repair view binding was supplied for the "
+            "work's bound KV views; the write geometry is never derived "
+            "from shape coincidences (see the model runner's "
+            "_repair_view_binding)"
+        )
+    if binding.block_size is None or binding.block_size <= 0:
+        raise ValueError(
+            f"hole repair: the binding's block size is not available or "
+            f"invalid ({binding.block_size}); the repair geometry cannot "
+            "be built without the authoritative block size"
+        )
+    if binding.blocks_axis != 0:
+        raise ValueError(
+            f"hole repair: the binding's blocks axis "
+            f"({binding.blocks_axis}) is not a supported binding "
+            "contract (blocks must be the leading dimension)"
+        )
+    if not views:
+        raise ValueError(
+            "hole repair: no KV cache view is bound to the repair fence "
+            "layer; the repair write set cannot be fenced"
+        )
+    view = views[0]
+    dim = view.dim()
+    if binding.kind == CORE_LOGICAL_VIEW_BINDING:
+        # One logical [B, H, N, C] tensor shared by K and V: a per-K/V
+        # pair (or any other form) contradicts the binding contract.
+        if len(views) != 1 or dim != 4:
+            raise ValueError(
+                f"hole repair: the bound views contradict the core "
+                f"logical binding contract: expected one shared 4D view, "
+                f"got {len(views)} view(s) of dim {dim}"
+            )
+        if int(view.shape[binding.token_axis]) != binding.block_size:
             raise ValueError(
                 f"hole repair: the bound 4D KV view shape "
-                f"{tuple(cache.shape)} does not carry the spec block size "
-                f"{spec_block_size} on the token axis (dim 2): the view "
-                "geometry contradicts the KV cache spec (manager block "
-                "size vs kernel block size divergence, or a wrong view "
-                "was bound to the layer)"
+                f"{tuple(view.shape)} does not carry the binding's block "
+                f"size {binding.block_size} on the token axis (dim "
+                f"{binding.token_axis}): the view geometry contradicts "
+                "the KV cache spec (manager block size vs kernel block "
+                "size divergence, or a wrong view was bound to the layer)"
+            )
+        if not _core_logical_strides_ok(view, binding.layout_name):
+            raise ValueError(
+                f"hole repair: the bound 4D KV view shape "
+                f"{tuple(view.shape)} strides {tuple(view.stride())} are "
+                f"not consistent with the core logical [B, H, N, C] "
+                f"binding under layout '{binding.layout_name}': the view "
+                "contradicts the binding contract"
             )
         return _RepairGeometry(
-            block_size=spec_block_size, token_axis=2, is_core_shared=True
+            block_size=binding.block_size,
+            token_axis=binding.token_axis,
+            is_core_shared=True,
         )
-    if len(caches) >= 1 and dim == 4:
-        # Ascend per-K/V 4D view: the resolved layout determines the
-        # token axis. LBHNC (HND): [n, h, bs, d] -> dim 2. LBNHC:
-        # [n, bs, h, d] -> dim 1. A layout outside the known set, or a
-        # view that does not match the layout's expected axis, is a
-        # fail-closed refusal.
-        if resolved_layout_name in ("LBHNC", "HND"):
-            token_axis = 2
-        elif resolved_layout_name in ("LBNHC", "NHD", None):
-            token_axis = 1
-        else:
+    if binding.kind == PER_KV_VIEW_BINDING:
+        # Separate K and V views (possibly more, e.g. quantization scale
+        # caches). A lone 4D view is the core-shared binding's shape and
+        # contradicts this contract; the flat 2D/3D convention may bind
+        # a single view (its rows are zeroed per token regardless of how
+        # K and V are packed into it).
+        if dim == 4 and len(views) < 2:
             raise ValueError(
-                f"hole repair: the resolved KV cache layout "
-                f"'{resolved_layout_name}' has no known per-K/V 4D view "
-                "token-axis contract; refusing to guess"
+                f"hole repair: the bound views contradict the per-K/V "
+                f"binding contract: expected separate K and V views, got "
+                f"{len(views)} view(s) of dim {dim}"
             )
-        # Shape-ambiguity guard (F2): when the head dim and the token
-        # dim carry the same size (num_kv_heads == block_size), the
-        # shape alone cannot confirm the token axis: a layout-label or
-        # binding disagreement would write the wrong cells with no
-        # refusal. Refuse (fail-closed) rather than rely on the label.
-        if int(cache.shape[1]) == int(cache.shape[2]):
-            raise ValueError(
-                f"hole repair: per-K/V 4D view shape "
-                f"{tuple(cache.shape)} is ambiguous: dim 1 and dim 2 "
-                f"carry the same size ({cache.shape[1]}), so the shape "
-                "cannot confirm the token axis for layout "
-                f"'{resolved_layout_name}' (num_kv_heads == block_size "
-                "edge case); refusing to write through an ambiguous "
-                "geometry"
-            )
-        if int(cache.shape[token_axis]) != spec_block_size:
-            raise ValueError(
-                f"hole repair: the bound per-K/V 4D view shape "
-                f"{tuple(cache.shape)} does not carry the spec block size "
-                f"{spec_block_size} on the layout-implied token axis "
-                f"(dim {token_axis} for layout '{resolved_layout_name}')"
-            )
+        for view in views:
+            if view.dim() != dim:
+                raise ValueError(
+                    f"hole repair: the bound per-K/V views mix dims "
+                    f"({dim} and {view.dim()}); the views contradict the "
+                    "binding contract"
+                )
+            if dim == 4:
+                if int(view.shape[binding.token_axis]) != binding.block_size:
+                    raise ValueError(
+                        f"hole repair: the bound per-K/V 4D view shape "
+                        f"{tuple(view.shape)} does not carry the binding's "
+                        f"block size {binding.block_size} on the bound "
+                        f"token axis (dim {binding.token_axis}): the view "
+                        "geometry contradicts the KV cache spec (manager "
+                        "block size vs kernel block size divergence, or a "
+                        "wrong view was bound to the layer)"
+                    )
+            elif dim in (2, 3):
+                # Flat [num_blocks, block_size, ...] per-K/V view: the
+                # token axis is dim 1 by the binding convention, under
+                # every layout.
+                if binding.token_axis != 1:
+                    raise ValueError(
+                        f"hole repair: a flat {dim}D per-K/V view (shape "
+                        f"{tuple(view.shape)}) carries its tokens on dim "
+                        f"1, but the binding declares dim "
+                        f"{binding.token_axis}; the views contradict the "
+                        "binding contract"
+                    )
+                if int(view.shape[1]) != binding.block_size:
+                    raise ValueError(
+                        f"hole repair: the bound flat per-K/V view shape "
+                        f"{tuple(view.shape)} does not carry the binding's "
+                        f"block size {binding.block_size} on the token "
+                        f"axis (dim 1): the view geometry contradicts the "
+                        "KV cache spec"
+                    )
+            else:
+                raise ValueError(
+                    f"hole repair: unrecognized per-K/V cache view dim "
+                    f"{dim} (shape {tuple(view.shape)}); the binding "
+                    "contract covers only flat 2D/3D and 4D views"
+                )
+            if not _row_major_strides(view):
+                raise ValueError(
+                    f"hole repair: the bound per-K/V view shape "
+                    f"{tuple(view.shape)} strides {tuple(view.stride())} "
+                    "are not consistent with a contiguous per-K/V view; "
+                    "the view contradicts the binding contract"
+                )
         return _RepairGeometry(
-            block_size=spec_block_size, token_axis=token_axis, is_core_shared=False
-        )
-    if dim in (2, 3):
-        # Ascend flat per-K/V view [num_blocks, block_size, ...]:
-        # token axis is dim 1 by the binding convention.
-        if int(cache.shape[1]) != spec_block_size:
-            raise ValueError(
-                f"hole repair: the bound flat per-K/V view shape "
-                f"{tuple(cache.shape)} does not carry the spec block size "
-                f"{spec_block_size} on the token axis (dim 1): the view "
-                "geometry contradicts the KV cache spec"
-            )
-        return _RepairGeometry(
-            block_size=spec_block_size, token_axis=1, is_core_shared=False
+            block_size=binding.block_size,
+            token_axis=binding.token_axis,
+            is_core_shared=False,
         )
     raise ValueError(
-        f"hole repair: unrecognized KV cache view geometry: dim={dim}, "
-        f"shape={tuple(cache.shape)}, layout='{resolved_layout_name}', "
-        f"spec_block_size={spec_block_size}. The repair indexing "
-        "contract does not cover this binding; refusing to write."
+        f"hole repair: unknown repair view binding kind '{binding.kind}'; "
+        f"the binding contract covers only '{CORE_LOGICAL_VIEW_BINDING}' "
+        f"and '{PER_KV_VIEW_BINDING}'"
     )
 
 
@@ -1755,55 +1932,53 @@ def _repair_cache_views(layer) -> list[torch.Tensor]:
 
 
 def _verify_repair_layer_geometry(
-    layer, geometry: _RepairGeometry
+    layer,
+    geometry: _RepairGeometry,
+    binding: "RepairViewBinding | None" = None,
 ) -> None:
-    """Verify a replayed layer's bound cache matches the repair geometry.
+    """Verify a replayed layer's bound views match the repair geometry.
 
-    The geometry was derived once from the resolved layout + spec (see
-    _derive_repair_geometry); this check confirms that every replayed
-    layer's bound view conforms to it. A mismatch is a fail-closed
-    refusal: the repair cannot write through a view whose indexing
-    contract differs from the one the fence authorized.
+    The geometry was validated once from the binding (see
+    _repair_geometry_from_binding); this check confirms that EVERY view
+    involved in the repair work item -- K and V alike, plus any further
+    per-K/V views (e.g. quantization scales) -- conforms to the SAME
+    binding, by shape AND by strides, before the first write. A mismatch
+    is a fail-closed refusal: the repair cannot write through a view
+    whose indexing contract differs from the one the fence authorized.
+    """
+    caches = _repair_cache_views(layer)
+    derived = _repair_geometry_from_binding(binding, caches)
+    if derived != geometry:
+        raise ValueError(
+            f"hole repair: layer cache geometry {derived} does not match "
+            f"the fence-authorized geometry {geometry}; the bound views "
+            "contradict the binding contract"
+        )
+
+
+def _repair_block_size(layer) -> int:
+    """Compatibility shim for the published Ascend repair init gate.
+
+    vllm-ascend #22650 (as published) imports this helper and its
+    ImportError fallback would SILENTLY DISABLE the init-time
+    LBNHC+repair refusal on vLLM builds that carry the binding-contract
+    repair executor -- a missing helper must never turn into successful
+    admission. The base semantics are preserved EXACTLY (the shape-based
+    derivation this module replaced), so the old gate behaves identically
+    to how it did on the base build: it refuses LBNHC+repair through the
+    block-size mismatch and admits the head-major layouts whose dim 2
+    carries the block size. Do not build new consumers on this helper:
+    the binding contract (_repair_geometry_from_binding) is the supported
+    derivation. Remove together with the vllm-ascend #22650 gate port.
     """
     caches = _repair_cache_views(layer)
     cache = caches[0]
     dim = cache.dim()
-    if geometry.is_core_shared:
-        if len(caches) != 1 or dim != 4:
-            raise ValueError(
-                f"hole repair: layer cache does not match the geometry "
-                f"contract: expected one shared 4D view, got "
-                f"{len(caches)} view(s) of dim {dim}"
-            )
-        if int(cache.shape[2]) != geometry.block_size:
-            raise ValueError(
-                f"hole repair: layer cache shape {tuple(cache.shape)} "
-                f"does not carry the spec block size {geometry.block_size} "
-                "on the token axis (dim 2); the view contradicts the "
-                "KV cache spec"
-            )
-        return
     if dim == 4:
-        if int(cache.shape[geometry.token_axis]) != geometry.block_size:
-            raise ValueError(
-                f"hole repair: per-K/V 4D view shape {tuple(cache.shape)} "
-                f"does not carry the spec block size {geometry.block_size} "
-                f"on the geometry token axis (dim {geometry.token_axis})"
-            )
-        return
+        return int(cache.shape[2])
     if dim in (2, 3):
-        if int(cache.shape[1]) != geometry.block_size:
-            raise ValueError(
-                f"hole repair: flat per-K/V view shape {tuple(cache.shape)} "
-                f"does not carry the spec block size {geometry.block_size} "
-                "on the token axis (dim 1)"
-            )
-        return
-    raise ValueError(
-        f"hole repair: unrecognized per-K/V cache view dim {dim} "
-        f"(shape {tuple(cache.shape)}); the geometry contract covers "
-        "only 2D/3D flat and 4D views"
-    )
+        return int(cache.shape[1])
+    raise ValueError(f"unrecognized repair KV cache geometry: {tuple(cache.shape)}")
 
 
 def _repair_block_table_row(meta, row: int) -> torch.Tensor:
