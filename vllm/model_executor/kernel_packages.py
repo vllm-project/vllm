@@ -101,7 +101,7 @@ def _misfit(definition: dict[str, Any], arguments: dict[str, Any]) -> str:
     }
     for name, spec in inputs.items():
         if (value := arguments.get(name)) is None:
-            if spec.get("optional"):
+            if spec.get("optional") and name in arguments:
                 continue
             return f"missing_{name}"
         if not (shape := spec.get("shape")):

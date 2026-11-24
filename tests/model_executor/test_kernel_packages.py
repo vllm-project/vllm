@@ -93,7 +93,9 @@ def test_site_fit_rules(monkeypatch):
     site = f"{__name__}.Doubler.forward"
     inputs = {"x": {"shape": ["T", "H"]}, "k": {"optional": True}, "scale": {}}
     pinned = {"inputs": inputs, "axes": {"T": {"type": "const", "value": 2}}}
+    absent = {"inputs": {**inputs, "ghost": {"optional": True}}}  # not a parameter
     routes = [
+        (absent, lambda **kwargs: None),  # never fits, so the next package is tried
         (pinned, lambda x, k, scale: x + 1),
         ({"inputs": inputs}, lambda x, k, scale: x - 1),
     ]
