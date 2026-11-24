@@ -71,3 +71,45 @@ def test_deep_gemm_needs_nvcc_12_9(
     _make_exe(nvcc)
     nvcc.write_text(f"#!/bin/sh\necho 'Cuda compilation tools, release {release}'\n")
     assert dg.is_deep_gemm_supported() is supported
+
+
+def test_deep_gemm_needs_cxx20_capable_host_compiler(
+    default_cuda_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """A pre-C++20 host compiler (gcc 9) makes nvcc drop -std=c++20, so CUDA
+    13's CCCL rejects the lowered dialect and the engine dies on the first
+    block-FP8 layer."""
+    nvcc = default_cuda_home / "bin" / "nvcc"
+    _make_exe(nvcc)
+    nvcc.write_text("#!/bin/sh\necho 'Cuda compilation tools, release 13.0'\n")
+    cc = tmp_path / "host" / "gcc"
+    _make_exe(cc)
+    cc.write_text("#!/bin/sh\necho 'gcc (Ubuntu 9.4.0-1ubuntu1~20.04.2) 9.4.0'\n")
+    monkeypatch.setenv("NVCC_CCBIN", str(cc))
+    assert not dg.is_deep_gemm_supported()
+
+
+@pytest.mark.parametrize(
+    ("version_line", "supported"),
+    [
+        ("gcc (Ubuntu 9.4.0-1ubuntu1~20.04.2) 9.4.0", False),
+        ("gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0", True),
+        ("clang version 10.0.0", False),
+        ("clang version 11.0.0", True),
+    ],
+)
+def test_deep_gemm_host_compiler_cxx20_floor(
+    default_cuda_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    version_line: str,
+    supported: bool,
+):
+    nvcc = default_cuda_home / "bin" / "nvcc"
+    _make_exe(nvcc)
+    nvcc.write_text("#!/bin/sh\necho 'Cuda compilation tools, release 13.0'\n")
+    cc = tmp_path / "host" / "cc"
+    _make_exe(cc)
+    cc.write_text(f"#!/bin/sh\necho '{version_line}'\n")
+    monkeypatch.setenv("NVCC_CCBIN", str(cc))
+    assert dg.is_deep_gemm_supported() is supported
