@@ -41,8 +41,12 @@ FLASHINFER_GDN_CHECKPOINT_ALIGNMENT = 64
 
 def plan_flashinfer_checkpoints(
     offsets: list[int], query_lens: list[int]
-) -> tuple[int, list[int], list[int]]:
+) -> tuple[int, list[int], list[int], list[int] | None]:
     """Lay out internal checkpoints as FlashInfer GDN prefill emits them.
+
+    The interval (gcd of the offsets) can emit states no row uses; `slots`
+    skips writing them. Slots rule out FlashInfer's CP route, so they are
+    returned only when needed.
 
     Args:
         offsets: Checkpoint offset into each checkpoint row's query, 0 for
@@ -50,9 +54,10 @@ def plan_flashinfer_checkpoints(
         query_lens: Query length of each sequence the prefill kernel runs.
 
     Returns:
-        `(every_n_tokens, cu_starts, rows)`: the stride shared by every
-        checkpoint in the batch, cumulative per-sequence checkpoint counts,
-        and the index of each checkpoint row's state among the emitted ones.
+        `(every_n_tokens, cu_starts, rows, slots)`: the interval, cumulative
+        per-sequence counts of emitted states, each checkpoint row's buffer
+        row, and each emitted state's buffer row (-1: skipped), or None when
+        every emitted state is used.
 
     """
     every_n_tokens = math.gcd(*offsets)
@@ -61,10 +66,14 @@ def plan_flashinfer_checkpoints(
         cu_starts.append(cu_starts[-1] + query_len // every_n_tokens)
     first = len(offsets) - len(query_lens)
     rows = [0] * len(offsets)
+    slots = [-1] * cu_starts[-1]
+    num_used = 0
     for i, offset in enumerate(offsets[first:]):
         if offset:
-            rows[first + i] = cu_starts[i] + offset // every_n_tokens - 1
-    return every_n_tokens, cu_starts, rows
+            slots[cu_starts[i] + offset // every_n_tokens - 1] = num_used
+            rows[first + i] = num_used
+            num_used += 1
+    return every_n_tokens, cu_starts, rows, slots if -1 in slots else None
 
 
 @dataclass(slots=True)
@@ -72,8 +81,10 @@ class GDNFlashInferCheckpointPlan:
     every_n_tokens: int
     num_checkpoints: int
     cu_starts: torch.Tensor
-    # Per checkpoint row, its state among the ``num_checkpoints`` emitted.
+    # Per checkpoint row, its state's row in the buffer.
     rows: torch.Tensor
+    # Per emitted state, its buffer row or -1 (skipped).
+    slots: torch.Tensor | None
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -355,7 +366,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 m.block_table_tensor,
                 m.seq_lens,
                 self.kv_cache_spec,
-                self.vllm_config.cache_config.mamba_cache_mode,
+                self.vllm_config.cache_config.enable_prefix_caching,
                 self.num_speculative_blocks,
             )
 
@@ -606,6 +617,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if spec_sequence_masks_cpu is not None:
                 request_rows = (~spec_sequence_masks_cpu).nonzero().flatten().tolist()
             checkpoint = self.checkpoint_builder.build(m, request_rows)
+            if checkpoint is not None and self.gdn_prefill_backend == "aiter_flydsl":
+                # FlyDSL cannot store checkpoints, so this step runs the
+                # Triton/FLA prefill, which needs FLA's chunk metadata.
+                chunk_indices, chunk_offsets = self._build_chunk_metadata(
+                    prefill_query_start_loc,
+                    prefill_query_start_loc_cpu,
+                    query_start_loc.device,
+                )
 
         flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
         if checkpoint is not None and self.plan_flashinfer_checkpoints:
@@ -613,17 +632,19 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             assert checkpoint.query_lens is not None
             # The prefill kernel runs the trailing checkpoint rows.
             num_prefill_rows = prefill_query_start_loc_cpu.shape[0] - 1
-            every_n_tokens, cu_starts, rows = plan_flashinfer_checkpoints(
+            every_n_tokens, cu_starts, rows, slots = plan_flashinfer_checkpoints(
                 checkpoint.offsets, checkpoint.query_lens[-num_prefill_rows:]
             )
             plan = async_tensor_h2d(
-                cu_starts + rows, query_start_loc.device, torch.int64
+                cu_starts + rows + (slots or []), query_start_loc.device, torch.int64
             )
+            slots_start = len(cu_starts) + len(rows)
             flashinfer_checkpoint_plan = GDNFlashInferCheckpointPlan(
                 every_n_tokens=every_n_tokens,
-                num_checkpoints=cu_starts[-1],
+                num_checkpoints=sum(1 for offset in checkpoint.offsets if offset),
                 cu_starts=plan[: len(cu_starts)],
-                rows=plan[len(cu_starts) :],
+                rows=plan[len(cu_starts) : slots_start],
+                slots=None if slots is None else plan[slots_start:],
             )
 
         # Function code counted on either presency non-spec decode or spec decode,
@@ -769,7 +790,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if m.checkpoint is not None
             else None
         )
-        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+        if self.vllm_config.cache_config.enable_prefix_caching:
             assert self.mamba_aligned_state_indices is not None
             blk_table = self.mamba_aligned_state_indices
         masks = m.spec_sequence_masks_cpu
