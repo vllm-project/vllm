@@ -54,34 +54,22 @@ fn reject_unsupported_fields(request: &ChatCompletionRequest) -> Result<(), ApiE
     }
 
     // Python's default is 1.0, which SDKs may send explicitly.
-    reject_non_default(
-        request.length_penalty.filter(|penalty| *penalty != 1.0).as_ref(),
-        "length_penalty",
-        "length_penalty is not supported.",
-    )?;
-    reject_non_default(
-        request.media_io_kwargs.as_ref(),
-        "media_io_kwargs",
-        "media_io_kwargs is not supported.",
-    )?;
-    reject_non_default(
-        request.mm_processor_kwargs.as_ref(),
-        "mm_processor_kwargs",
-        "mm_processor_kwargs is not supported.",
-    )?;
-
-    Ok(())
-}
-
-/// Reject one option unless it is entirely absent.
-fn reject_non_default<T>(
-    value: Option<&T>,
-    param: &'static str,
-    message: &str,
-) -> Result<(), ApiError> {
-    if value.is_some() {
-        bail_invalid_request!(param = param, "{}", message);
+    if request.length_penalty.is_some_and(|penalty| penalty != 1.0) {
+        bail_invalid_request!(param = "length_penalty", "length_penalty is not supported.");
     }
+    if request.media_io_kwargs.is_some() {
+        bail_invalid_request!(
+            param = "media_io_kwargs",
+            "media_io_kwargs is not supported."
+        );
+    }
+    if request.mm_processor_kwargs.is_some() {
+        bail_invalid_request!(
+            param = "mm_processor_kwargs",
+            "mm_processor_kwargs is not supported."
+        );
+    }
+
     Ok(())
 }
 
