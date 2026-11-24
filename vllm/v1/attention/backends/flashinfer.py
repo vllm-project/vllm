@@ -2463,6 +2463,7 @@ class FlashInferImpl(AttentionImpl):
                     prefill_kv_block_scales = packed_kv_block_scales
                 elif self.is_kvcache_nvfp4:
                     # NVFP4 trtllm-gen kernel requires FP8 query.
+                    assert packed_kv_data is not None
                     assert attn_metadata.q_data_type_prefill == FP8_DTYPE, (
                         "NVFP4 KV cache requires FP8 quantized queries for "
                         "trtllm-gen prefill. Set "
