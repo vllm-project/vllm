@@ -12,9 +12,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-import vllm
 from vllm import PoolingParams
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
@@ -71,9 +69,9 @@ def _transformers_logits(path: Path) -> tuple[torch.Tensor, torch.Tensor]:
     return base, merged
 
 
-def _vllm_logits(lora: str) -> tuple[torch.Tensor, torch.Tensor]:
-    llm = vllm.LLM(
-        model=MODEL,
+def _vllm_logits(vllm_runner, lora: str) -> tuple[torch.Tensor, torch.Tensor]:
+    with vllm_runner(
+        MODEL,
         hf_overrides={"architectures": ["GteForSequenceClassification"]},
         runner="pooling",
         dtype="float32" if current_platform.is_cpu() else "float16",
@@ -82,22 +80,21 @@ def _vllm_logits(lora: str) -> tuple[torch.Tensor, torch.Tensor]:
         enable_lora=True,
         max_lora_rank=RANK,
         gpu_memory_utilization=0.3,
-    )
-    params = PoolingParams(task="classify", use_activation=False)
-    results = []
-    for request in [None, LoRARequest("native", 1, lora)]:
-        outputs = llm.classify(
-            PROMPTS, pooling_params=params, lora_request=request, use_tqdm=False
-        )
-        results.append(torch.tensor([o.outputs.probs for o in outputs]))
-    del llm
-    cleanup_dist_env_and_memory()
-    return results[0], results[1]
+        enable_chunked_prefill=None,
+    ) as runner:
+        params = PoolingParams(task="classify", use_activation=False)
+        results = []
+        for request in [None, LoRARequest("native", 1, lora)]:
+            outputs = runner.llm.classify(
+                PROMPTS, pooling_params=params, lora_request=request, use_tqdm=False
+            )
+            results.append(torch.tensor([o.outputs.probs for o in outputs]))
+        return results[0], results[1]
 
 
-def test_native_gte_lora_matches_transformers(tmp_path):
+def test_native_gte_lora_matches_transformers(vllm_runner, tmp_path):
     hf_base, hf_merged = _transformers_logits(tmp_path / "lora")
-    base, lora = _vllm_logits(str(tmp_path / "lora"))
+    base, lora = _vllm_logits(vllm_runner, str(tmp_path / "lora"))
 
     signal = (hf_merged - hf_base).abs().mean()
     assert signal > 1e-2

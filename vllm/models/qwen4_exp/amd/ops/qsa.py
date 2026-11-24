@@ -15,9 +15,10 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
-# Up to this many single-row decode requests, scoring row by row beats the
-# tiled kernel on gfx942. Measured against the tiled kernel on MI325X.
-_QSA_ROWS_KERNEL_MAX_ROWS = 32
+# CDNA version -> (max rows, BLOCK_N, warps) for scoring single-row decode
+# row by row. Up to max rows this beats the tiled kernel; measured with the
+# 168-page decode table on MI300X and MI325X (CDNA3) and MI355X (CDNA4).
+_ROWS_KERNEL_PROFILES = {3: (32, 32, 4), 4: (128, 128, 2)}
 
 
 @triton.jit
@@ -745,7 +746,7 @@ def qsa_mqa_paged(
     """Compute QSA scores directly from a paged compressed-key cache.
 
     `single_row_decode` marks a batch of decode requests with one query row
-    each and no prefill. Small ones are scored row by row on gfx942.
+    each and no prefill. Small ones are scored row by row on CDNA3 and CDNA4.
 
     Returns:
         `logits` `[rows, columns]` fp32 and `visible_blocks` `[rows]` int32.
@@ -786,14 +787,13 @@ def qsa_mqa_paged(
     visible_blocks = torch.empty(q.shape[0], dtype=torch.int32, device=q.device)
     if not q.shape[0] or not columns:
         return logits, visible_blocks
-    if (
-        single_row_decode
-        and q.shape[0] <= _QSA_ROWS_KERNEL_MAX_ROWS
-        and get_cdna_version() == 3
-    ):
+    rows_profile = (
+        _ROWS_KERNEL_PROFILES.get(get_cdna_version()) if single_row_decode else None
+    )
+    if rows_profile is not None and q.shape[0] <= rows_profile[0]:
         # Rows from different requests share no keys, so a 16-row tl.dot tile is
         # mostly padding.
-        block_n = 32
+        _, block_n, rows_warps = rows_profile
         _qsa_mqa_paged_rows_kernel[(q.shape[0], triton.cdiv(columns, block_n))](
             q,
             k_cache,
@@ -823,7 +823,7 @@ def qsa_mqa_paged(
             BLOCK_N=block_n,
             BLOCK_D=triton.next_power_of_2(q.shape[2]),
             COMPRESS_RATIO=compress_ratio,
-            num_warps=4,
+            num_warps=rows_warps,
         )
         return logits, visible_blocks
     block_m, block_n = 16, 64
@@ -935,8 +935,13 @@ def qsa_select_paged_tokens(
     compress_ratio: int,
     out: torch.Tensor | None = None,
     single_row_decode: bool = False,
+    max_seq_len: int | None = None,
 ) -> torch.Tensor:
-    """Score, select, and expand QSA indices without host synchronization."""
+    """Score, select, and expand QSA indices without host synchronization.
+
+    `max_seq_len` bounds the scored columns to the batch's longest sequence;
+    without it every column of `page_table` is scored.
+    """
     rows = q.shape[0]
     output_width = token_topk + compress_ratio - 1
     if out is None:
@@ -947,6 +952,8 @@ def qsa_select_paged_tokens(
         return out
 
     columns = page_table.shape[1] * k_cache.shape[1]
+    if max_seq_len is not None:
+        columns = min(columns, -(-max_seq_len // compress_ratio))
     block_topk = token_topk // compress_ratio
     rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1))
     chunk_rows = min(rows, rows_per_chunk)
@@ -967,6 +974,7 @@ def qsa_select_paged_tokens(
             query_positions[row_slice],
             sequence_lengths,
             compress_ratio,
+            num_columns=columns,
             single_row_decode=single_row_decode,
         )
         blocks = blocks_buffer[: row_end - row_start]
@@ -1070,11 +1078,26 @@ def qsa_sparse_paged_attention(
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
     base_programs = q.shape[0] * k_cache.shape[2]
+    cdna_version = get_cdna_version()
+    cdna_bf16 = cdna_version in (3, 4) and k_cache.dtype == torch.bfloat16
+    if cdna_bf16:
+        # tl.dot with fewer than 16 rows is slow on CDNA3/4; pad the head group.
+        block_m = max(block_m, 16)
     small_profile_limit = 8 if block_m <= 8 else 4
 
-    # Tuned on GB300 for the Qwen-Air TP1, TP2, and TP4 attention shapes.
-    # Narrow tiles favor decode; wide tiles improve throughput for prefill.
-    if base_programs <= small_profile_limit:
+    if cdna_bf16 and base_programs >= 32:
+        # Narrow tiles, one warp, and enough splits for about 2048 programs.
+        # CDNA4 decode prefers about 1024 programs with four warps.
+        block_n = 16
+        target_splits = min(16, triton.next_power_of_2(-(-2048 // base_programs)))
+        partial_warps = 2 if base_programs <= 128 else 1
+        if cdna_version == 4 and base_programs <= 128:
+            target_splits = triton.next_power_of_2(-(-1024 // base_programs))
+            partial_warps = 4
+    # The shared profiles were tuned on GB300 for the Qwen-Air TP1, TP2, and TP4
+    # attention shapes. Narrow tiles favor decode; wide tiles improve throughput
+    # for prefill.
+    elif base_programs <= small_profile_limit:
         block_n, target_splits, partial_warps = 16, 64, 4
     elif base_programs < 32:
         block_n, target_splits, partial_warps = 16, 32, 4
@@ -1084,13 +1107,8 @@ def qsa_sparse_paged_attention(
         block_n, target_splits, partial_warps = 64, 4, 2
     else:
         block_n, target_splits, partial_warps = 64, 1, 2
-        # One warp per program is faster on CDNA3 and CDNA4, except BF16
-        # K/V with BLOCK_M >= 16 on CDNA3, where BLOCK_N=32 is faster
-        # (BLOCK_N=32 with one warp faults there).
-        cdna_version = get_cdna_version()
-        if cdna_version == 3 and block_m >= 16 and not is_fp8:
-            block_n = 32
-        elif cdna_version in (3, 4):
+        if cdna_version in (3, 4):
+            # FP8 K/V on CDNA3 and CDNA4 is faster with one warp per program.
             partial_warps = 1
     # gfx942 and gfx950 have a 64 KiB LDS limit. One software-pipelining
     # stage keeps the wide TP4 tile within that shared-memory budget.
