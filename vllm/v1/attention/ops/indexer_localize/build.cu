@@ -4,15 +4,22 @@
 // Per-step decode build of the die-local sparse-attention indexer, for one or
 // several indexer cache groups in one launch.
 //
-// Per group it writes each decode row's pages split by locality domain into
-// compact per-domain block tables (lbt0/lbt1), the per-domain context lengths
-// (llen0/llen1), the join map, the per-domain local-to-row page maps
+// Per group it writes each decode row's request pages split by locality domain
+// into compact per-domain block tables (lbt0/lbt1), the row's per-domain context
+// lengths (llen0/llen1), the join map, the per-domain local-to-request page maps
 // (inv0/inv1), the 64-entry zero pads after each domain's list (valid ids for
-// DeepGEMM's prefetch), the reset of rows num_rows..cap (lengths 0, 64
-// zeros), and both domains' DeepGEMM paged-MQA-logits schedules
+// DeepGEMM's prefetch), the reset of rows num_rows..cap (lengths 0, 64 zeros),
+// and both domains' DeepGEMM paged-MQA-logits schedules
 // ((sms + 1) x 2 int32: a port of DeepGEMM 2.8.1's
 // sm100_paged_mqa_logits_metadata with SPLIT_KV = 384, BLOCK_Q = 4 and the
 // domain's SM count). Other entries are not written.
+//
+// Requests (DeepGEMM's varlen form): consecutive rows with the same index are
+// one request, whose rows see one more key each (speculative decoding).
+// DeepGEMM reads the page list of a request's first row and scans as far as
+// its last row needs, so every row of a request gets the request's lists, cut
+// at its last row's length (the split length); each row keeps its own
+// per-domain lengths (its pages are a prefix of the request's).
 //
 // Grid (fixed per (group set, num_rows), so CUDA-graph safe), in order: for
 // each group one "schedule" block followed by num_rows x nch "split" blocks
@@ -20,14 +27,16 @@
 // "reset" blocks (kResetRows rows each).
 // * Split block: counts its chunk's domain-1 pages, publishes the count in a
 //   64-bit flag tagged with the group's epoch, sums all earlier chunks'
-//   counts of its row (one warp; they run concurrently), scatters. The row's
-//   last chunk also writes the row's lengths and zero pads. No atomics.
-// * Schedule block: reads every row's length, last page and that page's
-//   domain itself, waits for every chunk flag of every row, derives both
-//   domains' lengths from them (the split blocks' formula) and computes both
-//   schedules; then it bumps the group's epoch: every block that read the
-//   epoch has published its flag by then, so flags never need clearing and
-//   graph replays work.
+//   counts of its row (one warp; they run concurrently), scatters. The block
+//   holding the row's own last page writes the row's lengths; the request's
+//   last chunk writes the zero pads. No atomics.
+// * Schedule block: reads every row's split length, last page and that
+//   page's domain itself, waits for every chunk flag of every row, derives
+//   both domains' request lengths from them (the split blocks' formula) and
+//   computes both schedules (DeepGEMM prices a request by its last row);
+//   then it bumps the group's epoch: every block that read the epoch has
+//   published its flag by then, so flags never need clearing and graph
+//   replays work.
 //
 // Device state per group (zero-initialized once): state[0] = epoch. No
 // standard headers: compiled at runtime with NVRTC.
@@ -54,9 +63,9 @@ struct Group {
                        // indices)
   int* lbt0;           // [cap, out_stride] die-0 compact block table
   int* lbt1;
-  int* inv0;  // [cap, out_stride] die-d local page -> row page
+  int* inv0;  // [cap, out_stride] die-d local page -> request page
   int* inv1;
-  int* jmap;   // [cap, jmap_stride] row page -> (local_col << 1) | die
+  int* jmap;   // [cap, jmap_stride] request page -> (local_col << 1) | die
   int* llen0;  // [cap] die-0 context rows
   int* llen1;
   int* sched0;  // [(sms0 + 1) * 2] die-0 DeepGEMM schedule
@@ -125,6 +134,26 @@ static __device__ __forceinline__ u32 split_cost(u32 nq) {
 static __device__ __forceinline__ int page_dom(const Group& G, int b) {
   if (G.dom_k > 0) return (int)((((u32)G.dom_q0 + (u32)b) / (u32)G.dom_k) & 1u);
   return (int)G.dom[b];
+}
+
+// The length of the last row of row r's request (rows r, r + 1, ... with r's
+// index): the request's split length. The calling warp reads the next 32 rows'
+// indices and lengths at a time.
+static __device__ __forceinline__ int request_split_len(const Group& G, int r) {
+  const int lane = threadIdx.x & 31;
+  const int id = G.indices[r];
+  int len = G.lens[r];
+  for (int e = r;; e += 32) {
+    const int t = e + 1 + lane;
+    const bool in = t < G.num_rows;
+    const int t_id = in ? G.indices[t] : 0;
+    const int t_len = in ? G.lens[t] : 0;
+    const u32 same = __ballot_sync(0xffffffffu, in && t_id == id);
+    // Rows e + 1 .. e + run continue the request.
+    const int run = same == 0xffffffffu ? 32 : __ffs(~same) - 1;
+    if (run > 0) len = __shfl_sync(0xffffffffu, t_len, run - 1);
+    if (run < 32) return len;
+  }
 }
 
 // Waits until the flag carries `tag` (this launch) and returns its count.
@@ -343,8 +372,9 @@ static __device__ void schedules_warp(const Group& G, int sms0, int sms1,
   }
 }
 
-// The group's schedule block: per-row die lens from the rows' lengths, last
-// pages and chunk flags, then schedules.
+// The group's schedule block: per-row die lens of the rows' requests from the
+// split lengths, last pages and chunk flags, then schedules (which read the
+// lens of each request's last row only).
 static __device__ void schedule_block(const Group& G, int sms0, int sms1,
                                       u32* dsm, int* s_warp, int* s_misc) {
   const int tid = threadIdx.x;
@@ -353,17 +383,26 @@ static __device__ void schedule_block(const Group& G, int sms0, int sms1,
   u32* ln1 = dsm + T;
   u32* rs = dsm + 2 * T;
   u32* pf = dsm + 3 * T;
-  u32* s_np = pf;  // [T] pages per row         (pf, rs, ln1 are free until the
-                   // lens are known)
-  u32* s_last = rs;  // [T] the row's last block id
-  u32* s_n1 = ln1;   // [T] domain-1 pages per row (summed from the chunk flags)
+  // Until the lens are known: (ln0, ln1, rs and pf are free)
+  u32* s_split = ln0;  // [T] split length (the request's last row's length)
+  u32* s_n1 = ln1;     // [T] domain-1 pages of the split (from the flags)
+  u32* s_last = rs;    // [T] the split's last block id
+  u32* s_id = pf;      // [T] request index, then
+  u32* s_np = pf;      // [T] pages of the split
   if (tid == 0) s_misc[4] = (int)(ld_relaxed_u32(G.state) + 1u);
   const int idx = (T <= 32 && (tid & 31) < T)
                       ? G.indices[tid & 31]
                       : 0;  // warps 0-1 use it (T <= 32 path)
+  for (int r = tid; r < T; r += kThreads) s_id[r] = (u32)G.indices[r];
+  __syncthreads();
   for (int r = tid; r < T; r += kThreads) {
-    const int L = G.lens[r];
-    const int npages = (L + R - 1) / R;
+    int e = r;
+    while (e + 1 < T && s_id[e + 1] == s_id[r]) ++e;
+    s_split[r] = (u32)G.lens[e];
+  }
+  __syncthreads();
+  for (int r = tid; r < T; r += kThreads) {
+    const int npages = ((int)s_split[r] + R - 1) / R;
     s_np[r] = (u32)npages;
     s_n1[r] = 0;
     s_last[r] = npages > 0 ? (u32)G.bt[(i64)r * G.bt_stride + npages - 1] : 0u;
@@ -389,7 +428,7 @@ static __device__ void schedule_block(const Group& G, int sms0, int sms1,
   for (int r = tid, k = 0; r < T; r += kThreads, ++k) {
     const int d_last =
         k < 4 ? dl[k] : (s_np[r] > 0 ? page_dom(G, (int)s_last[r]) : 0);
-    const int L = G.lens[r];
+    const int L = (int)s_split[r];
     const int npages = (int)s_np[r];
     const int n1 = (int)s_n1[r];
     const int n0 = npages - n1;
@@ -416,19 +455,23 @@ static __device__ void split_block(const Group& G, int item, int* s_warp,
   const i64 rbt = (i64)r * G.bt_stride;
   const int cbase = c * kChunk;
   const int pbase = cbase + tid * kPer;
-  // The chunk's block ids, loaded before the row length arrives (entries past
-  // the row's pages are in the row of the block table, so in bounds; they are
+  // The chunk's block ids, loaded before the lengths arrive (entries past the
+  // request's pages are in the row of the block table, so in bounds; they are
   // masked out below).
   int bk[kPer];
 #pragma unroll
   for (int k = 0; k < kPer; ++k)
     bk[k] = (pbase + k < G.width) ? G.bt[rbt + pbase + k] : 0;
-  const int L = G.lens[r];
+  // The request's pages up to its last row (the split), and this row's own
+  // length (a prefix of them).
+  const int L = request_split_len(G, r);
+  const int L_row = min(G.lens[r], L);
   const int npages = (L + R - 1) / R;
+  const int np_row = (L_row + R - 1) / R;
   const int nchr = (npages + kChunk - 1) / kChunk;
   const int last_c = (nchr > 0 ? nchr : 1) - 1;
   if (c > last_c)
-    return;  // past the row's pages: nothing to write (block-uniform)
+    return;  // past the request's pages: nothing to write (block-uniform)
 
   const i64 rout = (i64)r * G.out_stride;
   const i64 rj = (i64)r * G.jmap_stride;
@@ -444,15 +487,13 @@ static __device__ void split_block(const Group& G, int item, int* s_warp,
     const int d = val[k] ? page_dom(G, bk[k]) : 0;
     one[k] = val[k] && d != 0;
     n1 += one[k] ? 1 : 0;
-    if (pbase + k == npages - 1)
-      s_misc[5] = d;  // the row's last page (only in its last chunk)
   }
   int chunk_n1;
-  const int t1 = block_excl_scan(
-      n1, s_warp, chunk_n1);  // its barriers also publish s_misc[4], s_misc[5]
+  const int t1 =
+      block_excl_scan(n1, s_warp, chunk_n1);  // its barriers publish s_misc[4]
   const u32 tag = (u32)s_misc[4];
   const u64* fl = G.flags + (i64)r * G.nch;
-  // An empty row's block is not waited for, so it may read the epoch after
+  // An empty request's block is not waited for, so it may read the epoch after
   // the schedule block bumped it: it must not publish (its tag would be the
   // next launch's).
   if (tid == 0 && npages > 0)
@@ -494,17 +535,19 @@ static __device__ void split_block(const Group& G, int item, int* s_warp,
       G.jmap[rj + pp] = p0 * twoR;
       ++p0;
     }
+    if (pp == np_row - 1) {  // the row's own last page: its lengths
+      const int sh = R * np_row - L_row;  // rows missing from that page
+      G.llen0[r] = p0 * R - (one[k] ? 0 : sh);
+      G.llen1[r] = p1 * R - (one[k] ? sh : 0);
+    }
   }
-  if (c == last_c) {  // the row's last chunk: lens and zero pads
+  if (np_row == 0 && c == 0 && tid == 0) {
+    G.llen0[r] = 0;
+    G.llen1[r] = 0;
+  }
+  if (c == last_c) {  // the request's last chunk: zero pads
     const int n1r = pre1 + chunk_n1;
     const int n0r = npages - n1r;
-    if (tid == 0) {
-      const bool last_ok = npages > 0;
-      const int d_last = last_ok ? s_misc[5] : 0;
-      const int sh = R * npages - L;  // rows missing from the last page
-      G.llen0[r] = n0r * R - ((last_ok && d_last == 0) ? sh : 0);
-      G.llen1[r] = n1r * R - ((last_ok && d_last != 0) ? sh : 0);
-    }
     for (int z = tid; z < 2 * kZPad; z += kThreads) {
       const int zz = z & (kZPad - 1);
       if (z < kZPad) {

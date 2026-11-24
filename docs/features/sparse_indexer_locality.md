@@ -27,10 +27,24 @@ bandwidth. With `VLLM_INDEXER_LOCALIZE=1`:
   request's index-key pages by domain and builds both domains' DeepGEMM
   schedules.
 - Each domain's SMs (a green context per domain) scan the pages in their own
-  memory with DeepGEMM's `fp8_fp4_paged_mqa_logits`. For batches of at most 64
-  rows with top-k 512, 1024 or 2048, each domain also runs the top-k on its own
-  scores and one kernel merges the two candidate lists; otherwise the two score
-  arrays are joined into the stock full-length array and the stock top-k runs.
+  memory with DeepGEMM's `fp8_fp4_paged_mqa_logits`. With top-k 512, 1024 or
+  2048, each domain also runs the stock selector's top-k (`cooperative_topk` up
+  to 64 rows, `persistent_topk` above) on its own scores and one kernel merges
+  the two candidate lists; otherwise the two score arrays are joined into the
+  stock full-length array and the stock top-k runs.
+- A decode batch takes the die split only when each domain's top-k fits in one
+  round of CTAs on the domain's SMs: rows times the top-k's CTAs per row (16,
+  8, 4 or 2 up to 4, 8, 33 or 64 rows, then 1) at most the domain's SM count.
+  On a GPU with 100 SMs per domain that is 1-25, 34-50 and 65-100 rows; other
+  batches run the stock indexer. The rule depends only on the row count, which
+  a FULL CUDA graph fixes per captured batch size.
+
+With speculative decoding, a request has one decode row per query token (the
+last accepted token and the draft tokens), and each row sees one key more than
+the one before. DeepGEMM reads the page list of a request's first row and scans
+as far as its last row needs, so the build splits each request's pages once, up
+to its last row, gives every row of the request the same per-domain page lists,
+and gives each row its own per-domain lengths.
 
 The scores are bit-identical to the single-launch scan, and the kept tokens have
 the same score multiset as the stock top-k (ties may keep other tokens). The CUDA
@@ -43,8 +57,8 @@ contexts and `torch.cuda.execute_on_streams` (nightly from 2026-10-08, 2.16).
 Where any of these is missing, vLLM logs why and runs the stock indexer. The die
 split and the KV cache placement are also off for models whose class does not
 set `supports_localized_indexer` (today Kimi K3 / K3.1 and DeepSeek-V4.1), with
-speculative decoding, decode or prefill context parallelism, a KV connector, and
-with the CuMem allocator on a plain (non-extensible) KV cache.
+decode or prefill context parallelism, a KV connector, and with the CuMem
+allocator on a plain (non-extensible) KV cache.
 
 `VLLM_INDEXER_LOCALIZE` is independent of
 [`VLLM_USE_LOCALITY_DOMAINS`](../configuration/env_vars.md), which splits the
@@ -52,8 +66,9 @@ NVFP4 MoE layers by locality domain; with both on, they share the per-domain
 green contexts.
 
 When active, each rank logs `KV cache placed in ... runs alternating between 2
-locality domains` and, once per indexer cache group, `Die-local sparse indexer
-active for N layers`. Each fallback is logged once as a warning.
+locality domains`, the decode batch sizes that take the die split and, once per
+indexer cache group, `Die-local sparse indexer active for N layers`. Each
+fallback is logged once as a warning.
 
 ## Indexer overlap (`VLLM_INDEXER_OVERLAP`)
 

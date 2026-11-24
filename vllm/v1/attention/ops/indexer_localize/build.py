@@ -2,9 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-step decode metadata of the die-local indexer.
 
-Every decode step, each indexer cache group needs its rows' pages split by
-locality domain (compact per-domain block tables, per-domain context lengths,
-a join map and local-to-row page maps) and both domains' DeepGEMM schedules.
+Every decode step, each indexer cache group needs its requests' pages split
+by locality domain (compact per-domain block tables, per-domain context
+lengths, a join map and local-to-request page maps) and both domains'
+DeepGEMM schedules. Decode rows are DeepGEMM's varlen form: one row per query
+token, consecutive rows of one request sharing its index; with speculative
+decoding a request has several rows, each seeing one key more than the one
+before. Every row of a request gets the request's page lists, cut at its last
+row, and its own per-domain lengths.
+
 The indexer metadata builder only records the inputs (its persistent block
 table, lengths and request indices); the first localized scan of the forward
 launches one kernel (`build.cu`) that builds every recorded group, so FULL
@@ -13,6 +19,7 @@ CUDA graphs capture it and nothing runs between graphs.
 
 import ctypes
 import weakref
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -211,6 +218,44 @@ def _build_kernel(device_index: int) -> _BuildKernel | None:
 
 
 # ---------------------------------------------------------------------------
+# Policy
+# ---------------------------------------------------------------------------
+def topk_ctas_per_row(num_rows: int) -> int:
+    """CTAs per row of the top-k the stock selector runs on `num_rows` decode
+    rows (one CTA fills an SM): `cooperative_topk`'s cluster of 16, 8, 4 or 2
+    CTAs up to 4, 8, 33 or 64 rows, then `persistent_topk`'s one CTA per row."""
+    for max_rows, ctas in ((4, 16), (8, 8), (33, 4), (64, 2)):
+        if num_rows <= max_rows:
+            return ctas
+    return 1
+
+
+def use_die_split(num_rows: int, domain_sms: Sequence[int]) -> bool:
+    """Whether a decode batch of `num_rows` rows (one per query token) takes
+    the die-local indexer; otherwise the whole batch takes the stock one.
+
+    Yes when each domain's top-k fits in one round of CTAs on the domain's
+    SMs. A second round costs about one CTA's fixed time, 7-9 us on VR200,
+    more than the die split saves there. The rule may depend only on the row
+    count: a FULL CUDA graph fixes the path per captured batch size, so it
+    must not depend on context lengths. The localizer sizes its buffers for
+    the largest batch this accepts.
+    """
+    return num_rows * topk_ctas_per_row(num_rows) <= min(domain_sms)
+
+
+def _row_ranges(rows: list[int]) -> str:
+    """`[1, 2, 3, 7, 8]` -> `1-3, 7-8`."""
+    runs: list[list[int]] = []
+    for n in rows:
+        if runs and runs[-1][1] == n - 1:
+            runs[-1][1] = n
+        else:
+            runs.append([n, n])
+    return ", ".join(f"{a}-{b}" if a != b else str(a) for a, b in runs)
+
+
+# ---------------------------------------------------------------------------
 # Localizer
 # ---------------------------------------------------------------------------
 class _PendingBuild:
@@ -238,8 +283,9 @@ class LocalizedDecodeMetadata:
     block_tables: list[torch.Tensor]  # [T, W] int32 per domain
     seq_lens: list[torch.Tensor]  # [T, 1] int32 per domain
     schedules: list[torch.Tensor]  # DeepGEMM schedule per domain
+    # Per row, of its request's pages (the same for every row of a request):
     join_map: torch.Tensor  # [T, W] int32: (local_col << 1) | domain
-    inv_maps: list[torch.Tensor]  # [T, W] int32 per domain: local -> row page
+    inv_maps: list[torch.Tensor]  # [T, W] int32 per domain: local -> page
     page_stride: int  # bytes between pages of the indexer cache view
     resources: DomainResources = field(repr=False)
     pending: _PendingBuild | None = field(default=None, repr=False)
@@ -282,11 +328,23 @@ class IndexerDecodeLocalizer:
         self.layer_names = list(layer_names)
         self.ctx = static_forward_context
         self.device = device
-        self.max_rows = max_rows
         self.width = width
         self.page_rows = page_rows
         self.res = get_domain_resources(device)
         self.disabled = self.res is None
+        # Buffers for the largest batch the policy sends to the die split.
+        accepted = []
+        if self.res is not None:
+            accepted = [
+                n for n in range(1, max_rows + 1) if use_die_split(n, self.res.sms)
+            ]
+            logger.info_once(
+                "Die-local sparse indexer: decode batches of %s rows take the die "
+                "split; other batches the stock indexer.",
+                _row_ranges(accepted) or "no",
+            )
+        self.max_rows = max(accepted, default=0)
+        self.disabled |= self.max_rows == 0
         self._key: Any = None
         self._dom_table: torch.Tensor | None = None
         self._dom_plan = (0, 0)
@@ -412,9 +470,11 @@ class IndexerDecodeLocalizer:
         The inputs must be the builder's persistent buffers: the build kernel
         reads them when the forward's first localized scan launches it.
         """
-        if self.disabled or not self._resolve():
+        if self.disabled:
             return None
         assert self.res is not None
+        if not use_die_split(num_rows, self.res.sms) or not self._resolve():
+            return None
         lens = seq_lens.reshape(-1)
         if (
             not 0 < num_rows <= min(self.max_rows, _MAX_ROWS)
@@ -511,11 +571,16 @@ def maybe_make_decode_localizer(
         return None
     scheduler_config = vllm_config.scheduler_config
     spec = builder.kv_cache_spec
+    # One decode row per query token: 1 + the speculative tokens per request.
+    rows_per_request = 1 + builder.num_speculative_tokens
     loc = IndexerDecodeLocalizer(
         builder.layer_names,
         vllm_config.compilation_config.static_forward_context,
         builder.device,
-        min(scheduler_config.max_num_seqs, scheduler_config.max_num_batched_tokens),
+        min(
+            scheduler_config.max_num_seqs * rows_per_request,
+            scheduler_config.max_num_batched_tokens,
+        ),
         block_table_width,
         int(getattr(spec, "num_states", spec.block_size)),
     )

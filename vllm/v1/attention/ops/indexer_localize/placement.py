@@ -41,8 +41,6 @@ def unsupported_config_reason(vllm_config: Any) -> str | None:
     parallel = vllm_config.parallel_config
     if not getattr(get_model_cls(model_config), "supports_localized_indexer", False):
         return f"architecture {model_config.architectures}"
-    if vllm_config.speculative_config is not None:
-        return "speculative decoding"
     if (
         parallel.decode_context_parallel_size > 1
         or parallel.prefill_context_parallel_size > 1

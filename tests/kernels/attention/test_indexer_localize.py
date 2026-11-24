@@ -225,6 +225,80 @@ def test_join_matches_reference(page_rows, out_dtype):
         assert torch.equal(out, ref)
 
 
+def _decode_rows(
+    rows: int,
+    width: int,
+    page_rows: int,
+    num_pages: int,
+    rows_per_request: int,
+    gen: torch.Generator,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Block table, lengths and request indices of `rows` decode rows in the
+    varlen layout: requests of up to `rows_per_request` consecutive rows (at
+    least two when allowed) share a block-table row and an index, each row
+    seeing one key more than the one before. The first requests are empty,
+    end one key in and fill the table; the last row of every third one reads
+    only the first key of a page. The last rows, a varying number, are
+    padding: length 0 and an index each."""
+    device = gen.device
+
+    def randint(lo: int, hi: int) -> int:
+        return int(torch.randint(lo, hi, (), generator=gen, device=device))
+
+    real = rows - randint(0, rows // 4 + 1)
+    bt = torch.zeros(rows, width, dtype=torch.int32, device=device)
+    lens = torch.zeros(rows, dtype=torch.int32, device=device)
+    ids = torch.randperm(4 * rows, generator=gen, device=device).int()
+    indices = ids[:rows].clone()  # padding rows keep one each
+    start = req = 0
+    while start < real:
+        end = min(start + randint(min(2, rows_per_request), rows_per_request + 1), real)
+        bt[start:end] = torch.randint(
+            1, num_pages, (width,), generator=gen, device=device
+        )
+        if req < 3:
+            last = (0, 1, width * page_rows)[req]
+        elif req % 3 == 0:
+            last = randint(1, width) * page_rows + 1
+        else:
+            last = randint(0, width * page_rows + 1)
+        before = torch.arange(end - start - 1, -1, -1, device=device)
+        lens[start:end] = (last - before).clamp(min=0)
+        indices[start:end] = ids[rows + req]
+        start, req = end, req + 1
+    return bt, lens, indices
+
+
+def _assert_request_split(
+    out: dict,
+    bt: torch.Tensor,
+    lens: torch.Tensor,
+    indices: torch.Tensor,
+    dom: torch.Tensor,
+    page_rows: int,
+) -> None:
+    """Each row holds its request's pages up to the request's last row, split
+    by domain in order, and its own keys per domain."""
+    rows = lens.numel()
+    idx, n_keys = indices.tolist(), lens.tolist()
+    for r in range(rows):
+        e = r
+        while e + 1 < rows and idx[e + 1] == idx[r]:
+            e += 1
+        pages = bt[r, : -(-n_keys[e] // page_rows)].long()
+        on1 = dom[pages] != 0
+        own = -(-n_keys[r] // page_rows)
+        for d in range(2):
+            mine = on1 == bool(d)
+            n = int(mine.sum())
+            assert torch.equal(out["bt"][d][r, :n], pages[mine].int()), (r, d)
+            assert torch.equal(out["inv"][d][r, :n], mine.nonzero().view(-1).int())
+            keys = int((on1[:own] == bool(d)).sum()) * page_rows
+            if own and bool(on1[own - 1]) == bool(d):
+                keys -= own * page_rows - n_keys[r]
+            assert int(out["lens"][d][r, 0]) == keys, (r, d)
+
+
 def _reference_build(
     bt: torch.Tensor,
     lens: torch.Tensor,
@@ -234,22 +308,29 @@ def _reference_build(
     sms: list[int],
     out: dict[str, list[torch.Tensor]],
 ) -> None:
-    """What `build.cu` writes, into the CPU tensors `out`: each row's pages
-    split by domain in page order (compact block tables followed by 64 zeros,
-    local-to-row page maps, the join map, per-domain lengths), rows past
-    `lens` reset, and DeepGEMM's schedule of each domain's lengths."""
+    """What `build.cu` writes, into the CPU tensors `out`. Consecutive rows
+    with the same index are one request: each row gets its request's pages up
+    to the request's last row, split by domain in page order (compact block
+    tables followed by 64 zeros, local-to-request page maps, the join map),
+    and its own per-domain lengths (its pages are a prefix of the request's).
+    Rows past `lens` are reset; DeepGEMM schedules each domain's lengths."""
     from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata
 
     cap, rows = out["bt"][0].shape[0], lens.numel()
     # Rows past `lens` are empty.
     bt = torch.nn.functional.pad(bt.cpu(), (0, 0, 0, cap - rows))
-    row_lens = torch.nn.functional.pad(lens.cpu(), (0, cap - rows))
+    row_lens = torch.nn.functional.pad(lens.cpu().view(-1), (0, cap - rows))
+    ids = indices.cpu().tolist()
     dom = dom.cpu()
     for r in range(cap):
-        n = int(row_lens[r])
-        npages = -(-n // page_rows)
+        e = r
+        while r < rows and e + 1 < rows and ids[e + 1] == ids[r]:
+            e += 1
+        n = int(row_lens[e])  # the request's last row: its split length
+        own = min(int(row_lens[r]), n)
+        npages, own_pages = -(-n // page_rows), -(-own // page_rows)
         on1 = dom[bt[r, :npages].long()] != 0
-        short = npages * page_rows - n  # rows missing from the last page
+        short = own_pages * page_rows - own  # keys missing from its last page
         for d in range(2):
             pages = (on1 == d).nonzero().view(-1)
             k = pages.numel()
@@ -258,8 +339,9 @@ def _reference_build(
             out["inv"][d][r, :k] = pages
             local = torch.arange(k, dtype=torch.int32)
             out["jmap"][0][r, pages] = local * 2 * page_rows + d
-            last = npages > 0 and bool(on1[-1]) == bool(d)
-            out["lens"][d][r] = k * page_rows - (short if last else 0)
+            mine = int((on1[:own_pages] == d).sum())
+            last = own_pages > 0 and bool(on1[own_pages - 1]) == bool(d)
+            out["lens"][d][r] = mine * page_rows - (short if last else 0)
     for d, num_sms in enumerate(sms):
         meta = get_paged_mqa_logits_metadata(
             out["lens"][d][:rows].to(indices.device),
@@ -270,15 +352,19 @@ def _reference_build(
         out["sched"][d][: meta.shape[0]] = meta.cpu()
 
 
+@pytest.mark.parametrize("rows_per_request", [1, 6], ids=["one_row", "2_to_6_rows"])
 @pytest.mark.parametrize("rows", [19, 40])  # warp and block schedule paths
 @pytest.mark.parametrize("domain_plan", [True, False])
-def test_build_kernel_matches_reference(nvrtc, domain_plan, rows):
+def test_build_kernel_matches_reference(nvrtc, domain_plan, rows, rows_per_request):
     """The one-launch build writes what the torch split and DeepGEMM's
-    schedules write, including in a CUDA graph replayed over new inputs."""
+    schedules write, including in a CUDA graph replayed over new inputs. With
+    several rows per request (speculative decoding), every row gets its
+    request's pages up to the request's last row and its own lengths, also
+    where a later row starts a new page."""
     if not (has_deep_gemm() and current_platform.is_device_capability_family(100)):
         pytest.skip("needs DeepGEMM's SM100 paged MQA logits schedule")
     device = _device()
-    gen = torch.Generator(device=device).manual_seed(int(domain_plan))
+    gen = torch.Generator(device=device).manual_seed(int(domain_plan) + rows)
     cap, width, page_rows, num_pages = rows + 5, 2300, 64, 40000
     pages = torch.arange(num_pages, device=device)
     if domain_plan:
@@ -296,20 +382,9 @@ def test_build_kernel_matches_reference(nvrtc, domain_plan, rows):
         )
 
     def inputs():
-        bt = torch.randint(
-            1, num_pages, (rows, width), generator=gen, device=device
-        ).int()
-        lens = torch.randint(
-            0, width * page_rows + 1, (rows,), generator=gen, device=device
-        ).int()
-        lens[:3] = torch.tensor([0, 1, width * page_rows], dtype=torch.int32)
-        # Empty rows move between replays (padded decode rows).
-        empty = 3 + torch.randperm(rows - 3, generator=gen, device=device)
-        lens[empty[: rows // 4]] = 0
-        return bt, lens
+        return _decode_rows(rows, width, page_rows, num_pages, rows_per_request, gen)
 
-    bt, lens = inputs()
-    indices = torch.arange(rows, dtype=torch.int32, device=device)
+    bt, lens, indices = inputs()
     # Both builds start from the same junk, so unwritten entries compare too.
     junk = dict(
         bt=[int32(cap, width) for _ in range(2)],
@@ -350,15 +425,30 @@ def test_build_kernel_matches_reference(nvrtc, domain_plan, rows):
 
     kernel.launch([args], sms)
     check()
+    _assert_request_split(out, bt, lens, indices, dom, page_rows)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         kernel.launch([args], sms)
     for _ in range(20):
-        new_bt, new_lens = inputs()
-        bt.copy_(new_bt)
-        lens.copy_(new_lens)
+        for t, new in zip((bt, lens, indices), inputs()):
+            t.copy_(new)
         graph.replay()
         check()
+
+
+def test_policy_takes_die_split_in_one_round_of_topk_ctas():
+    """A batch takes the die split when each domain's top-k CTAs (by the
+    stock selector's launch rule) fit on the domain's SMs at once."""
+    assert [build.topk_ctas_per_row(n) for n in (1, 4, 5, 8, 9, 33, 34, 64, 65)] == [
+        16, 16, 8, 8, 4, 4, 2, 2, 1,
+    ]  # fmt: skip
+    taken = [n for n in range(1, 200) if build.use_die_split(n, [100, 100])]
+    assert taken == [*range(1, 26), *range(34, 51), *range(65, 101)]
+    # DeepSeek-V4.1 with 16 requests and 1 to 6 tokens per request.
+    assert [build.use_die_split(16 * t, [100, 100]) for t in range(1, 7)] == [
+        True, False, True, False, True, True,
+    ]  # fmt: skip
+    assert build.use_die_split(32, [128, 100]) is False  # the smaller domain
 
 
 # ---------------------------------------------------------------------------
@@ -473,9 +563,19 @@ def _fill_index_cache(kv: torch.Tensor, key_bytes: int, gen: torch.Generator):
 
 class _DecodeCase:
     """A localized index-K cache and one decode batch over it, with the
-    stock (single-launch) scan for comparison."""
+    stock (single-launch) scan for comparison. Each request has
+    `rows_per_request` consecutive rows (query tokens) sharing its pages, each
+    seeing one key more than the one before; in every other request the last
+    row reads only the first key of a page."""
 
-    def __init__(self, fp4: bool, page_rows: int, rows: int, context: int):
+    def __init__(
+        self,
+        fp4: bool,
+        page_rows: int,
+        requests: int,
+        context: int,
+        rows_per_request: int = 1,
+    ):
         from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
         from vllm.utils.deep_gemm import (
             fp8_fp4_paged_mqa_logits,
@@ -485,6 +585,7 @@ class _DecodeCase:
         )
 
         device = _device()
+        rows = requests * rows_per_request
         gen = torch.Generator(device=device).manual_seed(rows + page_rows)
         heads, dim = 32, 128
         key_bytes = dim // 2 if fp4 else dim
@@ -492,7 +593,7 @@ class _DecodeCase:
         pages = math.ceil(context / page_rows)
         self.max_model_len = 2 * context
         self.width = math.ceil(self.max_model_len / page_rows)
-        num_blocks = rows * pages + 2
+        num_blocks = requests * pages + 2
         config = _cache_config(num_blocks, page_rows * row_bytes, 4)
         allocate = placement.localized_kv_allocate(config, device, None)
         assert allocate is not None
@@ -514,13 +615,19 @@ class _DecodeCase:
         cache.bind_kv_cache(kv.unsqueeze(1))
         blocks = torch.randperm(num_blocks - 1, generator=gen, device=device) + 1
         self.block_table = torch.zeros(
-            rows, self.width, dtype=torch.int32, device=device
+            requests, self.width, dtype=torch.int32, device=device
         )
-        self.block_table[:, :pages] = blocks[: rows * pages].view(rows, pages).int()
-        self.seq_lens = torch.randint(
-            context // 2, context + 1, (rows, 1), generator=gen, device=device
-        ).int()
-        self.indices = torch.arange(rows, dtype=torch.int32, device=device)
+        self.block_table[:, :pages] = blocks[: requests * pages].view(-1, pages).int()
+        last = torch.randint(
+            context // 2, context + 1, (requests, 1), generator=gen, device=device
+        )
+        last[::2] = (last[::2] - 1) // page_rows * page_rows + 1
+        before = torch.arange(rows_per_request - 1, -1, -1, device=device)
+        self.seq_lens = (last - before).view(-1, 1).int()
+        self.block_table = self.block_table.repeat_interleave(rows_per_request, 0)
+        self.indices = torch.arange(
+            1, 2 * requests, 2, dtype=torch.int32, device=device
+        ).repeat_interleave(rows_per_request)
         self.localizer = build.IndexerDecodeLocalizer(
             [cache.prefix],
             vllm_config.compilation_config.static_forward_context,
@@ -590,18 +697,47 @@ def _assert_same_kept_scores(
 
 
 @pytest.mark.parametrize(
-    "fp4,page_rows,topk",
-    [(False, 64, 2048), (True, 64, 512), (True, 128, 512)],
-    ids=["kimi_k3", "deepseek_v4_c2", "deepseek_v4_c1"],
+    "fp4,page_rows,topk,requests,rows_per_request",
+    [
+        (False, 64, 2048, 4, 1),
+        (False, 64, 2048, 2, 4),
+        (True, 64, 512, 4, 1),
+        (True, 64, 512, 12, 4),
+        (True, 128, 512, 4, 1),
+        (True, 128, 512, 16, 5),
+    ],
+    ids=[
+        "kimi_k3",
+        "kimi_k3_4_tokens",
+        "deepseek_v4_c2",
+        "deepseek_v4_c2_4_tokens",
+        "deepseek_v4_c1",
+        "deepseek_v4_c1_80_rows",
+    ],
 )
-def test_localized_decode_matches_single_launch(domains, fp4, page_rows, topk):
+def test_localized_decode_matches_single_launch(
+    domains, fp4, page_rows, topk, requests, rows_per_request
+):
     """The die-split scan and join return the single-launch scores bit for
-    bit; the per-domain top-k and merge keep the stock top-k's scores, also
-    deferred inside a CUDA graph replayed over new queries."""
-    case = _DecodeCase(fp4, page_rows, rows=4, context=96 * 1024)
+    bit, row by row, also with several rows (query tokens) per request; the
+    per-domain top-k (`cooperative_topk`, `persistent_topk` above 64 rows)
+    and merge keep the stock top-k's scores, also deferred inside a CUDA
+    graph replayed over new queries."""
+    case = _DecodeCase(fp4, page_rows, requests, 96 * 1024, rows_per_request)
     rows = case.seq_lens.shape[0]
     meta = case.localizer.build(case.block_table, case.seq_lens, case.indices, rows)
     assert meta is not None, "the localizer refused the batch"
+    # A row count whose per-domain top-k needs a second round takes the stock
+    # indexer.
+    second_round = next(
+        n for n in range(1, 256) if not build.use_die_split(n, domains.sms)
+    )
+    assert (
+        case.localizer.build(
+            case.block_table, case.seq_lens, case.indices, second_round
+        )
+        is None
+    )
     ref = case.stock()
     for want_fp32 in (False, True):
 
@@ -625,7 +761,8 @@ def test_localized_decode_matches_single_launch(domains, fp4, page_rows, topk):
 
     selector = get_indexer_topk("auto")
     max_seq_len = int(case.seq_lens.max())
-    assert scan.localized_topk_supported(selector, rows, case.max_model_len, topk)
+    backend = scan.localized_topk_backend(selector, rows, case.max_model_len, topk)
+    assert backend == ("cooperative" if rows <= 64 else "persistent")
 
     def stock_topk() -> tuple[torch.Tensor, torch.Tensor]:
         scores = case.stock()
@@ -647,6 +784,7 @@ def test_localized_decode_matches_single_launch(domains, fp4, page_rows, topk):
             topk,
             max_seq_len,
             kept,
+            topk_backend=backend,
         )
 
     assert localized_topk()
@@ -680,10 +818,12 @@ def candidate_stream(monkeypatch):
     indexer_overlap.init_candidate_stream(allowed=True)
 
 
-def test_candidate_source_matches_stock(domains, candidate_stream):
+@pytest.mark.parametrize("rows_per_request", [1, 3])
+def test_candidate_source_matches_stock(domains, candidate_stream, rows_per_request):
     """The candidate source layer's per-domain top-k with deferred candidates
     (FULL CUDA graph decode) writes the stock path's candidate blocks and
-    sparse block ids bit for bit, and keeps the stock top-k's scores."""
+    sparse block ids bit for bit, and keeps the stock top-k's scores, also
+    with several rows per request."""
     from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
         select_candidate_blocks,
     )
@@ -702,7 +842,7 @@ def test_candidate_source_matches_stock(domains, candidate_stream):
     )
 
     topk, block_size, topk_blocks, sparse_block_kv = 512, 8, 2048, 8
-    case = _DecodeCase(True, 128, rows=4, context=96 * 1024)
+    case = _DecodeCase(True, 128, 4, 96 * 1024, rows_per_request)
     rows = case.seq_lens.shape[0]
     device = case.seq_lens.device
     loc = case.localizer.build(case.block_table, case.seq_lens, case.indices, rows)
@@ -727,7 +867,7 @@ def test_candidate_source_matches_stock(domains, candidate_stream):
         seq_lens=row_ke,
         max_seq_len=int(row_ke.max()),
         slot_mapping=zeros,
-        num_decodes=rows,
+        num_decodes=rows // rows_per_request,
         num_decode_tokens=rows,
         num_prefills=0,
         num_prefill_tokens=0,

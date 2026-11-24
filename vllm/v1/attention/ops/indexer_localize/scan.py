@@ -8,11 +8,11 @@ compact block table, context lengths and schedule `build.py` made for the
 domain), with DeepGEMM's programmatic dependent launch off for these
 launches. Then either:
 
-* `localized_paged_mqa_topk`: each domain runs the stock `cooperative_topk`
-  on its compact scores, and one kernel (`merge.cu`) merges the 2 x K
-  candidates into the K request-local token positions: the same selected
-  score multiset as the single-launch scan and top-k (ties may pick other
-  tokens); or
+* `localized_paged_mqa_topk`: each domain runs the top-k the stock selector
+  picks (`cooperative_topk`, or `persistent_topk` above 64 rows) on its
+  compact scores, and one kernel (`merge.cu`) merges the 2 x K candidates into
+  the K request-local token positions: the same selected score multiset as the
+  single-launch scan and top-k (ties may pick other tokens); or
 * `localized_paged_mqa_logits`: one kernel joins both domains' compact scores
   into the full-length score array with the stock layout, bit-identical to
   the single-launch scan, for consumers that need the whole array.
@@ -393,12 +393,16 @@ def merge_candidates(
     )
 
 
-def localized_topk_supported(
+def localized_topk_backend(
     selector: Any, rows: int, max_model_len: int, topk_tokens: int
-) -> bool:
-    """Whether the stock selector would run `cooperative_topk` on these BF16
-    scores (the per-domain path uses that kernel: clusters, no grid sync, so
-    it runs on a domain's SMs)."""
+) -> str | None:
+    """The top-k each domain runs on its scores: the kernel the stock selector
+    would run on these BF16 scores, when it can run on a domain's SMs (no CTA
+    waits for CTAs it cannot see). That is `cooperative_topk` (clusters, no
+    grid sync) and, above 64 rows, `persistent_topk`, which then launches one
+    CTA per row. None for any other kernel."""
+    from vllm.model_executor.layers.indexer_topk import AUTO_COOPERATIVE_MAX_ROWS
+
     probe = torch.empty_strided(
         (rows, max_model_len),
         (-(-max_model_len // 64) * 64, 1),
@@ -406,9 +410,14 @@ def localized_topk_supported(
         device="meta",
     )
     try:
-        return selector.resolve_backend(probe, topk_tokens, rows) == "cooperative"
+        backend = selector.resolve_backend(probe, topk_tokens, rows)
     except Exception:  # noqa: BLE001 - an unsupported shape
-        return False
+        return None
+    if backend == "cooperative" or (
+        backend == "persistent" and rows > AUTO_COOPERATIVE_MAX_ROWS
+    ):
+        return backend
+    return None
 
 
 # Per-domain top-k scratch, per (device, domain) and (device, domain, topk).
@@ -450,15 +459,18 @@ def localized_paged_mqa_topk(
     max_seq_len: int,
     topk_out: torch.Tensor,
     keep: list[torch.Tensor] | None = None,
+    topk_backend: str = "cooperative",
 ) -> bool:
     """Per-domain scan and top-k, then the merge, into `topk_out`.
 
-    `topk_out` is the `[rows, K]` int32 view of the top-k buffer. With
+    `topk_out` is the `[rows, K]` int32 view of the top-k buffer, and
+    `topk_backend` the per-domain top-k (`localized_topk_backend`). With
     `keep`, both domains' compact scores are appended to it (for a join the
-    caller runs later; such a call never defers). When the caller requested a
-    deferred top-k (`indexer_overlap.request_deferred_topk`), the call returns without
-    joining: domain 0's stream waits for domain 1 and merges. Returns False,
-    without launching anything, when this call cannot be localized.
+    caller runs later; such a call never defers). When the caller requested
+    a deferred top-k (`indexer_overlap.request_deferred_topk`), the call
+    returns without joining: domain 0's stream waits for domain 1 and merges.
+    Returns False, without launching anything, when this call cannot be
+    localized.
     """
     rows = q[0].shape[0] * q[0].shape[1]
     if (
@@ -486,12 +498,15 @@ def localized_paged_mqa_topk(
         return False
     ensure_built(loc)
     streams = loc.resources.streams
+    topk_op = (
+        torch.ops._C.persistent_topk
+        if topk_backend == "persistent"
+        else torch.ops._C.cooperative_topk
+    )
 
     def scan_topk(d: int) -> torch.Tensor:
         o = _scan(loc, d, q, kv_cache, weights, max_model_len, logits_dtype, indices)
-        torch.ops._C.cooperative_topk(
-            o, loc.seq_lens[d], idx[d], workspaces[d], topk_tokens, max_seq_len
-        )
+        topk_op(o, loc.seq_lens[d], idx[d], workspaces[d], topk_tokens, max_seq_len)
         return o
 
     if keep is None and indexer_overlap.consume_deferred_topk_request():

@@ -562,9 +562,10 @@ def _localized_candidate_source_topk(
     loc = decode_metadata.localized
     assert loc is not None
     selector = get_indexer_topk(topk_backend)
-    if not scan.localized_topk_supported(
+    domain_topk = scan.localized_topk_backend(
         selector, topk_out.shape[0], max_model_len, topk_tokens
-    ):
+    )
+    if domain_topk is None:
         return False
     if not indexer_overlap.candidate_defer_allowed():
         if envs.VLLM_INDEXER_OVERLAP:
@@ -586,6 +587,7 @@ def _localized_candidate_source_topk(
         attn_metadata_narrowed.max_seq_len,
         topk_out,
         keep=kept,
+        topk_backend=domain_topk,
     ):
         return False
     o0, o1 = kept
@@ -1312,8 +1314,9 @@ def sparse_attn_indexer(
             )
             q = (padded_q_quant_cast, padded_q_scale)
             localized = decode_metadata.localized
-            # One query row per request over the whole context on this rank:
-            # what the die-local and the deferred paths take.
+            # One row per query token (the varlen form, also with speculative
+            # decoding) over the whole context on this rank: what the
+            # die-local and the deferred paths take.
             whole_rows = (
                 dcp_world_size == 1
                 and decode_metadata.global_seq_lens is None
@@ -1360,12 +1363,15 @@ def sparse_attn_indexer(
                 # scores (VLLM_INDEXER_LOCALIZE).
                 if (
                     candidate_blocks is None
-                    and scan.localized_topk_supported(
-                        get_indexer_topk(topk_backend),
-                        num_padded_tokens,
-                        max_model_len,
-                        topk_tokens,
+                    and (
+                        domain_topk := scan.localized_topk_backend(
+                            get_indexer_topk(topk_backend),
+                            num_padded_tokens,
+                            max_model_len,
+                            topk_tokens,
+                        )
                     )
+                    is not None
                     and scan.localized_paged_mqa_topk(
                         localized,
                         q,
@@ -1377,6 +1383,7 @@ def sparse_attn_indexer(
                         topk_tokens,
                         attn_metadata_narrowed.max_seq_len,
                         topk_indices_buffer[:num_padded_tokens, :topk_tokens],
+                        topk_backend=domain_topk,
                     )
                 ):
                     return topk_indices_buffer
