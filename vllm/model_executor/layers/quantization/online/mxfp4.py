@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
     select_mxfp4_moe_backend,
+    validate_mxfp4_emulation_activation,
 )
 from vllm.model_executor.layers.quantization.input_hadamard import (
     InputHadamardFusable,
@@ -179,13 +180,13 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
             config=self.moe, activation_key=self.activation_quant_key
         )
+        if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION:
+            validate_mxfp4_emulation_activation(self.activation_quant_key)
+            return
+
         # The oracle may fall back to a backend computing another activation
-        # format (EMULATION computes MXFP4): reject an override it cannot honour.
-        backend_key = (
-            kMxfp4Dynamic
-            if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION
-            else _backend_activation_key(self.mxfp4_backend)
-        )
+        # format: reject an override it cannot honour.
+        backend_key = _backend_activation_key(self.mxfp4_backend)
         if (
             self.activation_quant_key != kMxfp4Dynamic
             and self.activation_quant_key != backend_key
@@ -326,6 +327,7 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
+            activation_key=self.activation_quant_key,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:

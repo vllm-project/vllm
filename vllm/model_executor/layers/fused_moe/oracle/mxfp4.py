@@ -13,7 +13,7 @@ from vllm.config.kernel import (
     FLASHINFER_MOE_EP_DEEP_GEMM,
     MoEBackend,
 )
-from vllm.config.quantization import user_activation_override
+from vllm.config.quantization import quant_key_name, user_activation_override
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
     kFp8StaticTensorSym,
     kInt4Static32,
     kMxfp4Dynamic,
@@ -2121,6 +2122,15 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
 
+def validate_mxfp4_emulation_activation(activation_key: QuantKey | None) -> None:
+    if activation_key not in (None, kMxfp4Dynamic, kFp8DynamicTensorSym):
+        raise NotImplementedError(
+            f"MXFP4 MoE backend 'emulation' cannot honour "
+            f"activation={quant_key_name(activation_key)}. Supported activations: "
+            "null, mxfp4, fp8_per_tensor_dynamic."
+        )
+
+
 def make_mxfp4_moe_quant_config(
     mxfp4_backend: Mxfp4MoeBackend,
     w1_scale: Union[torch.Tensor, "PrecisionConfig"],
@@ -2133,6 +2143,7 @@ def make_mxfp4_moe_quant_config(
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
     layer: "RoutedExperts | None" = None,
+    activation_key: QuantKey | None = kMxfp4Dynamic,
 ) -> FusedMoEQuantConfig | None:
     """Create a FusedMoEQuantConfig for the given MXFP4 backend."""
     if mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
@@ -2203,6 +2214,17 @@ def make_mxfp4_moe_quant_config(
             block_shape=None,
             gemm1_clamp_limit=swiglu_limit,
         )
+    elif (
+        mxfp4_backend == Mxfp4MoeBackend.EMULATION
+        and activation_key == kFp8DynamicTensorSym
+    ):
+        return mxfp4_w4a8_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            gemm1_clamp_limit=swiglu_limit,
+        )
     elif mxfp4_backend in (
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
@@ -2229,7 +2251,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
         Mxfp4MoeBackend.CPU,
-    ):
+    ) or (mxfp4_backend == Mxfp4MoeBackend.EMULATION and activation_key is None):
         return mxfp4_w4a16_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
