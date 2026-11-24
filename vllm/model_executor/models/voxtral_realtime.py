@@ -499,6 +499,11 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         cls,
         stt_params: SpeechToTextParams,
     ) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError(
+                f'Voxtral Realtime only supports "transcribe", '
+                f"got {stt_params.task_type}"
+            )
         audio = stt_params.audio
         model_config = stt_params.model_config
         stt_config = stt_params.stt_config
@@ -508,7 +513,6 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
 
         req = TranscriptionRequest(
-            model=model_config.model,
             audio=audio.to_base64(audio.format),
             language=language,
             streaming=StreamingMode.OFFLINE,

@@ -3,7 +3,7 @@
 # Keep this helper best-effort: missing Buildkite metadata should fall back to
 # local/default values instead of blocking the Docker build.
 
-# Variant examples: "", "cu134", "ubuntu2404", "xpu".
+# Variant examples: "", "cu135", "ubuntu2404", "xpu".
 variant="${1:-}"
 variant_suffix="${variant:+-${variant}}"
 

@@ -4,7 +4,7 @@
 
 For the gfx950 fp8/fp8 nhead=32 qlen=1 fold path, the split/reduce metadata
 layout depends on the q/kv element size. The builder must forward dtype_q/dtype_kv
-to ``get_mla_metadata_v1``; omitting them lays out the work for the wrong dtype
+to `get_mla_metadata_v1`; omitting them lays out the work for the wrong dtype
 and corrupts decode output. The test pins the builder's metadata to a golden
 recomputed at runtime with the explicit correct dtypes.
 """
@@ -72,8 +72,8 @@ _OUTPUT_ARG_FIELDS = (
 def _build_decode_metadata():
     """Build AITER MLA decode metadata for the fp8/fp8 nhead=32 fold path.
 
-    Returns ``(metadata, captured)`` where ``captured`` records the positional
-    args/kwargs the builder passed to ``get_mla_metadata_v1``, so the golden can
+    Returns `(metadata, captured)` where `captured` records the positional
+    args/kwargs the builder passed to `get_mla_metadata_v1`, so the golden can
     be recomputed from the identical inputs.
     """
     from tests.v1.attention.utils import (
@@ -163,7 +163,7 @@ def _build_decode_metadata():
 def _compute_golden_metadata(captured: dict) -> dict[str, torch.Tensor]:
     """Recompute the persistent metadata with explicit fp8/bf16 dtypes.
 
-    Replays ``get_mla_metadata_v1`` on the builder's exact input tensors with
+    Replays `get_mla_metadata_v1` on the builder's exact input tensors with
     fresh output buffers and the explicitly-correct dtypes. This reference must
     match the builder's output when the fix is in place.
     """

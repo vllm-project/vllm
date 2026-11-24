@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 import torch
 import torch.nn as nn
-from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
@@ -22,6 +21,7 @@ from vllm.config import (
     CompilationMode,
     VllmConfig,
     get_current_vllm_config,
+    get_current_vllm_config_or_none,
     set_current_vllm_config,
 )
 from vllm.config.compilation import DynamicShapesType
@@ -296,7 +296,7 @@ def _try_load_aot_compiled_fn(
     """Try to load an AOT-compiled function from disk.
 
     Returns the loaded callable on success, or None on failure.
-    Re-raises on failure when ``VLLM_FORCE_AOT_LOAD`` is set.
+    Re-raises on failure when `VLLM_FORCE_AOT_LOAD` is set.
     """
     try:
         with monitor_torch_compile(
@@ -377,12 +377,19 @@ def _support_torch_compile(
         prefix: str = "",
         **kwargs: Any,
     ) -> None:
+        sig = inspect.signature(old_init)
         if vllm_config is None:
-            vllm_config = get_current_vllm_config()
+            if "vllm_config" in sig.parameters:
+                vllm_config = get_current_vllm_config()
+            # Classes vLLM does not own (e.g. Transformers classes decorated by
+            # the Transformers backend) can still be built outside vLLM, uncompiled
+            elif (vllm_config := get_current_vllm_config_or_none()) is None:
+                old_init(self, *args, **kwargs)
+                self.do_not_compile = True
+                return
 
         # NOTE: to support multimodal models (such as encoder),
         # we may not have vllm_config so we may need to patch it
-        sig = inspect.signature(old_init)
         # Check that any positional arguments match the old_init method signature
         annotations = [p.annotation for p in sig.parameters.values()]
         for arg, annotation in zip(args, annotations):
@@ -512,7 +519,8 @@ def _support_torch_compile(
                 else:
                     raise ValueError(
                         f"Unsupported dynamic dimensions {dims} "
-                        f"for argument {k} with type {type(arg)}."
+                        f"for argument {k} with type {type(arg)}. Check the type "
+                        f"hint of {k} in {type(mod).__name__}.forward."
                     )
 
         if mark_unbacked_dims:
@@ -647,6 +655,8 @@ def _support_torch_compile(
         # the function by calling InliningInstructionTranslator.inline_call_
         # we hijack this function to know all the functions called
         # during Dynamo tracing, and their corresponding files
+        from torch._dynamo.symbolic_convert import InliningInstructionTranslator
+
         inline_call = InliningInstructionTranslator.inline_call_
 
         def patched_inline_call(self_: Any) -> Any:

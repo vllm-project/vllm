@@ -3,12 +3,12 @@
 """RecoverSSM commit of an FP32 KDA state: one CTA per (head, request, layer).
 
 Folds the n accepted tokens of a verify window into the checkpoint as the stock
-FP32 commit (``_commit_kda_state_kernel``) does, in its association:
+FP32 commit (`_commit_kda_state_kernel`) does, in its association:
 
     S_n = S_0 * D_n + sum_{t<n} (u_t * kn_t) * P_t,   P_t = prod_{t<s<n} d_s
 
-(``u_t`` the verify's corrections, ``kn_t`` the normalized recorded keys, ``d_t`` the
-per-key decays, ``D_n = P_{-1}``), and with prefix caching (``align``) also the
+(`u_t` the verify's corrections, `kn_t` the normalized recorded keys, `d_t` the
+per-key decays, `D_n = P_{-1}`), and with prefix caching (`align`) also the
 boundary state S_m of the window's first m tokens.
 
 Thread c < 128 rebuilds key channel c's decays, normalized keys and suffix products
@@ -46,7 +46,7 @@ PAGE_BYTES = K * K * 4
 
 
 class KdaCommitF32:
-    """Args as the stock CuTe commit's ``KdaCommit`` (base addresses, strides,
+    """Args as the stock CuTe commit's `KdaCommit` (base addresses, strides,
     a_log [L, H], dt_bias [L, H, K], source / commit length / destination /
     boundary slot / boundary length per request, lower bound, null slot, stream);
     the state is FP32 [H, V, K] per slot."""
@@ -277,9 +277,9 @@ def use_commit_f32(heads: int, batch: int, layers: int = 1) -> bool:
 
 
 def supported(state: torch.Tensor, lower_bound: float | None) -> bool:
-    """Whether ``commit_f32`` folds this checkpoint cache (FP32 [slot, H, 128, 128]
+    """Whether `commit_f32` folds this checkpoint cache (FP32 [slot, H, 128, 128]
     pages, contiguous per slot, on SM10x) for a bounded gate (the stock softplus
-    gate of ``gate_lower_bound=None`` is not implemented)."""
+    gate of `gate_lower_bound=None` is not implemented)."""
     return (
         lower_bound is not None
         and state.dtype == torch.float32
@@ -305,9 +305,9 @@ def commit_f32(
     align: bool,
     record_rows: torch.Tensor | None = None,
 ):
-    """Fold a prepared commit plan of ``context`` (a ``KDARecoverSSMCommitContext``)
+    """Fold a prepared commit plan of `context` (a `KDARecoverSSMCommitContext`)
     into every layer's FP32 state in one launch on the current stream; the records
-    of request b are in slot ``record_rows[b]`` (default: b)."""
+    of request b are in slot `record_rows[b]` (default: b)."""
     state = context.checkpoints[0]
     compiled = _compiled(
         state.shape[1],

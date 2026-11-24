@@ -183,17 +183,17 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Plamo3EngineToolParser",
     ),
     "muse": (
-        "muse_tool_parser",
-        "MuseToolParser",
+        "muse_engine_tool_parser",
+        "MuseEngineToolParser",
     ),
     "muse_glimmer": (
         "muse_glimmer_tool_parser",
         "MuseGlimmerToolParser",
     ),
     # Alias of "muse".
-    "musespark1x": (
-        "muse_tool_parser",
-        "MuseToolParser",
+    "musespark": (
+        "muse_engine_tool_parser",
+        "MuseEngineToolParser",
     ),
     "openai": (
         "gptoss_tool_parser",

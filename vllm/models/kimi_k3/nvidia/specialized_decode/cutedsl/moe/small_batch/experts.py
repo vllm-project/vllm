@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Small-batch routed experts: ``ClusterExpertsTP16`` (TP16 B1/B2, six-CTA split-K
-clusters exchanging quantized hidden rows) and ``ClusterExpertsTP8`` (TP8 B1, one
+"""Small-batch routed experts: `ClusterExpertsTP16` (TP16 B1/B2, six-CTA split-K
+clusters exchanging quantized hidden rows) and `ClusterExpertsTP8` (TP8 B1, one
 six-CTA cluster per routing slot)."""
 
 from typing import Any
