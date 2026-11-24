@@ -192,7 +192,7 @@ def probe_output_head(
     # Heads with parameters apply more than a scale or a soft cap
     if next(model.parameters(), None) is not None:
         return None
-    hidden_states = 50 * torch.randn(1, 3, hidden_size)
+    hidden_states = torch.linspace(-50, 50, 3 * hidden_size).view(1, 3, hidden_size)
     hidden_states[0, 0, :2] = torch.tensor([1.0, 1e6])
     logits = model(inputs_embeds=hidden_states).logits
     # A scale maps 1 to itself and a soft cap maps large logits to itself
