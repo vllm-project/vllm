@@ -556,6 +556,7 @@ class KVCacheManager:
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
                 prefill_end=prefill_end,
+                replay_start=request.replay_start,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
             full_sequence_shortfall = (
@@ -594,6 +595,7 @@ class KVCacheManager:
             num_local_computed_tokens=num_local_computed_tokens,
             num_tokens_main_model=num_tokens_main_model,
             prefill_end=prefill_end,
+            replay_start=request.replay_start,
         )
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
@@ -628,6 +630,7 @@ class KVCacheManager:
                 num_external_computed_tokens=num_external_computed_tokens,
                 num_tokens_main_model=num_tokens_main_model,
                 skip_zeroing_group_ids=skip_zeroing_group_ids,
+                replay_start=request.replay_start,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
