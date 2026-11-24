@@ -33,7 +33,7 @@ vLLM currently supports the following reasoning models:
 | [Ripple-65B Preview](https://huggingface.co/ricursiveAI/Ripple-65B-Preview) | `ripple` | `json`, `regex` | ✅ |
 | [Step-3.5 / Step-3.7 Flash](https://huggingface.co/stepfun-ai/Step-3.5-Flash) | `step3p5` | `json`, `regex` | ✅ |
 | [ZAYA1 series](https://huggingface.co/Zyphra/ZAYA1-8B) | `zaya` | `json`, `regex` | ✅ |
-| [GigaChat4 series](https://huggingface.co/ai-sage/GigaChat4-708B-A41B) | — | | ✅ |
+| [GigaChat4 series](https://huggingface.co/ai-sage/GigaChat4-708B-A41B) | `gigachat4` | -- | ✅ |
 
 !!! note
     IBM Granite 3.2 and DeepSeek-V3.1 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
