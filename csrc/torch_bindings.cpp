@@ -844,7 +844,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor a, Tensor b, Tensor A_log, Tensor dt_bias,"
       "Tensor! q, Tensor! k, Tensor! v, Tensor! g, Tensor! beta,"
       "int num_k_heads, int head_dim, bool output_g_exp,"
-      "int null_block_id) -> ()");
+      "float beta_scale, int null_block_id) -> ()");
 #endif  // USE_ROCM
 
   // LongCat n-gram embedding index kernel. All tensor args are marked mutable

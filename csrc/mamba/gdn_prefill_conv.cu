@@ -101,6 +101,7 @@ struct Ptrs {
   int null_block_id;
   int H, HV;
   bool output_g_exp;
+  float beta_scale;
 };
 
 // noinline, measured: inlining these epilogues slows the main loop ~13%
@@ -108,8 +109,8 @@ struct Ptrs {
 __device__ __noinline__ void gbeta_epilogue(
     const __nv_bfloat16* a, const __nv_bfloat16* b, const float* A_log_p,
     const void* dt_bias_p, bool dt_bias_bf16, float* g, float* beta,
-    long stride_a, long stride_b, int HV, bool output_g_exp, int hv, int row0,
-    int end, int seq_start, int lane) {
+    long stride_a, long stride_b, int HV, bool output_g_exp, float beta_scale,
+    int hv, int row0, int end, int seq_start, int lane) {
   const float A_log = A_log_p[hv];
   const float dt_bias =
       dt_bias_bf16 ? __bfloat162float(
@@ -126,7 +127,7 @@ __device__ __noinline__ void gbeta_epilogue(
     float gv = -__expf(A_log) * sp;
     if (output_g_exp) gv = __expf(gv);
     g[tok * HV + hv] = gv;
-    beta[tok * HV + hv] = 1.f / (1.f + __expf(-bv));
+    beta[tok * HV + hv] = beta_scale / (1.f + __expf(-bv));
   }
 }
 
@@ -323,7 +324,7 @@ __global__ void __launch_bounds__(32, 25) gdn_prefill_conv_kernel(Ptrs p) {
   if (head >= 2 * p.H)
     gbeta_epilogue(p.a, p.b, p.A_log, p.dt_bias, p.dt_bias_bf16, p.g, p.beta,
                    p.stride_a_token, p.stride_b_token, p.HV, p.output_g_exp,
-                   head - 2 * p.H, row0, end, seq_start, lane);
+                   p.beta_scale, head - 2 * p.H, row0, end, seq_start, lane);
   if (chunk == 0)
     state_epilogue(p.stride_state_dim, p.stride_state_token, state_head, c0,
                    seqlen, load_init, x_base, xstep);
@@ -362,7 +363,7 @@ void gdn_prefill_conv(
     const torch::stable::Tensor& q, const torch::stable::Tensor& k,
     const torch::stable::Tensor& v, const torch::stable::Tensor& g,
     const torch::stable::Tensor& beta, int64_t num_k_heads, int64_t head_dim,
-    bool output_g_exp, int64_t null_block_id) {
+    bool output_g_exp, double beta_scale, int64_t null_block_id) {
   STD_TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.stride(1) == 1);
   STD_TORCH_CHECK(x.scalar_type() == torch::headeronly::ScalarType::BFloat16);
   STD_TORCH_CHECK(head_dim == 128 && x.size(1) % 128 == 0);
@@ -420,6 +421,7 @@ void gdn_prefill_conv(
   p.H = H;
   p.HV = HV;
   p.output_g_exp = output_g_exp;
+  p.beta_scale = (float)beta_scale;
 
   gdn_conv::launch_auto(p, num_tokens, get_current_cuda_stream());
 }

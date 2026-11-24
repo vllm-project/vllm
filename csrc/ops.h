@@ -650,7 +650,7 @@ void gdn_prefill_conv(
     const torch::stable::Tensor& q, const torch::stable::Tensor& k,
     const torch::stable::Tensor& v, const torch::stable::Tensor& g,
     const torch::stable::Tensor& beta, int64_t num_k_heads, int64_t head_dim,
-    bool output_g_exp, int64_t null_block_id);
+    bool output_g_exp, double beta_scale, int64_t null_block_id);
 
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,

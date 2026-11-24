@@ -2022,8 +2022,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.num_decodes == 0
             and self.conv1d.bias is None
             and self.activation in ("silu", "swish")
-            # The fused kernel has no beta_scale (negative-eigenvalue) support.
-            and self.beta_scale == 1.0
             and gdn_prefill_conv_supported(
                 mixed_qkv, conv_weights, conv_state, self.head_k_dim, self.head_v_dim
             )
@@ -2050,6 +2048,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 num_k_heads=self.num_k_heads // self.tp_size,
                 head_dim=self.head_k_dim,
                 output_g_exp=self.gdn_prefill_backend == "flashinfer",
+                beta_scale=self.beta_scale,
             )
         elif attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None

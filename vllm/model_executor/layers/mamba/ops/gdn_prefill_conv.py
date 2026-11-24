@@ -73,6 +73,7 @@ def gdn_prefill_conv(
     num_k_heads: int,
     head_dim: int,
     output_g_exp: bool = False,
+    beta_scale: float = 1.0,
     null_block_id: int | None = NULL_BLOCK_ID,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """SiLU causal conv of the packed (tokens, [Q | K | V]) projection `x`, then
@@ -114,6 +115,7 @@ def gdn_prefill_conv(
         num_k_heads,
         head_dim,
         output_g_exp,
+        beta_scale,
         -1 if null_block_id is None else null_block_id,
     )
     return q, k, v, g, beta

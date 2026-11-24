@@ -455,9 +455,13 @@ def test_fused_model_path_matches_reference(
         ),
     ],
 )
+@pytest.mark.parametrize("beta_scale", [1.0, 2.0])
 @torch.inference_mode()
 def test_fused_prefill_conv_matches_stock(
-    seq_lens: list[int], query_lens: list[int], draft_tokens: list[int]
+    seq_lens: list[int],
+    query_lens: list[int],
+    draft_tokens: list[int],
+    beta_scale: float,
 ) -> None:
     """`_forward_core` with the fused prefill conv matches stock `causal_conv1d_fn`
     + `fused_post_conv_prep`, alone and next to MTP spec decodes."""
@@ -536,6 +540,7 @@ def test_fused_prefill_conv_matches_stock(
             norm_weight,
             "silu",
         )
+        layer.beta_scale = beta_scale
         conv_weights = conv_weight.view(CONV_DIM, CONV_KERNEL)
         kv_conv_state = layer.kv_cache[0]
         if not is_conv_state_dim_first():
@@ -575,17 +580,17 @@ def test_fused_prefill_conv_matches_stock(
 # beta rel <= 4e-7.
 # -------------------------------------------------------------------------
 @pytest.mark.parametrize(
-    "seqlens,dim_first,output_g_exp,num_spec",
+    "seqlens,dim_first,output_g_exp,num_spec,beta_scale",
     [
-        ([2, 1, 3], True, False, 3),  # tiny multi-seq incl. a 1-token sequence
-        ([5, 64, 1, 2, 33, 100], True, False, 3),  # null-block padding
-        ([4096, 3, 2047], False, True, 3),  # multi-chunk, initial state, SD, g_exp
-        ([1] * 300 + [70] + [2] * 40 + [129], True, False, 0),  # radix search >32 seqs
+        ([2, 1, 3], True, False, 3, 1.0),  # tiny multi-seq incl. a 1-token sequence
+        ([5, 64, 1, 2, 33, 100], True, False, 3, 2.0),  # null-block padding
+        ([4096, 3, 2047], False, True, 3, 2.0),  # multi-chunk, init, SD, g_exp
+        ([1] * 300 + [70] + [2] * 40 + [129], True, False, 0, 1.0),  # >32 seqs
     ],
 )
 @torch.inference_mode()
 def test_gdn_prefill_conv_kernel_matches_stock(
-    seqlens, dim_first, output_g_exp, num_spec
+    seqlens, dim_first, output_g_exp, num_spec, beta_scale
 ):
     gen = torch.Generator(device="cuda")
     gen.manual_seed(len(seqlens) * 131 + sum(seqlens))
@@ -649,7 +654,16 @@ def test_gdn_prefill_conv_kernel_matches_stock(
         query_start_loc=qsl,
     ).transpose(0, 1)
     ref = fused_post_conv_prep(
-        conv_out, a, b, A_log, dt_bias, H, D, D, output_g_exp=output_g_exp
+        conv_out,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        H,
+        D,
+        D,
+        output_g_exp=output_g_exp,
+        beta_scale=beta_scale,
     )
     new_state = state.clone()
     out = gdn_prefill_conv(
@@ -666,6 +680,7 @@ def test_gdn_prefill_conv_kernel_matches_stock(
         H,
         D,
         output_g_exp=output_g_exp,
+        beta_scale=beta_scale,
     )
 
     valid = torch.ones(num_tokens, dtype=torch.bool, device=device)

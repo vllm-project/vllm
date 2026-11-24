@@ -1992,6 +1992,7 @@ def gdn_prefill_conv(
     num_k_heads: int,
     head_dim: int,
     output_g_exp: bool,
+    beta_scale: float,
     null_block_id: int,
 ):
     torch.ops._C.gdn_prefill_conv(
@@ -2013,6 +2014,7 @@ def gdn_prefill_conv(
         num_k_heads,
         head_dim,
         output_g_exp,
+        beta_scale,
         null_block_id,
     )
 
