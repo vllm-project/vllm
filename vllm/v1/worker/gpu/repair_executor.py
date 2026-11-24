@@ -36,6 +36,7 @@ import dataclasses
 import inspect
 import os
 import time
+import typing
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
@@ -227,7 +228,7 @@ def find_repair_fence_layer(model: Any) -> tuple[Any, Any]:
 
     The repair executor reaches every layer's cache through
     layer.self_attn.attn.kv_cache and derives the block size from that
-    cache's geometry (_repair_block_size), but model zoos name the
+    cache's geometry (_derive_repair_geometry), but model zoos name the
     decoder stack differently (ChatGLM transformer.encoder.layers,
     Falcon transformer.h, MPT transformer.blocks) and multimodal
     wrappers nest the backbone below language_model. Discover the first
@@ -543,6 +544,9 @@ def _execute_preflight(
     lo: int,
     hi: int,
     work_row: int,
+    *,
+    resolved_layout_name: str | None = None,
+    spec_block_size: int | None = None,
 ) -> _RepairPreflight:
     """The rank-local pre-execution checks, WITHOUT side effects.
 
@@ -606,7 +610,10 @@ def _execute_preflight(
         attn_metadata = get_forward_context().attn_metadata
         assert isinstance(attn_metadata, dict) and attn_metadata
         meta = next(iter(attn_metadata.values()))
-        block_size = _repair_block_size(layers[0])
+        geometry = _derive_repair_geometry(
+            layers, resolved_layout_name, spec_block_size
+        )
+        block_size = geometry.block_size
 
         # Per-layer metadata identity: every replayed layer resolves its
         # OWN metadata from the forward context (attn_metadata[layer_name]),
@@ -677,13 +684,7 @@ def _execute_preflight(
         # SAME slot numbers with a different block/offset split and write
         # outside the authorized rows.
         for layer in layers[: work.layer_end]:
-            layer_bs = _repair_block_size(layer)
-            assert layer_bs == block_size, (
-                "hole repair: a replayed layer derives block size "
-                f"{layer_bs}, but the fence validated the span with block "
-                f"size {block_size} (per-layer cache layout divergence); "
-                "the repair write set cannot be fenced"
-            )
+            _verify_repair_layer_geometry(layer, geometry)
 
         slots_host = _tolist_timed(
             meta.slot_mapping[lo:hi], "pre_write.slot_mapping.tolist"
@@ -878,6 +879,9 @@ def execute_repair_only(
     input_ids: torch.Tensor,
     positions: torch.Tensor,
     batch_req_ids: list[str],
+    *,
+    resolved_layout_name: str | None = None,
+    spec_block_size: int | None = None,
 ) -> list[RepairResultReport]:
     """Execute the repair works of one exclusive repair-only step.
 
@@ -1075,6 +1079,8 @@ def execute_repair_only(
                 lo,
                 hi,
                 work_row,
+                resolved_layout_name=resolved_layout_name,
+                spec_block_size=spec_block_size,
             )
         # The fence flags the commit check reports come from the
         # preflight verbatim: the same ordered battery the loop used to
@@ -1255,7 +1261,10 @@ def execute_repair_only(
             )
             if depth > 0:
                 try:
-                    _rezero_repair_span(layers[:depth], meta, lo, hi)
+                    abort_geometry = _derive_repair_geometry(
+                        layers, resolved_layout_name, spec_block_size
+                    )
+                    _rezero_repair_span(layers[:depth], meta, abort_geometry, lo, hi)
                 except Exception as exc:
                     if error_detail is None:
                         error_detail = _format_repair_exception(exc)
@@ -1587,6 +1596,115 @@ def _slots_cover_span(
     return actual == expected
 
 
+class _RepairGeometry(typing.NamedTuple):
+    """The explicit indexing contract for repair writes to bound KV views.
+
+    The block size comes from the KV cache spec (authoritative, not derived
+    from shape); the token axis comes from the binding convention the
+    resolved layout implies (Core logical [B,H,N,C] always carries the
+    token axis at dim 2 for every physical layout; Ascend per-K/V views
+    carry it at dim 1 for the flat LBNHC form and dim 2 for the head-major
+    LBHNC form). Shape is used to VERIFY this contract, never to
+    determine it: a matching shape is a confirmation, not a definition.
+    """
+
+    block_size: int
+    """Manager block size (tokens per block), from the KV cache spec."""
+    token_axis: int
+    """The dim of a per-K/V (or shared Core) view that indexes
+    within-block tokens."""
+    is_core_shared: bool
+    """True: one 4D [B,H,N,C] tensor shared by K and V (Core binding).
+    False: separate per-K/V views (Ascend binding)."""
+
+
+def _derive_repair_geometry(
+    layers,
+    resolved_layout_name: str | None,
+    spec_block_size: int | None,
+) -> _RepairGeometry:
+    """Derive the repair write geometry from the resolved layout and spec.
+
+    The resolved layout and the spec block size come from the model
+    runner's kv_cache_config at the entry point (execute_repair_only);
+    they identify the binding convention so the repair never guesses the
+    view's indexing from shape, rank, or a leading-dim coincidence. Any
+    mismatch between the contract and the actual bound view's shape is
+    a fail-closed refusal BEFORE the first write.
+    """
+    if spec_block_size is None or spec_block_size <= 0:
+        raise ValueError(
+            f"hole repair: the KV cache spec block size is not available "
+            f"or invalid ({spec_block_size}); the repair geometry cannot "
+            "be derived without the authoritative block size"
+        )
+    caches = _repair_cache_views(layers[0])
+    cache = caches[0]
+    dim = cache.dim()
+    if len(caches) == 1 and dim == 4:
+        # Core logical [B,H,N,C]: the binding convention carries the
+        # token axis at dim 2 for EVERY physical layout (the strides
+        # differ, the logical shape does not). K and V share the tensor
+        # (split along the channel dim C).
+        if int(cache.shape[2]) != spec_block_size:
+            raise ValueError(
+                f"hole repair: the bound 4D KV view shape "
+                f"{tuple(cache.shape)} does not carry the spec block size "
+                f"{spec_block_size} on the token axis (dim 2): the view "
+                "geometry contradicts the KV cache spec (manager block "
+                "size vs kernel block size divergence, or a wrong view "
+                "was bound to the layer)"
+            )
+        return _RepairGeometry(
+            block_size=spec_block_size, token_axis=2, is_core_shared=True
+        )
+    if len(caches) >= 1 and dim == 4:
+        # Ascend per-K/V 4D view: the resolved layout determines the
+        # token axis. LBHNC (HND): [n, h, bs, d] -> dim 2. LBNHC:
+        # [n, bs, h, d] -> dim 1. A layout outside the known set, or a
+        # view that does not match the layout's expected axis, is a
+        # fail-closed refusal.
+        if resolved_layout_name in ("LBHNC", "HND"):
+            token_axis = 2
+        elif resolved_layout_name in ("LBNHC", "NHD", None):
+            token_axis = 1
+        else:
+            raise ValueError(
+                f"hole repair: the resolved KV cache layout "
+                f"'{resolved_layout_name}' has no known per-K/V 4D view "
+                "token-axis contract; refusing to guess"
+            )
+        if int(cache.shape[token_axis]) != spec_block_size:
+            raise ValueError(
+                f"hole repair: the bound per-K/V 4D view shape "
+                f"{tuple(cache.shape)} does not carry the spec block size "
+                f"{spec_block_size} on the layout-implied token axis "
+                f"(dim {token_axis} for layout '{resolved_layout_name}')"
+            )
+        return _RepairGeometry(
+            block_size=spec_block_size, token_axis=token_axis, is_core_shared=False
+        )
+    if dim in (2, 3):
+        # Ascend flat per-K/V view [num_blocks, block_size, ...]:
+        # token axis is dim 1 by the binding convention.
+        if int(cache.shape[1]) != spec_block_size:
+            raise ValueError(
+                f"hole repair: the bound flat per-K/V view shape "
+                f"{tuple(cache.shape)} does not carry the spec block size "
+                f"{spec_block_size} on the token axis (dim 1): the view "
+                "geometry contradicts the KV cache spec"
+            )
+        return _RepairGeometry(
+            block_size=spec_block_size, token_axis=1, is_core_shared=False
+        )
+    raise ValueError(
+        f"hole repair: unrecognized KV cache view geometry: dim={dim}, "
+        f"shape={tuple(cache.shape)}, layout='{resolved_layout_name}', "
+        f"spec_block_size={spec_block_size}. The repair indexing "
+        "contract does not cover this binding; refusing to write."
+    )
+
+
 def _repair_cache_views(layer) -> list[torch.Tensor]:
     """The per-layer KV cache tensor(s) that the repair re-zero writes.
 
@@ -1621,30 +1739,56 @@ def _repair_cache_views(layer) -> list[torch.Tensor]:
     return [cache]
 
 
-def _repair_block_size(layer) -> int:
-    """The manager block size of a repair-written KV cache layer.
+def _verify_repair_layer_geometry(
+    layer, geometry: _RepairGeometry
+) -> None:
+    """Verify a replayed layer's bound cache matches the repair geometry.
 
-    Derives the token capacity of one block from the cache geometry:
-    the 4D core layout `[B, H, N, C]` carries the block size on dim 2
-    (`N`, tokens per block); the Ascend layouts carry it on dim 2 of the
-    per-K/V views (`[num_blocks, block_size, ...]` after the leading
-    K/V dim is peeled).
+    The geometry was derived once from the resolved layout + spec (see
+    _derive_repair_geometry); this check confirms that every replayed
+    layer's bound view conforms to it. A mismatch is a fail-closed
+    refusal: the repair cannot write through a view whose indexing
+    contract differs from the one the fence authorized.
     """
     caches = _repair_cache_views(layer)
     cache = caches[0]
     dim = cache.dim()
-    # [B, H, N, C] core layout: tokens-per-block is dim 2. A 4-D
-    # per-K/V Ascend view ([num_blocks, block_size, heads, dim]) is NOT
-    # supported: it is shape-ambiguous with the core layout, and this
-    # reading would derive the head count as the block size, so every
-    # such repair fails the fence (fail-closed).
+    if geometry.is_core_shared:
+        if len(caches) != 1 or dim != 4:
+            raise ValueError(
+                f"hole repair: layer cache does not match the geometry "
+                f"contract: expected one shared 4D view, got "
+                f"{len(caches)} view(s) of dim {dim}"
+            )
+        if int(cache.shape[2]) != geometry.block_size:
+            raise ValueError(
+                f"hole repair: layer cache shape {tuple(cache.shape)} "
+                f"does not carry the spec block size {geometry.block_size} "
+                "on the token axis (dim 2); the view contradicts the "
+                "KV cache spec"
+            )
+        return
     if dim == 4:
-        return int(cache.shape[2])
-    # Ascend 2-D/3-D [num_blocks, block_size, ...] views:
-    # tokens-per-block is dim 1.
+        if int(cache.shape[geometry.token_axis]) != geometry.block_size:
+            raise ValueError(
+                f"hole repair: per-K/V 4D view shape {tuple(cache.shape)} "
+                f"does not carry the spec block size {geometry.block_size} "
+                f"on the geometry token axis (dim {geometry.token_axis})"
+            )
+        return
     if dim in (2, 3):
-        return int(cache.shape[1])
-    raise ValueError(f"unrecognized repair KV cache geometry: {tuple(cache.shape)}")
+        if int(cache.shape[1]) != geometry.block_size:
+            raise ValueError(
+                f"hole repair: flat per-K/V view shape {tuple(cache.shape)} "
+                f"does not carry the spec block size {geometry.block_size} "
+                "on the token axis (dim 1)"
+            )
+        return
+    raise ValueError(
+        f"hole repair: unrecognized per-K/V cache view dim {dim} "
+        f"(shape {tuple(cache.shape)}); the geometry contract covers "
+        "only 2D/3D flat and 4D views"
+    )
 
 
 def _repair_block_table_row(meta, row: int) -> torch.Tensor:
@@ -1673,35 +1817,46 @@ def _repair_block_table_row(meta, row: int) -> torch.Tensor:
     return table[row]
 
 
-def _rezero_repair_span(layers, meta, lo: int = 0, hi: int | None = None) -> None:
+def _rezero_repair_span(
+    layers, meta, geometry: _RepairGeometry, lo: int = 0, hi: int | None = None
+) -> None:
     """Abort-path partial-write invalidation: re-zero the span's slot rows
     in every executed layer's K and V cache. A partial repair is not a
     valid prefix; no partial content is left readable.
 
     The write indexes the cache tensor's own block and token dims -- the
     per-layer cache can be a non-contiguous view (a reshape would copy,
-    and the zero would land in the copy). The core 4D `[B, H, N, C]`
-    layout carries the token dim at index 2; the Ascend per-K/V views
-    carry it at index 1. The slot window is the work item's [lo, hi)
-    rows of the step's slot mapping.
+    and the zero would land in the copy). The geometry (derived from the
+    resolved layout + spec, NOT from shape) identifies the view's token
+    axis and the K/V binding convention; the slot window is the work
+    item's [lo, hi) rows of the step's slot mapping. Shape is used only
+    to confirm the already-known contract.
     """
     slots = meta.slot_mapping if hi is None else meta.slot_mapping[lo:hi]
     slots = slots.long()
+    bidx = slots // geometry.block_size
+    oidx = slots % geometry.block_size
     max_abs_after = 0.0
     for layer in layers:
         caches = _repair_cache_views(layer)
-        block_size = _repair_block_size(layer)
-        bidx = slots // block_size
-        oidx = slots % block_size
         for cache in caches:
-            if cache.dim() == 4 and cache.shape[2] == block_size:
-                # Core [B, H, N, C]: zero every head row of the block.
+            if geometry.is_core_shared:
+                # Core logical [B,H,N,C]: token axis dim 2, zero all heads.
                 cache[bidx, :, oidx, :] = 0
+            elif cache.dim() == 4 and geometry.token_axis == 2:
+                # Ascend head-major [n, h, bs, d]: token axis dim 2.
+                cache[bidx, :, oidx, :] = 0
+            elif cache.dim() == 4 and geometry.token_axis == 1:
+                # Ascend token-major [n, bs, h, d]: token axis dim 1.
+                cache[bidx, oidx, :, :] = 0
             else:
+                # Flat 2D/3D per-K/V [n, bs, ...]: token axis dim 1.
                 cache[bidx, oidx] = 0
         probe = caches[0]
-        if probe.dim() == 4 and probe.shape[2] == block_size:
+        if geometry.is_core_shared or probe.dim() == 4 and geometry.token_axis == 2:
             k_rows = probe[bidx, :, oidx, :]
+        elif probe.dim() == 4 and geometry.token_axis == 1:
+            k_rows = probe[bidx, oidx, :, :]
         else:
             k_rows = probe[bidx, oidx]
         max_abs_after = max(max_abs_after, float(k_rows.abs().max()))

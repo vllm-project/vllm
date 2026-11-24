@@ -2249,12 +2249,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # scheduled request is a repair work (eager mode only).
                     # The replay's output is discarded; the verdicts ride
                     # the step's connector output.
+                    # The repair geometry inputs come from the runner's
+                    # own resolved configuration: the layout the engine
+                    # core resolved and the spec block size of the first
+                    # attention group (repair steps are single-KV-group
+                    # by the scheduler's init guard, so the first group
+                    # covers the replayed layers).
+                    _repair_layout_name = self.cache_config.kv_cache_layout
+                    _repair_spec_bs = (
+                        self.kv_cache_config.kv_cache_groups[0].block_size
+                        if self.kv_cache_config is not None
+                        and self.kv_cache_config.kv_cache_groups
+                        else None
+                    )
                     repair_results = execute_repair_only(
                         self.model,
                         scheduler_output,
                         model_inputs["input_ids"],
                         model_inputs["positions"],
                         list(input_batch.req_ids),
+                        resolved_layout_name=_repair_layout_name,
+                        spec_block_size=_repair_spec_bs,
                     )
                     model_output = None
                 else:
