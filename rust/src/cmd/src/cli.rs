@@ -774,6 +774,20 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub max_n_sequences: Option<i64>,
 
+    /// Maximum number of tokens allowed for /tokenize and /detokenize
+    /// requests. Defaults to max(max_model_len * 2, 131072); set <= 0 to
+    /// disable. The --max-tokenize-tokens CLI flag takes precedence.
+    #[arg(
+        long,
+        env = "VLLM_MAX_TOKENIZE_TOKENS",
+        value_parser = parse_optional_int,
+        hide_default_value = true,
+        default_value = "",
+        allow_negative_numbers = true
+    )]
+    #[serde(default)]
+    pub max_tokenize_tokens: OptionalInt,
+
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -1028,6 +1042,12 @@ impl SharedRuntimeArgs {
                 .map_err(|error| format!("invalid VLLM_MAX_N_SEQUENCES: {error}"))?;
             self.max_n_sequences = Some(max_n_sequences);
         }
+        if self.max_tokenize_tokens.is_none()
+            && let Some(value) = lookup("VLLM_MAX_TOKENIZE_TOKENS")
+        {
+            self.max_tokenize_tokens = parse_optional_int(&value)
+                .map_err(|error| format!("invalid VLLM_MAX_TOKENIZE_TOKENS: {error}"))?
+        }
         Ok(())
     }
 
@@ -1260,6 +1280,7 @@ impl SharedRuntimeArgs {
                 Some(limit) => Some(limit),
             },
             max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
+            max_tokenize_tokens: self.max_tokenize_tokens,
         }
     }
 
@@ -1395,6 +1416,16 @@ impl FromStr for LogStatsInterval {
 /// decimal integers in the `i64` range.
 fn parse_int(value: &str) -> Result<i64, String> {
     value.trim().parse().map_err(|_| format!("`{value}` is not an integer"))
+}
+
+/// Parse an optional integer environment variable, treating empty or
+/// whitespace-only strings as unset (`None`).
+type OptionalInt = Option<i64>;
+fn parse_optional_int(value: &str) -> Result<Option<i64>, String> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    parse_int(value).map(Some)
 }
 
 /// Parse an integer flag environment variable as Python's `bool(int(value))`,

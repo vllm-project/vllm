@@ -73,6 +73,14 @@ pub trait Tokenizer: Send + Sync {
         false
     }
 
+    /// Estimate the minimum token count for a text input.
+    ///
+    /// The estimate is based on the formula:
+    /// `length of the text / max_token_len_in_vocabulary`.
+    fn estimate_min_token(&self, text: &str) -> usize {
+        text.len()
+    }
+
     /// Create a stateful incremental decoder primed with the given prompt
     /// tokens.
     ///

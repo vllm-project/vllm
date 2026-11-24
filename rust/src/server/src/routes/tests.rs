@@ -13363,6 +13363,111 @@ async fn tokenize_chat_continue_final_vs_new_assistant_differs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn tokenize_chat_max_tokenize_tokens_enforcement() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-tokenize-chat-max-tokens",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    // Configure max_tokenize_tokens = 5.
+    let state = Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                max_tokenize_tokens: Some(5),
+                ..Default::default()
+            },
+        ),
+    );
+    let mut app = build_router(state);
+
+    // 1. Oversized chat payload is rejected early by pre-check.
+    // In TestTokenizer, each ASCII char is 1 byte / 1 token, so 10 chars is estimated as 10 tokens > 5 limit.
+    let (status, err_json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "0123456789"}],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err_json["error"]["param"], "input_tokens");
+    let err_msg = err_json["error"]["message"].as_str().unwrap();
+    assert!(
+        err_msg.contains("at least 10 input tokens"),
+        "expected 'at least 10 input tokens' in error message: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("maximum context length is 5 tokens"),
+        "expected 'maximum context length is 5 tokens' in error message: {err_msg}"
+    );
+
+    // 2. Chat payload passes pre-check (e.g. 2 chars estimated as 2 tokens <= 5),
+    // but chat template overhead pushes actual token count over 5 tokens.
+    // Post-check catches this and rejects with the exact token count (without "at least ").
+    let (status, err_json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hi"}],
+            "add_generation_prompt": true,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err_json["error"]["param"], "input_tokens");
+    let err_msg = err_json["error"]["message"].as_str().unwrap();
+    assert!(
+        !err_msg.contains("at least "),
+        "did not expect 'at least ' in post-check error message: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("maximum context length is 5 tokens"),
+        "expected 'maximum context length is 5 tokens' in error message: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("input tokens, which exceeds this limit"),
+        "expected standard error message structure: {err_msg}"
+    );
+
+    // 3. Valid request within max_tokenize_tokens succeeds.
+    // Configure another server with limit = 100.
+    let (chat2, _engine_task2) = test_models_with_engine_outputs_and_backend(
+        b"engine-tokenize-chat-max-tokens-ok",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state2 = Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat2).with_api_server_options(
+            ApiServerOptions {
+                max_tokenize_tokens: Some(100),
+                ..Default::default()
+            },
+        ),
+    );
+    let mut app2 = build_router(state2);
+
+    let (status, ok_json) = post_json(
+        &mut app2,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hi"}],
+            "add_generation_prompt": true,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(ok_json["count"].as_u64().unwrap() <= 100);
+    assert!(!ok_json["tokens"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn world_size_endpoint_is_dev_mode_only() {
     let (mut app, _engine_task) = test_app().await;
     let response = app
