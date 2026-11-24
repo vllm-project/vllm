@@ -43,6 +43,7 @@ class _PendingPublication:
     retention_interval: int | None
     replay_boundaries: Sequence[int]
     detached_blocks: list[KVCacheBlock] | None = None
+    detached_copies: dict[int, tuple[KVCacheBlock, ...]] = field(default_factory=dict)
     num_cached_blocks: int = 0
 
 
@@ -959,6 +960,10 @@ class HiSparseCoordinator:
         return any(
             pending.host_block.ref_cnt == 1
             or (
+                (publication := pending.request_state.publication) is not None
+                and publication.detached_copies
+            )
+            or (
                 pending.page[0] in self.request_states
                 and self._can_read_from_host(pending.page[0])
             )
@@ -995,7 +1000,20 @@ class HiSparseCoordinator:
                 or pending.worker_completions < pending.expected_worker_completions
             ):
                 continue
-            unpinned.extend(pending.resident_blocks)
+            publication = pending.request_state.publication
+            page_idx = pending.page[1]
+            if (
+                not pending.restore
+                and publication is not None
+                and publication.detached_blocks is not None
+                and publication.num_cached_blocks
+                <= page_idx
+                < len(publication.detached_blocks)
+            ):
+                # Preserve the DMA pin until the terminal host hash publishes.
+                publication.detached_copies[page_idx] = pending.resident_blocks
+            else:
+                unpinned.extend(pending.resident_blocks)
             pending.enqueue_applied = True
         if unpinned:
             # Resident blocks are never hashed, so each one freed is prepended:
@@ -1053,16 +1071,24 @@ class HiSparseCoordinator:
         assert self.host_manager is not None
         while state.ready_prefix_pages in state.valid_pages:
             state.ready_prefix_pages += 1
+        num_full_blocks = min(state.ready_prefix_pages, publication.num_pages)
         # The host group uses full-attention retention. Only sealed pages with
         # completed copies can outlive the request, including on cancellation.
         self.host_manager.block_pool.cache_full_blocks(
             request=publication.request,
             blocks=blocks,
             num_cached_blocks=publication.num_cached_blocks,
-            num_full_blocks=min(state.ready_prefix_pages, publication.num_pages),
+            num_full_blocks=num_full_blocks,
             block_size=self.host_manager.block_size,
             kv_cache_group_id=self.host_manager.kv_cache_group_id,
         )
+        for page_idx in sorted(publication.detached_copies, reverse=True):
+            copies = publication.detached_copies[page_idx]
+            if page_idx < num_full_blocks:
+                self._store_copy(blocks[page_idx], copies)
+                self.gpu_pool.unpin_blocks(copies, self._reuse_watcher)
+            else:
+                self.gpu_pool.free_blocks(copies)
         self.host_manager.block_pool.free_blocks(reversed(blocks))
         state.publication = None
 

@@ -2060,15 +2060,17 @@ def test_hisparse_terminal_prefix_waits_for_all_workers_and_preserves_identity()
     manager = make_hisparse_kv_cache_manager(32, 8, enable_caching=True)
     coordinator = get_hisparse_coordinator(manager)
     host_pool = coordinator.get_host_block_pool()
-    tokens = list(range(2 * HISPARSE_BLOCK_SIZE + 1))
+    tokens = list(range(3 * HISPARSE_BLOCK_SIZE + 1))
     request = make_request("reused", tokens, HISPARSE_BLOCK_SIZE, sha256)
     assert _allocate_scheduled(manager, request, len(tokens)) is not None
     old_blocks = list(manager.get_blocks(request.request_id).blocks[0])
+    old_resident_ids = _resident_block_ids(manager, request.request_id)
     command = coordinator.build_offload_command()
     counts = {transfer.transfer_id: 2 for transfer in command.page_transfers}
     partial = dict.fromkeys(counts, 1)
     first_completions = partial.copy()
-    first_completions[next(iter(counts))] = 2
+    first, second, third = counts
+    first_completions[first] = 2
     coordinator.update_spills(counts, first_completions)
     request.status = RequestStatus.FINISHED_LENGTH_CAPPED
     manager.free(request)
@@ -2078,23 +2080,39 @@ def test_hisparse_terminal_prefix_waits_for_all_workers_and_preserves_identity()
     assert _allocate_scheduled(manager, replacement, 17) is not None
     new_blocks = list(manager.get_blocks(replacement.request_id).blocks[0])
     pressure = host_pool.get_new_blocks(host_pool.get_num_free_blocks())
-    assert not {block.block_id for block in old_blocks[:2]} & {
+    assert not {block.block_id for block in old_blocks[:3]} & {
         block.block_id for block in pressure + new_blocks
     }
     # Only the page every worker finished writing is published.
     assert old_blocks[0].block_hash is not None
     assert all(block.block_hash is None for block in old_blocks[1:])
-    coordinator.update_spills({}, partial)
+    coordinator.update_spills({}, {second: 1})
+    assert all(block.block_hash is None for block in old_blocks[1:])
+    coordinator.update_spills({}, {third: 1})
     repeated = make_request("probe", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    assert manager.get_computed_blocks(repeated)[1] == 2 * HISPARSE_BLOCK_SIZE
+    computed, num_computed, _ = manager.get_computed_blocks(repeated)
+    assert num_computed == 3 * HISPARSE_BLOCK_SIZE
     assert all(block.block_hash is None for block in new_blocks)
-    assert all(block.ref_cnt == 0 for block in old_blocks[:2])
+    assert all(block.ref_cnt == 0 for block in old_blocks[:3])
     coordinator.update_spills({}, partial)
-    assert all(block.ref_cnt == 0 for block in old_blocks[:2])
+    assert all(block.ref_cnt == 0 for block in old_blocks[:3])
     host_pool.free_blocks(pressure)
+    assert _allocate_scheduled(
+        manager,
+        repeated,
+        len(tokens) - num_computed,
+        num_new_computed_tokens=num_computed,
+        new_computed_blocks=computed,
+    )
+    assert _resident_block_ids(manager, repeated.request_id)[:3] == old_resident_ids[:3]
+    manager.free(repeated)
     manager.free(replacement)
     _publish_hisparse_pages(manager)
     assert not coordinator.has_pending_work()
+    pool = manager.block_pool
+    assert pool.get_num_free_blocks() == pool.num_gpu_blocks - 1
+    pool.get_new_blocks(pool.get_num_free_blocks())
+    assert not coordinator.copies
 
 
 def test_hisparse_reset_prefix_cache_drops_copies():

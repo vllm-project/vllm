@@ -338,7 +338,13 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, metric_types, labelnames, per_engine_labelvalues
         )
 
-    def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
+    def start_load_kv(
+        self,
+        forward_context: ForwardContext,
+        *,
+        defer_decode_row_mirror: bool = False,
+        **kwargs: Any,
+    ) -> None:
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, HiSparseConnectorMetadata)
@@ -355,6 +361,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
             request_state_indices,
             request_ids,
             num_tokens=int(kwargs.get("num_tokens") or 0),
+            defer_decode_row_mirror=defer_decode_row_mirror,
         )
         self.connector_worker.prepare_forward(attn_metadata)
 

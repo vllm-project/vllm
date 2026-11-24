@@ -536,3 +536,23 @@ def test_residency_updates_persist_by_state_row():
 
     assert table[0, [0, 2]].tolist() == [[4, 5, 0, 0], [1, 0, 3, 6]]
     assert table[1, [0, 2]].tolist() == [[14, 15, 0, 0], [11, 0, 13, 16]]
+
+
+def test_paged_view_accepts_unaligned_trailing_compact_storage():
+    import torch
+
+    from vllm.v1.hisparse.runtime import PagedCacheView
+
+    raw = torch.arange(137).to(torch.int8)
+    view = PagedCacheView.bind(
+        raw,
+        dtype=torch.int8,
+        row_width=4,
+        byte_offset=16,
+        block_stride=48,
+        num_blocks=3,
+        block_size=4,
+    )
+    assert view.attention_cache.shape == (7, 4, 4)
+    torch.testing.assert_close(view.attention_cache[::3], view.cache)
+    torch.testing.assert_close(view.cache[-1, -1], raw[124:128])

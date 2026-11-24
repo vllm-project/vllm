@@ -296,11 +296,11 @@ def _pool_bytes_per_block_from_builder(
     """
     if not kv_cache_groups:
         return 0
-    if vllm_config.attention_config.hisparse_config is not None:
-        return _pool_bytes_per_block(vllm_config, kv_cache_groups)
     pool_bytes = builder._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
     if pool_bytes is not None:
         return pool_bytes
+    if vllm_config.attention_config.hisparse_config is not None:
+        return _pool_bytes_per_block(vllm_config, kv_cache_groups)
     saved_override = vllm_config.cache_config.num_gpu_blocks_override
     vllm_config.cache_config.num_gpu_blocks_override = None
     try:
