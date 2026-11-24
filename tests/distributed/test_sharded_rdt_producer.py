@@ -391,13 +391,15 @@ def _loop_engine(server, n_groups, *, lookahead):
     state `_run_gather_loop` reads. The `_rpc` seam dispatches inline;
     `_publish_async` sees no `.remote` and runs inline too."""
     groups = [(f"model.layers.{gi}.w",) for gi in range(n_groups)]
-    e = ShardedRDTTrainerWeightTransferEngine.__new__(
-        ShardedRDTTrainerWeightTransferEngine
+    e = ShardedRDTTrainerWeightTransferEngine(
+        client=Mock(),  # the loop runs below the client; never called
+        source=_CountingSource(groups),
+        is_sender=True,
+        init_info=ShardedRDTTrainerInitInfo(
+            rank=0, num_consumers=1, gather_lookahead=lookahead
+        ),
     )
-    e._init_info = ShardedRDTTrainerInitInfo(
-        rank=0, num_consumers=1, gather_lookahead=lookahead
-    )
-    e.source = _CountingSource(groups)
+    e._sync_idx = 0  # what send_weights has counted up before it runs the loop
     e._server = server
     e._rpc = lambda method, *a: getattr(server, method)(*a)
     e._meta = e.source.metadata
@@ -692,6 +694,33 @@ class TestBeginSync:
         assert ("sentinel",) in server._pack_dsts
 
 
+class TestSyncTaggedFreeSignals:
+    def test_tagged_signals_apply_only_to_their_sync(self, server_factory):
+        server = server_factory()
+        server.free_group(GI_A, sync_idx=0)
+        server.free_group(GI_A, sync_idx=0)
+        server.begin_sync(2, sync_idx=0)
+        _publish(server, GI_A, GROUP_A)
+        assert server._inflight_groups == []
+
+        server.end_sync()
+        server.begin_sync(2, sync_idx=1)
+        _publish(server, GI_A, GROUP_A)
+        server.free_group(GI_A, sync_idx=1)
+        server.free_group(GI_A, sync_idx=0)
+        assert server._inflight_groups == [GI_A]
+
+        server.free_group(GI_A, sync_idx=1)
+        assert server._inflight_groups == []
+
+    def test_untagged_signal_remains_backward_compatible(self, server_factory):
+        server = server_factory()
+        server.begin_sync(1, sync_idx=3)
+        _publish(server, GI_A, GROUP_A)
+        server.free_group(GI_A)
+        assert server._inflight_groups == []
+
+
 class TestServedNamesGuard:
     """A producer serves only the names it holds: its stage's groups, and
     within them its own EP coordinate's experts plus the replicated names.
@@ -938,8 +967,11 @@ class TestExportRing:
 
     @staticmethod
     def _engine():
-        eng = ShardedRDTTrainerWeightTransferEngine.__new__(
-            ShardedRDTTrainerWeightTransferEngine
+        eng = ShardedRDTTrainerWeightTransferEngine(
+            client=Mock(),
+            source=None,
+            is_sender=True,
+            init_info=ShardedRDTTrainerInitInfo(rank=0, num_consumers=1),
         )
         eng._export_ring = [None, None]
         eng._export_ring_args = [None, None]

@@ -132,7 +132,7 @@ class Experts(Enum):
     ROUTED = "routed"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FfnBuild:
     tokens: int
     tp: int = 4

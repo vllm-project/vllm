@@ -26,7 +26,7 @@ def test_step_invalidates_mm_processor_cache_misses():
     engine = object.__new__(LLMEngine)
     engine.should_execute_dummy_batch = False
     engine.dp_group = None
-    engine.log_stats = False
+    engine.collect_stats = False
     engine.logger_manager = None
 
     mm_processor_cache = MagicMock()
@@ -65,7 +65,7 @@ def test_dp_step_runs_dummy_batch_when_no_forward(model_executed: bool):
     engine.should_execute_dummy_batch = False
     engine.dp_group = MagicMock()
     engine.external_launcher_dp = True
-    engine.log_stats = False
+    engine.collect_stats = False
     engine.logger_manager = None
     engine.renderer = MagicMock(mm_processor_cache=None)
     engine.engine_core = MagicMock()
