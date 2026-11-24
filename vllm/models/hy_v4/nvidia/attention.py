@@ -25,6 +25,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.kernels.triton.fused_sigmoid_gate_mul import fused_sigmoid_gate_mul
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.hpc import hpc_gated_mla_gemm, hpc_gated_mla_supported
@@ -772,7 +773,7 @@ class HYV4MLAAttention(nn.Module):
                     attn_out = attn_out * torch.sigmoid(gate_score)
                     attn_out = attn_out.reshape(*attn_out.shape[:-2], -1)
                 else:
-                    attn_out = attn_out * torch.sigmoid(gate_score)
+                    attn_out = fused_sigmoid_gate_mul(attn_out, gate_score)
 
         out, _ = self.o_proj(attn_out)
         return self.post_proj_norm(out) if self.post_proj_norm is not None else out

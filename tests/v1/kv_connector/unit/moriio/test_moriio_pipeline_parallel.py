@@ -4,7 +4,6 @@
 
 import itertools
 import socket
-import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -117,6 +116,7 @@ def _decode_scheduler(*, send: bool = False) -> MoRIIOConnectorScheduler:
     scheduler._global_dp_rank = 0
     scheduler.transfer_id_to_request_id = {}
     scheduler.request_id_to_transfer_id = {}
+    scheduler._write_recvs_in_flight = {}
     scheduler.paths = {}
     scheduler.notified = []
     scheduler.released = []
@@ -474,15 +474,9 @@ def test_first_stage_failure_fails_the_transfer_once():
 
 def _write_done_fields(pp_rank: int, pp_size: int) -> list:
     sent = []
-    wrapper = SimpleNamespace(
-        lock=threading.Lock(),
-        done_req_ids=[],
-        done_remote_allocate_req_dict={},
-        waiting_for_transfer_complete=lambda statuses: None,
-        _mark_transfer_terminal_locked=lambda transfer_id: None,
-        send_notify=lambda *args, message_type, message_fields=None: sent.append(
-            message_fields
-        ),
+    wrapper = MoRIIOWrapper()
+    wrapper.send_notify = lambda *args, message_type, message_fields=None: sent.append(
+        message_fields
     )
     writer = make_moriio_writer(
         SimpleNamespace(

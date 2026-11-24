@@ -136,20 +136,6 @@ def _parse_disk_config(
     return disk
 
 
-def _find_simple_cpu_offload_connector(
-    connector: KVConnectorBase_V1,
-) -> "SimpleCPUOffloadConnector | None":
-    if isinstance(connector, SimpleCPUOffloadConnector):
-        return connector
-    child_connectors = getattr(connector, "_connectors", None)
-    if child_connectors:
-        for child in child_connectors:
-            found = _find_simple_cpu_offload_connector(child)
-            if found is not None:
-                return found
-    return None
-
-
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
     """CPU KV cache offloading with custom kernel transfers and BlockPool LRU."""
 
@@ -264,9 +250,6 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
                 kv_cache_config, vllm_config
             )
-            aligned_num_cpu_blocks = (
-                vllm_config.cache_config.simple_cpu_offload_num_blocks
-            )
             self.scheduler_manager = SimpleCPUOffloadScheduler(
                 vllm_config,
                 kv_cache_config,
@@ -277,7 +260,6 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 disk_capacity_bytes=disk.capacity_bytes,
                 use_page_cache=disk.use_page_cache,
                 num_cpu_blocks=num_cpu_blocks,
-                aligned_num_cpu_blocks=aligned_num_cpu_blocks,
                 hot_cache_tokens_per_request=disk.hot_cache_tokens,
             )
         elif role == KVConnectorRole.WORKER:
@@ -304,12 +286,6 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self.worker_handler is not None:
             self.worker_handler.register_kv_caches(kv_caches)
-
-    def get_aligned_num_cpu_blocks(self) -> int | None:
-        if self.worker_handler is None:
-            return None
-        num_cpu_blocks = self.worker_handler.num_cpu_blocks
-        return num_cpu_blocks if num_cpu_blocks > 0 else None
 
     def bind_connector_metadata(
         self,

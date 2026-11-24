@@ -20,7 +20,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 if TYPE_CHECKING:
     from transformers import PreTrainedConfig
 
-    from vllm.config import ParallelConfig, SpeculativeConfig
+    from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 
 _PKG = "vllm.v1.worker.gpu.spec_decode"
 
@@ -45,6 +45,8 @@ class SpeculatorConfig:
 
     # Uses the target model's hidden states (EAGLE or EAGLE3-style).
     uses_target_hidden_states: ClassVar[bool] = False
+    # The drafter's own KV at a position depends on the tokens it reads ahead.
+    draft_kv_depends_on_lookahead: ClassVar[bool] = False
     # Drafts in its own workspace lane.
     uses_separate_workspace_lane: ClassVar[bool] = False
     # For performance, prefers requests' full token history on the GPU instead of
@@ -57,12 +59,15 @@ class SpeculatorConfig:
     parallel_drafting: ClassVar[bool] = False
     # The draft model has its own vocabulary, which must match the target's.
     draft_has_own_vocab: ClassVar[bool] = False
+    # Runs the draft steps after the first as one-token decodes, with FULL graphs.
+    one_token_draft_decodes: ClassVar[bool] = False
 
     supports_watermarking: ClassVar[bool] = False
     # Prefill context parallelism.
     supports_pcp: ClassVar[bool] = False
-    # See `SpeculativeConfig.prefill_context_kv_only`.
-    supports_prefill_context_kv_only: ClassVar[bool] = False
+    # Its context KV is projected from the target's hidden states, so it supports
+    # `prefill_context_kv_only` and drafts read only its sliding-window tail.
+    projects_context_kv: ClassVar[bool] = False
 
     # --- SpeculativeConfig setup ---
 
@@ -95,6 +100,17 @@ class SpeculatorConfig:
     def apply_options(cls, spec: "SpeculativeConfig") -> None:
         """Apply method-specific options to the draft model config."""
         return
+
+    @classmethod
+    def supports_draft_eplb(cls, draft_model_config: "ModelConfig") -> bool:
+        """Whether the draft model's experts can be balanced by EPLB."""
+        return False
+
+    @classmethod
+    def verify_draft_eplb(cls, spec: "SpeculativeConfig") -> int | None:
+        """Validate draft EPLB with the target's, for a draft that supports it.
+        Returns the draft's routed expert count if its model config's isn't."""
+        return None
 
     # --- Behavior ---
 
@@ -137,6 +153,15 @@ class SpeculatorConfig:
         """See `VllmConfig.num_prefill_lookahead_tokens`."""
         # Hidden-state drafters read only the immediate next token.
         return 1 if self.uses_target_hidden_states else 0
+
+    @property
+    @final
+    def num_hash_lookahead_tokens(self) -> int:
+        """Next tokens the drafter's own KV at a position depends on, which
+        prefix-cache block hashes must cover."""
+        if self.draft_kv_depends_on_lookahead:
+            return self.num_prefill_lookahead_tokens
+        return 0
 
     @property
     def max_num_new_slots_for_drafting(self) -> int:
@@ -190,6 +215,13 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
 
     @classmethod
     def default_model(cls, spec: "SpeculativeConfig") -> str | None:
+        """Overridden by drafts whose checkpoint the target implies (e.g.
+        MTP), which may then also give `num_speculative_tokens`."""
+        if spec.num_speculative_tokens is None:
+            return None
+        method = spec.method
+        if method and (draft := spec.get_subfolder_checkpoint(method, required=False)):
+            return draft
         raise ValueError(
             "num_speculative_tokens was provided but without speculative model."
         )
