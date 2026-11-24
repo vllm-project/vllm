@@ -1226,9 +1226,6 @@ _A2A_SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
 # signal slot and each source rank's receive partition is line-aligned.
 _XPU_A2A_CACHE_LINE_BYTES = 64
 _XPU_A2A_SIGNAL_STRIDE = 32
-# Beyond this per-source slot size the direct exchange is PCIe-bound and no
-# faster than the XCCL all-to-all (~6 tokens of 16 heads x 512 dim bf16).
-_XPU_A2A_MAX_SLOT_BYTES = 96 * 1024
 
 
 class DirectDCPA2AWorkspace(DirectCPWorkspace):
@@ -1259,16 +1256,6 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
                 // math.gcd(lse_row_bytes, _XPU_A2A_CACHE_LINE_BYTES),
             )
         self.max_num_tokens = max_num_tokens
-        self.max_fast_num_tokens = max_num_tokens
-        if current_platform.is_xpu():
-            self.max_fast_num_tokens = min(
-                max_num_tokens,
-                max(
-                    1,
-                    _XPU_A2A_MAX_SLOT_BYTES
-                    // (heads_per_rank * head_dim * dtype.itemsize),
-                ),
-            )
         self.heads_per_rank = heads_per_rank
         self.head_dim = head_dim
 
@@ -1801,8 +1788,8 @@ class MLADCPManager:
     ) -> torch.Tensor:
         # Forced MQA path pass all batch tokens (including prefill) into combine,
         # which may exceed the direct symmetric-memory workspace. Fall back to
-        # the nccl a2a combine for those cases, and where it is faster.
-        if partial_output.shape[0] <= direct_workspace.max_fast_num_tokens:
+        # the nccl a2a combine for those cases.
+        if partial_output.shape[0] <= direct_workspace.max_num_tokens:
             return direct_workspace.lse_reduce(
                 partial_output,
                 partial_lse,

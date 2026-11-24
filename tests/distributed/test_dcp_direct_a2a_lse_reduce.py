@@ -352,7 +352,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
 
     group = MagicMock(world_size=2)
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: group)
-    direct_a2a = MagicMock(max_num_tokens=16, max_fast_num_tokens=16)
+    direct_a2a = MagicMock(max_num_tokens=16)
     direct_query = MagicMock()
     direct_kv = MagicMock()
     monkeypatch.setattr(
