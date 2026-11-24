@@ -50,7 +50,9 @@ def hybrid_config(tmp_path, dist_init, monkeypatch, request):
     ).save_pretrained(tmp_path)
     config = VllmConfig(
         cache_config=CacheConfig(
-            block_size=64, mamba_cache_mode="align", mamba_ssm_cache_dtype="float32"
+            block_size=64,
+            enable_prefix_caching=True,
+            mamba_ssm_cache_dtype="float32",
         ),
         quant_config=_LayerwiseKVConfig(),
     )
@@ -171,8 +173,8 @@ def test_packed_hybrid_checkpoint_is_exportable_and_reusable(hybrid_config, bloc
         hash_block_size=64,
         mamba_block_size=config.cache_config.mamba_block_size,
         checkpoint_alignment=alignment,
-        drop_eagle_block=False,
         cache_hit_alignment_tokens=64,
+        num_hash_lookahead_tokens=0,
     )
     assert offsets == [64]
     checkpoint = manager.block_pool.get_cached_block(request.block_hashes[0], [1])
@@ -191,7 +193,7 @@ def test_packed_hybrid_checkpoint_is_exportable_and_reusable(hybrid_config, bloc
 
 
 @pytest.mark.parametrize("hybrid_config", [2], indirect=True)
-def test_layerwise_hybrid_without_alignment_keeps_legacy_layout(hybrid_config):
+def test_layerwise_hybrid_without_prefix_caching_keeps_legacy_layout(hybrid_config):
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
     from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
     from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
@@ -200,7 +202,7 @@ def test_layerwise_hybrid_without_alignment_keeps_legacy_layout(hybrid_config):
     from vllm.v1.worker.utils import allocate_kv_cache, select_common_block_size
 
     config = hybrid_config
-    config.cache_config.mamba_cache_mode = "none"
+    config.cache_config.enable_prefix_caching = False
     config.cache_config.mamba_block_size = config.model_config.max_model_len
 
     Platform.update_block_size_for_backend(config)

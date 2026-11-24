@@ -640,7 +640,7 @@ def layerwise_config(tmp_path, request):
             return True
 
     config = VllmConfig(
-        cache_config=CacheConfig(block_size=64, mamba_cache_mode="align"),
+        cache_config=CacheConfig(block_size=64, enable_prefix_caching=True),
         quant_config=LayerwiseKVConfig(),
     )
     config.cache_config.kv_cache_layout = "BLHNC"
@@ -654,7 +654,9 @@ def layerwise_config(tmp_path, request):
 class TestDensePacking:
     @pytest.mark.skip_global_cleanup
     @pytest.mark.parametrize("layerwise_config", [False, True], indirect=True)
-    def test_layerwise_packing_preserves_exact_pages_and_capacity(self, layerwise_config):
+    def test_layerwise_packing_preserves_exact_pages_and_capacity(
+        self, layerwise_config
+    ):
         config = layerwise_config
         fp8 = AttentionSpec(
             block_size=64,
@@ -681,8 +683,6 @@ class TestDensePacking:
                 enable_prefix_caching=True,
             )
             config.cache_config.kv_cache_layout = None
-            config.cache_config.mamba_cache_mode = "align"
-            config.cache_config.enable_prefix_caching = True
             layout = resolve_kv_cache_layout(
                 config, [["LBHNC", "BLHNC"]], layers.values()
             )
@@ -695,7 +695,9 @@ class TestDensePacking:
         assert all(group.block_size == 64 for group in groups)
 
         available_memory = bytes_per_block * 32
-        kv_cache_config = get_kv_cache_config_from_groups(config, groups, available_memory)
+        kv_cache_config = get_kv_cache_config_from_groups(
+            config, groups, available_memory
+        )
         assert kv_cache_config.num_blocks == 32
         assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (64, 64)
         assert available_memory // padded_attention_bytes == 25

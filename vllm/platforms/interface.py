@@ -852,17 +852,17 @@ class Platform:
                         continue
                     # Packed rows cannot generally be subdivided into kernel
                     # pages (e.g. multi-head BLHNC), so require a native page.
-                    supported_sizes = backend.get_supported_kernel_block_sizes_for_layers(
+                    kernel_sizes = backend.get_supported_kernel_block_sizes_for_layers(
                         layer_config.spec, [name]
                     )
                     if not any(
                         cache_config.block_size % size.base == 0
                         if isinstance(size, MultipleOf)
                         else cache_config.block_size == size
-                        for size in supported_sizes
+                        for size in kernel_sizes
                     ):
                         unsupported_backends.append(
-                            f"{backend.get_name()} ({supported_sizes})"
+                            f"{backend.get_name()} ({kernel_sizes})"
                         )
             if unsupported_backends:
                 raise ValueError(
@@ -935,7 +935,7 @@ class Platform:
         if (
             model_config is None
             or not model_config.is_hybrid
-            or cache_config.mamba_cache_mode != "align"
+            or not cache_config.enable_prefix_caching
             or quant_config is None
             or not quant_config.has_layerwise_kv_cache()
         ):
