@@ -5015,6 +5015,16 @@ def test_renderer_num_workers_default():
     assert ModelConfig(mm_model, renderer_num_workers=8).renderer_num_workers == 8
 
 
+def test_renderer_num_workers_not_in_compile_factors():
+    """The renderer pool size resolves differently for `LLM` (1) and the async
+    server (4); it must not split the compile and FlashInfer autotune caches."""
+    model = "Qwen/Qwen3-0.6B"
+    assert (
+        ModelConfig(model, renderer_num_workers=1).compile_factors()
+        == ModelConfig(model, renderer_num_workers=4).compile_factors()
+    )
+
+
 def test_eagle_draft_model_config():
     """Test that EagleDraft model config is correctly set."""
     target_model_config = ModelConfig("meta-llama/Meta-Llama-3-8B-Instruct")
