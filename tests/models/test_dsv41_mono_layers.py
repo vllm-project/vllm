@@ -510,7 +510,7 @@ def _decode(
         lens = [len(p) for p in prompts]
         if graph_sizes is None:
             runner.llm.collective_rpc("capture_steps", args=(lens,))
-        params = SamplingParams(temperature=0.0, max_tokens=STEPS + 1)
+        params = SamplingParams(temperature=0.0, max_tokens=STEPS + 1, logprobs=0)
         outs = runner.llm.generate(
             [TokensPrompt(prompt_token_ids=p) for p in prompts], params
         )
@@ -700,6 +700,11 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
         _merged_matches_two_launches(vllm_runner, monkeypatch)
 
 
+# The largest log-probability difference of a chosen token between the padded
+# CUDA graph run and the eager run while their histories agree.
+LOGPROB_TOL = 0.1
+
+
 @pytest.mark.parametrize(
     ("tp", "rows", "graph"),
     [
@@ -742,10 +747,20 @@ def test_largestep_in_padded_cuda_graphs(
         assert len(captured) == len(WHOLE + FFN), rank
         assert all(n >= 1 for n in captured), rank
     # Graph replays and eager calls run the same launches on the same inputs,
-    # so the greedy tokens agree. The first decoded token only reads the
-    # prefill and one decode step, so it must match for every request; later
-    # tokens may follow a near-tie in the sampler's logits differently.
-    first = [a.token_ids[:2] == b.token_ids[:2] for a, b in zip(eager, graphs)]
-    assert all(first), [i for i, ok in enumerate(first) if not ok]
-    same = sum(a.token_ids == b.token_ids for a, b in zip(eager, graphs))
-    assert same >= rows * 9 // 10, (same, rows)
+    # so each request's first decoded token must match, and while two
+    # histories agree, the chosen token's log-probability must too. Random
+    # weights give near-ties, so a later token may differ (measured on MI300X
+    # TP4, 50 requests: 44 identical sequences), and the check stops at a
+    # request's first differing token. A padding row that leaked into a real
+    # row, or a launch that read a buffer the graph does not own, moves the
+    # log-probabilities far more than LOGPROB_TOL.
+    worst = 0.0
+    for i, (a, b) in enumerate(zip(eager, graphs, strict=True)):
+        assert a.token_ids[:2] == b.token_ids[:2], i
+        for t, (ta, tb) in enumerate(zip(a.token_ids, b.token_ids, strict=True)):
+            if ta != tb:
+                break
+            la, lb = a.logprobs[t][ta].logprob, b.logprobs[t][tb].logprob
+            worst = max(worst, abs(la - lb))
+    print(f"{tp=} {rows=}: largest log-probability difference {worst:.3e}")
+    assert worst < LOGPROB_TOL, worst
