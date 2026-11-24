@@ -491,6 +491,7 @@ class DiffusionGemmaRequestStates:
         device: torch.device,
         hidden_size: int,
         stability_threshold: int,
+        swap_capacity: int = 0,
     ):
         self.max_num_reqs = max_num_reqs
         self.canvas_length = canvas_length
@@ -583,6 +584,84 @@ class DiffusionGemmaRequestStates:
             max_num_reqs, canvas_length, hidden_size, dtype=torch.float32, device=device
         )
 
+        # Wide logprobs of slots that converged and have not committed yet.
+        self.wide_logprobs: dict[int, LogprobsTensors] = {}
+
+        # Canvas swap: the unfinished blocks of up to `swap_capacity` preempted
+        # requests, resumed once their prompt is prefilled again.
+        self.swap_capacity = swap_capacity
+        self._swap_live: dict[str, torch.Tensor] = {}
+        self._swap_pool: dict[str, torch.Tensor] = {}
+        self._swap_rows: dict[str, int] = {}  # req_id -> pool row, oldest first
+        self._swap_free = list(range(swap_capacity))
+        self._swap_resume: dict[int, str] = {}  # slot -> req_id it resumes
+        self._swap_denoising: set[int] = set()  # slots past their prefill
+        self.track_for_swap(
+            canvas=self.canvas,
+            argmax_canvas=self.argmax_canvas,
+            step=self.step,
+            is_encoder_phase=self.is_encoder_phase,
+            accepted_canvas_history=self.accepted_canvas_history,
+            accepted_canvas_history_len=self.accepted_canvas_history_len,
+            self_conditioning_embeds=self.self_conditioning_embeds,
+        )
+
+    def track_for_swap(self, **tensors: torch.Tensor) -> None:
+        """Per-slot tensors that make up a slot's unfinished block. The rest
+        of a slot's state is rebuilt from the request when it is added."""
+        for name, live in tensors.items():
+            self._swap_live[name] = live
+            self._swap_pool[name] = live.new_zeros(
+                (self.swap_capacity, *live.shape[1:])
+            )
+
+    def swap_out(self, req_id: str, slot_idx: int) -> None:
+        """Keep the unfinished block of a request that is being preempted."""
+        if slot_idx not in self._swap_denoising:
+            # Still prefilling: it has no block, or its kept one to resume.
+            return
+        self.swap_drop(req_id)
+        if self.wide_logprobs.pop(slot_idx, None) is not None:
+            # Too large to keep, so the block restarts.
+            return
+        if not self._swap_free:
+            # Full: the request preempted longest ago restarts its block.
+            self.swap_drop(next(iter(self._swap_rows)))
+        row = self._swap_rows[req_id] = self._swap_free.pop()
+        for name, live in self._swap_live.items():
+            self._swap_pool[name][row] = live[slot_idx]
+
+    def swap_drop(self, req_id: str) -> None:
+        """Free the kept block of a request, if it has one."""
+        row = self._swap_rows.pop(req_id, None)
+        if row is not None:
+            self._swap_free.append(row)
+
+    def swap_in(self, slots_np: np.ndarray) -> None:
+        """Resume the kept blocks of the slots that just finished their
+        prefill, at the step and phase they were preempted in."""
+        if not self.swap_capacity:
+            return
+        slots: list[int] = []
+        rows: list[int] = []
+        for slot in slots_np.tolist():
+            self._swap_denoising.add(slot)
+            req_id = self._swap_resume.pop(slot, None)
+            if req_id is not None and req_id in self._swap_rows:
+                slots.append(slot)
+                rows.append(self._swap_rows[req_id])
+                self.swap_drop(req_id)
+        if not rows:
+            return
+        slots_gpu = async_tensor_h2d(slots, dtype=torch.int64, device=self.device)
+        rows_gpu = async_tensor_h2d(rows, dtype=torch.int64, device=self.device)
+        # A block kept before its first denoise step holds nothing to resume.
+        has_block = self._swap_pool["step"][rows_gpu] > 0
+        for name, live in self._swap_live.items():
+            kept = self._swap_pool[name][rows_gpu]
+            mask = has_block.view(-1, *[1] * (kept.dim() - 1))
+            live[slots_gpu] = torch.where(mask, kept, live[slots_gpu])
+
     def init_canvas(self, slot_indices: torch.Tensor) -> None:
         """Initialize canvas with random tokens for the given slots.
 
@@ -597,7 +676,7 @@ class DiffusionGemmaRequestStates:
             device=self.device,
         )
 
-    def add_request(self, slot_idx: int) -> None:
+    def add_request(self, slot_idx: int, req_id: str | None = None) -> None:
         self.is_encoder_phase[slot_idx].fill_(True)
         self.init_canvas(async_tensor_h2d([slot_idx], device=self.device))
         self.step[slot_idx].fill_(0)
@@ -612,6 +691,9 @@ class DiffusionGemmaRequestStates:
         self.single_step_slots.discard(slot_idx)
         self.constrained.pop(slot_idx, None)
         self.canvas_width_np[slot_idx] = self.canvas_length
+        self._swap_denoising.discard(slot_idx)
+        if req_id is not None and req_id in self._swap_rows:
+            self._swap_resume[slot_idx] = req_id
 
     def remove_request(self, slot_idx: int) -> None:
         # add_request resets the GPU flags before a slot is reused. The host
@@ -623,6 +705,7 @@ class DiffusionGemmaRequestStates:
         self.read_only_slots.discard(slot_idx)
         self.single_step_slots.discard(slot_idx)
         self.constrained.pop(slot_idx, None)
+        self._swap_resume.pop(slot_idx, None)
 
     def set_seed_canvas(self, slot_idx: int, ids: list[int]) -> None:
         """`ids` covers the slot's canvas width; positions past it are never
@@ -734,6 +817,7 @@ class DiffusionGemmaModelState(ModelState):
             device=device,
             hidden_size=text_config.hidden_size,
             stability_threshold=stability_rows(self.gen_config),
+            swap_capacity=options.canvas_swap_capacity,
         )
         # compute_logits reads the step's shared allowed set from here.
         self.model.diffusion_states = self.diffusion_states
@@ -812,10 +896,21 @@ class DiffusionGemmaModelState(ModelState):
 
     def add_request(self, req_index: int, new_req_data: Any) -> None:
         self._req_id_to_index[new_req_data.req_id] = req_index
-        self.diffusion_states.add_request(req_index)
+        self.diffusion_states.add_request(req_index, new_req_data.req_id)
         if not new_req_data.req_id.startswith("_warmup_"):
             prompt_len = len(new_req_data.prompt_token_ids)
             self.diffusion_states.prompt_len[req_index].fill_(prompt_len)
+
+    def on_requests_preempted(self, req_ids: set[str]) -> None:
+        # Sorted so every TP rank keeps and evicts the same blocks.
+        for req_id in sorted(req_ids):
+            idx = self._req_id_to_index.get(req_id)
+            if idx is not None:
+                self.diffusion_states.swap_out(req_id, idx)
+
+    def on_requests_finished(self, req_ids: set[str]) -> None:
+        for req_id in req_ids:
+            self.diffusion_states.swap_drop(req_id)
 
     def remove_request(self, req_id: str) -> None:
         idx = self._req_id_to_index.pop(req_id, None)
@@ -1075,9 +1170,15 @@ class DiffusionSampler:
                 shape[:2], dtype=torch.int64, device=device
             ),
         )
+        # A block that converged before it was preempted commits with these.
+        diffusion_states.track_for_swap(
+            logprob_token_ids=self._logprob_stash.logprob_token_ids,
+            logprobs=self._logprob_stash.logprobs,
+            selected_token_ranks=self._logprob_stash.selected_token_ranks,
+        )
         # Requests with a wider top-k, filled on the step a slot converges:
         # a [canvas_length, vocab] stash per slot would not fit.
-        self._wide_logprobs: dict[int, LogprobsTensors] = {}
+        self._wide_logprobs = diffusion_states.wide_logprobs
 
     def add_request(self, req_idx: int, sampling_params: Any) -> None:
         if use_penalty(sampling_params):
@@ -1192,10 +1293,11 @@ class DiffusionSampler:
         )
         states.init_canvas(ps_gpu)
         states.apply_seed_canvases(ps, ps_gpu)
+        states.is_encoder_phase.index_fill_(0, ps_gpu, False)
+        states.swap_in(ps)
         self.req_states.draft_tokens[ps_gpu, : self.canvas_length] = states.canvas[
             ps_gpu
         ]
-        states.is_encoder_phase.index_fill_(0, ps_gpu, False)
 
     def _handle_prefill(
         self,
