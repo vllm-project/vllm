@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import ctypes
 import errno
 import os
 import signal
@@ -12,6 +13,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -51,6 +53,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     _compute_sender_transfer_plan,
     _contiguous_runs,
     _has_opaque_packed_row,
+    _mapped_block_runs,
     _normalize_paired_block_order,
     _pp_mismatch_hides_packed_layers,
     _validate_asymmetric_region_lengths,
@@ -2694,14 +2697,9 @@ def test_packed_and_unpacked_region_lengths_fail_homogeneous_tp_handshake():
     assert "region counts" in count_err
 
 
-@pytest.mark.parametrize(
-    ("num_groups", "expected_group_index"),
-    [(1, 0), (2, _SHARED_REGION_GROUP_ID)],
-)
-def test_register_kv_caches_collapses_shared_mla_storage(
-    num_groups, expected_group_index
-):
-    """Shared backing collapses to one packed region; two groups mark it -1."""
+@pytest.mark.parametrize("num_groups", [1, 2])
+def test_register_kv_caches_preserves_shared_mla_views(num_groups):
+    """Register an allocation once without losing logical layer identities."""
     num_blocks = 4
     packed_row = 256
     with mooncake_register_worker(
@@ -2719,13 +2717,121 @@ def test_register_kv_caches_collapses_shared_mla_storage(
     registered_ptrs, registered_lens = reg.call_args[0]
     assert registered_ptrs == [backing.data_ptr()]
     assert registered_lens == [backing.untyped_storage().nbytes()]
-    assert worker.kv_caches_base_addr == [backing.data_ptr()]
-    assert worker.block_len_per_layer == [packed_row]
-    assert worker.kv_block_len_per_layer == [packed_row]
-    assert worker.registered_layer_names == ["model.layers.0.mla_attn"]
-    assert worker.registered_group_indices == [expected_group_index]
-    if expected_group_index == _SHARED_REGION_GROUP_ID:
-        assert worker.region_shared_groups == [(0, 1)]
+    assert worker.kv_caches_base_addr == [backing.data_ptr()] * 2
+    assert worker.block_len_per_layer == [packed_row] * 2
+    assert worker.kv_block_len_per_layer == [packed_row] * 2
+    assert worker.registered_layer_names == [
+        "model.layers.0.mla_attn",
+        "model.layers.1.indexer",
+    ]
+    assert worker.registered_group_indices == [0, num_groups - 1]
+
+
+@pytest.mark.parametrize("consumer_groups", [(0, 1), (3, 1)])
+def test_mapped_swa_views_copy_each_groups_own_pages(consumer_groups):
+    """PP stages keep aliases whose consumer groups and row strides differ."""
+    page = 16
+    source = np.full((8, 2 * page), 0xA5, dtype=np.uint8)
+    destination = np.full((8, 4 * page), 0xEE, dtype=np.uint8)
+    expected = destination.copy()
+    local_blocks = [[2, 3, 4], [5, 6, 7]]
+    remote_blocks = [[], [], [], []]
+    remote_blocks[consumer_groups[0]] = [0, 2, 3]
+    remote_blocks[consumer_groups[1]] = [6, 7]
+    for group, blocks in enumerate(local_blocks):
+        for block in blocks:
+            source[block, :page] = 10 * group + block
+    expected[2, :page] = 3
+    expected[3, :page] = 4
+    expected[6, page : 2 * page] = 16
+    expected[7, page : 2 * page] = 17
+    regions = [
+        TransferRegion(
+            layer_name=f"model.layers.{12 + i}.attn.swa_cache",
+            layer_index=12 + i,
+            base_addr=source.ctypes.data,
+            block_len=source.strides[0],
+            kv_block_len=page,
+            group_index=i,
+            page_spec="same-swa-page",
+        )
+        for i in range(2)
+    ]
+    remote = [
+        replace(
+            region,
+            base_addr=destination.ctypes.data + i * page,
+            block_len=destination.strides[0],
+            group_index=consumer_groups[i],
+        )
+        for i, region in enumerate(regions)
+    ]
+    aligned_p, aligned_d, err = _align_transfer_regions(
+        regions, remote, allow_group_mapping=True
+    )
+    assert err is None
+    runs = _mapped_block_runs(local_blocks, remote_blocks, aligned_p, aligned_d)
+    for local, peer in zip(aligned_p, aligned_d):
+        src, dst, _, _ = runs[(local.group_index, peer.group_index)]
+        for p, d in zip(src.tolist(), dst.tolist()):
+            ctypes.memmove(
+                peer.base_addr + d * peer.block_len,
+                local.base_addr + p * local.block_len,
+                page,
+            )
+    np.testing.assert_array_equal(destination, expected)
+    np.testing.assert_array_equal(runs[(0, consumer_groups[0])][0], [3, 4])
+    np.testing.assert_array_equal(runs[(1, consumer_groups[1])][0], [6, 7])
+
+
+@pytest.mark.asyncio
+async def test_build_transfer_params_uses_endpoint_group_ids():
+    """A consumer suffix in group 3 reads the matched producer group 0."""
+    local = replace(
+        _region(0x1000, block_len=256, kv_block_len=128), page_spec="mla-page"
+    )
+    remote = replace(local, base_addr=0x9000, block_len=512, group_index=3)
+    send = SendBlockMeta(
+        p_req_id="p",
+        transfer_id="xfer",
+        local_block_ids=[[1, 2], [5, 6]],
+        ready=asyncio.Event(),
+    )
+    meta = _xfer_meta(
+        [remote],
+        {"d": ("xfer", [[], [], [], [7]])},
+        remote_pp_size=2,
+    )
+    with mooncake_register_worker(
+        _make_packed_mla_kv_cache_config(8, num_groups=2)
+    ) as (worker, _):
+        src, dst, lengths, errors, error = await worker._build_transfer_params(
+            [("d", send)], meta, [local], [remote]
+        )
+    assert errors == [] and error is None
+    np.testing.assert_array_equal(src, [0x1000 + 2 * 256])
+    np.testing.assert_array_equal(dst, [0x9000 + 7 * 512])
+    np.testing.assert_array_equal(lengths, [128])
+
+
+def test_mapped_pages_reject_missing_source_and_incompatible_semantics():
+    local = replace(_region(0x1000), page_spec="swa", group_index=0)
+    remote = replace(local, base_addr=0x2000, group_index=1)
+    with pytest.raises(ValueError, match="source page is a null block"):
+        _mapped_block_runs([[0, 2]], [[], [3, 4]], [local], [remote])
+    with pytest.raises(ValueError, match="missing KV group"):
+        _mapped_block_runs([[1]], [[2]], [local], [remote])
+    for incompatible in (
+        replace(remote, page_spec="full-attention"),
+        replace(remote, page_spec=""),
+        replace(remote, kv_block_len=128),
+    ):
+        assert (
+            _align_transfer_regions([local], [incompatible], allow_group_mapping=True)[
+                2
+            ]
+            is not None
+        )
 
 
 def test_block_ids_for_region_flattens_shared_groups():
@@ -3054,6 +3160,14 @@ def test_pp_mismatch_rejects_opaque_row_in_both_directions():
     # Hetero PP with page-contiguous views is not this rejection.
     assert not _pp_mismatch_hides_packed_layers(
         2, 1, local_has_opaque_row=False, **page_view
+    )
+    # A named contiguous view can fill its row without hiding layer identities.
+    assert not _pp_mismatch_hides_packed_layers(
+        2,
+        1,
+        local_has_opaque_row=False,
+        remote_page_specs=["explicit-logical-page"],
+        **opaque_row,
     )
 
 
