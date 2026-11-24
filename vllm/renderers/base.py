@@ -1007,6 +1007,7 @@ class BaseRenderer(ABC, Generic[_T]):
             mm_inputs["skip_mm_cache"] = skip_mm_cache
 
         self.update_mm_cache_stats()
+
         return mm_inputs
 
     def _process_tokens(
