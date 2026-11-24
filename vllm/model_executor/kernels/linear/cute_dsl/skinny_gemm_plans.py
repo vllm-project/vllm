@@ -61,9 +61,108 @@ SM121_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
     },
 }
 
+# B200, measured on the BF16 projections that stay unquantized in the Qwen3.5 / Qwen3.6
+# MoE FP8 checkpoints (GDN in_proj_ba, shared-expert gate, router, LM head) at the local
+# shapes of Qwen3.6-35B-A3B TP=1/2/4 and Qwen3.5-397B-A17B TP=4/8. Entries beat cuBLAS
+# by at least 10% under CUDA graph replay.
+SM100_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
+    # Qwen3.6-35B-A3B TP1 GDN in_proj_ba.
+    (64, 2048): {
+        1: SkinnyGemmConfig(1, 128, 2, static_k=2048),
+        2: SkinnyGemmConfig(2, 128, 2, static_k=2048),
+        4: SkinnyGemmConfig(4, 256, 1, vector_width=4, static_k=2048),
+        8: SkinnyGemmConfig(8, 128, 1, vector_width=4, static_k=2048),
+    },
+    # Qwen3.6-35B-A3B TP2 GDN in_proj_ba.
+    (32, 2048): {
+        1: SkinnyGemmConfig(1, 128, 1, k_unroll=2, vector_width=4, static_k=2048),
+        2: SkinnyGemmConfig(2, 128, 1, k_unroll=2, vector_width=4, static_k=2048),
+        4: SkinnyGemmConfig(4, 128, 1, k_unroll=2, static_k=2048),
+        8: SkinnyGemmConfig(8, 128, 1, k_unroll=4, static_k=2048),
+    },
+    # Qwen3.6-35B-A3B TP4 GDN in_proj_ba.
+    (16, 2048): {
+        1: SkinnyGemmConfig(1, 128, 2, vector_width=4, static_k=2048),
+        2: SkinnyGemmConfig(2, 128, 1, vector_width=4, static_k=2048),
+        4: SkinnyGemmConfig(4, 128, 1, vector_width=4, static_k=2048),
+        8: SkinnyGemmConfig(8, 128, 1, static_k=2048),
+    },
+    # Qwen3.6-35B-A3B shared-expert gate (replicated).
+    (1, 2048): {
+        1: SkinnyGemmConfig(1, 128, 1, k_unroll=2, vector_width=4, static_k=2048),
+        2: SkinnyGemmConfig(2, 64, 1, static_k=2048),
+        4: SkinnyGemmConfig(4, 128, 1, k_unroll=2, vector_width=4, static_k=2048),
+        8: SkinnyGemmConfig(8, 128, 1, static_k=2048),
+    },
+    # Qwen3.6-35B-A3B router (replicated).
+    (256, 2048): {
+        1: SkinnyGemmConfig(1, 64, 1, k_unroll=2, static_k=2048),
+        2: SkinnyGemmConfig(2, 128, 1, static_k=2048),
+        4: SkinnyGemmConfig(4, 128, 1, static_k=2048),
+        8: SkinnyGemmConfig(8, 128, 1, vector_width=4, static_k=2048),
+    },
+    # Qwen3.6-35B-A3B TP1 LM head.
+    (248320, 2048): {
+        1: SkinnyGemmConfig(1, 256, 4),
+        2: SkinnyGemmConfig(2, 32, 2, k_unroll=4),
+    },
+    # Qwen3.6-35B-A3B TP2 LM head.
+    (124160, 2048): {
+        1: SkinnyGemmConfig(1, 256, 4, k_unroll=2, vector_width=4),
+        2: SkinnyGemmConfig(2, 32, 2, k_unroll=4),
+    },
+    # Qwen3.6-35B-A3B TP4 LM head.
+    (62080, 2048): {
+        1: SkinnyGemmConfig(1, 256, 4, k_unroll=2, vector_width=4),
+        2: SkinnyGemmConfig(2, 128, 4),
+        4: SkinnyGemmConfig(4, 32, 4),
+    },
+    # Qwen3.5-397B-A17B TP4 GDN in_proj_ba.
+    (32, 4096): {
+        1: SkinnyGemmConfig(1, 256, 1, vector_width=4, static_k=4096),
+        2: SkinnyGemmConfig(2, 256, 1, k_unroll=2, static_k=4096),
+        4: SkinnyGemmConfig(4, 256, 1, k_unroll=2, static_k=4096),
+        8: SkinnyGemmConfig(8, 256, 1, k_unroll=2, static_k=4096),
+    },
+    # Qwen3.5-397B-A17B TP8 GDN in_proj_ba.
+    (16, 4096): {
+        1: SkinnyGemmConfig(1, 128, 1, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 1, static_k=4096),
+        4: SkinnyGemmConfig(4, 256, 1, static_k=4096),
+        8: SkinnyGemmConfig(8, 256, 1, k_unroll=2, static_k=4096),
+    },
+    # Qwen3.5-397B-A17B shared-expert gate (replicated).
+    (1, 4096): {
+        1: SkinnyGemmConfig(1, 128, 1, vector_width=4, static_k=4096),
+        2: SkinnyGemmConfig(2, 256, 1, k_unroll=4, static_k=4096),
+        4: SkinnyGemmConfig(4, 128, 1, k_unroll=4, static_k=4096),
+        8: SkinnyGemmConfig(8, 128, 1, k_unroll=2, static_k=4096),
+    },
+    # Qwen3.5-397B-A17B router (replicated).
+    (512, 4096): {
+        1: SkinnyGemmConfig(1, 128, 1, static_k=4096),
+        2: SkinnyGemmConfig(2, 256, 1, static_k=4096),
+        4: SkinnyGemmConfig(4, 128, 1, static_k=4096),
+        8: SkinnyGemmConfig(8, 128, 2, k_unroll=2, static_k=4096),
+    },
+    # Qwen3.5-397B-A17B TP4 LM head.
+    (62080, 4096): {
+        1: SkinnyGemmConfig(1, 256, 2, k_unroll=2),
+        2: SkinnyGemmConfig(2, 128, 4, k_unroll=4),
+        4: SkinnyGemmConfig(4, 32, 2, k_unroll=4),
+    },
+    # Qwen3.5-397B-A17B TP8 LM head.
+    (31040, 4096): {
+        1: SkinnyGemmConfig(1, 256, 2, k_unroll=4, vector_width=4),
+        2: SkinnyGemmConfig(2, 128, 4, k_unroll=4),
+        4: SkinnyGemmConfig(4, 32, 2, k_unroll=4, vector_width=4),
+    },
+}
+
 SKINNY_GEMM_PLANS_BY_CAPABILITY: dict[
     tuple[int, int] | None, dict[tuple[int, int], SkinnyGemmPlan]
 ] = {
+    (10, 0): SM100_SKINNY_GEMM_PLANS,
     (12, 1): SM121_SKINNY_GEMM_PLANS,
 }
 
