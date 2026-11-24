@@ -172,7 +172,8 @@ def test_output_head_transform(
         "jhu-clsp/ettin-decoder-17m",
         kwargs_ref={"dtype": "float32"},
         kwargs_test={"dtype": "float32"},
-        num_fused=(0, 1),  # `Wi` already holds the input and gate projections
+        # `Wi` already holds the input and gate projections
+        num_fused={"GLUFuser": 0, "QKVFuser": 1},
         model_impl="transformers",
     )
 
