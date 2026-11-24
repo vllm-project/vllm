@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-    from vllm.v1.request import Request
+    from vllm.v1.request import Request, RequestStatus
 else:
     AuxOutputConnectorMetadata = object
     ECConnectorMetadata = object
@@ -133,6 +133,20 @@ class NewRequestData:
             f"prompt_embeds_shape={prompt_embeds_shape}"
             ")"
         )
+
+
+@dataclass
+class FinishedRequestData:
+    """Final token counts of a finished request. Sent from the scheduler to
+    the workers with each step's ``SchedulerOutput``."""
+
+    req_id: str
+    num_tokens: int
+    """The request's final token count (prompt + generated)."""
+    num_prompt_tokens: int
+    finish_reason: "RequestStatus"
+    """Terminal state, e.g. FINISHED_STOPPED or FINISHED_ABORTED. Consumers
+    may drop aborted streams instead of closing them at the trim point."""
 
 
 @dataclass
@@ -270,6 +284,9 @@ class SchedulerOutput:
     # list of mm_hash strings associated with the encoder outputs to be
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
+
+    # Final token counts of the finished requests, by request id.
+    finished_request_data: dict[str, FinishedRequestData] = field(default_factory=dict)
 
     # Request-local CPU payload updates: None releases a consumed input; a
     # payload restores it for re-encoding after KV-load rollback. GPU embeddings

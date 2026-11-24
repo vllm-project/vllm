@@ -48,6 +48,7 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
+    FinishedRequestData,
     GrammarOutput,
     IterationDetails,
     KVConnectorBlockState,
@@ -255,6 +256,9 @@ class Scheduler(SchedulerInterface):
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
+        # Per-finished-request metadata (final token counts), keyed by request
+        # id; same lifecycle as finished_req_ids.
+        self.finished_request_data: dict[str, FinishedRequestData] = {}
 
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
@@ -1769,6 +1773,7 @@ class Scheduler(SchedulerInterface):
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
+            finished_request_data=self.finished_request_data,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             encoder_input_updates=self._get_encoder_input_updates(
                 num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
@@ -1913,6 +1918,7 @@ class Scheduler(SchedulerInterface):
         # NOTE: We shouldn't just clear() here because it will also affect
         # the scheduler output.
         self.finished_req_ids = set()
+        self.finished_request_data = {}
         self.reset_preempted_req_ids = set()
 
     def _update_request_as_session(
@@ -3242,6 +3248,9 @@ class Scheduler(SchedulerInterface):
         self._pending_encoder_input_ids.pop(request.request_id, None)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
+        self.finished_request_data[request_id] = FinishedRequestData(
+            request_id, request.num_tokens, request.num_prompt_tokens, request.status
+        )
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 

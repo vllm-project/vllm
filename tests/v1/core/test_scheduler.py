@@ -6536,6 +6536,12 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
     assert new_req.prefill_token_ids[95] == 100
     assert scheduler.running[0].request_id == request_low.request_id
     assert request_high.request_id in output.finished_req_ids
+    # Finish metadata carries the request's final token counts.
+    finished_data = output.finished_request_data[request_high.request_id]
+    assert finished_data.req_id == request_high.request_id
+    assert finished_data.num_tokens == request_high.num_tokens
+    assert finished_data.num_prompt_tokens == request_high.num_prompt_tokens
+    assert finished_data.finish_reason == RequestStatus.FINISHED_LENGTH_CAPPED
 
     ## Encoder-cache-specific checks:
     # mm_hash of request_low exists in cache after scheduling for all scenario

@@ -1289,7 +1289,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Preempted docs keep their query-use reservation until rescheduled.
             self.pooling_runner.on_requests_finished(finished_req_ids)
         if self.speculator is not None and finished_req_ids:
-            self.speculator.on_requests_finished(finished_req_ids)
+            self.speculator.on_requests_finished(
+                finished_req_ids, scheduler_output.finished_request_data
+            )
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
             finished_req_ids = finished_req_ids.union(preempted_req_ids)

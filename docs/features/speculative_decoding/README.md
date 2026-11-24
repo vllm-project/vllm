@@ -147,6 +147,14 @@ A preempted request's slot is freed without a hook, and the request is added
 again when it resumes, so keep such state per slot and reset it in
 `add_request`.
 
+`on_requests_finished` also receives the finished requests' scheduler-side
+final counts as `finished_request_data` (`num_tokens`, `num_prompt_tokens`,
+and `finish_reason` per request): use these instead of counting sampled
+tokens on the worker, which include the soon-to-be-discarded tokens of
+optimistically scheduled steps past a request's budget. `finish_reason`
+separates completions, length caps, and aborts. The mapping may be
+missing ids the scheduler did not report (e.g. synthetic warmup requests).
+
 ## `--speculative-config` schema
 
 Use `--speculative-config` to pass speculative decoding settings as a JSON

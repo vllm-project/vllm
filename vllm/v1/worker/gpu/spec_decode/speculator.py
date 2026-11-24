@@ -19,7 +19,7 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
-from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.core.sched.output import FinishedRequestData, NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
@@ -138,9 +138,19 @@ class BaseSpeculator(ABC):
         `req_index`, e.g. to reset per-slot state. No-op by default."""
         return
 
-    def on_requests_finished(self, finished_req_ids: set[str]) -> None:
+    def on_requests_finished(
+        self,
+        finished_req_ids: set[str],
+        finished_request_data: "dict[str, FinishedRequestData] | None" = None,
+    ) -> None:
         """Requests finished (not preempted), before their request-state slots
-        are freed so their token history is still readable. No-op by default."""
+        are freed so their token history is still readable. No-op by default.
+
+        `finished_request_data` gives each finished request's final token
+        counts, which a worker cannot derive (sampling counters include tokens
+        of optimistically scheduled, later-cancelled steps), and its
+        `finish_reason` distinguishes completion from length cap and abort.
+        """
         return
 
     def reset_state(self) -> None:

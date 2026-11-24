@@ -624,7 +624,11 @@ class SuffixSpeculator(BaseSpeculator):
     def capture(self) -> None:
         return None
 
-    def on_requests_finished(self, finished_req_ids: Iterable[str]) -> None:
+    def on_requests_finished(
+        self,
+        finished_req_ids: Iterable[str],
+        finished_request_data=None,
+    ) -> None:
         """Add finished responses to the corpus before their slots are freed."""
         if not self.has_corpus:
             return
