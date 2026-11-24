@@ -7,6 +7,7 @@ vLLM is widely used as the high-throughput rollout and teacher-scoring engine fo
 | What you want to do | Document | Key Flags / APIs |
 | --- | --- | --- |
 | Synchronize updated trainer weights into a running vLLM engine (IPC, NCCL, M2N, Sharded RDT, ModelExpress) | [Weight Updates](weight_updates/README.md) | `--weight-transfer-config`, `VLLM_RELOAD_MODE` |
+| Sync weights over HTTP without installing or importing vLLM in the trainer process | [Trainer Without Importing vLLM (HTTP-Only)](weight_updates/README.md#trainer-without-importing-vllm-http-only) | `VLLM_SERVER_DEV_MODE=1`, `/init_weight_transfer_engine`, `/update_weights` |
 | Understand in-place weight reload vs. layerwise reload & online quantization (QeRL) | [Direct Weight Reload](weight_updates/direct_reload.md) / [Layerwise (Re)loading](weight_updates/layerwise.md) | `VLLM_RELOAD_MODE=auto\|direct\|layerwise` |
 | Verify that a weight update landed identically on every rank | [Weight Checker](weight_updates/weight_checker.md) | SHA-256 parameter digest check |
 | Export rollout artifacts to the trainer (MoE routing, sampling masks, teacher top-K logprobs) | [Rollout Artifacts](rollout_artifacts/README.md) | `--enable-return-routed-experts`, `prompt_logprob_token_ids` |
