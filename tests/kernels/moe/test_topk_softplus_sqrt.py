@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 import vllm._custom_ops as ops
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
@@ -122,8 +123,8 @@ def _dsv4_moe_config(monkeypatch, default_vllm_config, has_hash_routing, backend
         ("triton_unfused", "UnfusedOAITritonExperts"),
     ],
 )
+@override_parallel_groups(SingleRankGroup())
 def test_hash_routing_backend_selection(
-    dist_init,
     default_vllm_config,
     monkeypatch,
     has_hash_routing,
@@ -146,8 +147,9 @@ def test_hash_routing_backend_selection(
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
+@override_parallel_groups(SingleRankGroup())
 def test_hash_routing_rejects_monolithic_without_support(
-    dist_init, default_vllm_config, monkeypatch
+    default_vllm_config, monkeypatch
 ):
     """A monolithic kernel that does not implement hash routing is rejected."""
     from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
@@ -167,6 +169,43 @@ def test_hash_routing_rejects_monolithic_without_support(
     )
     with pytest.raises(ValueError, match="hash routing"):
         select_deepseek_v4_mxfp4_moe_backend(config)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
+@pytest.mark.parametrize(
+    "ep_config,supported",
+    [
+        ({"use_ep": True, "ep_size": 8}, True),
+        ({"use_ep": True, "ep_size": 8, "enable_eplb": True}, False),
+        ({"use_ep": True, "ep_size": 8, "dp_size": 2}, False),
+    ],
+    ids=["naive_ep", "eplb", "all2all"],
+)
+@override_parallel_groups(SingleRankGroup())
+def test_aiter_w4a16_expert_parallel_selection(
+    default_vllm_config, monkeypatch, ep_config, supported
+):
+    """Naive EP (no all2all, no EPLB) selects the AITER W4A16 monolithic kernel,
+    including on hash-routed layers."""
+    from dataclasses import replace
+
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        select_deepseek_v4_mxfp4_moe_backend,
+    )
+
+    _, config = _dsv4_moe_config(
+        monkeypatch, default_vllm_config, True, "aiter_triton_mxfp4_bf16"
+    )
+    config = replace(
+        config, moe_parallel_config=replace(config.moe_parallel_config, **ep_config)
+    )
+    if supported:
+        _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+        assert experts_cls is not None
+        assert experts_cls.__name__ == "AiterW4A16ExpertsMonolithic"
+    else:
+        with pytest.raises(ValueError, match="parallel config"):
+            select_deepseek_v4_mxfp4_moe_backend(config)
 
 
 def test_torch_topk_softplus_sqrt_breaks_ties_by_expert_id():
@@ -361,7 +400,7 @@ def test_dsv4_fast_topk(
     if use_padding:
         monkeypatch.setattr(
             "vllm.model_executor.layers.fused_moe.router."
-            "fused_topk_bias_router._get_padding_mask",
+            "fused_topk_bias_router.get_moe_padding_mask",
             lambda _: is_padding,
         )
         gating_output[is_padding] = float("nan")

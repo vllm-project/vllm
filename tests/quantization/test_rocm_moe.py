@@ -39,7 +39,7 @@ CASES = [
             "num_experts_per_tok": 2,
             "moe_intermediate_size": 512,
         },
-        ["--code-revision", "e434a23f91ba5b4923cf6c9d9a238eb4a08e3a11"],
+        [],
         id="deepseek-fp8-per-tensor-triton",
     ),
     pytest.param(
@@ -92,7 +92,6 @@ def test_rocm_quantized_moe_generation(
         revision,
         "--load-format",
         "dummy",
-        "--trust-remote-code",
         "--dtype",
         "bfloat16",
         "--max-model-len",
@@ -117,7 +116,7 @@ def test_rocm_quantized_moe_generation(
     with RemoteOpenAIServer(
         model,
         args,
-        env_dict={"VLLM_ROCM_USE_AITER": "1", "VLLM_USE_V2_MODEL_RUNNER": "1"},
+        env_dict={"VLLM_ROCM_USE_AITER": "1"},
         override_hf_configs={**COMMON_OVERRIDES, **overrides},
         max_wait_seconds=1200,
     ) as server:

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
-
+use indexmap::IndexMap;
 use itertools::Itertools as _;
 use vllm_text::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
@@ -164,6 +163,16 @@ pub fn text_len(text: &str) -> u32 {
     u32::try_from(text.chars().count()).unwrap_or(u32::MAX)
 }
 
+/// The text offset just past the last token of a completions `logprobs`
+/// payload, where the next token's offset starts.
+pub fn text_end_offset(logprobs: &LogProbs) -> Option<u32> {
+    logprobs
+        .text_offset
+        .last()
+        .zip(logprobs.tokens.last())
+        .map(|(&offset, token)| offset.saturating_add(text_len(token)))
+}
+
 /// Concatenate two OpenAI-style completion logprobs payloads in token order.
 pub fn append_openai_logprobs(mut prefix: LogProbs, suffix: LogProbs) -> LogProbs {
     prefix.tokens.extend(suffix.tokens);
@@ -193,12 +202,7 @@ pub fn collected_logprobs_to_openai(
         })?;
         let prompt_logprobs =
             decoded_prompt_logprobs_to_openai(prompt_logprobs, 0, return_tokens_as_token_ids)?;
-        let completion_start = prompt_logprobs
-            .text_offset
-            .last()
-            .zip(prompt_logprobs.tokens.last())
-            .map(|(&offset, token)| offset.saturating_add(text_len(token)))
-            .unwrap_or(0);
+        let completion_start = text_end_offset(&prompt_logprobs).unwrap_or(0);
         return match collected.logprobs.as_ref() {
             Some(completion_logprobs) => Ok(append_openai_logprobs(
                 prompt_logprobs,
@@ -231,10 +235,13 @@ fn format_token(entry: &DecodedTokenLogprob, as_token_id: bool) -> String {
     }
 }
 
+/// Collecting keeps each key at its first position and the last value for it,
+/// like Python's dict, so a sampled token repeated among the top-k candidates,
+/// or two tokens decoding to the same string, yield one entry in Python's place.
 fn position_top_logprobs_map(
     position: &DecodedPositionLogprobs,
     return_tokens_as_token_ids: bool,
-) -> HashMap<String, f32> {
+) -> IndexMap<String, f32> {
     position
         .entries
         .iter()
@@ -301,7 +308,9 @@ pub fn clamp_logprob(logprob: f32) -> f32 {
 mod tests {
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
-    use super::{decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps};
+    use super::{
+        decoded_logprobs_to_openai, decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
+    };
 
     #[test]
     fn prompt_logprobs_maps_reject_missing_multi_token_payload() {
@@ -331,6 +340,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prompt_logprobs_maps_keep_engine_order() {
+        // Prompt token `C` is the rank-3 token: the engine row is `[C, A, B, C]`.
+        let mut scored_positions = sample_logprobs().positions;
+        let prompt_token = scored_positions[0].entries[2].clone();
+        scored_positions[0].entries.insert(0, prompt_token);
+        let prompt_logprobs = vllm_text::DecodedPromptLogprobs {
+            first_token_id: 10,
+            first_token: "first".to_string(),
+            scored_positions,
+        };
+
+        let maps = prompt_logprobs_to_maps(Some(&prompt_logprobs), &[10, 3]).unwrap();
+        let token_ids = maps[1].as_ref().unwrap().keys().copied().collect::<Vec<_>>();
+        assert_eq!(token_ids, [3, 1, 2]);
+    }
+
     fn sample_logprobs() -> DecodedLogprobs {
         DecodedLogprobs {
             positions: vec![DecodedPositionLogprobs {
@@ -356,6 +382,23 @@ mod tests {
                 ],
             }],
         }
+    }
+
+    #[test]
+    fn completion_top_logprobs_keep_engine_order() {
+        // Sampled `C` is the rank-3 token: the engine row is `[C, A, B, C]`.
+        // Python's dict keeps `C` first and once, then the rest in rank order.
+        let mut logprobs = sample_logprobs();
+        let sampled = logprobs.positions[0].entries[2].clone();
+        logprobs.positions[0].entries.insert(0, sampled);
+
+        let top_logprobs = |as_token_ids| {
+            let logprobs = decoded_logprobs_to_openai(&logprobs, 0, as_token_ids).unwrap();
+            serde_json::to_string(&logprobs.top_logprobs).unwrap()
+        };
+        expect_test::expect![[r#"[{"C":-2.0,"A":-0.1,"B":-1.0}]"#]].assert_eq(&top_logprobs(false));
+        expect_test::expect![[r#"[{"token_id:3":-2.0,"token_id:1":-0.1,"token_id:2":-1.0}]"#]]
+            .assert_eq(&top_logprobs(true));
     }
 
     fn chat_top_logprobs_len(top_logprobs: i32) -> usize {

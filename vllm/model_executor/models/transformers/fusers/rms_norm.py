@@ -82,6 +82,10 @@ def _variance_eps(rsqrt: fx.Node, x: fx.Node) -> float | None:
     mean = peel(nodes[0])
     if not is_op(mean, "mean"):
         return None
+    dim = _operand(mean, 1, "dim")
+    dims = dim if isinstance(dim, (list, tuple)) else (dim,)
+    if tuple(dims) != (-1,):
+        return None
     if not _is_squared(_operand(mean, 0, "input"), x):
         return None
     return float(consts[0])
@@ -170,6 +174,10 @@ class RMSNormFuser(BaseFuser):
         if rms_norm is not None and peel(_operand(rms_norm, 0, "input")) is x:
             if _has_trailing_compute(graph, rms_norm):
                 return None
+            shape = _operand(rms_norm, 1, "normalized_shape")
+            sizes = shape if isinstance(shape, (list, tuple)) else (shape,)
+            if len(sizes) != 1:
+                return None
             eps_attr, eps = cls._eps_source(graph, module)
             return cls(
                 zero_centered=False,
@@ -189,8 +197,11 @@ class RMSNormFuser(BaseFuser):
         # The `x * rsqrt(...)` normalize multiply.
         normalize = find_node(
             graph,
-            lambda n: is_op(n, "mul")
-            and rsqrt in map(peel, (_operand(n, 0, "input"), _operand(n, 1, "other"))),
+            lambda n: (
+                is_op(n, "mul")
+                and rsqrt
+                in map(peel, (_operand(n, 0, "input"), _operand(n, 1, "other")))
+            ),
         )
         if normalize is None:
             return None

@@ -21,6 +21,7 @@ from vllm.sampling_params import (
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 from vllm.v1.structured_output.request import get_structured_output_key
+from vllm.v1.structured_output.utils import allocate_token_bitmask
 
 from .utils import (
     BeamSearchInstance,
@@ -111,7 +112,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
-        # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
+        # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534
         base_sampling_params = SamplingParams(
             logprobs=2 * beam_width,
             max_tokens=1,
@@ -374,7 +375,13 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 key=sort_beams_key,
                 reverse=True,
             )
-            instance.beams = sorted_beams[:beam_width]
+            instance.beams = []
+            for beam in sorted_beams[:beam_width]:
+                if len(beam.tokens) >= self.model_config.max_model_len:
+                    beam.finish_reason = "length"
+                    instance.completed.append(beam)
+                else:
+                    instance.beams.append(beam)
 
         return False
 
@@ -444,7 +451,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             raise ValueError(f"Unsupported structured output backend: {backend_name}")
 
         structured_output_key = get_structured_output_key(structured_outputs)
-        bitmask = backend.allocate_token_bitmask(1)
+        bitmask = allocate_token_bitmask(1, vocab_size)
 
         return backend, structured_output_key, bitmask
 

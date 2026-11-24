@@ -80,8 +80,6 @@ hardware_overrides:
       - "ROCM_AITER_UNIFIED_ATTN"
       - "-cc.pass_config.fuse_rope_kvcache=True"
       - "-cc.use_inductor_graph_partition=True"
-      - "--gpu-memory-utilization"
-      - "0.95"
       - "--block-size=64"
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
@@ -187,7 +185,6 @@ guide: |
     --max-model-len 9216 \
     --max-num-batched-tokens 16384 \
     --max-num-seqs 2048 \
-    --gpu-memory-utilization 0.86 \
     --kv-cache-dtype fp8 \
     --load-format runai_streamer \
     --no-enable-prefix-caching \
@@ -207,7 +204,6 @@ guide: |
     --attention-backend ROCM_AITER_UNIFIED_ATTN \
     -cc.pass_config.fuse_rope_kvcache=True \
     -cc.use_inductor_graph_partition=True \
-    --gpu-memory-utilization 0.95 \
     --block-size 64
   ```
 
@@ -270,7 +266,7 @@ guide: |
   vllm serve openai/gpt-oss-120b \
     --tensor_parallel_size 8 --max-model-len 131072 \
     --max-num-batched-tokens 10240 --max-num-seqs 128 \
-    --gpu-memory-utilization 0.85 --no-enable-prefix-caching
+    --no-enable-prefix-caching
 
   mkdir -p /tmp/gpqa_openai
   OPENAI_API_KEY=empty python -m gpt_oss.evals \
@@ -283,7 +279,7 @@ guide: |
 
   - **Attention sinks dtype error on Blackwell:** pass `--quantization-config.moe.activation mxfp8` and `--kv-cache-dtype fp8`.
   - **`tl.language not defined`:** make sure no extra Triton (e.g., pytorch-triton) is installed.
-  - **H100 TP1 OOM:** `--gpu-memory-utilization 0.95 --max-num-batched-tokens 1024`.
+  - **H100 TP1 OOM:** `--max-num-batched-tokens 1024`.
   - **Harmony vocab download failure:** pre-download tiktoken files and set `TIKTOKEN_ENCODINGS_BASE`.
 
   ## Known Limitations

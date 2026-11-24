@@ -10,9 +10,8 @@ import torch
 from cutlass.cute.runtime import make_fake_stream
 
 from ..common.host import architecture, dynamic_fake, dynamic_view, stream
-from ..common.primitives import launch
+from ..common.primitives import launch, situ_and_mul
 from ..gemm.projection import PreparedProjection
-from .shared import situ
 
 
 class DenseSitu:
@@ -36,7 +35,7 @@ class DenseSitu:
             if col < self.hidden:
                 gate = cutlass.Float32(x[row, col])
                 up = cutlass.Float32(x[row, self.hidden + col])
-                value = situ(gate, up, beta, linear, native=True)
+                value = situ_and_mul(gate, up, beta, linear)
             out[row, col] = cutlass.BFloat16(value)
         cute.arch.griddepcontrol_launch_dependents()
 
@@ -72,6 +71,13 @@ class PreparedDenseMLP:
         self.down = PreparedProjection(down, policy(down_tiles))
         self.gate.prepare(), self.down.prepare()
         self.activation = _compile_activation(hidden, padded, architecture(self.device))
+
+    @torch.no_grad()
+    def process_weights_after_loading(self, mlp):
+        """After a weight reload: the padded TP16 down copy is ours, refill it in
+        place (padding columns stay zero). Unpadded, it is the backbone weight."""
+        if self.padded != self.hidden:
+            self.down.weight[:, : self.hidden].copy_(mlp.down_proj.weight)
 
     def run(self, x, out):
         gate, hidden = self.gates[: x.shape[0]], self.hidden_rows[: x.shape[0]]

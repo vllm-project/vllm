@@ -338,6 +338,36 @@ async def test_no_args_tool_call(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_strict_tool_without_parameters(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    # `parameters` is optional; a strict tool without it takes no arguments.
+    response = await client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": "What time is it now?"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_time",
+                    "description": "Get the current date and time.",
+                    "strict": True,
+                },
+            }
+        ],
+        tool_choice="required",
+        temperature=0.0,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+
+    tool_calls = response.choices[0].message.tool_calls
+    assert tool_calls
+    assert tool_calls[0].function.name == "get_current_time"
+    json.loads(tool_calls[0].function.arguments)
+
+
+@pytest.mark.asyncio
 async def test_named_tool_use(
     client: openai.AsyncOpenAI,
     sample_json_schema,
@@ -374,7 +404,7 @@ async def test_named_tool_use(
         tool_choice=tool_choice,
     )
     message = chat_completion.choices[0].message
-    assert len(message.content) == 0
+    assert not message.content
     json_string = message.tool_calls[0].function.arguments
     json1 = json.loads(json_string)
     jsonschema.validate(instance=json1, schema=sample_json_schema)
@@ -413,6 +443,44 @@ async def test_named_tool_use(
     jsonschema.validate(instance=json2, schema=sample_json_schema)
     assert json1["name"] != json2["name"]
     assert json1["age"] != json2["age"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_response_format_with_thinking_disabled(
+    client: openai.AsyncOpenAI, stream: bool
+):
+    """With thinking disabled the chat template closes reasoning in the prompt,
+    so the response format holds from the first generated token."""
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "legs": {"type": "integer"}},
+        "required": ["name", "legs"],
+    }
+    kwargs = dict(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Describe a cat."}],
+        max_completion_tokens=200,
+        temperature=0.0,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"name": "animal", "schema": schema},
+        },
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+    if stream:
+        chunks = await client.chat.completions.create(**kwargs, stream=True)
+        content = "".join(
+            [
+                chunk.choices[0].delta.content or ""
+                async for chunk in chunks
+                if chunk.choices
+            ]
+        )
+    else:
+        response = await client.chat.completions.create(**kwargs)
+        content = response.choices[0].message.content
+    jsonschema.validate(instance=json.loads(content), schema=schema)
 
 
 @pytest.mark.asyncio

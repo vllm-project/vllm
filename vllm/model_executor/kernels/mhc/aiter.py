@@ -121,7 +121,7 @@ def mhc_pre_delayed_aiter(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """MHC pre with the pre-mix carried in from the previous sublayer.
 
-    Matches ``mhc_pre_delayed_torch``: the stream collapse uses *pre_mix*
+    Matches `mhc_pre_delayed_torch`: the stream collapse uses *pre_mix*
     rather than the gate computed here, and that gate is returned as the
     pre-mix for the next sublayer seam.
 
@@ -225,8 +225,8 @@ def mhc_fused_post_pre_delayed_rms_norm_aiter(
     norm_eps: float,
     residual_out: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """:func:`mhc_pre_delayed_aiter` with the RMSNorm of the collapse folded in:
-    ``layer_input`` comes back normalised with ``norm_weight`` / ``norm_eps``."""
+    """`mhc_pre_delayed_aiter` with the RMSNorm of the collapse folded in:
+    `layer_input` comes back normalised with `norm_weight` / `norm_eps`."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     return rocm_aiter_ops.mhc_fused_post_pre_delayed_rms_norm(

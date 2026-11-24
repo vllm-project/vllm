@@ -8,9 +8,7 @@ vLLM initially supports basic model inference and serving on Intel GPU platform.
 
 - Supported Hardware: Intel Data Center GPU, Intel ARC GPU
 - Dependency: [vllm-xpu-kernels](https://github.com/vllm-project/vllm-xpu-kernels): a package provide all necessary vllm custom kernel when running vLLM on Intel GPU platform,
-- Python: 3.12
-!!! warning
-    The provided vllm-xpu-kernels whl is Python3.12 specific so this version is a MUST.
+- Python: 3.14
 
 --8<-- [end:requirements]
 --8<-- [start:set-up-using-python]
@@ -29,23 +27,7 @@ packages are served from the PyTorch XPU index, so both index URLs are needed.
 To install the wheel built from the latest main branch:
 
 ```bash
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/xpu --extra-index-url https://download.pytorch.org/whl/xpu --index-strategy unsafe-best-match
-```
-
-Note that after upgrading to PyTorch 2.14, xpu graph support requires specific oneAPI packages.
-
-```bash
-uv pip install \
-       "intel-cmplr-lib-rt==2026.1.1" \
-       "intel-cmplr-lib-ur==2026.1.1" \
-       "intel-cmplr-lic-rt==2026.1.1" \
-       "intel-sycl-rt==2026.1.1" \
-       "oneccl-devel==2022.1.2; platform_system == 'Linux' and platform_machine == 'x86_64'" \
-       "oneccl==2022.1.2; platform_system == 'Linux' and platform_machine == 'x86_64'" \
-       "dpcpp-cpp-rt==2026.1.1" \
-       "intel-opencl-rt==2026.1.1" \
-       "intel-openmp==2026.1.1" \
-       "intel-pti==1.1.0"
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/xpu --extra-index-url https://download.pytorch.org/whl/xpu --index-strategy unsafe-best-match --find-links https://vllm-project.github.io/vllm-xpu-kernels/whl/vllm-xpu-kernels/
 ```
 
 #### Install specific revisions
@@ -54,7 +36,7 @@ If you want to access the wheels for previous commits (e.g. to bisect the behavi
 
 ```bash
 export VLLM_COMMIT=730bd35378bf2a5b56b6d3a45be28b3092d26519 # use full commit hash from the main branch
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/xpu --extra-index-url https://download.pytorch.org/whl/xpu --index-strategy unsafe-best-match
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/xpu --extra-index-url https://download.pytorch.org/whl/xpu --index-strategy unsafe-best-match --find-links https://vllm-project.github.io/vllm-xpu-kernels/whl/vllm-xpu-kernels/
 ```
 
 --8<-- [end:pre-built-wheels]
@@ -113,6 +95,9 @@ docker run --rm \
 
 To use the docker image as base for development, you can launch it in interactive session through overriding the entrypoint.
 
+XPU images use `/vllm-workspace` (previously `/workspace/vllm`) as the source
+checkout and default working directory.
+
 ???+ console "Commands"
     ```bash
     docker run --rm -it \
@@ -150,7 +135,7 @@ XPU platform supports **tensor parallel** inference/serving and also supports **
 ```bash
 vllm serve facebook/opt-13b \
      --dtype=bfloat16 \
-     --max_model_len=1024 \
+     --max-model-len=1024 \
      --distributed-executor-backend=mp \
      --pipeline-parallel-size=2 \
      -tp=8
