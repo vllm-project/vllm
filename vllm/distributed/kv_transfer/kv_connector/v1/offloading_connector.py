@@ -61,7 +61,11 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         Never offer tokens for a range some group cannot cover: past such a
         group's own cached prefix its KV would be left unwritten.
         """
-        offloaded = set(get_offloading_group_ids(self._kv_cache_config))
+        offloaded = set(
+            get_offloading_group_ids(
+                self._kv_cache_config, self._exclude_group_ids
+            )
+        )
         return tuple(
             group_id
             for group_id, group in enumerate(self._kv_cache_config.kv_cache_groups)
@@ -86,6 +90,20 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config: KVCacheConfig,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
+
+        kv_transfer_config = vllm_config.kv_transfer_config
+        extra_config = (
+            kv_transfer_config.kv_connector_extra_config
+            if kv_transfer_config is not None
+            else None
+        ) or {}
+        # Groups the platform cannot offload (e.g. Mamba/linear-attention
+        # state on Ascend). Excluding them from the offload contract makes
+        # them bounding groups, so external hits are bounded by the locally
+        # available state cache.
+        self._exclude_group_ids: tuple[int, ...] = tuple(
+            extra_config.get("exclude_group_ids", ())
+        )
 
         offloading_config = build_offloading_config(vllm_config, kv_cache_config)
         self._canonical_layout = offloading_config.canonical_layout

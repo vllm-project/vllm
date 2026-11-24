@@ -16,6 +16,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
 from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
+    get_offloading_group_ids,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
     SchedulerOffloadConfig,
@@ -1321,3 +1322,25 @@ def test_blocks_per_chunk_must_be_positive():
 
     with pytest.raises(ValueError, match="greater than 0"):
         build_offloading_config(config, _make_kv_cache_config())
+
+
+def test_get_offloading_group_ids_honors_exclusion():
+    kv_cache_config = MagicMock()
+    kv_cache_config.hisparse_host_num_blocks = None
+    kv_cache_config.prefix_cacheable_group_ids = (0, 1, 2, 3)
+    assert get_offloading_group_ids(kv_cache_config) == (0, 1, 2, 3)
+    assert get_offloading_group_ids(kv_cache_config, (1, 3)) == (0, 2)
+
+
+def test_exclude_group_ids_drops_mamba_group_from_scheduler():
+    config = _make_vllm_config(extra_config={"exclude_group_ids": (1,)})
+    config.speculative_config = None
+    kv_cache_config = _make_mamba_hybrid_kv_cache_config()
+
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    assert tuple(group.group_id for group in offloading_config.groups) == (0,)
+
+    scheduler_config = SchedulerOffloadConfig.from_spec(
+        MockOffloadingSpec(offloading_config), config, kv_cache_config
+    )
+    assert [group.group_idx for group in scheduler_config.kv_group_configs] == [0]

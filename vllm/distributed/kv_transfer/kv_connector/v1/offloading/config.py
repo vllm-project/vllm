@@ -35,13 +35,29 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup
 
 
-def get_offloading_group_ids(kv_cache_config: "KVCacheConfig") -> tuple[int, ...]:
+def get_offloading_group_ids(
+    kv_cache_config: "KVCacheConfig",
+    exclude_group_ids: tuple[int, ...] = (),
+) -> tuple[int, ...]:
+    """Return the cache groups this connector should offload.
+
+    ``exclude_group_ids`` lets a platform exclude groups it cannot offload
+    (for example Mamba/linear-attention state on Ascend). Excluded groups are
+    treated as bounding groups by the scheduler, so an external hit is never
+    granted past a locally unavailable state cache.
+    """
+    excluded = frozenset(exclude_group_ids)
     if kv_cache_config.hisparse_host_num_blocks is None:
-        return kv_cache_config.prefix_cacheable_group_ids
+        return tuple(
+            group_id
+            for group_id in kv_cache_config.prefix_cacheable_group_ids
+            if group_id not in excluded
+        )
     return tuple(
         group_id
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         if group.role is KVCacheGroupRole.HISPARSE_INDEXER
+        and group_id not in excluded
     )
 
 
@@ -79,14 +95,15 @@ def build_offloading_config(
     """Translate vLLM configuration into the native offloading boundary."""
     kv_transfer_config = vllm_config.kv_transfer_config
     assert kv_transfer_config is not None
-    extra_config = kv_transfer_config.kv_connector_extra_config
+    extra_config = kv_transfer_config.kv_connector_extra_config or {}
+    exclude_group_ids = tuple(extra_config.get("exclude_group_ids", ()))
     assert kv_transfer_config.engine_id is not None
     engine_id = kv_transfer_config.engine_id
 
     parallel_config = vllm_config.parallel_config
     selected_groups = tuple(
         (group_id, kv_cache_config.kv_cache_groups[group_id])
-        for group_id in get_offloading_group_ids(kv_cache_config)
+        for group_id in get_offloading_group_ids(kv_cache_config, exclude_group_ids)
     )
     if not selected_groups:
         raise ValueError("KV offloading found no eligible cache groups.")
