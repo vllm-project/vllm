@@ -70,9 +70,9 @@ def test_registry_imports(model_arch):
 
     if (
         model_arch == "HYV4VLForConditionalGeneration"
-        and not current_platform.is_cuda()
+        and not current_platform.is_cuda_alike()
     ):
-        pytest.skip("HYV4 VL is only supported on NVIDIA CUDA")
+        pytest.skip("HYV4 VL is only supported on CUDA and ROCm")
 
     if (
         model_arch == "DeepseekV4ForConditionalGeneration"
