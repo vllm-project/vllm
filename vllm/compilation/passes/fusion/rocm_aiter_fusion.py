@@ -696,6 +696,116 @@ class AiterFusedAddRMSNormStaticQuantPattern(AiterRMSNormQuantPattern):
         )
 
 
+class AiterRMSMxfp4QuantGemmPattern:
+    """This pattern fuses aiter rms_norm & the MXFP4 quant inside the aiter
+    MXFP4 GEMM op into an aiter rmsnorm_mxfp4_quant op.
+    """
+
+    FUSED_OP = rocm_aiter_ops.get_rmsnorm_mxfp4_quant_op()
+    GEMM_OP = rocm_aiter_ops.get_mxfp4_gemm_dynamic_quant_op()
+
+    def __init__(self, epsilon: float) -> None:
+        self.epsilon = epsilon
+        self.device = torch.device("cuda")
+
+    def _extra_check(self, match: pm.Match) -> bool:
+        return match.kwargs["input"].meta["val"].shape[-1] % 256 == 0
+
+    def inputs(self) -> list[torch.Tensor]:
+        return [
+            torch.empty(5, 256, dtype=torch.bfloat16, device=self.device),  # input
+            torch.empty(256, dtype=torch.bfloat16, device=self.device),  # weight
+            torch.empty(32, 128, dtype=torch.uint8, device=self.device),  # gemm w
+            torch.empty(32, 8, dtype=torch.uint8, device=self.device),  # gemm ws
+        ]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            gemm_weight: torch.Tensor,
+            gemm_weight_scale: torch.Tensor,
+        ) -> torch.Tensor:
+            result_rms = torch.ops.vllm_ir.rms_norm(input, weight, self.epsilon)
+            return self.GEMM_OP(result_rms, gemm_weight, gemm_weight_scale, True)
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            gemm_weight: torch.Tensor,
+            gemm_weight_scale: torch.Tensor,
+        ) -> torch.Tensor:
+            x_q, x_s = self.FUSED_OP(
+                x=input,
+                weight=weight,
+                variance_epsilon=self.epsilon,
+                gemm_weight=gemm_weight,
+            )
+            return self.GEMM_OP(
+                x_q, gemm_weight, gemm_weight_scale, True, torch.bfloat16, x_s
+            )
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            self.inputs(),
+            pm.fwd_only,
+            pm_pass,
+            extra_check=self._extra_check,
+        )
+
+
+class AiterFusedAddRMSMxfp4QuantGemmPattern(AiterRMSMxfp4QuantGemmPattern):
+    """This pattern fuses aiter fused_add_rms_norm & the MXFP4 quant inside
+    the aiter MXFP4 GEMM op into an aiter rmsnorm_with_add_mxfp4_quant op.
+    """
+
+    FUSED_OP = rocm_aiter_ops.get_rmsnorm_with_add_mxfp4_quant_op()
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+            gemm_weight: torch.Tensor,
+            gemm_weight_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            result_rms, residual_out = torch.ops.vllm_ir.fused_add_rms_norm(
+                input, residual, weight, self.epsilon
+            )
+            out = self.GEMM_OP(result_rms, gemm_weight, gemm_weight_scale, True)
+            return out, residual_out
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+            gemm_weight: torch.Tensor,
+            gemm_weight_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            x_q, residual_out, x_s = self.FUSED_OP(
+                x=input,
+                residual=residual,
+                weight=weight,
+                variance_epsilon=self.epsilon,
+                gemm_weight=gemm_weight,
+            )
+            out = self.GEMM_OP(
+                x_q, gemm_weight, gemm_weight_scale, True, torch.bfloat16, x_s
+            )
+            return out, residual_out
+
+        input, weight, gemm_weight, gemm_weight_scale = self.inputs()
+        pm.register_replacement(
+            pattern,
+            replacement,
+            [input, weight, torch.empty_like(input), gemm_weight, gemm_weight_scale],
+            pm.fwd_only,
+            pm_pass,
+            extra_check=self._extra_check,
+        )
+
+
 class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
     """This pass fuses aiter rms_norm & vllm/aiter quant custom ops
     into a fused rms_norm_quant op.
@@ -744,7 +854,15 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         # additionally covers the rms_norm -> view -> 2x quant shape that
         # appears when the FP8 linear path inserts a 2D-flatten boilerplate
         # (DSv3.2 MLA indexer q_c norm).
+        fuse_mxfp4 = match_aiter_quant_op and current_platform.supports_mx()
+
         for epsilon in [1e-5, 1e-6]:
+            if fuse_mxfp4:
+                # Fuse aiter fused_add_rms_norm + MXFP4 GEMM activation quant
+                AiterFusedAddRMSMxfp4QuantGemmPattern(epsilon).register(self.patterns)
+                # Fuse aiter rms_norm + MXFP4 GEMM activation quant
+                AiterRMSMxfp4QuantGemmPattern(epsilon).register(self.patterns)
+
             # Fuse aiter rms_norm + 2x aiter group fp8 quant
             DoubleAiterRMSFp8GroupQuantPattern(
                 epsilon, FP8_DTYPE, GroupShape(1, 128), match_aiter_quant_op
@@ -838,6 +956,8 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             DoubleAiterRMSFp8GroupQuantPattern,
             DoubleAiterRMSFp8GroupQuantViewPattern,
             AiterRMSNormGatedFp8GroupQuantPattern,
+            AiterRMSMxfp4QuantGemmPattern,
+            AiterFusedAddRMSMxfp4QuantGemmPattern,
         ]
         return self.hash_source(self, *fusion_patterns)
 

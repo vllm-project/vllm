@@ -36,17 +36,17 @@ The table below lists the quantization schemes supported by each fusion on each 
 **—** means the fusion is not available on that platform. The latest and in-progress work is available in the tracking issue:
 [#36066](https://github.com/vllm-project/vllm/issues/36066)
 
-| Fusion                       | SM100 (Blackwell)                        | SM90 (Hopper)                            | SM89 (Ada)                               | SM80 (Ampere) | ROCm                                     |
-| ---------------------------- | ---------------------------------------- | ---------------------------------------- | ---------------------------------------- | ------------- | ---------------------------------------- |
-| `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVFP4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
-| `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
-| `fuse_attn_quant` (MLA)\*    | FP8 static\*, FP8 per-group\*, NVFP4\*   | FP8 static\*, FP8 per-group\*            | FP8 static\*, FP8 per-group\*            | —             | FP8 static\* (untested)                  |
-| `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
-| `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16                                | FP16/BF16     | —                                        |
-| `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
-| `fuse_act_quant`             | FP8 static, NVFP4                        | FP8 static, FP8 per-group (128/64)       | FP8 static, FP8 per-group (128/64)       | —             | FP8 per-group                            |
-| `fuse_act_padding`           | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
-| `fuse_mla_dual_rms_norm`     | —                                        | —                                        | —                                        | —             | BF16                                     |
+| Fusion                       | SM100 (Blackwell)                        | SM90 (Hopper)                            | SM89 (Ada)                               | SM80 (Ampere) | ROCm                                                     |
+| ---------------------------- | ---------------------------------------- | ---------------------------------------- | ---------------------------------------- | ------------- | -------------------------------------------------------- |
+| `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVFP4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                                        |
+| `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                                             |
+| `fuse_attn_quant` (MLA)\*    | FP8 static\*, FP8 per-group\*, NVFP4\*   | FP8 static\*, FP8 per-group\*            | FP8 static\*, FP8 per-group\*            | —             | FP8 static\* (untested)                                  |
+| `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                                |
+| `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16                                | FP16/BF16     | —                                                        |
+| `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group, MXFP4 (gfx950) |
+| `fuse_act_quant`             | FP8 static, NVFP4                        | FP8 static, FP8 per-group (128/64)       | FP8 static, FP8 per-group (128/64)       | —             | FP8 per-group                                            |
+| `fuse_act_padding`           | —                                        | —                                        | —                                        | —             | FP16/BF16                                                |
+| `fuse_mla_dual_rms_norm`     | —                                        | —                                        | —                                        | —             | BF16                                                     |
 
 \* `fuse_attn_quant` support depends on the attention backend in use; not all backends support
 fused quantization output. See the [`fuse_attn_quant` section](#attention--quantization-fuse_attn_quant)
@@ -228,6 +228,7 @@ Supported quantization scheme/hardware combinations:
 - FP8 static per-tensor: CUDA & HIP kernel
 - FP8 dynamic per-token: CUDA & HIP kernel, AITER
 - FP8 dynamic per-token-group (128/64): CUDA & HIP kernel, AITER
+- MXFP4 dynamic: AITER (gfx950+)
 
 **Code locations.**
 

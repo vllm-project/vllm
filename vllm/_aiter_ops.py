@@ -922,6 +922,15 @@ def _rocm_aiter_w8a8_gemm_fake(
     return Y
 
 
+def _mxfp4_use_preshuffle_gemm(M: int, N: int, K: int) -> bool:
+    # The preshuffle kernel's tuned configs split K in some M buckets.
+    return (
+        M <= 64
+        and not envs.VLLM_BATCH_INVARIANT
+        and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
+    )
+
+
 def _rocm_aiter_mxfp4_gemm_dynamic_quant_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -951,12 +960,7 @@ def _rocm_aiter_mxfp4_gemm_dynamic_quant_impl(
     if rocm_use_aiter_fp4_asm_gemm:
         from aiter import gemm_a4w4, per_1x32_f4_quant_hip
 
-        # The preshuffle kernel's tuned configs split K in some M buckets.
-        if (
-            M <= 64
-            and not envs.VLLM_BATCH_INVARIANT
-            and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
-        ):
+        if _mxfp4_use_preshuffle_gemm(M, N, K):
             if x_scales is None:
                 # use hip quant kernel for performance
                 x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=M >= 32, **quant_kwargs)
@@ -1661,6 +1665,87 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
         torch.empty_like(x, dtype=FP8_DTYPE, device=x.device),
         torch.empty(scale_shape, dtype=torch.float32, device=x.device),
     )
+
+
+def _rocm_aiter_rms_mxfp4_quant(
+    x: torch.Tensor,
+    residual: torch.Tensor | None,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    gemm_weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    from aiter.ops.triton.quant import fused_rms_mxfp4_quant
+
+    M, (N, K) = x.shape[0], gemm_weight.shape
+    shuffle = M >= 32 or not _mxfp4_use_preshuffle_gemm(M, N, K)
+    (x_q, x_s), _, _, residual_out = fused_rms_mxfp4_quant(
+        x,
+        weight,
+        variance_epsilon,
+        res1=residual,
+        shuffle=shuffle,
+        scale_shuffle_padding=True,
+    )
+    return (
+        x_q.view(torch.float4_e2m1fn_x2),
+        x_s.view(torch.float8_e8m0fnu),
+        residual_out,
+    )
+
+
+def _rocm_aiter_rms_mxfp4_quant_fake_outputs(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, K = x.shape
+    x_q = torch.empty((M, K // 2), dtype=torch.float4_e2m1fn_x2, device=x.device)
+    scale_shape = ((M + 255) // 256 * 256, ((K + 31) // 32 + 7) // 8 * 8)
+    x_s = torch.empty(scale_shape, dtype=torch.float8_e8m0fnu, device=x.device)
+    return x_q, x_s
+
+
+def _rocm_aiter_rmsnorm_mxfp4_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    gemm_weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    x_q, x_s, _ = _rocm_aiter_rms_mxfp4_quant(
+        x, None, weight, variance_epsilon, gemm_weight
+    )
+    return x_q, x_s
+
+
+def _rocm_aiter_rmsnorm_mxfp4_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    gemm_weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _rocm_aiter_rms_mxfp4_quant_fake_outputs(x)
+
+
+def _rocm_aiter_rmsnorm_with_add_mxfp4_quant_impl(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    gemm_weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    x_q, x_s, residual_out = _rocm_aiter_rms_mxfp4_quant(
+        x, residual, weight, variance_epsilon, gemm_weight
+    )
+    return x_q, residual_out, x_s
+
+
+def _rocm_aiter_rmsnorm_with_add_mxfp4_quant_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    gemm_weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    x_q, x_s = _rocm_aiter_rms_mxfp4_quant_fake_outputs(x)
+    return x_q, torch.empty_like(residual), x_s
 
 
 def _rocm_aiter_fused_rms_fp8_per_tensor_static_quant_impl(
@@ -3597,6 +3682,18 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_mxfp4_quant",
+                op_func=_rocm_aiter_rmsnorm_mxfp4_quant_impl,
+                fake_impl=_rocm_aiter_rmsnorm_mxfp4_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_with_add_mxfp4_quant",
+                op_func=_rocm_aiter_rmsnorm_with_add_mxfp4_quant_impl,
+                fake_impl=_rocm_aiter_rmsnorm_with_add_mxfp4_quant_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_act_mul_and_fp8_group_quant",
                 op_func=_rocm_aiter_act_mul_and_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
@@ -3731,6 +3828,18 @@ class rocm_aiter_ops:
     @staticmethod
     def get_rmsnorm_group_add_fused_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant.default
+
+    @staticmethod
+    def get_rmsnorm_mxfp4_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rmsnorm_mxfp4_quant.default
+
+    @staticmethod
+    def get_rmsnorm_with_add_mxfp4_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rmsnorm_with_add_mxfp4_quant.default
+
+    @staticmethod
+    def get_mxfp4_gemm_dynamic_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_mxfp4_gemm_dynamic_quant.default
 
     @staticmethod
     def get_per_token_quant_op() -> OpOverload:
