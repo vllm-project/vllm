@@ -462,10 +462,12 @@ Both retry and scale-down require `--enable-fault-tolerance`,
 `deepep_low_latency`).
 Retry can recover from a fault when all workers remain alive.
 
-Engines detect a dead rank on another engine when their all2all kernels time out.
-With `nixl_ep`, this timeout defaults to 30000 ms; set
-`--fault-tolerance-config.nixl_ep_timeout_ms` to detect faults sooner. Too low a
-value can mask a healthy peer that is only slow.
+Engines detect a dead rank on another engine when a collective with it times out:
+a CPU group collective (`--cpu-distributed-timeout-seconds`) or, during the
+forward pass, an all2all kernel. With `nixl_ep`, the kernel timeout defaults to
+30000 ms; lower `--fault-tolerance-config.nixl_ep_timeout_ms` together with
+`--cpu-distributed-timeout-seconds` to detect faults sooner. Too low a value can
+mask a healthy peer that is only slow.
 
 For scale-down recovery, also enable `--enable-eplb` and configure enough
 redundant expert slots with `--eplb-config.num_redundant_experts` to fit all

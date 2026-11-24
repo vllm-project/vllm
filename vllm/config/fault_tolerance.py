@@ -36,8 +36,9 @@ class FaultToleranceConfig:
     """GPU kernel timeout (in milliseconds) of the `nixl_ep` all2all backend.
     When a rank waits longer than this for a peer in dispatch or combine,
     NIXL EP marks the peer invalid and masks it out. With fault tolerance
-    enabled, surviving engines detect a dead rank on another engine through
-    this timeout. If None, NIXL EP's default (30000 ms) applies. Other all2all
+    enabled, surviving engines detect a dead rank on another engine when this
+    timeout or the CPU group timeout (`cpu_distributed_timeout_seconds`)
+    expires. If None, NIXL EP's default (30000 ms) applies. Other all2all
     backends ignore this setting.
     """
 
