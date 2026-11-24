@@ -22,8 +22,6 @@ pub enum Error {
     MissingChatTemplate,
     #[error("chat template error: {0}")]
     ChatTemplate(String),
-    #[error("chat template error: {0}")]
-    InvalidRequestChatTemplate(String),
     #[error("{message}")]
     ChatTemplateThrown { message: String },
     #[error("{0}")]
@@ -161,9 +159,9 @@ impl Error {
             Self::ToolChoiceRequiresTools | Self::ToolChoiceFunctionNotFound { .. } => {
                 ErrorKind::invalid_param("tool_choice")
             }
-            Self::UntrustedRequestChatTemplate
-            | Self::UnsupportedRequestChatTemplate
-            | Self::InvalidRequestChatTemplate(_) => ErrorKind::invalid_param("chat_template"),
+            Self::UntrustedRequestChatTemplate | Self::UnsupportedRequestChatTemplate => {
+                ErrorKind::invalid_param("chat_template")
+            }
             Self::ChatTemplateThrown { .. }
             | Self::InvalidReasoningControl { .. }
             | Self::ParserUnavailableForModel { .. }

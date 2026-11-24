@@ -232,16 +232,8 @@ impl HfChatRenderer {
             .chat_options
             .chat_template
             .as_ref()
-            .map(|template| {
-                self.compile_template(template.clone(), self.request_template_fuel).map_err(
-                    |error| match error {
-                        Error::ChatTemplate(message) => Error::InvalidRequestChatTemplate(message),
-                        other => other,
-                    },
-                )
-            })
+            .map(|template| self.compile_template(template.clone(), self.request_template_fuel))
             .transpose()?;
-        let is_request_override = override_template.is_some();
         let model_template = if request.tools().is_empty() {
             None
         } else {
@@ -253,14 +245,13 @@ impl HfChatRenderer {
             .or(model_template)
             .ok_or(Error::MissingChatTemplate)?;
 
-        self.apply_chat_template_inner(template, request, is_request_override)
+        self.apply_chat_template_inner(template, request)
     }
 
     fn apply_chat_template_inner(
         &self,
         effective_template: &CompiledChatTemplate,
         request: &ChatRequest,
-        is_request_override: bool,
     ) -> Result<RenderedPrompt> {
         let lowered = effective_template.developer_role().lower(&request.messages);
         let content_format = effective_template.content_format_for(&lowered);
@@ -303,22 +294,12 @@ impl HfChatRenderer {
                 Some(message) => Error::ChatTemplateThrown {
                     message: message.to_owned(),
                 },
-                None if is_request_override => {
-                    Error::InvalidRequestChatTemplate(error.to_report_string())
-                }
                 None => Error::ChatTemplate(error.to_report_string()),
             })?;
 
         let prompt = match &final_message_text {
             Some(final_message_text) => {
-                truncate_prompt_at_continue_final_message_tag(prompt, final_message_text).map_err(
-                    |error| match error {
-                        Error::ChatTemplate(message) if is_request_override => {
-                            Error::InvalidRequestChatTemplate(message)
-                        }
-                        other => other,
-                    },
-                )?
+                truncate_prompt_at_continue_final_message_tag(prompt, final_message_text)?
             }
             None => prompt,
         };
@@ -1527,29 +1508,10 @@ mod tests {
         assert!(render(Some(template), &request).is_ok());
 
         request.chat_options.chat_template = Some(template.to_string());
-        let error =
-            render(None, &request).expect_err("expected the request template to run out of fuel");
-        assert_eq!(
-            error.kind(),
-            crate::ErrorKind::invalid_param("chat_template")
-        );
-        let Error::InvalidRequestChatTemplate(message) = error else {
-            panic!("expected InvalidRequestChatTemplate, got: {error:?}");
+        let Err(Error::ChatTemplate(message)) = render(None, &request) else {
+            panic!("expected the request template to run out of fuel");
         };
         expect!["chat template exceeded its fuel budget; adjust VLLM_CHAT_TEMPLATE_FUEL to override: engine ran out of fuel (in chat:1)"].assert_eq(&message);
-    }
-
-    #[test]
-    fn invalid_request_chat_template_is_a_request_validation_error() {
-        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-        request.chat_options.chat_template = Some("{% if unclosed".to_string());
-
-        let error = render(None, &request).unwrap_err();
-        assert!(matches!(error, Error::InvalidRequestChatTemplate(_)));
-        assert_eq!(
-            error.kind(),
-            crate::ErrorKind::invalid_param("chat_template")
-        );
     }
 
     #[test]
