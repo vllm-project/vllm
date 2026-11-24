@@ -187,13 +187,23 @@ class CpuPlatform(Platform):
                 logger.info("Cannot use %s backend on CPU.", selected_backend)
             logger.debug_once("Using %s backend.", AttentionBackendEnum.CPU_MLA.name)
             return AttentionBackendEnum.CPU_MLA.get_path()
-        if attn_selector_config.kv_cache_dtype == "ultraquant_4bit":
+        if kv_cache_dtype == "ultraquant_4bit":
             # Selected by the KV cache dtype: the slot is packed FP4 codes and
-            # UE8M0 scales, which CPU_ATTN cannot address.
-            logger.info_once(
-                "Using %s backend.", AttentionBackendEnum.CPU_ULTRAQUANT.name
+            # UE8M0 scales, which CPU_ATTN cannot address. Validated because
+            # this backend serves fewer head sizes and no sliding window, so
+            # unlike CPU_ATTN it cannot take whatever the layer brings.
+            backend = AttentionBackendEnum.CPU_ULTRAQUANT
+            invalid_reasons = backend.get_class().validate_configuration(
+                device_capability=cls.get_device_capability(),  # type: ignore[arg-type]
+                **attn_selector_config._asdict(),
             )
-            return AttentionBackendEnum.CPU_ULTRAQUANT.get_path()
+            if invalid_reasons:
+                raise ValueError(
+                    f"--kv-cache-dtype {kv_cache_dtype} cannot serve this model "
+                    f"on CPU: {', '.join(invalid_reasons)}."
+                )
+            logger.info_once("Using %s backend.", backend.name)
+            return backend.get_path()
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if not AttentionBackendEnum.CPU_ATTN.get_class().supports_kv_cache_dtype(
