@@ -114,7 +114,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
 )
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 from vllm.v1.structured_output import StructuredOutputManager
@@ -126,6 +126,36 @@ logger = init_logger(__name__)
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
+
+
+def _is_noop_empty_step(core: "EngineCore", scheduler_output: SchedulerOutput) -> bool:
+    """Whether a 0-token step carries no worker-side state updates or
+    connector polling and can safely skip the `execute_model` RPC."""
+    if not isinstance(scheduler_output, SchedulerOutput):
+        return False
+    if (
+        scheduler_output.total_num_scheduled_tokens > 0
+        or core.is_mm_encoder_only
+        or core.vllm_config.kv_transfer_config is not None
+        or core.vllm_config.ec_transfer_config is not None
+        or core.vllm_config.aux_output_config.enabled
+        or core.vllm_config.parallel_config.pipeline_parallel_size > 1
+    ):
+        return False
+    return not (
+        scheduler_output.scheduled_new_reqs
+        or scheduler_output.scheduled_cached_reqs.req_ids
+        or scheduler_output.scheduled_encoder_inputs
+        or scheduler_output.finished_req_ids
+        or scheduler_output.preempted_req_ids
+        or scheduler_output.free_encoder_mm_hashes
+        or scheduler_output.encoder_input_updates
+        or scheduler_output.new_block_ids_to_zero
+        or scheduler_output.kv_cache_block_copies
+        or scheduler_output.kv_connector_metadata is not None
+        or scheduler_output.aux_output_connector_metadata is not None
+        or scheduler_output.ec_connector_metadata is not None
+    )
 
 
 class EngineCore:
@@ -709,14 +739,17 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
-        if scheduler_output.total_num_scheduled_tokens > 0:
-            self.num_executed_steps += 1
-        future = self.model_executor.execute_model(scheduler_output, non_block=True)
-        grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-        with self.log_error_detail(scheduler_output):
-            model_output = self._wait_for_output(future)
-            if model_output is None:
-                model_output = self.model_executor.sample_tokens(grammar_output)
+        if _is_noop_empty_step(self, scheduler_output):
+            model_output = EMPTY_MODEL_RUNNER_OUTPUT
+        else:
+            if scheduler_output.total_num_scheduled_tokens > 0:
+                self.num_executed_steps += 1
+            future = self.model_executor.execute_model(scheduler_output, non_block=True)
+            grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+            with self.log_error_detail(scheduler_output):
+                model_output = self._wait_for_output(future)
+                if model_output is None:
+                    model_output = self.model_executor.sample_tokens(grammar_output)
         iteration_details = self._untimed_iteration_details(scheduler_output)
 
         # Before processing the model output, process any aborts that happened
@@ -771,48 +804,57 @@ class EngineCore:
         # Workers need a deferred step's sample_tokens() before the next step.
         if self.deferred_step is None and self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
-            with self.log_error_detail(scheduler_output):
-                exec_future = self.model_executor.execute_model(
-                    scheduler_output, non_block=True
-                )
-            if not self.is_mm_encoder_only:
-                model_executed = scheduler_output.total_num_scheduled_tokens > 0
-            if model_executed:
-                self.num_executed_steps += 1
-
-            if self.is_pooling_model or not model_executed:
-                # No sampling required (no requests scheduled).
-                future = cast(Future[ModelRunnerOutput], exec_future)
+            if _is_noop_empty_step(self, scheduler_output):
+                if not batch_queue:
+                    self._process_aborts_queue()
+                    engine_core_outputs = self.scheduler.update_from_output(
+                        scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT
+                    )
+                    self._attach_weight_version(engine_core_outputs)
+                    return engine_core_outputs, False
             else:
-                if not scheduler_output.pending_structured_output_tokens:
-                    if scheduler_output.has_structured_output_spec_decode:
-                        draft_token_ids = self.model_executor.take_draft_token_ids()
-                        if draft_token_ids is not None:
-                            self.scheduler.update_draft_token_ids_in_output(
-                                draft_token_ids, scheduler_output
-                            )
-                    # We aren't waiting for any tokens, get any grammar output
-                    # and sample immediately.
-                    grammar_output = self.scheduler.get_grammar_bitmask(
-                        scheduler_output
+                with self.log_error_detail(scheduler_output):
+                    exec_future = self.model_executor.execute_model(
+                        scheduler_output, non_block=True
                     )
-                    future = self.model_executor.sample_tokens(
-                        grammar_output, non_block=True
-                    )
-                else:
-                    # We need to defer sampling until we have processed the model
-                    # outputs from the prior steps.
-                    self.deferred_step = (scheduler_output, exec_future)
+                if not self.is_mm_encoder_only:
+                    model_executed = scheduler_output.total_num_scheduled_tokens > 0
+                if model_executed:
+                    self.num_executed_steps += 1
 
-            if self.deferred_step is None:
-                # Add this step's future to the queue.
-                batch_queue.appendleft((future, scheduler_output, exec_future))
-                if len(batch_queue) < self.batch_queue_size and (
-                    model_executed or self.scheduler.has_requests()
-                ):
-                    # Don't block on next worker response unless the queue is full
-                    # or there are no more requests to schedule.
-                    return None, model_executed
+                if self.is_pooling_model or not model_executed:
+                    # No sampling required (no requests scheduled).
+                    future = cast(Future[ModelRunnerOutput], exec_future)
+                else:
+                    if not scheduler_output.pending_structured_output_tokens:
+                        if scheduler_output.has_structured_output_spec_decode:
+                            draft_token_ids = self.model_executor.take_draft_token_ids()
+                            if draft_token_ids is not None:
+                                self.scheduler.update_draft_token_ids_in_output(
+                                    draft_token_ids, scheduler_output
+                                )
+                        # We aren't waiting for any tokens, get any grammar output
+                        # and sample immediately.
+                        grammar_output = self.scheduler.get_grammar_bitmask(
+                            scheduler_output
+                        )
+                        future = self.model_executor.sample_tokens(
+                            grammar_output, non_block=True
+                        )
+                    else:
+                        # We need to defer sampling until we have processed the model
+                        # outputs from the prior steps.
+                        self.deferred_step = (scheduler_output, exec_future)
+
+                if self.deferred_step is None:
+                    # Add this step's future to the queue.
+                    batch_queue.appendleft((future, scheduler_output, exec_future))
+                    if len(batch_queue) < self.batch_queue_size and (
+                        model_executed or self.scheduler.has_requests()
+                    ):
+                        # Don't block on next worker response unless the queue is full
+                        # or there are no more requests to schedule.
+                        return None, model_executed
 
         elif not batch_queue:
             # Queue is empty. We should not reach here since this method should
@@ -1866,6 +1908,9 @@ class EngineCoreProc(EngineCore):
             stats.iteration_records = records
             self.output_queue.put_nowait((0, EngineCoreOutputs(scheduler_stats=stats)))
 
+    def _should_sleep_on_empty_step(self) -> bool:
+        return self.scheduler.has_requests()
+
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
         get_watch_dog().feed()
@@ -1881,7 +1926,7 @@ class EngineCoreProc(EngineCore):
         # If no model execution happened but there is still scheduler work
         # (e.g. WAITING_FOR_REMOTE_KVS or delayed KV connector frees), yield
         # the GIL briefly to allow background transfer threads to make progress.
-        if not model_executed and self.scheduler.has_requests():
+        if not model_executed and self._should_sleep_on_empty_step():
             time.sleep(0.001)
 
         return model_executed
@@ -2752,6 +2797,16 @@ class DPEngineCoreProc(EngineCoreProc):
                 current_wave=self.current_wave,
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
+
+    def _should_sleep_on_empty_step(self) -> bool:
+        if not self.scheduler.has_requests():
+            return False
+        # Skip the 1 ms sleep when run_busy_loop is about to dispatch a dummy
+        # batch immediately; sleeping here would stall peer DP ranks on every
+        # empty step. Keep it while sleeping or idle-draining finished cleanup.
+        return self.model_executor.is_sleeping or (
+            not self.engines_running and not self.scheduler.has_unfinished_requests()
+        )
 
     def _should_throttle_prefills(self) -> bool:
         # Throttle new prefills to cadence-aligned steps for DP balancing.
