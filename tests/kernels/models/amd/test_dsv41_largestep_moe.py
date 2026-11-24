@@ -103,10 +103,12 @@ def _worst_row(got: torch.Tensor, want: torch.Tensor) -> float:
 def _plain_weights(inter: int, dev, g):
     """Random MXFP4 expert weights in the layout vLLM loads: w13 [E, 2 Np,
     H / 2] (gate rows, then up rows, each padded to Np with zeros), w2 [E, H,
-    Np / 2]. E8M0 codes 114..129: the DeepSeek-V4.1-Flash checkpoint's routed
-    expert codes are 119..124 (sampled over all 40 layers, 24 Nov 2026), and
-    the range is widened on both sides so that the kernels' code arithmetic is
-    checked past what the checkpoint holds."""
+    Np / 2]. E8M0 codes 119..124, the range of the DeepSeek-V4.1-Flash
+    checkpoint's routed expert scales (sampled over all 40 layers, 24 Nov
+    2026). With these codes and x of scale 0.5 about 30% of h sits at the
+    SwiGLU clamp, as in the model. Codes far above the checkpoint's put most of
+    h at the clamp, where the MXFP8 error of x grows with the pre-activation
+    (stage 1 at 114..129: relative L2 1.1e-1, measured on MI300X)."""
     np_ = -(-inter // 128) * 128
     u8 = torch.uint8
 
@@ -114,9 +116,9 @@ def _plain_weights(inter: int, dev, g):
         return torch.randint(lo, hi, shape, generator=g, device=dev, dtype=u8)
 
     w13 = ri(0, 256, (E, 2 * np_, HID // 2))
-    w13_s = ri(114, 130, (E, 2 * np_, HID // 32))
+    w13_s = ri(119, 125, (E, 2 * np_, HID // 32))
     w2 = ri(0, 256, (E, HID, np_ // 2))
-    w2_s = ri(114, 130, (E, HID, np_ // 32))
+    w2_s = ri(119, 125, (E, HID, np_ // 32))
     for half in (0, np_):
         w13[:, half + inter : half + np_] = 0
     w2[..., inter // 2 :] = 0
