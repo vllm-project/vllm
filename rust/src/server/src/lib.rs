@@ -181,6 +181,10 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         let n_readers = client.world_size() as u32;
         info!(shm_name = %cache.shm_name(), n_readers, "shm mm processor cache reader count set");
         cache.set_n_readers(n_readers);
+        // Every worker opened the segment by name while initializing, before
+        // the engine reported ready, so the name is no longer needed. Dropping
+        // it now means a crash of any process cannot leak the segment.
+        cache.unlink_name();
     }
 
     let llm = EngineCoreLlm::new(client)
