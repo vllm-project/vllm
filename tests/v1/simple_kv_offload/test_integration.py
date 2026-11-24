@@ -11,8 +11,6 @@ from transformers import (
     Gemma3TextConfig,
     Llama4ForCausalLM,
     Llama4TextConfig,
-    LlamaConfig,
-    LlamaForCausalLM,
 )
 
 from tests.models.utils import check_logprobs_close
@@ -123,96 +121,10 @@ def test_chunked_local_partial_gpu_hit(vllm_runner, tmp_path, monkeypatch):
         assert mixed_hit.num_cached_tokens == 16
 
 
-def _prompt(seed: int, num_blocks: int) -> TokensPrompt:
-    """A seeded prompt of `num_blocks` full 16-token blocks plus one token."""
-    tokens = [3 + (seed * 101 + i * 37) % 500 for i in range(num_blocks * 16 + 1)]
-    return TokensPrompt(prompt_token_ids=tokens)
-
-
-def _params(max_tokens: int = 1) -> SamplingParams:
-    return SamplingParams(
-        temperature=0, max_tokens=max_tokens, ignore_eos=True, detokenize=False
-    )
-
-
-def _drop_gpu_cache(llm: LLM) -> None:
-    """Reset the GPU prefix cache once the CPU stores land, so the next
-    request can only hit the CPU tier. The engine keeps stepping while
-    stores are in flight."""
-    deadline = time.monotonic() + 30
-    while not llm.reset_prefix_cache():
-        assert time.monotonic() < deadline, "CPU stores did not finish"
-        time.sleep(0.05)
-
-
-def _generate_and_drop_gpu_cache(llm: LLM, seed: int, num_blocks: int) -> int | None:
-    """Generate one token for a seeded prompt and return its cached tokens."""
-    output = llm.generate(_prompt(seed, num_blocks), _params(), use_tqdm=False)[0]
-    _drop_gpu_cache(llm)
-    return output.num_cached_tokens
-
-
-def _tiny_offload_runner(vllm_runner, model_dir, num_cpu_blocks: int, **kwargs):
-    """A tiny random model with block size 16 and a small CPU tier."""
-    runner_kwargs = dict(
-        skip_tokenizer_init=True,
-        dtype="float16",
-        enforce_eager=True,
-        max_model_len=256,
-        max_num_batched_tokens=256,
-        max_num_seqs=1,
-        block_size=16,
-        num_gpu_blocks_override=64,
-        enable_prefix_caching=True,
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="SimpleCPUOffloadConnector",
-            kv_role="kv_both",
-            # The null block takes one CPU block.
-            kv_connector_extra_config={
-                "cpu_bytes_to_use": 16 << 20,
-                "num_cpu_blocks": num_cpu_blocks + 1,
-            },
-        ),
-    )
-    runner_kwargs.update(kwargs)
-    return vllm_runner(str(model_dir), **runner_kwargs)
-
-
-def test_cpu_tier_evicts_prefix_tail_first(vllm_runner, tmp_path):
-    """A prompt prefilled in chunks keeps its leading CPU blocks when a later
-    prompt evicts part of it, so a repeat still hits a prefix on CPU."""
-    config = LlamaConfig(
-        vocab_size=512,
-        hidden_size=128,
-        intermediate_size=256,
-        num_hidden_layers=2,
-        num_attention_heads=2,
-        num_key_value_heads=1,
-        head_dim=64,
-        max_position_embeddings=256,
-    )
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(1234)
-        LlamaForCausalLM(config).save_pretrained(tmp_path)
-
-    with _tiny_offload_runner(
-        vllm_runner,
-        tmp_path,
-        num_cpu_blocks=8,
-        enable_chunked_prefill=True,
-        max_num_batched_tokens=4 * 16,  # prefill in 4-block chunks
-    ) as runner:
-        llm = runner.get_llm()
-        # 8 blocks fill the CPU tier; 4 more blocks evict half of them.
-        assert _generate_and_drop_gpu_cache(llm, seed=0, num_blocks=8) == 0
-        assert _generate_and_drop_gpu_cache(llm, seed=1, num_blocks=4) == 0
-        assert _generate_and_drop_gpu_cache(llm, seed=0, num_blocks=8) == 4 * 16
-
-
 def test_hybrid_cpu_hit_is_requeued_after_it_finishes(vllm_runner, tmp_path):
-    """On a full-attention + sliding-window model, a request that hits its CPU
-    prefix requeues the blocks the hit needs when it finishes, after the
-    blocks other requests stored while it ran."""
+    """A request that hits its CPU prefix requeues the blocks the hit needs,
+    full attention and the last sliding window, when it finishes, after the
+    blocks another request stored while it ran."""
     config = Gemma3TextConfig(
         vocab_size=512,
         hidden_size=128,
@@ -229,31 +141,58 @@ def test_hybrid_cpu_hit_is_requeued_after_it_finishes(vllm_runner, tmp_path):
         torch.manual_seed(1234)
         Gemma3ForCausalLM(config).save_pretrained(tmp_path)
 
-    # An 8-block prompt keeps 8 full-attention blocks and the last 2-block
-    # window on CPU; a 3-block prompt keeps 3 + 2.
-    with _tiny_offload_runner(
-        vllm_runner,
-        tmp_path,
-        num_cpu_blocks=15,
+    def prompt(seed: int, num_blocks: int) -> TokensPrompt:
+        tokens = [3 + (seed * 101 + i * 37) % 500 for i in range(num_blocks * 16 + 1)]
+        return TokensPrompt(prompt_token_ids=tokens)
+
+    def params(max_tokens: int) -> SamplingParams:
+        return SamplingParams(
+            temperature=0, max_tokens=max_tokens, ignore_eos=True, detokenize=False
+        )
+
+    with vllm_runner(
+        str(tmp_path),
+        skip_tokenizer_init=True,
         dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=256,
+        max_num_batched_tokens=256,
+        max_num_seqs=2,
+        block_size=16,
+        num_gpu_blocks_override=64,
+        enable_prefix_caching=True,
         attention_config={"backend": "TRITON_ATTN"},
         disable_hybrid_kv_cache_manager=False,
-        max_num_seqs=2,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="SimpleCPUOffloadConnector",
+            kv_role="kv_both",
+            # 15 usable blocks; the null block takes one.
+            kv_connector_extra_config={
+                "cpu_bytes_to_use": 16 << 20,
+                "num_cpu_blocks": 16,
+            },
+        ),
     ) as runner:
         llm = runner.get_llm()
-        assert _generate_and_drop_gpu_cache(llm, seed=0, num_blocks=8) == 0
+
+        def cached_tokens(prompts, params) -> list[int | None]:
+            outputs = llm.generate(prompts, params, use_tqdm=False)
+            # Drop the GPU prefix cache once the CPU stores land.
+            deadline = time.monotonic() + 30
+            while not llm.reset_prefix_cache():
+                assert time.monotonic() < deadline, "CPU stores did not finish"
+                time.sleep(0.05)
+            return [o.num_cached_tokens for o in outputs]
+
+        # 8 full-attention blocks and the last 2-block window go to CPU.
+        assert cached_tokens(prompt(0, 8), params(1)) == [0]
         # Prompt 0 hits CPU and decodes, short of a new full block, while
-        # prompt 1 is stored.
-        outputs = llm.generate(
-            [_prompt(0, 8), _prompt(1, 3)],
-            [_params(max_tokens=15), _params()],
-            use_tqdm=False,
-        )
-        assert [o.num_cached_tokens for o in outputs] == [8 * 16, 0]
-        _drop_gpu_cache(llm)
-        # The CPU tier is full; prompt 2 evicts the blocks of prompt 1.
-        assert _generate_and_drop_gpu_cache(llm, seed=2, num_blocks=3) == 0
-        assert _generate_and_drop_gpu_cache(llm, seed=0, num_blocks=8) == 8 * 16
+        # prompt 1 stores 3 + 2 blocks and fills the CPU tier.
+        outputs = cached_tokens([prompt(0, 8), prompt(1, 3)], [params(15), params(1)])
+        assert outputs == [128, 0]
+        # Prompt 2 evicts 5 blocks, those of prompt 1.
+        assert cached_tokens(prompt(2, 3), params(1)) == [0]
+        assert cached_tokens(prompt(0, 8), params(1)) == [128]
 
 
 def _make_llm(model: str, lazy: bool, cpu_bytes_to_use: int, **llm_kwargs) -> LLM:

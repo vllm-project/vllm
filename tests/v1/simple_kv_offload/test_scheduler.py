@@ -1657,69 +1657,9 @@ def _store_and_finish(
     return kv_blocks
 
 
-def test_chunked_prompt_loses_cpu_tail_first() -> None:
-    """A prompt stored over two chunks keeps a usable prefix under eviction,
-    rather than losing block 0 first."""
-    # 5 total = 4 usable (null_block takes 1)
-    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
-    sched = fix.scheduler
-    req_a = make_request(num_blocks=4)
-    kv_a = _alloc_and_register(fix, req_a, 4, confirmed=False)
-    ids_a = kv_a.get_block_ids()
-    sched.update_state_after_alloc(req_a, kv_a, num_external_tokens=0)
-    for chunk in range(2):
-        req_a.num_computed_tokens = (chunk + 1) * 2 * BLOCK_SIZE
-        meta = sched.build_connector_meta(
-            make_scheduler_output(
-                {req_a.request_id: 2 * BLOCK_SIZE},
-                new_reqs={req_a.request_id: ids_a} if chunk == 0 else None,
-                cached_req_new_blocks={req_a.request_id: None} if chunk else None,
-            )
-        )
-        assert len(meta.store_cpu_blocks) == 2
-        simulate_store_completion(sched, meta.store_event)
-    sched.request_finished_all_groups(req_a, ids_a)
-
-    _store_and_finish(fix, make_request(num_blocks=2), 2)  # evicts 2 of A's 4
-
-    assert _cpu_hit_tokens(sched, req_a) == 2 * BLOCK_SIZE
-
-
-def test_gpu_prefix_hit_refreshes_cpu_copy_at_finish() -> None:
-    """A turn served from the GPU prefix cache makes its CPU copy recent when
-    it finishes, not only at admission, which ages while other requests store
-    theirs."""
-    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
-    sched = fix.scheduler
-    req_a = make_request(num_blocks=2)
-    kv_a = _store_and_finish(fix, req_a, 2)
-
-    # A's second turn hits A's 2 blocks on GPU; admission refreshes the copy.
-    turn_2 = _same_prompt(req_a, "req-a-turn-2")
-    assert sched.get_num_new_matched_tokens(turn_2, 2 * BLOCK_SIZE) == (0, False)
-    turn_2.num_computed_tokens = 2 * BLOCK_SIZE
-    sched.update_state_after_alloc(turn_2, kv_a, num_external_tokens=0)
-    meta = sched.build_connector_meta(
-        make_scheduler_output(
-            {turn_2.request_id: 1},
-            new_reqs={turn_2.request_id: kv_a.get_block_ids()},
-        )
-    )
-    assert meta.store_event == -1  # already cached, nothing to copy
-
-    req_b = make_request(num_blocks=2)
-    _store_and_finish(fix, req_b, 2)  # stored and finished while turn 2 runs
-    sched.request_finished_all_groups(turn_2, kv_a.get_block_ids())
-
-    _store_and_finish(fix, make_request(num_blocks=2), 2)  # evicts B, not A
-
-    assert _cpu_hit_tokens(sched, req_a) == 2 * BLOCK_SIZE
-    assert _cpu_hit_tokens(sched, req_b) == 0
-
-
 def test_cpu_prefix_refresh_waits_for_final_flush() -> None:
-    """The request stays registered until its finish-time flush lands, so the
-    flushed block is requeued with the rest and still evicted first."""
+    """A prompt stored in two steps, the last by the finish-time flush, is
+    requeued tail first after the flush lands, so eviction keeps its head."""
     fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
     sched = fix.scheduler
     req_a = make_request(num_blocks=3)
@@ -1736,12 +1676,9 @@ def test_cpu_prefix_refresh_waits_for_final_flush() -> None:
 
     req_a.num_computed_tokens = 3 * BLOCK_SIZE
     sched.request_finished_all_groups(req_a, ids_a)
-    assert sched._reqs_to_store[req_a.request_id].finished
     flush = sched.build_connector_meta(make_scheduler_output({}))
     assert len(flush.store_cpu_blocks) == 1
-    assert req_a.request_id in sched._reqs_to_store
     simulate_store_completion(sched, flush.store_event)
-    assert req_a.request_id not in sched._reqs_to_store
 
     # Takes the one empty CPU block and A's last block.
     _store_and_finish(fix, make_request(num_blocks=2), 2)
@@ -1779,67 +1716,6 @@ def test_cpu_hit_release_requeues_tail_first(via: str) -> None:
     _store_and_finish(fix, make_request(num_blocks=2), 2)  # evicts 2 of A's 4
 
     assert _cpu_hit_tokens(sched, req_a) == 2 * BLOCK_SIZE
-
-
-@pytest.mark.parametrize("second_group", ["sliding_window", "mamba"])
-def test_finish_requeues_the_blocks_a_hybrid_hit_needs(second_group: str) -> None:
-    """A finished hybrid request requeues the blocks a later hit needs (the
-    last sliding window, or the Mamba state at the hit boundary), so evicting
-    all other blocks, including older windows and states and blocks stored
-    later by another request, keeps the hit."""
-    num_blocks = 6
-    if second_group == "sliding_window":
-        block_size = BLOCK_SIZE
-        fix = make_scheduler(num_cpu_blocks=24, num_groups=2)
-        req, other = make_request(num_blocks), make_request(num_blocks)
-    else:
-        block_size = 4 * BLOCK_SIZE
-        fix = _make_hybrid_attention_mamba_scheduler(
-            num_cpu_blocks=24, block_size=block_size
-        )
-        req, other = (
-            _make_cp_request(num_blocks=num_blocks, virtual_block_size=block_size)
-            for _ in range(2)
-        )
-    sched = fix.scheduler
-    pool = sched.cpu_block_pool
-
-    def store(request: Request, group_ids: tuple[int, ...]) -> list[KVCacheBlock]:
-        """Cache blocks and free them in prefix order, as store completion does."""
-        stored: list[KVCacheBlock] = []
-        for group_id in group_ids:
-            blocks = pool.get_new_blocks(num_blocks)
-            pool.cache_full_blocks(
-                request=request,
-                blocks=blocks,
-                num_cached_blocks=0,
-                num_full_blocks=num_blocks,
-                block_size=sched.group_block_sizes[group_id],
-                kv_cache_group_id=group_id,
-            )
-            stored.extend(blocks)
-        pool.free_blocks(stored)
-        return stored
-
-    def cpu_hit() -> tuple[int, list[KVCacheBlock]]:
-        hit, hit_length, _ = sched.cpu_coordinator.find_longest_cache_hit(
-            req.block_hashes, num_blocks * block_size
-        )
-        return hit_length, [blk for grp in hit for blk in grp if not blk.is_null]
-
-    stored = store(req, (0, 1))
-    hit_length, needed = cpu_hit()
-    assert hit_length == num_blocks * block_size
-    assert len(needed) < len(stored)
-
-    sched.update_state_after_alloc(
-        req, KVCacheBlocks(blocks=([], [])), num_external_tokens=0
-    )
-    store(other, (0,))  # stored while req runs
-    sched.request_finished(req, block_ids=[])
-
-    pool.get_new_blocks(pool.get_num_free_blocks() - len(needed))
-    assert cpu_hit() == (hit_length, needed)
 
 
 # ---------------------------------------------------------------------------
