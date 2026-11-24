@@ -10,6 +10,8 @@ steps:
   - vllm/model_executor/model_loader/runai_streamer_loader.py
   - vllm/model_executor/model_loader/weight_utils.py
   - vllm/models/deepseek_v41/nvidia/dspark.py
+  - vllm/models/deepseek_v41/nvidia/model.py
+  - vllm/models/deepseek_v41/nvidia/vl_model.py
   - tests/model_executor/model_loader/runai_streamer_loader/
   commands:
   - uv pip install --python "$(command -v python)" --no-deps runai-model-streamer==0.17.1

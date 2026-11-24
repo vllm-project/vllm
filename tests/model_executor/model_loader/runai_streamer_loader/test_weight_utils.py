@@ -184,6 +184,71 @@ def test_runai_cpu_shards_reuse_ring_without_corrupting_retained_weights(
     assert os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] == "64"
 
 
+class _RetainingCpuWeightsModel(torch.nn.Module):
+    def __init__(self, expected):
+        super().__init__()
+        self.keys = {name: f"weight_{i}" for i, name in enumerate(expected)}
+        self.weights = torch.nn.ParameterDict(
+            {
+                self.keys[name]: torch.nn.Parameter(
+                    torch.empty_like(tensor), requires_grad=False
+                )
+                for name, tensor in expected.items()
+            }
+        )
+
+    def load_weights(self, weights):
+        for name, tensor in weights:
+            self.weights[self.keys[name]] = torch.nn.Parameter(
+                tensor, requires_grad=False
+            )
+
+
+class _CopyingCpuWeightsModel(_RetainingCpuWeightsModel):
+    def __init__(self, expected):
+        super().__init__(expected)
+        self.borrowed_inputs = []
+
+    def can_borrow_checkpoint_weight(self, name):
+        return name.startswith("copy_")
+
+    def load_weights(self, weights):
+        for name, tensor in weights:
+            if self.can_borrow_checkpoint_weight(name):
+                self.borrowed_inputs.append(tensor)
+                self.weights[self.keys[name]].data.copy_(tensor)
+            else:
+                self.weights[self.keys[name]] = torch.nn.Parameter(
+                    tensor, requires_grad=False
+                )
+
+
+@pytest.mark.parametrize(
+    "model_type", [_RetainingCpuWeightsModel, _CopyingCpuWeightsModel]
+)
+def test_runai_cpu_shards_ownership_comes_from_model(tmp_path, monkeypatch, model_type):
+    monkeypatch.setenv("RUNAI_STREAMER_MEMORY_LIMIT", "64")
+    expected = {
+        f"{mode}_{i}": torch.arange(65536, dtype=torch.float32) + i * 65536
+        for mode in ("copy", "retain")
+        for i in range(8)
+    }
+    path = tmp_path / "cpu.safetensors"
+    save_file(expected, path)
+    model = model_type(expected)
+    loader = _cpu_loader(path.name, cpu_memory_limit=65536 * 4)
+    loader.load_weights(model, _cpu_checkpoint(tmp_path))
+    for name, tensor in expected.items():
+        assert torch.equal(model.weights[model.keys[name]], tensor)
+    if isinstance(model, _CopyingCpuWeightsModel):
+        # Holding these views keeps owned tensors distinct. Borrowed views
+        # point into the reused ring; inspect addresses, not expired data.
+        assert len({t.data_ptr() for t in model.borrowed_inputs}) < len(
+            model.borrowed_inputs
+        )
+    assert os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] == "64"
+
+
 def test_runai_cpu_shards_restore_limit_when_consumer_closes(tmp_path, monkeypatch):
     monkeypatch.setenv("RUNAI_STREAMER_MEMORY_LIMIT", "64")
     path = tmp_path / "cpu.safetensors"

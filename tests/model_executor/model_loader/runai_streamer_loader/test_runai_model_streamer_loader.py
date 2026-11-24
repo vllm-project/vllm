@@ -253,8 +253,8 @@ def test_runai_model_loader_download_files_gcs(
 def test_runai_passes_revision_by_name():
     # revision must reach download_safetensors_index_file_from_hf as the
     # ``revision`` keyword, not the positional ``subfolder`` slot.
-    fake_self = types.SimpleNamespace(
-        load_config=types.SimpleNamespace(download_dir="/cache", ignore_patterns=[])
+    loader = rsl.RunaiModelStreamerLoader(
+        LoadConfig(download_dir="/cache", ignore_patterns=[])
     )
     with (
         patch.object(rsl, "is_runai_obj_uri", return_value=False),
@@ -264,7 +264,7 @@ def test_runai_passes_revision_by_name():
         ),
         patch.object(rsl, "download_safetensors_index_file_from_hf") as mock_idx,
     ):
-        rsl.RunaiModelStreamerLoader._prepare_weights(fake_self, "org/model", "myrev")
+        loader._prepare_weights("org/model", "myrev")
 
     mock_idx.assert_called_once()
     assert mock_idx.call_args.kwargs.get("revision") == "myrev"
@@ -337,11 +337,10 @@ def test_runai_invalid_extra_config_leaves_environ_untouched():
     ids=["object_storage", "hf_repo"],
 )
 def test_runai_get_all_weights_resolves_source(model_config, expected_source):
-    fake_self = types.SimpleNamespace(
-        _get_weights_iterator=lambda path, revision, is_unused_weight=None: iter(
-            [(f"{path}@{revision}", None)]
-        )
-    )
+    def iterator(path, revision, is_unused_weight=None, can_borrow_weight=None):
+        return iter([(f"{path}@{revision}", None)])
+
+    fake_self = types.SimpleNamespace(_get_weights_iterator=iterator)
 
     weights = list(
         rsl.RunaiModelStreamerLoader.get_all_weights(

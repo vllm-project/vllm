@@ -2038,6 +2038,10 @@ class DeepseekV41LLMForCausalLM(
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
+    def can_borrow_checkpoint_weight(self, name: str) -> bool:
+        # Engram copies these tables before requesting the next checkpoint tensor.
+        return ".engram.embed." in name
+
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mhc_broadcast_weights()
         config = self.model.vllm_config

@@ -12,7 +12,6 @@ from urllib.parse import urlsplit
 
 import torch
 from torch import nn
-from tqdm import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import ModelConfig
@@ -21,11 +20,9 @@ from vllm.distributed import get_world_group, in_single_pp_stage
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
-    _BAR_FORMAT,
     SafetensorsStreamer,
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
-    enable_tqdm,
     filter_safetensors_files_by_weight_name,
     runai_safetensors_weights_iterator,
 )
@@ -275,6 +272,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         model_or_path: str,
         revision: str | None,
         is_unused_weight: Callable[[str], bool] | None = None,
+        can_borrow_weight: Callable[[str], bool] | None = None,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
@@ -305,45 +303,37 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             else:
                 # Do not substitute another node's local checkpoint paths.
                 selected_files = hf_weights_files
-        return self._stream_weight_files(selected_files, is_distributed=is_distributed)
+        return self._stream_weight_files(
+            selected_files,
+            is_distributed=is_distributed,
+            can_borrow_weight=can_borrow_weight,
+        )
 
     def _stream_weight_files(
-        self, files: list[str], *, is_distributed: bool
+        self,
+        files: list[str],
+        *,
+        is_distributed: bool,
+        can_borrow_weight: Callable[[str], bool] | None = None,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
-        cpu_files = [
-            path for path in files if Path(path).name in self._cpu_weight_files
-        ]
-        ordinary_files = [path for path in files if path not in cpu_files]
+        ordinary_files, cpu_files = [], []
+        for path in files:
+            if Path(path).name in self._cpu_weight_files:
+                cpu_files.append(path)
+            else:
+                ordinary_files.append(path)
         if ordinary_files:
             yield from runai_safetensors_weights_iterator(
                 ordinary_files, self.load_config.use_tqdm_on_load, is_distributed
             )
-        if not cpu_files:
-            return
-        previous_limit = os.environ.get("RUNAI_STREAMER_MEMORY_LIMIT")
-        os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] = str(self._cpu_memory_limit)
-        try:
-            with SafetensorsStreamer() as streamer:
-                streamer.stream_files(
-                    cpu_files, device="cpu", is_distributed=False, owned=False
-                )
-                total = sum(map(len, streamer.files_to_tensors_metadata.values()))
-                for name, tensor in tqdm(
-                    streamer.get_tensors(),
-                    total=total,
-                    desc="Loading CPU safetensors using Runai Model Streamer",
-                    bar_format=_BAR_FORMAT,
-                    disable=not enable_tqdm(self.load_config.use_tqdm_on_load),
-                    mininterval=2,
-                ):
-                    # Engram copies its table synchronously into pinned storage.
-                    # Other weights may be retained after the ring is reused.
-                    yield name, tensor if ".engram.embed." in name else tensor.clone()
-        finally:
-            if previous_limit is None:
-                os.environ.pop("RUNAI_STREAMER_MEMORY_LIMIT", None)
-            else:
-                os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] = previous_limit
+        if cpu_files:
+            yield from runai_safetensors_weights_iterator(
+                cpu_files,
+                self.load_config.use_tqdm_on_load,
+                is_distributed=False,
+                memory_limit=self._cpu_memory_limit,
+                can_borrow_weight=can_borrow_weight,
+            )
 
     def download_model(self, model_config: ModelConfig) -> None:
         """Download model if necessary."""
@@ -361,6 +351,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             model_weights,
             model_config.revision,
             getattr(model, "is_unused_checkpoint_weight", None),
+            getattr(model, "can_borrow_checkpoint_weight", None),
         )
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:

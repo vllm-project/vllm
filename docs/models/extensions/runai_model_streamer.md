@@ -116,8 +116,9 @@ Set `cpu_weight_files` and `cpu_memory_limit` together; file names are relative
 basenames and must exist in the checkpoint. Each loading rank independently
 reads the CPU files after the ordinary phase. The CPU ring must fit the largest
 tensor. This changes staging, not the configured Engram storage location.
-DeepSeek's Engram tables are consumed synchronously from the reused ring;
-other weights in those files receive owned copies. The ordinary memory limit
+Models can expose `can_borrow_checkpoint_weight(name)` for weights they copy
+before requesting the next tensor. DeepSeek V4.1 uses this for Engram tables;
+weights without that guarantee receive owned copies. The ordinary memory limit
 is restored when the CPU iterator finishes, fails or closes early.
 
 The DSpark model's unused-weight predicate prevents rereading target-only shards
