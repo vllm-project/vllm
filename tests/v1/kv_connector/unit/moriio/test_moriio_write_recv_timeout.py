@@ -4,9 +4,9 @@
 
 Runs the real `Scheduler` and the real `MoRIIOConnectorWorker`
 `start_load_kv` / `get_transfer_results`, with no GPU or RDMA, at TP 2 through
-the real `KVOutputAggregator`; the reproducer runs one worker without it. One
-test covers the hybrid decode KV cache layouts: attention or MLA, each with a
-Mamba/KDA state group.
+the real `KVOutputAggregator`; the reproducer runs one worker without it. The
+TP-split test runs the hybrid decode KV cache layouts: attention or MLA, each
+with a Mamba/KDA state group.
 """
 
 import time
@@ -265,7 +265,13 @@ def test_timeout_reported_once_when_two_schedules_precede_the_output(engine):
     assert engine.pool.get_num_free_blocks() == held
 
 
-def test_blocks_freed_once_every_rank_has_its_write_done(engine):
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_blocks_freed_once_every_rank_has_its_write_done(
+    consumer_role, monkeypatch, layout
+):
+    """The failure is per request and the hold covers all of its blocks, in
+    every KV cache group (attention or MLA, with Mamba/KDA state)."""
+    engine = _Engine(monkeypatch, layout)
     free_before = engine.pool.get_num_free_blocks()
     request = engine.add_waiting_request()
     held = engine.pool.get_num_free_blocks()
@@ -315,24 +321,3 @@ def test_timer_runs_only_on_a_pure_consumer(consumer_role, role, timed):
     config = create_moriio_config(role=role, block_size=BLOCK_SIZE)
     connector = create_scheduler(config).connector.connector_scheduler
     assert (connector._write_recv_timeout is not None) == timed
-
-
-@pytest.mark.parametrize("layout", LAYOUTS)
-def test_every_kv_cache_group_is_held_and_then_freed(
-    consumer_role, monkeypatch, layout
-):
-    """The failure is per request and the hold covers all of its blocks, in
-    every KV cache group (attention or MLA, with or without Mamba/KDA state)."""
-    engine = _Engine(monkeypatch, layout)
-    free_before = engine.pool.get_num_free_blocks()
-    request = engine.add_waiting_request()
-    held = engine.pool.get_num_free_blocks()
-
-    engine.clock.now += TIMEOUT_S + 1
-    engine.step()
-    assert request.status == RequestStatus.FINISHED_ERROR
-    assert engine.pool.get_num_free_blocks() == held
-
-    engine.step(write_done=frozenset({request.request_id}))
-    assert request.request_id not in engine.scheduler.requests
-    assert engine.pool.get_num_free_blocks() == free_before
