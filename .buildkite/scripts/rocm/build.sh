@@ -210,7 +210,7 @@ keys_at() {
   local rev=$1 Ks Kr
   # The layer format (compression, and mtimes as built: see the bake file) is part of every image's
   # identity: an image left in an older format would hand later builds a second copy of the same layers.
-  Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree "$rev" -- "$SDF" tools/vllm-rocm/amdsmi ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16) \
+  Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree "$rev" -- "$SDF" tools/vllm-rocm/amdsmi/amdsmi_wrapper.patch tools/vllm-rocm/amdsmi/pyproject.toml ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16) \
     || return 1
   Kr=$(
     {

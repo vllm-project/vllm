@@ -85,7 +85,12 @@ SETUP_STEP_KEYS = {"ensure-ci-base-amd", ROCM_REFRESH_STEP_KEY, "pre-commit"}
 # A PR to main that changes these builds a new ROCm base image. Its
 # rocm-image-cache-check step fails until reconcile_rocm_cache caches the image
 # a trusted user's CI build pushed, so main reuses it after the merge.
-ROCM_STACK_INPUTS = ("docker/Dockerfile.rocm_base", "tools/vllm-rocm/therock_wheels.py")
+ROCM_STACK_INPUTS = (
+    "docker/Dockerfile.rocm_base",
+    "tools/vllm-rocm/amdsmi/amdsmi_wrapper.patch",
+    "tools/vllm-rocm/amdsmi/pyproject.toml",
+    "tools/vllm-rocm/therock_wheels.py",
+)
 ROCM_CACHE_YAML = ".buildkite/image_build/amd_rocm_cache.yaml"
 ROCM_CACHE_CHECK_KEY = "rocm-image-cache-check"
 ROCM_PROMOTE_KEY = "rocm-promote"
