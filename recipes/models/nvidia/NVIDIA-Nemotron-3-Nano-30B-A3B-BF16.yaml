@@ -60,6 +60,15 @@ variants:
     extra_args:
       - "--kv-cache-dtype"
       - "auto"
+    hardware_overrides:
+      arc_pro_b60:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
+      arc_pro_b70:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
 
   fp8:
     model_id: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8"
@@ -74,6 +83,14 @@ variants:
         extra_args:
           - "--moe-backend"
           - "flashinfer_cutlass"
+      arc_pro_b60:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
+      arc_pro_b70:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
 
 compatible_strategies:
   - single_node_tp

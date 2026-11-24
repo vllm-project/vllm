@@ -3,6 +3,8 @@
 """DSv4.1 Engram tables in an Engram pool (`vllm.distributed.engram_pool`): pool
 rows hold values then E8M0 scales; layers unpack MXFP8 WKV input as rows land."""
 
+from functools import partial
+
 import torch
 from torch import nn
 
@@ -22,6 +24,7 @@ from vllm.models.deepseek_v41.common.engram import (
     EngramBatch,
     EngramLayout,
     ParallelEngramEmbedding,
+    _engram_head_shard_weight_loader,
 )
 from vllm.models.deepseek_v41.common.ops.query_quant import (
     can_fuse_query_quant,
@@ -149,10 +152,15 @@ class PoolEngramEmbedding(ParallelEngramEmbedding):
             scales = shard[:, self.row_bytes :]
         self.weight = nn.Parameter(weight, requires_grad=False)
         self.weight_scale_inv = nn.Parameter(scales, requires_grad=False)
+        weight_loader = self._weight_loader
+        if pool.host_shards and weight.is_cuda:
+            weight_loader = partial(
+                _engram_head_shard_weight_loader, max_copy_bytes=64 << 20
+            )
         for param in (self.weight, self.weight_scale_inv):
             set_weight_attrs(
                 param,
-                {"weight_loader": self._weight_loader, "engram_vocab_start": row_start},
+                {"weight_loader": weight_loader, "engram_vocab_start": row_start},
             )
         # Constant dummy values; the ue8m0 encoding of scale 1.0 is 127.
         set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})

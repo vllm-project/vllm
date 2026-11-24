@@ -407,6 +407,7 @@ class MoEBlockFuser:
             num_experts,
             bias=False,
             out_dtype=out_dtype or self.router_dtype,
+            params_dtype=hf_gate.weight.dtype,
             prefix=maybe_prefix(prefix, self.gate_name),
         )
         if (bias := getattr(hf_gate, "e_score_correction_bias", None)) is not None:
