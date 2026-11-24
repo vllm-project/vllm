@@ -13,6 +13,7 @@ test_sharded_rdt_producer.py.
 """
 
 import itertools
+import threading
 from dataclasses import asdict
 from functools import cached_property
 from types import SimpleNamespace
@@ -232,9 +233,25 @@ def test_sharded_rdt_send_weights_drives_client_in_order(monkeypatch):
 
 
 def test_sharded_rdt_send_weights_group_order_mismatch_raises(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    rpc_exited = threading.Event()
+
+    # Simulate a real worker blocked inside update_weights waiting for the
+    # trainer to publish groups. On a gather-loop failure, send_weights() must
+    # propagate the error immediately rather than deadlocking in
+    # ThreadPoolExecutor.shutdown(wait=True).
+    class _BlockingClient(RecordingClient):
+        def update_weights(self, update_info):
+            super().update_weights(update_info)
+            started.set()
+            release.wait(timeout=10.0)
+            rpc_exited.set()
+
     # Source whose iteration order disagrees with its metadata order.
     class _BadSource(_ListSource):
         def iter_full(self):
+            assert started.wait(timeout=2.0)
             reordered = list(self._pairs)
             reordered[0], reordered[1] = reordered[1], reordered[0]
             return iter(reordered)
@@ -243,13 +260,18 @@ def test_sharded_rdt_send_weights_group_order_mismatch_raises(monkeypatch):
     engine = _rdt_engine_with_fake_server(
         _BadSource(_rdt_source_two_layers()._pairs),
         is_sender=True,
-        client=RecordingClient(),
+        client=_BlockingClient(),
         server=server,
         monkeypatch=monkeypatch,
     )
-    with pytest.raises(RuntimeError, match="must yield the owned names"):
-        engine.send_weights()
-    assert "error" in server.order  # gather error propagated to the server
+    try:
+        with pytest.raises(RuntimeError, match="must yield the owned names"):
+            engine.send_weights()
+        assert "error" in server.order  # gather error propagated to the server
+        assert not rpc_exited.is_set()  # did not wait for blocked update_weights RPC
+    finally:
+        release.set()
+        rpc_exited.wait(timeout=2.0)
 
 
 @pytest.mark.skipif(
@@ -548,31 +570,6 @@ class TestSyncIndexPlumbing:
             args[2] for method, args in producer_calls if method == "begin_sync"
         ] == [0, 1]
         assert engine.client.updates == []
-
-    def test_gather_loop_error_does_not_deadlock_on_blocked_update_rpc(self):
-        import threading
-
-        started = threading.Event()
-        release = threading.Event()
-
-        class _BlockingClient(RecordingClient):
-            def update_weights(self, update_info):
-                started.set()
-                release.wait(timeout=5.0)
-
-        engine, _ = self._trainer(is_sender=True)
-        engine.client = _BlockingClient()
-
-        def _failing_gather(*, update_future, live_count, live_ids=None):
-            assert started.wait(timeout=2.0)
-            raise RuntimeError("gather failed")
-
-        engine._run_gather_loop = _failing_gather
-        try:
-            with pytest.raises(RuntimeError, match="gather failed"):
-                engine.send_weights()
-        finally:
-            release.set()
 
 
 def test_sharded_rdt_worker_init_info_carries_the_ownership_table(monkeypatch):
