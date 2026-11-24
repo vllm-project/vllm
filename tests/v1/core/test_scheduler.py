@@ -740,7 +740,7 @@ def test_aux_outputs_opt_out_marks_survive_rowless_pruning():
     assert new_request.num_computed_tokens == 16
 
 
-def _aux_step(scheduler: Scheduler) -> None:
+def _aux_step(scheduler: Scheduler, rows: dict[str, int] | None = None) -> None:
     scheduler_output = scheduler.schedule()
     req_ids = list(scheduler_output.num_scheduled_tokens)
     requests = [scheduler.requests[req_id] for req_id in req_ids]
@@ -755,6 +755,10 @@ def _aux_step(scheduler: Scheduler) -> None:
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[],
+            aux_output_connector_output={
+                req_id: AuxRequestOutput(0, np.zeros((n, 1, 1), np.uint8))
+                for req_id, n in (rows or {}).items()
+            },
         ),
     )
 
@@ -797,6 +801,41 @@ def test_aux_outputs_opt_out_lookup_is_not_admission(reset):
     scheduler.add_request(late)
     (new_request,) = scheduler.schedule().scheduled_new_reqs
     assert new_request.num_computed_tokens == 0
+
+
+def test_aux_outputs_opt_out_holds_blocks_with_rows():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    connector = AuxOutputSchedulerConnector(scheduler.kv_cache_manager, 1)
+    scheduler.aux_output_connector = connector
+    (recorded,) = create_requests(
+        num_requests=1, num_tokens=32, max_tokens=1, req_ids=["recorded"]
+    )
+    scheduler.add_request(recorded)
+    _aux_step(scheduler, {"recorded": 32})
+    # Rows of both blocks stay; their GPU copies are evicted.
+    assert scheduler.kv_cache_manager.reset_prefix_cache()
+
+    (skipped,) = create_requests(
+        num_requests=1,
+        num_tokens=17,
+        req_ids=["skipped"],
+        sampling_params=_aux_outputs_params(False, max_tokens=20),
+    )
+    scheduler.add_request(skipped)
+    while skipped.num_tokens < 31:
+        _aux_step(scheduler)
+    # Its next token completes block 1 while an inline request finishes.
+    (inline,) = create_requests(
+        num_requests=2, num_tokens=16, max_tokens=1, req_ids=["a", "inline"]
+    )[1:]
+    scheduler.add_request(inline)
+    _aux_step(scheduler, {"inline": 16})
+    assert skipped.num_tokens == 32 and inline.is_finished()
+    while not skipped.is_finished():
+        _aux_step(scheduler)
+
+    block = maybe_convert_block_hash(recorded.block_hashes[1])
+    assert block in connector._kv_cached or block in connector._rowless
 
 
 def test_aux_outputs_flip_after_recording_delivers_finish():

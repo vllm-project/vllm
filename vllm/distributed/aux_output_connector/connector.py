@@ -108,9 +108,10 @@ class AuxOutputSchedulerConnector:
         self._rowless: dict[ExternalBlockHash, BlockHash] = {}
         # First token each active request computes here.
         self._computed_from: dict[str, int] = {}
-        # Per active opted-out request: KV blocks checked and the last one's
-        # hash, and the blocks it marked rowless, held through pruning.
-        self._skip_marked: dict[str, tuple[int, BlockHash | None]] = {}
+        # Per active opted-out request: KV blocks checked, the last one's hash,
+        # whether it was scheduled since its lookup, and the blocks it computes,
+        # held so their marks and rows outlive pruning until it finishes.
+        self._skip_marked: dict[str, tuple[int, BlockHash | None, bool]] = {}
         self._skip_rowless: dict[str, list[ExternalBlockHash]] = {}
         self._skip_held: Counter[ExternalBlockHash] = Counter()
         self._capacity = num_objects // (self._block_size // self._hash_block_size)
@@ -236,7 +237,11 @@ class AuxOutputSchedulerConnector:
             return
         victims = []
         for block, keys in self._kv_cached.items():
-            if block not in loading and not self._gpu_cached(keys[-1]):
+            if (
+                block not in loading
+                and block not in self._skip_held
+                and not self._gpu_cached(keys[-1])
+            ):
                 victims.append(block)
                 if len(victims) == excess:
                     break
@@ -331,36 +336,43 @@ class AuxOutputSchedulerConnector:
         self._release_unheld()
 
     def _mark_rowless(self, request: Request, lookup: bool = False) -> None:
-        """Mark the KV blocks an opted-out request computes as rowless: from the
-        first block its prefix lookup misses on, or every new block later."""
+        """Mark the KV blocks an opted-out request computes as rowless and hold
+        them; blocks whose rows are kept here are held without a mark."""
         request_id = request.request_id
         step = self._block_size // self._hash_block_size
         hashes = request.block_hashes
-        num_checked, last = self._skip_marked.get(request_id, (0, None))
-        if lookup or (
-            num_checked
-            and (
-                len(hashes) < num_checked * step
-                or hashes[num_checked * step - 1] != last
-            )
-        ):
-            # A lookup is not an admission, and a session turn can rewrite
-            # hashes: recheck from the start.
+        num_checked, last, scheduled = self._skip_marked.get(
+            request_id, (0, None, True)
+        )
+        start = num_checked
+        if lookup:
+            # A lookup is not an admission: recheck from the start.
             self._drop_skip_holds(request_id)
-            num_checked = 0
-        marked = self._skip_rowless.setdefault(request_id, [])
+            start = 0
+        elif not scheduled:
+            # The first scheduled step knows the real hit.
+            start = request.num_computed_tokens // self._block_size
+        elif num_checked and (
+            len(hashes) < num_checked * step or hashes[num_checked * step - 1] != last
+        ):
+            # A session turn rewrote hashes: recheck from the start.
+            self._drop_skip_holds(request_id)
+            start = 0
+        held = self._skip_rowless.setdefault(request_id, [])
         hit = lookup
-        for block, keys in self._kv_blocks(hashes[num_checked * step :]):
+        for block, keys in self._kv_blocks(hashes[start * step :]):
             hit = hit and self._gpu_cached(keys[-1]) is not None
-            if hit or block in self._kv_cached:
+            if hit:
                 continue
-            self._rowless[block] = keys[-1]
-            marked.append(block)
+            if block not in self._kv_cached:
+                self._rowless[block] = keys[-1]
+            held.append(block)
             self._skip_held[block] += 1
         num_blocks = len(hashes) // step
         self._skip_marked[request_id] = (
             num_blocks,
             hashes[num_blocks * step - 1] if num_blocks else None,
+            not lookup,
         )
 
     def _drop_skip_holds(self, request_id: str) -> None:
