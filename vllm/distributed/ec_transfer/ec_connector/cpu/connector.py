@@ -8,7 +8,7 @@ GPU copy plumbing. An ec_both instance reuses encoder outputs it has already
 offloaded to CPU instead of recomputing them.
 """
 
-from collections.abc import Collection
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -87,6 +87,12 @@ class ECCPUConnector(ECConnectorBase):
         )
 
     # Scheduler-side forwarders.
+    def bind_encoder_cache_query(
+        self, query: Callable[["Request", int], int | None]
+    ) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.bind_encoder_cache_query(query)
+
     def has_cache_item(self, identifier: str) -> bool:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.has_cache_item(identifier)
@@ -95,11 +101,18 @@ class ECCPUConnector(ECConnectorBase):
         self,
         request: "Request",
         num_computed_tokens: int,
-        local_cache_hashes: Collection[str] | None = None,
     ) -> bool:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.ensure_cache_available(
-            request, num_computed_tokens, local_cache_hashes
+            request, num_computed_tokens
+        )
+
+    def requires_encoder_cache_readmission(
+        self, request: "Request", input_id: int
+    ) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.requires_encoder_cache_readmission(
+            request, input_id
         )
 
     def take_unavailable_requests(self) -> set[str]:
