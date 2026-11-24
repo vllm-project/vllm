@@ -294,7 +294,7 @@ def test_dynamic_scales_auto_save(tmp_path) -> None:
 
 
 def _save_scales_state(monkeypatch: pytest.MonkeyPatch, path: Path):
-    """Arm the module's scale auto-save for ``path`` (margin 2) and return the
+    """Arm the module's scale auto-save for `path` (margin 2) and return the
     module plus a list of the renames it makes; restored after the test."""
     import vllm.model_executor.layers.attention.mm_encoder_attention as mod
 

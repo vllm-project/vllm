@@ -52,7 +52,7 @@ ViT pass (head_dim 80, MI350X, `ROCM_AITER_FA`), against the BF16 CK-tile
 head_dim-80 path:
 
 | Image | Patches | Speed vs BF16 |
-|---|---|---|
+| --- | --- | --- |
 | 2048x1600 | 16,416 | 1.72x faster |
 | 768x1024 | 4,144 | 0.86x (slower) |
 
