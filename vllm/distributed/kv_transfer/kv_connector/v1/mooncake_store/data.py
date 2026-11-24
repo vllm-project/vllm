@@ -245,6 +245,10 @@ class RequestTracker:
     prefill_end_tokens: int = 0
     partial_tail_sent: bool = False
     max_offload_tokens: int | None = None
+    # Token position of the last known complete Store boundary-state checkpoint
+    # for this request (seeded from the Store lookup hit when available, else
+    # the local/external resume offset, and advanced on each accepted offload).
+    last_boundary_state_tokens: int = 0
 
     def update(
         self,

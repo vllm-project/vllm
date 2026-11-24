@@ -76,10 +76,12 @@ def _make_bare_scheduler(
     enable_partial_hash_hits: bool = False,
     kv_role: str = "kv_both",
     save_decode_cache: bool = False,
+    boundary_state_offload_stride: int = 0,
 ) -> _TestMooncakeStoreScheduler:
     scheduler = object.__new__(_TestMooncakeStoreScheduler)
     scheduler.kv_role = kv_role
     scheduler.save_decode_cache = save_decode_cache
+    scheduler.boundary_state_offload_stride = boundary_state_offload_stride
     scheduler.enable_kv_events = False
     scheduler.lookup_async = False
     scheduler.client = _StubLookupClient(hit_tokens=0)
@@ -92,6 +94,7 @@ def _make_bare_scheduler(
     scheduler._store_group_ids = (0,)
     scheduler._store_group_id_by_kv_cache_group_id = {0: 0, 1: 1}
     scheduler.load_specs = {}
+    scheduler._store_hit_tokens = {}
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
     scheduler._load_failed_req_ids = set()
@@ -2343,3 +2346,446 @@ def test_failed_save_releases_hbm_only_after_every_worker_finishes():
         assert store.batch_put_from_multi_buffers.call_count == 1
         assert sender._saved_offset.get(request.req_id, 0) == 0
     assert not scheduler.has_pending_push_work()
+
+
+def _make_stride_step(
+    block_ids: tuple[list[int], ...],
+    offloads: list[tuple[int, int, int]],
+    *,
+    new_reqs: list[NewRequestData] | None = None,
+    num_scheduled: dict[str, int] | None = None,
+) -> SchedulerOutput:
+    out = SchedulerOutput.make_empty()
+    out.scheduled_new_reqs = new_reqs or []
+    out.num_scheduled_tokens = num_scheduled or {}
+    out.kv_connector_block_state = _make_connector_block_state(
+        block_ids=block_ids, offloads=offloads
+    )
+    return out
+
+
+def _register_stride_request(
+    scheduler: MooncakeStoreScheduler,
+    *,
+    num_tokens: int,
+    block_ids: tuple[list[int], ...],
+    hash_block_size: int = 16,
+    num_prompt_tokens: int | None = None,
+    num_computed_tokens: int | None = None,
+    last_boundary_state_tokens: int = 0,
+    with_tracker: bool = True,
+) -> Request:
+    prompt_tokens = num_tokens if num_prompt_tokens is None else num_prompt_tokens
+    request = Request(
+        request_id="req-0",
+        prompt_token_ids=list(range(prompt_tokens)),
+        sampling_params=SamplingParams(
+            max_tokens=max(1, num_tokens - prompt_tokens + 1)
+        ),
+        pooling_params=None,
+        block_hashes=[
+            BlockHash(bytes([i])) for i in range(num_tokens // hash_block_size)
+        ],
+    )
+    if num_tokens > prompt_tokens:
+        request.append_output_token_ids(list(range(prompt_tokens, num_tokens)))
+    request.num_computed_tokens = (
+        num_tokens if num_computed_tokens is None else num_computed_tokens
+    )
+    scheduler._unfinished_requests["req-0"] = (request, block_ids)
+    if with_tracker:
+        scheduler._request_trackers["req-0"] = RequestTracker(
+            req_id="req-0",
+            token_len=num_tokens,
+            allocated_block_ids=block_ids,
+            num_saved_tokens=num_tokens,
+            prefill_end_tokens=prompt_tokens,
+            last_boundary_state_tokens=last_boundary_state_tokens,
+        )
+    return request
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("bad_value", [-1, True, None, "4096", 1.5])
+def test_boundary_state_offload_stride_rejects_invalid_config(bad_value):
+    config = VllmConfig(
+        device_config=DeviceConfig(device="cpu"),
+        cache_config=CacheConfig(block_size=16),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MooncakeStoreConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"boundary_state_offload_stride": bad_value},
+        ),
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            make_kv_cache_group(
+                ["layer"],
+                AttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            )
+        ],
+    )
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1"
+            ".mooncake_store.scheduler.LookupKeyClient"
+        ),
+        pytest.raises(ValueError, match="boundary_state_offload_stride"),
+    ):
+        MooncakeStoreScheduler(config, kv_config)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "stride, resume_tokens, boundary_tokens, expect_write",
+    [
+        (0, 80, 96, True),  # Disabled (default): always writes
+        (64, 0, 48, False),  # Below first stride: bucket 0 == 0
+        (64, 0, 64, True),  # Exact first stride: bucket 1 > 0
+        (64, 0, 80, True),  # Crosses first stride: bucket 1 > 0
+        (64, 80, 96, False),  # Same bucket 1 -> skipped
+        (64, 96, 128, True),  # Crosses second stride: bucket 2 > 1
+    ],
+)
+def test_boundary_state_offload_stride_filters_turn_boundaries(
+    stride, resume_tokens, boundary_tokens, expect_write
+):
+    scheduler = _make_bare_scheduler(boundary_state_offload_stride=stride)
+    block_ids = (list(range(boundary_tokens // 16)), [50])
+    _register_stride_request(
+        scheduler,
+        num_tokens=boundary_tokens,
+        block_ids=block_ids,
+        last_boundary_state_tokens=resume_tokens,
+    )
+    meta = scheduler.build_connector_meta(
+        _make_stride_step(block_ids, [(1, 50, boundary_tokens)])
+    )
+    tracker = scheduler._request_trackers["req-0"]
+    if expect_write:
+        assert len(meta.requests) == 1
+        assert meta.requests[0].boundary_puts == [BoundaryPut(1, 50, boundary_tokens)]
+        if stride > 0:
+            assert tracker.last_boundary_state_tokens == boundary_tokens
+    else:
+        assert meta.requests == []
+        assert tracker.last_boundary_state_tokens == resume_tokens
+
+
+@pytest.mark.cpu_test
+def test_boundary_state_offload_stride_uses_external_load_resume_offset():
+    scheduler = _make_bare_scheduler(boundary_state_offload_stride=64)
+    scheduler._store_group_ids = (0, 1)
+    block_ids = (list(range(6)), [50])
+    request = _register_stride_request(
+        scheduler,
+        num_tokens=96,
+        block_ids=block_ids,
+        num_computed_tokens=0,
+        with_tracker=False,
+    )
+    scheduler.load_specs["req-0"] = LoadSpec(
+        vllm_cached_tokens=0, kvpool_cached_tokens=80, can_load=True
+    )
+    new_req = NewRequestData.from_request(request, block_ids, request.all_token_ids)
+    meta = scheduler.build_connector_meta(
+        _make_stride_step(
+            block_ids, [(1, 50, 96)], new_reqs=[new_req], num_scheduled={"req-0": 16}
+        )
+    )
+    assert scheduler._request_trackers["req-0"].last_boundary_state_tokens == 80
+    assert all(not r.boundary_puts for r in meta.requests)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "enable_lookup, store_hit, local_hit, expect_write",
+    [
+        # Store only has 4K (64) while local GPU has 8K (128), e.g. evicted
+        # from Store or failed PUT on one rank -> 9K (144) crosses bucket 2
+        # and heals Store coverage.
+        (True, 64, 128, True),
+        # Store also has complete 8K (128) -> 9K (144) stays in bucket 2 and
+        # is skipped with zero extra writes.
+        (True, 128, 128, False),
+        # With lookup disabled, falls back to local num_computed_tokens (128).
+        (False, 64, 128, False),
+    ],
+)
+def test_boundary_state_offload_stride_heals_when_store_lags_local_cache(
+    enable_lookup, store_hit, local_hit, expect_write
+):
+    scheduler = _make_bare_scheduler(boundary_state_offload_stride=64)
+    scheduler._store_group_ids = (0, 1)
+    scheduler.enable_lookup = enable_lookup
+    scheduler.client = _StubLookupClient(hit_tokens=store_hit)
+    block_ids = (list(range(9)), [50])
+    request = _register_stride_request(
+        scheduler,
+        num_tokens=144,
+        block_ids=block_ids,
+        num_computed_tokens=local_hit,
+        with_tracker=False,
+    )
+    assert scheduler.get_num_new_matched_tokens(request, local_hit) == (0, False)
+    new_req = NewRequestData.from_request(request, block_ids, request.all_token_ids)
+    meta = scheduler.build_connector_meta(
+        _make_stride_step(
+            block_ids,
+            [(1, 50, 144)],
+            new_reqs=[new_req],
+            num_scheduled={"req-0": 144 - local_hit},
+        )
+    )
+    tracker = scheduler._request_trackers["req-0"]
+    boundary_puts = [p for r in meta.requests for p in (r.boundary_puts or [])]
+    if expect_write:
+        assert boundary_puts == [BoundaryPut(1, 50, 144)]
+        assert tracker.last_boundary_state_tokens == 144
+    else:
+        assert boundary_puts == []
+        assert tracker.last_boundary_state_tokens == 128
+    assert "req-0" not in scheduler._store_hit_tokens
+
+
+@pytest.mark.cpu_test
+def test_boundary_state_offload_stride_clears_store_hit_on_failed_load():
+    scheduler = _make_bare_scheduler(boundary_state_offload_stride=64)
+    scheduler._store_group_ids = (0, 1)
+    scheduler.load_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=128)
+    block_ids = (list(range(9)), [50])
+    request = _register_stride_request(
+        scheduler,
+        num_tokens=144,
+        block_ids=block_ids,
+        num_computed_tokens=0,
+        with_tracker=False,
+    )
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (128, True)
+    assert scheduler._store_hit_tokens["req-0"] == 128
+
+    scheduler.update_connector_output(KVConnectorOutput(failed_recving={"req-0"}))
+    assert "req-0" not in scheduler._store_hit_tokens
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+
+    scheduler.load_specs.pop("req-0", None)
+    new_req = NewRequestData.from_request(request, block_ids, request.all_token_ids)
+    meta = scheduler.build_connector_meta(
+        _make_stride_step(
+            block_ids,
+            [(1, 50, 128)],
+            new_reqs=[new_req],
+            num_scheduled={"req-0": 144},
+        )
+    )
+    boundary_puts = [p for r in meta.requests for p in (r.boundary_puts or [])]
+    assert boundary_puts == [BoundaryPut(1, 50, 128)]
+    assert scheduler._request_trackers["req-0"].last_boundary_state_tokens == 128
+
+
+@pytest.mark.cpu_test
+def test_boundary_state_offload_stride_clears_store_hit_on_finish_and_preempt():
+    scheduler = _make_bare_scheduler(boundary_state_offload_stride=64)
+    scheduler._store_hit_tokens["req-fin"] = 128
+    fin_out = SchedulerOutput.make_empty()
+    fin_out.finished_req_ids = {"req-fin"}
+    scheduler.build_connector_meta(fin_out)
+    assert "req-fin" not in scheduler._store_hit_tokens
+
+    scheduler._store_hit_tokens["req-0"] = 128
+    preempted_req = _register_stride_request(
+        scheduler, num_tokens=144, block_ids=(list(range(9)), [50])
+    )
+    preempted_req.status = RequestStatus.PREEMPTED
+    preempt_out = SchedulerOutput.make_empty()
+    preempt_out.preempted_req_ids = {"req-0"}
+    scheduler.build_connector_meta(preempt_out)
+    assert "req-0" not in scheduler._store_hit_tokens
+
+
+@pytest.mark.cpu_test
+def test_boundary_state_offload_stride_multi_group_atomic_and_advances():
+    scheduler = _make_bare_scheduler(boundary_state_offload_stride=64)
+    scheduler._store_group_ids = (0, 1, 2)
+    scheduler._store_group_id_by_kv_cache_group_id = {0: 0, 1: 1, 2: 2}
+    scheduler._boundary_state_group_ids = frozenset({1, 2})
+    scheduler._store_coord = MooncakeStoreCoordinator(
+        [
+            make_kv_cache_group(
+                ["attention"],
+                AttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            ),
+            *[
+                make_kv_cache_group(
+                    [f"mamba{i}"],
+                    mamba_layer(
+                        block_size=16,
+                        shapes=((1,),),
+                        dtypes=(torch.float32,),
+                        enable_prefix_caching=True,
+                    ),
+                )
+                for i in (0, 1)
+            ],
+        ],
+        16,
+        16,
+    )
+    block_ids = (list(range(8)), [40, 41], [50, 51])
+    _register_stride_request(scheduler, num_tokens=128, block_ids=block_ids)
+    # Groups 1 & 2 hand off at 80 (bucket 1), 96 (bucket 1), and 128 (bucket 2).
+    # Both groups at 80 and 128 are kept atomically; both at 96 are skipped.
+    meta = scheduler.build_connector_meta(
+        _make_stride_step(
+            block_ids,
+            [
+                (1, 40, 80),
+                (2, 50, 80),
+                (1, 42, 96),
+                (2, 52, 96),
+                (1, 41, 128),
+                (2, 51, 128),
+            ],
+        )
+    )
+    assert len(meta.requests) == 1
+    assert meta.requests[0].boundary_puts == [
+        BoundaryPut(1, 40, 80),
+        BoundaryPut(2, 50, 80),
+        BoundaryPut(1, 41, 128),
+        BoundaryPut(2, 51, 128),
+    ]
+    assert scheduler._request_trackers["req-0"].last_boundary_state_tokens == 128
+
+
+@pytest.mark.cpu_test
+def test_boundary_state_offload_stride_filters_decode_boundaries():
+    scheduler = _make_bare_scheduler(
+        save_decode_cache=True, boundary_state_offload_stride=64
+    )
+    block_ids = (list(range(9)), [50])
+    _register_stride_request(
+        scheduler,
+        num_tokens=144,
+        block_ids=block_ids,
+        num_prompt_tokens=64,
+        last_boundary_state_tokens=64,
+    )
+    meta = scheduler.build_connector_meta(
+        _make_stride_step(block_ids, [(1, 50, 96), (1, 51, 128)])
+    )
+    assert len(meta.requests) == 1
+    assert meta.requests[0].boundary_puts == [BoundaryPut(1, 51, 128)]
+    assert scheduler._request_trackers["req-0"].last_boundary_state_tokens == 128
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "resume_tokens, boundary_tokens, expect_pinned",
+    [
+        (80, 108, False),  # Same bucket 1 (stride=64) -> skipped cleanly
+        (80, 140, True),  # Crosses into bucket 2 -> pinned & emitted
+    ],
+)
+def test_boundary_state_offload_stride_filters_finished_partial_tail(
+    resume_tokens, boundary_tokens, expect_pinned
+):
+    scheduler = _make_bare_scheduler(
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+        boundary_state_offload_stride=64,
+    )
+    scheduler._store_group_ids = (0, 1)
+    prompt_tokens = boundary_tokens + 1
+    block_ids = (list(range(1, (prompt_tokens + 15) // 16 + 1)), [50])
+    request = _register_stride_request(
+        scheduler,
+        num_tokens=prompt_tokens,
+        block_ids=block_ids,
+        hash_block_size=4,
+        last_boundary_state_tokens=resume_tokens,
+    )
+    scheduler._request_trackers["req-0"].num_saved_tokens = 0
+
+    assert (
+        scheduler.register_finished_partial_tail(
+            request, block_ids, [(1, 50, boundary_tokens)]
+        )
+        is False
+    )
+    tracker = scheduler._request_trackers["req-0"]
+    if expect_pinned:
+        assert "req-0" in scheduler._finished_partial_tail_metas
+        assert len(scheduler._pinned_saves) == 1
+        assert tracker.last_boundary_state_tokens == boundary_tokens
+    else:
+        assert scheduler._finished_partial_tail_metas == {}
+        assert scheduler._pinned_saves == {}
+        assert tracker.last_boundary_state_tokens == resume_tokens
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "prompt_tokens, offloads, expect_mamba, expect_attn_tail",
+    [
+        # Tail 100 in bucket 1 (same as resume=80) -> skip Mamba & attn tail.
+        (101, [(1, 50, 100)], [], False),
+        # Tail 140 crosses into bucket 2 -> emit both Mamba & paired attn tail.
+        (141, [(1, 50, 140)], [BoundaryPut(1, 50, 140)], True),
+        # Aligned 128 already crosses into bucket 2 -> 140 skipped, so attn
+        # partial tail at 140 must not be orphaned either.
+        (141, [(1, 49, 128), (1, 50, 140)], [BoundaryPut(1, 49, 128)], False),
+    ],
+)
+def test_boundary_state_offload_stride_partial_tail_consistency(
+    prompt_tokens, offloads, expect_mamba, expect_attn_tail
+):
+    scheduler = _make_bare_scheduler(
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+        boundary_state_offload_stride=64,
+    )
+    scheduler._store_group_ids = (0, 1)
+    block_ids = (list(range((prompt_tokens + 15) // 16)), [50])
+    request = _register_stride_request(
+        scheduler,
+        num_tokens=prompt_tokens,
+        block_ids=block_ids,
+        hash_block_size=4,
+        num_computed_tokens=80,
+        with_tracker=False,
+    )
+    new_req = NewRequestData.from_request(request, block_ids, request.all_token_ids)
+    meta = scheduler.build_connector_meta(
+        _make_stride_step(
+            block_ids,
+            offloads,
+            new_reqs=[new_req],
+            num_scheduled={"req-0": prompt_tokens - 80},
+        )
+    )
+    assert len(meta.requests) == 1
+    req_meta = meta.requests[0]
+    # Full-attention LCM-aligned blocks are always saved normally.
+    assert req_meta.token_len_chunk == (prompt_tokens // 16) * 16
+    puts = req_meta.boundary_puts or []
+    assert [p for p in puts if p.group_id == 1] == expect_mamba
+    assert any(p.group_id == 0 for p in puts) is expect_attn_tail
+
+
+@pytest.mark.cpu_test
+def test_boundary_state_offload_stride_preserves_non_hybrid_partial_tail():
+    scheduler = _make_bare_scheduler(
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+        boundary_state_offload_stride=64,
+    )
+    scheduler._boundary_state_group_ids = frozenset()
+    assert scheduler._save_partial_tail() is True

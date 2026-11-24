@@ -353,6 +353,41 @@ first 100 tokens. Partial-tail attention proofs must also fit within the cap.
 Omit the option or set it to `null` for no cap. Invalid values, including
 booleans, negatives, strings, and floats, are ignored with a warning.
 
+### Stride-based boundary-state offload throttling
+
+For hybrid models (such as Qwen3.5/Qwen3.8, Nemotron-H, Jamba, or Kimi-K3),
+recurrent boundary-state snapshots are fixed-size per checkpoint regardless of
+how many new tokens were added on a turn. In multi-turn workloads with small
+per-turn deltas, writing a new external boundary state on every turn causes
+heavy write amplification and eviction churn in the Mooncake pool.
+
+Set `boundary_state_offload_stride` (default `0`, disabled) in
+`kv_connector_extra_config` to only offload recurrent boundary states when a
+checkpoint crosses a new `stride`-token boundary
+(`boundary_tokens // stride > last_boundary_state_tokens // stride`):
+
+```json
+{
+    "kv_connector_extra_config": {
+        "boundary_state_offload_stride": 4096
+    }
+}
+```
+
+- Local GPU prefix caching is unaffected; only external Mooncake boundary-state
+  offloads (and any hybrid partial-tail attention blocks paired with a skipped
+  boundary state) are throttled.
+- Full-attention KV cache blocks continue to be saved normally.
+- Because the rule depends only on fixed `stride`-token buckets, it is
+  stateless across turns and instances: once a conversation exceeds one stride,
+  worst-case external-reload recompute is bounded by `< stride` tokens while
+  skipping redundant intermediate checkpoints.
+- When `enable_lookup` is enabled (the default), the scheduler seeds each
+  request's watermark from the Store lookup's complete multi-rank hit length
+  rather than local GPU progress alone. If an earlier checkpoint exists only in
+  local GPU cache (evicted from the Store or missing on one rank), the next
+  checkpoint in that bucket is automatically written to restore Store coverage.
+
 ### KV Role Options
 
 - **kv_producer**: For instances that store KV caches to the pool.
@@ -387,6 +422,7 @@ reset waits at most 60 seconds.
   incompatible with sleep mode and the CuMem allocator.
 - `cache_prefix` (str): Namespace prepended to every store key. Different prefixes isolate cached blocks, even for identical prompts. Set to `"auto"` to derive a deployment fingerprint automatically (see below). Other strings remain literal custom prefixes. Default: `""` (no prefix; existing key format).
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
+- `boundary_state_offload_stride` (int): Token stride for throttling external recurrent/Mamba boundary-state offloads (see [above](#stride-based-boundary-state-offload-throttling)). Must be a non-negative integer. Default: `0` (disabled).
 - `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
   sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
 

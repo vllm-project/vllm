@@ -116,6 +116,8 @@ def _partial_tail_non_mamba_puts(
 class MooncakeStoreScheduler:
     """Scheduler-side component for MooncakeStoreConnector."""
 
+    boundary_state_offload_stride: int = 0
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -129,6 +131,22 @@ class MooncakeStoreScheduler:
         # Skips lookup CPU cost on instances that never load KV from the store.
         self.enable_lookup = kvc_extra_config.get("enable_lookup", True)
         self.save_decode_cache = kvc_extra_config.get("save_decode_cache", False)
+        raw_stride = kvc_extra_config.get("boundary_state_offload_stride", 0)
+        if (
+            isinstance(raw_stride, bool)
+            or not isinstance(raw_stride, int)
+            or raw_stride < 0
+        ):
+            raise ValueError(
+                "boundary_state_offload_stride must be a non-negative integer, "
+                f"got {raw_stride!r}"
+            )
+        self.boundary_state_offload_stride = raw_stride
+        if self.boundary_state_offload_stride > 0:
+            logger.info(
+                "MooncakeStoreScheduler boundary_state_offload_stride=%d",
+                self.boundary_state_offload_stride,
+            )
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = bool(
             kv_event_config and kv_event_config.enable_kv_cache_events
@@ -187,6 +205,10 @@ class MooncakeStoreScheduler:
 
         # Per-request state
         self.load_specs: dict[str, LoadSpec] = {}  # to be loaded
+        # Observed Store prefix hit per request from lookup, used to seed
+        # stride-based boundary-state watermarks when local cache is ahead
+        # of (or a rank missed) the Store.
+        self._store_hit_tokens: dict[str, int] = {}
         # Save progress starts when a request is scheduled for compute.
         self._request_trackers: dict[str, RequestTracker] = {}
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
@@ -200,6 +222,32 @@ class MooncakeStoreScheduler:
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
+
+    def _should_offload_boundary_state(
+        self,
+        last_boundary_tokens: int,
+        boundary_tokens: int,
+    ) -> bool:
+        """Return whether a boundary-state offload crosses a new stride bucket.
+
+        Using `(boundary // stride) > (last // stride)` is stateless across
+        requests and instances: a multi-turn conversation writes at most one
+        external recurrent-state checkpoint per `stride`-token interval while
+        keeping worst-case external-reload recompute bounded by `< stride`
+        tokens once the first stride boundary is crossed.
+        """
+        stride = self.boundary_state_offload_stride
+        if stride <= 0:
+            return True
+        return (boundary_tokens // stride) > (last_boundary_tokens // stride)
+
+    def _save_partial_tail(self) -> bool:
+        # When stride throttling is active on a hybrid model, let accepted
+        # Mamba boundary puts drive _partial_tail_non_mamba_puts so skipped
+        # boundary states never emit orphaned non-Mamba partial-tail blocks.
+        return self.enable_partial_hash_hits and not (
+            self.boundary_state_offload_stride > 0 and self._boundary_state_group_ids
+        )
 
     def _lookup_align(self) -> int:
         # Fine-grained hits may land on a hash boundary inside a block; without
@@ -249,6 +297,8 @@ class MooncakeStoreScheduler:
             # Lookup not ready yet; scheduler will retry on a later step.
             return None, False
         num_external_hit_tokens = lookup_result.hit_length
+        if self.boundary_state_offload_stride > 0:
+            self._store_hit_tokens[request.request_id] = num_external_hit_tokens
 
         if num_external_hit_tokens < num_computed_tokens:
             need_to_allocate = 0
@@ -324,6 +374,7 @@ class MooncakeStoreScheduler:
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self.load_specs.pop(finished_req_id, None)
+            self._store_hit_tokens.pop(finished_req_id, None)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._unfinished_request_ids.discard(finished_req_id)
@@ -336,6 +387,7 @@ class MooncakeStoreScheduler:
                 continue  # Already re-admitted; the state is the new attempt's.
             self.client.discard(req_id)
             self.load_specs.pop(req_id, None)
+            self._store_hit_tokens.pop(req_id, None)
             self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
 
@@ -360,6 +412,13 @@ class MooncakeStoreScheduler:
             )
 
             prefill_tokens = request.prefill_token_ids
+            store_hit_tokens = self._store_hit_tokens.pop(request.req_id, None)
+            if store_hit_tokens is not None:
+                resume_tokens = store_hit_tokens
+            else:
+                resume_tokens = request.num_computed_tokens
+                if load_spec is not None and load_spec.can_load:
+                    resume_tokens = max(resume_tokens, load_spec.kvpool_cached_tokens)
             request_tracker = RequestTracker(
                 req_id=request.req_id,
                 token_len=num_tokens_to_compute,
@@ -374,6 +433,7 @@ class MooncakeStoreScheduler:
                 max_offload_tokens=get_max_offload_tokens(
                     request_real.kv_transfer_params
                 ),
+                last_boundary_state_tokens=resume_tokens,
             )
             self._request_trackers[request.req_id] = request_tracker
 
@@ -387,7 +447,7 @@ class MooncakeStoreScheduler:
                 skip_save=is_consumer,
                 block_hashes=request_real.block_hashes,
                 num_prompt_tokens=request_real.num_prompt_tokens,
-                save_partial_tail=self.enable_partial_hash_hits,
+                save_partial_tail=self._save_partial_tail(),
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -441,7 +501,7 @@ class MooncakeStoreScheduler:
                     skip_save=False,
                     block_hashes=unfinished_req.block_hashes,
                     num_prompt_tokens=unfinished_req.num_prompt_tokens,
-                    save_partial_tail=self.enable_partial_hash_hits,
+                    save_partial_tail=self._save_partial_tail(),
                 )
 
                 if req_meta is not None:
@@ -659,6 +719,10 @@ class MooncakeStoreScheduler:
             and boundary_tokens > tracker.max_offload_tokens
         ):
             return False
+        if not self._should_offload_boundary_state(
+            tracker.last_boundary_state_tokens, boundary_tokens
+        ):
+            return False
 
         mamba_puts: list[BoundaryPut] = []
         for group_id, block_id, boundary in partial_tail_offloads:
@@ -668,6 +732,9 @@ class MooncakeStoreScheduler:
             if block_id == NULL_BLOCK_ID:
                 return False
             mamba_puts.append(BoundaryPut(store_group_id, block_id, boundary))
+        tracker.last_boundary_state_tokens = max(
+            tracker.last_boundary_state_tokens, boundary_tokens
+        )
         req_meta = ReqMeta(
             req_id=request.request_id,
             token_len_chunk=0,
@@ -734,7 +801,7 @@ class MooncakeStoreScheduler:
                 # going away, so the offload is conservatively dropped.
                 logger.debug("Dropping boundary-state offload for request %s", req_id)
                 continue
-            accepted: list[BoundaryPut] = []
+            eligible: list[BoundaryPut] = []
             for group_id, block_id, boundary_tokens in entries:
                 if (
                     tracker.max_offload_tokens is not None
@@ -751,7 +818,27 @@ class MooncakeStoreScheduler:
                 store_group_id = self._store_group_id_by_kv_cache_group_id.get(group_id)
                 if store_group_id not in self._boundary_state_group_ids:
                     continue
-                accepted.append(BoundaryPut(store_group_id, block_id, boundary_tokens))
+                eligible.append(BoundaryPut(store_group_id, block_id, boundary_tokens))
+            if not eligible:
+                continue
+            if self.boundary_state_offload_stride > 0:
+                accepted: list[BoundaryPut] = []
+                # Group by ascending boundary so every boundary-state group
+                # sharing a checkpoint position is accepted or skipped together.
+                by_boundary: dict[int, list[BoundaryPut]] = {}
+                for put in eligible:
+                    by_boundary.setdefault(put.num_tokens, []).append(put)
+                for boundary_tokens in sorted(by_boundary):
+                    if not self._should_offload_boundary_state(
+                        tracker.last_boundary_state_tokens, boundary_tokens
+                    ):
+                        continue
+                    accepted.extend(by_boundary[boundary_tokens])
+                    tracker.last_boundary_state_tokens = max(
+                        tracker.last_boundary_state_tokens, boundary_tokens
+                    )
+            else:
+                accepted = eligible
             if not accepted:
                 continue
             tracker.has_pending_offload = True
@@ -783,6 +870,8 @@ class MooncakeStoreScheduler:
         self._load_failed_req_ids |= (
             connector_output.failed_recving & self._unfinished_request_ids
         )
+        for req_id in connector_output.failed_recving:
+            self._store_hit_tokens.pop(req_id, None)
 
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, MooncakeStoreWorkerMetadata):
