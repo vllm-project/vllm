@@ -23,7 +23,7 @@ CHUNK_SIZE = 1024
 TOPK_MAX_ELEMENTS = 64 << 20
 
 
-@dataclass
+@dataclass(slots=True)
 class _TokenIdScores:
     token_ids: torch.Tensor  # [num_rows, num_ids], on device
     pad: torch.Tensor  # [num_rows, num_ids] bool, True at padded columns

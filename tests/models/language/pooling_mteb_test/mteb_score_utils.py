@@ -292,7 +292,10 @@ def mteb_test_rerank_models(
     # SentenceTransformers mteb score to a constant
     if model_info.mteb_score is None:
         with hf_runner(
-            model_info.name, revision=model_info.revision, dtype=model_info.hf_dtype
+            model_info.name,
+            revision=model_info.revision,
+            dtype=model_info.hf_dtype,
+            trust_remote_code=model_info.trust_remote_code,
         ) as hf_model:
             hf_model.chat_template = chat_template
             st_main_score = run_mteb_rerank(

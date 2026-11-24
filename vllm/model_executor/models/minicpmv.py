@@ -58,7 +58,6 @@ from vllm.model_executor.layers.resampler import (
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -116,7 +115,13 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .utils import AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    flatten_bn,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
@@ -713,6 +718,10 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         version = self.get_model_version()
 
         if version == (2, 0) or version == (2, 5):
+            if max_slice_nums is not None:
+                image_processor = self.get_image_processor(
+                    max_slice_nums=max_slice_nums
+                )
             return image_processor.get_slice_image_placeholder(image_size)
 
         return image_processor.get_slice_image_placeholder(
@@ -890,10 +899,17 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
 
 class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
-    def get_image_prompt_texts(self, image_size: ImageSize, image_idx: int = 0) -> str:
+    def get_image_prompt_texts(
+        self,
+        image_size: ImageSize,
+        image_idx: int = 0,
+        *,
+        max_slice_nums: int | None = None,
+    ) -> str:
         return self.info.get_slice_image_placeholder(
             image_size,
             image_idx=image_idx,
+            max_slice_nums=max_slice_nums,
         )
 
     def get_video_prompt_texts(self, image_size: ImageSize, num_frames: int) -> str:
@@ -1114,7 +1130,13 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             return PromptUpdateDetails.select_token_ids(
                 cached_encode(
                     tokenizer,
-                    self.get_image_prompt_texts(image_size, item_idx),
+                    self.get_image_prompt_texts(
+                        image_size,
+                        item_idx,
+                        max_slice_nums=self.info.get_image_processor(
+                            **hf_processor_mm_kwargs
+                        ).max_slice_nums,
+                    ),
                     add_special_tokens=False,
                 ),
                 unk_token_ids,
@@ -2146,7 +2168,9 @@ class MiniCPMV2_6(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> nn.Module:
-        return Qwen2ForCausalLM(vllm_config=vllm_config, prefix=prefix)
+        return init_vllm_registered_model(
+            vllm_config, prefix=prefix, architectures=["Qwen2ForCausalLM"]
+        )
 
     def init_vision_module(
         self,

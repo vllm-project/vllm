@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "2.4T-parameter hybrid-attention MoE (~95B active) with linear attention on 69 of 92 layers, 512 routed experts, a built-in MTP draft head, 262K native context window and extensible to 1M context"
   date_added: 2026-08-10
-  date_updated: 2026-09-14
+  date_updated: 2026-11-17
   tasks:
     - text
   # Measured, not a capacity claim. The previous headline said "down to a single node",
@@ -36,13 +36,11 @@ model:
   model_id: "Qwen/Qwen3.8-2.4T-A95B"
   # Verified against upstream, not taken from the model card (the README is a stub):
   # `Qwen3_5MoeForCausalLM` — the architecture this checkpoint declares — is present in
-  # vllm/model_executor/models/registry.py on `main` but ABSENT at v0.26.0, the latest
-  # stable release, whose docs/models/supported_models.md lists only the
-  # `*ForConditionalGeneration` members of the Qwen3.5 family. Nightly is a real
-  # requirement here. Re-check at the next stable tag and pin it.
-  min_vllm_version: "nightly"
+  # vllm/model_executor/models/registry.py from v0.28.0 and ABSENT at v0.26.0, whose
+  # docs/models/supported_models.md lists only the `*ForConditionalGeneration`
+  # members of the Qwen3.5 family.
+  min_vllm_version: "0.28.0"
   default_frontend: rust
-  nightly_required: true
   docker_image:
     nvidia: "vllm/vllm-openai:qwen38"
     amd: "vllm/vllm-openai-rocm:qwen38"
@@ -248,12 +246,12 @@ guide: |
 
   ## Prerequisites
 
-  - **vLLM: nightly.** for the best performance
+  - **vLLM >= 0.28.0**; use the latest release for the best performance
   - **transformers >= 5.4.0**, per the version recorded in `config.json`.
 
   ```bash
   uv venv && source .venv/bin/activate
-  uv pip install -U vllm --extra-index-url https://wheels.vllm.ai/nightly
+  uv pip install -U vllm
   uv pip install -U "transformers>=5.4.0"
   ```
 

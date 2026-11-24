@@ -16,61 +16,20 @@ use tracing_futures::Instrument as _;
 use uuid::Uuid;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage,
-    ChatOptions, ChatRequest, ChatRequestProcessor, ChatTool, ChatToolChoice, GenerationPromptMode,
-    ResolvedToolContext, SamplingParams,
+    ChatOptions, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode, ResolvedToolContext,
+    SamplingParams,
 };
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
-use vllm_text::{
-    PromptTruncation, PromptTruncationLimit, TextDecodeOptions, TextRequestProcessor,
-    TruncationSide,
-};
+use vllm_text::{PromptTruncation, PromptTruncationLimit, TextDecodeOptions, TruncationSide};
 
 use super::convert::{self, json_to_proto_struct};
 use super::inference::text_error_to_status;
 use super::media;
 use super::pb;
 use super::pb::render_server::{Render, RenderServer};
-use crate::render::RenderState;
-use crate::state::AppState;
+use crate::render::RenderContext;
 
 pub(crate) type RenderGrpcService<S> = RenderServer<RenderServiceImpl<S>>;
-
-/// Chat and text processors shared by the engine-backed and render-only servers.
-pub(crate) trait RenderContext: Send + Sync + 'static {
-    fn chat_processor(&self) -> &ChatRequestProcessor;
-    fn text_processor(&self) -> &TextRequestProcessor;
-    /// Whether `model` names a served model or LoRA adapter.
-    fn is_served_model(&self, model: &str) -> impl Future<Output = bool> + Send;
-}
-
-impl RenderContext for AppState {
-    fn chat_processor(&self) -> &ChatRequestProcessor {
-        self.chat.request_processor()
-    }
-
-    fn text_processor(&self) -> &TextRequestProcessor {
-        self.chat.text().request_processor()
-    }
-
-    async fn is_served_model(&self, model: &str) -> bool {
-        let resolution = self.resolve_model_with_loras(Some(model)).await;
-        resolution.model_names.accepts(Some(model))
-    }
-}
-
-impl RenderContext for RenderState {
-    fn chat_processor(&self) -> &ChatRequestProcessor {
-        &self.chat
-    }
-
-    fn text_processor(&self) -> &TextRequestProcessor {
-        &self.text
-    }
-
-    async fn is_served_model(&self, model: &str) -> bool {
-        self.model_names().accepts(Some(model))
-    }
-}
 
 /// gRPC render service backed by either server's chat and text processors.
 pub(crate) struct RenderServiceImpl<S> {
@@ -186,7 +145,8 @@ async fn render_chat(
 /// Reject a model that is neither served nor a LoRA adapter. An empty name
 /// selects the default model.
 async fn check_model(state: &impl RenderContext, model: &str) -> Result<(), Status> {
-    if model.is_empty() || state.is_served_model(model).await {
+    let resolution = state.resolve_model(Some(model)).await;
+    if resolution.model_names.accepts(Some(model)) {
         Ok(())
     } else {
         Err(Status::not_found(format!("model `{model}` not found")))
@@ -423,11 +383,39 @@ fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
 /// the HTTP render route.
 fn chat_error_to_status(error: vllm_chat::Error) -> Status {
     let message = error.to_report_string();
-    if error.is_request_validation_error() || matches!(error, vllm_chat::Error::Multimodal(_)) {
+    if error.is_request_validation_error()
+        || matches!(
+            error,
+            vllm_chat::Error::Multimodal(_) | vllm_chat::Error::Media(_)
+        )
+    {
         Status::invalid_argument(message)
     } else if error.is_unavailable() {
         Status::unavailable(message)
     } else {
         Status::internal(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use llm_multimodal::MediaConnectorError;
+
+    use super::*;
+
+    /// A media fetch that failed on the host's side is still the request's
+    /// error here, as in HTTP render; only chat routes tell it apart.
+    #[test]
+    fn media_fetch_timeout_is_invalid_argument() {
+        let error = vllm_chat::Error::from(MediaConnectorError::Timeout {
+            url: "https://example.com/a.png".to_string(),
+            budget: Duration::from_secs(5),
+        });
+        assert_eq!(
+            chat_error_to_status(error).code(),
+            tonic::Code::InvalidArgument
+        );
     }
 }
