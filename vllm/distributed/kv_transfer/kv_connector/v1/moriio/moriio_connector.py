@@ -3696,9 +3696,10 @@ class MoRIIOConnectorWorker:
             self.moriio_wrapper.async_wait_reqid()
             return
         if self.mode == MoRIIOMode.WRITE:
-            live_req_ids = set(self.transfer_id_to_request_id.values())
-            self._write_recv_reported &= live_req_ids
-            self._write_recv_timed_out |= metadata.write_recv_timed_out_req_ids
+            if self.moriio_config.write_recv_timeout is not None:
+                live_req_ids = set(self.transfer_id_to_request_id.values())
+                self._write_recv_reported &= live_req_ids
+                self._write_recv_timed_out |= metadata.write_recv_timed_out_req_ids
             return
 
         # Handshake every referenced remote prefill rank up front, before any
