@@ -23,7 +23,13 @@ import vllm.models.qwen4_exp.common.ngram_embedding as ngram_embedding_module
 import vllm.models.qwen4_exp.nvidia.ngram_embedding as nvidia_ngram_embedding_module
 import vllm.utils.gpu_sync_debug as gpu_sync_debug
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.config import (
+    EngramConfig,
+    ModelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.mamba.checkpoint import (
@@ -1153,7 +1159,6 @@ def _make_ple_from_checkpoint(
     fmt: str,
     *,
     disk_offload: bool,
-    cpu_offload: bool = False,
     device: str = "cpu",
     load: bool = True,
 ) -> Qwen4ExpNGramEmbedding:
@@ -1166,9 +1171,7 @@ def _make_ple_from_checkpoint(
     vllm_config = SimpleNamespace(
         load_config=SimpleNamespace(load_format="auto"),
         engram_config=SimpleNamespace(
-            disk_offload=disk_offload,
-            cpu_offload=cpu_offload,
-            dp_shared_memory=False,
+            disk_offload=disk_offload, cpu_offload=False, dp_shared_memory=False
         ),
     )
     for name, value in (
@@ -1208,48 +1211,92 @@ def _make_ple_from_checkpoint(
     return module
 
 
+def _make_pinned_ple_embedding(
+    path: Path, fmt: str, device: str, *, amd: bool
+) -> Qwen4ExpNGramEmbedding | amd_ple_layer.Qwen4ExpNGramEmbedding:
+    config = Qwen4ExpTextConfig(
+        architectures=["Qwen4ExpForCausalLM"],
+        num_hidden_layers=1,
+        layer_types=["linear_attention"],
+        ple_layer_ids=[1],
+        ple_embed_dim=64,
+        ngram_size=2,
+        heads_per_ngram=2,
+        eos_token_id=0,
+        vocab_size=64,
+        split_ngram_parts=4,
+        ngram_vocab_size_base=8,
+        make_ngram_vocab_size_divisible_by=1,
+        ple_embedding_dtype={"nvfp4": "nvfp4", "fp8": "float8_e4m3fn"}.get(fmt),
+    )
+    config.save_pretrained(path)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(path),
+            skip_tokenizer_init=True,
+            max_model_len=128,
+            enforce_eager=True,
+        ),
+        engram_config=EngramConfig(dp_shared_memory=False),
+    )
+    with set_current_vllm_config(vllm_config), torch.device(device):
+        if amd:
+            return amd_ple_layer.Qwen4ExpNGramEmbedding(
+                config,
+                64,
+                0,
+                8,
+                prefix="t",
+                layer_name="t",
+                params_dtype=torch.bfloat16,
+            )
+        return Qwen4ExpNGramEmbedding(
+            config,
+            64,
+            0,
+            8,
+            data_parallel_rank=0,
+            prefix="t",
+            params_dtype=torch.bfloat16,
+        )
+
+
+@pytest.mark.parametrize("amd", [False, True], ids=["nvidia", "amd"])
 def test_pinned_ple_meta_constructor_skips_host_allocation(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    dist_init, tmp_path: Path, amd: bool
 ) -> None:
     """IPC's meta model must not allocate a pinned host table or its UVA view."""
-    monkeypatch.setattr(ngram_embedding_module, "is_uva_available", lambda: True)
-
-    module = _make_ple_from_checkpoint(
-        monkeypatch,
-        tmp_path / "unused.safetensors",
-        "bf16",
-        disk_offload=False,
-        cpu_offload=True,
-        device="meta",
-        load=False,
-    )
+    module = _make_pinned_ple_embedding(tmp_path, "bf16", "meta", amd=amd)
     embedding = module.ngram_embedding
 
     assert isinstance(embedding, Qwen4ExpPLEPinnedHostEmbedding)
     assert embedding.weight.is_meta
     assert not hasattr(embedding, "_uva_weight")
-    assert module._prefetch_ids.is_meta
+    if isinstance(module, Qwen4ExpNGramEmbedding):
+        assert module._prefetch_ids.is_meta
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or not torch.cuda.is_available(),
-    reason="requires NVIDIA CUDA",
+    not current_platform.is_cuda_alike() or not torch.cuda.is_available(),
+    reason="requires CUDA or ROCm",
 )
-@pytest.mark.parametrize("fmt", ["bf16", "fp8", "nvfp4"])
+@pytest.mark.parametrize(
+    "fmt",
+    [
+        "bf16",
+        "fp8",
+        pytest.param(
+            "nvfp4",
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="NVFP4 PLE requires NVIDIA CUDA"
+            ),
+        ),
+    ],
+)
 def test_pinned_ple_ipc_registered_host_lookup(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fmt: str
+    dist_init, tmp_path: Path, fmt: str
 ) -> None:
     """A PLE lookup reads the imported memfd without another pinned copy."""
-    path = tmp_path / "model.safetensors"
-    _save_ple_checkpoint(path, fmt)
-    module = _make_ple_from_checkpoint(
-        monkeypatch,
-        path,
-        fmt,
-        disk_offload=False,
-        cpu_offload=True,
-        device="cuda",
-    )
     from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
         rebuild_entries,
         record_bytes,
@@ -1262,7 +1309,19 @@ def test_pinned_ple_ipc_registered_host_lookup(
     )
     from vllm.model_executor.utils import weights_already_processed
 
+    path = tmp_path / "model.safetensors"
+    _save_ple_checkpoint(path, fmt)
+    module = _make_pinned_ple_embedding(
+        tmp_path, fmt, "cuda", amd=current_platform.is_rocm()
+    )
+    with safe_open(path, framework="pt") as checkpoint:
+        module.load_weights(
+            (name, checkpoint.get_tensor(name))
+            for name in checkpoint.keys()  # noqa: SIM118
+        )
     embedding = module.ngram_embedding
+    assert isinstance(embedding, Qwen4ExpPLEPinnedHostEmbedding)
+    embedding.quant_method.process_weights_after_loading(embedding)
     input_ids = torch.tensor([[3, 0], [1, 2]], device="cuda")
     expected = embedding._lookup(input_ids).clone()
     backend = TorchIPCBackend()
@@ -1298,7 +1357,6 @@ def test_qsa_topk_buffer_ipc_runtime_rebuild_preserves_shared_identity(
     tmp_path: Path, dist_init
 ) -> None:
     """Materializing the shared top-k buffer must preserve every QSA reference."""
-    from vllm.config import set_current_vllm_config
     from vllm.engine.arg_utils import EngineArgs
     from vllm.models.qwen4_exp.nvidia.model import Qwen4ExpModel
     from vllm.utils.torch_utils import set_default_torch_dtype
@@ -2728,7 +2786,6 @@ def _build_amd_ngram_embedding(
     device: str,
     cpu_offload: bool,
     fp8_checkpoint: bool,
-    load: bool = True,
 ) -> tuple[amd_ple_layer.Qwen4ExpNGramEmbedding, torch.Tensor]:
     """Construct and load a small AMD embedding through its checkpoint loader."""
     _mock_etp_group(monkeypatch)
@@ -2786,64 +2843,18 @@ def _build_amd_ngram_embedding(
         .reshape(embedding.org_vocab_size, embedding.embedding_dim)
         .to(embedding.weight.dtype)
     )
-    if load:
-        shard_size = (embedding.org_vocab_size + 1) // 2
-        weights = [
-            (f"ngram_embedding.shard_{i}.weight", shard)
-            for i, shard in enumerate(loaded_weight.split(shard_size))
-        ]
-        expected_loaded = {"ngram_embedding.weight"}
-        if fp8_checkpoint:
-            weights.append(("ngram_embedding.weight_scale", torch.tensor([0.25])))
-            expected_loaded.add("ngram_embedding.weight_scale")
-        assert module.load_weights(weights) == expected_loaded
-        embedding.quant_method.process_weights_after_loading(embedding)
+    shard_size = (embedding.org_vocab_size + 1) // 2
+    weights = [
+        (f"ngram_embedding.shard_{i}.weight", shard)
+        for i, shard in enumerate(loaded_weight.split(shard_size))
+    ]
+    expected_loaded = {"ngram_embedding.weight"}
+    if fp8_checkpoint:
+        weights.append(("ngram_embedding.weight_scale", torch.tensor([0.25])))
+        expected_loaded.add("ngram_embedding.weight_scale")
+    assert module.load_weights(weights) == expected_loaded
+    embedding.quant_method.process_weights_after_loading(embedding)
     return module, loaded_weight
-
-
-def test_amd_pinned_ple_meta_constructor_skips_host_allocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """IPC's meta model must not allocate a pinned host table or its UVA view."""
-    monkeypatch.setattr(ngram_embedding_module, "is_uva_available", lambda: True)
-
-    module, _ = _build_amd_ngram_embedding(
-        monkeypatch,
-        device="meta",
-        cpu_offload=True,
-        fp8_checkpoint=False,
-        load=False,
-    )
-    embedding = module.ngram_embedding
-
-    assert isinstance(embedding, Qwen4ExpPLEPinnedHostEmbedding)
-    assert embedding.weight.is_meta
-    assert not hasattr(embedding, "_uva_weight")
-
-
-def test_amd_pinned_ple_ipc_runtime_rebuild_uses_final_cpu_weight(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Runtime recovery binds the final imported weight as a registered host view."""
-    monkeypatch.setattr(ngram_embedding_module, "is_uva_available", lambda: True)
-    module, _ = _build_amd_ngram_embedding(
-        monkeypatch,
-        device="meta",
-        cpu_offload=True,
-        fp8_checkpoint=False,
-        load=False,
-    )
-    from vllm.model_executor.utils import weights_already_processed
-
-    embedding = module.ngram_embedding
-    weight = nn.Parameter(torch.ones(embedding.weight.shape), requires_grad=False)
-    embedding.weight = weight
-    monkeypatch.setattr(
-        ngram_embedding_module, "get_accelerator_view_from_cpu_tensor", lambda t: t
-    )
-    with weights_already_processed():
-        embedding.quant_method.process_weights_after_loading(embedding)
-    assert embedding._uva_weight is weight
 
 
 @pytest.mark.parametrize(

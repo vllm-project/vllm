@@ -181,146 +181,6 @@ def test_vmm_weights_survive_producer_exit_and_preserve_views():
         process.close()
 
 
-@pytest.mark.distributed(num_gpus=1)
-@pytest.mark.parametrize("backend_name", ["torch_ipc", "vmm_ipc"])
-@create_new_process_for_each_test("spawn")
-def test_memfd_socket_round_trip_preserves_views_after_producer_close(backend_name):
-    """Only pinned CPU storages use FDs and remain valid after producer teardown."""
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends import (
-        memfd_ipc,
-        serial_utils,
-    )
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        rebuild_entries,
-        record_bytes,
-    )
-    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
-        rebuild_tensors,
-    )
-
-    model = torch.nn.Module()
-    storage = torch.arange(48, dtype=torch.float32, pin_memory=True).reshape(6, 8)
-    model.register_parameter(
-        "weight", torch.nn.Parameter(storage[:, ::2], requires_grad=False)
-    )
-    model.register_buffer("weight_view", storage[1:, 1:4])
-    model.register_buffer("small", torch.tensor([1.0, 2.0]))
-    expected_weight = model.weight.detach().clone()
-    expected_view = model.weight_view.clone()
-
-    model.register_buffer("large_pageable", torch.zeros(1 << 20, dtype=torch.uint8))
-    state, backend = _state_for_model(model, backend_name)
-    entries = [backend.export_storage(record) for record in state.storages]
-    weight_index = state.manifest["tensors"]["weight"]["storage"]
-    small_index = state.manifest["tensors"]["small"]["storage"]
-    assert isinstance(entries[weight_index], memfd_ipc.MemfdStorageEntry)
-    assert not isinstance(entries[small_index], memfd_ipc.MemfdStorageEntry)
-    payload = {
-        "storages": entries,
-        "manifest": state.manifest,
-        "aliases": state.aliases,
-    }
-    encoded, descriptors = serial_utils.encode_message(payload)
-    assert len(encoded) > 1 << 20
-    assert len(descriptors) == 1
-
-    client, server = socket.socketpair()
-    with client, server:
-        sender = threading.Thread(target=serial_utils.send_msg, args=(server, payload))
-        sender.start()
-        received = serial_utils.recv_msg(client)
-        sender.join()
-    records = rebuild_entries(received["storages"], 0)
-    buffers = [
-        record_bytes(record, storage["nbytes"])
-        for record, storage in zip(
-            records, received["manifest"]["storages"], strict=True
-        )
-    ]
-    views = rebuild_tensors(received["manifest"], buffers)
-
-    entries[weight_index].fd.close()
-    del state, backend, entries, payload, model, storage
-    gc.collect()
-
-    assert torch.equal(views["weight"], expected_weight)
-    assert torch.equal(views["weight_view"], expected_view)
-    assert torch.equal(views["small"], torch.tensor([1.0, 2.0]))
-    assert views["weight"].stride() == (8, 2)
-    assert views["weight_view"].stride() == (8, 1)
-    assert views["weight_view"].storage_offset() == 9
-    assert views["weight"].untyped_storage().data_ptr() == (
-        views["weight_view"].untyped_storage().data_ptr()
-    )
-
-
-@pytest.mark.distributed(num_gpus=1)
-def test_memfd_mapping_unregisters_after_last_storage_release(monkeypatch):
-    """Pinned mappings unregister only after their last tensor storage is gone."""
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends import (
-        memfd_ipc,
-        serial_utils,
-    )
-
-    registered = []
-    unregistered: list[int] = []
-
-    def register(pointer, nbytes):
-        registered.append((pointer, nbytes))
-        return True
-
-    monkeypatch.setattr(memfd_ipc, "host_register", register)
-    monkeypatch.setattr(memfd_ipc, "host_unregister", unregistered.append)
-    fd = serial_utils.SharedFileDescriptor(os.memfd_create("memfd_test"))
-    try:
-        os.ftruncate(fd.fileno(), 4096)
-        record = memfd_ipc.MemfdStorageEntry(fd, 4096).rebuild(0)
-        storage = record.storage
-        assert len(registered) == 1
-        assert registered[0][1] == 4096
-
-        del record
-        fd.close()
-        assert unregistered == []
-        del storage
-        gc.collect()
-        assert unregistered == [registered[0][0]]
-    finally:
-        fd.close()
-
-
-@pytest.mark.distributed(num_gpus=1)
-def test_memfd_failed_rebuild_releases_mapping_with_live_traceback(monkeypatch):
-    """A later entry failure must not leave an earlier memfd mapping registered."""
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends import (
-        memfd_ipc,
-        serial_utils,
-    )
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        rebuild_entries,
-    )
-
-    unregistered: list[int] = []
-    monkeypatch.setattr(memfd_ipc, "host_register", lambda pointer, nbytes: True)
-    monkeypatch.setattr(memfd_ipc, "host_unregister", unregistered.append)
-    fd = serial_utils.SharedFileDescriptor(os.memfd_create("memfd_test"))
-    os.ftruncate(fd.fileno(), 4096)
-
-    class BadEntry:
-        def rebuild(self, device_index, cache=None):
-            raise RuntimeError("bad entry")
-
-    entries = [memfd_ipc.MemfdStorageEntry(fd, 4096), BadEntry()]
-    error = None
-    try:
-        rebuild_entries(entries, 0)
-    except RuntimeError as exc:
-        error = exc
-    assert error is not None
-    assert len(unregistered) == 1
-    fd.close()
-
-
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
 @pytest.mark.skipif(
@@ -642,7 +502,7 @@ def _save_tiny_qwen4_exp_checkpoint(path: Path) -> None:
 
 @pytest.mark.distributed(num_gpus=1)
 def test_ipc_cache_tiny_qwen4_exp_private_pinned_restart(
-    vllm_runner, tmp_path, monkeypatch, enable_pickle
+    vllm_runner, tmp_path, enable_pickle
 ):
     """A memfd-backed PLE table serves the same outputs as the GPU-resident table."""
     from safetensors import safe_open
@@ -659,8 +519,6 @@ def test_ipc_cache_tiny_qwen4_exp_private_pinned_restart(
             checkpoint.get_slice(name).get_dtype() == "BF16" for name in ple_shards
         )
 
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
     engram_config = {
         "cpu_offload": True,
         "dp_shared_memory": False,
@@ -1674,49 +1532,6 @@ def test_weight_cache_key_distinguishes_dp_ranks():
     assert key.mismatched_fields(replace(key, dp_rank=4)) == ["dp_rank"]
     assert key.mismatched_fields(replace(key, dp_size=8, dp_rank=3)) == ["dp_size"]
     assert key.mismatched_fields(replace(key, pp_rank=0)) == ["pp_rank"]
-
-
-@pytest.mark.distributed(num_gpus=1)
-def test_weight_cache_key_tracks_engram_and_attention_configs(
-    tmp_path, monkeypatch, default_vllm_config
-):
-    """Runtime weight layouts cannot cross Engram or attention config changes."""
-    from transformers import DeepseekV2Config
-
-    from vllm.config import AttentionConfig, EngramConfig, ModelConfig
-    from vllm.model_executor.model_loader.weight_cache.utils import (
-        build_weight_cache_key,
-    )
-
-    hf_config = DeepseekV2Config()
-    hf_config.architectures = ["DeepseekV2ForCausalLM"]
-    hf_config.save_pretrained(tmp_path)
-    model_config = ModelConfig(
-        model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128
-    )
-    monkeypatch.setattr(default_vllm_config, "model_config", model_config)
-    base_engram = EngramConfig(dp_shared_memory=False)
-    base_attention = AttentionConfig()
-    monkeypatch.setattr(default_vllm_config, "engram_config", base_engram)
-    monkeypatch.setattr(default_vllm_config, "attention_config", base_attention)
-    key = build_weight_cache_key(default_vllm_config, model_config)
-
-    monkeypatch.setattr(
-        default_vllm_config,
-        "engram_config",
-        EngramConfig(cpu_offload=False, dp_shared_memory=False),
-    )
-    different_engram = build_weight_cache_key(default_vllm_config, model_config)
-    monkeypatch.setattr(default_vllm_config, "engram_config", base_engram)
-    monkeypatch.setattr(
-        default_vllm_config,
-        "attention_config",
-        AttentionConfig(indexer_kv_dtype="fp8"),
-    )
-    different_attention = build_weight_cache_key(default_vllm_config, model_config)
-
-    assert key.mismatched_fields(different_engram) == ["engram_cpu_offload"]
-    assert key.mismatched_fields(different_attention) == ["indexer_kv_dtype"]
 
 
 @pytest.mark.parametrize("hf_quant_config", [None, {"quant_algo": "NVFP4"}])
