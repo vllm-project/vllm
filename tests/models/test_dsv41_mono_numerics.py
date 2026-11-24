@@ -953,7 +953,9 @@ def _check_largestep_hook(rank: int, tp: int, device, rows: int, image: bool) ->
     left out of the id check.
 
     With `image`, the layer has the image routing bias (`bias_vl`) and every
-    LS_IMAGE_EVERY-th token is an image sentinel id, which routes with it.
+    LS_IMAGE_EVERY-th token is an image sentinel id, which routes with it in
+    the block (vLLM's router). Stock's AITER routing has no bias_vl and is
+    compared with the text-bias routing instead.
 
     Pass: stock's error against ref is below LS_STOCK_RTOL and the block's
     below LS_BLOCK_RTOL. The block quantizes x and the intermediate to MXFP8 (as the
@@ -1056,6 +1058,17 @@ def _check_largestep_hook(rank: int, tp: int, device, rows: int, image: bool) ->
     ref = tensor_model_parallel_all_reduce(part.float()).double()
     assert torch.isfinite(block).all() and torch.isfinite(stock).all()
     err_block, err_stock = _rel(block, ref), _rel(stock, ref)
+    if image:
+        # Stock's monolithic a16w4 MoE routes inside AITER with the text bias
+        # only (`aiter_triton_kernel_w4a16_moe_forward` takes no bias_vl), so
+        # image rows go to other experts there: measured 0.54 against this
+        # reference, 3.9e-3 against the text-bias one. Stock is checked
+        # against the text-bias routing, the block against bias_vl's.
+        t_ids, t_w, _ = R.route_fp64(x, gate_w, bias.expand(rows, -1), scale)
+        part_t = R.routed_fp64(x, *plain, t_ids, t_w, inter)
+        part_t = part_t + R.shared_fp64(x, s_gu, s_dn)
+        ref_t = tensor_model_parallel_all_reduce(part_t.float()).double()
+        err_stock = _rel(stock, ref_t)
     print(
         f"TP{tp} rank {rank}, {rows} rows, image {image}: block {err_block:.3e}, "
         f"stock {err_stock:.3e} (relative L2 against float64), "
