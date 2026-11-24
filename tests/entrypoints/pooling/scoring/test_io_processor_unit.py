@@ -662,10 +662,13 @@ class TestCrossEncoderRenderExtrasAndCacheFlags:
 
         seen_flags: list[bool] = []
         monkeypatch.setattr(score_io_mod, "extract_target_prompt", lambda mc, ep: ep)
+
+        def _mock_process_for_engine(prompt, arrival_time, skip_mm_cache=False):
+            seen_flags.append(skip_mm_cache)
+            return prompt
+
         llm_reranker_processor.renderer = SimpleNamespace(
-            process_for_engine=lambda prompt, arrival_time, skip_mm_cache=False: (
-                seen_flags.append(skip_mm_cache) or prompt
-            )
+            process_for_engine=_mock_process_for_engine
         )
 
         render_params = _make_render_params_with_extras(

@@ -3,7 +3,7 @@
 """Unit tests for EmbedIOProcessor."""
 
 import contextlib
-from typing import get_args
+from typing import cast, get_args
 
 import pytest
 import torch
@@ -664,10 +664,13 @@ class TestEmbedRequestCacheSaltValidation:
 
     @pytest.mark.parametrize("salt", ["a", "s" * 128])
     def test_valid_cache_salt_accepted(self, salt: str):
-        request = TypeAdapter(EmbeddingRequest).validate_python(
-            {"model": "test", "input": "hello", "cache_salt": salt}
+        request = cast(
+            EmbeddingRequest,
+            TypeAdapter(EmbeddingRequest).validate_python(
+                {"model": "test", "input": "hello", "cache_salt": salt}
+            ),
         )
-        assert getattr(request, "cache_salt", salt) == salt
+        assert request.cache_salt == salt
 
     @pytest.mark.parametrize(
         "bad_salt", ["", "s" * 129, "a@b", "a/b", "a\\b", "a\x00b"]
