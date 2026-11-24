@@ -92,11 +92,6 @@ def test_sampling_mask_lists_slices_multiple_positions_by_request():
 
 
 @pytest.mark.parametrize("max_num_kept", [512, 20_001])
-@pytest.mark.skipif(
-    current_platform.is_xpu(),
-    reason="CI failed on XPU with Triton, Skipped until sycl kernel merged. "
-    "See https://github.com/vllm-project/vllm/pull/55851",
-)
 def test_sampling_mask_tensors_match_finite_support(max_num_kept):
     """Whatever its size (empty, one, around the compact width, beyond the
     cap, the whole vocab), a sampled row's mask is exactly the ascending set
@@ -124,7 +119,9 @@ def test_sampling_mask_tensors_match_finite_support(max_num_kept):
     )
 
     assert tensors.token_ids.shape[1] == min(max_num_kept, MAX_COMPACT_SUPPORT)
-    assert tensors.to_cpu_nonblocking().tolists().to_nested_list() == expected
+    cpu_tensors = tensors.to_cpu_nonblocking()
+    torch.accelerator.synchronize()
+    assert cpu_tensors.tolists().to_nested_list() == expected
 
 
 def test_sampling_mask_matches_processed_top_k_top_p_support():
@@ -190,7 +187,9 @@ def test_sampling_mask_tensors_multirow_request_layout():
         max_num_kept=2,
         rows_per_request=rows_per_request,
     )
-    result = tensors.to_cpu_nonblocking().tolists(counts)
+    cpu_tensors = tensors.to_cpu_nonblocking()
+    torch.accelerator.synchronize()
+    result = cpu_tensors.tolists(counts)
 
     assert tensors.token_ids.shape == (16, 2)
     assert tensors.rows_per_request == rows_per_request

@@ -14,16 +14,17 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.block_table import BlockTables, make_slot_mappings
 from vllm.v1.worker.gpu.cp_utils import cp_local_slot
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
@@ -31,7 +32,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, groups_with_metadata_builders
 
 logger = init_logger(__name__)
 
@@ -63,8 +64,12 @@ class DFlashSpeculator(DraftModelSpeculator):
         # Multimodal inputs not currently supported.
         self.supports_mm_inputs = False
 
-        # Each request emits exactly (bonus + N mask) query tokens per step.
-        self.num_query_per_req = 1 + self.num_speculative_steps
+        # Fill-in: bonus + N mask queries; anchor-first: N queries, the anchor
+        # predicting the first draft token. See _prepare_dflash_inputs_kernel.
+        speculator_config = speculative_config.speculator_config
+        assert isinstance(speculator_config, DFlashSpeculatorConfig)
+        self.sample_from_anchor = speculator_config.sample_from_anchor
+        self.num_query_per_req = speculator_config.num_query_tokens
 
         self.parallel_drafting_token_id = get_parallel_drafting_token_id(
             self.draft_model_config.hf_config
@@ -75,20 +80,6 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.requires_non_causal = dflash_has_any_non_causal(
             self.draft_model_config.hf_config
         )
-
-        # Whether the anchor query position is itself a prediction. DFlash default uses
-        # the anchor as the bonus token (only mask tokens predict); DSpark samples from
-        # the anchor and the N-1 mask token positions. See _prepare_dflash_inputs_kernel
-        dflash_config = (
-            getattr(self.draft_model_config.hf_config, "dflash_config", None) or {}
-        )
-        if dflash_config.get("sample_from_anchor", False):
-            raise ValueError(
-                "sample_from_anchor=True is not supported for DFlash. "
-                "DFlash uses a fixed 1+N query layout where the anchor "
-                "is the bonus token."
-            )
-        self.sample_from_anchor = False
 
         # Context positions for the K/V precompute, populated by prepare_dflash_inputs.
         self.context_positions = torch.zeros(
@@ -302,6 +293,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         block_tables: BlockTables,
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
+        kernel_block_sizes: list[int],
     ) -> None:
         super().set_attn(
             model_state,
@@ -309,17 +301,19 @@ class DFlashSpeculator(DraftModelSpeculator):
             block_tables,
             target_input_buffers,
             target_attn_groups,
+            kernel_block_sizes,
         )
 
         # FlashAttention's AOT split schedule is wrong for a windowed drafter,
         # and `_get_sliding_window_configs` leaves it on or off depending on
         # whether the target also runs FlashAttention. Decide it here instead.
         for groups in self.attn_groups:
-            for group in groups:
+            for group in groups_with_metadata_builders(groups):
                 builder = group.get_metadata_builder()
-                if getattr(
-                    builder, "aot_schedule", False
-                ) and get_kv_cache_spec_sliding_window(builder.kv_cache_spec):
+                kv_group = kv_cache_config.kv_cache_groups[group.kv_cache_group_id]
+                if getattr(builder, "aot_schedule", False) and issubclass(
+                    kv_group.manager_cls, SlidingWindowManager
+                ):
                     # `aot_schedule` belongs to FlashAttention's builder, not
                     # to the base class this loop is typed against.
                     builder.aot_schedule = False  # type: ignore[attr-defined]
@@ -331,11 +325,8 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.draft_kv_cache_group_id = self.draft_kv_cache_group_ids[0]
 
         # Per-group context slot buffers for the precompute (one row per group).
-        self._context_slot_mappings = torch.zeros(
-            len(self.draft_kv_cache_group_ids),
-            self.max_num_tokens,
-            dtype=torch.int64,
-            device=self.device,
+        self._context_slot_mappings = make_slot_mappings(
+            len(self.draft_kv_cache_group_ids), self.max_num_tokens, self.device
         )
 
         # Map each draft decoder layer to the index (within draft_kv_cache_group_ids)
@@ -939,10 +930,10 @@ def _prepare_dflash_inputs_kernel(
     tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=is_query)
 
     # --- Sample indices / positions / idx_mapping ---
-    # When SAMPLE_FROM_ANCHOR (DSpark), so we sample at EVERY query position
-    # and each position k predicts the NEXT token (sampled position = query_pos + 1).
-    # Otherwise (DFlash default) the anchor is the bonus token and only the mask tokens
-    # at offsets > 0 are sampled from, each AT its own position.
+    # When SAMPLE_FROM_ANCHOR (anchor-first layout), we sample at EVERY query
+    # position and each position k predicts the NEXT token (sampled position =
+    # query_pos + 1). Otherwise (fill-in layout) the anchor is the bonus token and
+    # only the mask tokens at offsets > 0 are sampled from, each AT its own position.
     sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
     is_sample = is_query & (query_off >= sample_off)
     sample_idx = req_idx * num_speculative_steps + (query_off - sample_off)

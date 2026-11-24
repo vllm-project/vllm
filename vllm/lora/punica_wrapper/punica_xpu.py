@@ -504,6 +504,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
         add_inputs: bool = True,
+        row_map: torch.Tensor | None = None,
     ):
         """Perform a fused forward computation for a LoRA MoE layer."""
         (
@@ -541,7 +542,8 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             num_active_loras,
             adapter_enabled,
             shrink_config.get("BLOCK_SIZE_M", 64),
-            shrink_config.get("BLOCK_SIZE_N", 64),
+            # XPU tl.dot requires N >= 16, including rank-sharded adapters.
+            max(shrink_config.get("BLOCK_SIZE_N", 64), 16),
             shrink_config.get("BLOCK_SIZE_K", 32),
             shrink_config.get("GROUP_SIZE_M", 8),
             shrink_config.get("NUM_WARPS", 4),
@@ -558,6 +560,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             fully_sharded,
             offset,
             add_inputs,
+            row_map,
         )
 
     def add_lora_w13(
@@ -582,6 +585,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         use_tuned_config: bool,
         add_inputs: bool = True,
         token_lora_mapping: torch.Tensor | None = None,
+        row_map: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -687,6 +691,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             fully_sharded=fully_sharded,
             token_lora_mapping=token_lora_mapping,
             add_inputs=add_inputs,
+            row_map=row_map,
         )
 
         return (
@@ -718,6 +723,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         tp_rank: int,
         use_tuned_config: bool,
         add_inputs: bool = True,
+        row_map: torch.Tensor | None = None,
     ) -> None:
         import functools
 
@@ -801,4 +807,5 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             offset=offset,
             token_lora_mapping=token_lora_mapping,
             add_inputs=add_inputs,
+            row_map=row_map,
         )

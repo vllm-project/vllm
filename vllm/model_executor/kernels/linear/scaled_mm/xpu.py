@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
@@ -122,6 +123,12 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
 
 
 class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
