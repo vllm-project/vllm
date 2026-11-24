@@ -957,25 +957,44 @@ class BaseNanoNemotronVLProcessor(ABC):
                     source_pixels = sum(p.media.width * p.media.height for p in params)
                     size_bytes = source_pixels * 3 * torch.uint8.itemsize
                 else:
+                    resized_pixels = sum(height * width for height, width in imgs_sizes)
                     size_bytes = self._estimate_image_resize_bytes(
-                        images,
-                        imgs_sizes,
-                        sum(height * width for height, width in imgs_sizes),
+                        images, imgs_sizes, resized_pixels
                     )
+                    output_dtype = (
+                        (self.dtype or torch.float32)
+                        if self.do_cpu_normalize
+                        else torch.uint8
+                    )
+                    # Packing retains resized images, rearranged patches, and the
+                    # concatenated output after the resize scratch is released.
+                    output_bytes = resized_pixels * 3 * output_dtype.itemsize
+                    size_bytes = max(size_bytes, 3 * output_bytes)
                 self._validate_image_preprocessing_budget(size_bytes, limit)
+            pixel_values: list[torch.Tensor] | torch.Tensor
             if self.device_resize:
-                pixel_values_lst = [_pil_to_nhwc_tensor(p.media)[0] for p in params]
+                pixel_values = [_pil_to_nhwc_tensor(p.media)[0] for p in params]
                 num_tokens_per_image = [p.num_embeddings for p in params]
             else:
                 pixel_values_lst, num_tokens_per_image = tiler.get_image_tensors(
                     params, dtype=self.dtype
                 )
-            image_num_patches = torch.tensor([1] * len(num_tokens_per_image))
+                pixel_values = DynamicResolutionImageTiler.stack(
+                    pixel_values_lst, self.config.patch_size
+                )[0]
+            image_num_patches = torch.tensor(
+                [
+                    (height // self.config.patch_size)
+                    * (width // self.config.patch_size)
+                    for height, width in imgs_sizes
+                ]
+            )
             pixels_key = (
                 "pixel_values_raw" if self.device_resize else "pixel_values_flat"
             )
             image_inputs = {
-                pixels_key: pixel_values_lst,
+                pixels_key: pixel_values,
+                "image_num_patches": image_num_patches,
                 "imgs_sizes": imgs_sizes,
                 "num_tokens_per_image": num_tokens_per_image,
             }
@@ -1266,6 +1285,9 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             )
             num_tubelets = math.ceil(num_frames / T) if T > 1 else num_frames
 
+            use_video_pruning = (
+                self.video_pruning_rate is not None and self.video_pruning_rate > 0.0
+            )
             if self.video_pruning_rate is not None and self.video_pruning_rate > 0.0:
                 # Start of EVS-specific code
                 num_tokens = compute_retained_tokens_count(
@@ -1292,6 +1314,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                 img_end_token_ids=self._img_end_token_ids,
                 img_context_token_ids=self._img_context_token_ids,
                 video_temporal_patch_size=T,
+                select_token_ids=not use_video_pruning,
             )
 
             # video_repl.full is a list of token IDs
@@ -1393,8 +1416,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             )
         else:
             batch = BatchFeature(combined_inputs, tensor_type=return_tensors)
-            # allow images to be exempt from the BatchFeature validation:
-            # We will .stack() them in _parse_and_validate_image_input
+            # Raw images for device resize can have different shapes.
             batch.update(image_inputs)
         if raw_videos is not None:
             batch["pixel_values_raw_video"] = raw_videos
@@ -1447,16 +1469,16 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         img_end_token_ids: list[int],
         img_context_token_ids: list[int],
         video_temporal_patch_size: int = 1,
+        select_token_ids: bool = False,
     ) -> PromptUpdateDetails:
         """Build prompt replacement for a video.
-        The replacement returned is not actually used to replace the placeholder
-        tokens - it's just used to make sure we allocate the correct number
-        of tokens.
-        Actual replacement is done in embed_multimodal of
-        NemotronH_Nano_VL_V2
-        (specifically in _process_video_input -> _create_final_video_embeddings).
-        There, we create the final embeddings with text embeddings for indicator tokens
-        and video embeddings for video tokens.
+
+        When select_token_ids is true, only image context tokens receive video
+        embeddings; timestamps and structural tokens use text embeddings.
+        Otherwise, the final merge is handled in embed_multimodal of
+        NemotronH_Nano_VL_V2 (specifically in _process_video_input ->
+        _create_final_video_embeddings).
+
         This is a single function that handles all cases - non EVS, EVS dummy, EVS real.
         The differentiation is done via tokens_per_frame parameter.
         - non EVS case - constant value same value across all frames
@@ -1474,6 +1496,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             img_end_token_ids (list[int]): pre-tokenized IMG_END tokens
             img_context_token_ids (list[int]): pre-tokenized IMG_CONTEXT tokens
             video_temporal_patch_size (int): temporal patch size for videos
+            select_token_ids (bool): whether to select only image context tokens
+                for video embeddings
         """
         # TODO: Add support of frame_duration_ms to be None
         # At preprocessing step we should allow absent / metadata without
@@ -1540,4 +1564,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             all_token_ids.extend(img_context_token_ids * num_tokens)
             all_token_ids.extend(img_end_token_ids)
 
+        if select_token_ids:
+            return PromptUpdateDetails.select_token_ids(
+                all_token_ids, img_context_token_ids
+            )
         return PromptUpdateDetails.from_seq(all_token_ids)

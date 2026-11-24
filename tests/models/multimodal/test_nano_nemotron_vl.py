@@ -240,6 +240,30 @@ class _CharTokenizer:
         return BatchEncoding({"input_ids": self.encode(text)})
 
 
+@pytest.mark.parametrize("select_token_ids", [True, False])
+def test_nemotron_video_repl_embedding_mask(select_token_ids: bool):
+    tokenizer = _CharTokenizer()
+    img_context_token_ids = [3]
+    repl = NanoNemotronVLProcessor.get_video_repl(
+        tokens_per_frame=[2],
+        frames_indices=[0],
+        frame_duration_ms=500,
+        tokenizer=tokenizer,
+        img_start_token_ids=[1],
+        img_end_token_ids=[2],
+        img_context_token_ids=img_context_token_ids,
+        select_token_ids=select_token_ids,
+    )
+
+    if select_token_ids:
+        assert repl.is_embed is not None
+        assert repl.is_embed(repl.full).tolist() == [
+            token_id in img_context_token_ids for token_id in repl.full
+        ]
+    else:
+        assert repl.is_embed is None
+
+
 _NORM_MEAN = [0.485, 0.456, 0.406]
 _NORM_STD = [0.229, 0.224, 0.225]
 
@@ -351,8 +375,34 @@ def test_dynamic_uint8_image_budget_counts_resize_temporary(
 
     monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget)
     output = processor(text="<image>", images=[image])
-    assert output["pixel_values_flat"][0].shape == (3, 40, 24)
-    assert output["pixel_values_flat"][0].dtype == torch.uint8
+    assert output["imgs_sizes"] == [(40, 24)]
+    assert output["pixel_values_flat"].shape == (60, 3 * 4**2)
+    assert output["pixel_values_flat"].dtype == torch.uint8
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("do_cpu_normalize", [False, True])
+def test_dynamic_image_budget_counts_patch_packing(
+    do_cpu_normalize: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+):
+    processor = _make_processor(
+        do_rescale=do_cpu_normalize, do_normalize=do_cpu_normalize
+    )
+    images = [Image.new("RGB", (8, 8)) for _ in range(3)]
+    text = "<image>" * len(images)
+    dtype = torch.bfloat16 if do_cpu_normalize else torch.uint8
+    # The resized images, rearranged patches, and packed tensor coexist.
+    budget = 3 * len(images) * 8**2 * 3 * dtype.itemsize
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget - 1)
+    with pytest.raises(VLLMValidationError, match="Image preprocessing exceeds"):
+        processor(text=text, images=images)
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget)
+    output = processor(text=text, images=images)
+    assert output["image_num_patches"].tolist() == [4, 4, 4]
+    assert output["pixel_values_flat"].nbytes == budget // 3
 
 
 @pytest.mark.core_model
@@ -487,6 +537,47 @@ def _sources(modality: str) -> list[np.ndarray]:
     return [rng.integers(0, 256, shape, dtype=np.uint8) for shape in shapes]
 
 
+def test_nemotron_dynamic_cpu_pixels_are_patch_flat(default_vllm_config):
+    processor = _make_processor()
+    sources = _sources("image")
+    _, inputs = _preprocess(processor, "image", sources)
+
+    tiler = processor.dynamic_tiler
+    assert tiler is not None
+    text_prompt_length = len(
+        processor.tokenizer(" Describe.", add_special_tokens=False).input_ids
+    )
+    params = tiler.compute_params(
+        [Image.fromarray(source) for source in sources],
+        tiler.max_num_tokens_available(text_prompt_length),
+    )
+    resized, expected_tokens = tiler.get_image_tensors(params, dtype=processor.dtype)
+    expected = DynamicResolutionImageTiler.stack(resized, processor.config.patch_size)[
+        0
+    ]
+    expected_num_patches = [
+        (image.shape[-2] // processor.config.patch_size)
+        * (image.shape[-1] // processor.config.patch_size)
+        for image in resized
+    ]
+
+    assert len({image.shape[-2:] for image in resized}) == len(sources)
+    assert inputs["imgs_sizes"] == [image.shape[-2:] for image in resized]
+    assert inputs["num_tokens_per_image"] == expected_tokens
+    assert inputs["image_num_patches"].tolist() == expected_num_patches
+    pixels = inputs["pixel_values_flat"]
+    assert pixels.shape == (sum(expected_num_patches), 3 * 4 * 4)
+    torch.testing.assert_close(pixels, expected, rtol=0, atol=0)
+
+    model = _uninitialized_model()
+    model.dynamic_resolution = True
+    model.patch_size = processor.config.patch_size
+    parsed = model._parse_and_validate_image_input(**inputs)
+    assert isinstance(parsed, NanoNemotronVLImagePixelInputsDynamic)
+    assert parsed.pixel_values_flat.shape == (1, *expected.shape)
+    torch.testing.assert_close(parsed.pixel_values_flat[0], pixels, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("modality", ["image", "video"])
 def test_nemotron_processor_device_resize_sends_source_pixels(
     modality: str, default_vllm_config
@@ -508,8 +599,16 @@ def test_nemotron_processor_device_resize_sends_source_pixels(
     if modality == "image":
         resized = inputs.pop("pixel_values_flat")
         raw = raw_inputs.pop("pixel_values_raw")
-        sizes = raw_inputs["imgs_sizes"]
-        assert raw_inputs == inputs
+        assert raw_inputs.keys() == inputs.keys()
+        assert raw_inputs["imgs_sizes"] == inputs["imgs_sizes"]
+        assert raw_inputs["num_tokens_per_image"] == inputs["num_tokens_per_image"]
+        torch.testing.assert_close(
+            raw_inputs["image_num_patches"], inputs["image_num_patches"]
+        )
+        assert resized.shape == (
+            inputs["image_num_patches"].sum().item(),
+            3 * 4 * 4,
+        )
     else:
         resized = [inputs["pixel_values_flat_video"]]
         raw = raw_inputs["pixel_values_raw_video"]
@@ -517,7 +616,7 @@ def test_nemotron_processor_device_resize_sends_source_pixels(
         torch.testing.assert_close(
             raw_inputs["video_num_patches"], inputs["video_num_patches"]
         )
-    assert [tuple(size) for size in sizes] == [tuple(r.shape[-2:]) for r in resized]
+        assert [tuple(size) for size in sizes] == [tuple(r.shape[-2:]) for r in resized]
     for raw_pixels, source in zip(raw, sources, strict=True):
         assert raw_pixels.dtype == torch.uint8
         assert torch.equal(raw_pixels, torch.from_numpy(source))
