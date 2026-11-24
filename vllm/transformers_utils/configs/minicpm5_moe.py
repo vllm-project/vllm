@@ -32,7 +32,6 @@ class MiniCPM5MoEConfig(PreTrainedConfig):
         eos_token_id: int | list[int] | tuple[int, ...] | None = (1, 130073),
         tie_word_embeddings: bool = False,
         rope_theta: float = 5000000.0,
-        rope_scaling: dict | None = None,
         rope_parameters: dict | None = None,
         attention_bias: bool = False,
         attention_dropout: float = 0.0,
@@ -66,18 +65,9 @@ class MiniCPM5MoEConfig(PreTrainedConfig):
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
-        # Accept the checkpoint's Transformers 4 fields and the Transformers 5
-        # schema. Never overwrite an explicit rope_parameters dictionary.
-        rope_parameters = dict(
-            rope_parameters if rope_parameters is not None else (rope_scaling or {})
-        )
-        legacy_type = rope_parameters.pop("type", "default")
-        rope_parameters.setdefault("rope_type", legacy_type)
-        rope_parameters.setdefault("rope_theta", rope_theta)
-        self.rope_parameters = rope_parameters
-        self.rope_theta = rope_parameters["rope_theta"]
-        # Transformers 5 exposes rope_scaling as an alias of rope_parameters.
-        # Reassigning the legacy value here would discard the normalized dict.
+        supplied_rope = dict(rope_parameters or {})
+        self.rope_parameters = supplied_rope
+        self.rope_theta = rope_theta
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.mlp_bias = mlp_bias
@@ -104,3 +94,10 @@ class MiniCPM5MoEConfig(PreTrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+        # Prefer explicit parameters if Transformers also read legacy RoPE fields.
+        if rope_parameters is not None and self.rope_parameters is not supplied_rope:
+            self.rope_parameters = supplied_rope
+            self.convert_rope_params_to_dict()
+        self.rope_parameters = dict(self.rope_parameters)
+        self.rope_parameters.pop("type", None)
+        self.rope_theta = self.rope_parameters["rope_theta"]

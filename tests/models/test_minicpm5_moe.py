@@ -58,9 +58,9 @@ class TestMiniCPM5MoEConfig(unittest.TestCase):
             self.assertEqual(config.rope_parameters["rope_theta"], 5000000)
             self.assertEqual(config.rope_parameters["rope_type"], "default")
 
-    def test_legacy_scaled_rope_preserves_scaling(self):
+    def test_legacy_rope_type_is_normalized(self):
         scaling = {"type": "linear", "factor": 2.0}
-        config = MiniCPM5MoEConfig(rope_theta=12345, rope_scaling=scaling)
+        config = MiniCPM5MoEConfig(rope_theta=12345, rope_parameters=scaling)
         self.assertEqual(
             config.rope_parameters,
             {
@@ -75,6 +75,7 @@ class TestMiniCPM5MoEConfig(unittest.TestCase):
         parameters = {"rope_type": "linear", "factor": 3.0, "rope_theta": 45678}
         config = MiniCPM5MoEConfig(rope_theta=12345, rope_parameters=parameters)
         self.assertEqual(config.rope_parameters, parameters)
+        self.assertEqual(config.rope_theta, 45678)
         with tempfile.TemporaryDirectory() as directory:
             config.save_pretrained(directory)
             reloaded = MiniCPM5MoEConfig.from_pretrained(directory)
