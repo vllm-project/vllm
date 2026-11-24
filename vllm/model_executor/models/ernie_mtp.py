@@ -37,7 +37,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .llama import LlamaDecoderLayer
+from .ernie45_moe import Ernie4_5_MoeDecoderLayer
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -55,7 +55,12 @@ class ErnieMultiTokenPredictorLayer(nn.Module):
         self.mtp_linear_proj = nn.Linear(
             config.hidden_size * 2, config.hidden_size, bias=False
         )
-        self.mtp_block = LlamaDecoderLayer(vllm_config, prefix)
+        self.mtp_block = Ernie4_5_MoeDecoderLayer(
+            config=config,
+            cache_config=vllm_config.cache_config,
+            quant_config=vllm_config.quant_config,
+            prefix=prefix,
+        )
 
     def forward(
         self,

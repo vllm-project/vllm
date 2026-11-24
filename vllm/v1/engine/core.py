@@ -61,6 +61,8 @@ from vllm.v1.core.kv_cache_planning import (
     finalize_extensible_kv_cache,
     get_global_kv_cache_groups,
     get_kv_cache_configs,
+    get_pipeline_stages,
+    resolve_mamba_block_size,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -133,7 +135,7 @@ class EngineCore:
         self,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         executor_fail_callback: Callable | None = None,
         include_finished_set: bool = False,
     ):
@@ -156,7 +158,7 @@ class EngineCore:
                 vllm_config,
             )
 
-        self.log_stats = log_stats
+        self.collect_stats = collect_stats
         # Opaque weight version supplied by the caller.
         self._weight_version = "default"
 
@@ -204,7 +206,7 @@ class EngineCore:
             kv_cache_config=kv_cache_config,
             structured_output_manager=self.structured_output_manager,
             include_finished_set=include_finished_set,
-            log_stats=self.log_stats,
+            collect_stats=self.collect_stats,
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
         )
@@ -234,6 +236,8 @@ class EngineCore:
         if self.batch_queue_size > 1:
             logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
+        # Step awaiting prior outputs before sampling (see step_with_batch_queue).
+        self.deferred_step: tuple[SchedulerOutput, Future[Any]] | None = None
 
         self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
@@ -287,6 +291,11 @@ class EngineCore:
 
         # Get all kv cache needed by the model
         layer_configs = self.model_executor.get_kv_cache_layer_configs()
+        mamba_block_size = resolve_mamba_block_size(vllm_config, layer_configs)
+        if mamba_block_size is not None:
+            vllm_config.cache_config.mamba_block_size = mamba_block_size
+            self.model_executor.set_mamba_block_size(mamba_block_size)
+            layer_configs = self.model_executor.get_kv_cache_layer_configs()
 
         # Resolve the KV cache layout before memory profiling: workers that
         # capture full cudagraphs initialize a minimal KV cache during it.
@@ -379,12 +388,14 @@ class EngineCore:
             scheduler_block_size,
             hash_block_size,
         )
+        pipeline_stages = get_pipeline_stages(vllm_config, kv_cache_configs)
         # The scheduler's config is a deep copy taken before these are resolved,
         # so set them there too: the KV connector's scheduler side reads the same
         # fields as its workers.
         for kv_cache_config in (*kv_cache_configs, scheduler_kv_cache_config):
             kv_cache_config.hash_block_size = hash_block_size
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
+            kv_cache_config.pipeline_stages = pipeline_stages
 
         self.model_executor.initialize_from_config(kv_cache_configs)
         compilation_times = []
@@ -401,24 +412,8 @@ class EngineCore:
             if max_model_len != max_model_len_after:
                 self.collective_rpc("update_max_model_len", args=(max_model_len,))
             self.model_executor.extend_kv_cache(num_blocks)
-        # Under the extensible KV cache, workers create the connector in
-        # `extend_kv_cache`, so ask for its block count only afterwards.
-        kv_transfer_config = vllm_config.kv_transfer_config
-        if (
-            kv_transfer_config is not None
-            and kv_transfer_config.has_connector("SimpleCPUOffloadConnector")
-            and vllm_config.cache_config.enable_prefix_caching
-        ):
-            aligned_num_cpu_blocks = (
-                self.model_executor.get_simple_cpu_offload_num_blocks()
-            )
-            assert aligned_num_cpu_blocks is not None, (
-                "SimpleCPUOffloadConnector workers must report their block count"
-            )
-            vllm_config.cache_config.simple_cpu_offload_num_blocks = (
-                aligned_num_cpu_blocks
-            )
 
+        kv_transfer_config = vllm_config.kv_transfer_config
         if (
             kv_transfer_config is not None
             and kv_transfer_config.is_kv_transfer_instance
@@ -633,7 +628,7 @@ class EngineCore:
             # With GPU timing the worker returns the iteration's record later.
             and not self.vllm_config.gpu_iteration_timing
         )
-        if not self.log_stats or not enable_details:
+        if not self.collect_stats or not enable_details:
             return None
         # 0-token step: DPEngineCoreProc logs the dummy batch it runs instead
         # (avoids double-log).
@@ -773,8 +768,8 @@ class EngineCore:
         assert len(batch_queue) < self.batch_queue_size
 
         model_executed = False
-        deferred_scheduler_output = None
-        if self.scheduler.has_requests():
+        # Workers need a deferred step's sample_tokens() before the next step.
+        if self.deferred_step is None and self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
@@ -805,11 +800,11 @@ class EngineCore:
                         grammar_output, non_block=True
                     )
                 else:
-                    # We need to defer sampling until we have processed the model output
-                    # from the prior step.
-                    deferred_scheduler_output = scheduler_output
+                    # We need to defer sampling until we have processed the model
+                    # outputs from the prior steps.
+                    self.deferred_step = (scheduler_output, exec_future)
 
-            if not deferred_scheduler_output:
+            if self.deferred_step is None:
                 # Add this step's future to the queue.
                 batch_queue.appendleft((future, scheduler_output, exec_future))
                 if len(batch_queue) < self.batch_queue_size and (
@@ -848,7 +843,13 @@ class EngineCore:
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
-        if deferred_scheduler_output:
+        # With async scheduling depth > 2, wait until no queued step shares a
+        # request with the deferred one.
+        if self.deferred_step is not None and not any(
+            so.shares_requests_with(self.deferred_step[0]) for _, so, _ in batch_queue
+        ):
+            deferred_scheduler_output, exec_future = self.deferred_step
+            self.deferred_step = None
             # Update the deferred scheduler output before computing its grammar
             # bitmask.
             if deferred_scheduler_output.has_structured_output_spec_decode:
@@ -1337,7 +1338,7 @@ class EngineCoreProc(EngineCore):
         local_client: bool,
         handshake_address: str,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
         *,
@@ -1398,7 +1399,7 @@ class EngineCoreProc(EngineCore):
             super().__init__(
                 vllm_config,
                 executor_class,
-                log_stats,
+                collect_stats,
                 executor_fail_callback,
                 internal_dp_balancing,
             )
@@ -2111,6 +2112,7 @@ class EngineCoreProc(EngineCore):
     def _make_ready_response(self) -> EngineCoreReadyResponse:
         parallel_config = self.vllm_config.parallel_config
         scheduler_config = self.vllm_config.scheduler_config
+        mm_config = self.vllm_config.model_config.multimodal_config
         return EngineCoreReadyResponse(
             max_model_len=self.vllm_config.model_config.max_model_len,
             num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
@@ -2171,6 +2173,12 @@ class EngineCoreProc(EngineCore):
             enable_expert_parallel=parallel_config.enable_expert_parallel,
             supports_prompt_logprobs=(
                 not self.vllm_config.cache_config.kv_sharing_fast_prefill
+            ),
+            allow_missing_mm_embeddings=(
+                mm_config is not None and mm_config.allow_missing_mm_embeddings
+            ),
+            max_mm_embeds_per_request=getattr(
+                self.scheduler, "max_mm_embeds_per_request", None
             ),
         )
 
@@ -2578,7 +2586,7 @@ class DPEngineCoreProc(EngineCoreProc):
         local_client: bool,
         handshake_address: str,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
@@ -2612,7 +2620,7 @@ class DPEngineCoreProc(EngineCoreProc):
             local_client,
             handshake_address,
             executor_class,
-            log_stats,
+            collect_stats,
             client_handshake_address,
             engine_index=dp_rank,
             tensor_queue=tensor_queue,
@@ -3114,7 +3122,7 @@ class DPMoEEngineCoreActor(EngineCoreActorMixin, DPEngineCoreProc):
         local_client: bool,
         addresses: EngineZmqAddresses,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
@@ -3124,7 +3132,7 @@ class DPMoEEngineCoreActor(EngineCoreActorMixin, DPEngineCoreProc):
             self, vllm_config, addresses, dp_rank, local_dp_rank
         )
         DPEngineCoreProc.__init__(
-            self, vllm_config, local_client, "", executor_class, log_stats
+            self, vllm_config, local_client, "", executor_class, collect_stats
         )
 
 
@@ -3137,7 +3145,7 @@ class EngineCoreActor(EngineCoreActorMixin, EngineCoreProc):
         local_client: bool,
         addresses: EngineZmqAddresses,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
@@ -3151,6 +3159,6 @@ class EngineCoreActor(EngineCoreActorMixin, EngineCoreProc):
             local_client,
             "",
             executor_class,
-            log_stats,
+            collect_stats,
             engine_index=dp_rank,
         )

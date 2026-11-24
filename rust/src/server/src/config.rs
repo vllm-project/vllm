@@ -101,9 +101,9 @@ pub struct ApiServerOptions {
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
-    /// Maximum HTTP request body size in bytes
-    /// (`VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, default 32 MiB). `None` removes the
-    /// limit.
+    /// Maximum size in bytes of an HTTP request body and of a gRPC request
+    /// message (`VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, default 32 MiB). `None`
+    /// removes the limit.
     #[educe(Default(expression = Some(DEFAULT_REQUEST_BODY_LIMIT_BYTES)))]
     pub request_body_limit_bytes: Option<usize>,
     /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`, default 16384).
@@ -393,6 +393,8 @@ pub struct Config {
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities default to 999 items.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Default overrides for multimodal processor options.
+    pub mm_processor_kwargs: HashMap<String, Value>,
     /// LoRA adapters loaded at startup, in order. Startup fails if any of
     /// them cannot be loaded.
     pub lora_modules: Vec<LoraModulePath>,
