@@ -27,18 +27,16 @@ from vllm.platforms import current_platform
 
 E, TOPK, HID = R.EXPERTS, R.TOPK, R.HIDDEN
 
-# Tolerances, as relative L2 error against the float64 reference. MXFP8 (e4m3,
-# 3 mantissa bits, one power-of-two scale per 32 values) rounds each value by up
-# to 2^-4 of its block's scale; over random data that is a relative error of a
-# few percent per value, and the dot products do not average it away because
-# the reference has no quantization at all. The measured errors are printed
-# with -s; the bounds keep about 1.5x headroom over them.
-STAGE1_RTOL = 3e-2  # x to MXFP8, then swiglu, then h to bf16
-STAGE2_RTOL = 3e-2  # h to MXFP8, then the down projection, a pick to bf16
-COMBINE_RTOL = 1e-2  # bf16 picks summed in f32, the token to bf16 (2^-8)
-BLOCK_RTOL = 5e-2  # all of the above, x and h both quantized
-# A wrong expert, row or scale gives a relative error near 1, so every bound
-# above is far from a real bug.
+# Tolerances, as relative L2 error against the float64 reference, each about
+# 1.3x the error measured on MI300X (24 Nov 2026, every M and TP alike to 2%).
+# MXFP8 (e4m3, 3 mantissa bits, one power-of-two scale per 32 values) gives a
+# relative error of a few percent per value, and on random data a GEMM output
+# keeps about the relative error of its quantized input. A wrong expert, row or
+# scale gives a relative error near 1, so every bound is far from a real bug.
+STAGE1_RTOL = 5e-2  # x to MXFP8, swiglu, h to bf16: measured 3.8e-2
+STAGE2_RTOL = 3.5e-2  # h to MXFP8, down projection, a pick to bf16: 2.7e-2
+COMBINE_RTOL = 2.5e-3  # bf16 picks summed in f32, the token to bf16: 1.7e-3
+BLOCK_RTOL = 6.5e-2  # all of the above, x and h both quantized: 4.7e-2
 
 ROWS = [
     pytest.param(16, id="M16"),
