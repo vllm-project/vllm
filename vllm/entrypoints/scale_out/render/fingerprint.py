@@ -51,7 +51,10 @@ class RenderFingerprint:
 
 
 def _resolve_snapshot(
-    source: str, revision: str | None, patterns: list[str]
+    source: str,
+    revision: str | None,
+    patterns: list[str],
+    token: bool | str | None,
 ) -> tuple[Path, Presence]:
     """Fetch the listed files the Hub names, then hash what the snapshot holds."""
     if Path(source).exists():
@@ -63,6 +66,7 @@ def _resolve_snapshot(
         revision=revision,
         allow_patterns=patterns,
         local_files_only=offline,
+        token=token,
     )
     return Path(path), "local" if offline else "hub"
 
@@ -110,10 +114,13 @@ def _builtin_chat_template(
 
 def _configured_chat_template(args: Namespace, loaded: str | None) -> str | None:
     """Text of `--chat-template` as given, without newline translation."""
-    path = Path(args.chat_template) if args.chat_template else None
-    if path is not None and path.is_file():
-        return path.read_bytes().decode("utf-8")
-    return loaded
+    if not args.chat_template:
+        return loaded
+    try:
+        return Path(args.chat_template).read_bytes().decode("utf-8")
+    except OSError:
+        # An inline template or a built-in template name.
+        return loaded
 
 
 def _flags(
@@ -183,18 +190,21 @@ def compute_render_fingerprint(
         logger.info("render_fingerprint is not computed with VLLM_USE_MODELSCOPE.")
         return None
 
+    token = model_config.hf_token
     tokenizer_dir, tokenizer_presence = _resolve_snapshot(
         model_config.tokenizer,
         model_config.tokenizer_revision,
         [*_TOKENIZER_PATTERNS, "additional_chat_templates/*.jinja"],
+        token,
     )
     config_dir, config_presence = _resolve_snapshot(
         model_config.hf_config_path or model_config.model,
-        model_config.revision,
+        model_config.hf_config_revision,
         list(CONFIG_FILES),
+        token,
     )
     model_dir, model_presence = _resolve_snapshot(
-        model_config.model, model_config.revision, list(PROCESSOR_FILES)
+        model_config.model, model_config.revision, list(PROCESSOR_FILES), token
     )
 
     manifest = build_manifest(

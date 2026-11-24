@@ -261,3 +261,17 @@ async def test_render_fingerprint_matches_its_manifest(client):
     # Server-side defaults the operator did not pass must stay out, or a
     # frontend without that flag could never produce the same manifest.
     assert data["manifest"]["flags"]["default_chat_template_kwargs"] is None
+
+
+def test_render_fingerprint_keeps_a_long_inline_chat_template():
+    """An inline `--chat-template` longer than a file name must not be probed
+    as a path: the server would fail to start."""
+    template = (
+        "{# " + "x" * 300 + " #}{% for m in messages %}{{ m.content }}{% endfor %}"
+    )
+    args = ["--chat-template", template]
+
+    with RemoteLaunchRenderServer(MODEL_NAME, args, max_wait_seconds=120) as srv:
+        response = httpx.get(srv.url_for("inference/v1/render_fingerprint"))
+
+    assert response.json()["manifest"]["flags"]["chat_template"] == template
