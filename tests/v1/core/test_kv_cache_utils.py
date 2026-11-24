@@ -1954,7 +1954,7 @@ def _hybrid_prefix_match_config(
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             )
         )
     if swa_block_size is not None:
