@@ -638,7 +638,7 @@ def _verify_load(
 def _verify_p(s_tmem, b, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr):
     """Alias bf16 P over the first half of S buffer `b`."""
     layout: gl.constexpr = _bw.TensorMemoryLayout((BLOCK_M, 2 * BLOCK_N), col_stride=1)
-    p = s_tmem._reinterpret(gl.bfloat16, [2, BLOCK_M, 2 * BLOCK_N], layout)
+    p = s_tmem.reinterpret(gl.bfloat16, [2, BLOCK_M, 2 * BLOCK_N], layout)
     return p.index(b).slice(0, BLOCK_N)
 
 
