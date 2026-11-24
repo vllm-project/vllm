@@ -446,6 +446,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        q_out_fp8: torch.Tensor | None = None,
+        q_scale: torch.Tensor | None = None,
     ):
         key_cache, value_cache = self._split_kv_cache(kv_cache)
         rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
@@ -469,6 +471,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             kv_cache_dtype=self.kv_cache_dtype,
             use_shuffle_layout=self._use_shuffle_kv,
             return_kv=False,
+            q_out_fp8=q_out_fp8,
+            q_scale=q_scale,
         )
 
     def do_qk_norm_mrope_kvcache_update(

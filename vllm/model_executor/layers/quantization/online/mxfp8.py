@@ -9,7 +9,10 @@ import torch
 from torch.nn import Module
 
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp8Dynamic,
+)
 
 if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -121,9 +124,30 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
 
     fp8_backend: "Fp8MoeBackend"
     experts_cls: "type[mk.FusedMoEExperts] | None"
+    accepts_activation_override = True
 
-    def __init__(self, *, moe: FusedMoEConfig):
+    @classmethod
+    def resolve_activation_quant_key(
+        cls, activation_quant_key: QuantKey | None, explicit: bool
+    ) -> QuantKey | None:
+        key = super().resolve_activation_quant_key(activation_quant_key, explicit)
+        if explicit and key != kMxfp8Dynamic:
+            raise NotImplementedError(
+                f"activation override for online {cls.__name__} supports only "
+                f"{kMxfp8Dynamic}, got {key}"
+            )
+        return key
+
+    def __init__(
+        self,
+        *,
+        moe: FusedMoEConfig,
+        activation_quant_key: QuantKey | None = None,
+    ):
         super().__init__(moe)
+        self.activation_quant_key = self.resolve_activation_quant_key(
+            activation_quant_key, explicit=activation_quant_key is not None
+        )
         self.weight_block_size: list[int] = [1, MXFP8_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
 

@@ -43,8 +43,6 @@ model:
     - "--max-model-len"
     - "32768"
     - "--enable-prefix-caching"
-    - "--mamba-cache-mode"
-    - "align"
     - "--limit-mm-per-prompt"
     - '{"image": 8}'
     - "--max-num-seqs"
@@ -147,9 +145,9 @@ guide: |
     stays `jev-decision`. The path is the local checkout
     `JEV-27B-VL/adapter_vllm`, or the `adapter_vllm` directory inside an
     HF or ModelScope checkout.
-  - **`--mamba-cache-mode align`** — the Qwen3.8 hybrid backbone mixes
-    full attention with Mamba-style layers; the card serves it in `align`
-    mode.
+  - **`--enable-prefix-caching`** — the Qwen3.8 hybrid backbone mixes
+    full attention with Mamba-style layers; prefix caching also caches the
+    Mamba state at block boundaries.
   - **`--limit-mm-per-prompt '{"image": 8}'`** — at most 8 images per
     request.
   - **`--max-num-seqs 8`** — required. The card says that with more than 8
@@ -194,7 +192,6 @@ guide: |
     --logprobs-mode processed_logprobs \
     --max-model-len 32768 \
     --enable-prefix-caching \
-    --mamba-cache-mode align \
     --limit-mm-per-prompt '{"image": 8}' \
     --max-num-seqs 8 \
     --trust-request-chat-template
