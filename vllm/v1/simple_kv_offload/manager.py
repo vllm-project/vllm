@@ -1421,12 +1421,10 @@ class SimpleCPUOffloadScheduler:
                     self._load_event_to_reqs.pop(state.load_event, None)
 
         if state.transfer_meta is not None:
-            # Free CPU touch refs. Dedup to avoid double-free: the
-            # transfer pairs may repeat the same CPU block when
-            # different GPU blocks share identical content.
+            # Release one CPU touch ref per transfer entry.
             self.cpu_block_pool.free_blocks(
                 self.cpu_block_pool.blocks[bid]
-                for bid in dict.fromkeys(state.transfer_meta.cpu_block_ids)
+                for bid in state.transfer_meta.cpu_block_ids
             )
             # Free GPU touch refs. CPU-hit allocation gives each loaded block a
             # distinct GPU block, asserted in update_state_after_alloc.
