@@ -11,6 +11,7 @@ import torch
 
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.parse import (
+    DictEmbeddingItems,
     ImageSize,
     MultiModalDataItems,
     MultiModalDataParser,
@@ -34,14 +35,83 @@ from vllm.transformers_utils.processors.hy_v4 import (
 )
 
 
+def _get_vision_fields(inputs, temporal_patch_size):
+    result = {}
+    for modality, pixel_key in (
+        ("image", "pixel_values"),
+        ("video", "pixel_values_videos"),
+    ):
+        grid_key = f"{modality}_grid_thw"
+        grid = inputs.get(grid_key, torch.empty((0, 3), dtype=torch.long))
+        result[pixel_key] = MultiModalFieldConfig.flat_from_sizes(
+            modality, grid.prod(-1)
+        )
+        result[grid_key] = MultiModalFieldConfig.batched(modality, keep_on_cpu=True)
+        if modality == "video":
+            tau = temporal_patch_size
+            result["video_timestamps"] = MultiModalFieldConfig.flat_from_sizes(
+                "video", (grid[:, 0] + tau - 1) // tau, keep_on_cpu=True
+            )
+    return result
+
+
 class HYV4VLDataParser(MultiModalDataParser):
+    embedding_fields = {
+        "image": {"image_grid_thw": "metadata"},
+        "video": {"video_grid_thw": "metadata", "video_timestamps": "metadata"},
+    }
+
+    def __init__(self, vision_config, max_model_len: int, **kwargs):
+        super().__init__(video_needs_metadata=True, **kwargs)
+        self.vision_config = vision_config
+        self.max_model_len = max_model_len
+
+    def _parse_metadata(self, data, modality: str) -> DictEmbeddingItems:
+        fields = self.placeholder_metadata_fields(modality)
+        if not self.allow_missing_mm_embeddings or data.keys() != fields:
+            raise ValueError(f"HYV4 VL expects only {sorted(fields)} on the consumer")
+        grid = data[f"{modality}_grid_thw"]
+        if (
+            not isinstance(grid, torch.Tensor)
+            or grid.dtype not in (torch.int32, torch.int64)
+            or grid.ndim != 2
+            or grid.shape[1] != 3
+            or not len(grid)
+        ):
+            raise ValueError(f"Invalid HYV4 {modality} grid")
+        tau = self.vision_config.temporal_patch_size
+        total_tokens = total_frames = 0
+        for item in grid.tolist():
+            total_tokens += vision_token_count(item, self.vision_config, modality)
+            total_frames += (item[0] + tau - 1) // tau
+            if total_tokens > self.max_model_len:
+                raise ValueError(f"HYV4 {modality} metadata exceeds the model context")
+        if modality == "video":
+            timestamps = data["video_timestamps"]
+            if (
+                not isinstance(timestamps, torch.Tensor)
+                or timestamps.shape != (total_frames,)
+                or not torch.isfinite(timestamps).all()
+            ):
+                raise ValueError("HYV4 video timestamps must match the merged frames")
+        return DictEmbeddingItems(
+            data,
+            modality=modality,
+            required_fields=fields,
+            fields_factory=partial(_get_vision_fields, temporal_patch_size=tau),
+        )
+
     def _parse_image_data(self, data):
-        if isinstance(data, dict) or self.is_embeddings(data):
+        if isinstance(data, dict):
+            return self._parse_metadata(data, "image")
+        if self.is_embeddings(data):
             raise ValueError("HYV4 VL does not support precomputed image embeddings")
         return super()._parse_image_data(data)
 
     def _parse_video_data(self, data):
-        if isinstance(data, dict) or self.is_embeddings(data):
+        if isinstance(data, dict):
+            return self._parse_metadata(data, "video")
+        if self.is_embeddings(data):
             raise ValueError("HYV4 VL does not support precomputed video embeddings")
         return super()._parse_video_data(data)
 
@@ -64,7 +134,11 @@ class HYV4VLProcessingInfo(BaseProcessingInfo):
         return int(options.get("max_frames", processor.max_frames))
 
     def get_data_parser(self):
-        return HYV4VLDataParser(video_needs_metadata=True)
+        return HYV4VLDataParser(
+            self.get_hf_config().vision_config,
+            self.ctx.model_config.max_model_len,
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
+        )
 
     def get_image_size_with_most_features(self):
         processor = self.get_hf_processor().image_processor
@@ -210,19 +284,23 @@ class HYV4VLMultiModalProcessor(BaseMultiModalProcessor[HYV4VLProcessingInfo]):
         intervals = options.get("second_per_grid_ts")
         if intervals is not None:
             videos = inputs.mm_data_items.get("video", ())
-            if len(intervals) != len(videos):
-                raise ValueError("second_per_grid_ts must match video count")
-            normalized = []
-            for item, interval in zip(videos, intervals):
-                if item is None:
-                    raise ValueError("Video timing overrides require media metadata")
-                frames, metadata = item
-                normalized.append(
-                    (frames, {**metadata, "second_per_grid_t": float(interval)})
+            mm_items = inputs.mm_data_items
+            if not isinstance(videos, DictEmbeddingItems):
+                if len(intervals) != len(videos):
+                    raise ValueError("second_per_grid_ts must match video count")
+                normalized = []
+                for item, interval in zip(videos, intervals):
+                    if item is None:
+                        raise ValueError(
+                            "Video timing overrides require media metadata"
+                        )
+                    frames, metadata = item
+                    normalized.append(
+                        (frames, {**metadata, "second_per_grid_t": float(interval)})
+                    )
+                mm_items = MultiModalDataItems(
+                    {**inputs.mm_data_items, "video": VideoProcessorItems(normalized)}
                 )
-            mm_items = MultiModalDataItems(
-                {**inputs.mm_data_items, "video": VideoProcessorItems(normalized)}
-            )
             kwargs = dict(inputs.hf_processor_mm_kwargs)
             kwargs.pop("second_per_grid_ts", None)
             inputs = replace(
@@ -231,23 +309,9 @@ class HYV4VLMultiModalProcessor(BaseMultiModalProcessor[HYV4VLProcessingInfo]):
         return super().apply(inputs, timing_ctx)
 
     def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
-        result = {}
-        for modality, pixel_key in (
-            ("image", "pixel_values"),
-            ("video", "pixel_values_videos"),
-        ):
-            grid_key = f"{modality}_grid_thw"
-            grid = hf_inputs.get(grid_key, torch.empty((0, 3), dtype=torch.long))
-            result[pixel_key] = MultiModalFieldConfig.flat_from_sizes(
-                modality, grid.prod(-1)
-            )
-            result[grid_key] = MultiModalFieldConfig.batched(modality, keep_on_cpu=True)
-            if modality == "video":
-                tau = self.info.get_hf_config().vision_config.temporal_patch_size
-                result["video_timestamps"] = MultiModalFieldConfig.flat_from_sizes(
-                    "video", (grid[:, 0] + tau - 1) // tau, keep_on_cpu=True
-                )
-        return result
+        return _get_vision_fields(
+            hf_inputs, self.info.get_hf_config().vision_config.temporal_patch_size
+        )
 
     def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
