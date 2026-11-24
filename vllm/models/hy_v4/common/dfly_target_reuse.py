@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -9,14 +10,20 @@ from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import KVCacheConfig, MLAAttentionSpec
 from vllm.v1.worker.utils import customize_attention_spec
 
-from .attention import HYV4MLAAttention
-from .dfly import HYV4DFlyForCausalLM
 from .dfly_inputs import build_dfly_reuse_indices
+
+if TYPE_CHECKING:
+    from vllm.models.hy_v4.nvidia.attention import HYV4MLAAttention
+    from vllm.models.hy_v4.nvidia.dfly import HYV4DFlyForCausalLM
 
 
 class HYV4DFlyTargetReuse:
     def __init__(
-        self, target: nn.Module, draft: HYV4DFlyForCausalLM, vllm_config: VllmConfig
+        self,
+        target: nn.Module,
+        draft: "HYV4DFlyForCausalLM",
+        vllm_config: VllmConfig,
+        attention_cls: type["HYV4MLAAttention"],
     ):
         config = draft.config
         if vllm_config.cache_config.cache_dtype not in (
@@ -37,9 +44,9 @@ class HYV4DFlyTargetReuse:
         self.draft = draft
         self.config = config
 
-        def target_attention(index: int) -> HYV4MLAAttention:
+        def target_attention(index: int) -> "HYV4MLAAttention":
             attn = target_layers[index].self_attn
-            if not isinstance(attn, HYV4MLAAttention):
+            if not isinstance(attn, attention_cls):
                 raise ValueError(f"DFly target layer {index} is not HYV4 MLA")
             return attn
 
