@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
+from safetensors.torch import save_file
 
-from vllm.lora.lora_model import LoRAModel
+from vllm.lora.lora_model import LoRAModel, MoEEPLoadSpec
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import parse_fine_tuned_lora_name
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
@@ -147,10 +149,80 @@ def test_gemma4_lora_weights_mapping():
 def test_gemma4_moe_lora_weights_mapping():
     mapper = Gemma4ForCausalLM.hf_to_vllm_mapper
     name = (
-        "base_model.model.model.language_model.layers.9.moe.experts."
+        "base_model.model.model.language_model.layers.9.experts."
         "gate_up_proj.lora_B.weight"
     )
     assert parse_fine_tuned_lora_name(name, mapper) == (
-        "model.layers.9.moe.gate_up_proj",
+        "model.layers.9.experts.gate_up_proj",
         False,
     )
+
+
+@pytest.mark.parametrize("source", ["memory", "disk"])
+@pytest.mark.parametrize("unsupported", [False, True])
+def test_tensor_adapter_module_validation(tmp_path, source, unsupported):
+    """Both sources reject unknown or unwrapped target modules."""
+    tensors = {
+        f"base_model.model.model.pooler.dense.lora_{ab}.weight": torch.ones(4, 4)
+        for ab in ("A", "B")
+    }
+    peft_helper = PEFTHelper(r=4, lora_alpha=4, target_modules=["dense"])
+    expected = {"dense"} if unsupported else {"q_proj"}
+    kwargs = dict(
+        peft_helper=peft_helper,
+        device="cpu",
+        unsupported_lora_modules={"model.pooler.dense"} if unsupported else set(),
+    )
+    with pytest.raises(ValueError, match="Please verify that the loaded LoRA"):
+        if source == "memory":
+            LoRAModel.from_lora_tensors(
+                1, tensors, expected_lora_modules=expected, **kwargs
+            )
+        else:
+            save_file(tensors, tmp_path / "adapter_model.safetensors")
+            LoRAModel.from_local_checkpoint(str(tmp_path), expected, **kwargs)
+
+
+@pytest.mark.parametrize("ep_rank", [0, 1])
+def test_tensor_adapter_matches_checkpoint(tmp_path, ep_rank):
+    """Memory loading preserves mapping, skips, EP ownership and tensor values."""
+    weight = torch.arange(16).reshape(4, 4).float()
+    prefix = "base_model.model.model.layers.0.mlp.experts"
+    tensors = {
+        f"{prefix}.{expert}.{proj}.lora_{ab}.weight": weight + expert
+        for expert in range(4)
+        for proj in ("gate_proj", "up_proj", "down_proj")
+        for ab in ("A", "B")
+    }
+    tensors["base_model.model.mtp.ignored.lora_A.weight"] = torch.ones(4, 4)
+    save_file(tensors, tmp_path / "adapter_model.safetensors")
+    peft_helper = PEFTHelper(r=4, lora_alpha=8, target_modules=["gate_proj"])
+    expected = {
+        f"experts.{expert}.{proj}"
+        for expert in range(4)
+        for proj in ("gate_proj", "up_proj", "down_proj")
+    }
+    kwargs = dict(
+        peft_helper=peft_helper,
+        device="cpu",
+        weights_mapper=WeightsMapper(orig_to_new_prefix={"model.": "language_model."}),
+        skip_prefixes=["mtp."],
+        moe_ep_spec=MoEEPLoadSpec(ep_rank, 2, 4),
+    )
+    disk = LoRAModel.from_local_checkpoint(str(tmp_path), expected, **kwargs)
+    memory = LoRAModel.from_lora_tensors(
+        2, tensors, expected_lora_modules=expected, **kwargs
+    )
+    assert memory.loras.keys() == disk.loras.keys()
+    assert len(memory.loras) == 6
+    for name, weights in memory.loras.items():
+        assert name.startswith("language_model.")
+        expert = int(name.split(".experts.")[1].split(".")[0])
+        assert expert // 2 == ep_rank
+        torch.testing.assert_close(
+            weights.lora_a, disk.loras[name].lora_a, rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            weights.lora_b, disk.loras[name].lora_b, rtol=0, atol=0
+        )
+        assert weights.scaling == disk.loras[name].scaling

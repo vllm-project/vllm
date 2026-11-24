@@ -6,7 +6,6 @@ from functools import partial
 
 import torch
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4,
@@ -48,9 +47,8 @@ class EmulationMxfp6LinearKernel(MxFp6LinearKernel):
         self.dequant_func = _WEIGHT_DEQUANT_FUNCS[config.weight_quant_key]
         if config.activation_quant_key is None:
             # no input Q/DQ for weight-only
-            self.quant_dequant_func: Callable[[torch.Tensor], torch.Tensor] = (
-                lambda x: x
-            )
+            qdq_fn: Callable[[torch.Tensor], torch.Tensor] = lambda x: x
+            self.quant_dequant_func = qdq_fn
         else:
             self.quant_dequant_func = _ACTIVATION_QUANT_DEQUANT_FUNCS[
                 config.activation_quant_key
@@ -80,7 +78,7 @@ class EmulationMxfp6LinearKernel(MxFp6LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+        pass
 
     def apply_weights(
         self,

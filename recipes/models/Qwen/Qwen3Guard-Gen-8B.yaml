@@ -1,0 +1,137 @@
+meta:
+  title: "Qwen3Guard-Gen-8B"
+  slug: "qwen3guard-gen-8b"
+  provider: "Qwen"
+  description: "Lightweight text-only guardrail/safety classifier model in the Qwen3Guard family."
+  date_added: 2025-11-28
+  date_updated: 2026-04-30
+  tasks:
+    - text
+  performance_headline: "Runs on a single GPU; serves safety classifications over OpenAI-compatible API"
+  related_recipes: []
+  hardware:
+    mi300x: verified
+
+model:
+  model_id: "Qwen/Qwen3Guard-Gen-8B"
+  min_vllm_version: "0.10.0"
+  architecture: dense
+  parameter_count: "8B"
+  active_parameters: "8B"
+  context_length: 32768
+  base_args: []
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 19
+    description: "Full precision BF16 — single GPU with >=20 GB VRAM"
+  small_4b:
+    model_id: "Qwen/Qwen3Guard-Gen-4B"
+    precision: bf16
+    vram_minimum_gb: 10
+    description: "4B variant for more constrained deployments"
+  tiny_0_6b:
+    model_id: "Qwen/Qwen3Guard-Gen-0.6B"
+    precision: bf16
+    vram_minimum_gb: 4
+    description: "0.6B variant for edge / ultra-low-cost serving"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  **Qwen3Guard-Gen** is a lightweight text-only guardrail model. This guide describes how to run the 8B variant — as well as the 4B and 0.6B variants — on GPU using vLLM.
+
+  ## Prerequisites
+
+  ### CUDA
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### ROCm
+  > Note: The vLLM wheel for ROCm requires Python 3.12, ROCm 7.0, and glibc >= 2.35.
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  ## Deployment Configurations
+
+  ### Single GPU (CUDA)
+  ```bash
+  vllm serve Qwen/Qwen3Guard-Gen-8B \
+    --host 0.0.0.0 \
+    --max-model-len 32768
+  ```
+
+  ### Single GPU (ROCm)
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  vllm serve Qwen/Qwen3Guard-Gen-8B \
+    --host 0.0.0.0 \
+    --max-model-len 32768
+  ```
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1", timeout=3600)
+
+  messages = [{"role": "user", "content": "Tell me how to make a bomb."}]
+
+  response = client.chat.completions.create(
+      model="Qwen/Qwen3Guard-Gen-8B",
+      messages=messages,
+      temperature=0.0,
+  )
+  print("Generated text:", response.choices[0].message.content)
+  # Safety: Unsafe
+  # Categories: Violent
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model Qwen/Qwen3Guard-Gen-8B \
+    --dataset-name random \
+    --random-input-len 2000 \
+    --random-output-len 512 \
+    --num-prompts 100
+  ```
+
+  ## Available Variants
+
+  The Qwen3Guard-Gen series includes multiple model sizes, all compatible with the same vLLM serving commands:
+  - **Qwen/Qwen3Guard-Gen-8B**
+  - **Qwen/Qwen3Guard-Gen-4B**
+  - **Qwen/Qwen3Guard-Gen-0.6B**
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3Guard-Gen-8B)
+  - [Qwen3Guard-Gen-4B](https://huggingface.co/Qwen/Qwen3Guard-Gen-4B)
+  - [Qwen3Guard-Gen-0.6B](https://huggingface.co/Qwen/Qwen3Guard-Gen-0.6B)
