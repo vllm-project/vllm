@@ -3716,13 +3716,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         decode = attn_metadata.decode
-        if (
-            self.dcp_query_storage_heads is not None
-            and isinstance(q, torch.Tensor)
-            and (decode is None or decode.dcp_route is not _DCPDecodeRoute.CPRR)
-        ):
-            # Only the cprr asm decode reads the padded query storage in place
-            q = q.contiguous()
         if decode is None or decode.varlen_q_rows is None:
             return self._forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
         assert decode.varlen_o_rows is not None
@@ -3934,6 +3927,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             mla_padded_q = AiterMLAHelper.get_mla_padded_q(
                 self._decode_num_heads, q, target_heads=mla_num_heads
             )
+        if not mla_padded_q.is_contiguous():
+            mla_padded_q = mla_padded_q.contiguous()
         o = torch.empty(
             B,
             mla_num_heads,
