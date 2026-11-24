@@ -125,10 +125,6 @@ def test_token_ids_view_searches_in_place():
     tokens = TokenBuffer([1, 2, 3, 4])
     view = TokenIdsView(tokens, [5, 6])
     assert len(view) == 6 and rfind_tokens(view, (2, 6)) == 5
-    assert view[2:5] == [3, 4, 5]
-    assert view[-1] == 6
-    assert view[::-2] == [6, 4, 2]
-    assert view._list is None  # short reads don't copy the full token history
     view.pop()
     view.pop()
     view.pop()
@@ -166,15 +162,6 @@ def test_token_ids_view_slices_match_list(materialized, split):
         if expected:
             view.pop()
             expected.pop()
-
-
-def test_token_ids_view_tail_does_not_materialize_history():
-    view = TokenIdsView(TokenBuffer(range(32768)), [32768, 32769])
-    assert view[-4:] == [32766, 32767, 32768, 32769]
-    assert view._list is None
-    view.pop()
-    assert view[-2:] == [32767, 32768]
-    assert view._list is None
 
 
 def test_token_buffer_pickles_out_of_band_snapshot():

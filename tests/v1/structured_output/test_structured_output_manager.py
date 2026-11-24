@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import random
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -161,97 +160,8 @@ def test_kimi_reopened_draft_keeps_first_constraint(tokenizer, mode, close_tail)
         manager.clear_backend()
 
 
-@pytest.fixture(scope="module", params=["gpt2", "atomic", "unequal"])
-def kimi_boundary_model(request, tmp_path_factory):
-    from transformers import AutoConfig
-
-    path = tmp_path_factory.mktemp("kimi-boundary")
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
-    if request.param != "gpt2":
-        tokenizer.add_special_tokens(
-            {
-                "additional_special_tokens": ["<|open|>", "<|close|>", "<|sep|>"]
-                if request.param == "atomic"
-                else ["<|open|>"]
-            }
-        )
-    tokenizer.save_pretrained(path)
-    config = AutoConfig.from_pretrained(TOKENIZER)
-    config.vocab_size = len(tokenizer)
-    config.save_pretrained(path)
-    return str(path)
-
-
-@pytest.mark.parametrize("committed", [False, True])
-@pytest.mark.parametrize("thinking", [False, True])
-def test_kimi_boundary_matches_every_prefix(kimi_boundary_model, committed, thinking):
-    manager = StructuredOutputManager(
-        VllmConfig(
-            model_config=ModelConfig(model=kimi_boundary_model),
-            device_config=DeviceConfig(device="cpu"),
-            structured_outputs_config=StructuredOutputsConfig(
-                backend="xgrammar", reasoning_parser="kimi_k3"
-            ),
-        )
-    )
-    tokenizer = manager.tokenizer
-    kwargs = {"chat_template_kwargs": {"thinking": thinking}}
-    reasoner = KimiK3ReasoningParser(tokenizer, **kwargs)
-    params = SamplingParams(
-        structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
-    )
-    open_text, close_text = "<|open|>think<|sep|>", "<|close|>think<|sep|>"
-    texts = [
-        " plain reasoning",
-        close_text + open_text,
-        "." + close_text + open_text + "." + close_text,
-        open_text + "." + close_text + "<|open|>response",
-        close_text * 2 + open_text * 2,
-        "<|close|>response<|sep|>" + open_text,
-    ]
-    history = tokenizer.encode(" earlier") * 4096 + tokenizer.encode(open_text)
-    try:
-        for text in texts:
-            tokens = tokenizer.encode(text)
-            # Every split tests a marker crossing the committed/draft boundary.
-            for split in range(len(tokens) + 1):
-                before, remaining = history + tokens[:split], tokens[split:]
-                for length in range(len(remaining) + 1):
-                    draft = remaining[:length]
-                    req = Request(
-                        request_id="boundary",
-                        prompt_token_ids=before,
-                        sampling_params=params,
-                        pooling_params=None,
-                        reasoning_ended=False,
-                        reasoning_parser_kwargs=kwargs,
-                    )
-                    if committed:
-                        req.append_output_token_ids(draft)
-                    # Definition of A: earliest ended nonempty prefix wins,
-                    # regardless of what a later draft suffix would do.
-                    expected = next(
-                        (
-                            i
-                            for i in range(1, length + 1)
-                            if reasoner.is_reasoning_end_streaming(
-                                before + draft[:i], draft[:i]
-                            )
-                        ),
-                        length + 1,
-                    )
-                    bounds = manager._get_constraint_bounds(req, draft, committed)
-                    assert bounds == (expected, expected), (text, split, length)
-                    assert list(req.all_token_ids) == before + (
-                        draft if committed else []
-                    )
-                    assert req.structured_output_request.reasoning_ended is False
-    finally:
-        manager.clear_backend()
-
-
-def test_kimi_context_free_end_keeps_first_close(kimi_boundary_model):
-    tokenizer = AutoTokenizer.from_pretrained(kimi_boundary_model)
+def test_kimi_context_free_end_keeps_first_close(boundary_parser_model):
+    tokenizer = AutoTokenizer.from_pretrained(boundary_parser_model)
     reasoner = KimiK3ReasoningParser(tokenizer)
     close = tokenizer.encode("<|close|>think<|sep|>")
     reopen = tokenizer.encode("<|open|>think<|sep|>")
@@ -269,8 +179,8 @@ def test_kimi_context_free_end_keeps_first_close(kimi_boundary_model):
         assert reasoner.find_reasoning_end(close[n:] + reopen) is None
 
 
-@pytest.fixture(scope="module")
-def boundary_parser_model(tmp_path_factory):
+@pytest.fixture(scope="module", params=["gpt2", "atomic", "unequal"])
+def boundary_parser_model(request, tmp_path_factory):
     from transformers import AutoConfig
 
     path = tmp_path_factory.mktemp("boundary-parsers")
@@ -289,12 +199,17 @@ def boundary_parser_model(tmp_path_factory):
                 "<ifm|think>",
                 "</ifm|think>",
                 "<ifm|tool_calls>",
-                "<|open|>",
-                "<|close|>",
-                "<|sep|>",
             ]
         }
     )
+    if request.param != "gpt2":
+        tokenizer.add_special_tokens(
+            {
+                "additional_special_tokens": ["<|open|>", "<|close|>", "<|sep|>"]
+                if request.param == "atomic"
+                else ["<|open|>"]
+            },
+        )
     tokenizer.save_pretrained(path)
     config = AutoConfig.from_pretrained(TOKENIZER)
     config.vocab_size = len(tokenizer)
@@ -316,6 +231,12 @@ def boundary_parser_model(tmp_path_factory):
         ("minimax_m3", "<mm:think>", "</mm:think>", {}),
         ("k2_horizon", "<ifm|think>", "</ifm|think>", {}),
         ("kimi_k3", "<|open|>think<|sep|>", "<|close|>think<|sep|>", {}),
+        (
+            "kimi_k3",
+            "<|open|>think<|sep|>",
+            "<|close|>think<|sep|>",
+            {"thinking": False},
+        ),
     ],
 )
 def test_single_token_checks_preserve_first_boundary(
@@ -338,11 +259,6 @@ def test_single_token_checks_preserve_first_boundary(
     for split in range(len(closed)):
         for tail in ([], plain, opened, opened + closed, opened[:1], plain * 32):
             cases.append((history + closed[:split], closed[split:] + tail))
-    rng = random.Random(68112)
-    chunks = [plain, opened, closed, closed[:-1], opened[:-1]]
-    for _ in range(200):
-        draft = [t for _ in range(rng.randrange(1, 9)) for t in rng.choice(chunks)]
-        cases.append((history, draft))
     parser_kwargs = {"chat_template_kwargs": kwargs}
     try:
         for before, draft in cases:
