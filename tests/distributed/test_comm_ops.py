@@ -419,9 +419,6 @@ def _patch_fi_ar_module(
         flashinfer_all_reduce, "TorchDistBackend", lambda group: group, raising=False
     )
     monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace_groups", {})
-    monkeypatch.setattr(
-        flashinfer_all_reduce, "_mnnvl_supported_groups", {}, raising=False
-    )
     monkeypatch.setattr(flashinfer_all_reduce, "_node_count", lambda group: node_count)
     monkeypatch.setattr(
         flashinfer_all_reduce,
@@ -511,19 +508,36 @@ def test_create_workspace_joins_collective_vote_when_local_probe_raises(
     fake_comm.create_allreduce_fusion_workspace.assert_not_called()
 
 
-def test_create_workspace_memoizes_negative_mnnvl_vote(
+@pytest.mark.parametrize(
+    "getter_name", ["get_fi_ar_workspace", "get_fi_ar_quant_workspace"]
+)
+def test_flashinfer_workspace_failure_does_not_repeat_mnnvl_vote(
     monkeypatch: pytest.MonkeyPatch,
+    getter_name: str,
 ) -> None:
-    # creation is retried on every call after a failure, so the negative vote
-    # must be latched to keep probes/allgathers out of the per-layer hot path.
-    group = object()
-    _, vote = _patch_fi_ar_module(
+    # The public getters latch failures, keeping probes out of the per-layer path.
+    fake_comm, vote = _patch_fi_ar_module(
         monkeypatch, node_count=2, fabric_supported=lambda device: False
     )
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace", None)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_quant_workspace", None)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace_failed", False)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_quant_workspace_failed", False)
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "_resolve_fi_ar_backend",
+        Mock(return_value=("mnnvl", False)),
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "_get_tuned_standalone_max_size", Mock(return_value=None)
+    )
+    get_workspace = getattr(flashinfer_all_reduce, getter_name)
+    args = (4, 0, 128, 64, torch.bfloat16, object())
 
-    assert _create_mnnvl_workspace(group) is None
-    assert _create_mnnvl_workspace(group) is None
+    assert get_workspace(*args) is None
+    assert get_workspace(*args) is None
     vote.assert_called_once()
+    fake_comm.create_allreduce_fusion_workspace.assert_not_called()
 
 
 @pytest.mark.parametrize(
