@@ -15,6 +15,23 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE = current_platform.device_type
 
 
+@pytest.mark.parametrize(
+    "num_spec,K,V,expected",
+    [
+        (14, 128, 128, True),
+        (15, 128, 128, False),
+        (10, 96, 192, True),
+        (11, 96, 192, False),
+    ],
+)
+def test_deferred_spec_state_record_capacity(num_spec, K, V, expected):
+    from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
+        deferred_spec_state_fits,
+    )
+
+    assert deferred_spec_state_fits(num_spec, K, V) == expected
+
+
 @pytest.mark.parametrize("tp_size", [1])
 @pytest.mark.parametrize("num_reqs", [1, 2, 4])
 @pytest.mark.parametrize("num_k_heads", [16])
@@ -206,7 +223,7 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
 
 
 @pytest.mark.parametrize("num_reqs", [1, 5])
-@pytest.mark.parametrize("num_speculative_tokens", [1, 3, 7])
+@pytest.mark.parametrize("num_speculative_tokens", [1, 3, 7, 14])
 def test_fused_sigmoid_gating_delta_rule_update_defer_spec_state(
     num_reqs: int,
     num_speculative_tokens: int,

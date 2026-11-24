@@ -10,6 +10,17 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv, next_power_of_2
+
+DEFER_SPEC_STATE_BV = 16
+
+
+def deferred_spec_state_fits(num_spec: int, K: int, V: int) -> bool:
+    """Whether the draft-input records fit in one recurrent-state slot."""
+    BK = next_power_of_2(K)
+    BV = min(next_power_of_2(V), DEFER_SPEC_STATE_BV)
+    NV = cdiv(V, BV)
+    return num_spec * NV * (BK + BV + 2) <= V * K
 
 
 @triton.jit
@@ -315,7 +326,9 @@ def fused_sigmoid_gating_delta_rule_update(
     # record layout, so it must not change between steps; num_warps may, and a
     # single sequence is too few programs for one warp each.
     BK = triton.next_power_of_2(K)
-    BV = min(triton.next_power_of_2(V), 16 if defer_spec_state else 32)
+    BV = min(
+        triton.next_power_of_2(V), DEFER_SPEC_STATE_BV if defer_spec_state else 32
+    )
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 3
@@ -360,7 +373,7 @@ def fused_sigmoid_gating_delta_rule_update(
         # Replay matches the per-token states exactly only if the state is
         # never rounded between tokens.
         assert initial_state.dtype == torch.float32
-        assert (max_query_len - 1) * NV * (BK + BV + 2) <= V * K, (
+        assert deferred_spec_state_fits(max_query_len - 1, K, V), (
             "too many speculative tokens to record in one state slot"
         )
 

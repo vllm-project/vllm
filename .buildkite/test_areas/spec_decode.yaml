@@ -250,6 +250,8 @@ steps:
     - vllm/models/qwen3_5/nvidia/mtp.py
     - vllm/model_executor/models/qwen3_next_mtp.py
     - vllm/config/speculative.py
+    - vllm/model_executor/layers/mamba/gdn/
+    - vllm/third_party/flash_linear_attention/ops/fused_sigmoid_gating.py
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/mtp/qwen3_5/
@@ -268,6 +270,7 @@ steps:
       - vllm/model_executor/model_loader/
       - vllm/v1/sample/
       - vllm/model_executor/layers/
+      - vllm/third_party/flash_linear_attention/ops/fused_sigmoid_gating.py
       - vllm/transformers_utils/configs/speculators/
       - vllm/model_executor/models/qwen3_5_mtp.py
       - vllm/models/qwen3_5/

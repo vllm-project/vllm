@@ -60,6 +60,10 @@ vllm serve Qwen/Qwen3.8-27B \
 
 Set `num_speculative_tokens` to the checkpoint's block size minus one.
 
+The Triton GDN path uses per-token recurrent-state storage when the configured
+draft window exceeds its deferred-state buffer capacity. Larger windows remain
+supported, with additional recurrent-state writes.
+
 ## DFlash query layouts
 
 DFlash and DFlash2 drafts default to the fill-in layout: the anchor is the

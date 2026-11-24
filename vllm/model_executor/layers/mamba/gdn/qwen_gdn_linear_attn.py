@@ -85,6 +85,9 @@ from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp import (
     fused_gdn_decode_post_conv_mtp_triton,
 )
+from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
+    deferred_spec_state_fits,
+)
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.utils.math_utils import cdiv
 from vllm.utils.multi_stream_utils import execute_in_parallel
@@ -927,6 +930,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and self.num_spec > 0
             and not self.cache_config.enable_prefix_caching
             and self.get_state_dtype()[1] == torch.float32
+            and deferred_spec_state_fits(
+                self.num_spec, self.head_k_dim, self.head_v_dim
+            )
         )
 
         compilation_config = get_current_vllm_config().compilation_config
