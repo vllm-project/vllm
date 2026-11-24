@@ -55,6 +55,10 @@ class CPUUltraQuantAttentionBackend(CPUAttentionBackend):
     """CPU backend for the `ultraquant_4bit` KV-cache dtype."""
 
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["ultraquant_4bit"]
+    # The decode kernel takes a bf16 query and the staging page is bf16, so the
+    # fp16 and fp32 the parent allows cannot be served; the GPU backend narrows
+    # this the same way.
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
 
     @staticmethod
     def get_name() -> str:
@@ -211,7 +215,7 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
 
     @property
     def rotation_t(self) -> torch.Tensor:
-        """Transposed rotation in the model dtype, for the decode query."""
+        """Transposed rotation in bf16, for the decode query."""
         t = getattr(self, "_rot_t", None)
         if t is None:
             t = self.rotation.T.to(torch.bfloat16).contiguous()
