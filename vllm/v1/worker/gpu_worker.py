@@ -441,43 +441,48 @@ class Worker(WorkerBase):
         tp = get_tp_group().rank_in_group
         return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:"
 
-    def _weight_checker_draft(self) -> nn.Module | str | None:
+    def _resolve_weight_checker_draft(self) -> tuple[nn.Module | None, str | None]:
         spec = self.speculative_config
         if (
             spec is None
             or spec.draft_model_config is None
             or spec.prefill_context_kv_only
         ):
-            return "Weight Checker requires a resident speculative draft model."
+            return None, "Weight Checker requires a resident speculative draft model."
         # The draft runs on the last PP stage, including when its own PP size is 1.
         draft = self.get_draft_model()
         if draft is None and get_pp_group().is_last_rank:
-            return f"Missing resident draft model on {self._weight_checksum_prefix()}"
+            return None, (
+                f"Missing resident draft model on {self._weight_checksum_prefix()}"
+            )
         if draft is not None and next(draft.parameters(), None) is None:
-            return "Weight Checker requires a draft model with weight parameters."
-        return draft
+            return None, "Weight Checker requires a draft model with weight parameters."
+        return draft, None
 
     def compute_weight_checksums(
         self, model: WeightCheckerModel = "target"
     ) -> dict[str, str] | str:
         if model not in ("target", "draft", "both"):
             return f"Invalid Weight Checker model selection: {model!r}"
-        draft = self._weight_checker_draft() if model != "target" else None
-        if isinstance(draft, str):
-            return draft
+        draft = None
+        if model != "target":
+            draft, error = self._resolve_weight_checker_draft()
+            if error is not None:
+                return error
+
+        models: list[tuple[str, nn.Module]] = []
+        if model != "draft":
+            models.append(("target", self.get_model()))
+        if draft is not None:
+            models.append(("draft", draft))
+
         prefix = self._weight_checksum_prefix()
         checksums: dict[str, str] = {}
-        if model != "draft":
-            target_prefix = "target:" + prefix if model == "both" else prefix
+        for name, module in models:
+            model_prefix = f"{name}:" if model == "both" else ""
             checksums.update(
-                (target_prefix + name, digest)
-                for name, digest in compute_tensor_digests(self.get_model()).items()
-            )
-        if draft is not None:
-            draft_prefix = "draft:" + prefix if model == "both" else prefix
-            checksums.update(
-                (draft_prefix + name, digest)
-                for name, digest in compute_tensor_digests(draft).items()
+                (model_prefix + prefix + key, digest)
+                for key, digest in compute_tensor_digests(module).items()
             )
         return checksums
 
@@ -486,31 +491,34 @@ class Worker(WorkerBase):
     ) -> tuple[nn.Module, ...] | str:
         if model not in ("target", "draft", "both"):
             return f"Invalid Weight Checker model selection: {model!r}"
-        if model != "target" and self.parallel_config.pipeline_parallel_size > 1:
+        is_target = model == "target"
+        if not is_target and self.parallel_config.pipeline_parallel_size > 1:
             return "Cannot reset draft weights with pipeline parallelism."
 
         target = self.get_model()
-        draft: nn.Module | str | None
-        if model == "target":
-            draft = self.get_draft_model() if self.speculative_config else None
+        if is_target:
+            draft = (
+                self.get_draft_model() if self.speculative_config is not None else None
+            )
         else:
-            draft = self._weight_checker_draft()
-        if isinstance(draft, str):
-            return draft
-        if draft is not None and model != "both":
-            if model == "target":
-                selected, other = target, draft
-            else:
-                selected, other = draft, target
-            if shared := find_shared_weight_storage(selected, other):
-                return (
-                    f"Cannot reset {model} weights independently: {shared[0]!r} "
-                    f"shares storage with {shared[1]!r} in the other model."
-                )
-        if model == "target":
-            return (target,)
-        assert draft is not None
-        return (draft,) if model == "draft" else (target, draft)
+            draft, error = self._resolve_weight_checker_draft()
+            if error is not None:
+                return error
+
+        if model == "both":
+            assert draft is not None
+            return target, draft
+
+        selected, other = (target, draft) if is_target else (draft, target)
+        assert selected is not None
+        if other is not None and (
+            shared := find_shared_weight_storage(selected, other)
+        ):
+            return (
+                f"Cannot reset {model} weights independently: {shared[0]!r} "
+                f"shares storage with {shared[1]!r} in the other model."
+            )
+        return (selected,)
 
     def _zero_reset_models(self, models: tuple[nn.Module, ...]) -> None:
         for model in models:

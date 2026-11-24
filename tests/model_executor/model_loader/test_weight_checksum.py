@@ -110,7 +110,7 @@ def test_reset_rejects_single_model_when_storage_is_shared(shared, monkeypatch):
     worker.speculative_config = SimpleNamespace()
     monkeypatch.setattr(worker, "get_model", lambda: target)
     monkeypatch.setattr(worker, "get_draft_model", lambda: draft)
-    monkeypatch.setattr(worker, "_weight_checker_draft", lambda: draft)
+    monkeypatch.setattr(worker, "_resolve_weight_checker_draft", lambda: (draft, None))
 
     if not shared:
         assert worker._models_for_weight_reset("target") == (target,)
