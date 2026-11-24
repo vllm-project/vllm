@@ -147,6 +147,25 @@ class OutputHead:
     soft_cap: float | None = None
 
 
+def _module_renames(renames: dict[str, str]) -> dict[str, str]:
+    """The largest modules whose weights all move together under `renames`, mapped
+    to where they move (e.g. `decoder` -> `lm_head` for Ettin's `decoder.weight` and
+    `decoder.bias`). Unlike weight names, these also rename names below them, such as
+    LoRA's `decoder.lora_A.weight` and quantization configs' module names."""
+    targets: dict[str, set[str]] = {}
+    for name, new_name in renames.items():
+        parts = name.split(".")
+        for i in range(1, len(parts) + 1):
+            suffix = "".join(f".{part}" for part in parts[i:])
+            # "" if the weight's name below this module changes, so it can't move whole
+            target = new_name.removesuffix(suffix) if new_name.endswith(suffix) else ""
+            targets.setdefault(".".join(parts[:i]), set()).add(target)
+    moved = {k: t.pop() for k, t in targets.items() if len(t) == 1 and "" not in t}
+    return {
+        k: v for k, v in moved.items() if k.rpartition(".")[0] not in moved and k != v
+    }
+
+
 def to_output_head(model: PreTrainedModel) -> OutputHead | None:
     """Turn `model`, a `ForCausalLM` built with `stub_base_model`, into its output
     head in place.
@@ -181,17 +200,17 @@ def to_output_head(model: PreTrainedModel) -> OutputHead | None:
                 setattr(module, child_name, output_embeddings)
     for name, _ in model.named_parameters():
         renames[name] = maybe_prefix("output_head", name)
-    # Quantization configs name modules, not parameters
-    for name, new_name in list(renames.items()):
-        if "." in name:
-            renames.setdefault(name.rpartition(".")[0], new_name.rpartition(".")[0])
-    renames = {k: v for k, v in renames.items() if k != v}
-    exact_names = {re.compile(rf"^{re.escape(k)}$"): v for k, v in renames.items()}
+    # Into `output_head` first, as Ettin's `lm_head` moves there and `decoder` to it
+    module_renames = sorted(
+        _module_renames(renames).items(),
+        key=lambda kv: not kv[1].startswith("output_head."),
+    )
+    prefixes = {re.compile(rf"^{re.escape(k)}(?=\.|$)"): v for k, v in module_renames}
     return OutputHead(
         model=model,
         output_embeddings=output_embeddings,
         in_features=embeddings.in_features,
-        weights_mapper=WeightsMapper(orig_to_new_regex=exact_names),
+        weights_mapper=WeightsMapper(orig_to_new_regex=prefixes),
     )
 
 
