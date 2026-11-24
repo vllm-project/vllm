@@ -91,6 +91,7 @@ class WriteTask:
     enqueue_time: float = field(default_factory=time.perf_counter)
     retried: int = 0
     transfer_state: WriteTransferState | None = None
+    attempt: int = 0
 
 
 @dataclass(slots=True)
@@ -623,6 +624,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_abort: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.preempted_transfer_ids: set[TransferId] = set()
 
     def __repr__(self):
         return (

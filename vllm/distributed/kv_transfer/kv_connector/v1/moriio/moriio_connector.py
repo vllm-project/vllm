@@ -468,6 +468,11 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(self._connector_metadata, MoRIIOConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
 
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        if self.connector_worker is not None:
+            assert isinstance(kv_connector_metadata, MoRIIOConnectorMetadata)
+            self.connector_worker.handle_preemptions(kv_connector_metadata)
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         """READs are awaited in start_load_kv, before the forward."""
         pass
@@ -1476,6 +1481,16 @@ class MoRIIOConnectorScheduler:
     ) -> KVConnectorMetadata:
         meta = MoRIIOConnectorMetadata()
         meta.transfer_id_to_request_id = self.transfer_id_to_request_id
+
+        preempted_req_ids = getattr(scheduler_output, "preempted_req_ids", None)
+        if preempted_req_ids:
+            for req_id in preempted_req_ids:
+                transfer_id = self.request_id_to_transfer_id.get(req_id)
+                if transfer_id is not None:
+                    meta.preempted_transfer_ids.add(transfer_id)
+                self._reqs_need_pending_save.pop(req_id, None)
+                self._reqs_need_save.pop(req_id, None)
+                self._req_kv_params.pop(req_id, None)
 
         if self.mode == MoRIIOMode.WRITE and get_role() == ROLE.PRODUCER:
             # This is the logic for checking against chunked prefill.
@@ -3527,6 +3542,11 @@ class MoRIIOConnectorWorker:
                 )
 
             self._eager_handshaked_engines.add(remote_engine_id)
+
+    def handle_preemptions(self, metadata: MoRIIOConnectorMetadata) -> None:
+        if self.is_producer and self.mode == MoRIIOMode.WRITE:
+            for transfer_id in metadata.preempted_transfer_ids:
+                self._writer.handle_preemption(transfer_id)
 
     def start_load_kv(self, metadata: MoRIIOConnectorMetadata):
         """Start loading by triggering non-blocking moriio_xfer.

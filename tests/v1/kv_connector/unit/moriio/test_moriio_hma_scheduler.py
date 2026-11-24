@@ -875,6 +875,7 @@ def test_hybrid_write_build_meta_saves_current_state_on_the_final_chunk():
             ),
             num_scheduled_tokens={"req": num_scheduled},
             new_block_ids_to_zero=None,
+            preempted_req_ids=None,
             kv_connector_block_state=KVConnectorBlockState(
                 req_ids={"req"},
                 resolve_block_ids=lambda _: ([0, 51, 52, 53], [31, 32, 33]),
