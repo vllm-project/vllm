@@ -62,6 +62,19 @@ if os.getenv("VLLM_TEST_MODEL"):
             backends=["TRITON_MLA"],
         )
 
+# GDN models: `backend` picks the full-attention kernel; GDN_ATTN is CUDA only.
+IS_GDN_MODEL = False
+if os.getenv("VLLM_TEST_MODEL"):
+    layer_types = getattr(config.get_text_config(), "layer_types", None) or ()
+    IS_GDN_MODEL = "linear_attention" in layer_types
+if IS_GDN_MODEL:
+    DEVICE_BACKENDS["cuda"] = DeviceConfig(
+        available=DEVICE_BACKENDS["cuda"].available,
+        backends=["FLASH_ATTN", "TRITON_ATTN"],
+    )
+    for device in ("xpu", "rocm"):
+        DEVICE_BACKENDS[device] = DeviceConfig(available=False, backends=[])
+
 # Only include backends for devices that are actually available.
 BACKENDS: list[str] = sorted(
     {b for cfg in DEVICE_BACKENDS.values() if cfg.available for b in cfg.backends}

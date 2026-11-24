@@ -170,3 +170,47 @@ def test_gemma_add_rms_norm_correctness(
     # reference only by reduction-order rounding (1-ulp output flips).
     tol = {"atol": 1e-3, "rtol": 1e-3 if dtype == torch.float16 else 1.6e-2}
     torch.testing.assert_close(y, ref_y, **tol)
+
+
+# Qwen/Qwen3.5-0.8B and Qwen3.5-2B/35B-A3B hidden sizes.
+@pytest.mark.parametrize("H", [1024, 2048])
+@pytest.mark.parametrize("use_flashinfer", [False, True], ids=["triton", "flashinfer"])
+@pytest.mark.parametrize("has_residual", [True, False])
+@torch.inference_mode()
+def test_qwen3_5_rms_norm_batch_invariant(
+    monkeypatch: pytest.MonkeyPatch, H: int, use_flashinfer: bool, has_residual: bool
+):
+    """Under VLLM_BATCH_INVARIANT, a row normed alone or with others gets the
+    same bits, on both paths of `Qwen3_5RMSNorm`: FlashInfer, and the Triton
+    `gemma_add_rms_norm` it falls back to without FlashInfer."""
+    import vllm.envs as envs
+    from vllm.models.qwen3_5.nvidia.model import Qwen3_5RMSNorm
+    from vllm.utils.flashinfer import has_flashinfer
+
+    if use_flashinfer and not (
+        current_platform.has_device_capability(80) and has_flashinfer()
+    ):
+        pytest.skip("FlashInfer norm kernels need SM80+ and FlashInfer")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+
+    norm = Qwen3_5RMSNorm(H)
+    norm.use_flashinfer = use_flashinfer
+    g = torch.Generator(device="cuda").manual_seed(0)
+    norm.weight.data = (
+        torch.rand(H, generator=g, device="cuda") * 3.5 - 1.0
+    ).bfloat16()
+    num_tokens = 2048
+    x = torch.randn(num_tokens, H, generator=g, device="cuda").bfloat16()
+    residual = (torch.randn(num_tokens, H, generator=g, device="cuda") * 4).bfloat16()
+
+    def run(start: int, end: int) -> torch.Tensor:
+        # Both paths may update x and the residual in place.
+        x_in = x[start:end].clone()
+        if not has_residual:
+            return norm(x_in)
+        return norm(x_in, residual[start:end].clone())[0]
+
+    # All rows in one call vs slices on both sides of the 16-warp limit (384).
+    bounds = [0, 1, 8, 392, num_tokens]
+    sliced = torch.cat([run(a, b) for a, b in zip(bounds, bounds[1:])])
+    torch.testing.assert_close(sliced, run(0, num_tokens), rtol=0, atol=0)
