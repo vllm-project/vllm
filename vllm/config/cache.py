@@ -211,6 +211,10 @@ class CacheConfig:
     inside a physical block. It controls matching granularity only, not how
     often states are stored.
 
+    An explicit value fails at startup if prefix-cache hits would fall back
+    to the scheduler block size (for example, when a sliding-window group
+    requires block-aligned lookups).
+
     This equals to the `hash_block_size` used throughout the KV cache code.
     """
     gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
@@ -337,9 +341,6 @@ class CacheConfig:
     num_cpu_blocks: int | None = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
-    simple_cpu_offload_num_blocks: int | None = field(default=None, init=False)
-    """Worker-aligned offload block count for `SimpleCPUOffloadConnector`."""
-
     # Set after KV cache initialization.
     effective_attention_block_size: int | None = field(default=None, init=False)
     """Full-attention block size in tokens, including DCP, or None if unavailable."""
@@ -440,7 +441,6 @@ class CacheConfig:
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
-            "simple_cpu_offload_num_blocks",
             "effective_attention_block_size",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",
