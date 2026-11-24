@@ -566,6 +566,36 @@ def test_finish_request():
         scheduler.aux_output_connector.request_finished.assert_called_with(request)
 
 
+def test_update_from_kv_xfer_finished_tolerates_untracked_or_running_request():
+    from tests.v1.kv_connector.unit.utils import (
+        create_scheduler as create_test_scheduler,
+    )
+    from tests.v1.kv_connector.unit.utils import (
+        create_vllm_config,
+    )
+    from vllm.v1.outputs import KVConnectorOutput
+
+    vllm_config = create_vllm_config()
+    scheduler = create_test_scheduler(vllm_config)
+
+    # 1. Untracked request in finished_recving (e.g. already finished and freed)
+    output_untracked = KVConnectorOutput(finished_recving={"untracked-req"})
+    scheduler._update_from_kv_xfer_finished(output_untracked)
+
+    # 2. Untracked request in finished_sending
+    output_sending = KVConnectorOutput(finished_sending={"untracked-req"})
+    scheduler._update_from_kv_xfer_finished(output_sending)
+
+    # 3. Running request receives duplicate finished_recving
+    req = create_requests(num_requests=1)[0]
+    scheduler.add_request(req)
+    req.status = RequestStatus.RUNNING
+    output_running = KVConnectorOutput(finished_recving={req.request_id})
+    scheduler._update_from_kv_xfer_finished(output_running)
+    assert req.request_id in scheduler.requests
+    assert req.status == RequestStatus.RUNNING
+
+
 def test_get_num_unfinished_requests():
     scheduler = create_scheduler()
     requests = create_requests(num_requests=10)
