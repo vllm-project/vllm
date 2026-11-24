@@ -1036,7 +1036,8 @@ OUTPUT_HEADS = [
     (
         "roberta",
         "RobertaForCausalLM",
-        {"is_decoder": True},
+        # Untied, as when the head is built, so `lm_head.bias` is its own parameter
+        {"is_decoder": True, "tie_word_embeddings": False},
         {
             "lm_head.decoder.weight": "lm_head.weight",
             "lm_head.decoder.bias": "lm_head.bias",

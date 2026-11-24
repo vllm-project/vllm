@@ -18,7 +18,7 @@
 
 import copy
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -186,6 +186,15 @@ def to_output_head(model: PreTrainedModel) -> OutputHead | None:
     params = {id(embeddings.weight): "lm_head.weight"}
     if embeddings.bias is not None:
         params[id(embeddings.bias)] = "lm_head.bias"
+    # Tying is off, so the sources of ties to the output embeddings (e.g. Roberta's
+    # `lm_head.bias`) are separate parameters, and checkpoints only hold those
+    embeddings_name = next(n for n, m in model.named_modules() if m is embeddings)
+    tied = getattr(model, "_tied_weights_keys", None)
+    for target, source in tied.items() if isinstance(tied, dict) else ():
+        module_name, _, param_name = target.rpartition(".")
+        if module_name == embeddings_name:
+            with suppress(AttributeError):
+                params[id(model.get_parameter(source))] = f"lm_head.{param_name}"
     renames: dict[str, str] = {}
     for name, module in list(model.named_modules(remove_duplicate=False)):
         for param_name, param in list(module.named_parameters(recurse=False)):
