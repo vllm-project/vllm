@@ -8,6 +8,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.qwen_triton_warmup import QwenGDNKernelWarmup
+from vllm.model_executor.warmup.qwen_vl_triton_warmup import Qwen3VLKernelWarmup
 
 from .qsa import Qwen4ExpQSAAttention
 
@@ -26,6 +27,10 @@ class Qwen4ExpKernelWarmup(QwenGDNKernelWarmup):
         )
         if owner is not None and self.vllm_config.kernel_config.enable_jit_warmup:
             _warm_qsa_kernels(owner, worker)
+
+
+class Qwen4ExpVLKernelWarmup(Qwen4ExpKernelWarmup, Qwen3VLKernelWarmup):
+    pass
 
 
 def _warm_qsa_kernels(owner: Qwen4ExpQSAAttention, worker: "Worker") -> None:

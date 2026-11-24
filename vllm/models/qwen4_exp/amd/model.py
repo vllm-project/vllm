@@ -918,9 +918,11 @@ class Qwen4ExpForConditionalGeneration(
     }
 
     def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
-        from vllm.model_executor.warmup.qwen_triton_warmup import QwenGDNKernelWarmup
+        from vllm.model_executor.warmup.qwen_vl_triton_warmup import (
+            QwenGDNVLKernelWarmup,
+        )
 
-        return QwenGDNKernelWarmup
+        return QwenGDNVLKernelWarmup
 
     @staticmethod
     def get_model_state_cls():

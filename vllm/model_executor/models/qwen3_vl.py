@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from functools import lru_cache, partial
 from itertools import islice
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import torch
@@ -168,6 +168,9 @@ from .vision import (
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
 
 logger = init_logger(__name__)
 
@@ -1931,6 +1934,11 @@ class Qwen3VLForConditionalGeneration(
         if marker_embed_tokens is not None:
             return marker_embed_tokens(input_ids)
         return self.get_language_model().embed_input_ids(input_ids)
+
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from vllm.model_executor.warmup.qwen_vl_triton_warmup import Qwen3VLKernelWarmup
+
+        return Qwen3VLKernelWarmup
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         super().__init__()

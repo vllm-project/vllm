@@ -6,10 +6,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.model_executor.warmup.qwen_vl_triton_warmup import (
-    _warm_mrope,
-    _warm_vision,
-)
+from vllm.model_executor.warmup.mrope_warmup import _warm_mrope
+from vllm.model_executor.warmup.qwen_vl_triton_warmup import _warm_vision
 
 
 def test_vision_warmup_calls_only_position_and_rotary_paths() -> None:

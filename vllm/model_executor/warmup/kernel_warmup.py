@@ -35,7 +35,7 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
-from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warmup
+from vllm.model_executor.warmup.mrope_warmup import mrope_triton_warmup
 from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
     replayssm_lifecycle_warmup,
@@ -313,7 +313,7 @@ class KernelWarmup:
                 time.perf_counter() - jit_warmup_start,
             )
 
-        qwen_vl_triton_warmup(self.runner)
+        mrope_triton_warmup(self.runner)
         replayssm_lifecycle_warmup(self.runner)
         if enable_jit_warmup and self.vllm_config.cache_config.enable_prefix_caching:
             # Copy-on-write first copies blocks mid-serving.

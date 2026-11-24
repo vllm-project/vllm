@@ -4,6 +4,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -62,6 +63,9 @@ from .utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
 
 
 class InternS2MobiusProcessingInfo(InternS2PreviewProcessingInfo):
@@ -411,6 +415,12 @@ class InternS2MobiusModel(nn.Module, EagleModelMixin):
 
 
 class InternS2MobiusForCausalLM(Qwen3_5ForCausalLMBase):
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        # Not the Qwen GDN warmup the Qwen3.5 base class opts into.
+        from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
+
+        return KernelWarmup
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
@@ -465,6 +475,12 @@ class InternS2MobiusMTP(Qwen3_5MoeMTP):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class InternS2MobiusForConditionalGeneration(InternS2PreviewForConditionalGeneration):
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        # Not the Qwen GDN warmup the Qwen3.5 base class opts into.
+        from vllm.model_executor.warmup.qwen_vl_triton_warmup import Qwen3VLKernelWarmup
+
+        return Qwen3VLKernelWarmup
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model") -> None:
         nn.Module.__init__(self)
 

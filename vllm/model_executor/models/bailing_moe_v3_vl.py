@@ -4,7 +4,7 @@
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
-from typing import Any, cast, get_type_hints
+from typing import TYPE_CHECKING, Any, cast, get_type_hints
 
 import numpy as np
 import regex as re
@@ -75,6 +75,9 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import run_dp_sharded_mrope_vision_model
+
+if TYPE_CHECKING:
+    from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
 
 IMAGE_TOKEN = "<|image_pad|>"
 IMAGE_PLACEHOLDER = f"<|vision_start|>{IMAGE_TOKEN}<|vision_end|>"
@@ -583,6 +586,11 @@ class BailingMoeV3VLForConditionalGeneration(
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple:
         return BailingMoeV3ForCausalLM.get_mamba_state_copy_func()
+
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from vllm.model_executor.warmup.qwen_vl_triton_warmup import Qwen3VLKernelWarmup
+
+        return Qwen3VLKernelWarmup
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model") -> None:
         super().__init__()

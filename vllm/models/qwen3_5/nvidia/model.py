@@ -854,9 +854,11 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     }
 
     def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
-        from vllm.model_executor.warmup.qwen_triton_warmup import QwenGDNKernelWarmup
+        from vllm.model_executor.warmup.qwen_vl_triton_warmup import (
+            QwenGDNVLKernelWarmup,
+        )
 
-        return QwenGDNKernelWarmup
+        return QwenGDNVLKernelWarmup
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
