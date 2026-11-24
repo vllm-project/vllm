@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 from collections.abc import Iterator
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm import LLM
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import BlockStored
@@ -15,6 +17,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
     LMCacheKVEvents,
 )
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.worker.gpu.spec_decode.gemma4.config import Gemma4MTPSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
 
 
 @pytest.fixture
@@ -849,3 +853,36 @@ def test_engine_shutdown_stops_lmcache_threads(monkeypatch):
         if not t.daemon and t not in threads_before
     ]
     assert leftover == []
+
+
+def test_calculate_mtp_layers_skips_target_kv_only_drafter():
+    pytest.importorskip("lmcache")
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
+        vllm_v1_adapter,
+    )
+
+    draft_cfg = SimpleNamespace(get_num_layers=lambda _pc: 6)
+
+    plain_vllm_config = SimpleNamespace(
+        speculative_config=None, parallel_config=SimpleNamespace()
+    )
+    mtp_vllm_config = SimpleNamespace(
+        speculative_config=fake_speculative_config(
+            speculator_config_cls=MTPSpeculatorConfig,
+            method="mtp",
+            draft_model_config=draft_cfg,
+        ),
+        parallel_config=SimpleNamespace(),
+    )
+    gemma4_vllm_config = SimpleNamespace(
+        speculative_config=fake_speculative_config(
+            speculator_config_cls=Gemma4MTPSpeculatorConfig,
+            method="mtp",
+            draft_model_config=draft_cfg,
+        ),
+        parallel_config=SimpleNamespace(),
+    )
+
+    assert vllm_v1_adapter._calculate_mtp_layers(plain_vllm_config) == 0
+    assert vllm_v1_adapter._calculate_mtp_layers(mtp_vllm_config) == 6
+    assert vllm_v1_adapter._calculate_mtp_layers(gemma4_vllm_config) == 0

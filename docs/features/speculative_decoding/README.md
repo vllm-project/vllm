@@ -90,12 +90,12 @@ A custom speculator consists of:
 - Its config: a subclass of
   `vllm.v1.worker.gpu.spec_decode.speculator_config.SpeculatorConfig`, which
   names the speculator class and describes how it behaves (KV lookahead slots,
-  whether it needs the target's hidden states, which features it supports,
-  ...). It's used in every vLLM process, including those that never build the
-  speculator, so its module shouldn't import the speculator. A speculator that
-  behaves like a built-in one should subclass that speculator's config (e.g.
-  `Eagle3SpeculatorConfig`), which also determines how its draft model is
-  configured from `model`.
+  whether it needs the target's hidden states, whether it has its own KV cache,
+  which features it supports, ...). It's used in every vLLM process, including
+  those that never build the speculator, so its module shouldn't import the
+  speculator. A speculator that behaves like a built-in one should subclass
+  that speculator's config (e.g. `Eagle3SpeculatorConfig`), which also
+  determines how its draft model is configured from `model`.
 
 ```python
 # my_package/config.py

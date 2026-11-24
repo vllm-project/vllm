@@ -12,4 +12,5 @@ class Gemma4MTPSpeculatorConfig(MTPSpeculatorConfig):
         "draft_lm_head_quantization"
     }
     # The Q-only drafter reads the target's KV and writes none of its own.
+    has_own_kv_cache = False
     draft_kv_depends_on_lookahead = False

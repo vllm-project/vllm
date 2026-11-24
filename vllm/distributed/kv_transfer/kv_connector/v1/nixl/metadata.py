@@ -112,9 +112,14 @@ class NixlHandshakePayload(KVConnectorHandshakeMetadata):
 def _get_speculative_compatibility_factors(
     vllm_config: VllmConfig,
 ) -> dict[str, Any] | None:
-    """Return NIXL compatibility factors for hidden-state-based speculators."""
+    """Return NIXL compatibility factors for hidden-state-based speculators
+    that maintain their own KV cache."""
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None or not speculative_config.uses_target_hidden_states:
+    if (
+        speculative_config is None
+        or not speculative_config.uses_target_hidden_states
+        or not speculative_config.has_own_kv_cache
+    ):
         return None
 
     draft_model_config = speculative_config.draft_model_config

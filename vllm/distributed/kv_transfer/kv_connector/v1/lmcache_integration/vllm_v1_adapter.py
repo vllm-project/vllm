@@ -409,7 +409,9 @@ def _calculate_mtp_layers(vllm_config):
         logger.info(
             "vllm_config.speculative_config: %s", vllm_config.speculative_config
         )
-        if vllm_config.speculative_config.uses_target_hidden_states:
+        if vllm_config.speculative_config.uses_target_hidden_states and getattr(
+            vllm_config.speculative_config, "has_own_kv_cache", True
+        ):
             try:
                 draft_model_config = vllm_config.speculative_config.draft_model_config
                 num_mtp_layers = draft_model_config.get_num_layers(
