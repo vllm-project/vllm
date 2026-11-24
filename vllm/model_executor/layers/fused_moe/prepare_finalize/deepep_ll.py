@@ -133,8 +133,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if "use_mxfp8" not in dispatch_params:
             raise RuntimeError(
                 "VLLM_DEEPEPLL_MXFP8_DISPATCH=1 requires a DeepEP build of the "
-                "hybrid-ep branch (https://github.com/deepseek-ai/DeepEP/tree/"
-                "hybrid-ep), which has MXFP8 low-latency dispatch."
+                "hybrid-ep branch that includes MXFP8 low-latency dispatch "
+                "(https://github.com/deepseek-ai/DeepEP/pull/823)."
             )
         logger.info_once(
             "Quantization is fused with DeepEP mxfp8 dispatch as "

@@ -32,7 +32,7 @@ from vllm.utils.flashinfer import (
     silu_and_mul_mxfp8_experts_quantize,
     silu_and_mul_scaled_nvfp4_experts_quantize,
 )
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 
 logger = init_logger(__name__)
 
@@ -493,6 +493,8 @@ def flashinfer_cutedsl_mxfp8_moe_masked(
         aq, aq_sf = hidden_states
         assert aq.dtype == torch.float8_e4m3fn, f"expected e4m3, got {aq.dtype}"
         assert aq.shape == (num_experts, m, k)
+        assert aq_sf.dtype == torch.uint8, f"expected uint8, got {aq_sf.dtype}"
+        assert aq_sf.shape == (32, 4, cdiv(m, 128), 4, k // 128, num_experts)
         aq = aq.permute(1, 2, 0)  # requirement of kernel
     else:
         assert hidden_states.shape == (num_experts, m, k)

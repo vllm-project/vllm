@@ -713,7 +713,7 @@ class _FakeDeepEPBuffer:
     """A `deep_ep.Buffer` stand-in whose dispatch can quantize to MXFP8. It
     returns `expert_x` and records the options of the call."""
 
-    def __init__(self, expert_x: tuple[torch.Tensor, torch.Tensor] | None = None):
+    def __init__(self, expert_x: torch.Tensor | tuple[torch.Tensor, torch.Tensor]):
         self.expert_x = expert_x
         self.dispatch_options: dict = {}
 
@@ -753,6 +753,21 @@ def _make_deepep_ll_prepare_finalize(buffer, quant_dtype: str):
     return prepare_finalize
 
 
+def _deepep_ll_prepare(prepare_finalize, num_experts: int, hidden_dim: int):
+    """Dispatch 8 tokens for MXFP8 experts; returns the experts' activations
+    and their scales."""
+    expert_x, expert_x_scale, *_ = prepare_finalize.prepare(
+        torch.randn(8, hidden_dim, dtype=torch.bfloat16, device="cuda"),
+        topk_weights=torch.ones(8, 1, device="cuda"),
+        topk_ids=torch.zeros(8, 1, dtype=torch.int64, device="cuda"),
+        num_experts=num_experts,
+        expert_map=None,
+        apply_router_weight_on_input=False,
+        quant_config=_mxfp8_quant_config(),
+    )
+    return expert_x, expert_x_scale
+
+
 @torch.inference_mode()
 def test_deepep_ll_mxfp8_dispatch(monkeypatch: pytest.MonkeyPatch):
     """With VLLM_DEEPEPLL_MXFP8_DISPATCH=1, DeepEP quantizes the dispatched
@@ -769,14 +784,8 @@ def test_deepep_ll_mxfp8_dispatch(monkeypatch: pytest.MonkeyPatch):
     buffer = _FakeDeepEPBuffer((values, scales))
     prepare_finalize = _make_deepep_ll_prepare_finalize(buffer, "mxfp8")
 
-    expert_x, expert_x_scale, *_ = prepare_finalize.prepare(
-        torch.randn(8, hidden_dim, dtype=torch.bfloat16, device="cuda"),
-        topk_weights=torch.ones(8, 1, device="cuda"),
-        topk_ids=torch.zeros(8, 1, dtype=torch.int64, device="cuda"),
-        num_experts=num_experts,
-        expert_map=None,
-        apply_router_weight_on_input=False,
-        quant_config=_mxfp8_quant_config(),
+    expert_x, expert_x_scale = _deepep_ll_prepare(
+        prepare_finalize, num_experts, hidden_dim
     )
 
     assert buffer.dispatch_options["use_mxfp8"]
@@ -792,18 +801,27 @@ def test_deepep_ll_mxfp8_dispatch(monkeypatch: pytest.MonkeyPatch):
         pytest.param("1", "nvfp4", id="experts_take_no_mxfp8"),
     ],
 )
+@torch.inference_mode()
 def test_deepep_ll_mxfp8_dispatch_disabled(
     monkeypatch: pytest.MonkeyPatch, flag: str, quant_dtype: str
 ):
     """DeepEP dispatches in bfloat16 unless VLLM_DEEPEPLL_MXFP8_DISPATCH=1
     and the experts take activations that the dispatch quantized to MXFP8."""
     monkeypatch.setenv("VLLM_DEEPEPLL_MXFP8_DISPATCH", flag)
+    num_experts, max_tokens, hidden_dim = 4, 16, 2048
+    dispatched = torch.randn(
+        num_experts, max_tokens, hidden_dim, dtype=torch.bfloat16, device="cuda"
+    )
+    buffer = _FakeDeepEPBuffer(dispatched)
+    prepare_finalize = _make_deepep_ll_prepare_finalize(buffer, quant_dtype)
 
-    prepare_finalize = _make_deepep_ll_prepare_finalize(
-        _FakeDeepEPBuffer(), quant_dtype
+    expert_x, expert_x_scale = _deepep_ll_prepare(
+        prepare_finalize, num_experts, hidden_dim
     )
 
-    assert not prepare_finalize.use_mxfp8_dispatch
+    assert not buffer.dispatch_options["use_mxfp8"]
+    assert expert_x_scale is None
+    torch.testing.assert_close(expert_x, dispatched, atol=0, rtol=0)
 
 
 def test_deepep_ll_mxfp8_dispatch_requires_deepep_support(
