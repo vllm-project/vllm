@@ -661,9 +661,7 @@ class IrOpImpl:
         # unwrap: a decorated implementation is hashed by its own file
         sources = [Path(inspect.getfile(inspect.unwrap(self.impl_fn)))]
         if self.functional_impl is not None:
-            sources.append(
-                Path(inspect.getfile(inspect.unwrap(self.functional_impl)))
-            )
+            sources.append(Path(inspect.getfile(inspect.unwrap(self.functional_impl))))
         return hash_source(*sources)
 
     def func_impl_fn(self, *args, **kwargs) -> Any:
