@@ -153,6 +153,9 @@ impl HfSpecialTokens {
 pub struct ModelConfig {
     model_type: Option<String>,
     vocab_size: Option<u32>,
+    /// Real vocabulary size when `vocab_size` is the padded embedding size
+    /// (Inkling).
+    unpadded_vocab_size: Option<u32>,
     eos_token_id: Option<OneOrManyTokenIds>,
     num_experts: Option<OneOrManyExpertCount>,
     moe_num_experts: Option<OneOrManyExpertCount>,
@@ -287,8 +290,11 @@ impl ModelConfig {
 
     /// Return the effective model vocabulary size, following the same
     /// simplified text-config selection as `model_type`.
+    ///
+    /// `unpadded_vocab_size` wins over `vocab_size`, like Python's
+    /// `get_vocab_size`: rows past it pad the embedding and are not tokens.
     pub fn vocab_size(&self) -> Result<u32> {
-        if let Some(vocab_size) = self.vocab_size {
+        if let Some(vocab_size) = self.unpadded_vocab_size.or(self.vocab_size) {
             Ok(vocab_size)
         } else if let Some(text_config) = self.text_config.as_deref() {
             text_config.vocab_size()
@@ -565,6 +571,22 @@ mod tests {
         assert_eq!(config.num_experts(), 8);
         assert_eq!(config.model_type(), Some("top_level"));
         assert!(config.is_moe());
+    }
+
+    #[test]
+    fn model_config_prefers_unpadded_vocab_size() {
+        // Inkling-Small's `config.json`: `vocab_size` is the padded embedding size.
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "text_config": {
+                    "vocab_size": 201024,
+                    "unpadded_vocab_size": 200058
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.vocab_size().unwrap(), 200058);
     }
 
     #[test]
