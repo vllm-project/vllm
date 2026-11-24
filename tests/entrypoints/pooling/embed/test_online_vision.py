@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gzip
 import json
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import pybase64
 import pytest
 import requests
 from transformers import AutoProcessor
@@ -29,6 +34,30 @@ TEST_IMAGE_ASSETS = [
 input_text = "The best thing about vLLM is that it supports many different models"
 image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
 image_base64 = {"url": encode_image_url(fetch_image(image_url))}
+
+
+@pytest.fixture
+def gzip_image_url() -> Iterator[str]:
+    _, encoded_image = image_base64["url"].split(",", 1)
+    body = gzip.compress(pybase64.b64decode(encoded_image))
+
+    class ImageHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), ImageHandler) as http_server:
+        thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{http_server.server_port}/image.png"
+        finally:
+            http_server.shutdown()
+            thread.join()
 
 
 @pytest.fixture(scope="module")
@@ -79,13 +108,15 @@ def test_chat_text_request(server: RemoteOpenAIServer, model_name: str):
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_chat_image_url_request(server: RemoteOpenAIServer, model_name: str):
+def test_chat_gzip_image_url_request(
+    server: RemoteOpenAIServer, model_name: str, gzip_image_url: str
+):
     messages = [
         {
             "role": "user",
             "content": [
                 {"type": "text", "text": "Represent the user's input."},
-                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "image_url", "image_url": {"url": gzip_image_url}},
             ],
         }
     ]

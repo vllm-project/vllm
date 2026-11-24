@@ -3,6 +3,7 @@
 
 import asyncio
 import functools
+import socket
 import threading
 import time
 from collections.abc import Callable, Coroutine, Mapping, MutableMapping
@@ -11,8 +12,8 @@ from typing import Any, ParamSpec, TypeVar
 
 import aiohttp
 import requests
-from urllib3.exceptions import DecodeError, ProtocolError, ReadTimeoutError, SSLError
 from urllib3.util import parse_url
+from urllib3.util.ssltransport import SSLTransport
 
 import vllm.envs as envs
 from vllm.exceptions import VLLMValidationError
@@ -151,6 +152,71 @@ def _append_chunk(
     return received_bytes
 
 
+def _remaining_media_timeout(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise MediaFetchDeadlineExceededError("Media fetch exceeded its time limit")
+    return remaining
+
+
+class _BodyReadSocket:
+    """Apply the deadline to I/O below HTTP buffering and content decoding."""
+
+    def __init__(self, sock: socket.socket | SSLTransport, deadline: float) -> None:
+        self._sock = sock
+        self._deadline = deadline
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._sock, name)
+
+    def _call(self, operation: Callable[..., _T], *args: Any) -> _T:
+        remaining = _remaining_media_timeout(self._deadline)
+        timeout = self._sock.gettimeout()
+        if timeout is not None and timeout <= remaining:
+            return operation(*args)
+        self._sock.settimeout(remaining)
+        try:
+            return operation(*args)
+        finally:
+            self._sock.settimeout(timeout)
+
+    def recv_into(self, buffer: memoryview) -> int | bytes | None:
+        sock = self._sock
+        if isinstance(sock, SSLTransport):
+            # HTTPS proxies can do several socket reads within one TLS read.
+            transport = sock.socket
+            sock.socket = _BodyReadSocket(transport, self._deadline)  # type: ignore[assignment]
+            try:
+                return sock.recv_into(buffer)
+            finally:
+                sock.socket = transport
+        return self._call(sock.recv_into, buffer)
+
+    def recv(self, size: int) -> int | bytes:
+        return self._call(self._sock.recv, size)
+
+    def sendall(self, data: bytes) -> None:
+        self._call(self._sock.sendall, data)
+
+
+def _set_body_read_deadline(
+    response: requests.Response, *, deadline: float, **_: Any
+) -> None:
+    try:
+        _remaining_media_timeout(deadline)
+        # urllib3 1.x can otherwise return partial data after a premature EOF.
+        response.raw.enforce_content_length = True
+        # The stock Requests adapter uses http.client for urllib3 1.x and
+        # 2.x. Each response owns its SocketIO, even on a reused connection.
+        original = response.raw._original_response
+        if original is not None and original.fp is not None:
+            raw: Any = original.fp.raw
+            raw._sock = _BodyReadSocket(raw._sock, deadline)
+    except Exception:
+        response.close()
+        raise
+
+
 def _read_response_bytes(
     response: requests.Response,
     max_bytes: int | None,
@@ -168,30 +234,11 @@ def _read_response_bytes(
     )
     chunks: list[bytes] = []
     received_bytes = 0
-    if deadline is not None and time.monotonic() >= deadline:
-        raise MediaFetchDeadlineExceededError("Media fetch exceeded its time limit")
-    if deadline is None:
-        chunks_iter = response.iter_content(_RESPONSE_READ_CHUNK_SIZE)
-    else:
-        # iter_content can wait for a full chunk while a peer trickles bytes.
-        def read1() -> bytes:
-            try:
-                return response.raw.read1(
-                    _RESPONSE_READ_CHUNK_SIZE, decode_content=True
-                )
-            except ProtocolError as e:
-                raise requests.exceptions.ChunkedEncodingError(e) from e
-            except DecodeError as e:
-                raise requests.exceptions.ContentDecodingError(e) from e
-            except ReadTimeoutError as e:
-                raise requests.exceptions.ConnectionError(e) from e
-            except SSLError as e:
-                raise requests.exceptions.SSLError(e) from e
-
-        chunks_iter = iter(read1, b"")
-    for chunk in chunks_iter:
-        if deadline is not None and time.monotonic() >= deadline:
-            raise MediaFetchDeadlineExceededError("Media fetch exceeded its time limit")
+    if deadline is not None:
+        _remaining_media_timeout(deadline)
+    for chunk in response.iter_content(_RESPONSE_READ_CHUNK_SIZE):
+        if deadline is not None:
+            _remaining_media_timeout(deadline)
         received_bytes = _append_chunk(
             chunks,
             chunk,
@@ -200,8 +247,8 @@ def _read_response_bytes(
             media_download_limit,
             request_budget,
         )
-    if deadline is not None and time.monotonic() >= deadline:
-        raise MediaFetchDeadlineExceededError("Media fetch exceeded its time limit")
+    if deadline is not None:
+        _remaining_media_timeout(deadline)
     return b"".join(chunks)
 
 
@@ -338,11 +385,7 @@ def _sync_retry(
                 else None
             )
             if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise MediaFetchDeadlineExceededError(
-                        "Media fetch exceeded its time limit"
-                    )
+                remaining = _remaining_media_timeout(deadline)
                 attempt_timeout = min(attempt_timeout or remaining, remaining)
             kwargs["timeout"] = attempt_timeout
             try:
@@ -466,11 +509,21 @@ class HTTPConnection:
         timeout: float | None = None,
         extra_headers: Mapping[str, str] | None = None,
         allow_redirects: bool = True,
+        deadline: float | None = None,
     ):
         self._validate_http_url(url)
 
         client = self.get_sync_client()
         extra_headers = extra_headers or {}
+        # Requests can consume redirect bodies before returning the response.
+        hooks = None
+        if deadline is not None:
+            hooks = {
+                "response": [
+                    functools.partial(_set_body_read_deadline, deadline=deadline),
+                    *client.hooks.get("response", ()),
+                ]
+            }
 
         return client.get(
             url,
@@ -478,6 +531,7 @@ class HTTPConnection:
             stream=stream,
             timeout=timeout,
             allow_redirects=allow_redirects,
+            hooks=hooks,
         )
 
     async def get_async_response(
@@ -516,6 +570,7 @@ class HTTPConnection:
             stream=True,
             timeout=timeout,
             allow_redirects=allow_redirects,
+            deadline=deadline,
         ) as r:
             r.raise_for_status()
 
