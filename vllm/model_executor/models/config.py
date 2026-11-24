@@ -1000,6 +1000,21 @@ class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
                 "--override-generation-config max_new_tokens must be 1, not "
                 f"{overrides['max_new_tokens']}."
             )
+        # Decision prompts read with shared-context packing (chunked-text-v1)
+        # run their segment attention on FlashAttention's varlen kernel.
+        if getattr(model_config.hf_config, "decision_prompt", None) == (
+            "chunked-text-v1"
+        ):
+            from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+            attention_config = vllm_config.attention_config
+            if attention_config.backend is None:
+                attention_config.backend = AttentionBackendEnum.FLASH_ATTN
+            elif attention_config.backend != AttentionBackendEnum.FLASH_ATTN:
+                raise ValueError(
+                    "Nemotron decision_prompt chunked-text-v1 reads are packed "
+                    "and need --attention-backend FLASH_ATTN."
+                )
         validator = (
             "vllm.model_executor.models.nemotron_dllm:"
             "NemotronBidirectionalReadValidator"

@@ -57,6 +57,12 @@ from vllm.v1.worker.gpu.sample.penalties import use_penalty
 from vllm.v1.worker.gpu.states import RequestState
 
 from .interfaces import SupportsPP, SupportsQuant
+from .nemotron_dllm_packed import (
+    PackedReadPlan,
+    packed_encoder_only_state_cls,
+    wrap_packed_encoder_attention,
+    write_packed_readout,
+)
 
 logger = init_logger(__name__)
 
@@ -206,12 +212,10 @@ class NemotronLabsDiffusionForBlockDiffusion(nn.Module, SupportsPP, SupportsQuan
     def get_model_state_cls(self):
         if self.ar_mode:
             if not getattr(self.config, "is_causal", True):
-                # Bidirectional reads: encoder-only attention, no KV cache.
-                from vllm.v1.worker.gpu.model_states.encoder_only import (
-                    EncoderOnlyModelState,
-                )
-
-                return EncoderOnlyModelState
+                # Bidirectional reads: encoder-only attention, no KV cache,
+                # plus shared-context packed reads (nemotron_dllm_packed.py)
+                # for requests that carry a layout.
+                return packed_encoder_only_state_cls()
             from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
             return DefaultModelState
@@ -242,6 +246,11 @@ class NemotronLabsDiffusionForBlockDiffusion(nn.Module, SupportsPP, SupportsQuan
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+        # Packed reads: the plan of the current batch (set by the model state)
+        # and the mask slots' hidden states (read by compute_logits).
+        self._sc_batch: PackedReadPlan | None = None
+        self._sc_logits: tuple[PackedReadPlan, torch.Tensor] | None = None
+        self._sc_supported = False
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -253,14 +262,36 @@ class NemotronLabsDiffusionForBlockDiffusion(nn.Module, SupportsPP, SupportsQuan
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+        out = self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+        plan, self._sc_batch = self._sc_batch, None
+        if plan is not None and isinstance(out, torch.Tensor):
+            self._sc_logits = (plan, out.index_select(0, plan.slot_rows))
+        return out
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
-        return self.logits_processor(self.diffusion_head, hidden_states)
+        logits = self.logits_processor(self.diffusion_head, hidden_states)
+        packed, self._sc_logits = self._sc_logits, None
+        if packed is not None and logits is not None:
+            plan, slot_hidden = packed
+            slot_logits = self.logits_processor(self.diffusion_head, slot_hidden)
+            logits = write_packed_readout(logits, plan, slot_logits)
+        return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if self.ar_mode and not getattr(self.config, "is_causal", True):
+            self._sc_supported = all(
+                wrap_packed_encoder_attention(layer.self_attn.attn)
+                for layer in self.model.layers
+                if getattr(layer, "self_attn", None) is not None
+            )
+            if not self._sc_supported:
+                logger.info(
+                    "Nemotron packed reads need the FLASH_ATTN backend; "
+                    "requests with a packed layout will be rejected."
+                )
+        return loaded
 
 
 # torch < 2.14 Inductor can reuse an indirect load from inside a reduction loop
