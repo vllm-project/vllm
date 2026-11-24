@@ -30,7 +30,7 @@ pub use deepseek_v41::DeepSeekV41ChatRenderer;
 pub use glm5_next::Glm5NextChatRenderer;
 pub use harmony::HarmonyChatRenderer;
 pub use inkling::InklingChatRenderer;
-pub use kimi_k3::KimiK3ChatRenderer;
+pub use kimi_k3::{KimiK3ChatRenderer, KimiK3Variant};
 pub use selection::RendererSelection;
 
 /// Location of one multimodal content part in the source chat request.
@@ -87,6 +87,12 @@ pub trait ChatRenderer: Send + Sync {
     /// override. Requests carrying one are rejected for other renderers.
     fn renders_request_chat_template(&self) -> bool {
         false
+    }
+
+    /// Render an OpenAI completions `prompt` and `suffix` into the model's
+    /// fill-in-the-middle prompt text, or `None` if the model has none.
+    fn render_completion_suffix(&self, _prompt: &str, _suffix: &str) -> Option<String> {
+        None
     }
 }
 

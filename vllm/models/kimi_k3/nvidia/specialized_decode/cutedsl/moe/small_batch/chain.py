@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Small-batch MoE chains: front -> routed experts -> (shared expert) -> polling tail.
 
-TP8 B1: ``MoeFrontTP8`` -> ``ClusterExpertsTP8`` -> ``MoeSharedTP8`` -> ``MoeTail``
-(front_poll, trigger 3). TP16 B1/B2: ``MoeFrontTP16`` (shared expert inside, on
-designated SMs) -> ``ClusterExpertsTP16`` -> ``MoeTail``. The o-projection consumer
+TP8 B1: `MoeFrontTP8` -> `ClusterExpertsTP8` -> `MoeSharedTP8` -> `MoeTail`
+(front_poll, trigger 3). TP16 B1/B2: `MoeFrontTP16` (shared expert inside, on
+designated SMs) -> `ClusterExpertsTP16` -> `MoeTail`. The o-projection consumer
 publishes the post-attention row into the x_moe mailbox (parity = layer index % 2) and
 bumps an epoch hint; the co-resident front has staged its weights by then. MoE tail
 polls the G/W/S slots (three parities, 0xffff-armed, re-armed after use) and publishes
@@ -14,7 +14,7 @@ import functools
 
 import cutlass.cute as cute
 import torch
-from cutlass import Float32, Float64, Int32, Uint64
+from cutlass import Float32, Int32, Uint64
 from cutlass.cute.runtime import make_fake_stream
 
 from ...common.host import fake, layout, stream, to_cute
@@ -27,9 +27,9 @@ from .front_tp16 import MoeFrontTP16, initialize_designated
 # Kernel class and trailing scalar arguments of each small-batch launch.
 _KERNELS = {
     "front": (MoeFrontTP8, (Int32,) * 3 + (Uint64, Float32)),
-    "front16": (MoeFrontTP16, (Int32,) * 3 + (Uint64,) + (Float32,) * 4 + (Float64,)),
-    "experts_tp16": (ClusterExpertsTP16, (Float32,) * 3),
-    "experts_tp8": (ClusterExpertsTP8, (Float32,) * 3),
+    "front16": (MoeFrontTP16, (Int32,) * 3 + (Uint64,) + (Float32,) * 3),
+    "experts_tp16": (ClusterExpertsTP16, (Float32,) * 4),
+    "experts_tp8": (ClusterExpertsTP8, (Float32,) * 4),
     "shared": (MoeSharedTP8, (Int32,) * 2),
     "tables": (SharedSituTables, (Float32,) * 2),
 }
@@ -142,8 +142,7 @@ class SmallBatchChain:
             routed = _launch("experts_tp16", (latent, ids, maps, *scales, g), b)
             tail = compile_tail(16, b, box.device.index, "front_poll", 2)
             self.codes[b] = front, routed, tail
-        lb = linear_beta
-        self.scalars += (Float32(beta), Float32(1 / beta), Float32(lb), Float64(1 / lb))
+        self.scalars += (Float32(beta), Float32(linear_beta))
         self.experts = experts.scalars
 
     def run(self, out, consume):

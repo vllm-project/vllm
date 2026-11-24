@@ -20,6 +20,12 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+    AiterFlyDSLMxfp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+    RocmDotScaledMxfp8LinearKernel,
+)
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -29,7 +35,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-    derive_aiter_quant_method,
+    derive_aiter_quant_type,
     mxfp4_w4a16_extra_kwargs,
     rocm_aiter_fused_experts,
 )
@@ -38,6 +44,10 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
+)
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -55,6 +65,7 @@ from vllm.model_executor.layers.mhc import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -75,14 +86,20 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.model_executor.utils import refill_derived, replace_parameter
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    refill_derived,
+    replace_parameter,
+)
 from vllm.models.deepseek_v4.amd.mega_moe import (
     DeepseekV4AiterMegaMoEExperts,
     finalize_mega_moe_weights,
 )
 from vllm.models.deepseek_v4.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
+from vllm.models.deepseek_v4.amd.silu_and_mul_mxfp8 import silu_and_mul_mxfp8
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
+from vllm.models.deepseek_v4.compressor import dsv4_swa_replay_enabled
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.sequence import IntermediateTensors
@@ -93,6 +110,34 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_token_offset
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 
 logger = init_logger(__name__)
+
+_MXFP8_INPUT_ATTR = "_rocm_mxfp8_input"
+
+
+def attach_mxfp8_input(x: torch.Tensor, qa: QuantizedActivation) -> None:
+    """Carry the MXFP8 copy of a sublayer input on the bf16 tensor itself.
+
+    Any reshape, slice or gather makes a new tensor without it, so a consumer
+    only ever sees the quantized copy of the exact rows it projects.
+    """
+    setattr(x, _MXFP8_INPUT_ATTR, qa)
+
+
+def mxfp8_input(x: torch.Tensor) -> QuantizedActivation | None:
+    return getattr(x, _MXFP8_INPUT_ATTR, None)
+
+
+def takes_rocm_mxfp8_input(linear: nn.Module) -> bool:
+    """Whether `linear` reads a pre-quantized MXFP8 activation with row-major
+    E8M0 scales as is (the quant key does not encode the scale layout)."""
+    kernel = getattr(getattr(linear, "quant_method", None), "kernel", None)
+    return (
+        get_input_quant_key(linear) == kMxfp8Dynamic
+        and isinstance(
+            kernel, (RocmDotScaledMxfp8LinearKernel, AiterFlyDSLMxfp8LinearKernel)
+        )
+        and kernel.supports_quantized_input(linear)
+    )
 
 
 class DeepseekV4MLP(nn.Module):
@@ -143,6 +188,9 @@ class DeepseekV4MLP(nn.Module):
         self._gateup = rocm_aiter_ops.is_enabled()
         # Block scale for the preshuffled gate_up weight; None = not preshuffled.
         self._gateup_scale: torch.Tensor | None = None
+        # Whether down_proj reads row-major MXFP8 as is; resolved on first use,
+        # after the weights are processed.
+        self._down_takes_mxfp8: bool | None = None
 
     def prepare_gateup_preshuffle(self) -> None:
         # B-preshuffle the gate_up_proj weight in place (single weight).
@@ -168,7 +216,10 @@ class DeepseekV4MLP(nn.Module):
         if ws.dtype == torch.float8_e8m0fnu:
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
         # Skip when the linear kernel already B-preshuffled this weight.
-        if not getattr(self.gate_up_proj, "aiter_bpreshuffled", False):
+        if not (
+            getattr(self.gate_up_proj, "aiter_bpreshuffled", False)
+            or is_weights_pre_processed()
+        ):
             replace_parameter(
                 self.gate_up_proj,
                 "weight",
@@ -190,8 +241,24 @@ class DeepseekV4MLP(nn.Module):
                 output_dtype=x.dtype,
             )
         else:
-            gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
+            # The fused mHC seam may hand over x already quantized to MXFP8.
+            qa = mxfp8_input(x)
+            gate_up, _ = self.gate_up_proj(x if qa is None else qa)
+        if self._down_takes_mxfp8 is None:
+            self._down_takes_mxfp8 = (
+                self.down_proj.input_is_parallel
+                and takes_rocm_mxfp8_input(self.down_proj)
+            )
+        if self._down_takes_mxfp8 and gate_up.dim() == 2 and gate_up.is_contiguous():
+            # One launch for the activation and down_proj's MXFP8 input quant.
+            values, scales = silu_and_mul_mxfp8(
+                gate_up, getattr(self.act_fn, "swiglu_limit", None)
+            )
+            x = QuantizedActivation(
+                values, scales, gate_up.dtype, values.shape, kMxfp8Dynamic
+            )
+        else:
+            x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
 
@@ -505,7 +572,7 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
                 activation=self.activation,
                 expert_mask=self.expert_map,
                 quant_config=quant_config,
-                quant_method=derive_aiter_quant_method(quant_config),
+                quant_type=derive_aiter_quant_type(quant_config),
                 output_dtype=x.dtype,
                 moe_sorting_dispatch_policy=(rocm_aiter_ops.get_moe_dispatch_policy()),
                 shared_w1=self.shared_w1,
@@ -534,7 +601,7 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
             activation=self.activation,
             expert_mask=self.expert_map,
             quant_config=self._routed_quant_config,
-            quant_method=derive_aiter_quant_method(self._routed_quant_config),
+            quant_type=derive_aiter_quant_type(self._routed_quant_config),
             output_dtype=x.dtype,
             moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
             **mxfp4_w4a16_extra_kwargs(self._routed_quant_config, self.moe_config),
@@ -958,7 +1025,7 @@ class DeepseekV4DecoderLayer(nn.Module):
     ):
         """Reduce HC residual streams to the next sub-layer input.
 
-        When ``norm_weight`` is set, RMSNorm is fused into the pre kernel.
+        When `norm_weight` is set, RMSNorm is fused into the pre kernel.
         """
         post_mix, res_mix, layer_input = self.mhc_pre(
             residual=x,
@@ -1452,8 +1519,8 @@ def _redirect_shared_expert_name(
     """Route a DSV4 shared-expert checkpoint name to its final parameter name.
 
     Fused layers go to the appended routed-expert slot. When any layer is fused
-    the weight mapper leaves the checkpoint ``.w2`` names untouched, so
-    non-fused layers still need the native ``down_proj`` parameter name.
+    the weight mapper leaves the checkpoint `.w2` names untouched, so
+    non-fused layers still need the native `down_proj` parameter name.
     """
     if ".ffn.shared_experts.w" not in name:
         return name
@@ -1516,6 +1583,12 @@ def _make_deepseek_v4_weights_mapper(
     )
 
 
+def _swa_replay_model_state_cls():
+    from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
+
+    return DeepseekV41ModelState
+
+
 class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     model_cls = DeepseekV4Model
 
@@ -1553,6 +1626,14 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
+        # SWA replay (UMBP on ROCm) needs the replay-aware model state: it
+        # passes replay_start to the SWA metadata and pads the replayed slots
+        # of the prefix-cached groups so their restored KV is not rewritten.
+        if dsv4_swa_replay_enabled(vllm_config):
+            self.get_model_state_cls = _swa_replay_model_state_cls
+
+    # No engram lookback; read by the replay model state.
+    token_lookback_depth = 0
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -1600,6 +1681,9 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
                 module.prepare_attn_preshuffle()
             elif isinstance(module, DeepseekV4MLP):
                 module.prepare_gateup_preshuffle()
+        for module in self.modules():
+            if isinstance(module, DeepseekV4DecoderLayer) and module.mono is not None:
+                module.mono.prepare(module)
         if fused_compressor_layers:
             logger.info(
                 "Fused the C4 compressor GEMMs in %d DeepSeek V4 layers",

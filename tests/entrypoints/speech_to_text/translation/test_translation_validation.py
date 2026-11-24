@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import difflib
 import io
 
 # imports for structured outputs tests
@@ -183,6 +184,25 @@ async def test_canary_translation(mary_had_lamb):
                 )
 
 
+@pytest.mark.asyncio
+async def test_transcription_only_model_rejects_translation(mary_had_lamb):
+    """A model that cannot translate must not return a transcript as a translation."""
+    # NOTE - like the LoRA test above, run before the module scoped server.
+    model_name = "zai-org/GLM-ASR-Nano-2512"
+    attention_config = _get_rocm_attention_config(model_name)
+    with RemoteOpenAIServer(
+        model_name, _get_server_args(attention_config)
+    ) as remote_server:
+        client = remote_server.get_async_client()
+        with pytest.raises(openai.BadRequestError, match="only supports"):
+            await client.audio.translations.create(
+                model=model_name,
+                file=mary_had_lamb,
+                extra_body=dict(language="en", to_language="de"),
+                temperature=0.0,
+            )
+
+
 # NOTE: (NickLucche) the large-v3-turbo model was not trained on translation!
 @pytest.mark.asyncio
 async def test_basic_audio(foscolo, client_and_model):
@@ -242,7 +262,7 @@ async def test_streaming_response(foscolo, client_and_model, server):
         "seed": 42,
     }
     foscolo.seek(0)
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=30) as http_client:
         files = {"file": foscolo}
         async with http_client.stream(
             "POST", url, headers=headers, data=data, files=files
@@ -261,11 +281,12 @@ async def test_streaming_response(foscolo, client_and_model, server):
     res_stream = translation.split()
     # NOTE There's a small non-deterministic issue here, likely in the attn
     # computation, which will cause a few tokens to be different, while still
-    # being very close semantically.
-    assert (
-        sum([x == y for x, y in zip(res_stream, res_no_stream.text.split())])
-        >= len(res_stream) * 0.87
+    # being very close semantically. Align the words rather than compare them
+    # by position: one inserted or dropped word must not shift the rest.
+    matcher = difflib.SequenceMatcher(
+        None, res_stream, res_no_stream.text.split(), autojunk=False
     )
+    assert matcher.ratio() >= 0.87, (translation, res_no_stream.text)
 
 
 @pytest.mark.asyncio
@@ -285,7 +306,7 @@ async def test_stream_options(foscolo, server):
     foscolo.seek(0)
     final = False
     continuous = True
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=30) as http_client:
         files = {"file": foscolo}
         async with http_client.stream(
             "POST", url, headers=headers, data=data, files=files

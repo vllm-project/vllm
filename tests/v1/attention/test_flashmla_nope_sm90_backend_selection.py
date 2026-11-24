@@ -6,8 +6,8 @@ GLM5Next is rope-free MLA: qk_nope_head_dim=256, qk_rope_head_dim=0,
 v_head_dim=256, kv_lora_rank=512 -> head_size 512. These tests pin the
 selection contract only (no GPU required):
 
-* ``get_supported_head_sizes`` advertises 512 so the backend is a candidate;
-* ``supports_combination`` admits 512 only for rope-free models on SM90, with
+* `get_supported_head_sizes` advertises 512 so the backend is a candidate;
+* `supports_combination` admits 512 only for rope-free models on SM90, with
   a bf16 cache or an fp8_ds_mla cache (zero RoPE slot), and rejects
   everything else;
 * adding 512 must NOT reorder the SM100 priority list for bf16, which is why
@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
@@ -28,7 +29,6 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
     KVQuantMode,
@@ -120,7 +120,7 @@ def test_flashmla_bf16_nope_accepts_packed_manager_blocks():
                 block_stride=len(layers) * page_size,
             )
         ],
-        kv_cache_groups=[KVCacheGroupSpec(layers, spec)],
+        kv_cache_groups=[new_kv_cache_group(layers, spec)],
     )
     groups = [[AttentionGroup(FlashMLASparseBackend, layers, spec, 0)]]
 
