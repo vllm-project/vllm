@@ -202,7 +202,11 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         if params.response_format is not None:
             kwargs["response_format"] = _dump_k3_template_value(params.response_format)
         kwargs["tokenize"] = True
-        return tokenizer.apply_chat_template(conversation, **kwargs)
+        try:
+            return tokenizer.apply_chat_template(conversation, **kwargs)
+        except AssertionError as e:
+            # The checkpoint's encoder asserts on request values it rejects.
+            raise VLLMValidationError(str(e)) from e
 
     def render_messages(
         self,

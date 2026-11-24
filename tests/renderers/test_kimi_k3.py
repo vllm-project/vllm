@@ -217,6 +217,20 @@ def test_chat_request_thinking_object_reaches_k3_template(thinking, expected):
     }
 
 
+def test_apply_chat_template_reports_encoder_assertion_as_validation_error():
+    """An effort the checkpoint's encoder asserts on is a client error."""
+
+    class AssertingTokenizer(StubTokenizer):
+        def apply_chat_template(self, conversation, **kwargs) -> list[int]:
+            raise AssertionError("Unsupported thinking_effort='medium'")
+
+    renderer = _make_renderer(AssertingTokenizer([]), model_type="kimi_k31")
+    params = ChatParams(chat_template_kwargs={"reasoning_effort": "medium"})
+
+    with pytest.raises(VLLMValidationError, match="Unsupported thinking_effort"):
+        renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+
 @pytest.mark.parametrize("reasoning_effort", ["low", "high", "max"])
 def test_apply_chat_template_translates_supported_reasoning_effort(
     reasoning_effort: str,
