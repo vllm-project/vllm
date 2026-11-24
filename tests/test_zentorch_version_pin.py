@@ -4,9 +4,9 @@
 
 zentorch (the AMD Zen CPU optimization extra) tracks the torch release that
 vLLM depends on, differing only by an extra trailing "patch level" segment.
-Concretely, torch ``X.Y.Z`` corresponds to zentorch ``X.Y.Z.W``.
+Concretely, torch `X.Y.Z` corresponds to zentorch `X.Y.Z.W`.
 
-This test parses the raw text of ``setup.py`` and ``requirements/cpu.txt`` and
+This test parses the raw text of `setup.py` and `requirements/cpu.txt` and
 string-matches the versions.
 """
 
@@ -38,8 +38,8 @@ def _extract_zentorch_version() -> str:
 def _extract_torch_version() -> str:
     """Pull the pinned torch version out of requirements/cpu.txt.
 
-    The local version label (e.g. the ``+cpu`` in ``2.13.0+cpu``) is stripped
-    so only the upstream release ``X.Y.Z`` is compared.
+    The local version label (e.g. the `+cpu` in `2.13.0+cpu`) is stripped
+    so only the upstream release `X.Y.Z` is compared.
     """
     text = CPU_REQUIREMENTS.read_text()
     # Match lines like: torch==2.13.0+cpu; platform_machine == "x86_64" ...

@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Split-KV paged decode attention for Flint (GQA 8, head_dim 128, bf16 KV).
 
-Numerics mirror FlashInfer's trtllm-gen decode kernel: ``S = K q`` with bf16
-inputs and fp32 accumulation; softmax in fp32 as ``exp2(S * c - m * c)`` with
-``c = scale * log2(e)`` and the running max ``m`` in unscaled logits; the row
-sum accumulates the fp32 probabilities while ``P`` is rounded to bf16 for
-``P V`` (fp32 accumulation); the sink adds ``exp2(sink * log2(e) - m * c)`` to
+Numerics mirror FlashInfer's trtllm-gen decode kernel: `S = K q` with bf16
+inputs and fp32 accumulation; softmax in fp32 as `exp2(S * c - m * c)` with
+`c = scale * log2(e)` and the running max `m` in unscaled logits; the row
+sum accumulates the fp32 probabilities while `P` is rounded to bf16 for
+`P V` (fp32 accumulation); the sink adds `exp2(sink * log2(e) - m * c)` to
 the final denominator. Split partials (unnormalized O, m, l) stay fp32
 (trtllm-gen stores partial O in bf16) and are merged either by the last CTA of
 each (request, kv head), found with a self-resetting arrival counter, or, for
@@ -14,7 +14,7 @@ the short sliding-window layers, inside a thread-block cluster through
 distributed shared memory (every rank merges a slice of the head dims).
 
 Each warp streams 8 KB pages (16 tokens x [K | V], HND layout) through a
-private ring of bulk-copy (TMA) stages and runs ``mma.sync`` on them. The
+private ring of bulk-copy (TMA) stages and runs `mma.sync` on them. The
 kernel is launched with programmatic dependent launch: it prefetches its
 leading pages before waiting on the grid dependency (all but the page holding
 the current token, whose K/V the previous kernel writes), touches q and its
@@ -275,8 +275,8 @@ def _neg_inf():
 class _FlintDecodeAttention:
     """Grid (splits, kv heads, batch). The attended pages of a (request, kv
     head) are interleaved over the warps of its active splits; a split is
-    active when every one of its warps gets at least ``min_pages`` pages.
-    With ``cluster`` the splits of a (request, kv head) form a thread-block
+    active when every one of its warps gets at least `min_pages` pages.
+    With `cluster` the splits of a (request, kv head) form a thread-block
     cluster and merge through distributed shared memory instead of global
     partials."""
 
@@ -1050,7 +1050,7 @@ def _launch_config(batch, num_kv_heads, sliding, num_sms):
 
 
 def _supports_kv_cache(kv_cache: torch.Tensor) -> bool:
-    """Whether ``kv_cache`` has the HND bf16 page layout the kernel assumes:
+    """Whether `kv_cache` has the HND bf16 page layout the kernel assumes:
     [blocks, kv_heads, 16, 2 * 128], contiguous pages, 16 B aligned."""
     return (
         kv_cache.dtype == torch.bfloat16
@@ -1083,17 +1083,17 @@ def flint_decode_attention(
     Args:
         q: [B, num_heads, 128] bf16 queries.
         kv_cache: [num_blocks, num_kv_heads, 16, 256] bf16 HND cache with K in
-            ``[..., :128]`` and V in ``[..., 128:]``.
+            `[..., :128]` and V in `[..., 128:]`.
         block_tables: [B, max_blocks] int32.
         seq_lens: [B] int32 KV lengths including the current token (0 writes
             zeros).
         sinks: [num_heads] fp32 sink logits.
-        window: Attend to the last ``window`` positions, or None for all.
+        window: Attend to the last `window` positions, or None for all.
         scale: Softmax scale.
         out: [B, num_heads, 128] bf16 output.
 
     Returns:
-        ``out``.
+        `out`.
 
     """
     batch, num_heads, head_dim = q.shape

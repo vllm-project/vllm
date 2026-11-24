@@ -183,6 +183,7 @@ llm_kwargs = dict(
     max_model_len=8192,
     distributed_executor_backend="ray",
     attention_backend=ATTN_BACKEND,
+    # Leave headroom for the weight transfer's buffers, which vLLM doesn't reserve.
     gpu_memory_utilization=0.75,
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
 )
@@ -295,6 +296,7 @@ llm_v2_kwargs = dict(
     model=MODEL_NAME_V2,
     enforce_eager=True,
     max_model_len=8192,
+    # Leave headroom for the weight transfer's buffers, which vLLM doesn't reserve.
     gpu_memory_utilization=0.75,
     distributed_executor_backend="ray",
     attention_backend=ATTN_BACKEND,
