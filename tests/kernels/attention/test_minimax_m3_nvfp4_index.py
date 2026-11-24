@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniMax-M3 NVFP4 index scorers (FlyDSL) against AITER's FP8 scorers and an
-fp32 reference over the same e4m3 keys; the context-parallel push scorer
-(4-row and 8-row request builds) against the single-head scorer, bit for bit,
-on one GPU."""
+fp32 reference over the same e4m3 keys, and against AITER's NVFP4 scorers; the
+context-parallel push scorer (4-row and 8-row request builds) against the
+single-head scorer, bit for bit, on one GPU."""
 
 import pytest
 import torch
@@ -733,3 +733,125 @@ def test_parallel_decode_graph_replay_resets_counters(monkeypatch, query_len, fu
     for case, output, counter in snapshots:
         torch.testing.assert_close(output, references[case], rtol=0, atol=0)
         assert torch.count_nonzero(counter).item() == 0
+
+
+def _aiter_msa():
+    """AITER's MSA score ops, skipping when they predate the nvfp4 scorers."""
+    msa = pytest.importorskip("aiter.ops.msa_block_select")
+    if not hasattr(msa, "NVFP4_INDEX_HEADS"):
+        pytest.skip("AITER without nvfp4 index scorers (needs v0.1.30+)")
+    from aiter.ops import msa_attention
+
+    return msa_attention
+
+
+def test_aiter_index_score_gate(monkeypatch):
+    """Off by default; on only with an AITER that has the nvfp4 scorers."""
+    import sys
+    from types import ModuleType
+
+    gate = indexer_nvfp4.use_aiter_nvfp4_index_score
+
+    def check(env, expected):
+        monkeypatch.setenv("VLLM_ROCM_AITER_NVFP4_INDEX_SCORE", env)
+        gate.cache_clear()
+        assert gate() is expected
+
+    try:
+        check("0", False)
+        _aiter_msa()
+        check("1", True)
+        monkeypatch.setitem(sys.modules, "aiter.ops.msa_block_select", ModuleType("x"))
+        check("1", False)
+    finally:
+        gate.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("num_heads", "query_len"),
+    [(1, 1), (1, 4), (1, 8), (2, 4), (2, 8), (4, 1), (4, 4), (4, 8)],
+)
+@pytest.mark.parametrize("page_step", [1, 2])
+@pytest.mark.parametrize("max_seq_len", [None, 131072])
+def test_aiter_index_decode_matches_flydsl(
+    num_heads, query_len, page_step, max_seq_len
+):
+    """AITER's nvfp4 decode scorer on the indexer's cache view against the
+    FlyDSL scorer, and the FlyDSL top-k over both."""
+    msa = _aiter_msa()
+    torch.manual_seed(0)
+    lens = _lens(40, 20000)
+    table, num_blocks = _block_table(lens, share=True)
+    seq_lens = torch.tensor(lens, dtype=torch.int32, device="cuda")
+    cache = _index_cache(num_blocks, page_step)
+    rows = len(lens) * query_len
+    q = (torch.randn(rows, num_heads, D, device="cuda") * 0.5).to(torch.float8_e4m3fn)
+    msl = max_seq_len or max(lens)
+    kw = dict(init_blocks=1, local_blocks=2, query_len=query_len, max_seq_len=msl)
+    scores = []
+    for score_fn, kv in (
+        (minimax_m3_nvfp4_index_score_decode, cache),
+        (msa.pa_sparse_block_score_decode, indexer_nvfp4.aiter_nvfp4_pages(cache)),
+    ):
+        score = torch.full((num_heads, rows, _width(msl)), float("nan"), device="cuda")
+        score_fn(q, kv, score, table, seq_lens, **kw)
+        scores.append(score)
+    unwritten = scores[0].isnan()
+    assert torch.equal(scores[1].isnan(), unwritten)
+    _assert_scores(scores[1][~unwritten], scores[0][~unwritten])
+    ids = [_topk_out(num_heads, rows, pad=False)[0] for _ in scores]
+    for score, out in zip(scores, ids):
+        minimax_m3_index_topk_decode_indices(
+            score, out, seq_lens, max_seq_len=msl, query_len=query_len
+        )
+    assert torch.equal(ids[1], ids[0])
+
+
+@pytest.mark.parametrize("num_heads", [1, 2, 4])
+@pytest.mark.parametrize(
+    ("q_lens", "seq_lens_list"),
+    [
+        ([4096], [4096]),  # fresh prompt
+        ([129, 300, 5], [129, 2500, 2049]),  # ragged, unaligned prefixes
+        ([700, 1500], [30000, 1500]),  # long cached prefix + fresh
+    ],
+)
+@pytest.mark.parametrize("page_step", [1, 2])
+def test_aiter_index_prefill_matches_flydsl(
+    num_heads, q_lens, seq_lens_list, page_step
+):
+    """AITER's nvfp4 prefill scorer on the indexer's cache view against the
+    FlyDSL scorer on every block a row sees, and the FlyDSL top-k over both."""
+    from vllm.models.minimax_m3.amd.ops.index_topk_decode.host import (
+        minimax_m3_index_topk_prefill_indices,
+    )
+
+    msa = _aiter_msa()
+    table, seq_lens, cu, cache, q = _prefill_case(
+        q_lens, seq_lens_list, num_heads, page_step
+    )
+    msl = max(seq_lens_list)
+    kw = dict(init_blocks=1, local_blocks=2, max_query_len=max(q_lens), max_seq_len=msl)
+    rows = sum(q_lens)
+    scores = []
+    for score_fn, kv in (
+        (minimax_m3_nvfp4_index_score_prefill, cache),
+        (msa.pa_sparse_block_score_prefill, indexer_nvfp4.aiter_nvfp4_pages(cache)),
+    ):
+        score = torch.full((num_heads, rows, _width(msl)), float("nan"), device="cuda")
+        score_fn(q, kv, score, table, cu, seq_lens, **kw)
+        scores.append(score)
+    q_start, valid_pages = 0, []
+    for q_len, s in zip(q_lens, seq_lens_list):
+        row_pos, seen = _causal_blocks(q_len, s, num_heads)
+        sl = (slice(None), slice(q_start, q_start + q_len), slice(0, seen.shape[2]))
+        _assert_scores(scores[1][sl][seen], scores[0][sl][seen], (q_len, s))
+        valid_pages.append(row_pos // BLOCK + 1)
+        q_start += q_len
+    num_valid_pages = torch.cat(valid_pages).to(torch.int32)
+    ids = [_topk_out(num_heads, rows, pad=False)[0] for _ in scores]
+    for score, out in zip(scores, ids):
+        minimax_m3_index_topk_prefill_indices(
+            score, out, max_seq_len=msl, num_valid_pages=num_valid_pages
+        )
+    assert torch.equal(ids[1], ids[0])
