@@ -279,6 +279,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
             get_hisparse_coordinator(
                 kv_cache_manager,
                 import_step_tokens=self.connector_scheduler.import_step_tokens,
+                num_reprefillable_tokens=self._vllm_config.num_reprefillable_tokens,
             )
         )
 
