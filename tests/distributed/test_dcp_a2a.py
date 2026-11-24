@@ -8,6 +8,7 @@ Tests cover:
 3. LSE-weighted combination correctness
 """
 
+import functools
 import math
 
 import multiprocess as mp
@@ -17,6 +18,7 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config.parallel import ParallelConfig
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_file_store_init_method
 from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.attention.ops.dcp import _V_UP_PROJ_FIRST_MIN_TOKENS
@@ -55,7 +57,13 @@ def _packed_a2a_reference(
         .contiguous()
         .float()
     )
-    lses = cp_attn_lse.view(B, world_size, h_per_rank).permute(1, 0, 2).contiguous()
+    # Packed A2A returns FP32 LSE, including for FP16/BF16 attention outputs.
+    lses = (
+        cp_attn_lse.view(B, world_size, h_per_rank)
+        .permute(1, 0, 2)
+        .contiguous()
+        .float()
+    )
     return _lse_weighted_combine(
         outputs,
         lses,
@@ -100,6 +108,7 @@ def _distributed_run(fn, world_size: int, extra_env: dict[str, str]) -> None:
         if process.is_alive():
             process.kill()
             process.join()
+    for process in processes:
         assert process.exitcode == 0
 
 
@@ -630,86 +639,190 @@ def test_distributed_packed_a2a_with_workspace_matches_reference():
 
 
 def _distributed_v_up_proj_a2a_worker(env: dict[str, str]) -> None:
+    """Exercise both projection orders with actual exchanges and graph replay."""
     update_environment_variables(env)
     local_rank = int(env["LOCAL_RANK"])
     world_size = int(env["WORLD_SIZE"])
     torch.accelerator.set_device_index(local_rank)
     dist.init_process_group(
         backend="nccl",
-        init_method=env["DISTRIBUTED_INIT_METHOD"],
-        rank=local_rank,
+        init_method=env.get("DISTRIBUTED_INIT_METHOD", "env://"),
+        rank=int(env.get("RANK", local_rank)),
         world_size=world_size,
     )
+    workspaces = []
+    group = None
+    graph = None
     try:
+        from vllm.distributed.parallel_state import GroupCoordinator
         from vllm.v1.attention.ops.dcp import (
             dcp_a2a_lse_reduce,
             dcp_a2a_v_up_proj_lse_reduce,
         )
 
         dtype = _dtype_from_name(env["TEST_DTYPE"])
+        backend = env.get("TEST_DCP_TRANSPORT", "nccl")
         device = torch.device(f"cuda:{local_rank}")
         rank = dist.get_rank()
-        B, h_per_rank, L, V = int(env["TEST_NUM_TOKENS"]), 2, 64, 32
-        H = world_size * h_per_rank
-        cp_group = _FakeCPGroup(world_size, dist.group.WORLD)
-
-        generator = torch.Generator(device=device)
-        generator.manual_seed(1234)
-        w_uv = torch.randn(
-            H, L, V, device=device, dtype=dtype, generator=generator
-        ) / math.sqrt(L)
-        generator.manual_seed(1235 + rank)
-        cp_attn_out = torch.randn(
-            B, H, L, device=device, dtype=dtype, generator=generator
+        group = GroupCoordinator(
+            [list(range(world_size))],
+            local_rank,
+            "nccl",
+            use_device_communicator=False,
         )
-        cp_attn_lse = torch.randn(B, H, device=device, dtype=dtype, generator=generator)
-        # Rank 0 holds no KV for the first request; its output there is undefined.
-        seq_lens = torch.tensor([int(rank != 0), 3], device=device, dtype=torch.int32)
-        query_start_loc = torch.tensor([0, 2, B], device=device, dtype=torch.int32)
-        if rank == 0:
-            cp_attn_out[:2] = float("nan")
+        h_per_rank, H = 2, world_size * 2
 
-        actual = torch.empty(B, h_per_rank * V, device=device, dtype=dtype)
-        dcp_a2a_v_up_proj_lse_reduce(
-            cp_attn_out,
-            cp_attn_lse,
-            w_uv,
-            actual,
-            cp_group,
-            seq_lens=seq_lens,
-            query_start_loc=query_start_loc,
-        )
+        def nccl_reference(partial, lse, *, out=None, **kwargs):
+            width = partial.shape[-1]
+            # NCCL's existing pack kernel requires a power-of-two width.
+            # Padding after projection preserves its arithmetic for the
+            # non-power-of-two layouts supported by NIXL.
+            if width & (width - 1):
+                padded_width = 1 << (width - 1).bit_length()
+                padded = torch.nn.functional.pad(partial, (0, padded_width - width))
+                merged = dcp_a2a_lse_reduce(padded, lse, group, **kwargs)[..., :width]
+                if out is not None:
+                    out.copy_(merged)
+                    return out
+                return merged
+            return dcp_a2a_lse_reduce(partial, lse, group, out=out, **kwargs)
 
-        latent = dcp_a2a_lse_reduce(
-            cp_attn_out,
-            cp_attn_lse,
-            cp_group,
-            seq_lens=seq_lens,
-            query_start_loc=query_start_loc,
-        )
-        assert isinstance(latent, torch.Tensor)
-        local_w_uv = w_uv[rank * h_per_rank : (rank + 1) * h_per_rank]
-        expected = torch.bmm(latent.transpose(0, 1).float(), local_w_uv.float())
-        _assert_packed_a2a_close(actual, expected.transpose(0, 1).reshape(B, -1), dtype)
+        for L, V in ((64, 32 if backend == "nccl" else 24), (512, 128)):
+            layouts = {}
+            if backend == "nixl":
+                from vllm.v1.attention.ops.nixl_dcp import NixlDCPA2AWorkspace
+
+                for dim in (L, V):
+                    ws = NixlDCPA2AWorkspace(
+                        group,
+                        device,
+                        64,
+                        h_per_rank,
+                        dim,
+                        dtype,
+                        tile_bytes=512,
+                    )
+                    layouts[dim] = ws
+                    workspaces.append(ws)
+
+            def combine(partial, lse, layouts=layouts, **kwargs):
+                return layouts[partial.shape[-1]].lse_reduce(partial, lse, **kwargs)
+
+            generator = torch.Generator(device=device).manual_seed(1234)
+            w_uv = torch.randn(
+                H, L, V, device=device, dtype=dtype, generator=generator
+            ) / math.sqrt(L)
+            # Alternate widths and return to earlier shapes with the same workspaces.
+            for B in (
+                1,
+                _V_UP_PROJ_FIRST_MIN_TOKENS - 1,
+                _V_UP_PROJ_FIRST_MIN_TOKENS,
+                64,
+                7,
+                8,
+            ):
+                generator.manual_seed(1235 + rank + B)
+                partial = torch.randn(
+                    B, H, L, device=device, dtype=dtype, generator=generator
+                )
+                lse = torch.randn(
+                    H, B, device=device, dtype=torch.float32, generator=generator
+                ).T
+                lengths = torch.tensor(
+                    [int(rank != 0), 3], device=device, dtype=torch.int32
+                )
+                starts = torch.tensor(
+                    [0, min(2, B), B], device=device, dtype=torch.int32
+                )
+                if rank == 0:
+                    partial[: min(2, B)] = float("nan")
+                actual = torch.empty(B, h_per_rank * V, device=device, dtype=dtype)
+                if backend == "nixl" and B == 8:
+                    storage = torch.empty(
+                        B, h_per_rank * V + 8, device=device, dtype=dtype
+                    )
+                    actual = storage[:, : h_per_rank * V]
+                reference = torch.empty_like(actual)
+
+                run = functools.partial(
+                    dcp_a2a_v_up_proj_lse_reduce,
+                    partial,
+                    lse,
+                    w_uv,
+                    cp_group=group,
+                    seq_lens=lengths,
+                    query_start_loc=starts,
+                )
+
+                transport = None if backend == "nccl" else combine
+                run(actual, combine=transport)
+                run(reference, combine=nccl_reference)
+                _assert_packed_a2a_close(actual, reference, dtype)
+                latent = dcp_a2a_lse_reduce(
+                    partial,
+                    lse,
+                    group,
+                    seq_lens=lengths,
+                    query_start_loc=starts,
+                )
+                local_w_uv = w_uv[rank * h_per_rank : (rank + 1) * h_per_rank]
+                expected = torch.bmm(latent.transpose(0, 1).float(), local_w_uv.float())
+                _assert_packed_a2a_close(
+                    actual,
+                    expected.transpose(0, 1).reshape(B, -1),
+                    dtype,
+                )
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    run(actual, combine=transport)
+                for _ in range(3):
+                    partial.mul_(0.75)
+                    lse.add_(0.125 * (rank + 1))
+                    run(reference, combine=nccl_reference)
+                    graph.replay()
+                    if backend == "nixl":
+                        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+                    else:
+                        _assert_packed_a2a_close(actual, reference, dtype)
     finally:
+        torch.accelerator.synchronize()
+        # NCCL retains captured communicators until their graphs are released.
+        if graph is not None:
+            graph.reset()
+        for workspace in workspaces:
+            if hasattr(workspace, "close"):
+                workspace.close()
+        if group is not None:
+            group.destroy()
         dist.destroy_process_group()
 
 
 @pytest.mark.skipif(
     torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs."
 )
-@pytest.mark.parametrize("dtype_name", ["bfloat16", "float32"])
 @pytest.mark.parametrize(
-    "num_tokens",
-    [_V_UP_PROJ_FIRST_MIN_TOKENS - 1, _V_UP_PROJ_FIRST_MIN_TOKENS],
+    "backend,dtype_name",
+    [
+        ("nccl", "float32"),
+        ("nccl", "bfloat16"),
+    ]
+    + (
+        [
+            ("nixl", "bfloat16"),
+            ("nixl", "float16"),
+        ]
+        if current_platform.is_cuda()
+        else []
+    ),
 )
 def test_distributed_v_up_proj_a2a_matches_combine_then_v_up_proj(
-    dtype_name: str, num_tokens: int
+    backend: str,
+    dtype_name: str,
 ):
     _distributed_run(
         _distributed_v_up_proj_a2a_worker,
         world_size=2,
-        extra_env={"TEST_DTYPE": dtype_name, "TEST_NUM_TOKENS": str(num_tokens)},
+        extra_env={"TEST_DTYPE": dtype_name, "TEST_DCP_TRANSPORT": backend},
     )
 
 

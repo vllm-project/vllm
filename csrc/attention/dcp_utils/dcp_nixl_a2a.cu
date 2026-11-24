@@ -4,7 +4,7 @@
 #include <cuda/atomic>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
-#include <gpu/nixl_device.cuh>
+#include <nixl_device.cuh>
 #include <math_constants.h>
 #include <torch/csrc/stable/library.h>
 #include <torch/headeronly/core/ScalarType.h>
@@ -15,7 +15,7 @@
 
 #include "dcp_direct_common.cuh"
 
-#if !UCT_CUDA_IPC_SUPPORTED && !UCT_RC_MLX5_GDA_SUPPORTED
+#if !UCT_CUDA_IPC_SUPPORTED || !UCT_RC_MLX5_GDA_SUPPORTED
   #error "NIXL DCP requires a UCX GPU device transport"
 #endif
 
@@ -157,8 +157,8 @@ __global__ void nixl_pack_put_signal_kernel(
     char* receive, const uint64_t* state, const int64_t* peer_ptrs,
     nixlMemViewH local, nixlMemViewH remote, int world_size, int rank,
     int ubatch, int num_tokens, int heads, int head_dim, int tile_tokens,
-    int tile_stride, size_t peer_bytes, size_t receive_ubatch_bytes,
-    int active_channels, bool vectorized) {
+    int tile_stride, size_t peer_bytes, size_t send_peer_bytes,
+    size_t receive_ubatch_bytes, int active_channels, bool vectorized) {
   const int peer = blockIdx.y;
   const int channel = blockIdx.x;
   // Remote-view indices omit our own rank. A null mapping uses NIXL puts;
@@ -169,7 +169,7 @@ __global__ void nixl_pack_put_signal_kernel(
   const int tiles = (num_tokens + tile_tokens - 1) / tile_tokens;
   const size_t slot = (state[0] & 1) * world_size * peer_bytes;
   const size_t rx_base = ubatch * receive_ubatch_bytes;
-  const size_t tx_base = (ubatch * world_size + peer) * peer_bytes;
+  const size_t tx_base = (ubatch * world_size + peer) * send_peer_bytes;
   const size_t counter_offset = rx_base + 2 * world_size * peer_bytes +
                                 rank * kCounterStride +
                                 channel * sizeof(uint64_t);
@@ -182,8 +182,12 @@ __global__ void nixl_pack_put_signal_kernel(
     const int rows = min(tile_tokens, num_tokens - first);
     const size_t offset = static_cast<size_t>(tile) * tile_stride;
     const size_t dst_offset = rx_base + slot + rank * peer_bytes + offset;
+    // Interleave channel slots so small transfers reserve only their tiles.
+    const size_t staging_offset =
+        static_cast<size_t>(batch_count * active_channels + channel) *
+        tile_stride;
     char* packed = peer_receive != nullptr ? peer_receive + dst_offset
-                                           : send + tx_base + offset;
+                                           : send + tx_base + staging_offset;
     const size_t output_bytes =
         static_cast<size_t>(rows) * heads * head_dim * 2;
     const size_t lse_offset = align_bytes(output_bytes, 16);
@@ -239,7 +243,7 @@ __global__ void nixl_pack_put_signal_kernel(
         batch_count == kBatchPuts || tile + active_channels >= tiles;
     if (peer_receive == nullptr && threadIdx.x < 32) {
       auto status = nixlPut<nixl_gpu_level_t::WARP>(
-          {local, 0, tx_base + offset},
+          {local, 0, tx_base + staging_offset},
           {remote, static_cast<size_t>(peer - (peer > rank)), dst_offset},
           bytes, channel, batch_end ? 0 : nixl_gpu_flags::defer,
           batch_end ? &request : nullptr);
@@ -345,9 +349,17 @@ void nixl_dcp_a2a_dispatch(const Tensor& output, const Tensor& lse,
   size_t tile_stride = align_bytes(
       align_bytes(tile_tokens * heads * dim * 2, 16) + tile_tokens * heads * 4,
       16);
-  size_t peer_bytes = send.size(2);
+  const size_t send_peer_bytes = send.size(2);
+  const int64_t receive_payload = receive.size(1) - world * kCounterStride;
+  STD_TORCH_CHECK(receive_payload > 0 && receive_payload % (2 * world) == 0,
+                  "invalid NIXL DCP receive capacity");
+  const size_t peer_bytes = receive_payload / (2 * world);
   int tiles = (tokens + tile_tokens - 1) / tile_tokens;
-  STD_TORCH_CHECK(peer_bytes % 128 == 0 && tiles * tile_stride <= peer_bytes &&
+  const size_t staging_tiles = std::min(tiles, channels * kBatchPuts);
+  STD_TORCH_CHECK(send_peer_bytes % 128 == 0 &&
+                      staging_tiles * tile_stride <= send_peer_bytes &&
+                      peer_bytes % 128 == 0 &&
+                      tiles * tile_stride <= peer_bytes &&
                       static_cast<size_t>(receive.size(1)) ==
                           2 * world * peer_bytes + world * kCounterStride,
                   "NIXL DCP input exceeds registered capacity");
@@ -391,7 +403,7 @@ void nixl_dcp_a2a_dispatch(const Tensor& output, const Tensor& lse,
             reinterpret_cast<nixlMemViewH>(local_view),
             reinterpret_cast<nixlMemViewH>(remote_view), world, rank, ubatch,
             tokens, heads, dim, tile_tokens, tile_stride, peer_bytes,
-            receive.size(1), active_channels, vectorized);
+            send_peer_bytes, receive.size(1), active_channels, vectorized);
   };
   if (lse_type == ScalarType::Float) {
     launch.operator()<float>();

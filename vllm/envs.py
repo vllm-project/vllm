@@ -2430,7 +2430,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
     ),
-    # Experimental NIXL GPU Device API DCP exchange; requires an opt-in build.
+    # NIXL GPU Device API DCP exchange in CUDA builds.
     "VLLM_USE_NIXL_DCP_A2A": lambda: bool(int(os.getenv("VLLM_USE_NIXL_DCP_A2A", "0"))),
     # Direct DCP ops default on when applicable. Set to 1 to bypass feature
     # heuristics (but not topology safety), or 0 to disable.

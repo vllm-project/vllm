@@ -1602,6 +1602,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     get_dcp_group().all_gather(self.W_UV.contiguous(), dim=0),
                 )
 
+        if self.dcp_manager is not None:
+            self.dcp_manager.prepare_output_workspace(
+                self.W_UV_dcp.shape[-1] if self.W_UV_dcp is not None else None
+            )
+
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
         # for more details.

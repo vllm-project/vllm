@@ -475,6 +475,11 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                     self.dcp_manager.group.all_gather(self.W_UV.contiguous(), dim=0),
                 )
 
+        if self.dcp_manager is not None:
+            self.dcp_manager.prepare_output_workspace(
+                self.W_UV_dcp.shape[-1] if self.W_UV_dcp is not None else None
+            )
+
         quant_method = (
             resolve_quant_method(self.quant_config, self, prefix=self.layer_name)
             if self.quant_config

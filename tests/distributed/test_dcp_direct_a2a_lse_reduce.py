@@ -384,6 +384,7 @@ def test_mla_nixl_selection_overrides_auto_and_reserves_prefill(monkeypatch, dir
         True,
         False,
     )
+    manager.prepare_output_workspace(None)
     factory.assert_called_once_with(
         group,
         torch.device("cpu"),
@@ -405,7 +406,19 @@ def test_mla_nixl_selection_overrides_auto_and_reserves_prefill(monkeypatch, dir
     # SDK/setup errors must propagate instead of silently selecting NCCL.
     factory.side_effect = RuntimeError("SDK unavailable")
     with pytest.raises(RuntimeError, match="SDK unavailable"):
-        manager._init_combine(2, 4, torch.bfloat16, True, False)
+        another = dcp.MLADCPManager(
+            _manager_config(),
+            torch.device("cpu"),
+            2,
+            8,
+            4,
+            torch.bfloat16,
+            torch.bfloat16,
+            None,
+            True,
+            False,
+        )
+        another.prepare_output_workspace(None)
 
 
 @pytest.mark.parametrize(
@@ -418,17 +431,58 @@ def test_mla_nixl_selection_overrides_auto_and_reserves_prefill(monkeypatch, dir
 )
 def test_mla_nixl_rejects_conflicting_configuration(
     monkeypatch,
+    tmp_path,
     direct,
     a2a,
     pcp,
     message,
 ):
+    from vllm.config import (
+        DeviceConfig,
+        ParallelConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.distributed.parallel_state import (
+        destroy_distributed_environment,
+        destroy_model_parallel,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+
+    monkeypatch.setattr(dcp.envs, "VLLM_USE_NIXL_DCP_A2A", False)
+    config = VllmConfig(
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(dcp_comm_backend="a2a" if a2a else "ag_rs"),
+    )
     monkeypatch.setattr(dcp.envs, "VLLM_USE_NIXL_DCP_A2A", True)
     monkeypatch.setattr(dcp.envs, "VLLM_USE_DIRECT_DCP_A2A", direct)
-    manager = object.__new__(dcp.MLADCPManager)
-    manager.use_a2a = a2a
-    with pytest.raises(ValueError, match=message):
-        manager._init_combine(2, 128, torch.bfloat16, True, pcp)
+    try:
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            distributed_init_method=f"file://{tmp_path / 'rendezvous'}",
+            backend="gloo",
+        )
+        with set_current_vllm_config(config):
+            initialize_model_parallel(backend="gloo")
+        with pytest.raises(ValueError, match=message):
+            dcp.MLADCPManager(
+                config,
+                torch.device("cpu"),
+                2,
+                128,
+                128,
+                torch.bfloat16,
+                torch.bfloat16,
+                None,
+                True,
+                pcp,
+            )
+    finally:
+        destroy_model_parallel()
+        destroy_distributed_environment()
 
 
 @pytest.mark.parametrize(
@@ -533,7 +587,9 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     workspace = torch.empty(96, 8)
 
     assert manager.v_up_proj_combine is None
-    assert manager.query_gather == direct_query.gather
+    local_query = torch.empty(2, 2, 8)
+    assert manager.query_gather(local_query) == direct_query.gather.return_value
+    direct_query.gather.assert_called_once_with(local_query)
     manager.init_kv_gather(workspace, 64)
     gathered_kv, local_kv = torch.empty(4, 8), torch.empty(2, 8)
     manager.kv_gather(gathered_kv, local_kv)
@@ -623,17 +679,22 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch):
     assert manager.v_up_proj_combine.keywords == {
         "cp_group": group,
         "is_lse_base_on_e": True,
+        "combine": manager.combine,
     }
 
 
 # False: a diffusion canvas of 3 without a speculative config.
 @pytest.mark.parametrize("with_spec_config", [True, False])
 def test_dcp_workspace_covers_decode_width(with_spec_config):
+    from vllm.config import SpeculativeConfig
+
     config = _manager_config()
     config.scheduler_config.max_num_batched_tokens = 128
     config.num_speculative_tokens = 3
     if with_spec_config:
-        config.speculative_config = MagicMock(num_speculative_tokens=3)
+        config.speculative_config = SpeculativeConfig(
+            method="ngram", num_speculative_tokens=3
+        )
 
     assert dcp.get_dcp_workspace_max_num_tokens(config) == 16
 
@@ -1039,6 +1100,10 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             num_ubatches=2,
             **workspace_options,
         )
+        if use_nixl:
+            # Bound registered staging even when the payload spans many batches.
+            bound = workspace.num_channels * 4 * workspace.tile_stride
+            assert workspace.send.size(2) <= (bound + 127) // 128 * 128
         if use_nixl and env.get("TEST_REQUIRE_RDMA") == "1":
             assert any(
                 "rc_mlx5_gda" in transports for transports in workspace.peer_transports
@@ -1118,10 +1183,13 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
                     partial_output,
                     partial_lse,
                     packed_send,
-                    world_size,
-                    heads_per_rank,
-                    head_dim,
-                    2,
+                    None,
+                    None,
+                    has_mask=False,
+                    world_size=world_size,
+                    h_per_rank=heads_per_rank,
+                    head_dim=head_dim,
+                    lse_pack_dim=2,
                 )
                 expected_recv = torch.empty_like(packed_send)
                 dist.all_to_all_single(expected_recv, packed_send)
@@ -1164,12 +1232,16 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
                             rtol=0,
                             atol=0,
                         )
-                nccl_output, nccl_lse = dcp._dcp_a2a_unpack_combine(
+                nccl_output = torch.empty_like(actual)
+                nccl_lse = torch.empty_like(actual_lse)
+                dcp._dcp_a2a_unpack_combine(
                     expected_recv,
-                    head_dim,
-                    2,
-                    True,
-                    is_lse_base_on_e,
+                    nccl_output,
+                    nccl_lse,
+                    head_dim=head_dim,
+                    lse_pack_dim=2,
+                    return_lse=True,
+                    is_lse_base_on_e=is_lse_base_on_e,
                 )
                 torch.testing.assert_close(actual, nccl_output, rtol=0, atol=0)
                 torch.testing.assert_close(actual_lse, nccl_lse, rtol=0, atol=0)
@@ -1382,12 +1454,29 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
                 (world_size, replays, 1, 10), device=device, dtype=dtype
             )
             dcp._dcp_a2a_pack_send(
-                output_history, lse_history, reference_send, world_size, 1, 8, 2
+                output_history,
+                lse_history,
+                reference_send,
+                None,
+                None,
+                has_mask=False,
+                world_size=world_size,
+                h_per_rank=1,
+                head_dim=8,
+                lse_pack_dim=2,
             )
             reference_recv = torch.empty_like(reference_send)
             dist.all_to_all_single(reference_recv, reference_send)
-            reference_history = dcp._dcp_a2a_unpack_combine(
-                reference_recv, 8, 2, False, is_lse_base_on_e
+            reference_history = torch.empty((replays, 1, 8), device=device, dtype=dtype)
+            unused_lse = torch.empty((1, 1), device=device, dtype=dtype)
+            dcp._dcp_a2a_unpack_combine(
+                reference_recv,
+                reference_history,
+                unused_lse,
+                head_dim=8,
+                lse_pack_dim=2,
+                return_lse=False,
+                is_lse_base_on_e=is_lse_base_on_e,
             )
             torch.testing.assert_close(history, reference_history[:, 0], rtol=0, atol=0)
 
@@ -1460,6 +1549,34 @@ def test_distributed_direct_a2a_matches_reference(
             "TEST_LSE_DTYPE": lse_dtype,
             "TEST_LSE_LAYOUT": lse_layout,
             "LSE_BASE_E": lse_base_e,
+        },
+    )
+
+
+@pytest.mark.parametrize("world_size", [2, 8])
+@pytest.mark.parametrize("num_channels", [1, 4])
+@pytest.mark.parametrize(
+    "dtype,lse_layout,lse_base_e",
+    [("bfloat16", "transposed", "1"), ("float16", "packed", "0")],
+)
+def test_distributed_nixl_a2a_matches_reference(
+    world_size, dtype, lse_layout, lse_base_e, num_channels
+):
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need {world_size} CUDA GPUs")
+    if not hasattr(torch.ops._C, "nixl_dcp_a2a_dispatch"):
+        pytest.fail("CUDA vLLM build is missing NIXL DCP operators")
+    _distributed_run(
+        _distributed_direct_a2a_worker,
+        world_size=world_size,
+        extra_env={
+            "TEST_DCP_TRANSPORT": "nixl",
+            "TEST_DTYPE": dtype,
+            "TEST_LSE_DTYPE": "float32",
+            "TEST_LSE_LAYOUT": lse_layout,
+            "LSE_BASE_E": lse_base_e,
+            "TEST_NIXL_CHANNELS": str(num_channels),
+            "TEST_REQUIRE_MAPPED_P2P": "1",
         },
     )
 
@@ -1550,34 +1667,6 @@ def _distributed_direct_dcp_topk_worker(env: dict[str, str]) -> None:
 )
 def test_distributed_direct_dcp_topk_matches_all_gather():
     _distributed_run(_distributed_direct_dcp_topk_worker, world_size=4, extra_env={})
-
-
-@pytest.mark.parametrize("world_size", [2, 8])
-@pytest.mark.parametrize("num_channels", [1, 4])
-@pytest.mark.parametrize(
-    "dtype,lse_layout,lse_base_e",
-    [("bfloat16", "transposed", "1"), ("float16", "packed", "0")],
-)
-def test_distributed_nixl_a2a_matches_reference(
-    world_size, dtype, lse_layout, lse_base_e, num_channels
-):
-    if torch.accelerator.device_count() < world_size:
-        pytest.skip(f"Need {world_size} CUDA GPUs")
-    if not hasattr(torch.ops._C, "nixl_dcp_a2a_dispatch"):
-        pytest.skip("Build vLLM with VLLM_BUILD_NIXL_DCP=ON")
-    _distributed_run(
-        _distributed_direct_a2a_worker,
-        world_size=world_size,
-        extra_env={
-            "TEST_DCP_TRANSPORT": "nixl",
-            "TEST_DTYPE": dtype,
-            "TEST_LSE_DTYPE": "float32",
-            "TEST_LSE_LAYOUT": lse_layout,
-            "LSE_BASE_E": lse_base_e,
-            "TEST_NIXL_CHANNELS": str(num_channels),
-            "TEST_REQUIRE_MAPPED_P2P": "1",
-        },
-    )
 
 
 if __name__ == "__main__":

@@ -1134,6 +1134,8 @@ def dcp_a2a_v_up_proj_lse_reduce(
     is_lse_base_on_e: bool = True,
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
+    *,
+    combine: Callable[..., torch.Tensor] | None = None,
 ) -> None:
     """Combine partial MLA outputs with All-to-All and up-project them by W_UV.
 
@@ -1149,20 +1151,22 @@ def dcp_a2a_v_up_proj_lse_reduce(
         w_uv: [H, L, V] up-projection of all H heads, in DCP rank order
         out: [B, H/N * V] combined output of this rank's heads
         cp_group: GroupCoordinator for DCP communication
+        combine: Exchange/combine backend; defaults to NCCL A2A.
         is_lse_base_on_e: If True, LSE is base e; if False, base 2
         seq_lens: Local KV lengths. Empty shards contribute zero weight.
         query_start_loc: Cumulative query-token offsets for each request.
 
     """
+    if combine is None:
+        combine = functools.partial(dcp_a2a_lse_reduce, cp_group=cp_group)
     B, H, _ = cp_attn_out.shape
     V = w_uv.shape[-1]
     if B < _V_UP_PROJ_FIRST_MIN_TOKENS:
         H_per_rank = H // cp_group.world_size
         rank = cp_group.rank_in_group
-        latent = dcp_a2a_lse_reduce(
+        latent = combine(
             cp_attn_out,
             cp_attn_lse,
-            cp_group,
             is_lse_base_on_e=is_lse_base_on_e,
             seq_lens=seq_lens,
             query_start_loc=query_start_loc,
@@ -1177,10 +1181,9 @@ def dcp_a2a_v_up_proj_lse_reduce(
     v = cp_attn_out.new_empty((B, H, V))
     # (H, B, L) x (H, L, V) -> (H, B, V) written transposed into (B, H, V)
     torch.bmm(cp_attn_out.transpose(0, 1), w_uv, out=v.transpose(0, 1))
-    dcp_a2a_lse_reduce(
+    combine(
         v,
         cp_attn_lse,
-        cp_group,
         is_lse_base_on_e=is_lse_base_on_e,
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
@@ -1641,6 +1644,7 @@ class MLADCPManager:
         is_lse_base_on_e: bool,
         use_pcp: bool,
     ) -> None:
+        self._use_nixl = envs.VLLM_USE_NIXL_DCP_A2A
         parallel_config = vllm_config.parallel_config
         self.group = get_dcp_group()
         self.device = torch.device(device)
@@ -1656,6 +1660,14 @@ class MLADCPManager:
         self.padded_num_heads = padded_num_heads
         # Set when the combine can merge W_UV-projected outputs instead.
         self.v_up_proj_combine: Callable[..., None] | None = None
+        self._nixl_workspaces: dict[int, Any] = {}
+        self._projection_dim: int | None = None
+        self._output_workspace_ready = False
+        self._output_geometry = (
+            num_heads,
+            output_head_dim,
+            output_dtype,
+        )
 
         self.combine = self._init_combine(
             num_heads,
@@ -1664,6 +1676,13 @@ class MLADCPManager:
             is_lse_base_on_e,
             use_pcp,
         )
+        if self.use_a2a and not use_pcp and not self._has_direct_a2a_workspace:
+            self.v_up_proj_combine = functools.partial(
+                dcp_a2a_v_up_proj_lse_reduce,
+                cp_group=self.group,
+                is_lse_base_on_e=is_lse_base_on_e,
+                combine=self.combine,
+            )
         if vllm_config.kernel_config.enable_jit_warmup and not self.use_a2a:
             _CORRECT_ATTN_CP_OUT_KERNEL.register_warmup(
                 vllm_config,
@@ -1675,6 +1694,7 @@ class MLADCPManager:
         if (
             vllm_config.kernel_config.enable_jit_warmup
             and self.use_a2a
+            and not self._use_nixl
             and (
                 not self._has_direct_a2a_workspace
                 or self.max_num_tokens
@@ -1718,7 +1738,8 @@ class MLADCPManager:
         is_lse_base_on_e: bool,
         use_pcp: bool,
     ) -> DCPCombine:
-        if envs.VLLM_USE_NIXL_DCP_A2A:
+        if self._use_nixl:
+            self._has_direct_a2a_workspace = False
             if envs.VLLM_USE_DIRECT_DCP_A2A is True:
                 raise ValueError(
                     "VLLM_USE_NIXL_DCP_A2A and VLLM_USE_DIRECT_DCP_A2A "
@@ -1726,21 +1747,9 @@ class MLADCPManager:
                 )
             if not self.use_a2a or use_pcp:
                 raise ValueError("NIXL DCP requires the a2a backend without PCP")
-            from vllm.v1.attention.ops.nixl_dcp import get_nixl_dcp_a2a_workspace
-
-            workspace = get_nixl_dcp_a2a_workspace(
-                self.group,
-                self.device,
-                self.nixl_max_num_tokens,
-                num_heads,
-                head_dim,
-                dtype,
-                self.num_ubatches,
-            )
             logger.info_once("Using NIXL GPU Device API DCP A2A for MLA.")
             return functools.partial(
-                workspace.lse_reduce,
-                is_lse_base_on_e=is_lse_base_on_e,
+                self._nixl_combine, is_lse_base_on_e=is_lse_base_on_e
             )
         direct_workspace = None
         if self.use_a2a:
@@ -1762,13 +1771,6 @@ class MLADCPManager:
                 is_lse_base_on_e=is_lse_base_on_e,
             )
 
-        # PCP regroups the merged heads before the up-projection.
-        if self.use_a2a and not use_pcp:
-            self.v_up_proj_combine = functools.partial(
-                dcp_a2a_v_up_proj_lse_reduce,
-                cp_group=self.group,
-                is_lse_base_on_e=is_lse_base_on_e,
-            )
         combine_fn = (
             dcp_a2a_lse_reduce
             if self.use_a2a
@@ -1780,6 +1782,45 @@ class MLADCPManager:
             combine_fn,
             cp_group=self.group,
             is_lse_base_on_e=is_lse_base_on_e,
+        )
+
+    def prepare_output_workspace(self, projected_head_dim: int | None) -> None:
+        """Finalize NIXL layouts after weight preparation, before capture."""
+        if not self._use_nixl:
+            return
+        if self._output_workspace_ready:
+            if projected_head_dim != self._projection_dim:
+                raise ValueError(
+                    "DCP projection layout cannot change after initialization"
+                )
+            return
+        heads, latent_dim, dtype = self._output_geometry
+        from vllm.v1.attention.ops.nixl_dcp import get_nixl_dcp_a2a_workspace
+
+        latent_capacity = self.nixl_max_num_tokens
+        if projected_head_dim is not None and projected_head_dim != latent_dim:
+            latent_capacity = min(latent_capacity, _V_UP_PROJ_FIRST_MIN_TOKENS - 1)
+        layouts = {latent_dim: latent_capacity}
+        if projected_head_dim is not None:
+            layouts[projected_head_dim] = self.nixl_max_num_tokens
+        for dim, capacity in layouts.items():
+            self._nixl_workspaces[dim] = get_nixl_dcp_a2a_workspace(
+                self.group,
+                self.device,
+                capacity,
+                heads,
+                dim,
+                dtype,
+                self.num_ubatches,
+            )
+        self._projection_dim = projected_head_dim
+        self._output_workspace_ready = True
+
+    def _nixl_combine(self, partial_output, partial_lse, **kwargs):
+        if not self._output_workspace_ready:
+            raise RuntimeError("Prepare DCP output workspaces before execution")
+        return self._nixl_workspaces[partial_output.shape[-1]].lse_reduce(
+            partial_output, partial_lse, **kwargs
         )
 
     def _direct_workspace_combine(

@@ -161,6 +161,21 @@ You can find more information about vLLM's wheels in [Install the latest code](#
     Building from source requires GCC/G++ ≥ 13 ([#58158](https://github.com/vllm-project/vllm/issues/58158)).
     Ubuntu 24.04, the base of the default vLLM image, ships GCC 13 by default.
 
+CUDA source builds also require the RDMA development headers, including
+`infiniband/mlx5dv.h`, to compile the NIXL DCP device operators. Install
+`libibverbs-dev` on Debian/Ubuntu or `rdma-core-devel` on RPM-based distributions
+before building. These headers are required even when NIXL DCP is disabled at
+runtime; installing a prebuilt vLLM wheel does not require them.
+
+```bash
+# Debian/Ubuntu
+sudo apt-get update
+sudo apt-get install -y libibverbs-dev
+
+# RPM-based distributions
+sudo dnf install -y rdma-core-devel
+```
+
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 
 ```bash

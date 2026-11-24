@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 _COUNTER_STRIDE = 128
+_BATCH_PUTS = 4
 
 
 @triton.jit
@@ -76,10 +77,14 @@ def _nixl_wait_combine_kernel(
     peer_bytes,
     counter_offset,
     tile_stride,
+    out_stride_token,
+    out_stride_head,
+    out_stride_dim,
     TILE_TOKENS: tl.constexpr,
     N: tl.constexpr,
     H_PER_RANK: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    BLOCK_D: tl.constexpr,
     IS_BASE_E: tl.constexpr,
     RETURN_LSE: tl.constexpr,
 ):
@@ -121,8 +126,8 @@ def _nixl_wait_combine_kernel(
     else:
         global_lse = tl.log2(lse_sum) + lse_max
 
-    dims = tl.arange(0, HEAD_DIM)
-    acc = tl.zeros([HEAD_DIM], dtype=tl.float32)
+    dims = tl.arange(0, BLOCK_D)
+    acc = tl.zeros([BLOCK_D], dtype=tl.float32)
     output_offset = ((row * H_PER_RANK + head) * HEAD_DIM + dims) * 2
     for source in tl.static_range(N):
         value = _nixl_lse(recv_ptr, base + source * peer_bytes + lse_offset)
@@ -132,12 +137,21 @@ def _nixl_wait_combine_kernel(
             weight = tl.exp2(value - global_lse)
         weight = tl.where(weight != weight, 0.0, weight)
         ptr = recv_ptr + base + source * peer_bytes + output_offset
-        partial = tl.load(ptr.to(tl.pointer_type(out_ptr.dtype.element_ty))).to(
-            tl.float32
-        )
+        partial = tl.load(
+            ptr.to(tl.pointer_type(out_ptr.dtype.element_ty)),
+            mask=dims < HEAD_DIM,
+            other=0,
+        ).to(tl.float32)
         partial = tl.where(weight == 0.0, 0.0, partial)
         acc += partial * weight
-    tl.store(out_ptr + (token * H_PER_RANK + head) * HEAD_DIM + dims, acc)
+    tl.store(
+        out_ptr
+        + token * out_stride_token
+        + head * out_stride_head
+        + dims * out_stride_dim,
+        acc,
+        mask=dims < HEAD_DIM,
+    )
     if RETURN_LSE:
         tl.store(out_lse_ptr + token * H_PER_RANK + head, global_lse)
 
@@ -187,15 +201,18 @@ class NixlDCPA2AWorkspace:
                 raise ValueError("NIXL DCP supports FP16 and BF16 output")
             if min(max_num_tokens, heads_per_rank, head_dim, num_ubatches) < 1:
                 raise ValueError("NIXL DCP workspace dimensions must be positive")
-            if head_dim & (head_dim - 1):
-                raise ValueError("NIXL DCP requires a power-of-two head dimension")
             if num_channels not in (1, 2, 4, 8) or tile_bytes < 16:
                 raise ValueError("NIXL DCP needs 1/2/4/8 channels and tile_bytes >= 16")
             if not hasattr(torch.ops._C, "nixl_dcp_a2a_dispatch"):
                 raise RuntimeError(
                     "vLLM was built without the three-launch NIXL DCP operators. "
-                    "Rebuild with -DVLLM_BUILD_NIXL_DCP=ON and matching "
-                    "NIXL/UCX headers."
+                    "Install a CUDA vLLM build containing the NIXL DCP operators."
+                )
+            from importlib.metadata import version
+
+            if version("nixl") != "1.5.2":
+                raise RuntimeError(
+                    "NIXL DCP requires nixl==1.5.2 to match its device SDK"
                 )
             from nixl import _bindings, nixl_agent, nixl_agent_config
 
@@ -222,10 +239,15 @@ class NixlDCPA2AWorkspace:
         )
         tiles = (max_num_tokens + self.tile_tokens - 1) // self.tile_tokens
         self.peer_bytes = (tiles * self.tile_stride + 127) // 128 * 128
+        # Each channel completes at most four puts before reusing staging.
+        self.staging_tiles = min(tiles, num_channels * _BATCH_PUTS)
+        self.send_peer_bytes = (
+            (self.staging_tiles * self.tile_stride + 127) // 128 * 128
+        )
         self.counter_offset = 2 * self.world_size * self.peer_bytes
         receive_bytes = self.counter_offset + self.world_size * _COUNTER_STRIDE
         layout = (
-            "mixed3-v1",
+            "mixed3-staging-v2",
             max_num_tokens,
             heads_per_rank,
             head_dim,
@@ -246,7 +268,7 @@ class NixlDCPA2AWorkspace:
             try:
                 with torch.accelerator.device_index(self.device.index):
                     self.send = torch.empty(
-                        (num_ubatches, self.world_size, self.peer_bytes),
+                        (num_ubatches, self.world_size, self.send_peer_bytes),
                         device=self.device,
                         dtype=torch.uint8,
                     )
@@ -393,6 +415,7 @@ class NixlDCPA2AWorkspace:
         query_start_loc: torch.Tensor | None = None,
         *,
         return_lse: bool = False,
+        out: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.v1.attention.ops.dcp import _validate_dcp_empty_shard_args
 
@@ -430,11 +453,18 @@ class NixlDCPA2AWorkspace:
         ubatch = dbo_current_ubatch_id()
         if not 0 <= ubatch < self.num_ubatches:
             raise ValueError("NIXL DCP ubatch is outside the registered workspace")
-        output = torch.empty(
-            (num_tokens, self.heads_per_rank, self.head_dim),
-            device=self.device,
-            dtype=self.dtype,
-        )
+        output_shape = (num_tokens, self.heads_per_rank, self.head_dim)
+        if out is None:
+            out = torch.empty(output_shape, device=self.device, dtype=self.dtype)
+        elif (
+            tuple(out.shape) != output_shape
+            or out.device != self.send.device
+            or out.dtype != self.dtype
+        ):
+            raise ValueError(
+                "NIXL DCP output buffer has an incompatible shape/dtype/device"
+            )
+        output = out
         output_lse = torch.empty(
             (num_tokens, self.heads_per_rank) if return_lse else (1,),
             device=self.device,
@@ -466,10 +496,14 @@ class NixlDCPA2AWorkspace:
             self.peer_bytes,
             self.counter_offset,
             self.tile_stride,
+            output.stride(0),
+            output.stride(1),
+            output.stride(2),
             TILE_TOKENS=self.tile_tokens,
             N=self.world_size,
             H_PER_RANK=self.heads_per_rank,
             HEAD_DIM=self.head_dim,
+            BLOCK_D=triton.next_power_of_2(self.head_dim),
             IS_BASE_E=is_lse_base_on_e,
             RETURN_LSE=return_lse,
         )

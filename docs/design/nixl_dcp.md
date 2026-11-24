@@ -3,29 +3,25 @@
 The opt-in prototype implements MLA DCP output/LSE exchange on two or more
 GPUs using direct stores to mapped peers and NIXL device puts to unmapped peers.
 It targets both CUDA IPC mappings and cross-node mlx5 GPU-initiated RDMA, with
-three kernel launches per invocation. NIXL is disabled by default and requires
-an optional source build. H100 functional qualification covers mapped, RDMA
-and mixed groups, including CUDA graph replay. NCCL, direct P2P and NIXL can
-share a source-built image.
+three communication kernel launches per invocation. NIXL execution is disabled
+by default; the device operators are included in CUDA source builds.
 
 ## Build and select
 
-Build NIXL 1.5.0 (`1683cf3b7f3d11674c03c5e861cea22339876c96`) against UCX
-`589be40811c7b53591cbbfe8a3739b5984987cdc` with CUDA IPC device support,
-multithreading and installed headers. For East-West traffic, enable UCX verbs
-and GDA (`--with-verbs --with-gda --enable-mt`) and include its GPUNetIO submodule
-at `f44728fb023ba61911b705dba289b1650ce2eb28`. The compile-time
-`UCT_RC_MLX5_GDA_SUPPORTED` check must pass. Use matching headers and libraries
-at build and runtime; the setup probe inspects this pinned UCX device ABI.
-`nixl._bindings.HAVE_UCX_GPU_DEVICE_API` must be true. The ordinary KV-transfer
-NIXL wheel does not by itself establish device API support.
+CUDA builds fetch NIXL 1.5.2 device headers and UCX
+`65e342a82dd2609a28c8c2b8c45ed7fe2cb33fa0`, matching that NIXL release's wheel
+build. The UCX GPUNetIO submodule is pinned by the same revision. Install
+`rdma-core-devel` (RPM) or `libibverbs-dev` (Debian/Ubuntu) in the build
+environment. No separate NIXL build flag is needed. The CUDA source includes
+both mapped-memory and GPU-initiated RDMA device support.
 
-Add these options to the usual vLLM source build (substitute install prefixes):
-
-```bash
-export CMAKE_ARGS="-DVLLM_BUILD_NIXL_DCP=ON -DNIXL_DCP_INCLUDE_DIR=/opt/nixl/include -DNIXL_DCP_UCX_INCLUDE_DIR=/opt/ucx/include"
-uv pip install --python .venv/bin/python --no-build-isolation --no-deps -e .
-```
+The runtime needs `nixl==1.5.2` and the corresponding CUDA wheel (for example,
+`nixl-cu13==1.5.2` for CUDA 13). NIXL/UCX runtime libraries come from that
+package; vLLM does not link a second UCX runtime. Avoid overriding these with
+an unrelated `LD_LIBRARY_PATH` or plugin directory. Device setup verifies
+`nixl._bindings.HAVE_UCX_GPU_DEVICE_API`, mapped accessibility and supported
+RDMA queue geometry. Importing NIXL successfully alone does not qualify RDMA
+on a particular device/driver configuration.
 
 At runtime use `--dcp-comm-backend a2a`, a DCP size greater than 1, PCP size 1, an MLA
 model, and FP16 or BF16 attention output. Set the flags explicitly for comparisons:
@@ -72,6 +68,26 @@ all-reduce initialization, which can stall on this topology even with
 `--disable-custom-all-reduce`. It does not disable NIXL DCP's mapped-peer copies.
 Use the same all-reduce setting in the NCCL and NIXL comparison arms.
 
+## Projection and workspace sizing
+
+NCCL and NIXL share the MLA projection-order helper. Eligible
+batches with at least eight query tokens project before exchange; smaller
+batches combine latent outputs before projecting local heads. Dimensions and
+eligibility come from the model's absorbed weights, not a model-name check.
+The common MLA path and KimiK3's specialized path initialize their workspaces
+after weight preparation and before CUDA graph capture.
+
+The existing symmetric P2P backend retains combine-then-project and its
+original workspace allocation. NIXL adopts NCCL's eight-query-token heuristic;
+the threshold has not been tuned for mixed NVLink/RDMA groups. Query-token count
+can differ from request batch size when using speculative decoding.
+
+NIXL reserves a full-capacity projected workspace and a small latent workspace
+when projection first is available. Otherwise it retains full latent capacity.
+Each workspace has bounded send staging, two receive slots and independent
+microbatch state. Logged workspace bytes exclude projection weights,
+intermediate outputs, CUDA graph pools and NIXL/UCX internal resources.
+
 ## Protocol and lifetime
 
 Setup allocates fixed registered send storage and one registered receive
@@ -116,8 +132,10 @@ finishing its own combine of `g`. This argument requires ordered all-rank
 participation and completion of the previous combine before the next dispatch
 on the same ubatch. It does not permit independent asynchronous sends.
 
-Outgoing payload and atomic operations complete within the send kernel, so its
-registered source and request storage can be reused on the next invocation.
+Each channel reuses at most four registered send tile slots after the existing
+batch completion and block synchronization. Receive storage retains the full
+payload for two generations; it cannot be reused merely because a put completed.
+Outgoing atomic operations also complete before the send kernel returns.
 Application waits and completion polls trap after 30 seconds; a backend call
 that blocks internally still requires an external job/process timeout.
 Communication errors are fatal to the worker.
@@ -136,34 +154,50 @@ owning tensors can be freed. Graphs must not be replayed after teardown.
 
 There is no NIXL-specific upper bound on DCP group size. The usual TP/DCP and
 attention-head divisibility constraints still apply, as do transport, queue and
-workspace capacity checks. Configuration acceptance does not qualify a topology:
-DCP16 has not yet been validated on GPUs.
+workspace capacity checks. Configuration acceptance does not qualify a topology.
 
-The mixed implementation passed H100 functional qualification on the pinned
-NIXL/UCX build with Torch 2.14.0+cu130 and NVIDIA driver 580.95.05:
+The revised SDK, shared projection and bounded staging implementation passed
+H100 functional checks with NIXL 1.5.2, its matching UCX release build,
+Torch 2.14.0+cu130 and NVIDIA driver 580.95.05:
 
 | Placement | DCP size | Qualified paths |
 | --- | --- | --- |
 | One node | 2 and 8 | Mapped peers, including untouched send-staging sentinels. |
 | Two nodes, one GPU each | 2 | GPU-initiated RDMA. |
 | Two nodes, two GPUs each | 4 | One mapped peer and two RDMA peers per rank. |
+| Two nodes, eight GPUs each | 16 | Seven mapped peers and eight RDMA peers per rank. |
 
 Checks include exact NCCL payload/merge comparisons and 1,024 changing-input
-CUDA graph replays per case. Stress tests record samples from every replay on
-the GPU and check them after the loop, without per-replay NCCL rendezvous.
-Cross-node checks also cover delayed consumers
-and verify the three-launch protocol on every rank. Schema and FakeTensor
-`torch.library.opcheck` checks passed for the native operators; their isolated
-mapped-peer setup does not replace the distributed protocol checks.
+CUDA graph replays per native case. Stress tests record samples from every
+replay on the GPU and check them after the loop, without per-replay NCCL
+rendezvous. Cross-node checks also cover delayed consumers and verify the
+three-launch protocol on every rank. Shared-projection tests exercise both
+projection orders, empty shards, bounded staging reuse, graph replay and
+non-power-of-two projected widths. The 16-rank test also covers the full
+16,384-token projected workspace capacity with strided inputs.
 
-DeepSeek-V2-Lite BF16 model qualification passed locally at TP=DCP2/8 and across
-two hosts at TP=DCP2/4, using six prompts and the existing token/logprob gates.
-The cross-node TP4 run exercised mapped and RDMA peers in each workspace, with
-the separate symmetric-memory all-reduce initializer disabled in both arms as
-described above. These are bounded generation checks, not a model-wide accuracy
-evaluation. No performance improvement is established for the mapped-peer
-optimization. Cross-node groups larger than four and GPU generations other than
-H100 remain unqualified.
+Bounded DeepSeek-V2-Lite BF16 model checks passed at TP=DCP2 locally (eager
+and graph execution), TP=DCP2 across hosts, and mixed TP=DCP4. Batches of
+1, 7 and 8 requests were queued completely before stepping the scheduler,
+with 32 generated tokens per request and two repetitions. NIXL and NCCL
+produced identical tokens and saved logprobs; local symmetric P2P passed the
+existing token/logprob bounds. Worker evidence confirms projection preparation
+and the small latent/full projected workspace layouts. These are bounded
+correctness checks, not model-wide accuracy or performance measurements.
+They do not establish invariance to HTTP arrival timing or batch composition.
+
+Use separate compilation caches when changing topology: a cached local
+all-reduce fusion may be invalid for an RDMA-only process group. Disable the
+separate symmetric-memory all-reduce initializer in both arms as described
+above. Bounded DeepSeek-V3 FP8 model checks also passed at mixed TP=DCP16:
+NIXL matched same-order NCCL tokens and saved logprobs for nine prompts and
+288 generation steps, with exact restoration of the original NCCL path.
+Changing projection order produced BF16 differences that failed the original
+cross-order bounds; these checks do not establish task-accuracy equivalence.
+No performance improvement is established for the revised implementation; its
+full-model projection-order performance comparison remains incomplete.
+KimiK3/GLM model runs and GPU generations other than H100 remain unqualified.
+SM100 compilation passed, but is not Blackwell execution.
 
 The existing distributed DCP suite includes `test_distributed_nixl_a2a_matches_reference`
 for two/eight GPUs, one/four channels, FP16/BF16 output, FP32 packed/transposed
