@@ -176,12 +176,15 @@ def test_merge_kernel_matches_reference(nvrtc, topk, score_dtype, page_rows):
     torch.testing.assert_close(kept.sort(dim=1, descending=True).values, expected)
 
 
+@pytest.mark.parametrize("far", [False, True], ids=["near", "2_31_apart"])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("page_rows", [64, 128])
-def test_join_matches_reference(page_rows, out_dtype):
+def test_join_matches_reference(page_rows, out_dtype, far):
     """Both domains' compact scores land at their row positions bit for bit,
     for output rows with and without 16-byte alignment; columns at or past a
-    row's length stay unwritten."""
+    row's length stay unwritten. `far` starts domain 1's scores just under
+    2**31 elements after domain 0's, so their distance plus a column passes
+    2**31."""
     device = _device()
     gen = torch.Generator(device=device).manual_seed(page_rows)
     rows, pages = 6, 40
@@ -189,11 +192,17 @@ def test_join_matches_reference(page_rows, out_dtype):
     stride = math.ceil(width / 1536) * 1536  # DeepGEMM's row alignment
     inv, jmap = _row_pages(rows, pages, page_rows, gen)
     compact = [
-        torch.randn(rows, stride, generator=gen, device=device).to(torch.bfloat16)[
-            :, :width
-        ]
+        torch.randn(rows, stride, generator=gen, device=device).to(torch.bfloat16)
         for _ in range(2)
     ]
+    if far:
+        delta = 2**31 - 1024  # a multiple of 16, as allocations are
+        assert delta + pages * page_rows > 2**31
+        big = torch.empty(delta + rows * stride, dtype=torch.bfloat16, device=device)
+        for d, offset in enumerate((0, delta)):
+            dst = big[offset : offset + rows * stride].view(rows, stride)
+            compact[d] = dst.copy_(compact[d])
+    compact = [c[:, :width] for c in compact]
     lens = torch.tensor(
         [0, 1, page_rows, 7 * page_rows + 5, width - 3, width],
         dtype=torch.int32,
@@ -555,6 +564,55 @@ def test_kv_cache_granules_live_in_their_planned_domain(domains, extensible):
     q0, k = placement.page_domain_plan(view)
     pages = torch.arange(config.num_blocks, device=device)
     assert k > 0 and torch.equal((((q0 + pages) // k) % 2).to(torch.int8), table)
+
+
+def test_kv_cache_run_goes_anywhere_when_its_domain_is_full(domains, monkeypatch):
+    """A run whose locality domain is full is created on the device instead,
+    so the extensible KV cache still commits; the other domain's runs keep
+    their placement."""
+    from cuda.bindings import driver as cu
+
+    from vllm.utils.extensible_tensor import granule_size
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+    from vllm.v1.worker.extensible_kv_cache import ExtensibleKVCache
+
+    real_create = cu.cuMemCreate
+    domain_type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN
+
+    def create(nbytes, prop, flags):
+        loc = prop.location
+        if loc.type == domain_type and loc.localized.localityDomainId == 1:
+            return cu.CUresult.CUDA_ERROR_OUT_OF_MEMORY, None
+        return real_create(nbytes, prop, flags)
+
+    monkeypatch.setattr(cu, "cuMemCreate", create)
+    device = _device()
+    page_rows, row_bytes = 64, 132
+    config = _cache_config(6000, page_rows * row_bytes, 4)
+    size = config.kv_cache_tensors[0].size
+    kv_cache = ExtensibleKVCache(config, device, KVCacheLayout.BLHNC)
+    allocate = placement.localized_kv_allocate(config, device, kv_cache.allocate)
+    assert allocate is not None
+    buf = allocate(size)
+    kv_cache.commit(config.num_blocks)
+    found = placement.find_buffer(buf.data_ptr())
+    assert found is not None
+    base, _, run_bytes, _ = found
+
+    granule = granule_size(device.index)
+    for g in range(size // granule):
+        handle = cu.cuMemRetainAllocationHandle(base + g * granule + granule // 2)[1]
+        prop = cu.cuMemGetAllocationPropertiesFromHandle(handle)[1]
+        cu.cuMemRelease(handle)
+        if ((g * granule + granule // 2) // run_bytes) % 2 == 0:
+            assert prop.location.type == domain_type, g
+            assert prop.location.localized.localityDomainId == 0, g
+        else:
+            assert (
+                prop.location.type == cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
+            ), g
+    buf.fill_(1)
+    assert int(buf.view(torch.uint8).sum()) == size
 
 
 def _fill_index_cache(kv: torch.Tensor, key_bytes: int, gen: torch.Generator):

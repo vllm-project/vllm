@@ -64,12 +64,15 @@ allocator on a plain (non-extensible) KV cache.
 `VLLM_INDEXER_LOCALIZE` is independent of
 [`VLLM_USE_LOCALITY_DOMAINS`](../configuration/env_vars.md), which splits the
 NVFP4 MoE layers by locality domain; with both on, they share the per-domain
-green contexts.
+green contexts, unless `VLLM_MOE_LOCALIZE_BACKFILL` gives the MoE layers
+backfilled ones.
 
 When active, each rank logs `KV cache placed in ... runs alternating between 2
 locality domains`, the decode batch sizes that take the die split and, once per
 indexer cache group, `Die-local sparse indexer active for N layers`. Each
-fallback is logged once as a warning.
+fallback is logged once as a warning. If one domain fills up before the device
+does, the KV cache runs that do not fit it are created anywhere on the device,
+and the indexer reads their pages remotely, with the same results.
 
 ## Indexer overlap (`VLLM_INDEXER_OVERLAP`)
 

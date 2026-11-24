@@ -167,7 +167,9 @@ def _join_kernel(
             e = e_next
             e_next = tl.load(jrow + p + PB, mask=(p + PB) < p_hi, other=0)
             m = mp
-            die = (e & 1) * delta  # keeps delta's divisibility, tl.where not
+            # A product keeps delta's divisibility (tl.where would not); 64-bit
+            # because delta plus a column can pass 2**31.
+            die = (e & 1).to(tl.int64) * delta
             # (e >> (LV + 1)) << LV equals e >> 1 when that is a multiple of
             # the vector, and the compiler can see it.
             bad = tl.max(tl.where(m, (e >> 1) & ((1 << LV) - 1), 0), axis=0)

@@ -176,11 +176,16 @@ def _place_by_domain(buffer: ExtensibleTensor, run_bytes: int) -> None:
     """Create each granule `buffer` commits from now on in the locality domain
     of its midpoint's run.
 
+    A domain can run out before the device does; a run that does not fit its
+    domain is then created anywhere on the device, and the sparse indexer
+    reads its pages remotely (same results, less locality).
+
     cuda-bindings is used for `cuMemCreate`: it resolves the driver entry
     point that accepts locality-domain locations.
     """
     from cuda.bindings import driver as cu
 
+    device_index = int(buffer.device.index)
     props = []
     for domain in range(NUM_DOMAINS):
         prop = cu.CUmemAllocationProp()
@@ -188,16 +193,39 @@ def _place_by_domain(buffer: ExtensibleTensor, run_bytes: int) -> None:
         prop.location.type = (
             cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN
         )
-        prop.location.localized.deviceId = int(buffer.device.index)
+        prop.location.localized.deviceId = device_index
         prop.location.localized.localityDomainId = domain
         props.append(prop)
+    anywhere = cu.CUmemAllocationProp()
+    anywhere.type = cu.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
+    anywhere.location.type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
+    anywhere.location.id = device_index
     granule = buffer.granularity
+    warned = False
 
     def domain_of(g: int) -> int:
         return ((g * granule + granule // 2) // run_bytes) % NUM_DOMAINS
 
     def create(nbytes: int, domain: int) -> int:
+        nonlocal warned
         err, handle = cu.cuMemCreate(nbytes, props[domain], 0)
+        if err != cu.CUresult.CUDA_SUCCESS:
+            # Memory idling in torch's caching allocator may be in this domain.
+            torch.accelerator.empty_cache()
+            err, handle = cu.cuMemCreate(nbytes, props[domain], 0)
+        if err != cu.CUresult.CUDA_SUCCESS:
+            domain_err = err
+            err, handle = cu.cuMemCreate(nbytes, anywhere, 0)
+            if err == cu.CUresult.CUDA_SUCCESS and not warned:
+                warned = True
+                logger.warning(
+                    "VLLM_INDEXER_LOCALIZE: locality domain %d is full (%r); KV "
+                    "cache runs that do not fit their domain are placed anywhere "
+                    "on the device, and the sparse indexer reads their pages "
+                    "remotely.",
+                    domain,
+                    domain_err,
+                )
         if err != cu.CUresult.CUDA_SUCCESS:
             raise RuntimeError(
                 f"cuMemCreate in locality domain {domain} failed: {err!r}"
