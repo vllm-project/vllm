@@ -393,7 +393,7 @@ where
             error.as_report()
         ))
     })?;
-    serde_json::from_str(&content).map_err(|error| {
+    json5::from_str(&content).map_err(|error| {
         Error::Tokenizer(format!(
             "failed to parse {}: {}",
             path.display(),
@@ -405,6 +405,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::{HfTokenizerConfig, ModelConfig, ModelDtype, SamplingDefaults};
+
+    #[test]
+    fn config_json_reads_bare_constants_as_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"time_step_limit": [0.0, Infinity], "low": -Infinity, "nan": NaN,
+                "max": {"__float__": "Infinity"}, "text": "a \"NaN\" b"}"#,
+        )
+        .unwrap();
+        let config: serde_json::Value = super::read_json_file(Some(&path)).unwrap();
+        assert_eq!(
+            config,
+            serde_json::json!({
+                "time_step_limit": [0.0, null],
+                "low": null,
+                "nan": null,
+                "max": {"__float__": "Infinity"},
+                "text": "a \"NaN\" b",
+            })
+        );
+    }
 
     #[test]
     fn tokenizer_config_reads_single_and_named_chat_templates() {

@@ -514,6 +514,8 @@ pub(super) struct ChatCompletionStreamChoice {
     pub index: u32,
     pub delta: ChatMessageDelta,
     pub logprobs: Option<ChatLogProbs>,
+    /// Sent as `null` until the choice finishes, as Python and OpenAI do.
+    #[serialize_always]
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
@@ -551,22 +553,15 @@ fn validate_chat_cross_parameters(
         return Err(e);
     }
 
-    // 3. Validate token limits - min <= max
+    // 3. Validate token limits - min <= max. `normalize` has already moved a
+    // lone `max_tokens` into `max_completion_tokens`, so this is the effective
+    // limit; a `max_tokens` left beside it is overridden, as in Python.
     if let (Some(min_tokens), Some(max_completion_tokens)) =
         (req.min_tokens, req.max_completion_tokens)
         && min_tokens > max_completion_tokens
     {
         let mut e = validator::ValidationError::new("min_tokens_exceeds_max_completion_tokens");
         e.message = Some("min_tokens cannot be greater than max_completion_tokens".into());
-        return Err(e);
-    }
-
-    #[expect(deprecated, reason = "Local type still mirrors legacy upstream field")]
-    if let (Some(min_tokens), Some(max_tokens)) = (req.min_tokens, req.max_tokens)
-        && min_tokens > max_tokens
-    {
-        let mut e = validator::ValidationError::new("min_tokens_exceeds_max_tokens");
-        e.message = Some("min_tokens cannot be greater than max_tokens".into());
         return Err(e);
     }
 

@@ -146,8 +146,12 @@ pub(super) fn expand_prompt_token_ids(
 mod tests {
     use llm_multimodal::TokenId;
     use vllm_engine_core_client::protocol::tensor::WireArrayData;
+    use vllm_tokenizer::Tokenizer as _;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::super::tests::{
+        HY4_IMAGE_END_ID, HY4_IMAGE_START_ID, HY4_IMAGE_TOKEN, HY4_IMAGE_TOKEN_ID,
+        HY4_VIDEO_END_ID, HY4_VIDEO_START_ID, HY4_VIDEO_TOKEN, HY4_VIDEO_TOKEN_ID,
         LLAMA4_IMAGE_END_ID, LLAMA4_IMAGE_ID, LLAMA4_IMAGE_START_ID, LLAMA4_PATCH_ID,
         LLAMA4_TILE_X_SEPARATOR_ID, LLAMA4_TILE_Y_SEPARATOR_ID, QWEN3_IMAGE_PAD_ID,
         QWEN3_VIDEO_PAD_ID, STEP3_IM_END_ID, STEP3_IM_PATCH_ID, STEP3_IM_START_ID,
@@ -645,5 +649,160 @@ mod tests {
         let expected_mask =
             replacement.iter().map(|&token| token == STEP3_IM_PATCH_ID).collect::<Vec<_>>();
         assert_bool_mask(&ranges[0], &expected_mask);
+    }
+
+    /// HY4-VL prepared media with the real `[start, embed, end]` prompt marker.
+    fn hy4_vl_prepared(
+        modality: Modality,
+        placeholder_token: &str,
+        [start, embed, end]: [u32; 3],
+        replacements: Vec<PromptReplacement>,
+    ) -> PreparedMedia {
+        PreparedMedia {
+            modality,
+            placeholder: ResolvedPlaceholder {
+                token: placeholder_token.to_string(),
+                marker_token_ids: vec![start, embed, end],
+                embed_token_id: embed,
+            },
+            replacements,
+            items: Vec::new(),
+        }
+    }
+
+    fn hy4_vl_image_prepared(replacements: Vec<PromptReplacement>) -> PreparedMedia {
+        hy4_vl_prepared(
+            Modality::Image,
+            HY4_IMAGE_TOKEN,
+            [HY4_IMAGE_START_ID, HY4_IMAGE_TOKEN_ID, HY4_IMAGE_END_ID],
+            replacements,
+        )
+    }
+
+    fn hy4_vl_video_prepared(replacements: Vec<PromptReplacement>) -> PreparedMedia {
+        hy4_vl_prepared(
+            Modality::Video,
+            HY4_VIDEO_TOKEN,
+            [HY4_VIDEO_START_ID, HY4_VIDEO_TOKEN_ID, HY4_VIDEO_END_ID],
+            replacements,
+        )
+    }
+
+    #[test]
+    fn expand_prompt_tokens_marks_only_hy4_vl_embed_tokens_as_embed() {
+        let image_replacement = {
+            let mut tokens = vec![HY4_IMAGE_START_ID as TokenId];
+            tokens.extend(std::iter::repeat_n(HY4_IMAGE_TOKEN_ID as TokenId, 3));
+            tokens.push(HY4_IMAGE_END_ID as TokenId);
+            tokens
+        };
+        // A one-frame video replacement: the timestamp stamp text rides as
+        // ordinary text (byte) tokens between the structural tokens.
+        let video_replacement = {
+            let mut tokens = vec![HY4_VIDEO_START_ID as TokenId];
+            tokens.extend("<0.0 seconds>".bytes().map(TokenId::from));
+            tokens.push(HY4_IMAGE_START_ID as TokenId);
+            tokens.extend(std::iter::repeat_n(HY4_VIDEO_TOKEN_ID as TokenId, 2));
+            tokens.push(HY4_IMAGE_END_ID as TokenId);
+            tokens.push(HY4_VIDEO_END_ID as TokenId);
+            tokens
+        };
+        let mut prompt_token_ids = vec![
+            1,
+            HY4_IMAGE_START_ID,
+            HY4_IMAGE_TOKEN_ID,
+            HY4_IMAGE_END_ID,
+            2,
+            HY4_VIDEO_START_ID,
+            HY4_VIDEO_TOKEN_ID,
+            HY4_VIDEO_END_ID,
+            3,
+        ];
+        let prepared = vec![
+            hy4_vl_image_prepared(vec![PromptReplacement::sequence(
+                Modality::Image,
+                HY4_IMAGE_TOKEN,
+                image_replacement.clone(),
+            )]),
+            hy4_vl_video_prepared(vec![PromptReplacement::sequence(
+                Modality::Video,
+                HY4_VIDEO_TOKEN,
+                video_replacement.clone(),
+            )]),
+        ];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+
+        let mut expected = vec![1];
+        expected.extend(image_replacement.iter().map(|&token| token as u32));
+        expected.push(2);
+        expected.extend(video_replacement.iter().map(|&token| token as u32));
+        expected.push(3);
+        assert_eq!(prompt_token_ids, expected);
+
+        let image_ranges = &ranges[&Modality::Image];
+        assert_eq!(image_ranges.len(), 1);
+        assert_eq!((image_ranges[0].offset, image_ranges[0].length), (1, 5));
+        assert_bool_mask(&image_ranges[0], &[false, true, true, true, false]);
+
+        // Only the video_token positions are embeds; the stamp text and every
+        // structural token (video_start/end, image_start/end) are not.
+        let video_ranges = &ranges[&Modality::Video];
+        assert_eq!(video_ranges.len(), 1);
+        assert_eq!(
+            (video_ranges[0].offset, video_ranges[0].length),
+            (7, video_replacement.len())
+        );
+        let expected_mask = video_replacement
+            .iter()
+            .map(|&token| token as u32 == HY4_VIDEO_TOKEN_ID)
+            .collect::<Vec<_>>();
+        assert_bool_mask(&video_ranges[0], &expected_mask);
+    }
+
+    /// Each token in HY4-VL's framed marker is atomic, so adjacent text cannot
+    /// BPE-merge with a boundary (the OCRBench HME100k failure mode:
+    /// `<image>Please` -> `< image >P ...`), and expansion finds the complete
+    /// `[start, embed, end]` marker.
+    #[test]
+    fn expand_prompt_tokens_special_marker_survives_bpe_hostile_suffix() {
+        const GT_P: u32 = 300;
+
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token(">P", GT_P)
+            .with_regular_token("<｜hy_image▁start:opensource｜>", HY4_IMAGE_START_ID)
+            .with_regular_token("<｜hy_image▁pad:opensource｜>", HY4_IMAGE_TOKEN_ID)
+            .with_regular_token("<｜hy_image▁end:opensource｜>", HY4_IMAGE_END_ID);
+        let mut prompt_token_ids =
+            tokenizer.encode(&format!("{HY4_IMAGE_TOKEN}Please"), false).unwrap();
+        assert_eq!(
+            prompt_token_ids[..3],
+            [HY4_IMAGE_START_ID, HY4_IMAGE_TOKEN_ID, HY4_IMAGE_END_ID]
+        );
+
+        let replacement = {
+            let mut tokens = vec![HY4_IMAGE_START_ID as TokenId];
+            tokens.extend(std::iter::repeat_n(HY4_IMAGE_TOKEN_ID as TokenId, 3));
+            tokens.push(HY4_IMAGE_END_ID as TokenId);
+            tokens
+        };
+        let prepared = vec![hy4_vl_image_prepared(vec![PromptReplacement::sequence(
+            Modality::Image,
+            HY4_IMAGE_TOKEN,
+            replacement.clone(),
+        )])];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+
+        let mut expected = replacement.iter().map(|&token| token as u32).collect::<Vec<_>>();
+        expected.extend("Please".bytes().map(u32::from));
+        assert_eq!(prompt_token_ids, expected);
+
+        let image_ranges = &ranges[&Modality::Image];
+        assert_eq!(
+            (image_ranges[0].offset, image_ranges[0].length),
+            (0, replacement.len())
+        );
+        assert_bool_mask(&image_ranges[0], &[false, true, true, true, false]);
     }
 }

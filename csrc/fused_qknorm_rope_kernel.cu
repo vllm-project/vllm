@@ -162,6 +162,8 @@ __global__ void fusedQKNormRopeKernel(
     int const headIdx = isQ ? localHeadIdx : localHeadIdx - num_heads_q;
 
     int const num_heads = num_heads_q + num_heads_k + num_heads_v;
+    // 64-bit: the row offset can exceed INT_MAX.
+    qkv += static_cast<int64_t>(tokenIdx) * num_heads * head_dim;
 
     static_assert(head_dim % (32 * 2) == 0,
                   "head_dim must be divisible by 64 (each warp processes one "
@@ -179,13 +181,11 @@ __global__ void fusedQKNormRopeKernel(
 
     int offsetWarp;  // Offset for the warp
     if (isQ) {
-      // Q segment: token offset + head offset within Q segment
-      offsetWarp = tokenIdx * num_heads * head_dim + headIdx * head_dim;
+      // Q segment: head offset within Q segment
+      offsetWarp = headIdx * head_dim;
     } else {
-      // K segment: token offset + entire Q segment + head offset within K
-      // segment
-      offsetWarp = tokenIdx * num_heads * head_dim + num_heads_q * head_dim +
-                   headIdx * head_dim;
+      // K segment: entire Q segment + head offset within K segment
+      offsetWarp = num_heads_q * head_dim + headIdx * head_dim;
     }
     int offsetThread = offsetWarp + laneId * numElemsPerThread;
 
@@ -243,7 +243,8 @@ __global__ void fusedQKNormRopeKernel(
     T_cache const* cos_ptr = cache_ptr;
     T_cache const* sin_ptr = cache_ptr + embed_dim;
     int const rotary_lanes = rotary_dim / numElemsPerThread;  // rotary range
-    if (laneId < rotary_lanes) {
+    // All lanes take the NeoX branch: its warp collectives use the full mask.
+    if (!interleave || laneId < rotary_lanes) {
       if constexpr (interleave) {
         // Perform interleaving. Use pre-computed cos/sin values.
 #pragma unroll
@@ -273,7 +274,10 @@ __global__ void fusedQKNormRopeKernel(
         // cos/sin values.
 #pragma unroll
         for (int i = 0; i < numElemsPerThread; i++) {
-          elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+          elements2[i] = __shfl_sync(
+              FINAL_MASK, elements[i],
+              laneId < pairOffset ? laneId + pairOffset : laneId - pairOffset,
+              32);
 
           if (laneId < pairOffset) {
             elements2[i] = -elements2[i];
@@ -285,9 +289,11 @@ __global__ void fusedQKNormRopeKernel(
           float cos_val = CacheConverter::convert(VLLM_LDG(cos_ptr + half_dim));
           float sin_val = CacheConverter::convert(VLLM_LDG(sin_ptr + half_dim));
 
-          elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
+          if (laneId < rotary_lanes) {
+            elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
+          }
         }
-        // __shfl_xor_sync does not provide memfence. Need to sync again.
+        // __shfl_sync does not provide memfence. Need to sync again.
         __syncwarp();
       }
     }
@@ -380,6 +386,8 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
             : (total_qk_heads - first_head);
 
     if (tokenIdx >= num_tokens) return;
+    // 64-bit: the row offset can exceed INT_MAX.
+    qkv += static_cast<int64_t>(tokenIdx) * num_heads * head_dim;
 
     static_assert(head_dim % (32 * 2) == 0, "head_dim must be divisible by 64");
     constexpr int numElemsPerThread = head_dim / 32;
@@ -410,10 +418,9 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
       int const headIdx = isQ ? localHeadIdx : localHeadIdx - num_heads_q;
       int offWarp;
       if (isQ) {
-        offWarp = tokenIdx * num_heads * head_dim + headIdx * head_dim;
+        offWarp = headIdx * head_dim;
       } else {
-        offWarp = tokenIdx * num_heads * head_dim + num_heads_q * head_dim +
-                  headIdx * head_dim;
+        offWarp = num_heads_q * head_dim + headIdx * head_dim;
       }
       int const offThread = offWarp + laneId * numElemsPerThread;
       char* smem_dst =
@@ -465,10 +472,9 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
 
       int offsetWarp;
       if (isQ) {
-        offsetWarp = tokenIdx * num_heads * head_dim + headIdx * head_dim;
+        offsetWarp = headIdx * head_dim;
       } else {
-        offsetWarp = tokenIdx * num_heads * head_dim + num_heads_q * head_dim +
-                     headIdx * head_dim;
+        offsetWarp = num_heads_q * head_dim + headIdx * head_dim;
       }
       int const offsetThread = offsetWarp + laneId * numElemsPerThread;
 
@@ -498,11 +504,16 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
         elements[i] *= rms_rcp * (isQ ? q_w[i] : k_w[i]);
       }
 
-      // On first head: wait for group 1 (cos/sin) before RoPE.
-      if (k == 0) cp_async_wait_group<0>();
+      // On first head: wait for group 1 (cos/sin) before RoPE, then sync the
+      // warp so each lane sees the cos/sin copied by the other lanes.
+      if (k == 0) {
+        cp_async_wait_group<0>();
+        __syncwarp();
+      }
 
       // === Part 2: RoPE using cos/sin from shared memory. ===
-      if (laneId < rotary_lanes) {
+      // All lanes take the NeoX branch: its warp collectives use the full mask.
+      if (!interleave || laneId < rotary_lanes) {
         if constexpr (interleave) {
 #pragma unroll
           for (int i = 0; i < numElemsPerThread / 2; ++i) {
@@ -522,14 +533,19 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
           int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
 #pragma unroll
           for (int i = 0; i < numElemsPerThread; i++) {
-            elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+            elements2[i] = __shfl_sync(
+                FINAL_MASK, elements[i],
+                laneId < pairOffset ? laneId + pairOffset : laneId - pairOffset,
+                32);
             if (laneId < pairOffset) elements2[i] = -elements2[i];
             int dim_idx = laneId * numElemsPerThread + i;
             dim_idx = (dim_idx * 2) % rotary_dim;
             int const half_dim = dim_idx / 2;
             float const cos_val = CacheConverter::convert(cos_smem[half_dim]);
             float const sin_val = CacheConverter::convert(sin_smem[half_dim]);
-            elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
+            if (laneId < rotary_lanes) {
+              elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
+            }
           }
           __syncwarp();
         }
