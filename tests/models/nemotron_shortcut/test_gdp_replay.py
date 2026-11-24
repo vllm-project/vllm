@@ -24,6 +24,7 @@ from vllm.models.nemotron_shortcut.nvidia.gdp import (
 from vllm.models.nemotron_shortcut.nvidia.gdp_replay import (
     FLUSH_MIN,
     GdpReplayTrackers,
+    is_prefix_view,
 )
 
 from .utils import make_config
@@ -120,6 +121,19 @@ def test_binding_sizes_the_trackers_and_keeps_captured_addresses():
         trackers.bind(torch.zeros(NUM_BLOCKS + 4, 8, 4))
 
 
+def test_a_prefix_view_shares_start_block_shape_and_strides():
+    pools = (torch.zeros(NUM_BLOCKS, 3, 4), torch.zeros(NUM_BLOCKS, 5))
+    committed = tuple(pool[: NUM_BLOCKS - 2] for pool in pools)
+    assert is_prefix_view(pools, committed)
+    assert is_prefix_view(pools, pools)
+
+    # More blocks, other storage, other strides, other block shape.
+    assert not is_prefix_view(committed, pools)
+    assert not is_prefix_view(pools, tuple(view.clone() for view in committed))
+    assert not is_prefix_view(pools, tuple(pool[::2] for pool in pools))
+    assert not is_prefix_view(pools, (pools[0].view(NUM_BLOCKS, 12)[:4], pools[1][:4]))
+
+
 def test_the_first_layer_to_see_a_steps_metadata_commits():
     step, other_group, next_step = (
         SimpleNamespace(),
@@ -200,6 +214,47 @@ def _mixer(
     assert mixer.gdp_replay_trackers is not None
     mixer.gdp_replay_trackers.bind(mixer.kv_cache[0])
     return mixer
+
+
+def _bind_raw(mixer: NemotronShortcutGDPMixer, raw: torch.Tensor) -> None:
+    dtypes = gdp_replay_state_dtype(torch.bfloat16, "auto")
+    mixer.get_state_dtype = lambda: dtypes  # type: ignore[method-assign]
+    mixer.bind_kv_cache(raw)
+
+
+def _raw_pages(mixer: NemotronShortcutGDPMixer) -> torch.Tensor:
+    page = sum(state[0].numel() * state.element_size() for state in mixer.kv_cache)
+    return torch.zeros(NUM_BLOCKS, 1, 1, page, dtype=torch.int8)
+
+
+def test_a_committed_rebind_keeps_the_capacity_views(forward_context):
+    """The replay op compiles per pool shape, block count included. When an
+    extensible KV cache rebinds a committed prefix after graph capture, the
+    layer keeps the capacity views, so the op meets the shapes it compiled."""
+    mixer = _mixer(3, "model.layers.0.capacity_views")
+    raw = _raw_pages(mixer)
+    _bind_raw(mixer, raw)
+    capacity = mixer.kv_cache
+    assert capacity[0].shape[0] == NUM_BLOCKS
+
+    _bind_raw(mixer, raw[: NUM_BLOCKS - 2])
+    assert mixer.kv_cache is capacity
+
+    # A remap that moves the storage, as a defragmenting commit can, takes the
+    # new views.
+    moved = raw.clone()[: NUM_BLOCKS - 2]
+    _bind_raw(mixer, moved)
+    assert mixer.kv_cache[0].data_ptr() == moved.data_ptr()
+    assert mixer.kv_cache[0].shape[0] == NUM_BLOCKS - 2
+
+
+def test_without_replay_a_rebind_takes_the_new_views(forward_context):
+    mixer = _mixer(3, "model.layers.0.plain_rebind")
+    mixer.gdp_replay_trackers = None
+    raw = _raw_pages(mixer)
+    _bind_raw(mixer, raw)
+    _bind_raw(mixer, raw[: NUM_BLOCKS - 2])
+    assert mixer.kv_cache[0].shape[0] == NUM_BLOCKS - 2
 
 
 def _replay_group(num_spec: int):

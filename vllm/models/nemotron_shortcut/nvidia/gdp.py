@@ -47,7 +47,12 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
-from .gdp_replay import FLUSH_MIN, GdpReplayStep, GdpReplayTrackers
+from .gdp_replay import (
+    FLUSH_MIN,
+    GdpReplayStep,
+    GdpReplayTrackers,
+    is_prefix_view,
+)
 
 
 def gdp_state_dtype(
@@ -438,6 +443,8 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         self.gdp_replay_trackers: GdpReplayTrackers | None = None
         if self.use_replayssm:
             self.gdp_replay_trackers = gdp_replay_trackers or GdpReplayTrackers()
+        # The state views from the first bind, at the KV cache's full capacity.
+        self.gdp_replay_capacity_views: tuple[torch.Tensor, ...] | None = None
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
         self.g_clamp_value = getattr(config, "gdp_g_clamp_value", None)
@@ -476,8 +483,20 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         super().bind_kv_cache(kv_cache)
-        if self.gdp_replay_trackers is not None:
-            self.gdp_replay_trackers.bind(self.kv_cache[0])
+        if self.gdp_replay_trackers is None:
+            return
+        self.gdp_replay_trackers.bind(self.kv_cache[0])
+        # The replay op compiles per pool shape, block count included. An
+        # extensible KV cache binds the pools at capacity for CUDA graph
+        # capture, then rebinds the committed prefix. Keeping the capacity
+        # views lets calls outside a captured graph reuse the kernels compiled
+        # at warmup instead of compiling again mid-serving. Only committed
+        # blocks are ever indexed, and the uncommitted tail keeps its reserved
+        # addresses.
+        if self.gdp_replay_capacity_views is None:
+            self.gdp_replay_capacity_views = self.kv_cache
+        elif is_prefix_view(self.gdp_replay_capacity_views, self.kv_cache):
+            self.kv_cache = self.gdp_replay_capacity_views
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None and self.cache_config is not None

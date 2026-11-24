@@ -22,6 +22,7 @@ metadata carries the previous step's accepted counts, so the bookkeeping
 stays inside a captured CUDA graph.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -285,6 +286,21 @@ class GdpReplayTrackers:
         step = getattr(metadata, _STEP, None)
         assert step is not None, "the group's first GDP layer plans each step"
         return step
+
+
+def is_prefix_view(
+    capacity: Sequence[torch.Tensor], views: Sequence[torch.Tensor]
+) -> bool:
+    """Whether each of `views` is a leading run of blocks of the matching
+    `capacity` tensor: the same start, block shape and strides, and no more
+    blocks."""
+    return len(capacity) == len(views) and all(
+        c.data_ptr() == v.data_ptr()
+        and c.shape[1:] == v.shape[1:]
+        and c.stride() == v.stride()
+        and c.shape[0] >= v.shape[0]
+        for c, v in zip(capacity, views)
+    )
 
 
 def validate_gdp_replay(vllm_config: VllmConfig) -> None:
