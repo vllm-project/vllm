@@ -10,11 +10,12 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine import FinishReason
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
+from vllm.v1.structured_output.backend_types import StructuredOutputGrammar
 from vllm.v1.structured_output.request import StructuredOutputRequest
 
 
 def test_pending_compilation_is_cancelled_at_deadline():
-    future = Future()
+    future: Future[StructuredOutputGrammar] = Future()
     request = StructuredOutputRequest(
         params=StructuredOutputsParams(regex="[a-z]+"),
         compilation_start_time=time.monotonic() - 2,
@@ -27,7 +28,7 @@ def test_pending_compilation_is_cancelled_at_deadline():
 
 
 def test_disabled_deadline_keeps_pending_compilation():
-    future = Future()
+    future: Future[StructuredOutputGrammar] = Future()
     request = StructuredOutputRequest(
         params=StructuredOutputsParams(regex="[a-z]+"),
         compilation_start_time=time.monotonic() - 2,
@@ -40,7 +41,7 @@ def test_disabled_deadline_keeps_pending_compilation():
 
 def test_completed_failure_is_preserved_after_deadline():
     failure = ValueError("compilation failed")
-    future = Future()
+    future: Future[StructuredOutputGrammar] = Future()
     future.set_exception(failure)
     request = StructuredOutputRequest(
         params=StructuredOutputsParams(regex="[a-z]+"),
@@ -67,7 +68,7 @@ def test_scheduler_reports_timeout_even_if_it_schedules_again_before_output():
     structured_request = request.structured_output_request
     assert structured_request is not None
     structured_request.compilation_start_time = time.monotonic() - timeout
-    future = Future()
+    future: Future[StructuredOutputGrammar] = Future()
     structured_request.grammar = future
     scheduler.add_request(request)
 
