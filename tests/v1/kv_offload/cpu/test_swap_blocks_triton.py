@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.kv_offload.cpu.swap_blocks_triton import swap_blocks_batch
+from vllm.v1.kv_offload.cpu.platforms.cuda import swap_blocks_batch
 
 
 def _addrs(buffers: list[torch.Tensor]) -> torch.Tensor:

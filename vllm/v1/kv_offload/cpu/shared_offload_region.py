@@ -10,6 +10,7 @@ import shutil
 import time
 from collections.abc import Callable, Iterator
 from ctypes import c_int, c_long, c_size_t, c_void_p
+from typing import Protocol
 
 import numpy as np
 import torch
@@ -21,9 +22,29 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 from vllm.logger import init_logger
 from vllm.utils.host_memory import exclude_from_core_dump
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.v1.kv_offload.cpu.host_register import host_unregister
 
 logger = init_logger(__name__)
+
+
+class HostRegistrar(Protocol):
+    """Host-memory registration, as needed by the shared mmap region."""
+
+    def register_host(self, ptr: int, num_bytes: int) -> bool: ...
+
+    def unregister_host(self, ptr: int) -> None: ...
+
+
+class _NoopRegistrar:
+    """Default for regions that are never pinned through this API."""
+
+    def register_host(self, ptr: int, num_bytes: int) -> bool:
+        return False
+
+    def unregister_host(self, ptr: int) -> None:
+        return
+
+
+_NOOP_REGISTRAR: HostRegistrar = _NoopRegistrar()
 
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
@@ -169,10 +190,14 @@ class SharedOffloadRegion:
         private: bool = False,
         populate: bool = True,
         mmap_path: str | None = None,
+        registrar: HostRegistrar | None = None,
     ) -> None:
         assert not private or (barrier is None and populate_shard is None)
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_chunk % self.page_size == 0
+        # The runtime that registered pinned ranges is also the one that
+        # unregisters them, so cleanup cannot cross platform APIs.
+        self._registrar = registrar or _NOOP_REGISTRAR
 
         self.num_chunks = num_chunks
         self._row_stride = kv_bytes_per_chunk
@@ -409,6 +434,10 @@ class SharedOffloadRegion:
             yield aligned, end - aligned
 
     @property
+    def registrar(self) -> HostRegistrar:
+        return self._registrar
+
+    @property
     def base_tensor(self) -> torch.Tensor:
         if self._base is None:
             raise RuntimeError("Shared offload region has been released.")
@@ -518,7 +547,7 @@ class SharedOffloadRegion:
             base_ptr = self._base.data_ptr()
             addresses = self.pinned_addresses or [base_ptr]
             for address in reversed(addresses):
-                host_unregister(address)
+                self._registrar.unregister_host(address)
             self.pinned_addresses.clear()
             self.is_pinned = False
         # Release views before _base: each view holds a _base reference and a

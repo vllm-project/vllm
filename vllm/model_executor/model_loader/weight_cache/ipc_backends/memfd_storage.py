@@ -19,12 +19,13 @@ from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
     SharedFileDescriptor,
 )
-from vllm.v1.kv_offload.cpu.host_register import host_register, host_unregister
+from vllm.v1.kv_offload.cpu.platforms.base import DeviceRuntime
+from vllm.v1.kv_offload.cpu.platforms.factory import get_device_runtime
 
 
-def _unregister(mapping: mmap.mmap) -> None:
+def _unregister(runtime: DeviceRuntime, mapping: mmap.mmap) -> None:
     # The finalizer holds the mmap until the last tensor view releases its storage.
-    host_unregister(ctypes.addressof(ctypes.c_char.from_buffer(mapping)))
+    runtime.unregister_host(ctypes.addressof(ctypes.c_char.from_buffer(mapping)))
 
 
 @dataclass(slots=True)
@@ -45,11 +46,12 @@ class MemfdStorageEntry:
     def rebuild(self, device_index: int, cache: dict | None = None) -> StorageRecord:
         mapping = mmap.mmap(self.fd.fileno(), self.nbytes)
         buffer = (ctypes.c_ubyte * self.nbytes).from_buffer(mapping)
-        if not host_register(ctypes.addressof(buffer), self.nbytes):
+        runtime = get_device_runtime()
+        if not runtime.register_host(ctypes.addressof(buffer), self.nbytes):
             del buffer
             mapping.close()
             raise ValueError("Could not register pinned CPU weights")
-        finalizer = weakref.finalize(buffer, _unregister, mapping)
+        finalizer = weakref.finalize(buffer, _unregister, runtime, mapping)
         finalizer.atexit = False  # type: ignore[misc]
         tensor = torch.frombuffer(buffer, dtype=torch.uint8)
         return StorageRecord(owner=tensor, storage=tensor.untyped_storage())
