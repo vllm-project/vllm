@@ -3,6 +3,8 @@
 
 from typing import TYPE_CHECKING, Literal
 
+from pydantic import Field
+
 from vllm.config.utils import CompileFactors, config
 
 if TYPE_CHECKING:
@@ -28,6 +30,15 @@ class FaultToleranceConfig:
     'fail': abort unfinished requests immediately (default).
     Passing `params={"abort": true}` to the `retry` instruction discards
     queued requests even when the policy is 'recompute'.
+    """
+
+    nixl_ep_timeout_ms: int | None = Field(default=None, gt=0)
+    """GPU kernel timeout (in milliseconds) of the `nixl_ep` all2all backend.
+    When a rank waits longer than this for a peer in dispatch or combine,
+    NIXL EP marks the peer invalid and masks it out. With fault tolerance
+    enabled, surviving engines detect a dead rank on another engine through
+    this timeout. If None, NIXL EP's default (30000 ms) applies. Other all2all
+    backends ignore this setting.
     """
 
     def compile_factors(self) -> CompileFactors:

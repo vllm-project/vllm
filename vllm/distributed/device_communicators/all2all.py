@@ -489,9 +489,11 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         assert NixlEPAll2AllManager._buffer is None, (
             "NIXL EP buffer already initialized"
         )
+        timeout_ms = parallel_config.fault_tolerance_config.nixl_ep_timeout_ms
         buffer = Buffer(
             rank=self.rank,
             tcp_store_group=self.tcp_store_group.store,
+            **({} if timeout_ms is None else {"timeout_ms": timeout_ms}),
         )
         buffer.update_memory_buffers(
             num_ranks=max_num_ep_ranks,

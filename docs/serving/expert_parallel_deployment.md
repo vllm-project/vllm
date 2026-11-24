@@ -462,6 +462,11 @@ Both retry and scale-down require `--enable-fault-tolerance`,
 `deepep_low_latency`).
 Retry can recover from a fault when all workers remain alive.
 
+Engines detect a dead rank on another engine when their all2all kernels time out.
+With `nixl_ep`, this timeout defaults to 30000 ms; set
+`--fault-tolerance-config.nixl_ep_timeout_ms` to detect faults sooner. Too low a
+value can mask a healthy peer that is only slow.
+
 For scale-down recovery, also enable `--enable-eplb` and configure enough
 redundant expert slots with `--eplb-config.num_redundant_experts` to fit all
 logical experts on the surviving ranks. The original checkpoint must remain
