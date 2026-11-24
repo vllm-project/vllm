@@ -4,7 +4,7 @@
 //! HY4-VL (HunYuan HYV4 VL) vision model contract: image and video lanes.
 //!
 //! Mirrors vLLM's `transformers_utils/processors/hy_v4.py` (`HYV4VLProcessor`)
-//! prompt expansion and `models/hy_v4/nvidia/mm_preprocess.py`
+//! prompt expansion and `models/hy_v4/common/mm_preprocess.py`
 //! (`HYV4VLMultiModalProcessor`) placeholder targets and engine fields:
 //!
 //! - The prompt markers join the config-declared start, embed and end token

@@ -33,7 +33,10 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     maybe_prefix,
 )
-from vllm.models.hy_v4.dfly_config import HYV4DFlySpeculatorConfig
+from vllm.models.hy_v4.dfly_config import (
+    HYV4DFlySpeculatorConfig,
+    verify_rocm_dfly_kv_cache_dtype,
+)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 from vllm.utils.math_utils import round_up
@@ -43,11 +46,11 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
 
+from ..common.mrope import set_token_rope
+from ..nvidia.moe import HYV4FeedForward
 from .aiter_mla_sparse import HYV4AiterMLASparseBackend
 from .attention import HYV4MLAAttention
 from .model import HYV4DecoderLayer
-from .moe import HYV4FeedForward
-from .mrope import set_token_rope
 
 
 class HYV4DFlyQuantizationConfig(CompressedTensorsConfig):
@@ -282,11 +285,10 @@ class HYV4DFlyModel(nn.Module):
         )
         for layer in self.layers:
             attn = layer.self_attn
-            if (
-                not attn.learnable_sink
-                or attn.mla_attn.get_attn_backend() is not HYV4AiterMLASparseBackend
-            ):
-                raise ValueError("DFly requires a backend that applies learnable sinks")
+            # Only the sink path binds the backend that packs the draft rows.
+            if not attn.learnable_sink:
+                raise ValueError("HYV4 DFly on ROCm requires learnable_sink=True")
+            assert attn.mla_attn.get_attn_backend() is HYV4AiterMLASparseBackend
             attn.use_hpc_gated_mla = False
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mtp_fusion = HYV4DFlyFusion(
@@ -372,9 +374,9 @@ class HYV4DFlyForCausalLM(nn.Module):
         super().__init__()
         if not current_platform.is_rocm():
             raise NotImplementedError("The HYV4 DFly AMD implementation requires ROCm")
-        # The ROCm fp8_ds_mla sparse path cannot apply the learnable sink.
-        if vllm_config.cache_config.cache_dtype not in ("auto", "bfloat16"):
-            raise ValueError("HYV4 DFly on ROCm requires BF16 KV storage")
+        # Covers a cache dtype inherited from the target, which the speculative
+        # config cannot see.
+        verify_rocm_dfly_kv_cache_dtype(vllm_config.cache_config.cache_dtype)
         self.model = HYV4DFlyModel(vllm_config, maybe_prefix(prefix, "model"))
         self.config = self.model.config
         self.has_own_embed_tokens = False

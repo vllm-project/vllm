@@ -7,10 +7,10 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
-def _group_prefix(
-    Starts, Lengths, Ends, BATCH: tl.constexpr, R: tl.constexpr, BLOCK: tl.constexpr
-):
+# Batch, token and slot counts change every step, so they stay runtime
+# arguments instead of triggering a recompile per value.
+@triton.jit(do_not_specialize=["BATCH"])
+def _group_prefix(Starts, Lengths, Ends, BATCH, R: tl.constexpr, BLOCK: tl.constexpr):
     request = tl.arange(0, BLOCK)
     start = tl.load(Starts + request, request < BATCH, 0)
     end = tl.load(Starts + request + 1, request < BATCH, 0)
@@ -21,7 +21,7 @@ def _group_prefix(
     tl.store(Ends + request, tl.cumsum(count), request < BATCH)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["BATCH", "TOKENS", "SLOTS", "POS_PLANE"])
 def _gather_groups(
     Keys,
     Positions,
@@ -35,14 +35,14 @@ def _gather_groups(
     Requests,
     Groups,
     Live,
-    BATCH: tl.constexpr,
-    TOKENS: tl.constexpr,
-    SLOTS: tl.constexpr,
+    BATCH,
+    TOKENS,
+    SLOTS,
     R: tl.constexpr,
     RING: tl.constexpr,
     KEY_ROW: tl.constexpr,
     KEY_COL: tl.constexpr,
-    POS_PLANE: tl.constexpr,
+    POS_PLANE,
     POS_TOKEN: tl.constexpr,
     THREE: tl.constexpr,
     TAIL_BLOCK: tl.constexpr,
@@ -114,7 +114,7 @@ def _gather_groups(
     tl.store(Live + slot, live)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["BATCH", "TOKENS"])
 def _query_metadata(
     Starts,
     Lengths,
@@ -122,15 +122,16 @@ def _query_metadata(
     Logical,
     Upper,
     Live,
-    BATCH: tl.constexpr,
-    TOKENS: tl.constexpr,
+    BATCH,
+    TOKENS,
+    SEARCH_STEPS: tl.constexpr,
     R: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     token = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     lo = tl.full((BLOCK,), 0, tl.int32)
     hi = tl.full((BLOCK,), BATCH, tl.int32)
-    for _ in range((BATCH + 1).bit_length()):
+    for _ in range(SEARCH_STEPS):
         mid = (lo + hi) // 2
         end = tl.load(Starts + mid + 1, mid < BATCH, 2147483647)
         left = token < end
@@ -149,7 +150,7 @@ def _query_metadata(
     tl.store(Live + token, live, token < TOKENS)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["POS_PLANE"])
 def _write_tails(
     Keys,
     Positions,
@@ -160,7 +161,7 @@ def _write_tails(
     RING: tl.constexpr,
     KEY_ROW: tl.constexpr,
     KEY_COL: tl.constexpr,
-    POS_PLANE: tl.constexpr,
+    POS_PLANE,
     POS_TOKEN: tl.constexpr,
     THREE: tl.constexpr,
     TAIL_BLOCK: tl.constexpr,
@@ -253,6 +254,7 @@ def prepare_groups(keys, positions, tail, table, starts, lengths, tokens, ratio)
             token_live,
             batch,
             tokens,
+            (batch + 1).bit_length(),
             ratio,
             256,
         )

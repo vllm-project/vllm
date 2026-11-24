@@ -671,14 +671,20 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR | T + I<sup>+</sup> | `baidu/Unlimited-OCR`, etc. | ✅︎ | ✅︎ |
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR-2 | T + I<sup>+</sup> | `baidu/Unlimited-OCR-2` | | |
 
-!!! note "HY4 Flash"
+!!! note "HY4 and HY4 Flash"
 
-    HY4 Flash supports NVIDIA CUDA and, on AMD ROCm, MI355X (gfx950) only.
-    ROCm requires BF16 KV storage (`--kv-cache-dtype auto` or `bfloat16`) and
-    OCP FP8. LoRA and pipeline parallelism are not supported. Published
-    checkpoints use
-    `HYV4FlashForConditionalGeneration`, which vLLM maps to
-    `HYV4FlashVLForConditionalGeneration`.
+    HY4 and HY4 Flash run on NVIDIA CUDA and on AMD ROCm gfx950 GPUs (MI350X,
+    MI355X). HY4 Flash and DFly reject MI300X and MI325X (gfx942); HY4 loads
+    on gfx942 but is untested there. On ROCm, set `VLLM_ROCM_USE_AITER=1`
+    and `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1`: AITER's default sparse MLA
+    decode kernel reads the wrong KV rows once a layer's KV cache exceeds
+    4 GiB (ROCm/aiter#6277), and vLLM warns when the Triton kernel is not
+    selected. HY4 Flash on ROCm also requires BF16 KV storage
+    (`--kv-cache-dtype auto` or `bfloat16`) and OCP FP8.
+
+    HY4 Flash does not support LoRA or pipeline parallelism. Published HY4
+    Flash checkpoints use `HYV4FlashForConditionalGeneration`, which vLLM maps
+    to `HYV4FlashVLForConditionalGeneration`.
 
 On ROCm, Unlimited-OCR-2 DASH defaults to `ROCM_AITER_FA` and uses AITER CK
 varlen attention; the vision encoder also defaults to `ROCM_AITER_FA`.

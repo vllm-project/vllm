@@ -13,11 +13,13 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_fp8_paged_mqa_logits
 
-from ..nvidia.indexpool_cache import POOL_PAGE_SIZE, IndexPoolCache, IndexPoolMetadata
+from ..common.indexpool_cache import POOL_PAGE_SIZE, IndexPoolCache, IndexPoolMetadata
 from .indexpool_ops import (
+    INDEX_DIM,
     expand_groups,
     fwht_quantize,
     gated_pool,
+    rope_inverse_frequencies,
     rotate_indexer,
     select_groups,
     write_pool,
@@ -37,14 +39,21 @@ class FlashCompressedIndexer(nn.Module):
             raise ValueError("IndexPool requires 1..64 scoring heads")
         self.rope_dim = config.qk_rope_head_dim
         self.rope_parameters = config.rope_parameters
+        self.register_buffer(
+            "rope_inverse",
+            rope_inverse_frequencies(self.rope_dim, self.rope_parameters)
+            if self.rope_dim
+            else None,
+            persistent=False,
+        )
         self.eps = config.rms_norm_eps
         self.topk_indices_buffer = topk_indices_buffer
         self.max_model_len = vllm_config.model_config.max_model_len
         self.logits_budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024 // 4
         for name, input_size, output_size in (
-            ("query_projection", config.q_lora_rank, self.num_heads * 128),
+            ("query_projection", config.q_lora_rank, self.num_heads * INDEX_DIM),
             ("head_weight_projection", config.hidden_size, self.num_heads),
-            ("token_key_projection", config.hidden_size, 128),
+            ("token_key_projection", config.hidden_size, INDEX_DIM),
         ):
             setattr(
                 self,
@@ -57,12 +66,16 @@ class FlashCompressedIndexer(nn.Module):
                     prefix=f"{prefix}.{name}",
                 ),
             )
-        self.token_key_norm = nn.RMSNorm(128, eps=self.eps)
-        self.key_value_projection = nn.Linear(128, 128, bias=False, dtype=torch.float32)
-        self.key_gate_projection = nn.Linear(128, 128, bias=False, dtype=torch.float32)
-        self.key_norm = nn.RMSNorm(128, eps=self.eps, dtype=torch.float32)
+        self.token_key_norm = nn.RMSNorm(INDEX_DIM, eps=self.eps)
+        self.key_value_projection = nn.Linear(
+            INDEX_DIM, INDEX_DIM, bias=False, dtype=torch.float32
+        )
+        self.key_gate_projection = nn.Linear(
+            INDEX_DIM, INDEX_DIM, bias=False, dtype=torch.float32
+        )
+        self.key_norm = nn.RMSNorm(INDEX_DIM, eps=self.eps, dtype=torch.float32)
         self.intra_group_ape = nn.Parameter(
-            torch.empty(self.ratio, 128, dtype=torch.float32)
+            torch.empty(self.ratio, INDEX_DIM, dtype=torch.float32)
         )
         self.k_cache = IndexPoolCache(
             f"{prefix}.k_cache", vllm_config.cache_config, self.ratio
@@ -123,7 +136,11 @@ class FlashCompressedIndexer(nn.Module):
             ).bfloat16()
             quant, scales = fwht_quantize(
                 rotate_indexer(
-                    pooled, group_positions, self.rope_dim, self.rope_parameters
+                    pooled,
+                    group_positions,
+                    self.rope_dim,
+                    self.rope_parameters,
+                    self.rope_inverse,
                 )
             )
             write_pool(
@@ -133,21 +150,26 @@ class FlashCompressedIndexer(nn.Module):
             keys, positions, tail, tm.block_table, km.query_start_loc, km.seq_lens
         )
         query = self.query_projection(q_c)[0][:tokens].reshape(
-            tokens, self.num_heads, 128
+            tokens, self.num_heads, INDEX_DIM
         )
         query = rotate_indexer(
-            query, positions[..., :tokens], self.rope_dim, self.rope_parameters
+            query,
+            positions[..., :tokens],
+            self.rope_dim,
+            self.rope_parameters,
+            self.rope_inverse,
         )
-        quant_q, scales_q = fwht_quantize(query.reshape(-1, 128).bfloat16())
+        quant_q, scales_q = fwht_quantize(query.reshape(-1, INDEX_DIM).bfloat16())
         # The Triton scorer needs a power-of-two head tile of at least 16.
         heads = max(16, next_power_of_2(self.num_heads))
-        quant_q = quant_q.reshape(tokens, self.num_heads, 128)
+        quant_q = quant_q.reshape(tokens, self.num_heads, INDEX_DIM)
         weights = self.head_weight_projection(hidden_states)[0][:tokens].float()
-        weights = weights * (self.num_heads**-0.5 * 128**-0.5)
+        weights = weights * (self.num_heads**-0.5 * INDEX_DIM**-0.5)
         weights = weights * scales_q.reshape(tokens, self.num_heads)
         if heads != self.num_heads:
             quant_q = torch.cat(
-                (quant_q, quant_q.new_zeros(tokens, heads - self.num_heads, 128)), 1
+                (quant_q, quant_q.new_zeros(tokens, heads - self.num_heads, INDEX_DIM)),
+                1,
             )
             weights = torch.cat(
                 (weights, weights.new_zeros(tokens, heads - self.num_heads)), 1

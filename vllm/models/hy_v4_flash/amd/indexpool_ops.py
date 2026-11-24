@@ -9,7 +9,7 @@ from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_
 from vllm.triton_utils import tl, triton
 
 INDEX_DIM = 128
-FP8_MAX = 448.0
+FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 
 def fwht_quantize(vectors: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -36,15 +36,20 @@ def gated_pool(values, gates, ape, norm_weight, eps):
     return F.rms_norm(pooled, (INDEX_DIM,), norm_weight.float(), eps)
 
 
-def rotate_indexer(x, positions, rope_dim, parameters):
-    if rope_dim == 0:
-        return x
+def rope_inverse_frequencies(rope_dim, parameters, device=None):
     if parameters.get("rope_type", "default") != "default":
         raise ValueError("Flash IndexPool currently requires default RoPE")
     theta = parameters.get("rope_theta", 10000.0)
-    inverse = theta ** (
-        -torch.arange(0, rope_dim, 2, device=x.device, dtype=torch.float32) / rope_dim
+    return theta ** (
+        -torch.arange(0, rope_dim, 2, device=device, dtype=torch.float32) / rope_dim
     )
+
+
+def rotate_indexer(x, positions, rope_dim, parameters, inverse=None):
+    if rope_dim == 0:
+        return x
+    if inverse is None:
+        inverse = rope_inverse_frequencies(rope_dim, parameters, x.device)
     if positions.ndim == 1:
         frequency = positions.float()[:, None] * inverse
     else:
@@ -125,12 +130,12 @@ def _scatter_rows(
 
 
 def write_pool(cache, table, owners, groups, active, quant, scales):
+    if groups.numel() == 0:
+        return
     page_size = cache.shape[1]
     columns = (groups // page_size).clamp(0, table.shape[1] - 1)
     base = table[owners, columns].long() * cache.stride(0)
     row = groups % page_size
-    if groups.numel() == 0:
-        return
     _scatter_rows[(groups.numel(),)](
         cache,
         quant.view(torch.uint8),

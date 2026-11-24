@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.kernels.triton.fused_sigmoid_gate_mul import fused_sigmoid_gate_mul
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -219,6 +220,6 @@ class HYV4FlashAttention(HYV4MLAAttention):
             device=hidden_states.device,
         )
         self._indexer_and_attn(hidden_states, q_c, positions, q, kv_c, k_pe, out)
-        out = out * torch.sigmoid(self.linear_gate(hidden_states)[0])
+        out = fused_sigmoid_gate_mul(out, self.linear_gate(hidden_states)[0])
         out = self.o_proj(out)[0]
         return self.post_proj_norm(out) if self.post_proj_norm is not None else out

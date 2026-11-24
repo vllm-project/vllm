@@ -13,11 +13,31 @@ without a host sync.
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
     ROCMAiterMLASparseImpl,
 )
+
+logger = init_logger(__name__)
+
+
+def warn_if_aiter_triton_sparse_mla_disabled() -> None:
+    """Warn when HY V4 sparse MLA would use AITER's default decode kernel.
+
+    That kernel reads the wrong KV rows once a layer's KV cache passes 4 GiB
+    (fixed by ROCm/aiter#6277); the Triton sparse MLA kernel does not.
+    """
+    if rocm_aiter_ops.is_triton_sparse_mla_enabled():
+        return
+    logger.warning_once(
+        "HYV4 on ROCm should run with VLLM_ROCM_USE_AITER=1 and "
+        "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1 (gfx950): AITER's default "
+        "sparse MLA decode kernel reads the wrong KV rows once a layer's KV "
+        "cache exceeds 4 GiB (ROCm/aiter#6277)."
+    )
 
 
 @triton.jit
