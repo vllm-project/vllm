@@ -277,7 +277,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         fallback = OutputHead(
             model=None,
             in_features=hidden_size,
-            scale=getattr(self.text_config, "logit_scale", 1.0),
+            scale=getattr(self.text_config, "logit_scale", None) or 1.0,
             soft_cap=getattr(self.text_config, "final_logit_softcapping", None),
         )
         for architecture in self.config.architectures or []:
