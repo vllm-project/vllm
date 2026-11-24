@@ -61,10 +61,10 @@ SM121_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
     },
 }
 
-# B200, measured on the BF16 projections that stay unquantized in the Qwen3.5 / Qwen3.6
-# MoE FP8 checkpoints (GDN in_proj_ba, shared-expert gate, router, LM head) at the local
-# shapes of Qwen3.6-35B-A3B TP=1/2/4 and Qwen3.5-397B-A17B TP=4/8. Entries beat cuBLAS
-# by at least 10% under CUDA graph replay.
+# B200 and B300, measured on the BF16 projections that stay unquantized in the
+# Qwen3.5 / Qwen3.6 MoE FP8 checkpoints (GDN in_proj_ba, shared-expert gate, router,
+# LM head) at the local shapes of Qwen3.6-35B-A3B TP=1/2/4 and Qwen3.5-397B-A17B
+# TP=4/8. Entries beat cuBLAS by at least 10% under CUDA graph replay on both.
 SM100_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
     # Qwen3.6-35B-A3B TP1 GDN in_proj_ba.
     (64, 2048): {
@@ -163,6 +163,8 @@ SKINNY_GEMM_PLANS_BY_CAPABILITY: dict[
     tuple[int, int] | None, dict[tuple[int, int], SkinnyGemmPlan]
 ] = {
     (10, 0): SM100_SKINNY_GEMM_PLANS,
+    # B300: every entry also beats cuBLAS by at least 10% on SM103.
+    (10, 3): SM100_SKINNY_GEMM_PLANS,
     (12, 1): SM121_SKINNY_GEMM_PLANS,
 }
 
