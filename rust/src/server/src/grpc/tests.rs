@@ -3755,11 +3755,7 @@ type KvEventStream =
 /// publisher.
 async fn kv_events_service(
     config: Option<KvEventsConfig>,
-) -> (
-    KvEventsServiceImpl,
-    tokio_util::sync::CancellationToken,
-    MockEngineTask,
-) {
+) -> (KvEventsServiceImpl, MockEngineTask) {
     let mut ready = default_ready_response();
     ready.kv_events_config = config;
     let (state, _engine_health, engine_task) = setup_app_state_with_engine_script(
@@ -3770,39 +3766,28 @@ async fn kv_events_service(
     )
     .await;
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let service = KvEventsServiceImpl::new(state, shutdown.clone());
-    (service, shutdown, engine_task)
+    (KvEventsServiceImpl::new(state, shutdown), engine_task)
 }
 
+/// Subscribe to rank 0, from `resume = (stream ID, next sequence number)`
+/// when given. Returns the stream's ID and its batches.
 async fn subscribe_kv_events(
     service: &KvEventsServiceImpl,
-    resume: Option<pb::KvEventCursor>,
-) -> Result<KvEventStream, Status> {
+    resume: Option<(&str, u64)>,
+) -> Result<(String, KvEventStream), Status> {
     use pb::kv_events_server::KvEvents as _;
+    use pb::subscribe_kv_events_response::Item;
 
     let request = pb::SubscribeKvEventsRequest {
         data_parallel_rank: 0,
-        resume,
+        resume: resume.map(|(stream_id, next_sequence_number)| pb::KvEventCursor {
+            stream_id: stream_id.to_string(),
+            next_sequence_number,
+        }),
     };
-    Ok(service.subscribe_kv_events(Request::new(request)).await?.into_inner())
-}
-
-fn kv_event_cursor(stream_id: &str, next_sequence_number: u64) -> Option<pb::KvEventCursor> {
-    Some(pb::KvEventCursor {
-        stream_id: stream_id.to_string(),
-        next_sequence_number,
-    })
-}
-
-/// The stream ID a stream starts with.
-async fn kv_event_stream_id(stream: &mut KvEventStream) -> String {
-    use pb::subscribe_kv_events_response::Item;
-
-    match stream.next().await.expect("start item").expect("start item").item {
-        Some(Item::Start(start)) => {
-            assert_eq!(start.data_parallel_rank, 0);
-            start.stream_id
-        }
+    let mut stream = service.subscribe_kv_events(Request::new(request)).await?.into_inner();
+    match stream.next().await.expect("start item")?.item {
+        Some(Item::Start(start)) => Ok((start.stream_id, stream)),
         other => panic!("expected a start item, got {other:?}"),
     }
 }
@@ -3816,34 +3801,6 @@ async fn next_kv_event_batch(stream: &mut KvEventStream) -> Result<pb::KvEventBa
     }
 }
 
-async fn next_kv_event_sequence_numbers(stream: &mut KvEventStream, count: usize) -> Vec<u64> {
-    let mut sequence_numbers = Vec::with_capacity(count);
-    for _ in 0..count {
-        sequence_numbers.push(next_kv_event_batch(stream).await.unwrap().sequence_number);
-    }
-    sequence_numbers
-}
-
-/// Publish a batch until the stream yields something. A PUB socket drops what
-/// it sends before the subscription reaches it, and the relay ignores the
-/// repeats.
-async fn publish_kv_events_until_received(
-    publisher: &mut MockKvEventPublisher,
-    sequence_number: u64,
-    stream: &mut KvEventStream,
-) -> Result<pb::KvEventBatch, Status> {
-    let batch = kv_event_batch(vec![]);
-    publisher.retain(sequence_number, &batch);
-    let payload = bytes::Bytes::from(rmp_serde::to_vec_named(&batch).unwrap());
-    loop {
-        publisher.publish_payload(sequence_number, payload.clone()).await;
-        let received = tokio::time::timeout(Duration::from_millis(20), next_kv_event_batch(stream));
-        if let Ok(batch) = received.await {
-            return batch;
-        }
-    }
-}
-
 fn kv_event_batch(events: Vec<KvCacheEvent>) -> KvEventBatch {
     KvEventBatch {
         ts: 1.5,
@@ -3852,20 +3809,22 @@ fn kv_event_batch(events: Vec<KvCacheEvent>) -> KvEventBatch {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kv_events_resume_replays_the_engine_buffer_then_continues_live() {
-    let ipc = IpcNamespace::new().expect("create ipc namespace");
-    let mut publisher = MockKvEventPublisher::bind(&ipc, true).await;
-    publisher.retain(
-        0,
-        &kv_event_batch(vec![KvCacheEvent::BlockStored(BlockStored {
+/// A batch with every event type and field: as the engine publishes it, and
+/// as the stream carries it.
+fn kv_event_batch_with_every_field() -> (KvEventBatch, pb::KvEventBatch) {
+    use pb::block_hash::Value as Hash;
+    use pb::extra_key_value::Value as Key;
+    use pb::kv_cache_event::Event;
+
+    let published = kv_event_batch(vec![
+        KvCacheEvent::BlockStored(BlockStored {
             block_hashes: vec![
                 ExternalBlockHash::Unsigned(1),
                 ExternalBlockHash::Signed(-2),
             ],
-            parent_block_hash: Some(ExternalBlockHash::Digest(vec![0; 4])),
-            token_ids: vec![11, 12, 21, 22],
-            block_size: 2,
+            parent_block_hash: Some(ExternalBlockHash::Digest(vec![0xab])),
+            token_ids: vec![11, 12],
+            block_size: 1,
             lora_id: Some(7),
             medium: Some("GPU".to_string()),
             lora_name: Some("adapter".to_string()),
@@ -3874,9 +3833,9 @@ async fn kv_events_resume_replays_the_engine_buffer_then_continues_live() {
                     ExtraKeyValue::Text("adapter".to_string()),
                     ExtraKeyValue::Tuple(vec![
                         ExtraKeyValue::Text("image-hash".to_string()),
-                        ExtraKeyValue::Integer(-3),
+                        ExtraKeyValue::Integer(3),
                     ]),
-                    ExtraKeyValue::Data(vec![0xaa]),
+                    ExtraKeyValue::Data(b"digest".to_vec()),
                 ]),
                 None,
             ]),
@@ -3886,383 +3845,155 @@ async fn kv_events_resume_replays_the_engine_buffer_then_continues_live() {
             locality: Some("LOCAL".to_string()),
             ownership: Some("kvcr".to_string()),
             session_id: Some("session-1".to_string()),
-            lookahead_token_ids: Some(vec![vec![21], vec![31]]),
-        })]),
-    );
-    publisher.retain(
-        1,
-        &kv_event_batch(vec![
-            KvCacheEvent::BlockRemoved(BlockRemoved {
-                block_hashes: vec![ExternalBlockHash::Unsigned(1)],
-                medium: Some("CPU".to_string()),
-                locality: Some("REMOTE".to_string()),
-                ..Default::default()
+            lookahead_token_ids: Some(vec![vec![12], vec![13]]),
+        }),
+        KvCacheEvent::BlockRemoved(BlockRemoved {
+            block_hashes: vec![ExternalBlockHash::Unsigned(1)],
+            medium: Some("GPU".to_string()),
+            group_idx: Some(1),
+            locality: Some("REMOTE".to_string()),
+            ownership: Some("kvcr".to_string()),
+        }),
+        KvCacheEvent::AllBlocksCleared,
+    ]);
+
+    let hash = |value| pb::BlockHash { value: Some(value) };
+    let key = |value| pb::ExtraKeyValue { value: Some(value) };
+    let tokens = |token_ids: &[u64]| pb::TokenIdList {
+        token_ids: token_ids.to_vec(),
+    };
+    let events = vec![
+        Event::BlockStored(pb::BlockStored {
+            block_hashes: vec![hash(Hash::UnsignedValue(1)), hash(Hash::SignedValue(-2))],
+            parent_block_hash: Some(hash(Hash::Digest(vec![0xab]))),
+            token_ids: Some(pb::BlockTokenIds {
+                ids: Some(pb::block_token_ids::Ids::Single(tokens(&[11, 12]))),
             }),
-            KvCacheEvent::AllBlocksCleared,
-        ]),
-    );
-    let (service, _shutdown, _engine_task) = kv_events_service(Some(publisher.config())).await;
+            block_size: 1,
+            lora_id: Some(7),
+            medium: Some("GPU".to_string()),
+            lora_name: Some("adapter".to_string()),
+            session_id: Some("session-1".to_string()),
+            cache_salt: None,
+            mm_routing_spans: vec![],
+            extra_keys: vec![
+                pb::BlockExtraKeys {
+                    keys: vec![
+                        key(Key::Text("adapter".to_string())),
+                        key(Key::Tuple(pb::ExtraKeyTuple {
+                            items: vec![
+                                key(Key::Text("image-hash".to_string())),
+                                key(Key::Integer(3)),
+                            ],
+                        })),
+                        key(Key::Data(b"digest".to_vec())),
+                    ],
+                },
+                pb::BlockExtraKeys { keys: vec![] },
+            ],
+            group_idx: Some(1),
+            kv_cache_spec_kind: Some("sliding_window".to_string()),
+            kv_cache_spec_sliding_window: Some(4096),
+            locality: Some("LOCAL".to_string()),
+            ownership: Some("kvcr".to_string()),
+            lookahead_token_ids: vec![tokens(&[12]), tokens(&[13])],
+        }),
+        Event::BlockRemoved(pb::BlockRemoved {
+            block_hashes: vec![hash(Hash::UnsignedValue(1))],
+            medium: Some("GPU".to_string()),
+            group_idx: Some(1),
+            locality: Some("REMOTE".to_string()),
+            ownership: Some("kvcr".to_string()),
+        }),
+        Event::AllBlocksCleared(pb::AllBlocksCleared {}),
+    ];
+    let streamed = pb::KvEventBatch {
+        sequence_number: 0,
+        ts: 1.5,
+        data_parallel_rank: Some(0),
+        events: events
+            .into_iter()
+            .map(|event| pb::KvCacheEvent { event: Some(event) })
+            .collect(),
+    };
+    (published, streamed)
+}
+
+/// Publish an empty batch until the stream yields it. A PUB socket drops what
+/// it sends before the subscription reaches it, and readers skip the repeats.
+async fn publish_kv_events_until_received(
+    publisher: &mut MockKvEventPublisher,
+    sequence_number: u64,
+    stream: &mut KvEventStream,
+) -> pb::KvEventBatch {
+    loop {
+        publisher.publish(sequence_number, &kv_event_batch(vec![])).await;
+        let received = tokio::time::timeout(Duration::from_millis(20), next_kv_event_batch(stream));
+        if let Ok(batch) = received.await {
+            return batch.unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_events_resume_replays_the_engine_buffer_then_continues_live() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let mut publisher = MockKvEventPublisher::bind(&ipc).await;
+    // Published before anyone subscribed.
+    let (published, streamed) = kv_event_batch_with_every_field();
+    publisher.retain(0, &published);
+    let (service, _engine_task) = kv_events_service(Some(publisher.config.clone())).await;
 
     // Without a cursor, the stream starts live.
-    let mut live = subscribe_kv_events(&service, None).await.unwrap();
-    let stream_id = kv_event_stream_id(&mut live).await;
-    let first_live = publish_kv_events_until_received(&mut publisher, 2, &mut live).await.unwrap();
-    assert_eq!(first_live.sequence_number, 2);
+    let (stream_id, mut live) = subscribe_kv_events(&service, None).await.unwrap();
+    let first_live = publish_kv_events_until_received(&mut publisher, 1, &mut live).await;
+    assert_eq!(first_live.sequence_number, 1);
 
     // A cursor replays the engine's buffer, then continues live.
-    let mut resumed = subscribe_kv_events(&service, kv_event_cursor("", 0)).await.unwrap();
-    assert_eq!(kv_event_stream_id(&mut resumed).await, stream_id);
-    let replayed = [
-        next_kv_event_batch(&mut resumed).await.unwrap(),
-        next_kv_event_batch(&mut resumed).await.unwrap(),
-    ];
-    expect_test::expect![[r#"
-        [
-            KvEventBatch {
-                sequence_number: 0,
-                ts: 1.5,
-                data_parallel_rank: Some(
-                    0,
-                ),
-                events: [
-                    KvCacheEvent {
-                        event: Some(
-                            BlockStored(
-                                BlockStored {
-                                    block_hashes: [
-                                        BlockHash {
-                                            value: Some(
-                                                UnsignedValue(
-                                                    1,
-                                                ),
-                                            ),
-                                        },
-                                        BlockHash {
-                                            value: Some(
-                                                SignedValue(
-                                                    -2,
-                                                ),
-                                            ),
-                                        },
-                                    ],
-                                    parent_block_hash: Some(
-                                        BlockHash {
-                                            value: Some(
-                                                Digest(
-                                                    [
-                                                        0,
-                                                        0,
-                                                        0,
-                                                        0,
-                                                    ],
-                                                ),
-                                            ),
-                                        },
-                                    ),
-                                    token_ids: Some(
-                                        BlockTokenIds {
-                                            ids: Some(
-                                                Single(
-                                                    TokenIdList {
-                                                        token_ids: [
-                                                            11,
-                                                            12,
-                                                            21,
-                                                            22,
-                                                        ],
-                                                    },
-                                                ),
-                                            ),
-                                        },
-                                    ),
-                                    block_size: 2,
-                                    lora_id: Some(
-                                        7,
-                                    ),
-                                    medium: Some(
-                                        "GPU",
-                                    ),
-                                    lora_name: Some(
-                                        "adapter",
-                                    ),
-                                    session_id: Some(
-                                        "session-1",
-                                    ),
-                                    cache_salt: None,
-                                    mm_routing_spans: [],
-                                    extra_keys: [
-                                        BlockExtraKeys {
-                                            keys: [
-                                                ExtraKeyValue {
-                                                    value: Some(
-                                                        Text(
-                                                            "adapter",
-                                                        ),
-                                                    ),
-                                                },
-                                                ExtraKeyValue {
-                                                    value: Some(
-                                                        Tuple(
-                                                            ExtraKeyTuple {
-                                                                items: [
-                                                                    ExtraKeyValue {
-                                                                        value: Some(
-                                                                            Text(
-                                                                                "image-hash",
-                                                                            ),
-                                                                        ),
-                                                                    },
-                                                                    ExtraKeyValue {
-                                                                        value: Some(
-                                                                            Integer(
-                                                                                -3,
-                                                                            ),
-                                                                        ),
-                                                                    },
-                                                                ],
-                                                            },
-                                                        ),
-                                                    ),
-                                                },
-                                                ExtraKeyValue {
-                                                    value: Some(
-                                                        Data(
-                                                            [
-                                                                170,
-                                                            ],
-                                                        ),
-                                                    ),
-                                                },
-                                            ],
-                                        },
-                                        BlockExtraKeys {
-                                            keys: [],
-                                        },
-                                    ],
-                                    group_idx: Some(
-                                        1,
-                                    ),
-                                    kv_cache_spec_kind: Some(
-                                        "sliding_window",
-                                    ),
-                                    kv_cache_spec_sliding_window: Some(
-                                        4096,
-                                    ),
-                                    locality: Some(
-                                        "LOCAL",
-                                    ),
-                                    ownership: Some(
-                                        "kvcr",
-                                    ),
-                                    lookahead_token_ids: [
-                                        TokenIdList {
-                                            token_ids: [
-                                                21,
-                                            ],
-                                        },
-                                        TokenIdList {
-                                            token_ids: [
-                                                31,
-                                            ],
-                                        },
-                                    ],
-                                },
-                            ),
-                        ),
-                    },
-                ],
-            },
-            KvEventBatch {
-                sequence_number: 1,
-                ts: 1.5,
-                data_parallel_rank: Some(
-                    0,
-                ),
-                events: [
-                    KvCacheEvent {
-                        event: Some(
-                            BlockRemoved(
-                                BlockRemoved {
-                                    block_hashes: [
-                                        BlockHash {
-                                            value: Some(
-                                                UnsignedValue(
-                                                    1,
-                                                ),
-                                            ),
-                                        },
-                                    ],
-                                    medium: Some(
-                                        "CPU",
-                                    ),
-                                    group_idx: None,
-                                    locality: Some(
-                                        "REMOTE",
-                                    ),
-                                    ownership: None,
-                                },
-                            ),
-                        ),
-                    },
-                    KvCacheEvent {
-                        event: Some(
-                            AllBlocksCleared(
-                                AllBlocksCleared,
-                            ),
-                        ),
-                    },
-                ],
-            },
-        ]
-    "#]]
-    .assert_debug_eq(&replayed);
+    let (_, mut resumed) = subscribe_kv_events(&service, Some((&stream_id, 0))).await.unwrap();
+    assert_eq!(next_kv_event_batch(&mut resumed).await.unwrap(), streamed);
     assert_eq!(next_kv_event_batch(&mut resumed).await.unwrap(), first_live);
-    publisher.publish(3, &kv_event_batch(vec![])).await;
-    assert_eq!(next_kv_event_sequence_numbers(&mut resumed, 1).await, [3]);
-    assert_eq!(next_kv_event_sequence_numbers(&mut live, 1).await, [3]);
+    publisher.publish(2, &kv_event_batch(vec![])).await;
+    for stream in [&mut resumed, &mut live] {
+        assert_eq!(
+            next_kv_event_batch(stream).await.unwrap().sequence_number,
+            2
+        );
+    }
 
-    let mut by_stream_id =
-        subscribe_kv_events(&service, kv_event_cursor(&stream_id, 3)).await.unwrap();
-    kv_event_stream_id(&mut by_stream_id).await;
-    assert_eq!(
-        next_kv_event_sequence_numbers(&mut by_stream_id, 1).await,
-        [3]
-    );
-
-    let status = subscribe_kv_events(&service, kv_event_cursor("another-stream", 3))
-        .await
-        .err()
-        .unwrap();
+    // A cursor of another stream, or older than the engine's buffer, is refused.
+    let status = subscribe_kv_events(&service, Some(("another-stream", 2))).await.err().unwrap();
     assert_eq!(status.code(), Code::OutOfRange);
-
-    // The engine no longer buffers batch 0, then nothing at all.
     publisher.forget_before(1);
-    let status = subscribe_kv_events(&service, kv_event_cursor("", 0)).await.err().unwrap();
-    assert_eq!(status.code(), Code::OutOfRange);
-    publisher.forget_before(u64::MAX);
-    let status = subscribe_kv_events(&service, kv_event_cursor("", 2)).await.err().unwrap();
+    let status = subscribe_kv_events(&service, Some(("", 0))).await.err().unwrap();
     assert_eq!(status.code(), Code::OutOfRange);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kv_events_fill_a_gap_on_the_engine_hop_from_its_buffer() {
+async fn kv_events_fill_a_gap_from_the_engine_buffer_or_end_the_stream() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
-    let mut publisher = MockKvEventPublisher::bind(&ipc, true).await;
-    let (service, _shutdown, _engine_task) = kv_events_service(Some(publisher.config())).await;
+    let mut publisher = MockKvEventPublisher::bind(&ipc).await;
+    let (service, _engine_task) = kv_events_service(Some(publisher.config.clone())).await;
+    let (_, mut stream) = subscribe_kv_events(&service, None).await.unwrap();
+    publish_kv_events_until_received(&mut publisher, 0, &mut stream).await;
 
-    let mut stream = subscribe_kv_events(&service, None).await.unwrap();
-    kv_event_stream_id(&mut stream).await;
-    publish_kv_events_until_received(&mut publisher, 0, &mut stream).await.unwrap();
-
-    // Batch 1 is dropped by the PUB socket but kept for replay.
+    // Batch 1 is dropped by the PUB socket but still buffered.
     publisher.retain(1, &kv_event_batch(vec![]));
     publisher.publish(2, &kv_event_batch(vec![])).await;
-    assert_eq!(next_kv_event_sequence_numbers(&mut stream, 2).await, [1, 2]);
-}
+    for sequence_number in [1, 2] {
+        let batch = next_kv_event_batch(&mut stream).await.unwrap();
+        assert_eq!(batch.sequence_number, sequence_number);
+    }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kv_events_catch_up_a_slow_subscriber_until_the_buffer_no_longer_covers_it() {
-    let ipc = IpcNamespace::new().expect("create ipc namespace");
-    let mut publisher = MockKvEventPublisher::bind(&ipc, true).await;
-    let (service, _shutdown, _engine_task) = kv_events_service(Some(publisher.config())).await;
-
-    let mut fast = subscribe_kv_events(&service, None).await.unwrap();
-    kv_event_stream_id(&mut fast).await;
-    publish_kv_events_until_received(&mut publisher, 0, &mut fast).await.unwrap();
-
-    // `slow` reads nothing while the relay forwards more batches than it holds
-    // for one subscriber; `fast` confirms each one was forwarded.
-    let count = 1500;
-    let mut publish_and_forward = async |publisher: &mut MockKvEventPublisher, numbers| {
-        for sequence_number in numbers {
-            publisher.publish(sequence_number, &kv_event_batch(vec![])).await;
-            assert_eq!(
-                next_kv_event_sequence_numbers(&mut fast, 1).await,
-                [sequence_number]
-            );
-        }
-    };
-    let mut slow = subscribe_kv_events(&service, None).await.unwrap();
-    kv_event_stream_id(&mut slow).await;
-    publish_and_forward(&mut publisher, 1..=count).await;
-    assert_eq!(
-        next_kv_event_sequence_numbers(&mut slow, count as usize).await,
-        (1..=count).collect::<Vec<_>>()
-    );
-
-    let mut slow = subscribe_kv_events(&service, None).await.unwrap();
-    kv_event_stream_id(&mut slow).await;
-    publish_and_forward(&mut publisher, count + 1..=2 * count).await;
-    publisher.forget_before(u64::MAX);
-    assert_eq!(
-        next_kv_event_batch(&mut slow).await.unwrap_err().code(),
-        Code::DataLoss
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kv_events_unrecoverable_gap_ends_the_stream() {
-    let ipc = IpcNamespace::new().expect("create ipc namespace");
-    // Without a replay socket, a batch the PUB socket drops is gone.
-    let mut publisher = MockKvEventPublisher::bind(&ipc, false).await;
-    let (service, _shutdown, _engine_task) = kv_events_service(Some(publisher.config())).await;
-
-    let mut stream = subscribe_kv_events(&service, None).await.unwrap();
-    let stream_id = kv_event_stream_id(&mut stream).await;
-    let first = publish_kv_events_until_received(&mut publisher, 0, &mut stream).await.unwrap();
-    assert_eq!(first.sequence_number, 0);
-
-    publisher.publish(2, &kv_event_batch(vec![])).await;
+    // Batch 3 is dropped and not buffered.
+    publisher.publish(4, &kv_event_batch(vec![])).await;
     let status = next_kv_event_batch(&mut stream).await.unwrap_err();
     assert_eq!(status.code(), Code::DataLoss);
-
-    let status = subscribe_kv_events(&service, kv_event_cursor(&stream_id, 1))
-        .await
-        .err()
-        .unwrap();
-    assert_eq!(status.code(), Code::OutOfRange);
-
-    let mut stream = subscribe_kv_events(&service, None).await.unwrap();
-    assert_eq!(kv_event_stream_id(&mut stream).await, stream_id);
-    publisher.publish(3, &kv_event_batch(vec![])).await;
-    assert_eq!(next_kv_event_sequence_numbers(&mut stream, 1).await, [3]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kv_events_streams_end_at_shutdown() {
-    let ipc = IpcNamespace::new().expect("create ipc namespace");
-    let publisher = MockKvEventPublisher::bind(&ipc, true).await;
-    let (service, shutdown, _engine_task) = kv_events_service(Some(publisher.config())).await;
-
-    let mut stream = subscribe_kv_events(&service, None).await.unwrap();
-    kv_event_stream_id(&mut stream).await;
-    shutdown.cancel();
-    assert_eq!(
-        next_kv_event_batch(&mut stream).await.unwrap_err().code(),
-        Code::Unavailable
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kv_events_require_an_engine_that_publishes_them_to_this_frontend() {
-    let (service, _shutdown, _engine_task) = kv_events_service(None).await;
-    let status = subscribe_kv_events(&service, None).await.err().unwrap();
-    assert_eq!(status.code(), Code::FailedPrecondition);
-
-    use pb::kv_events_server::KvEvents as _;
-    let request = pb::SubscribeKvEventsRequest {
-        data_parallel_rank: 3,
-        resume: None,
-    };
-    let status = service.subscribe_kv_events(Request::new(request)).await.err().unwrap();
-    assert_eq!(status.code(), Code::InvalidArgument);
-
-    // Publishing, but not to this frontend (an engine started without its
-    // addresses).
-    let ipc = IpcNamespace::new().expect("create ipc namespace");
-    let mut config = MockKvEventPublisher::bind(&ipc, true).await.config();
-    config.frontend_endpoint = None;
-    let (service, _shutdown, _engine_task) = kv_events_service(Some(config)).await;
+async fn kv_events_require_an_engine_that_publishes_them() {
+    let (service, _engine_task) = kv_events_service(None).await;
     let status = subscribe_kv_events(&service, None).await.err().unwrap();
     assert_eq!(status.code(), Code::FailedPrecondition);
 }

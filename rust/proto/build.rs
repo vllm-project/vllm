@@ -20,6 +20,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
+        // `BlockStored` dwarfs the other events; boxing it would allocate per event.
+        .type_attribute(
+            "vllm.KvCacheEvent.event",
+            "#[allow(clippy::large_enum_variant)]",
+        )
         .compile_fds(file_descriptor_set)?;
 
     Ok(())

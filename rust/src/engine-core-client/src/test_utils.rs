@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -247,31 +248,23 @@ where
 /// sequence numbers a test asks for.
 pub struct MockKvEventPublisher {
     events: PubSocket,
-    config: KvEventsConfig,
+    /// The configuration an engine with this publisher reports.
+    pub config: KvEventsConfig,
     /// Batches served on the replay socket.
-    retained: Arc<Mutex<Vec<(u64, Bytes)>>>,
-    _replay: Option<AbortOnDropHandle<()>>,
+    retained: Arc<Mutex<BTreeMap<u64, Bytes>>>,
+    _replay: AbortOnDropHandle<()>,
 }
 
 impl MockKvEventPublisher {
-    /// Bind the PUB socket and, with `replay`, the replay socket.
-    pub async fn bind(ipc: &IpcNamespace, replay: bool) -> Self {
+    pub async fn bind(ipc: &IpcNamespace) -> Self {
         let endpoint = ipc.endpoint("kv-events.sock");
+        let replay_endpoint = ipc.endpoint("kv-events-replay.sock");
         let mut events = PubSocket::new();
         events.bind(&endpoint).await.expect("bind KV event socket");
-
-        let retained = Arc::new(Mutex::new(Vec::new()));
-        let replay_endpoint = replay.then(|| ipc.endpoint("kv-events-replay.sock"));
-        let replay = match &replay_endpoint {
-            Some(endpoint) => {
-                let mut socket = RouterSocket::new();
-                socket.bind(endpoint).await.expect("bind KV event replay socket");
-                Some(AbortOnDropHandle::new(tokio::spawn(
-                    serve_kv_event_replays(socket, retained.clone()),
-                )))
-            }
-            None => None,
-        };
+        let mut replay = RouterSocket::new();
+        replay.bind(&replay_endpoint).await.expect("bind KV event replay socket");
+        let retained = Arc::new(Mutex::new(BTreeMap::new()));
+        let replay = tokio::spawn(serve_kv_event_replays(replay, retained.clone()));
 
         Self {
             events,
@@ -286,82 +279,64 @@ impl MockKvEventPublisher {
                 max_queue_size: 100_000,
                 topic: "kv".to_string(),
                 frontend_endpoint: Some(endpoint),
-                frontend_replay_endpoint: replay_endpoint,
+                frontend_replay_endpoint: Some(replay_endpoint),
             },
             retained,
-            _replay: replay,
+            _replay: AbortOnDropHandle::new(replay),
         }
-    }
-
-    /// The configuration an engine with this publisher reports.
-    pub fn config(&self) -> KvEventsConfig {
-        self.config.clone()
     }
 
     /// Stop buffering batches before `sequence_number`, like a replay buffer
     /// that has moved on.
     pub fn forget_before(&self, sequence_number: u64) {
-        self.retained.lock().retain(|(retained, _)| *retained >= sequence_number);
+        self.retained.lock().retain(|retained, _| *retained >= sequence_number);
     }
 
     /// Keep a batch for replay without publishing it, like a batch the PUB
     /// socket dropped.
-    pub fn retain(&self, sequence_number: u64, batch: &KvEventBatch) {
-        let payload = rmp_serde::to_vec_named(batch).expect("encode KV event batch");
-        self.retained.lock().push((sequence_number, payload.into()));
+    pub fn retain(&self, sequence_number: u64, batch: &KvEventBatch) -> Bytes {
+        let payload = Bytes::from(rmp_serde::to_vec_named(batch).expect("encode KV event batch"));
+        self.retained.lock().insert(sequence_number, payload.clone());
+        payload
     }
 
     /// Publish a batch and keep it for replay.
     pub async fn publish(&mut self, sequence_number: u64, batch: &KvEventBatch) {
-        self.retain(sequence_number, batch);
-        let payload = rmp_serde::to_vec_named(batch).expect("encode KV event batch");
-        self.publish_payload(sequence_number, payload.into()).await;
-    }
-
-    /// Publish a raw payload without keeping it for replay.
-    pub async fn publish_payload(&mut self, sequence_number: u64, payload: Bytes) {
-        let frames = vec![
-            Bytes::from(self.config.topic.clone()),
-            Bytes::copy_from_slice(&sequence_number.to_be_bytes()),
-            payload,
-        ];
-        self.events
-            .send(ZmqMessage::try_from(frames).expect("KV event frames"))
-            .await
-            .expect("publish KV event batch");
+        let payload = self.retain(sequence_number, batch);
+        let frames = kv_event_frames(sequence_number, payload);
+        self.events.send(frames).await.expect("publish KV event batch");
     }
 }
 
-async fn serve_kv_event_replays(mut socket: RouterSocket, retained: Arc<Mutex<Vec<(u64, Bytes)>>>) {
+fn kv_event_frames(sequence_number: u64, payload: Bytes) -> ZmqMessage {
+    let frames = vec![
+        Bytes::from_static(b"kv"),
+        Bytes::copy_from_slice(&sequence_number.to_be_bytes()),
+        payload,
+    ];
+    ZmqMessage::try_from(frames).expect("KV event frames")
+}
+
+async fn serve_kv_event_replays(
+    mut socket: RouterSocket,
+    retained: Arc<Mutex<BTreeMap<u64, Bytes>>>,
+) {
     while let Ok(request) = socket.recv().await {
         let frames = request.into_vec();
         let [client, _, start] = frames.as_slice() else {
             panic!("replay request must be [client, empty, start], got {frames:?}");
         };
         let start = u64::from_be_bytes(start.as_ref().try_into().expect("8-byte start"));
-        let batches: Vec<_> =
-            retained.lock().iter().filter(|(seq, _)| *seq >= start).cloned().collect();
-        let mut replies: Vec<Vec<Bytes>> = batches
-            .into_iter()
-            .map(|(seq, payload)| {
-                vec![
-                    Bytes::from_static(b"kv"),
-                    Bytes::copy_from_slice(&seq.to_be_bytes()),
-                    payload,
-                ]
-            })
+        let mut replies: Vec<(u64, Bytes)> = (retained.lock().range(start..))
+            .map(|(seq, payload)| (*seq, payload.clone()))
             .collect();
-        replies.push(vec![
-            Bytes::new(),
-            Bytes::copy_from_slice(&u64::MAX.to_be_bytes()),
-            Bytes::new(),
-        ]);
-        for reply in replies {
-            let frames = [vec![client.clone(), Bytes::new()], reply].concat();
-            socket
-                .send(ZmqMessage::try_from(frames).expect("replay frames"))
-                .await
-                .expect("send KV event replay");
+        // `ZmqEventPublisher.END_SEQ` ends a replay.
+        replies.push((u64::MAX, Bytes::new()));
+        for (sequence_number, payload) in replies {
+            let mut reply = kv_event_frames(sequence_number, payload);
+            reply.push_front(Bytes::new());
+            reply.push_front(client.clone());
+            socket.send(reply).await.expect("send KV event replay");
         }
     }
 }
