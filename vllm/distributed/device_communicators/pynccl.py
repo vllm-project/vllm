@@ -176,6 +176,8 @@ class PyNcclCommunicator:
         assert isinstance(device, torch.device)
         self.device = device
         # nccl communicator and stream will use this device
+        # Streams with their own communicator; the others use self.comm.
+        self._stream_comms: dict[int, PyNcclCommunicator] = {}
         with torch.accelerator.device_index(device.index):
             self.comm: ncclComm_t = self.nccl.ncclCommInitRank(
                 self.world_size, self.unique_id, self.rank
@@ -200,17 +202,17 @@ class PyNcclCommunicator:
         device: int | str | torch.device,
         library_path: str | None = None,
     ) -> "PyNcclCommunicator":
-        """Build a communicator from pre-shared ``ncclUniqueId`` bytes.
+        """Build a communicator from pre-shared `ncclUniqueId` bytes.
 
-        For peers that cannot join a ``StatelessProcessGroup`` / TCPStore (e.g. a
+        For peers that cannot join a `StatelessProcessGroup` / TCPStore (e.g. a
         torch-free JAX trainer): every rank passes the same id, minted once via
-        ``ncclGetUniqueId`` and shared out of band. There is no barrier, so all
-        ranks must enter init concurrently or ``ncclCommInitRank`` hangs.
+        `ncclGetUniqueId` and shared out of band. There is no barrier, so all
+        ranks must enter init concurrently or `ncclCommInitRank` hangs.
 
-        Warm-up handshake: immediately after ``ncclCommInitRank`` this issues a
-        one-element ``all_reduce`` (mirroring ``__init__``). It is a collective,
+        Warm-up handshake: immediately after `ncclCommInitRank` this issues a
+        one-element `all_reduce` (mirroring `__init__`). It is a collective,
         so every peer -- including a foreign, non-vLLM rank -- must issue a
-        matching one-element ``all_reduce`` before any other collective, or all
+        matching one-element `all_reduce` before any other collective, or all
         ranks deadlock.
         """
         if len(unique_id_bytes) != NCCL_UNIQUE_ID_BYTES:
@@ -249,6 +251,8 @@ class PyNcclCommunicator:
 
     def destroy(self):
         if self.available and not self.disabled:
+            for stream_comm in self._stream_comms.values():
+                stream_comm.destroy()
             # ncclCommAbort can block until all CUDA graphs that
             # captured NCCL ops on this comm are destroyed — and
             # those graphs are released later in this same main-
@@ -269,6 +273,20 @@ class PyNcclCommunicator:
             abort_thread.join(timeout=5.0)
             self.available = False
             self.disabled = True
+
+    def bind_stream(self, stream: torch.cuda.Stream) -> None:
+        """Give the collectives issued on `stream` their own communicator, so
+        they never share one with collectives on a concurrent stream. Collective."""
+        if self.disabled or stream.cuda_stream in self._stream_comms:
+            return
+        assert self.group is not None
+        self._stream_comms[stream.cuda_stream] = PyNcclCommunicator(
+            self.group, self.device
+        )
+
+    def _comm_for(self, stream) -> ncclComm_t:
+        stream_comm = self._stream_comms.get(stream.cuda_stream)
+        return self.comm if stream_comm is None else stream_comm.comm
 
     def all_reduce(
         self,
@@ -298,7 +316,7 @@ class PyNcclCommunicator:
             in_tensor.numel(),
             ncclDataTypeEnum.from_torch(in_tensor.dtype),
             ncclRedOpTypeEnum.from_torch(op),
-            self.comm,
+            self._comm_for(stream),
             cudaStream_t(stream.cuda_stream),
         )
         return out_tensor
@@ -322,7 +340,7 @@ class PyNcclCommunicator:
             buffer_type(output_tensor.data_ptr()),
             input_tensor.numel(),
             ncclDataTypeEnum.from_torch(input_tensor.dtype),
-            self.comm,
+            self._comm_for(stream),
             cudaStream_t(stream.cuda_stream),
         )
 
@@ -355,7 +373,7 @@ class PyNcclCommunicator:
                 dst_slice.numel(),
                 ncclDataTypeEnum.from_torch(input_tensor.dtype),
                 root,
-                self.comm,
+                self._comm_for(stream),
                 cudaStream_t(stream.cuda_stream),
             )
             split_offset += split_size
@@ -385,7 +403,7 @@ class PyNcclCommunicator:
             output_tensor.numel(),
             ncclDataTypeEnum.from_torch(input_tensor.dtype),
             ncclRedOpTypeEnum.from_torch(op),
-            self.comm,
+            self._comm_for(stream),
             cudaStream_t(stream.cuda_stream),
         )
 
@@ -420,7 +438,7 @@ class PyNcclCommunicator:
                 ncclDataTypeEnum.from_torch(input_tensor.dtype),
                 ncclRedOpTypeEnum.from_torch(op),
                 root,
-                self.comm,
+                self._comm_for(stream),
                 cudaStream_t(stream.cuda_stream),
             )
             split_offset += split_size
@@ -449,7 +467,7 @@ class PyNcclCommunicator:
             ncclDataTypeEnum.from_torch(input_tensor.dtype),
             ncclRedOpTypeEnum.from_torch(op),
             root,
-            self.comm,
+            self._comm_for(stream),
             cudaStream_t(stream.cuda_stream),
         )
 
@@ -486,6 +504,60 @@ class PyNcclCommunicator:
             self.recv(output_tensor, root, stream)
         self.nccl.ncclGroupEnd()
 
+    def all_to_all_single(
+        self,
+        output_tensor: torch.Tensor,
+        input_tensor: torch.Tensor,
+        output_split_sizes: list[int],
+        input_split_sizes: list[int],
+        stream=None,
+    ):
+        """All-to-all along dim 0, like `torch.distributed.all_to_all_single`:
+        the next `input_split_sizes[i]` rows of `input_tensor` go to rank i, and
+        the next `output_split_sizes[i]` rows of `output_tensor` come from it.
+        CUDA graph capturable for split sizes fixed at capture.
+        """
+        if self.disabled:
+            return
+        assert input_tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {input_tensor.device}"
+        )
+        assert input_tensor.is_contiguous() and output_tensor.is_contiguous()
+        if stream is None:
+            stream = current_stream()
+        nccl_stream = cudaStream_t(stream.cuda_stream)
+        nccl_dtype = ncclDataTypeEnum.from_torch(input_tensor.dtype)
+        row_numel = input_tensor[0].numel() if input_tensor.dim() > 1 else 1
+        row_bytes = row_numel * input_tensor.element_size()
+        send_ptr = input_tensor.data_ptr()
+        recv_ptr = output_tensor.data_ptr()
+        self.nccl.ncclGroupStart()
+        for peer in range(self.world_size):
+            send_rows = input_split_sizes[peer]
+            recv_rows = output_split_sizes[peer]
+            if send_rows > 0:
+                self.nccl.ncclSend(
+                    buffer_type(send_ptr),
+                    send_rows * row_numel,
+                    nccl_dtype,
+                    peer,
+                    self._comm_for(stream),
+                    nccl_stream,
+                )
+            if recv_rows > 0:
+                self.nccl.ncclRecv(
+                    buffer_type(recv_ptr),
+                    recv_rows * row_numel,
+                    nccl_dtype,
+                    peer,
+                    self._comm_for(stream),
+                    nccl_stream,
+                )
+            send_ptr += send_rows * row_bytes
+            recv_ptr += recv_rows * row_bytes
+        self.nccl.ncclGroupEnd()
+
     def send(self, tensor: torch.Tensor, dst: int, stream=None):
         if self.disabled:
             return
@@ -509,7 +581,7 @@ class PyNcclCommunicator:
             tensor.numel(),
             nccl_dtype,
             dst,
-            self.comm,
+            self._comm_for(stream),
             cudaStream_t(stream.cuda_stream),
         )
 
@@ -536,7 +608,7 @@ class PyNcclCommunicator:
             tensor.numel(),
             nccl_dtype,
             src,
-            self.comm,
+            self._comm_for(stream),
             cudaStream_t(stream.cuda_stream),
         )
 
@@ -562,7 +634,7 @@ class PyNcclCommunicator:
             tensor.numel(),
             ncclDataTypeEnum.from_torch(tensor.dtype),
             src,
-            self.comm,
+            self._comm_for(stream),
             cudaStream_t(stream.cuda_stream),
         )
 
@@ -597,6 +669,8 @@ class PyNcclCommunicator:
                 "memory suspension."
             )
             return
+        for stream_comm in self._stream_comms.values():
+            stream_comm.suspend()
         self.nccl.ncclCommSuspend(self.comm, _NCCL_SUSPEND_MEM)
         self._suspended = True
 
@@ -604,6 +678,8 @@ class PyNcclCommunicator:
         """Restore a suspended comm (collective); no-op unless suspended."""
         if self.disabled or not self._suspended:
             return
+        for stream_comm in self._stream_comms.values():
+            stream_comm.resume()
         self.nccl.ncclCommResume(self.comm)
         self._suspended = False
 

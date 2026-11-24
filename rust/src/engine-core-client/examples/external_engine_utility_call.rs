@@ -60,7 +60,9 @@ async fn main() -> Result<()> {
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address: args.handshake_address.clone(),
             advertised_host: args.host.clone(),
+            engine_start_index: 0,
             engine_count: args.engine_count,
+            data_parallel_size: args.engine_count,
             ready_timeout: Duration::from_secs(args.ready_timeout_secs),
             local_input_address: None,
             local_output_address: None,
@@ -112,7 +114,7 @@ async fn main() -> Result<()> {
         println!("sleep_wake=skipped");
     } else {
         let sleep_level = SleepLevel::try_from(args.sleep_level).map_err(anyhow::Error::msg)?;
-        client.sleep(sleep_level, args.sleep_mode).await.with_context(|| {
+        client.sleep(sleep_level, args.sleep_mode, true).await.with_context(|| {
             format!(
                 "failed to call sleep utility with level={} mode={}",
                 args.sleep_level, args.sleep_mode

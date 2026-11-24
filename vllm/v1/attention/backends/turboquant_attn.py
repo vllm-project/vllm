@@ -346,7 +346,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             else head_size
         )
         self._val_data_bytes = math.ceil(head_size * cfg.effective_value_quant_bits / 8)
-        self._n_centroids = cfg.n_centroids if not cfg.key_fp8 else 1
 
         # Detect flash-attn version (FA2/3/4) for prefill paths.
         self.fa_version = get_flash_attn_version(head_size=head_size)

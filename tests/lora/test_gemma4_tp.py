@@ -24,8 +24,10 @@ TEST_IMAGES = [
 
 EXPECTED_OUTPUTS_VISION = [
     "A red stop sign stands prominently in the foreground.",
-    "A majestic skyscraper stands tall, partially obscured by a vibrant "
-    "canopy of cherry blossoms, against a clear blue sky.",
+    (
+        "A majestic skyscraper stands tall, partially obscured by a vibrant "
+        "canopy of cherry blossoms, against a clear blue sky."
+    ),
 ]
 
 
@@ -51,56 +53,54 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         )
 
 
-def test_gemma4_lora(gemma4_vision_lora_files):
-    llm = vllm.LLM(
+def test_gemma4_lora(vllm_runner, gemma4_vision_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
         enforce_eager=True,
         max_loras=4,
-        trust_remote_code=True,
         limit_mm_per_prompt={"image": 1},
         mm_processor_cache_gb=0,
         enable_tower_connector_lora=True,
-    )
-
-    generate_and_test(llm, gemma4_vision_lora_files, lora_id=1)
-    generate_and_test(llm, gemma4_vision_lora_files, lora_id=2)
+        gpu_memory_utilization=0.8,
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, gemma4_vision_lora_files, lora_id=1)
+        generate_and_test(runner.llm, gemma4_vision_lora_files, lora_id=2)
 
 
 @multi_gpu_test(num_gpus=2)
-def test_gemma4_lora_tp2(gemma4_vision_lora_files):
-    llm = vllm.LLM(
+def test_gemma4_lora_tp2(vllm_runner, gemma4_vision_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enforce_eager=True,
         enable_lora=True,
         max_loras=4,
-        trust_remote_code=True,
         tensor_parallel_size=2,
         limit_mm_per_prompt={"image": 1},
         mm_processor_cache_gb=0,
         enable_tower_connector_lora=True,
-    )
-
-    generate_and_test(llm, gemma4_vision_lora_files, lora_id=1)
-    generate_and_test(llm, gemma4_vision_lora_files, lora_id=2)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, gemma4_vision_lora_files, lora_id=1)
+        generate_and_test(runner.llm, gemma4_vision_lora_files, lora_id=2)
 
 
 @multi_gpu_test(num_gpus=4)
-def test_gemma4_lora_tp4(gemma4_vision_lora_files):
-    llm = vllm.LLM(
+def test_gemma4_lora_tp4(vllm_runner, gemma4_vision_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enforce_eager=True,
         enable_lora=True,
         max_loras=4,
-        trust_remote_code=True,
         tensor_parallel_size=4,
         limit_mm_per_prompt={"image": 1},
         mm_processor_cache_gb=0,
         enable_tower_connector_lora=True,
-    )
-
-    generate_and_test(llm, gemma4_vision_lora_files, lora_id=1)
-    generate_and_test(llm, gemma4_vision_lora_files, lora_id=2)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, gemma4_vision_lora_files, lora_id=1)
+        generate_and_test(runner.llm, gemma4_vision_lora_files, lora_id=2)
