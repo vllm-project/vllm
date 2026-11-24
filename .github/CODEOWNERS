@@ -49,7 +49,7 @@
 /vllm/entrypoints/openai/models @chaunceyjiang @DarkLight1337
 /vllm/entrypoints/openai/parser @aarnphm @chaunceyjiang @sfeng33
 /vllm/entrypoints/openai/responses @aarnphm @chaunceyjiang @sfeng33
-/vllm/entrypoints/pooling @noooop @DarkLight1337
+/vllm/entrypoints/pooling @noooop @DarkLight1337 @taneem-ibrahim
 /vllm/entrypoints/rl @aoshen02 @njhill
 /vllm/entrypoints/scale_out @aoshen02 @noooop @DarkLight1337
 /vllm/entrypoints/speech_to_text @NickLucche
@@ -68,7 +68,7 @@
 /tests/entrypoints/openai/models @chaunceyjiang @DarkLight1337
 /tests/entrypoints/openai/parser @aarnphm @chaunceyjiang @sfeng33
 /tests/entrypoints/openai/responses @aarnphm @chaunceyjiang @sfeng33
-/tests/entrypoints/pooling @noooop @DarkLight1337
+/tests/entrypoints/pooling @noooop @DarkLight1337 @taneem-ibrahim
 /tests/entrypoints/rl @aoshen02 @njhill
 /tests/entrypoints/scale_out @noooop @DarkLight1337
 /tests/entrypoints/speech_to_text @NickLucche
@@ -88,7 +88,7 @@
 
 # Input/Output Processing
 /vllm/sampling_params.py @njhill @NickLucche
-/vllm/pooling_params.py @noooop @DarkLight1337
+/vllm/pooling_params.py @noooop @DarkLight1337 @taneem-ibrahim
 /vllm/tokenizers @DarkLight1337 @njhill
 /vllm/renderers @DarkLight1337 @njhill
 /vllm/reasoning @aarnphm @chaunceyjiang @sfeng33 @bbrowning
@@ -126,6 +126,7 @@
 # Model runner V2
 /vllm/v1/worker/gpu @WoosukKwon @njhill @yewentao256
 /vllm/v1/worker/gpu/kv_connector.py @orozery
+/vllm/v1/worker/gpu/pool @WoosukKwon @njhill @yewentao256 @taneem-ibrahim
 /vllm/v1/worker/gpu/model_states/mamba_hybrid.py @WoosukKwon @njhill @yewentao256 @ZJY0516
 /vllm/v1/worker/gpu/spec_decode @WoosukKwon @njhill @yewentao256 @TheEpicDolphin
 
@@ -232,6 +233,7 @@ mkdocs.yaml @hmellor
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
 /vllm/**/*rocm* @tjtanaa @dllehr-amd @shen-shanshan
 /docker/Dockerfile.rocm* @tjtanaa @dllehr-amd @AndreasKaratzas
+/tools/vllm-rocm @tjtanaa @dllehr-amd @AndreasKaratzas
 /vllm/v1/attention/backends/rocm*.py @tjtanaa @dllehr-amd
 /vllm/v1/attention/backends/mla/rocm*.py @tjtanaa @dllehr-amd
 /vllm/v1/attention/ops/rocm*.py @tjtanaa @dllehr-amd
@@ -260,11 +262,14 @@ mkdocs.yaml @hmellor
 /requirements/kv_connectors.txt @NickLucche
 
 # Pooling models
-/examples/pooling @noooop
-/docs/models/pooling_models @noooop
-/tests/models/*/pooling* @noooop
-/vllm/config/pooler.py @noooop
-/vllm/model_executor/layers/pooler @noooop
+/examples/pooling @noooop @taneem-ibrahim
+/docs/models/pooling_models @noooop @taneem-ibrahim
+/tests/models/*/pooling* @noooop @taneem-ibrahim
+/tests/model_executor/layers/test_pooler_*.py @taneem-ibrahim
+/tests/test_pooling_params.py @taneem-ibrahim
+/vllm/config/pooler.py @noooop @taneem-ibrahim
+/vllm/model_executor/layers/pooler @noooop @taneem-ibrahim
+/vllm/v1/pool @taneem-ibrahim
 
 # Reinforcement learning
 /vllm/distributed/weight_transfer @aoshen02
