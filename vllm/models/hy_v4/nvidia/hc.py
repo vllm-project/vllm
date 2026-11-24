@@ -11,14 +11,15 @@ scatters the result back over the channels (`HYV4HCPostLayer`). The final
 NOTE: Each of the three steps has an optional single-kernel HPC replacement
 (`HpcIHCPre` / `HpcIHCPost` / `HpcIHCHead`). Pre and post fall back to
 in-tree Triton kernels on CUDA when HPC is unavailable, then to the eager path.
-TODO: port the cross-layer post+pre fusion (`HpcIHCPostPre`) as well; it
-requires restructuring the decoder-layer forward scheduling.
+`IHCBoundary` fuses a sub-block's post, the next pre and its RMSNorm into one
+CUDA op; `HYV4DecoderLayer` uses it across layers when it is available.
 """
 
 import torch
 from torch import nn
 from transformers import PreTrainedConfig
 
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.hpc import HpcIHCHead, HpcIHCPost, HpcIHCPre
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.models.hy_v4.nvidia.triton_ihc import (
@@ -388,3 +389,46 @@ class HYV4HCLayer(nn.Module):
             return output_with_bias + residual
         assert post_gates is not None
         return self.hc_post(output_with_bias, residual, post_gates)
+
+
+class IHCBoundary(nn.Module):
+    """Fused iHC boundary: optional post step, then pre and RMSNorm.
+
+    With only `residual` it replaces `pre` + `norm`; given the previous
+    sub-block's output `x` and its `post_gates`, it first applies that post
+    step. Owns no parameters: it reads the weights of the pre layer and RMSNorm
+    it replaces.
+    """
+
+    def __init__(self, pre_owner: HYV4HCPreLayer, norm_owner: nn.Module) -> None:
+        super().__init__()
+        # Keep the owners out of the module tree so their weights load once.
+        object.__setattr__(self, "_pre", pre_owner)
+        object.__setattr__(self, "_norm", norm_owner)
+
+    @staticmethod
+    def supported(config: PreTrainedConfig) -> bool:
+        return ops.hy_v4_ihc_boundary_supported(config.hc_mult, config.hidden_size)
+
+    def forward(
+        self,
+        residual: torch.Tensor,
+        x: torch.Tensor | None = None,
+        post_gates: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Returns `(residual, hidden_states, post_gates)`."""
+        pre = self._pre
+        residual, hidden, post_gates, _ = ops.hy_v4_ihc_boundary(
+            residual.contiguous(),
+            None if x is None else x.contiguous(),
+            post_gates,
+            pre.hc_fn.weight,
+            pre.hc_scale,
+            pre.hc_base,
+            self._norm.weight,
+            pre.magnitude,
+            pre.hc_eps,
+            pre.layernorm_epsilon,
+            self._norm.variance_epsilon,
+        )
+        return residual, hidden, post_gates
