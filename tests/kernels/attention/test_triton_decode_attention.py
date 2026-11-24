@@ -891,8 +891,9 @@ def test_decode_attention_gqa_group_above_tile(H_Q, H_KV):
     max_pages = cdiv(L, PAGE_SIZE)
 
     req_to_page = torch.randint(0, num_pages, (B, max_pages), device=DEVICE_TYPE)
-    req_to_token = req_to_page * PAGE_SIZE
-    req_to_token = req_to_token.unsqueeze(-1).expand(B, max_pages, PAGE_SIZE)
+    req_to_token = req_to_page.unsqueeze(-1) * PAGE_SIZE + torch.arange(
+        PAGE_SIZE, device=DEVICE_TYPE
+    )
     req_to_token = req_to_token.reshape(B, -1)[:, :L].contiguous()
 
     q = torch.randn(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
@@ -915,7 +916,7 @@ def test_decode_attention_gqa_group_above_tile(H_Q, H_KV):
         v_buffer,
         o,
         lse,
-        req_to_token,
+        req_to_page,
         b_seq_len,
         attn_logits,
         num_kv_splits,
