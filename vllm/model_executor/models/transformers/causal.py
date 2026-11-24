@@ -371,7 +371,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
                     with torch.device(load_device):
                         self.lm_head._register_bias()
                     self.lm_head.bias.weight_loader(self.lm_head.bias, weight)
-                    lm_head_bias.add(name)
+                    lm_head_bias.add("lm_head.bias")
                 else:
                     yield name, weight
 
