@@ -198,7 +198,7 @@ def _mamba_group(
     enable_kv_transfer: bool = True,
 ) -> KVCacheGroup:
     config = MambaManager.config(
-        mamba_cache_mode="align", num_speculative_blocks=num_speculative_blocks
+        enable_prefix_caching=True, num_speculative_blocks=num_speculative_blocks
     )
     layer = KVCacheLayerConfig(config, spec or _mamba_spec())
     return KVCacheGroup.from_layers(
@@ -217,7 +217,6 @@ def _gate_vllm_config(
     block_size: int = 16,
     num_lookahead_tokens: int = 0,
     num_speculative_tokens: int = 0,
-    mamba_cache_mode: str = "align",
     dcp_size: int = 1,
 ):
     return SimpleNamespace(
@@ -231,10 +230,7 @@ def _gate_vllm_config(
             kv_role="kv_consumer",
         ),
         speculative_config=speculative_config,
-        cache_config=SimpleNamespace(
-            block_size=block_size,
-            mamba_cache_mode=mamba_cache_mode,
-        ),
+        cache_config=SimpleNamespace(block_size=block_size),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         num_lookahead_tokens=num_lookahead_tokens,
         num_speculative_tokens=num_speculative_tokens,
@@ -353,7 +349,7 @@ def _glm5_next_mtp_kv_cache_config() -> KVCacheConfig:
     """GLM-5.3-Flash-shaped groups from the real grouping, with an MTP layer."""
     kpool, num_spec = 4, 1
     mamba = MambaManager.layer_config(
-        _mamba_spec(), mamba_cache_mode="align", num_speculative_blocks=num_spec
+        _mamba_spec(), enable_prefix_caching=True, num_speculative_blocks=num_spec
     )
     layers: dict[str, KVCacheLayerConfig] = {}
     for i in range(7):
@@ -766,6 +762,8 @@ def test_plain_write_notify_skips_blocks_of_the_local_prefix_hit(
 ):
     sched = _FakeScheduler(
         mode=MoRIIOMode.WRITE,
+        is_producer=False,
+        _write_recvs_in_flight={},
         _has_mamba=False,
         block_size=16,
         tp_size=1,
@@ -1224,7 +1222,6 @@ def _make_hybrid_read_consumer(block_size: int = 16):
         kv_connector="MoRIIOConnector",
         kv_connector_extra_config={"read_mode": "true", "host_ip": "127.0.0.1"},
     )
-    vllm_config.cache_config.mamba_cache_mode = "align"
     attn_spec = AttentionSpec(
         block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
     )

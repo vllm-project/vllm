@@ -238,6 +238,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
                 reduce_results=not self.use_hc_sequence_parallel,
+                overlap_ba_proj=True,
             )
         elif layer_type in _QSA_LAYER_TYPES:
             use_qsa = getattr(config, "indexer_n_heads", None) is not None
@@ -565,8 +566,9 @@ class Qwen4ExpModel(nn.Module):
                         forward_context.is_padding, hidden_states
                     )
                 hidden_states = sp_shard(hidden_states)
-            # Expand only the local token rows when SP is enabled.
-            hidden_states = hidden_states.repeat(1, self.config.hc_count)
+            # Expand only the local token rows when SP is enabled. cat hits a
+            # vectorized copy path; repeat lowers to a slow broadcast copy.
+            hidden_states = torch.cat([hidden_states] * self.config.hc_count, dim=-1)
         else:
             if intermediate_tensors is None:
                 raise ValueError("pipeline stage requires intermediate tensors")
@@ -1014,7 +1016,7 @@ class Qwen4ExpForConditionalGeneration(
             self.video_pruning_rate = 0.0
             self._tokenizer = None
             self.visual = StageMissingLayer("vision_tower")
-            self._tower_model_names = []
+            self._tower_model_names = ()
         else:
             self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
             self._init_video_pruning(multimodal_config)
