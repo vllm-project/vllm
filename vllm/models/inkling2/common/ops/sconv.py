@@ -3,7 +3,7 @@
 """Inkling2 short convolution over a paged sliding-window conv-state cache.
 
 The cache (`[num_blocks, H, N, D]`, see `InklingConvState` in
-`vllm/models/inkling2/nvidia/sconv.py`) stores each stream's conv input at every
+`vllm/models/inkling2/common/sconv.py`) stores each stream's conv input at every
 absolute position. Per token, one launch writes the current input to its slot
 and convolves the `W` taps ending at its position: taps inside this forward
 are read from `x`, earlier taps from the paged cache, and taps before
@@ -24,12 +24,12 @@ RMS-normalizes V per head and writes both to the paged KV cache.
 
 import torch
 
-from vllm.models.inkling2.nvidia.ops.norm import qr_clip_rel_tokens, rsqrt
+from vllm.models.inkling2.common.ops.norm import qr_clip_rel_tokens, rsqrt
 from vllm.triton_utils import tl, triton
 
-from . import use_pdl
 from .e4m3 import cast_store, e4m3_arg
 from .pdl import gdc_launch_dependents, gdc_wait
+from .platform import use_pdl
 
 
 @triton.jit

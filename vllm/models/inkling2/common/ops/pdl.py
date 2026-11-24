@@ -5,7 +5,7 @@
 
 from vllm.triton_utils import tl, triton
 
-from . import use_pdl
+from .platform import use_pdl
 
 _PDL = tl.constexpr(use_pdl())
 

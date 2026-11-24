@@ -9,12 +9,12 @@ from typing import Any
 import pytest
 import torch
 
-import vllm.models.inkling2.nvidia.ops.sconv as sconv_ops
+import vllm.models.inkling2.common.ops.sconv as sconv_ops
 from tests.models.inkling2.test_attention import shear_rel_logits
-from vllm.models.inkling2.nvidia.ops.attn_res import attn_res
-from vllm.models.inkling2.nvidia.ops.conv_mix import conv_mix
-from vllm.models.inkling2.nvidia.ops.norm import rms_norm
-from vllm.models.inkling2.nvidia.ops.sconv import (
+from vllm.models.inkling2.common.ops.attn_res import attn_res
+from vllm.models.inkling2.common.ops.conv_mix import conv_mix
+from vllm.models.inkling2.common.ops.norm import rms_norm
+from vllm.models.inkling2.common.ops.sconv import (
     attention_prologue,
     shift_rel_proj,
     short_conv,
@@ -40,7 +40,7 @@ def test_rms_norm_rounds_once_to_bf16(in_dtype, width):
 def test_e4m3_conversions_match_torch():
     """`to_e4m3` rounds to nearest even like torch and `from_e4m3` decodes
     every byte: in software below SM90."""
-    from vllm.models.inkling2.nvidia.ops.e4m3 import e4m3_arg, from_e4m3, to_e4m3
+    from vllm.models.inkling2.common.ops.e4m3 import e4m3_arg, from_e4m3, to_e4m3
     from vllm.triton_utils import tl, triton
 
     @triton.jit
@@ -88,7 +88,7 @@ def test_e4m3_conversions_match_torch():
 @pytest.mark.parametrize("broadcast", [False, True])
 def test_loop_norm_preserves_stacked_reference_and_graph(tokens, broadcast):
     """The fused upstream pair norm preserves direct-write normalization."""
-    from vllm.models.inkling2.nvidia.ops.loop import pair_rms_norm
+    from vllm.models.inkling2.common.ops.loop import pair_rms_norm
 
     torch.manual_seed(42)
     streams, width = 3, 2304
@@ -309,7 +309,7 @@ def test_loop_blend_matches_per_stream_controllers(tokens):
     """The stream-batched controllers (shared `dest` and norm weight, as a
     local layer's q/k/v) equal each stream's reference controller followed by
     its RMSNorm."""
-    from vllm.models.inkling2.nvidia.loop import (
+    from vllm.models.inkling2.common.loop import (
         Inkling2LoopDecoderLayer,
         Inkling2MessageController,
     )
@@ -721,7 +721,7 @@ def test_sm12x_ll_gemm_projection_and_graph(tokens, shape, dtype):
 
 def test_sm12x_linear_large_batch_fallback():
     """Rows beyond the GEMV tile must retain the complete cuBLAS output."""
-    from vllm.models.inkling2.nvidia.ops.linear import linear
+    from vllm.models.inkling2.common.ops.linear import linear
 
     torch.manual_seed(0)
     x = torch.randn(33, 256, device=DEVICE).bfloat16()

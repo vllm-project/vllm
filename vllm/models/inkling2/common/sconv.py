@@ -20,13 +20,19 @@ from vllm.models.inkling.nvidia.sconv_swa_attn import (
     InklingConvState,
     InklingSconvMetadata,
 )
+from vllm.models.inkling2.nvidia.ops.allreduce import (
+    Inkling2AllReduceWorkspace,
+    all_reduce_conv_mix,
+)
+from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import (
+    sm12x_bf16_ll_gemm,
+    use_sm12x_bf16_ll_gemm,
+)
+from vllm.models.inkling2.nvidia.ops.seq_parallel import SeqParallel
 
-from .ops.allreduce import Inkling2AllReduceWorkspace, all_reduce_conv_mix
 from .ops.conv_mix import conv_mix as fused_conv_mix
 from .ops.linear import linear_k_groups
-from .ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
 from .ops.sconv import short_conv
-from .ops.seq_parallel import SeqParallel
 
 K_STREAM, V_STREAM, ATTN_STREAM, MLP_STREAM = range(4)
 

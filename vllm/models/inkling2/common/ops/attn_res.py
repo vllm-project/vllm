@@ -12,11 +12,11 @@ returned as is (fp32) without a norm weight.
 
 import torch
 
-from vllm.models.inkling2.nvidia.ops.norm import rsqrt
+from vllm.models.inkling2.common.ops.norm import rsqrt
 from vllm.triton_utils import tl, tldevice, triton
 
-from . import use_pdl
 from .pdl import gdc_wait
+from .platform import use_pdl
 
 
 @triton.jit

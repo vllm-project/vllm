@@ -9,7 +9,7 @@ import torch
 
 from vllm.triton_utils import tl, tldevice, triton
 
-from . import use_native_e4m3
+from .platform import use_native_e4m3
 
 _NATIVE_E4M3 = tl.constexpr(use_native_e4m3())
 

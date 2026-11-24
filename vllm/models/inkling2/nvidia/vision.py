@@ -17,8 +17,8 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.models.inkling2.common.ops.linear import linear_k_groups
 from vllm.models.inkling2.nvidia.ops import use_sm100_kernels
-from vllm.models.inkling2.nvidia.ops.linear import linear_k_groups
 from vllm.models.inkling2.nvidia.ops.vision import (
     apply_rotary_qk_,
     embed_tokens,

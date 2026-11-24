@@ -38,8 +38,8 @@ from vllm.lora.layers import (
 )
 from vllm.lora.punica_wrapper import PunicaWrapperBase
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+from vllm.models.inkling2.common.moe import Inkling2MoE
 
-from .moe import Inkling2MoE
 from .ops.grouped_gemm import grouped_gemm
 from .ops.seq_parallel import SeqParallel
 

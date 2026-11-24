@@ -95,8 +95,8 @@ def _ref_attention(
 
 @requires_sm90
 def test_e4m3_kv_load_preserves_all_byte_values_and_masks():
-    from vllm.models.inkling2.nvidia.ops.attention_sm90 import _load_fp8_kv
-    from vllm.models.inkling2.nvidia.ops.e4m3 import e4m3_arg
+    from vllm.models.inkling2.common.ops.attention_sm90 import _load_fp8_kv
+    from vllm.models.inkling2.common.ops.e4m3 import e4m3_arg
     from vllm.triton_utils import tl, triton
 
     @triton.jit
@@ -125,7 +125,7 @@ def test_portable_attention_dequantizes_kv_before_mma(
     cache_dtype, query_len, splits, window
 ):
     """Stored FP16/FP8 values match explicit BF16 dequantization in all phases."""
-    from vllm.models.inkling2.nvidia.ops.attention_sm90 import (
+    from vllm.models.inkling2.common.ops.attention_sm90 import (
         MODE_OUT_LSE,
         MODE_PARTIAL,
         rel_attention,
@@ -202,13 +202,13 @@ def test_inkling2_rel_attention(
     num_splits,
     use_scheduler,
 ):
+    from vllm.models.inkling2.common.ops.attention_sm90 import (
+        MODE_OUT_LSE,
+        rel_attention,
+    )
     from vllm.models.inkling2.nvidia.ops import use_sm100_kernels
     from vllm.models.inkling2.nvidia.ops.attention import (
         _INKLING2_FA4_REL_ATTENTION_KERNEL,
-    )
-    from vllm.models.inkling2.nvidia.ops.attention_sm90 import (
-        MODE_OUT_LSE,
-        rel_attention,
     )
 
     sm100 = use_sm100_kernels()
@@ -322,7 +322,7 @@ def test_inkling2_rel_decode_attention(
 ):
     """Decode and verify on the Gluon kernel match the reference, gate and
     sink included, with and without split-KV."""
-    from vllm.models.inkling2.nvidia.ops.attention import rel_decode_attention
+    from vllm.models.inkling2.common.ops.attention import rel_decode_attention
 
     torch.manual_seed(0)
     device = "cuda"
@@ -395,8 +395,8 @@ def test_inkling2_decode_attention_after_prologue(is_local, num_splits):
     """Back to back under PDL (CUDA graph replay), the decode kernel loads
     cached keys while the prologue still writes the new ones: it must match a
     run with the two launches serialized."""
-    from vllm.models.inkling2.nvidia.ops.attention import rel_decode_attention
-    from vllm.models.inkling2.nvidia.ops.sconv import attention_prologue, shift_rel_proj
+    from vllm.models.inkling2.common.ops.attention import rel_decode_attention
+    from vllm.models.inkling2.common.ops.sconv import attention_prologue, shift_rel_proj
 
     torch.manual_seed(0)
     device = "cuda"
@@ -507,7 +507,7 @@ def test_inkling2_decode_attention_after_prologue(is_local, num_splits):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @pytest.mark.parametrize("num_tokens", [1, 300])
 def test_gate_sink(num_tokens):
-    from vllm.models.inkling2.nvidia.ops.attention import gate_sink
+    from vllm.models.inkling2.common.ops.attention import gate_sink
 
     torch.manual_seed(0)
     num_heads, head_dim = 12, 128

@@ -23,17 +23,21 @@ from vllm.distributed import (
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.inkling2.nvidia.ops.activation import swiglu_quantize
+from vllm.models.inkling2.nvidia.ops.block_scales import (
+    shuffle_rows,
+    swizzle_block_scales,
+)
+from vllm.models.inkling2.nvidia.ops.moe import NUM_COUNTERS, combine_push, route
+from vllm.models.inkling2.nvidia.ops.moe_humming import HummingNVFP4Experts
+from vllm.models.inkling2.nvidia.ops.moe_sm90 import HummingExperts
+from vllm.models.inkling2.nvidia.ops.moe_sm120 import bmm as bmm_sm120
+from vllm.models.inkling2.nvidia.ops.seq_parallel import SeqParallel
+from vllm.models.inkling2.nvidia.ops.trtllm_bmm import bmm, expert_plan, load_kernels
 from vllm.platforms import current_platform
 
-from .ops import use_sm100_kernels
-from .ops.activation import swiglu_quantize
-from .ops.block_scales import shuffle_rows, swizzle_block_scales
-from .ops.moe import NUM_COUNTERS, combine, combine_push, route
-from .ops.moe_humming import HummingNVFP4Experts
-from .ops.moe_sm90 import HummingExperts, select_experts
-from .ops.moe_sm120 import bmm as bmm_sm120
-from .ops.seq_parallel import SeqParallel
-from .ops.trtllm_bmm import bmm, expert_plan, load_kernels
+from .ops.moe import combine, select_experts
+from .ops.platform import use_sm100_kernels
 
 QuantFormat = Literal["nvfp4", "mxfp8"]
 

@@ -28,6 +28,11 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.models.inkling2.common.ops.attention import (
+    block_decode_attention,
+    plan_decode_attention,
+)
+from vllm.models.inkling2.common.ops.linear import linear
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
@@ -38,7 +43,6 @@ from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax
 
 from ..configs import Inkling2DSparkConfig
 from ..speculator_config import Inkling2DSparkSpeculatorConfig
-from .ops.attention import block_decode_attention, plan_decode_attention
 from .ops.dspark import (
     add_softcap,
     markov_gate,
@@ -47,7 +51,6 @@ from .ops.dspark import (
     rope_,
     silu_and_mul,
 )
-from .ops.linear import linear
 
 
 class _RMSNorm(nn.Module):

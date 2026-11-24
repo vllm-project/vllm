@@ -43,6 +43,19 @@ from vllm.model_executor.models.utils import (
     _merge_multimodal_embeddings,
 )
 from vllm.models.inkling.nvidia.sconv_swa_attn import InklingConvState
+from vllm.models.inkling2.nvidia.lora import (
+    LORA_NAME_PREFIXES,
+    LORA_NAME_SUBSTRINGS,
+    PACKED_MODULES_MAPPING,
+)
+from vllm.models.inkling2.nvidia.lora import register as register_lora
+from vllm.models.inkling2.nvidia.ops.allreduce import Inkling2AllReduceWorkspace
+from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import (
+    sm12x_bf16_ll_gemm,
+    use_sm12x_bf16_ll_gemm,
+)
+from vllm.models.inkling2.nvidia.ops.seq_parallel import SeqParallel
+from vllm.models.inkling2.nvidia.vision import Inkling2VisionEncoder, VisionMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.encoder_cudagraph_defs import (
@@ -61,21 +74,11 @@ from ..processing import (
 )
 from ..quant_config import Inkling2QuantConfig
 from .attention import Inkling2Attention
-from .lora import (
-    LORA_NAME_PREFIXES,
-    LORA_NAME_SUBSTRINGS,
-    PACKED_MODULES_MAPPING,
-)
-from .lora import register as register_lora
 from .moe import Inkling2MoE, QuantFormat
-from .ops.allreduce import Inkling2AllReduceWorkspace
 from .ops.attention import compute_log_scaling_tau
 from .ops.attn_res import attn_res
-from .ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
 from .ops.norm import rms_norm
-from .ops.seq_parallel import SeqParallel
 from .sconv import ATTN_STREAM, MLP_STREAM, Inkling2ShortConv, conv_metadata
-from .vision import Inkling2VisionEncoder, VisionMetadata
 
 
 class Inkling2LogitsProcessor(LogitsProcessor):

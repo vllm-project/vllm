@@ -19,10 +19,12 @@ if not (
 ):
     pytest.skip("Inkling2 requires Ampere or newer", allow_module_level=True)
 
+from vllm.models.inkling2.common.ops.attention import (
+    block_decode_attention,  # noqa: E402
+)
 from vllm.models.inkling2.nvidia.dspark import (  # noqa: E402
     Inkling2MarkovHead,
 )
-from vllm.models.inkling2.nvidia.ops.attention import block_decode_attention  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.dspark import (  # noqa: E402
     add_softcap,
     markov_gate,

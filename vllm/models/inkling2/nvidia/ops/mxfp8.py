@@ -6,12 +6,12 @@ import math
 
 import torch
 
+from vllm.models.inkling2.common.ops.e4m3 import e4m3_arg, to_e4m3
+from vllm.models.inkling2.common.ops.pdl import gdc_wait
 from vllm.triton_utils import tl, tldevice, triton
 
 from . import use_pdl
 from .block_scales import _scale_offsets
-from .e4m3 import e4m3_arg, to_e4m3
-from .pdl import gdc_wait
 
 
 @triton.jit

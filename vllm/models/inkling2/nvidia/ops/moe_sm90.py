@@ -17,144 +17,13 @@ import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
-from vllm.triton_utils import tl, triton
-
-from .activation import _situ
-from .linear import k_group_partials
-from .moe import _load_bias, _local_experts, _select_experts
+from vllm.models.inkling2.common.ops.moe import swiglu
 
 if TYPE_CHECKING:
     from vllm.utils.humming import HummingInputSchema
 
 # Row block size when no Humming tuning range covers the row count.
 _DEFAULT_BLOCK_M = 64
-
-
-@triton.jit
-def _select_kernel(
-    Partials,
-    Bias,
-    ExpertBounds,
-    IsPadding,
-    Ids,
-    Weights,
-    Src2Dst,
-    T,
-    route_scale,
-    E: tl.constexpr,
-    E_POW2: tl.constexpr,
-    GROUPS: tl.constexpr,
-    TOPK: tl.constexpr,
-    SORT: tl.constexpr,
-):
-    """Local expert ids (-1: not local), routing weights and identity
-    `src2dst` of the flat rows of one token."""
-    token = tl.program_id(0) + tl.arange(0, 1)
-    bias = _load_bias(Bias, E, E_POW2)
-    ids, weights = _select_experts(
-        Partials, bias, token, T, route_scale, E, E_POW2, GROUPS, TOPK, SORT
-    )
-    padding = None
-    if IsPadding is not None:
-        padding = tl.load(IsPadding + token)
-    local = _local_experts(
-        ids, tl.load(ExpertBounds), tl.load(ExpertBounds + 1), padding
-    )
-    rows = token[:, None] * TOPK + tl.arange(0, TOPK)[None, :]
-    tl.store(Ids + rows, local)
-    tl.store(Weights + rows, weights)
-    tl.store(Src2Dst + rows, tl.where(local >= 0, rows, -1))
-
-
-def select_experts(
-    x: torch.Tensor,
-    gate_weight: torch.Tensor,
-    bias: torch.Tensor,
-    topk: int,
-    route_scale: float,
-    expert_bounds: torch.Tensor,
-    is_padding: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """The router and top-k of `ops.moe.route`, without its layout.
-
-    Returns the local expert id of each token's slots `[T, topk]` (-1: not
-    one of the local experts `expert_bounds`, or a padding token), their
-    routing weights `[T * topk]` and the identity `src2dst` `[T * topk]`
-    of the local rows (-1 elsewhere).
-    """
-    tokens = x.shape[0]
-    experts = gate_weight.shape[0]
-    partials = k_group_partials(x, gate_weight)
-    ids = torch.empty((tokens, topk), dtype=torch.int32, device=x.device)
-    weights = torch.empty(tokens * topk, dtype=torch.float32, device=x.device)
-    src2dst = torch.empty(tokens * topk, dtype=torch.int32, device=x.device)
-    _select_kernel[(tokens,)](
-        partials,
-        bias,
-        expert_bounds,
-        is_padding,
-        ids,
-        weights,
-        src2dst,
-        tokens,
-        route_scale,
-        E=experts,
-        E_POW2=triton.next_power_of_2(experts),
-        GROUPS=partials.shape[0],
-        TOPK=topk,
-        SORT=tokens <= 128,
-        num_warps=4 if tokens <= 256 else 1,
-    )
-    return ids, weights, src2dst
-
-
-@triton.jit
-def _swiglu_kernel(
-    GateUp,
-    Weights,
-    Src2Dst,
-    Out,
-    N: tl.constexpr,
-    BLOCK: tl.constexpr,
-    GATE_CAP: tl.constexpr,
-    UP_CAP: tl.constexpr,
-):
-    """bf16 softcapped SwiGLU of a local row times its routing weight."""
-    row = tl.program_id(0)
-    if tl.load(Src2Dst + row) < 0:
-        return
-    start = tl.program_id(1) * BLOCK
-    gamma = tl.load(Weights + row)
-    values = _situ(GateUp, row, start, gamma, N, BLOCK, GATE_CAP, UP_CAP)
-    tl.store(Out + row * N + start + tl.arange(0, BLOCK), values.to(tl.bfloat16))
-
-
-def swiglu(
-    gate_up: torch.Tensor,
-    weights: torch.Tensor,
-    src2dst: torch.Tensor,
-    gate_cap: float,
-    up_cap: float,
-) -> torch.Tensor:
-    """`activation.swiglu_quantize`'s SiTU of the interleaved (gate, up)
-    columns times the routing weights, in bf16, for the local rows (the
-    others are left unset)."""
-    rows, n = gate_up.shape[0], gate_up.shape[1] // 2
-    block = 256 if n % 256 == 0 else 128
-    assert n % block == 0
-    out = torch.empty((rows, n), dtype=torch.bfloat16, device=gate_up.device)
-    _swiglu_kernel[(rows, n // block)](
-        gate_up,
-        weights,
-        src2dst,
-        out,
-        N=n,
-        BLOCK=block,
-        GATE_CAP=gate_cap,
-        UP_CAP=up_cap,
-        num_warps=2,
-    )
-    return out
 
 
 class HummingExperts:
@@ -314,3 +183,18 @@ class HummingExperts:
         return self._gemm(
             "w2", activated, rows, alignments[block_m["w2"]], 1, valid_rows
         )
+
+
+def __getattr__(name: str):
+    """Names that moved to `common/ops/` stay importable from this module."""
+    from importlib import import_module
+
+    for module in (
+        "moe",
+        "activation",
+        "linear",
+    ):
+        moved = import_module(f"vllm.models.inkling2.common.ops.{module}")
+        if hasattr(moved, name):
+            return getattr(moved, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

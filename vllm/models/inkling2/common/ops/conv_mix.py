@@ -5,10 +5,11 @@ sublayer, for large batches of an already reduced input (CUDA)."""
 
 import torch
 
-from . import use_native_conv_mix
+from vllm.models.inkling2.nvidia.ops.seq_parallel import SeqParallel
+
 from .attn_res import attn_res
+from .platform import use_native_conv_mix
 from .sconv import short_conv
-from .seq_parallel import SeqParallel
 
 
 def conv_mix(

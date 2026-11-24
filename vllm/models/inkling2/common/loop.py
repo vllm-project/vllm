@@ -18,6 +18,10 @@ import torch
 from torch import nn
 
 from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import (
+    sm12x_bf16_ll_gemm,
+    use_sm12x_bf16_ll_gemm,
+)
 
 from ..configs import Inkling2ModelConfig
 from ..quant_config import Inkling2QuantConfig
@@ -28,7 +32,6 @@ from .model import (
 )
 from .ops.attn_res import attn_res
 from .ops.linear import linear_k_groups
-from .ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
 from .ops.loop import blend_rms_norm, pair_rms_norm
 from .sconv import conv_metadata
 

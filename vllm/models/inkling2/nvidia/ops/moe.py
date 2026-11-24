@@ -7,146 +7,32 @@ top-k combine.
 
 import torch
 
+from vllm.models.inkling2.common.ops.e4m3 import e4m3_arg
+from vllm.models.inkling2.common.ops.linear import (
+    _k_group_tile,
+    _prefetch_k_group_tile,
+    k_group_partials,
+)
+from vllm.models.inkling2.common.ops.moe import (
+    LAUNCH_DEPENDENTS_MAX_TOKENS,
+    _combine,
+    _key_values,
+    _load_bias,
+    _local_experts,
+    _log_sigmoid,
+    _routing_weights,
+    _select_experts,
+    _top_keys,
+)
+from vllm.models.inkling2.common.ops.pdl import gdc_launch_dependents, gdc_wait
 from vllm.triton_utils import tl, tldevice, triton
 
 from . import use_pdl
 from .block_scales import _scale_offsets
-from .e4m3 import e4m3_arg
-from .linear import _k_group_tile, _prefetch_k_group_tile, k_group_partials
 from .mxfp8 import _mxfp8_block, _store_mxfp8_block
 from .nvfp4 import FP32_MAX, _quantize_block, _quantize_columns, _store_block
-from .pdl import gdc_launch_dependents, gdc_wait
 from .seq_parallel import HALO_ROWS, SeqParallel
 from .trtllm_bmm import ExpertPlan, operand
-
-
-@triton.jit
-def _sum8(x):
-    # ((x0 + x2) + (x1 + x3)) + ((x4 + x6) + (x5 + x7)) of each row of [R, 8]:
-    # the summation order of the reference renormalization kernel, so routing
-    # weights match bitwise.
-    low, high = tl.split(tl.permute(tl.reshape(x, (x.shape[0], 2, 2, 2)), (0, 1, 3, 2)))
-    low, high = tl.split(low + high)
-    low, high = tl.split(low + high)
-    return low + high
-
-
-@triton.jit
-def _selection_keys(logits, bias, experts, E: tl.constexpr):
-    """Sort keys of the experts `experts` (padding: 0): order-preserving
-    bits of sigmoid(logit) + bias in the high word and the reversed expert
-    index in the low bits, so ties prefer the lower expert index."""
-    sigmoid = tl.div_rn(1.0, 1.0 + tldevice.exp(-logits))
-    selection = sigmoid + bias
-    bits = selection.to(tl.uint32, bitcast=True)
-    bits = bits ^ tl.where((bits & 0x80000000) != 0, 0xFFFFFFFF, 0x80000000)
-    keys = (bits.to(tl.uint64) << 16) | (E - experts).to(tl.uint64)
-    return tl.where(experts < E, keys, 0)
-
-
-@triton.jit
-def _key_values(values, keys, top):
-    """`values` [R, C] where `keys` [R, C] equals each of `top` [R, K]."""
-    hit = keys[:, None, :] == top[:, :, None]
-    return tl.max(tl.where(hit, values[:, None, :], float("-inf")), 2)
-
-
-@triton.jit
-def _log_sigmoid(logits):
-    return tl.minimum(logits, 0.0) - tldevice.log1p(tldevice.exp(-tl.abs(logits)))
-
-
-@triton.jit
-def _routing_weights(log_probs, route_scale, TOPK: tl.constexpr):
-    """Renormalized sigmoid probabilities [R, TOPK] of the selected experts
-    from their log-sigmoids."""
-    max_log_probs = tl.max(log_probs, 1)
-    shifted = tldevice.exp(log_probs - max_log_probs[:, None])
-    total = _sum8(shifted) if TOPK == 8 else tl.sum(shifted, 1)
-    logsumexp = max_log_probs + tldevice.log(total)
-    return tldevice.exp(log_probs - logsumexp[:, None]) * route_scale
-
-
-@triton.jit
-def _group_sum(Partials, rows, cols, mask, T, E: tl.constexpr, GROUPS: tl.constexpr):
-    """In-order sum of the K-group partials `[GROUPS, T, E]` at `(rows,
-    cols)`."""
-    total = tl.load(Partials + rows * E + cols, mask, other=0.0, cache_modifier=".cg")
-    for group in tl.static_range(1, GROUPS):
-        total = total + tl.load(
-            Partials + (group * T + rows) * E + cols,
-            mask,
-            other=0.0,
-            cache_modifier=".cg",
-        )
-    return total
-
-
-@triton.jit
-def _load_bias(Bias, E: tl.constexpr, E_POW2: tl.constexpr):
-    """The selection bias [1, E_POW2] (padding: 0) for `_select_experts`; a
-    weight, so it may load before `gdc_wait`."""
-    offs = tl.arange(0, E_POW2)[None, :]
-    return tl.load(Bias + offs, offs < E, other=0.0)
-
-
-@triton.jit
-def _top_keys(
-    Partials,
-    bias,
-    tokens,
-    T,
-    E: tl.constexpr,
-    E_POW2: tl.constexpr,
-    GROUPS: tl.constexpr,
-    TOPK: tl.constexpr,
-):
-    """The logits and `_selection_keys` [R, E_POW2] of tokens `tokens` [R]
-    and their top-k keys [R, TOPK] (`_select_experts`)."""
-    offs = tl.arange(0, E_POW2)[None, :]
-    logits = _group_sum(Partials, tokens[:, None], offs, offs < E, T, E, GROUPS)
-    keys = _selection_keys(logits, bias, offs, E)
-    return logits, keys, tl.topk(keys, TOPK)
-
-
-@triton.jit
-def _select_experts(
-    Partials,
-    bias,
-    tokens,
-    T,
-    route_scale,
-    E: tl.constexpr,
-    E_POW2: tl.constexpr,
-    GROUPS: tl.constexpr,
-    TOPK: tl.constexpr,
-    SORT: tl.constexpr,
-):
-    """Top-k ids and routing weights [R, TOPK] of tokens `tokens` [R] from
-    the K-group logit partials `[GROUPS, T, E]` and the `_load_bias`
-    `bias`, by `tl.topk` (`SORT`) or k max passes."""
-    rows = tokens[:, None]
-    offs = tl.arange(0, E_POW2)[None, :]
-    if SORT:
-        logits, keys, top = _top_keys(
-            Partials, bias, tokens, T, E, E_POW2, GROUPS, TOPK
-        )
-        ids = E - (top & 0xFFFF).to(tl.int32)
-        selected = _key_values(logits, keys, top)
-    else:
-        logits = _group_sum(Partials, rows, offs, offs < E, T, E, GROUPS)
-        keys = _selection_keys(logits, bias, offs, E)
-        # Fewer instructions than the bitonic top-k: better for large batches.
-        slots = tl.arange(0, TOPK)[None, :]
-        ids = tl.zeros((tokens.shape[0], TOPK), tl.int32)
-        for k in tl.static_range(TOPK):
-            best = tl.max(keys, 1)[:, None]
-            ids = tl.where(slots == k, E - (best & 0xFFFF).to(tl.int32), ids)
-            keys = tl.where(keys == best, 0, keys)
-        # The selected logits, summed again in the same order.
-        selected = _group_sum(Partials, rows, ids, ids >= 0, T, E, GROUPS)
-    return ids, _routing_weights(_log_sigmoid(selected), route_scale, TOPK)
-
 
 # Completion counters of the routing kernels, one 128-byte line apart.
 _ROUTERS_DONE = tl.constexpr(0)
@@ -158,17 +44,6 @@ NUM_COUNTERS = 64
 def _spin_until(Counter, value):
     while tl.atomic_add(Counter, 0, sem="acquire") < value:
         pass
-
-
-@triton.jit
-def _local_experts(ids, lo, hi, padding):
-    """Local index of the experts `ids` [R, TOPK] among the local experts
-    `[lo, hi)` (-1: not local, or the token is `padding`; None: none
-    is)."""
-    local = tl.where((ids >= lo) & (ids < hi), ids - lo, -1)
-    if padding is not None:
-        local = tl.where(padding[:, None], -1, local)
-    return local
 
 
 @triton.jit
@@ -569,10 +444,6 @@ def _store_x(
 FUSED_ROUTING_MAX_TOKENS = 16
 # From this many tokens, NVFP4 rows are quantized by single-warp programs.
 NVFP4_SCATTER_MIN_TOKENS = 2048
-# Up to this many tokens, kernels let the next kernel launch (and wait) as soon
-# as they start, which hides its launch; with more, its waiting programs would
-# hold back theirs.
-LAUNCH_DEPENDENTS_MAX_TOKENS = 256
 
 
 @triton.jit
@@ -1057,57 +928,6 @@ def route(
     return outputs, quantized
 
 
-@triton.jit
-def _combine_kernel(
-    Down,
-    Src2Dst,
-    Out,
-    SlotBases,
-    tokens,
-    shard,
-    H: tl.constexpr,
-    TOPK: tl.constexpr,
-    BLOCK: tl.constexpr,
-    LAUNCH_DEPENDENTS: tl.constexpr,
-    PUSH: tl.constexpr,
-    HALO_ROWS: tl.constexpr,
-):
-    gdc_wait()
-    if LAUNCH_DEPENDENTS:
-        gdc_launch_dependents()
-    token = tl.program_id(0).to(tl.int64)
-    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    acc = tl.zeros((BLOCK,), tl.float32)
-    for slot in tl.static_range(TOPK):
-        row = tl.load(Src2Dst + token * TOPK + slot).to(tl.int64)
-        acc += tl.load(Down + row * H + cols, row >= 0, other=0).to(tl.float32)
-    if PUSH:
-        # Into the owner's slot of this rank, after its halo rows; the last
-        # halo rows of a shard also into the next owner's.
-        owner = token // shard
-        local = token - owner * shard
-        dst = tl.load(SlotBases + owner).to(tl.pointer_type(tl.bfloat16))
-        tl.store(dst + (local + HALO_ROWS) * H + cols, acc.to(tl.bfloat16))
-        if local >= shard - HALO_ROWS and (owner + 1) * shard < tokens:
-            dst = tl.load(SlotBases + owner + 1).to(tl.pointer_type(tl.bfloat16))
-            tl.store(dst + (local - shard + HALO_ROWS) * H + cols, acc.to(tl.bfloat16))
-    else:
-        tl.store(Out + token * H + cols, acc)
-
-
-def combine(
-    down: torch.Tensor,
-    src2dst: torch.Tensor,
-    topk: int,
-    out_dtype: torch.dtype,
-) -> torch.Tensor:
-    """Sum each token's rows of `down` (rows -1 count 0)."""
-    tokens = src2dst.numel() // topk
-    out = torch.empty((tokens, down.shape[1]), dtype=out_dtype, device=down.device)
-    _combine(down, src2dst, topk, out, None)
-    return out
-
-
 def combine_push(
     down: torch.Tensor, src2dst: torch.Tensor, topk: int, sp: SeqParallel
 ) -> None:
@@ -1120,30 +940,12 @@ def combine_push(
     _combine(down, src2dst, topk, None, sp)
 
 
-def _combine(
-    down: torch.Tensor,
-    src2dst: torch.Tensor,
-    topk: int,
-    out: torch.Tensor | None,
-    sp: SeqParallel | None,
-) -> None:
-    hidden = down.shape[1]
-    tokens = src2dst.numel() // topk
-    block = 512 if hidden % 512 == 0 else 256
-    assert hidden % block == 0
-    _combine_kernel[(tokens, hidden // block)](
-        down,
-        src2dst,
-        out,
-        None if sp is None else sp.slot_bases,
-        tokens,
-        1 if sp is None else sp.shard(tokens)[2],
-        hidden,
-        topk,
-        block,
-        tokens <= LAUNCH_DEPENDENTS_MAX_TOKENS,
-        sp is not None,
-        HALO_ROWS,
-        num_warps=2,
-        launch_pdl=use_pdl(),
-    )
+def __getattr__(name: str):
+    """Names that moved to `common/ops/` stay importable from this module."""
+    from importlib import import_module
+
+    for module in ("moe",):
+        moved = import_module(f"vllm.models.inkling2.common.ops.{module}")
+        if hasattr(moved, name):
+            return getattr(moved, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

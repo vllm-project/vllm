@@ -11,15 +11,15 @@ import math
 
 import torch
 
+from vllm.models.inkling2.common.ops.activation import FP32_MAX
+from vllm.models.inkling2.common.ops.e4m3 import e4m3_arg, from_e4m3, to_e4m3
+from vllm.models.inkling2.common.ops.pdl import gdc_wait
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from . import use_pdl, use_sm100_kernels
 from .block_scales import _scale_offsets
-from .e4m3 import e4m3_arg, from_e4m3, to_e4m3
-from .pdl import gdc_wait
 
-FP32_MAX = tl.constexpr(3.4028234663852886e38)
 # Both Blackwell families have native e2m1 conversions; Hopper uses software.
 _HW_E2M1 = tl.constexpr(
     use_sm100_kernels() or current_platform.is_device_capability_family(120)

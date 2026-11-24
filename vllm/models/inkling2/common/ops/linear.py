@@ -5,13 +5,16 @@ reference `linear` with fp32 accumulation in ordered 1024-wide K groups."""
 
 import torch
 
+from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import (
+    sm12x_bf16_ll_gemm,
+    use_sm12x_bf16_ll_gemm,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import is_flashinfer_autotuning
 
-from . import use_pdl, use_sm100_kernels
-from .ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
 from .pdl import gdc_launch_dependents, gdc_wait
+from .platform import use_pdl, use_sm100_kernels
 
 # Up to this many rows, FlashInfer's CuTe DSL low-M kernels run near HBM
 # bandwidth (cuBLAS is up to 2x slower); larger batches use cuBLAS.

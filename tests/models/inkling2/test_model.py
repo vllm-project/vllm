@@ -325,9 +325,9 @@ def _record_moe_routing(model: torch.nn.Module) -> None:
     loop message controllers (dummy ones leave every pass alike), then
     record, in call order, the torch reference routing of every MoE call's
     input (sorted expert ids per token)."""
-    from vllm.models.inkling2.nvidia.loop import Inkling2LoopDecoderLayer
-    from vllm.models.inkling2.nvidia.moe import Inkling2MoE
-    from vllm.models.inkling2.nvidia.ops.linear import linear_k_groups
+    from vllm.models.inkling2.common.loop import Inkling2LoopDecoderLayer
+    from vllm.models.inkling2.common.moe import Inkling2MoE
+    from vllm.models.inkling2.common.ops.linear import linear_k_groups
     from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
     calls: list[torch.Tensor] = []
@@ -508,7 +508,7 @@ def test_sm12x_logits_preserve_softcap_and_vocabulary(tmp_path, dist_init, token
     from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-    from vllm.models.inkling2.nvidia.model import Inkling2LogitsProcessor
+    from vllm.models.inkling2.common.model import Inkling2LogitsProcessor
 
     (tmp_path / "config.json").write_text(json.dumps(TINY_CONFIG))
     config = VllmConfig(

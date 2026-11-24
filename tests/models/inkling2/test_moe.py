@@ -17,25 +17,23 @@ if not (
 ):
     pytest.skip("Inkling2 MoE requires Ampere or newer", allow_module_level=True)
 
-import vllm.models.inkling2.nvidia.moe as moe_module  # noqa: E402
+import vllm.models.inkling2.common.moe as moe_module  # noqa: E402
 import vllm.models.inkling2.nvidia.ops.moe_sm120 as moe_sm120  # noqa: E402
 import vllm.models.inkling2.nvidia.ops.trtllm_bmm as trtllm_bmm  # noqa: E402
-from vllm.models.inkling2.nvidia.moe import Inkling2MoE  # noqa: E402
-from vllm.models.inkling2.nvidia.ops import use_sm100_kernels  # noqa: E402
-from vllm.models.inkling2.nvidia.ops.activation import (  # noqa: E402
+from vllm.models.inkling2.common.moe import Inkling2MoE  # noqa: E402
+from vllm.models.inkling2.common.ops.activation import (  # noqa: E402
     _div_rn,
     _sigmoid_approx,
-    swiglu_quantize,
 )
+from vllm.models.inkling2.common.ops.linear import linear_k_groups  # noqa: E402
+from vllm.models.inkling2.common.ops.moe import select_experts  # noqa: E402
+from vllm.models.inkling2.nvidia.ops import use_sm100_kernels  # noqa: E402
+from vllm.models.inkling2.nvidia.ops.activation import swiglu_quantize  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.block_scales import (  # noqa: E402
     shuffle_rows,
     swizzle_block_scales,
 )
-from vllm.models.inkling2.nvidia.ops.linear import linear_k_groups  # noqa: E402
-from vllm.models.inkling2.nvidia.ops.moe_sm90 import (  # noqa: E402
-    HummingExperts,
-    select_experts,
-)
+from vllm.models.inkling2.nvidia.ops.moe_sm90 import HummingExperts  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.mxfp8 import mxfp8_quantize  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.nvfp4 import nvfp4_quantize  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.trtllm_bmm import ExpertPlan  # noqa: E402
@@ -786,7 +784,7 @@ def _humming_kernel(humming: HummingExperts, name: str, rows: int):
 @pytest.mark.parametrize("hidden", [512, 2304, 4608])
 def test_combine_supports_mini_hidden_width(hidden):
     """Sum routed rows in slot order, including absent experts and a 256 tail."""
-    from vllm.models.inkling2.nvidia.ops.moe import combine
+    from vllm.models.inkling2.common.ops.moe import combine
 
     torch.manual_seed(42)
     down = torch.randn(16, hidden, device="cuda").bfloat16()
