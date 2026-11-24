@@ -33,6 +33,7 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, MmKwargsItem};
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
+use vllm_tokenizer::parse_checkpoint_json;
 
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 use crate::renderer::{MediaPartSource, RenderedPrompt};
@@ -338,7 +339,7 @@ fn load_preprocessor_config(
     if let Some(path) = processor_config_path {
         let text = fs::read_to_string(path)
             .map_err(|error| multimodal!("failed to read processor_config.json: {error}"))?;
-        let value: serde_json::Value = serde_json::from_str(&text)
+        let value: serde_json::Value = parse_checkpoint_json(&text)
             .map_err(|error| multimodal!("failed to parse processor_config.json: {error}"))?;
         if let Some(processor) = value.get(processor_section).filter(|value| !value.is_null()) {
             let source = format!("{processor_section} from processor_config.json");
@@ -352,7 +353,7 @@ fn load_preprocessor_config(
     };
     let text = fs::read_to_string(path)
         .map_err(|error| multimodal!("failed to read {dedicated_name}: {error}"))?;
-    let config = serde_json::from_str(&text)
+    let config = parse_checkpoint_json(&text)
         .map_err(|error| multimodal!("failed to parse {dedicated_name}: {error}"))?;
     Ok(Some(CheckpointProcessorConfig {
         source: dedicated_name.to_owned(),
@@ -451,7 +452,7 @@ impl MultimodalModelInfo {
             Some(path) => {
                 let text = fs::read_to_string(path)
                     .map_err(|error| multimodal!("failed to read config.json: {error}"))?;
-                json5::from_str(&text)
+                parse_checkpoint_json(&text)
                     .map_err(|error| multimodal!("failed to parse config.json: {error}"))?
             }
             None => serde_json::Value::Object(Default::default()),
@@ -2053,6 +2054,34 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        assert_eq!(config.config["sampling_rate"], 8000);
+    }
+
+    #[test]
+    fn processor_configs_accept_python_json_non_finite_literals() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("preprocessor_config.json");
+        let combined = dir.path().join("processor_config.json");
+        fs::write(&legacy, r#"{"sampling_rate":8000,"max_value":Infinity}"#).unwrap();
+        fs::write(
+            &combined,
+            r#"{"image_processor":{"sampling_rate":24000,"min_value":-Infinity},"eps":NaN}"#,
+        )
+        .unwrap();
+
+        let config = load_preprocessor_config(
+            Some(&legacy),
+            "preprocessor_config.json",
+            Some(&combined),
+            "image_processor",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.config["sampling_rate"], 24000);
+
+        let config = load_preprocessor_config(Some(&legacy), "preprocessor_config.json", None, "")
+            .unwrap()
+            .unwrap();
         assert_eq!(config.config["sampling_rate"], 8000);
     }
 
