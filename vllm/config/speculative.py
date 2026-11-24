@@ -126,6 +126,7 @@ _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
     "dspark_draft_topk",
+    "draft_early_exit",
     "draft_lm_head_quantization",
     "index_share_for_mtp_iteration",
     "xpress_topc",
@@ -628,6 +629,13 @@ class SpeculativeConfig:
     """Whether to adaptively size the draft-verification budget from per-request
     confidence. Currently only supported for method="dspark"."""
 
+    draft_early_exit: bool | None = None
+    """Whether an autoregressive drafter (EAGLE, MTP) stops drafting early in a
+    step once one more draft position is expected to add fewer accepted tokens
+    than it costs, as adaptive verification prices drafts. The draft steps run
+    in a CUDA graph WHILE node, so stopping needs no host synchronization.
+    Needs enable_adaptive_verification and FULL CUDA graphs for draft decodes."""
+
     prefill_context_kv_only: bool = False
     """Set on a P/D prefill instance (Model Runner V2, DFlash-based speculators)
     to only store the drafter's context K/V, which the decode instance reads:
@@ -753,6 +761,7 @@ class SpeculativeConfig:
             "synthetic_acceptance_rates",
             "synthetic_acceptance_length",
             "enable_adaptive_verification",
+            "draft_early_exit",
             "draft_sample_method",
             "dspark_draft_topk",
             "xpress_topc",
@@ -1561,6 +1570,36 @@ class SpeculativeConfig:
                 "the draft logits, which use_local_argmax_reduction never "
                 "materializes. Disable one of them."
             )
+
+        if self.draft_early_exit:
+            if not self.enable_adaptive_verification:
+                raise ValueError(
+                    "draft_early_exit needs enable_adaptive_verification, whose "
+                    "cost model and acceptance estimates decide when to stop."
+                )
+            if (self.num_speculative_tokens or 0) < 2:
+                raise ValueError("draft_early_exit needs num_speculative_tokens >= 2.")
+            if self.uses_dynamic_speculative_decoding():
+                raise ValueError(
+                    "draft_early_exit is not supported with "
+                    "num_speculative_tokens_per_batch_size."
+                )
+            parallel_config = self.target_parallel_config
+            if parallel_config is not None and parallel_config.data_parallel_size > 1:
+                raise ValueError(
+                    "draft_early_exit is not supported with data parallelism: "
+                    "draft forwards can hold collectives across DP ranks (e.g. "
+                    "expert parallel MoE), so every rank must run the same draft "
+                    "steps."
+                )
+            if (
+                parallel_config is not None
+                and parallel_config.prefill_context_parallel_size > 1
+            ):
+                raise ValueError(
+                    "draft_early_exit is not supported with prefill context "
+                    "parallelism."
+                )
 
         return self
 

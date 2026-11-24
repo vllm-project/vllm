@@ -8,8 +8,10 @@ class Gemma4MTPSpeculatorConfig(MTPSpeculatorConfig):
         "vllm.v1.worker.gpu.spec_decode.gemma4.speculator.Gemma4Speculator"
     )
     # Gemma-4 MTP scores tied embedding rows directly; no lm_head to share.
+    # Draft early exit needs draft steps that advance their positions.
     supported_options = MTPSpeculatorConfig.supported_options - {
-        "draft_lm_head_quantization"
+        "draft_lm_head_quantization",
+        "draft_early_exit",
     }
     # The Q-only drafter reads the target's KV and writes none of its own.
     draft_kv_depends_on_lookahead = False
