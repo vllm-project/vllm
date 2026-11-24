@@ -322,6 +322,10 @@ silu_and_mul_scaled_nvfp4_experts_quantize = _lazy_import_wrapper(
 scaled_fp4_grouped_quantize = _lazy_import_wrapper(
     "flashinfer", "scaled_fp4_grouped_quantize"
 )
+mxfp8_grouped_quantize = _lazy_import_wrapper("flashinfer", "mxfp8_grouped_quantize")
+silu_and_mul_mxfp8_experts_quantize = _lazy_import_wrapper(
+    "flashinfer", "silu_and_mul_mxfp8_experts_quantize"
+)
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer.fp4_quantization", "block_scale_interleave"
 )
@@ -565,6 +569,34 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
     mod = _get_submodule("flashinfer.mla._sparse_mla_sm120")
     dispatch = getattr(mod, "_DECODE_DSV4_DISPATCH", None) if mod else None
     return dispatch is not None and (int(num_q_heads), int(top_k)) in dispatch
+
+
+@functools.cache
+def has_flashinfer_topk_varlen_gvr2() -> bool:
+    """Return `True` if FlashInfer ships the `gvr_2` varlen top-k backend
+    (self-sampling GVR V2, `flashinfer.top_k_varlen(backend="gvr_2")`).
+
+    Feature-detected on the production entry `run_varlen` (FlashInfer >=
+    0.7.2: per-row `kv_lens`, a capture-stable `max_seq_len` and the
+    hint-free `top_k`) and the band-aware `warmup_varlen` (`row_stride`)
+    that the dispatcher calls.
+    """
+    if not has_flashinfer():
+        return False
+    try:
+        import inspect
+
+        from flashinfer.topk_varlen.kernels import gvr2_topk_host
+
+        run_params = inspect.signature(gvr2_topk_host.run_varlen).parameters
+        warmup_params = inspect.signature(gvr2_topk_host.warmup_varlen).parameters
+    except Exception:
+        # The module imports the CuTe DSL; anything it raises means unusable.
+        return False
+    return {"kv_lens", "max_seq_len", "top_k"} <= set(run_params) and {
+        "num_rows_list",
+        "row_stride",
+    } <= set(warmup_params)
 
 
 @functools.cache
@@ -1459,6 +1491,8 @@ __all__ = [
     "flashinfer_fp4_quantize",
     "silu_and_mul_scaled_nvfp4_experts_quantize",
     "scaled_fp4_grouped_quantize",
+    "mxfp8_grouped_quantize",
+    "silu_and_mul_mxfp8_experts_quantize",
     "nvfp4_block_scale_interleave",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
     "has_flashinfer_localized_moe",
