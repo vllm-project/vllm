@@ -16,9 +16,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.layers.quantization.online.fp8_requant import (
-    dequant_block_fp8_to_bf16,
-)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import dequant_block_fp8
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mxfp4_quantize
 from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.runtime.consensus import (  # noqa: E501
     MonoUnsupported,
@@ -151,7 +149,7 @@ def _shared_expert_mxfp4(mlp) -> dict[str, torch.Tensor]:
 
     def mx(linear):
         w, s = _fp8_param(linear)
-        q, sc = mxfp4_quantize(dequant_block_fp8_to_bf16(w, s, FP8_BLOCK))
+        q, sc = mxfp4_quantize(dequant_block_fp8(w, s, FP8_BLOCK, torch.bfloat16))
         return q.view(torch.uint8), sc.view(torch.uint8)
 
     ug, s_ug = mx(mlp.gate_up_proj)  # rows [gate; up], as w13

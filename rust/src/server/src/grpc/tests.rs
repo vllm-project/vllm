@@ -362,6 +362,7 @@ fn qwen_multimodal_model_info(
         },
         Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID)),
         limit_mm_per_prompt,
+        &std::collections::HashMap::new(),
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
