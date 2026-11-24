@@ -36,6 +36,13 @@ requires_nvfp4 = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="nvfp4 needs a CUDA W4A16 kernel"
 )
 NVFP4 = pytest.param("nvfp4", marks=requires_nvfp4)
+# The "fp8" alias runs W8A8 and needs an FP8 GEMM (SM89+); weight-only FP8 is
+# covered separately by the targets-key test.
+requires_fp8_gemm = pytest.mark.skipif(
+    current_platform.is_cuda() and not current_platform.has_device_capability(89),
+    reason="the fp8 alias is W8A8 and needs SM89+",
+)
+FP8 = pytest.param("fp8", marks=requires_fp8_gemm)
 
 
 def _target_head(monkeypatch, seed: int = 0) -> ParallelLMHead:
@@ -58,7 +65,10 @@ def _tensors(module: torch.nn.Module) -> dict[str, torch.Tensor]:
 @requires_cuda
 @pytest.mark.parametrize(
     ("quantization", "max_rel_err", "min_top1"),
-    [("fp8", 0.05, 0.9), pytest.param("nvfp4", 0.15, 0.75, marks=requires_nvfp4)],
+    [
+        pytest.param("fp8", 0.05, 0.9, marks=requires_fp8_gemm),
+        pytest.param("nvfp4", 0.15, 0.75, marks=requires_nvfp4),
+    ],
 )
 def test_tracks_bf16_head_through_logits_processor(
     default_vllm_config, dist_init, monkeypatch, quantization, max_rel_err, min_top1
@@ -118,7 +128,7 @@ def test_targets_key_weight_only_fp8_tracks_bf16_head(
 
 
 @requires_cuda
-@pytest.mark.parametrize("quantization", ["fp8", NVFP4])
+@pytest.mark.parametrize("quantization", [FP8, NVFP4])
 def test_refresh_follows_target_update(
     default_vllm_config, dist_init, monkeypatch, quantization
 ):
@@ -166,6 +176,7 @@ def _draft_update_worker(vllm_config, drafter: torch.nn.Module, **engine) -> Wor
 
 
 @requires_cuda
+@requires_fp8_gemm
 def test_draft_weight_update_refreshes_copy(
     default_vllm_config, dist_init, monkeypatch
 ):
@@ -191,7 +202,7 @@ def test_draft_weight_update_refreshes_copy(
 
 
 @requires_cuda
-@pytest.mark.parametrize("quantization", ["fp8", NVFP4])
+@pytest.mark.parametrize("quantization", [FP8, NVFP4])
 def test_draft_weight_update_loads_lm_head(
     default_vllm_config, dist_init, monkeypatch, quantization
 ):
