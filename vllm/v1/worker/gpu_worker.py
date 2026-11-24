@@ -86,8 +86,8 @@ from vllm.model_executor.model_loader.base_loader import (
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
-    find_shared_weight_storage,
-    zero_weights,
+    select_reset_weights,
+    zero_selected_weights,
 )
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
@@ -486,17 +486,15 @@ class Worker(WorkerBase):
             )
         return checksums
 
-    def _models_for_weight_reset(
+    def _weight_reset_plan(
         self, model: WeightCheckerModel
-    ) -> tuple[nn.Module, ...] | str:
+    ) -> tuple[torch.Tensor, ...] | str:
         if model not in ("target", "draft", "both"):
             return f"Invalid Weight Checker model selection: {model!r}"
-        is_target = model == "target"
-        if not is_target and self.parallel_config.pipeline_parallel_size > 1:
+        if model != "target" and self.parallel_config.pipeline_parallel_size > 1:
             return "Cannot reset draft weights with pipeline parallelism."
 
-        target = self.get_model()
-        if is_target:
+        if model == "target":
             draft = (
                 self.get_draft_model() if self.speculative_config is not None else None
             )
@@ -504,32 +502,25 @@ class Worker(WorkerBase):
             draft, error = self._resolve_weight_checker_draft()
             if error is not None:
                 return error
-
-        if model == "both":
             assert draft is not None
-            return target, draft
+            # Draft updates refresh quantized LM heads, while this model-specific
+            # hook runs only after target updates.
+            if getattr(draft, "refresh_derived_weights", None) is not None:
+                return (
+                    "Cannot reset draft weights with model-specific derived weights "
+                    "that require a target update to refresh."
+                )
+        return select_reset_weights(self.get_model(), draft, model)
 
-        selected, other = (target, draft) if is_target else (draft, target)
-        assert selected is not None
-        if other is not None and (
-            shared := find_shared_weight_storage(selected, other)
-        ):
-            return (
-                f"Cannot reset {model} weights independently: {shared[0]!r} "
-                f"shares storage with {shared[1]!r} in the other model."
-            )
-        return (selected,)
-
-    def _zero_reset_models(self, models: tuple[nn.Module, ...]) -> None:
-        for model in models:
-            zero_weights(model)
+    def _zero_reset_weights(self, weights: tuple[torch.Tensor, ...]) -> None:
+        zero_selected_weights(weights)
         self.synchronize_device()
 
     def reset_weights(self, model: WeightCheckerModel = "target") -> str | None:
-        models = self._models_for_weight_reset(model)
-        if isinstance(models, str):
-            return models
-        self._zero_reset_models(models)
+        weights = self._weight_reset_plan(model)
+        if isinstance(weights, str):
+            return weights
+        self._zero_reset_weights(weights)
         return None
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:

@@ -11,7 +11,8 @@ from vllm.config import ParallelConfig
 from vllm.model_executor import parameter
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
-    find_shared_weight_storage,
+    select_reset_weights,
+    zero_selected_weights,
     zero_weights,
 )
 from vllm.v1.worker import gpu_worker
@@ -79,48 +80,112 @@ def test_tensor_subclass_inner_tensors_are_hashed_and_reset():
     )
 
 
-@pytest.mark.parametrize("alias", ["parameter", "view", "buffer"])
-def test_reset_preflight_detects_storage_shared_with_the_other_model(alias):
-    draft = nn.Linear(2, 2, bias=False)
-    target = nn.Linear(2, 2, bias=False)
-    assert find_shared_weight_storage(draft, target) is None
-    if alias == "parameter":
-        target.weight = draft.weight
-    elif alias == "view":
-        target.weight = nn.Parameter(draft.weight.view(-1)[1:])
-    else:
-        target.register_buffer("shared", draft.weight.detach())
-    assert find_shared_weight_storage(draft, target) == (
-        "weight",
-        "shared" if alias == "buffer" else "weight",
+@pytest.mark.parametrize("model", ["target", "draft", "both"])
+def test_reset_follows_weight_ownership(model):
+    target = nn.Module()
+    target.embed_tokens = nn.Embedding(4, 2)
+    target.lm_head = nn.Linear(2, 4, bias=False)
+    target.private = nn.Parameter(torch.full((2,), 3.0))
+    nn.init.ones_(target.embed_tokens.weight)
+    nn.init.ones_(target.lm_head.weight)
+
+    draft = nn.Module()
+    draft.embed_tokens = target.embed_tokens
+    draft.lm_head = nn.Linear(2, 4, bias=False)
+    draft.lm_head.weight = nn.Parameter(target.lm_head.weight.detach())
+    # An independent copy with equal values is still draft-owned.
+    draft.private = nn.Parameter(target.private.detach().clone())
+    draft.already_zero = nn.Parameter(torch.zeros(1))
+    before_target = compute_tensor_digests(target)
+    before_draft = compute_tensor_digests(draft)
+    shared = {"embed_tokens.weight", "lm_head.weight"}
+    assert all(before_target[name] == before_draft[name] for name in shared)
+
+    plan = select_reset_weights(target, draft, model)
+    assert not isinstance(plan, str)
+    assert len(plan) == {"target": 3, "draft": 2, "both": 5}[model]
+    zero_selected_weights(plan)
+
+    assert draft.embed_tokens is target.embed_tokens
+    assert draft.lm_head.weight.data_ptr() == target.lm_head.weight.data_ptr()
+    after_target = compute_tensor_digests(target)
+    after_draft = compute_tensor_digests(draft)
+    assert {key for key in after_target if after_target[key] != before_target[key]} == (
+        set(before_target) if model != "draft" else set()
     )
+    assert {key for key in after_draft if after_draft[key] != before_draft[key]} == (
+        (shared if model != "draft" else set())
+        | ({"private"} if model != "target" else set())
+    )
+    for weight in plan:
+        torch.testing.assert_close(weight, torch.zeros_like(weight))
 
 
-@pytest.mark.parametrize("shared", [False, True])
-def test_reset_rejects_single_model_when_storage_is_shared(shared, monkeypatch):
+def test_target_reset_without_draft():
+    target = _Model()
+    plan = select_reset_weights(target, None, "target")
+    assert not isinstance(plan, str)
+    zero_selected_weights(plan)
+    assert all(torch.count_nonzero(weight) == 0 for weight in target.parameters())
+    assert target.k_scale.item() == 2.0
+
+
+def test_draft_only_reset_requires_private_weights():
     target = nn.Linear(2, 2, bias=False)
-    draft = nn.Linear(2, 2, bias=False)
-    if shared:
-        draft.weight = target.weight
+    draft = nn.Sequential(target)
+    assert select_reset_weights(target, draft, "draft") == (
+        "Weight Checker found no independently resettable draft weights."
+    )
+    plan = select_reset_weights(target, draft, "both")
+    assert not isinstance(plan, str)
+    assert len(plan) == 1 and plan[0] is target.weight
 
-    worker = object.__new__(Worker)
-    worker._weight_update_active = False
-    worker._incomplete_weight_updates = set()
-    worker.parallel_config = ParallelConfig(pipeline_parallel_size=1)
-    worker.speculative_config = SimpleNamespace()
-    monkeypatch.setattr(worker, "get_model", lambda: target)
-    monkeypatch.setattr(worker, "get_draft_model", lambda: draft)
-    monkeypatch.setattr(worker, "_resolve_weight_checker_draft", lambda: (draft, None))
 
-    if not shared:
-        assert worker._models_for_weight_reset("target") == (target,)
-        assert worker._models_for_weight_reset("draft") == (draft,)
+@pytest.mark.parametrize("model", ["target", "draft", "both"])
+def test_reset_rejects_partial_overlap_before_mutation(model):
+    storage = torch.ones(8)
+    target, draft = nn.Module(), nn.Module()
+    target.weight = nn.Parameter(storage[:5])
+    draft.weight = nn.Parameter(storage[4:])
+    error = select_reset_weights(target, draft, model)
+    assert isinstance(error, str) and "ambiguous overlapping storage" in error
+    torch.testing.assert_close(storage, torch.ones(8))
+
+
+@pytest.mark.parametrize("kind", ["contiguous", "interleaved", "columns"])
+def test_reset_treats_disjoint_views_as_independent(kind):
+    storage = torch.ones(2, 4)
+    if kind == "contiguous":
+        left, right = storage[0], storage[1]
+    elif kind == "interleaved":
+        left, right = storage[:, ::2], storage[:, 1::2]
     else:
-        for model in ("target", "draft"):
-            error = worker._models_for_weight_reset(model)
-            assert isinstance(error, str)
-            assert "shares storage" in error
-    assert worker._models_for_weight_reset("both") == (target, draft)
+        left, right = storage[:, :2], storage[:, 2:]
+    target, draft = nn.Module(), nn.Module()
+    target.weight = nn.Parameter(left)
+    draft.weight = nn.Parameter(right)
+    plan = select_reset_weights(target, draft, "draft")
+    assert not isinstance(plan, str)
+    zero_selected_weights(plan)
+    torch.testing.assert_close(target.weight, torch.ones_like(left))
+    torch.testing.assert_close(draft.weight, torch.zeros_like(right))
+
+
+@pytest.mark.parametrize("owner", ["target", "draft"])
+def test_reset_rejects_a_write_through_the_other_models_buffer(owner):
+    target, draft = nn.Linear(2, 2, bias=False), nn.Linear(2, 2, bias=False)
+    selected, other = (target, draft) if owner == "target" else (draft, target)
+    other.register_buffer("alias", selected.weight.detach())
+    before = other.alias.clone()
+    for model in (owner, "both"):
+        error = select_reset_weights(target, draft, model)
+        assert isinstance(error, str) and "overlaps buffer 'alias'" in error
+    other_plan = select_reset_weights(
+        target, draft, "draft" if owner == "target" else "target"
+    )
+    assert not isinstance(other_plan, str)
+    zero_selected_weights(other_plan)
+    torch.testing.assert_close(other.alias, before)
 
 
 def test_dense_dp_replicas_get_distinct_key_prefixes(monkeypatch):

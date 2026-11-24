@@ -8,7 +8,18 @@ import pytest
 import regex as re
 import requests
 import torch
-from transformers import AutoModelForCausalLM
+from safetensors.torch import save_file
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from torch import nn
+from transformers import (
+    AutoModelForCausalLM,
+    LlamaConfig,
+    LlamaForCausalLM,
+    LlamaModel,
+    PreTrainedTokenizerFast,
+)
 
 from tests.entrypoints.rl.conftest import (
     MODEL_NAME,
@@ -17,7 +28,7 @@ from tests.entrypoints.rl.conftest import (
     ok,
     server,
 )
-from tests.utils import multi_gpu_test
+from tests.utils import RemoteOpenAIServer, multi_gpu_marks, multi_gpu_test
 from vllm.distributed.weight_transfer import (
     HTTPVLLMWeightSyncClient,
     ModuleSource,
@@ -269,6 +280,148 @@ def test_ipc_transfer_restores_target_and_draft_weights():
             assert comparison.json() == {"match": True, "mismatches": []}
         requests.post(f"{url}/resume", timeout=30).raise_for_status()
         assert ok(gen(url))
+
+
+@pytest.fixture
+def eagle_checkpoints(tmp_path):
+    """Small Llama target and an EAGLE checkpoint with no embed or head weights."""
+    target_path = tmp_path / "target"
+    draft_path = tmp_path / "eagle-draft"
+    draft_path.mkdir()
+    config = LlamaConfig(
+        vocab_size=128,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=128,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+        tie_word_embeddings=False,
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        target = LlamaForCausalLM(config).to(torch.bfloat16)
+        target.save_pretrained(target_path)
+        draft_config = LlamaConfig.from_pretrained(target_path, num_hidden_layers=1)
+        draft = LlamaModel(draft_config)
+        del draft.embed_tokens, draft.norm
+        draft.layers[0].input_layernorm = nn.Identity()
+        draft.fc = nn.Linear(2 * config.hidden_size, config.hidden_size, bias=False)
+        draft.to(torch.bfloat16)
+    draft_config.save_pretrained(draft_path)
+    save_file(draft.state_dict(), draft_path / "model.safetensors")
+
+    vocab = {"<pad>": 0, "<s>": 1, "</s>": 2, "<unk>": 3}
+    vocab.update({f"token{i}": i for i in range(4, config.vocab_size)})
+    tokenizer = Tokenizer(WordLevel(vocab, unk_token="<unk>"))
+    tokenizer.pre_tokenizer = Whitespace()
+    PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        pad_token="<pad>",
+        bos_token="<s>",
+        eos_token="</s>",
+        unk_token="<unk>",
+    ).save_pretrained(target_path)
+    return target_path, draft_path, target, draft
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="IPC weight transfer uses CUDA IPC."
+)
+@pytest.mark.parametrize(
+    "pp_size", [1, pytest.param(2, marks=multi_gpu_marks(num_gpus=2))]
+)
+def test_eagle_shared_weights_reset_and_recover(eagle_checkpoints, pp_size):
+    target_path, draft_path, target, draft = eagle_checkpoints
+    args = [
+        "--served-model-name",
+        "m",
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "128",
+        "--max-num-seqs",
+        "4",
+        "--pipeline-parallel-size",
+        str(pp_size),
+        "--enforce-eager",
+        "--weight-transfer-config",
+        '{"backend": "ipc"}',
+        "--speculative-config",
+        json.dumps(
+            {"method": "eagle", "model": str(draft_path), "num_speculative_tokens": 2}
+        ),
+    ]
+    env = {"VLLM_SERVER_DEV_MODE": "1", "VLLM_ALLOW_INSECURE_SERIALIZATION": "1"}
+    with RemoteOpenAIServer(str(target_path), args, env_dict=env) as running:
+        url = running.url_root
+        prompt = "token4 token5 token6"
+        original = gen(url, prompt)
+        assert ok(original)
+        requests.post(f"{url}/pause?mode=abort", timeout=30).raise_for_status()
+
+        baseline = checksums(url, "both")
+        target_keys = {key for key in baseline if key.startswith("target:")}
+        draft_keys = {key for key in baseline if key.startswith("draft:")}
+        shared = {
+            f"draft:dp0:pp{pp_size - 1}:pcp0:tp0:{name}"
+            for name in ("model.embed_tokens.weight", "lm_head.weight")
+        }
+        assert shared < draft_keys
+        assert all(
+            baseline[key] == baseline[key.replace("draft:", "target:", 1)]
+            for key in shared
+        )
+        assert checksums(url) == {
+            key.removeprefix("target:"): baseline[key] for key in target_keys
+        }
+
+        expected = {
+            "target": target_keys | shared,
+            "draft": draft_keys - shared,
+            "both": target_keys | draft_keys,
+        }
+        for model, mismatches in expected.items():
+            response = weight_checker(url, "reset", model=model)
+            if pp_size > 1 and model != "target":
+                assert response.status_code == 409, response.text
+                assert "pipeline parallelism" in response.text
+            else:
+                response.raise_for_status()
+                compare = weight_checker(url, "compare", baseline, model="both")
+                compare.raise_for_status()
+                assert set(compare.json()["mismatches"]) == mismatches
+
+                if pp_size > 1:
+                    requests.post(
+                        f"{url}/collective_rpc",
+                        json={"method": "reload_weights"},
+                        timeout=300,
+                    ).raise_for_status()
+                else:
+                    transfer = []
+                    if model != "draft":
+                        transfer.append((target, HTTPVLLMWeightSyncClient(url)))
+                    if model != "target":
+                        transfer.append((draft, DraftWeightSyncClient(url)))
+                    for module, client in transfer:
+                        WeightTransferTrainerFactory.trainer_init(
+                            IPCTrainerInitInfo(rank=0),
+                            client=client,
+                            source=ModuleSource(module.cuda()),
+                        ).send_weights()
+
+            compare = weight_checker(url, "compare", baseline, model="both")
+            compare.raise_for_status()
+            assert compare.json() == {"match": True, "mismatches": []}
+
+        requests.post(f"{url}/resume", timeout=30).raise_for_status()
+        recovered = gen(url, prompt)
+        assert ok(recovered)
+        assert recovered["choices"][0]["text"] == original["choices"][0]["text"]
 
 
 @multi_gpu_test(num_gpus=4)

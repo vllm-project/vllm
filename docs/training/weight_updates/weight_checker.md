@@ -25,10 +25,32 @@ parallelism, draft keys come from the last stage. The endpoint keeps no state,
 so the caller holds the baseline.
 
 Invalid requests return HTTP 400, and selecting a draft without resident draft
-weights returns HTTP 409. Reset also returns HTTP 409 for draft and both
-selections under pipeline parallelism, or if a single-model reset would overwrite
-storage shared with the other model. Use `both` for shared weights and restore
-both models before resuming.
+weights returns HTTP 409.
+
+## Shared weights and reset scope
+
+Some speculative drafters borrow the target's embeddings, LM head, or other
+parameters. Checksum and compare cover all parameters visible to the selected
+model, including borrowed weights. With `both`, a shared weight appears under
+both models' keys.
+
+| Reset selection | Weights cleared | Recovery |
+| --- | --- | --- |
+| `target` | Target-private and target-owned shared weights | Transfer target weights. The draft's aliases see the restored values. |
+| `draft` | Draft-private weights | Transfer draft weights. Omit parameters borrowed from the target. |
+| `both` | Target-owned and draft-private weights, with shared weights cleared once | Complete the target transfer, then transfer the draft-private weights. |
+
+Draft-only reset returns HTTP 409 if there are no independently resettable draft
+weights. Reset also returns HTTP 409 if the worker cannot establish ownership
+for overlapping tensor views or if the operation would write through an alias
+to a buffer in the other model. Views with provably disjoint bytes can be reset
+independently.
+
+Private quantized copies created with `draft_lm_head_quantization` are refreshed
+in place after a target reload or weight update, and after a draft weight update.
+The draft transfer can omit the source LM head. Drafters with model-specific
+derived state that can only be refreshed after a target update support target
+reset, while `draft` and `both` resets return HTTP 409.
 
 ## RL weight-update check
 
@@ -53,6 +75,7 @@ jq --arg model "$MODEL" '{action:"compare", model:$model, baseline:.checksums}' 
 # 4. Transfer the original target weights with /start_weight_update,
 #    /update_weights, /finish_weight_update. For the draft, use
 #    /start_draft_weight_update, then the same update and finish routes.
+#    Omit borrowed target weights from the draft transfer.
 #    For both, complete the target transfer before starting the draft transfer.
 
 # 5. Compare against the baseline. Resume only after match is true.
@@ -67,14 +90,18 @@ curl -X POST "$URL/resume"
 
 - Stay paused from `checksum` to `compare`: the weights are invalid between
   `reset` and the transfer, and EPLB moves experts while serving.
+- Reset validates local writes before each worker mutates its weights. A
+  different worker may already have reset its weights when the server reports a
+  conflict. Keep inference paused until recovery and comparison succeed.
 - A request covers the engines managed by the API server it reaches. With
   several API servers (for example `--data-parallel-external-lb`), send it to
   each one.
 - Buffers and LoRA adapters are excluded from checksum and reset.
 - Restoring a draft requires an existing weight transfer backend and topology
-  that support draft weight updates. With pipeline parallelism, `draft` and
-  `both` support checksum and compare. Reset returns HTTP 409 for these
-  selections because the draft weight transfer path requires PP size 1.
+  that support draft weight updates. With pipeline parallelism, target reset
+  supports target-owned sharing on the last stage. `draft` and `both` support
+  checksum and compare and return HTTP 409 for reset, since draft weight transfer
+  requires PP size 1.
 - CPU backends that repack linear weights hide them from the checker.
 - compressed-tensors online transforms are not supported: their Hadamard
   weights are normalized once per storage, so restored copies differ.
