@@ -15,6 +15,7 @@ import torch
 
 import vllm.utils.gpu_sync_debug as gsd
 from vllm.model_executor.layers.attention.mla_attention import (
+    accumulate_mla_context_chunk,
     build_mla_chunked_context_metadata,
     init_mla_context_partial,
     reorg_kvcache,
@@ -22,6 +23,9 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadataBuilder,
 )
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.ops.merge_attn_states import _merge_attn_states_torch
 
 BLOCK_SIZE = 16
 
@@ -181,6 +185,69 @@ def test_continuation_is_confined_to_a_chunks_first_request():
             offset - chunk.token_slice.start
             for offset in query_start_loc[request_start : request_end + 1]
         ]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
+def test_continuation_merge_matches_an_out_of_place_merge():
+    """A continuation chunk merges into the running partial in place.
+
+    With V padded to the 192-wide qk head dim, 16 heads put head 5 across two
+    thread blocks of the native merge kernel, so one block can read the lse
+    another block already merged.
+    """
+    query_lens = [32, 32, 32]
+    metadata = build_chunked_context([768, 512, 512], query_lens, 1024)
+    assert metadata is not None
+    first, second = metadata.chunks
+    assert second.is_continuation
+    num_tokens, num_heads, head_size = sum(query_lens), 16, 192
+    device = torch.device(current_platform.device_type)
+
+    def random_partial(chunk):
+        chunk_tokens = chunk.token_slice.stop - chunk.token_slice.start
+        out = torch.randn(
+            chunk_tokens, num_heads, head_size, dtype=torch.bfloat16, device=device
+        )
+        return out, torch.randn(num_heads, chunk_tokens, device=device)
+
+    set_random_seed(0)
+    first_out, first_lse = random_partial(first)
+    second_out, second_lse = random_partial(second)
+    merged = slice(second.token_slice.start, second.continuation_token_end)
+    num_merged = merged.stop - merged.start
+    expected = torch.empty(
+        num_tokens, num_heads, head_size, dtype=torch.bfloat16, device=device
+    )
+    expected_lse = torch.empty(num_heads, num_tokens, device=device)
+    expected[first.token_slice] = first_out
+    expected_lse[:, first.token_slice] = first_lse
+    _merge_attn_states_torch(
+        expected[merged],
+        expected[merged].clone(),
+        expected_lse[:, merged].clone(),
+        second_out[:num_merged],
+        second_lse[:, :num_merged],
+        expected_lse[:, merged],
+    )
+    expected[merged.stop : second.token_slice.stop] = second_out[num_merged:]
+    expected_lse[:, merged.stop : second.token_slice.stop] = second_lse[:, num_merged:]
+
+    # A busy side stream staggers the merge kernel's thread blocks, which
+    # exposes the race.
+    side_stream = torch.cuda.Stream()
+    busy = torch.randn(8192, 8192, dtype=torch.bfloat16, device=device)
+    for _ in range(20):
+        output, output_lse = init_mla_context_partial(
+            metadata, first_out, first_lse, num_tokens=num_tokens
+        )
+        accumulate_mla_context_chunk(first, first_out, first_lse, output, output_lse)
+        torch.accelerator.synchronize()
+        with torch.cuda.stream(side_stream):
+            busy @ busy
+        accumulate_mla_context_chunk(second, second_out, second_lse, output, output_lse)
+        torch.accelerator.synchronize()
+        torch.testing.assert_close(output, expected)
+        torch.testing.assert_close(output_lse, expected_lse)
 
 
 def test_tail_splitting_minimizes_chunks():

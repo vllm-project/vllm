@@ -21,6 +21,7 @@ from vllm.utils.hashing import safe_hash
 from vllm.utils.torch_utils import token_ids_to_tensor
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import get_reusable_prefix_length
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -31,11 +32,30 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@dataclass
+def num_cached_tokens(
+    num_prompt_tokens: int,
+    block_size: int,
+    num_hash_lookahead_tokens: int,
+    is_store: bool,
+) -> int:
+    """Prompt prefix whose KV is stored or loaded.
+
+    Its key adds the next `num_hash_lookahead_tokens`, which the draft KV of the
+    prefix depends on. A load prompt is the cached prompt plus one generated
+    token, so that token is left out.
+    """
+    return get_reusable_prefix_length(
+        num_prompt_tokens if is_store else num_prompt_tokens - 1,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+        alignment_tokens=block_size,
+    )
+
+
+@dataclass(slots=True)
 class ReqMeta:
-    # Request tokens
+    # Key tokens: the cached prefix and the lookahead tokens after it
     token_ids: torch.Tensor
-    # Slot mappings, should have the same length as token_ids
+    # Slot mappings of the cached prefix
     slot_mapping: torch.Tensor
     # Is store or load
     is_store: bool
@@ -48,9 +68,14 @@ class ReqMeta:
         block_size: int,
         is_store: bool,
         mm_hashes: list[str],
+        num_hash_lookahead_tokens: int,
     ) -> "ReqMeta":
-        valid_num_tokens = align_to_block_size(len(token_ids), block_size)
-        token_ids_tensor = torch.tensor(token_ids)[:valid_num_tokens]
+        valid_num_tokens = num_cached_tokens(
+            len(token_ids), block_size, num_hash_lookahead_tokens, is_store
+        )
+        token_ids_tensor = torch.tensor(token_ids)[
+            : valid_num_tokens + num_hash_lookahead_tokens
+        ]
         block_ids_tensor = torch.tensor(block_ids)
         num_blocks = block_ids_tensor.shape[0]
         block_offsets = torch.arange(0, block_size)
@@ -78,9 +103,17 @@ class ExampleConnectorMetadata(KVConnectorMetadata):
         block_size: int,
         is_store: bool,
         mm_hashes: list[str],
+        num_hash_lookahead_tokens: int,
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(token_ids, block_ids, block_size, is_store, mm_hashes)
+            ReqMeta.make_meta(
+                token_ids,
+                block_ids,
+                block_size,
+                is_store,
+                mm_hashes,
+                num_hash_lookahead_tokens,
+            )
         )
 
 
@@ -102,6 +135,7 @@ class ExampleConnector(KVConnectorBase_V1):
             kv_cache_config=kv_cache_config,
         )
         self._block_size = vllm_config.cache_config.block_size
+        self._num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
         self._requests_need_load: dict[str, Request] = {}
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
@@ -295,9 +329,12 @@ class ExampleConnector(KVConnectorBase_V1):
 
         # Now, first num_tokens_to_check tokens are hit, we need to prepare
         # the metadata for the worker connector to correctly load the KV
-        token_ids = request.prompt_token_ids or []
-        num_tokens_to_check = align_to_block_size(len(token_ids) - 1, self._block_size)
-
+        num_tokens_to_check = num_cached_tokens(
+            len(request.prompt_token_ids or []),
+            self._block_size,
+            self._num_hash_lookahead_tokens,
+            is_store=False,
+        )
         return num_tokens_to_check - num_computed_tokens, False
 
     def update_state_after_alloc(
@@ -337,6 +374,7 @@ class ExampleConnector(KVConnectorBase_V1):
                     block_size=self._block_size,
                     is_store=False,
                     mm_hashes=mm_hashes,
+                    num_hash_lookahead_tokens=self._num_hash_lookahead_tokens,
                 )
                 total_need_load += 1
             else:
@@ -351,6 +389,7 @@ class ExampleConnector(KVConnectorBase_V1):
                         block_size=self._block_size,
                         is_store=True,
                         mm_hashes=mm_hashes,
+                        num_hash_lookahead_tokens=self._num_hash_lookahead_tokens,
                     )
 
         assert total_need_load == len(self._requests_need_load)
@@ -376,11 +415,15 @@ class ExampleConnector(KVConnectorBase_V1):
         prompt_token_ids: Sequence[int],
         mm_hashes: list[str],
     ) -> bool:
-        num_tokens_to_check = align_to_block_size(
-            len(prompt_token_ids) - 1, self._block_size
+        num_tokens_to_check = num_cached_tokens(
+            len(prompt_token_ids),
+            self._block_size,
+            self._num_hash_lookahead_tokens,
+            is_store=False,
         )
+        num_key_tokens = num_tokens_to_check + self._num_hash_lookahead_tokens
         foldername = self._generate_foldername_debug(
-            token_ids_to_tensor(prompt_token_ids)[:num_tokens_to_check],
+            token_ids_to_tensor(prompt_token_ids)[:num_key_tokens],
             mm_hashes,
             create_folder=False,
         )
@@ -421,8 +464,3 @@ class ExampleConnector(KVConnectorBase_V1):
             token_ids, mm_hashes=mm_hashes, create_folder=True
         )
         return os.path.join(foldername, f"{layer_name}.safetensors")
-
-
-def align_to_block_size(num_tokens: int, block_size) -> int:
-    """Align the number of tokens to the block size."""
-    return (num_tokens - 1) // block_size * block_size
