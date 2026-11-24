@@ -482,17 +482,17 @@ def test_custom_allreduce_size_gate_ignored_under_batch_invariance(
 
 
 @pytest.mark.parametrize("batch_invariant", [False, True])
-def test_custom_allreduce_dispatch_max_size(batch_invariant: bool) -> None:
+def test_custom_allreduce_dispatch_max_size(
+    custom_allreduce, batch_invariant: bool
+) -> None:
     """Messages at or above the dispatch limit fall back, unless batch
     invariance pins the backend."""
-    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
-    communicator.disabled = False
+    communicator = custom_allreduce
     communicator.world_size = 4
     communicator.fully_connected = True
     communicator.max_size = 8192 * 1024
     communicator._dispatch_max_size = 1024
     communicator.batch_invariant = batch_invariant
-    communicator._ptr = 0
 
     assert communicator.should_custom_ar(torch.empty(256, dtype=torch.float16))
     at_limit = torch.empty(512, dtype=torch.float16)
