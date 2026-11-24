@@ -22,6 +22,7 @@ import torch
 
 from vllm import SamplingParams
 from vllm.utils.hashing import sha256
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
@@ -1245,7 +1246,10 @@ def _schedule_remote_prefill(scheduler, request_id: int, num_tokens: int):
         block_size=16,
     )
     request.kv_transfer_params = {
-        **_make_read_request([[10, 11, 12], [90]]).kv_transfer_params,
+        # The producer sends the attention blocks for its N-1 prompt tokens.
+        **_make_read_request(
+            [list(range(10, 10 + cdiv(num_tokens - 1, 16))), [90]]
+        ).kv_transfer_params,
         "transfer_id": f"tx-{request_id}",
     }
     scheduler.add_request(request)
@@ -1274,8 +1278,12 @@ def test_hybrid_read_writes_the_state_block_a_full_local_hit_resumes_from():
     num_tokens = 2 * 16 + 1
 
     first, output = _schedule_remote_prefill(scheduler, 1, num_tokens)
-    first_state_blocks = output.scheduled_new_reqs[0].block_ids[1]
+    first_attn_blocks, first_state_blocks = output.scheduled_new_reqs[0].block_ids
     recv = output.kv_connector_metadata.reqs_to_recv[first.request_id]
+    # The block of the locally recomputed last token has no remote source.
+    assert len(first_attn_blocks) == 3
+    assert recv.local_block_ids[0] == first_attn_blocks[:2]
+    assert recv.remote_block_ids[0] == [10, 11]
     scheduler.update_from_output(output, create_model_runner_output([first]))
     _, output = _schedule_remote_prefill(scheduler, 2, num_tokens)
 

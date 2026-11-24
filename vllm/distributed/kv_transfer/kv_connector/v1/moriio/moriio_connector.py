@@ -293,8 +293,9 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
-        # The READ path always transfers the recurrent-state slot, including
-        # when the attention prefix is already present locally.
+        # READ transfers the recurrent-state slot whenever external tokens
+        # remain. A full local hit transfers nothing, because the scheduler then
+        # reconciles to the boundary every group agrees on.
         return self.mode == MoRIIOMode.READ and self._transfers_mamba_state
 
     def __init__(
@@ -1165,9 +1166,10 @@ class MoRIIOConnectorScheduler:
                                     aligned_remote_attn.append(aligned_remote)
                                 aligned_local_mamba: list[list[int]] = []
                                 aligned_remote_mamba: list[list[int]] = []
-                                # Scratch slots were removed by
-                                # split_block_groups, so only one local running
-                                # state tail can remain.
+                                # split_block_groups removed the scratch
+                                # slots. One running-state slot remains, plus
+                                # the block cached for N-1 tokens when they end
+                                # a block.
                                 cached_state_blocks = self._cached_prompt_state_blocks(
                                     request, block_ids
                                 )
