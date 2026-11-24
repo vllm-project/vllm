@@ -170,7 +170,7 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         asyncio_mode=False,
         vllm_config=vllm_config,
         executor_class=object,
-        log_stats=False,
+        collect_stats=False,
         client_addresses={
             "input_address": "inproc://input",
             "output_address": "inproc://output",
@@ -825,7 +825,7 @@ def test_engine_core_client(
                 asyncio_mode=False,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
-                log_stats=False,
+                collect_stats=False,
             )
 
         MAX_TOKENS = 20
@@ -916,7 +916,7 @@ async def test_engine_core_client_asyncio(
                 asyncio_mode=True,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
-                log_stats=True,
+                collect_stats=True,
             )
 
         try:
@@ -1016,7 +1016,7 @@ async def test_engine_core_client_util_method_custom_return(
                 asyncio_mode=True,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
-                log_stats=True,
+                collect_stats=True,
             )
 
         try:
@@ -1064,7 +1064,7 @@ async def test_engine_core_client_util_method_custom_dict_return(
                 asyncio_mode=True,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
-                log_stats=True,
+                collect_stats=True,
             )
 
         try:
@@ -1121,7 +1121,7 @@ async def test_engine_core_client_util_method_nested_structures(
                 asyncio_mode=True,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
-                log_stats=True,
+                collect_stats=True,
             )
 
         try:
@@ -1230,7 +1230,7 @@ async def test_engine_core_client_future_utility_async(
                 asyncio_mode=True,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
-                log_stats=True,
+                collect_stats=True,
             )
 
         try:
@@ -1288,7 +1288,7 @@ def test_kv_cache_events(
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=False,
+            collect_stats=False,
         )
     endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
     subscriber = MockSubscriber(
@@ -1371,7 +1371,7 @@ async def test_kv_cache_events_dp(
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=False,
+            collect_stats=False,
         )
     await asyncio.sleep(1)
 
@@ -1469,7 +1469,7 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=True,
+            collect_stats=True,
         )
 
     assert "Engine core initialization failed" in str(e_info.value)
@@ -1537,7 +1537,7 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
             local_client=True,
             handshake_address="tcp://127.0.0.1:12345",
             executor_class=mock_executor_class,
-            log_stats=False,
+            collect_stats=False,
             engine_index=0,
         )
 
