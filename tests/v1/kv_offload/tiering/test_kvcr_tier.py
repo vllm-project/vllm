@@ -193,6 +193,7 @@ def _make_tier(
     control_ports: list[int] | None = None,
     data_parallel_rank_local: int | None = None,
     backpressure: dict[str, Any] | None = None,
+    startup_timeout_seconds: int | None = None,
 ) -> KVCRSecondaryTierManager:
     def make_control(_bind_host, bind_port, advertise_host):
         return _StubControlChannel(f"tcp://{advertise_host}:{int(bind_port)}")
@@ -228,6 +229,8 @@ def _make_tier(
     }
     if backpressure is not None:
         tier_config["backpressure"] = backpressure
+    if startup_timeout_seconds is not None:
+        tier_config["startup_timeout_seconds"] = startup_timeout_seconds
     tier = SecondaryTierFactory.create_secondary_tier(
         tier_config=tier_config,
         offloading_spec=SimpleNamespace(
@@ -323,6 +326,16 @@ def test_kvcr_tier_configures_service_for_local_dp_rank(monkeypatch):
     assert (region.size, region.stride or region.size, region.count) == (16, 16, 4)
     assert (region.label, region.mem_type, region.device_Id) == ("", "DRAM", 0)
     assert kvcr.backend_configs.local_dram is None
+
+
+@pytest.mark.parametrize("startup_timeout_seconds", [None, 600])
+def test_kvcr_tier_passes_startup_timeout(monkeypatch, startup_timeout_seconds):
+    """Pass the tier's startup timeout to KVCR; unset keeps KVCR's default."""
+    kvcr = RecordingKVCR()
+    _make_tier(monkeypatch, kvcr, startup_timeout_seconds=startup_timeout_seconds)
+
+    assert kvcr.config is not None
+    assert kvcr.config.startup_timeout_seconds == startup_timeout_seconds
 
 
 def test_kvcr_tier_converts_g3_paths(monkeypatch, tmp_path):
