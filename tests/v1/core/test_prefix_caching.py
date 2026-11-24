@@ -1287,7 +1287,7 @@ def _hot_transition_scheduler(tmp_path, max_num_batched_tokens):
         vllm_config=config,
         kv_cache_config=make_hisparse_kv_cache_config(38, 64, num_resident_groups=3),
         block_size=HISPARSE_BLOCK_SIZE,
-        log_stats=True,
+        collect_stats=True,
         structured_output_manager=template.structured_output_manager,
     )
 
