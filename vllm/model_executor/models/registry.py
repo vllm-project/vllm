@@ -848,6 +848,10 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
         "transformers",
         "TransformersMultiModalForCausalLM",
     ),
+    "OmniASRForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForTranscription",
+    ),
     "VibeVoiceAsrForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForTranscription",

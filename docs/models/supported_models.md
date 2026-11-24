@@ -841,6 +841,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `OmniASRForConditionalGeneration` | Omnilingual ASR | `hf-audio/omniasr-llm-300m-v2` | ✅︎ | ✅︎ |
 | `VibeVoiceAsrForConditionalGeneration` | VibeVoice-ASR | `microsoft/VibeVoice-ASR-HF` | ✅︎ | ✅︎ |
 
 #### Realtime Transcription
