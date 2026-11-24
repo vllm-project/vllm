@@ -171,11 +171,24 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 def test_w8a8_block_fp8_matmul_rows_past_int32_offsets(K, N):
     """Rows whose element offset in A or C does not fit in int32."""
     M = 2**31 // max(K, N) + 128
+    # The checked rows below all lie past the int32 bound.
+    assert (M - 64) * max(K, N) >= 2**31
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1250
+
+        if on_gfx1250():
+            pytest.skip("gfx1250 takes the torch fallback, not this kernel")
+    free, _ = current_platform.mem_get_info()
+    if free < 2 * (M * K + 2 * M * N):
+        pytest.skip("not enough free device memory")
     block_size = [128, 128]
     fp8_dtype = current_platform.fp8_dtype()
 
     torch.manual_seed(0)
-    A_fp8 = torch.randn(M, K, dtype=torch.bfloat16).to(fp8_dtype)
+    # Only the last rows are checked, so only they need random data; this keeps
+    # the peak memory near the size of A and C themselves.
+    A_fp8 = torch.zeros(M, K, dtype=fp8_dtype)
+    A_fp8[-64:] = torch.randn(64, K, dtype=torch.bfloat16).to(fp8_dtype)
     B_fp8 = torch.randn(N, K, dtype=torch.bfloat16).to(fp8_dtype)
     As = torch.rand(M, K // 128, dtype=torch.float32) * 1e-2
     Bs = torch.rand(N // 128, K // 128, dtype=torch.float32) * 1e-2

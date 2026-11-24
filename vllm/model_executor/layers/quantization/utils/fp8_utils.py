@@ -883,8 +883,10 @@ def _w8a8_triton_block_scaled_mm(
     pid_m = first_pid_m + (pid % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    # int64 rows: offs_am * stride_am and offs_cm * stride_cm pass 2**31 for large M
-    offs_am = (pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    # Row offsets (offs_am * stride_am, offs_cm * stride_cm) pass 2**31 once M * K
+    # or M * N does, so both row indices are int64. Of the forms measured, widening
+    # offs_am after its % M and offs_cm through pid_m kept the kernel's speed.
+    offs_am = ((pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M).to(tl.int64)
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = A + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
