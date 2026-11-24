@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """UltraQuant 4-bit KV-cache attention on CPU.
 
-The slot layout is the one in ``v1/attention/ops/ultraquant/format.py``, so a
+The slot layout is the one in `v1/attention/ops/ultraquant/format.py`, so a
 cache written here is byte-identical to the GPU backend's. Only the seams
 differ: the store and decode kernels are the AVX-512 ops in
-``csrc/cpu/ultraquant.cpp``, a first prefill chunk attends the unquantized
+`csrc/cpu/ultraquant.cpp`, a first prefill chunk attends the unquantized
 K/V it was handed, and a continuation chunk stages the dequantized prefix
 into a bf16 page so vLLM's own CPU attention kernel can run over it.
 """
@@ -48,7 +48,7 @@ _CONTINUATION_DECODE_RATIO = 8
 
 
 class CPUUltraQuantAttentionBackend(CPUAttentionBackend):
-    """CPU backend for the ``ultraquant_4bit`` KV-cache dtype."""
+    """CPU backend for the `ultraquant_4bit` KV-cache dtype."""
 
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["ultraquant_4bit"]
 
@@ -277,7 +277,7 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
         return kc, vc
 
     def _rotation_like(self, t: torch.Tensor) -> torch.Tensor:
-        """The store's rotation in ``t``'s dtype; hadamard_matrix caches these."""
+        """The store's rotation in `t`'s dtype; hadamard_matrix caches these."""
         return hadamard_matrix(self.head_size, t.device, t.dtype)
 
     def _prefill(

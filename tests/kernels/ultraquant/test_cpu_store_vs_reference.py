@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the AVX-512 UltraQuant store kernel on CPU.
 
-Same contract as the Triton kernel in ``test_store_vs_reference.py`` -- codes
-and scale bytes match ``reference.ultraquant_encode`` bit for bit -- except
+Same contract as the Triton kernel in `test_store_vs_reference.py` -- codes
+and scale bytes match `reference.ultraquant_encode` bit for bit -- except
 that the kernel's bf16 fast path rotates K in bf16, so there K is held to a
 one-level bound instead. The CPU cache is head-major inside a block.
 """

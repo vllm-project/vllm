@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the AVX-512 UltraQuant decode kernel on CPU.
 
-The kernel is checked against ``reference_ultraquant_attention`` over a cache
+The kernel is checked against `reference_ultraquant_attention` over a cache
 the CPU store wrote, so store and decode are held to one shared definition of
 the format. K/V are fp32 here, which is the store's bit-exact path, and Q is
-rotated in fp32, so what is left is the vectorised ``fast_exp`` the online
-softmax shares with ``cpu_attn.cpp``. A separate case covers the bf16
+rotated in fp32, so what is left is the vectorised `fast_exp` the online
+softmax shares with `cpu_attn.cpp`. A separate case covers the bf16
 rotations the backend actually runs.
 """
 
@@ -62,7 +62,7 @@ def _build_paged_cache(key, value, block_size):
 def _decode(query, kv_cache, block_table, seq_lens, scale, sinks=None, rot_dtype=None):
     """Rotate and FP8-round Q as the backend does, then run the op.
 
-    ``rot_dtype`` picks the rotation's precision: bf16 is what the backend
+    `rot_dtype` picks the rotation's precision: bf16 is what the backend
     uses, fp32 isolates the kernel from that choice.
     """
     head_dim = query.shape[-1]
