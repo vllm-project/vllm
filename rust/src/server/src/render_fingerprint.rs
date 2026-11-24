@@ -26,7 +26,7 @@ struct RenderFingerprintManifest {
 
 #[derive(Serialize)]
 struct RenderFingerprintFlags {
-    tokenizer_mode: &'static str,
+    tokenizer_mode: RendererSelection,
     config_format: &'static str,
     trust_remote_code: bool,
     chat_template: Option<String>,
@@ -57,6 +57,7 @@ pub(crate) async fn for_render_server(
         renderer,
         manifest(
             flags(
+                config.renderer,
                 config.chat_template.as_deref(),
                 optional_canonical_map(&config.hf_overrides.0),
                 optional_canonical_map(&config.default_chat_template_kwargs),
@@ -87,6 +88,7 @@ pub(crate) async fn for_server(
         renderer,
         manifest(
             flags(
+                config.renderer,
                 config.chat_template.as_deref(),
                 optional_canonical_map(&config.hf_overrides.0),
                 default_chat_template_kwargs,
@@ -105,6 +107,7 @@ pub(crate) async fn for_server(
 }
 
 fn flags(
+    tokenizer_mode: RendererSelection,
     chat_template: Option<&str>,
     hf_overrides: Option<BTreeMap<String, Value>>,
     default_chat_template_kwargs: Option<BTreeMap<String, Value>>,
@@ -118,7 +121,7 @@ fn flags(
     trust_request_chat_template: bool,
 ) -> Result<RenderFingerprintFlags> {
     Ok(RenderFingerprintFlags {
-        tokenizer_mode: "auto",
+        tokenizer_mode,
         config_format: "auto",
         trust_remote_code: false,
         chat_template: configured_chat_template(chat_template)?,
@@ -184,7 +187,17 @@ fn fingerprint_file(path: Option<&Path>) -> Result<Option<String>> {
 }
 
 fn configured_chat_template(template: Option<&str>) -> Result<Option<String>> {
-    template.map(vllm_chat::resolve_chat_template).transpose().map_err(Into::into)
+    template
+        .map(|template| {
+            let path = Path::new(template);
+            if path.exists() {
+                std::fs::read_to_string(path)
+                    .with_context(|| format!("failed to read chat template {}", path.display()))
+            } else {
+                vllm_chat::resolve_chat_template(template).map_err(Into::into)
+            }
+        })
+        .transpose()
 }
 
 fn optional_canonical_map<'a>(
@@ -335,7 +348,7 @@ mod tests {
     fn test_manifest() -> RenderFingerprintManifest {
         manifest(
             RenderFingerprintFlags {
-                tokenizer_mode: "auto",
+                tokenizer_mode: RendererSelection::Auto,
                 config_format: "auto",
                 trust_remote_code: false,
                 chat_template: None,
@@ -492,6 +505,14 @@ mod tests {
                 .unwrap()
         );
 
+        let mut changed_tokenizer_mode = render_config("org/model");
+        changed_tokenizer_mode.renderer = RendererSelection::Auto;
+        let changed =
+            for_render_server(&changed_tokenizer_mode, RendererSelection::Hf, None, &files)
+                .await
+                .unwrap();
+        assert_ne!(baseline, changed);
+
         let mut changed_mm_kwargs = render_config("org/model");
         changed_mm_kwargs
             .mm_processor_kwargs
@@ -526,6 +547,25 @@ mod tests {
             )
             .await
             .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn render_fingerprint_preserves_configured_template_file_text() {
+        let (_dir, files) = model_files().await;
+        let template = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(template.path(), "{{ messages }}\r\n").unwrap();
+
+        let mut from_file = render_config("org/model");
+        from_file.chat_template = Some(template.path().to_str().unwrap().to_string());
+        let mut inline = render_config("org/model");
+        inline.chat_template = Some("{{ messages }}\r\n".to_string());
+
+        assert_eq!(
+            for_render_server(&from_file, RendererSelection::Hf, None, &files)
+                .await
+                .unwrap(),
+            for_render_server(&inline, RendererSelection::Hf, None, &files).await.unwrap()
         );
     }
 
