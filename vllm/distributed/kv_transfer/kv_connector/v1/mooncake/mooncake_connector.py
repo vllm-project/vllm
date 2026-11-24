@@ -991,12 +991,14 @@ class RequestState:
     scheduled_end_tokens: int = 0
     num_prompt_tokens: int = 0
     inference_finished: bool = False
+    transfer_finished: bool = False
     preempted: bool = False
     sent_tokens: dict[tuple[WorkerKey, str], int] = field(default_factory=dict)
     available_tokens: dict[int, int] = field(default_factory=dict)
     sealed: bool = False
     error: str | None = None
     ack_scheduled_workers: set[WorkerKey] = field(default_factory=set)
+    cancel_ack: threading.Event = field(default_factory=threading.Event)
     deadline: float = float("inf")
     destinations: dict[WorkerKey, Destination] = field(default_factory=dict)
 
@@ -1088,14 +1090,37 @@ class MooncakeLayerwiseRequestHandler:
         self._retired[transfer_id] = deadline
 
     def schedule_completion_ack(
-        self, transfer_id: str, worker_key: WorkerKey, error: str | None
+        self,
+        transfer_id: str,
+        worker_key: WorkerKey,
+        error: str | None,
+        sends: tuple[Future[SendResult], ...] = (),
+        cancel_ack: threading.Event | None = None,
     ) -> None:
         """Model thread: schedule an ACK without touching the ZMQ socket."""
         future = asyncio.run_coroutine_threadsafe(
-            self._send_completion_ack(transfer_id, worker_key, error),
+            self._complete_after_sends(
+                transfer_id, worker_key, error, sends, cancel_ack
+            ),
             self._worker.sender_loop,
         )
         future.add_done_callback(self._log_ack_result)
+
+    async def _complete_after_sends(
+        self,
+        transfer_id: str,
+        worker_key: WorkerKey,
+        error: str | None,
+        sends: tuple[Future[SendResult], ...],
+        cancel_ack: threading.Event | None,
+    ) -> None:
+        # wrap_future wakes this loop on completion without occupying a sender
+        # thread or depending on another model-thread poll. A failed send must
+        # never produce a success ACK; the model thread also fails closed.
+        if sends:
+            await asyncio.gather(*(asyncio.wrap_future(send) for send in sends))
+        if cancel_ack is None or not cancel_ack.is_set():
+            await self._send_completion_ack(transfer_id, worker_key, error)
 
     @staticmethod
     def _log_ack_result(future: Future[None]) -> None:
@@ -1409,6 +1434,13 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(self._connector_metadata, MooncakeConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
 
+    def prepare_kv_writes(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        assert self.connector_worker is not None
+        worker = self.connector_worker
+        if worker._layerwise and worker.is_kv_producer:
+            assert isinstance(kv_connector_metadata, MooncakeConnectorMetadata)
+            worker.prepare_kv_writes(kv_connector_metadata)
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         """KV loads complete at request granularity."""
         pass
@@ -1529,6 +1561,8 @@ class MooncakeConnectorScheduler:
         ]
         if self._layerwise:
             self._prefill_requests: dict[str, Request] = {}
+            self._pending_layerwise_sends: set[str] = set()
+            self._completed_layerwise_sends: set[str] = set()
             for index, group in enumerate(self.kv_cache_config.transfer_groups):
                 if issubclass(group.manager_cls, SlidingWindowManager):
                     self.blocks_per_sw[index] = (
@@ -1624,6 +1658,20 @@ class MooncakeConnectorScheduler:
         for req_id in connector_output.finished_recving or ():
             self._lease_reqs.pop(req_id, None)
 
+        if not self._layerwise or not self.is_kv_producer:
+            return
+        # The executor aggregates ranks; defer early reports and ignore cancelled IDs.
+        for req_id in connector_output.finished_sending or ():
+            request = self._prefill_requests.get(req_id)
+            if req_id in self._pending_layerwise_sends or (
+                request is not None and not request.is_finished()
+            ):
+                self._completed_layerwise_sends.add(req_id)
+        finished = self._pending_layerwise_sends & self._completed_layerwise_sends
+        self._pending_layerwise_sends.difference_update(finished)
+        self._completed_layerwise_sends.difference_update(finished)
+        connector_output.finished_sending = finished or None
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
@@ -1718,6 +1766,11 @@ class MooncakeConnectorScheduler:
             if not params.get("transfer_id"):
                 logger.warning("Missing transfer_id in kv_transfer_params from router!")
             elif self._layerwise:
+                if (
+                    request.sampling_params is None
+                    or request.sampling_params.max_tokens != 1
+                ):
+                    raise ValueError("Layerwise requires one P output token")
                 self._prefill_requests[request.request_id] = request
             else:
                 # Add an empty list to worker to create event.
@@ -1817,6 +1870,8 @@ class MooncakeConnectorScheduler:
             # Also include the case of a P/D Prefill request with immediate
             # block free (eg abort). Stop tracking this request.
             self._reqs_not_processed.add(params["transfer_id"])
+            if self._layerwise:
+                self._completed_layerwise_sends.discard(request.request_id)
             return False, None
 
         # TODO: check whether block_ids actually ever be 0. If not we could
@@ -1824,6 +1879,8 @@ class MooncakeConnectorScheduler:
         delay_free_blocks = any(len(group) > 0 for group in block_ids)
 
         if delay_free_blocks:
+            if self._layerwise:
+                self._pending_layerwise_sends.add(request.request_id)
             self._reqs_need_send[request.request_id] = (
                 request,
                 list(self.kv_cache_config.select_transfer_block_ids(block_ids))
@@ -4303,6 +4360,7 @@ class MooncakeConnectorWorker:
         self._layerwise_transfer_interval = _get_layerwise_transfer_interval(
             self.vllm_config.kv_transfer_config
         )
+        self._prepared_metadata: MooncakeConnectorMetadata | None = None
         self._saved_layer_indices: set[int] = set()
         self.requests_to_send: dict[str, RequestState] = {}
         # Transfer IDs of requests prefilling in the current scheduler step.
@@ -4331,27 +4389,43 @@ class MooncakeConnectorWorker:
         if self.pcp_rank != 0:
             replica_finished: set[str] = set()
             for transfer_id, state in list(self.requests_to_send.items()):
-                if state.inference_finished and state.req_id is not None:
+                if (
+                    state.req_id is not None
+                    and (state.sealed or state.inference_finished)
+                    and not state.transfer_finished
+                ):
+                    state.transfer_finished = True
                     replica_finished.add(state.req_id)
+                if state.inference_finished and state.req_id is not None:
                     self.requests_to_send.pop(transfer_id)
             return replica_finished or None, None
-        # Speculative runners may collect output before wait_for_save. Completion
-        # must not release blocks until that step's send barrier has run.
-        if self._pending_sends:
-            return None, None
+        # Sends may outlive the forward that submitted them. Only completed
+        # transfers may publish progress or allow source blocks to be released.
+        self._finish_pending_send()
+        pending_ids = {
+            task.transfer_id for tasks, _ in self._pending_sends for task in tasks
+        }
         now = time.monotonic()
         finished: set[str] = set()
         for transfer_id, state in list(self.requests_to_send.items()):
+            if transfer_id in pending_ids:
+                continue
             if now >= state.deadline and state.error is None:
                 state.error = "P transfer expired"
                 self.xfer_stats.record_kv_expired_req()
             complete = self._finish_destinations(state)
             if not complete and state.error is None:
                 continue
-            if state.inference_finished:
-                assert state.req_id is not None
+            if (
+                state.req_id is not None
+                and not state.transfer_finished
+                and (state.inference_finished or (state.sealed and state.error is None))
+            ):
+                state.transfer_finished = True
                 finished.add(state.req_id)
-            elif state.req_id is not None or state.error is None:
+            if not state.inference_finished and (
+                state.req_id is not None or state.error is None
+            ):
                 # Keep active P requests, and ready-only requests awaiting P.
                 continue
             self._retire_request(transfer_id)
@@ -4362,9 +4436,40 @@ class MooncakeConnectorWorker:
         }
         return finished or None, None
 
+    def _aborted_transfer_ids(self, metadata: MooncakeConnectorMetadata) -> set[str]:
+        # Normal handoffs may arrive with finished_req_ids before worker state
+        # has inference_finished set. They retain their blocks and need no wait.
+        finished = metadata.finished_req_ids - metadata.reqs_to_send.keys()
+        if not finished:
+            return metadata.reqs_not_processed
+        return metadata.reqs_not_processed | {
+            transfer_id
+            for transfer_id, state in self.requests_to_send.items()
+            if state.req_id in finished and not state.inference_finished
+        }
+
+    def prepare_kv_writes(self, metadata: MooncakeConnectorMetadata) -> None:
+        if metadata.preempted_req_ids:
+            # Reset/retry can reuse the same D destination and transfer ID.
+            # Source fencing alone does not establish attempt isolation.
+            raise RuntimeError("Layerwise preemption recovery is not supported")
+        aborted = self._aborted_transfer_ids(metadata)
+        if aborted:
+            for transfer_id in aborted:
+                if (state := self.requests_to_send.get(transfer_id)) is not None:
+                    state.cancel_ack.set()
+            # Cancellation can free source blocks before this runner step.
+            # Drain its readers before zeroing, copies or forward can reuse them.
+            self._finish_pending_send(aborted_transfer_ids=aborted)
+        self._prepared_metadata = metadata
+
     def _start_layerwise_step(self, metadata: MooncakeConnectorMetadata) -> None:
-        # wait_for_save must drain device readers before replacing block tables.
-        assert not self._pending_sends
+        if self._prepared_metadata is not metadata:
+            raise RuntimeError("Layerwise requires the runner pre-write hook")
+        self._prepared_metadata = None
+        # SendTask retains immutable block tables and its readiness event.
+        # Normal prefill can advance while those source blocks remain retained.
+        self._finish_pending_send()
         self._saved_layer_indices.clear()
         self.cached_block_slices.clear()
         self.process_decode_ready_requests()
@@ -4399,13 +4504,7 @@ class MooncakeConnectorWorker:
                 self._kv_lease_duration or envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
             )
         # Finished requests without a normal handoff are treated as aborted.
-        aborted = metadata.reqs_not_processed | {
-            transfer_id
-            for transfer_id, state in self.requests_to_send.items()
-            if state.req_id in metadata.finished_req_ids
-            and not state.inference_finished
-        }
-        for transfer_id in aborted:
+        for transfer_id in self._aborted_transfer_ids(metadata):
             state = self.requests_to_send.get(transfer_id)
             if state is not None:
                 state.error = "P request ended without a transferable prefill"
@@ -4416,9 +4515,9 @@ class MooncakeConnectorWorker:
         if cached_prefix_available:
             self._ready_event = self._record_event()
             self._process_pending_transfers()
-        # No-forward steps skip wait_for_save; drain transfers here instead.
+        # Empty steps must make progress without waiting on unrelated sends.
         if not ids:
-            self._process_pending_transfers(wait=True)
+            self._process_pending_transfers()
             self.cached_block_slices.clear()
 
     def _prepare_layerwise_regions(
@@ -4574,6 +4673,11 @@ class MooncakeConnectorWorker:
                 )
                 continue
             state = self.requests_to_send.get(transfer_id)
+            if state is not None and state.transfer_finished:
+                self._layerwise_request_handler.schedule_completion_ack(
+                    transfer_id, meta.worker_key, "P transfer already completed"
+                )
+                continue
             if state is None:
                 state = RequestState(transfer_id)
                 self.requests_to_send[transfer_id] = state
@@ -4703,26 +4807,31 @@ class MooncakeConnectorWorker:
                 raise RuntimeError(error)
         return result
 
-    def _finish_pending_send(self, *, wait: bool = False) -> None:
-        if not self._pending_sends:
-            return
-        if not wait and any(not future.done() for _, future in self._pending_sends):
-            return
-        # Drain every batch before allowing completion or block release.
+    def _finish_pending_send(
+        self, *, wait: bool = False, aborted_transfer_ids: set[str] | None = None
+    ) -> None:
+        pending = []
         for tasks, future in self._pending_sends:
+            aborted = aborted_transfer_ids is not None and any(
+                task.transfer_id in aborted_transfer_ids for task in tasks
+            )
+            if not wait and not aborted and not future.done():
+                pending.append((tasks, future))
+                continue
             try:
                 result = future.result()
             except Exception as exc:
-                logger.exception("Layerwise send batch failed")
-                error = str(exc)
-                for layer_transfer_task in tasks:
-                    self.requests_to_send[layer_transfer_task.transfer_id].error = error
+                # A failed API call is not proof that every issued DMA has
+                # stopped. Do not ACK or release pages on that assumption.
+                raise RuntimeError(
+                    "Layerwise send failed; DMA drain is unconfirmed"
+                ) from exc
             else:
                 for transfer_id, worker_key, layer_name, end in result.progress:
                     self.requests_to_send[transfer_id].sent_tokens[
                         worker_key, layer_name
                     ] = end
-        self._pending_sends.clear()
+        self._pending_sends = pending
 
     def _build_layer_transfer_task(
         self, state, destination, kv_cache_name, cached_block_slices
@@ -4816,8 +4925,13 @@ class MooncakeConnectorWorker:
 
     def _submit_available_layers(self) -> None:
         """Model thread: snapshot block ranges and retain their destination layouts."""
-        if self._pending_sends:
-            return
+        # Serialize ranges only within one request/destination/cache region.
+        # sent_tokens advances on completion, never on submission.
+        in_flight = {
+            (task.transfer_id, task.destination.meta.worker_key, task.kv_cache_name)
+            for tasks, _ in self._pending_sends
+            for task in tasks
+        }
         session_tasks: dict[str, list[SendTask]] = {}
         now = time.monotonic()
         for state in self.requests_to_send.values():
@@ -4838,6 +4952,9 @@ class MooncakeConnectorWorker:
                 try:
                     for layer_index in state.available_tokens:
                         for kv_cache_name in remote_kv_cache_names.get(layer_index, ()):
+                            key = (state.transfer_id, worker_key, kv_cache_name)
+                            if key in in_flight:
+                                continue
                             layer_transfer_task = self._build_layer_transfer_task(
                                 state,
                                 destination,
@@ -4874,6 +4991,12 @@ class MooncakeConnectorWorker:
         if wait:
             # Finish all destination batches before advancing transfer state.
             self._finish_pending_send(wait=True)
+        for state in self.requests_to_send.values():
+            if state.error is None:
+                self._finish_destinations(state)
+            else:
+                # Error replies still require the existing pending-send drain.
+                state.cancel_ack.set()
 
     def _apply_lease_renewals(self) -> None:
         while True:
@@ -4886,26 +5009,45 @@ class MooncakeConnectorWorker:
                 state.deadline = max(state.deadline, deadline)
 
     def _finish_destinations(self, state: RequestState) -> bool:
-        """ACK each D only after every required region reached its target."""
+        """Arm an ACK once submitted ranges cover the sealed destination."""
+        if state.error is not None:
+            state.cancel_ack.set()
         for worker_key, destination in state.destinations.items():
-            if worker_key in state.ack_scheduled_workers:
+            if worker_key in state.ack_scheduled_workers and state.error is None:
                 continue
             required_layers = destination.required_layers
-            if (
-                state.error is None
-                and required_layers
-                and (
-                    not state.sealed
-                    or any(
-                        state.sent_tokens.get((worker_key, name), -1)
-                        < state.num_prompt_tokens
-                        for name in required_layers
-                    )
-                )
-            ):
-                continue
+            sends: list[Future[SendResult]] = []
+            if state.error is None and required_layers:
+                if not state.sealed:
+                    continue
+                submitted = {
+                    name: state.sent_tokens.get((worker_key, name), -1)
+                    for name in required_layers
+                }
+                for tasks, future in self._pending_sends:
+                    relevant = False
+                    for task in tasks:
+                        if (
+                            task.transfer_id == state.transfer_id
+                            and task.destination.meta.worker_key == worker_key
+                        ):
+                            submitted[task.kv_cache_name] = max(
+                                submitted.get(task.kv_cache_name, -1), task.end_tokens
+                            )
+                            relevant = True
+                    if relevant:
+                        sends.append(future)
+                if any(
+                    submitted[name] < state.num_prompt_tokens
+                    for name in required_layers
+                ):
+                    continue
             self._layerwise_request_handler.schedule_completion_ack(
-                state.transfer_id, worker_key, state.error
+                state.transfer_id,
+                worker_key,
+                state.error,
+                tuple(sends),
+                state.cancel_ack if state.error is None else None,
             )
             state.ack_scheduled_workers.add(worker_key)
         if not state.destinations:
@@ -4970,7 +5112,7 @@ class MooncakeConnectorWorker:
                 # End-of-forward fallback for regions without a per-layer hook.
                 for layer_index in layer_indices:
                     state.available_tokens[layer_index] = state.scheduled_end_tokens
-        self._process_pending_transfers(wait=True)
+        self._process_pending_transfers()
         self.cached_block_slices.clear()
         self.prefilling_transfer_ids = ()
         self._saved_layer_indices.clear()

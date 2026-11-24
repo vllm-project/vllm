@@ -5,6 +5,8 @@ import contextlib
 import ctypes
 import queue
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import msgspec
@@ -14,8 +16,9 @@ import zmq.asyncio
 from huggingface_hub.utils import httpx
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
-from vllm.config import set_current_vllm_config
+from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import mooncake_connector
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
@@ -35,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
 )
+from vllm.v1.request import RequestStatus
 
 from .test_mooncake_connector import (
     _BootstrapClientStub,
@@ -58,6 +62,7 @@ def _layerwise_copy_worker(
     spec=None,
     manager_config=None,
     array_api=False,
+    before_copy=None,
 ):
     config = _make_worker_vllm_config(
         kv_role, {"transfer_mode": "layerwise", **(extra or {})}
@@ -74,6 +79,8 @@ def _layerwise_copy_worker(
     )
 
     def write(_session, sources, destinations, lengths):
+        if before_copy is not None:
+            before_copy(sources)
         if writes is not None:
             writes.append(tuple(map(int, lengths)))
         for src, dst, length in zip(sources, destinations, lengths):
@@ -264,6 +271,7 @@ async def test_layerwise_interval_batches_layers_and_flushes_each_chunk(
                 )
                 for req, blocks in (("a", (1, 2)), ("b", (3, 4)))
             )
+            worker.prepare_kv_writes(metadata)
             worker.start_load_kv(metadata)
             for i, (name, source) in enumerate(zip(names, sources)):
                 source[chunk].fill_(10 + i)
@@ -279,6 +287,7 @@ async def test_layerwise_interval_batches_layers_and_flushes_each_chunk(
                     expected = 10 + j if j < copied else 0
                     assert torch.all(destination[chunk + 4] == expected)
             worker.wait_for_save()
+            worker._process_pending_transfers(wait=True)
             assert len(writes) == (len(names) + interval - 1) // interval
             for source, destination in zip(sources, destinations):
                 assert torch.equal(destination[5 : 5 + chunk], source[1 : 1 + chunk])
@@ -331,6 +340,7 @@ async def test_layerwise_prefix_copy_waits_for_complete_blocks_and_destination(
                 num_computed_tokens=block_size + prefix_delta,
             ),
         )
+        worker.prepare_kv_writes(metadata)
         worker.start_load_kv(metadata)
         if not ready_before_start:
             assert not torch.any(destination)
@@ -351,6 +361,7 @@ async def test_layerwise_prefix_copy_waits_for_complete_blocks_and_destination(
         ):
             worker.save_kv_layer(name)
             worker.wait_for_save()
+            worker._process_pending_transfers(wait=True)
         assert torch.equal(destination[3:5], source[1:3])
 
 
@@ -392,12 +403,14 @@ async def test_layerwise_state_copy_waits_for_final_kv_and_excludes_scratch(recu
                 num_computed_tokens=3 * size,
             ),
         )
+        worker.prepare_kv_writes(metadata)
         worker.start_load_kv(metadata)
         worker._finish_pending_send(wait=True)
         assert not torch.any(destination)
         source[1].fill_(11)
         worker.save_kv_layer(name)
         worker.wait_for_save()
+        worker._process_pending_transfers(wait=True)
         assert torch.equal(destination[4], source[1])
         assert not torch.any(destination[5:7])
 
@@ -419,6 +432,7 @@ async def test_layerwise_reuses_slices_across_hooks_and_refreshes_next_forward()
         metadata.requests = (
             mooncake_connector.PushReqMeta("a", "a", ((1, 2),), size, 2 * size),
         )
+        worker.prepare_kv_writes(metadata)
         worker.start_load_kv(metadata)
         worker.save_kv_layer(names[0])
         worker._finish_pending_send(wait=True)
@@ -432,6 +446,7 @@ async def test_layerwise_reuses_slices_across_hooks_and_refreshes_next_forward()
         )
         assert reused_slice is first_slice
         worker.wait_for_save()
+        worker._process_pending_transfers(wait=True)
         assert not worker.cached_block_slices
         for destination in destinations:
             assert torch.all(destination[3] == 7)
@@ -441,10 +456,12 @@ async def test_layerwise_reuses_slices_across_hooks_and_refreshes_next_forward()
         metadata.requests = (
             mooncake_connector.PushReqMeta("a", "a", ((1, 5),), 2 * size, 2 * size),
         )
+        worker.prepare_kv_writes(metadata)
         worker.start_load_kv(metadata)
         for name in names:
             worker.save_kv_layer(name)
         worker.wait_for_save()
+        worker._process_pending_transfers(wait=True)
         assert not worker.cached_block_slices
         for destination in destinations:
             assert torch.all(destination[3] == 7)
@@ -476,9 +493,11 @@ async def test_layerwise_ready_at_bootstrap_publication_copies_registered_cache(
             mooncake_connector.PushReqMeta("a", "a", ((1,),), count, count),
         )
         metadata.reqs_to_send["a"] = ("a", [[1]])
+        worker.prepare_kv_writes(metadata)
         worker.start_load_kv(metadata)
         worker.save_kv_layer(name)
         worker.wait_for_save()
+        worker._process_pending_transfers(wait=True)
         assert worker.get_finished()[0] == {"a"}
         response = msgspec.msgpack.decode(
             replies.get(timeout=5)[1], type=MooncakeXferResponse
@@ -486,6 +505,71 @@ async def test_layerwise_ready_at_bootstrap_publication_copies_registered_cache(
         assert response.ok_reqs == ["a"]
         assert response.covered_layers == [name]
         assert torch.equal(destination[3], source[1])
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_layerwise_early_completion_releases_blocks_before_worker_retirement(cancel):
+    """Early rank reports permit N+4 reuse without double-freeing cancellations."""
+    config = _make_worker_vllm_config("kv_producer", {"transfer_mode": "layerwise"})
+    config.parallel_config = ParallelConfig(tensor_parallel_size=2)
+    config.scheduler_config.async_scheduling = True
+    config.cache_config.enable_prefix_caching = False
+    config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    scheduler = create_scheduler(config, num_blocks=2)
+    aggregator = KVOutputAggregator(config.parallel_config.world_size)
+    size = config.cache_config.block_size
+    request = create_request(num_tokens=size, max_tokens=1, do_remote_decode=True)
+    request.kv_transfer_params["transfer_id"] = request.request_id
+    scheduler.add_request(request)
+    first = scheduler.schedule()  # N+1: final chunk.
+    original_blocks = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    waiting = create_request(num_tokens=size, max_tokens=1)
+    scheduler.add_request(waiting)
+    second = scheduler.schedule()  # N+2 precedes consumption of N+1.
+    assert waiting.request_id not in second.num_scheduled_tokens
+    if cancel:
+        scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.update_from_output(
+        first,
+        aggregator.aggregate(
+            [
+                create_model_runner_output(
+                    [request], finished_sending={request.request_id}
+                ),
+                create_model_runner_output([request]),
+            ]
+        ),
+    )
+    if not cancel:
+        assert request.request_id in scheduler.requests  # One rank is insufficient.
+    third = scheduler.schedule()  # N+3 carries the normal retirement metadata.
+    if not cancel:
+        assert request.request_id in third.kv_connector_metadata.reqs_to_send
+        assert waiting.request_id not in third.num_scheduled_tokens
+    # The existing executor aggregator joins reports arriving in different steps.
+    scheduler.update_from_output(
+        second,
+        aggregator.aggregate(
+            [
+                create_model_runner_output([]),
+                create_model_runner_output([], finished_sending={request.request_id}),
+            ]
+        ),
+    )
+    assert request.request_id not in scheduler.requests
+    fourth = scheduler.schedule()
+    if not cancel:
+        assert waiting.request_id in fourth.num_scheduled_tokens
+        assert scheduler.kv_cache_manager.get_block_ids(waiting.request_id) == (
+            original_blocks
+        )
+    scheduler.update_from_output(
+        third,
+        create_model_runner_output(
+            [waiting] if waiting.request_id in third.num_scheduled_tokens else [],
+            finished_sending={request.request_id},
+        ),
+    )  # Late retirement must not free the same request a second time.
 
 
 @pytest.mark.asyncio
@@ -519,6 +603,7 @@ async def test_layerwise_finished_prefill_drains_late_ready(
         request = create_request(
             num_tokens=2 * size,
             common_prefix_len=2 * size,
+            max_tokens=1,
             block_size=size,
             do_remote_decode=True,
         )
@@ -533,14 +618,17 @@ async def test_layerwise_finished_prefill_drains_late_ready(
         destinations = [torch.zeros_like(source) for source in sources]
         for layer, source in enumerate(sources):
             source[blocks] = layer + 7
+        worker.prepare_kv_writes(metadata)
         worker.start_load_kv(metadata)
         for name in names:
             worker.save_kv_layer(name)
         worker.wait_for_save()
+        worker._process_pending_transfers(wait=True)
         scheduler.update_from_output(scheduled, create_model_runner_output([request]))
         assert scheduler.has_requests()
         empty = scheduler.schedule()
         assert empty.total_num_scheduled_tokens == 0
+        worker.prepare_kv_writes(empty.kv_connector_metadata)
         worker.start_load_kv(empty.kv_connector_metadata)
         assert worker.get_finished()[0] is None
         scheduler.update_from_output(empty, create_model_runner_output([]))
@@ -555,30 +643,40 @@ async def test_layerwise_finished_prefill_drains_late_ready(
         empty = scheduler.schedule()
         assert empty.total_num_scheduled_tokens == 0
         with (
-            patch.object(
-                worker.transfer_backend.engine,
-                "batch_transfer_sync_write",
-                return_value=write_status,
-            )
-            if write_status
-            else contextlib.nullcontext()
+            (
+                patch.object(
+                    worker.transfer_backend.engine,
+                    "batch_transfer_sync_write",
+                    return_value=write_status,
+                )
+                if write_status
+                else contextlib.nullcontext()
+            ),
+            (
+                pytest.raises(RuntimeError, match="DMA drain is unconfirmed")
+                if write_status
+                else contextlib.nullcontext()
+            ),
         ):
+            worker.prepare_kv_writes(empty.kv_connector_metadata)
             worker.start_load_kv(empty.kv_connector_metadata)
+            worker._process_pending_transfers(wait=True)
+        if write_status:
+            assert replies.empty()
+            assert request.request_id in worker.requests_to_send
+            assert scheduler.has_requests()
+            assert all(not torch.any(dest) for dest in destinations)
+            return
         finished, _ = worker.get_finished()
         assert finished == {request.request_id}
         response = msgspec.msgpack.decode(
             replies.get(timeout=5)[1], type=MooncakeXferResponse
         )
         assert response.status == MooncakeXferResponseStatus.FINISH
-        if write_status:
-            assert response.err_reqs == [request.request_id]
-            assert not response.ok_reqs
-            assert all(not torch.any(dest) for dest in destinations)
-        else:
-            assert response.ok_reqs == [request.request_id]
-            assert response.covered_layers == list(names)
-            for source, destination in zip(sources, destinations):
-                assert torch.equal(destination[3:5], source[blocks])
+        assert response.ok_reqs == [request.request_id]
+        assert response.covered_layers == list(names)
+        for source, destination in zip(sources, destinations):
+            assert torch.equal(destination[3:5], source[blocks])
         scheduler.update_from_output(
             empty, create_model_runner_output([], finished_sending=finished)
         )
@@ -611,3 +709,202 @@ async def test_layerwise_rejects_request_protocol_before_copy():
         with pytest.raises(ValueError, match="same transfer_mode"):
             await worker.send_kv_to_decode(b"decode", AsyncMock(), remote)
         assert not torch.any(destination)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("complete_before_seal", [False, True])
+async def test_layerwise_ack_without_another_model_thread_poll(complete_before_seal):
+    entered, release, acknowledged = Event(), Event(), Event()
+    responses = []
+
+    def before_copy(sources):
+        entered.set()
+        assert release.wait(10)
+
+    async def receive_ack(parts):
+        responses.append(msgspec.msgpack.decode(parts[1], type=MooncakeXferResponse))
+        acknowledged.set()
+
+    with _layerwise_copy_worker(before_copy=before_copy) as worker:
+        name = worker.registered_layer_names[0]
+        source = worker.device_kv_caches[name]
+        source[1].fill_(11)
+        destination = torch.zeros_like(source)
+        remote = _copy_destination_metadata(worker, [destination], {"a": (3,)})
+        sock = AsyncMock()
+        sock.send_multipart.side_effect = receive_ack
+        await worker.send_kv_to_decode(b"decode", sock, remote)
+        size = worker.logical_block_size
+        metadata = MooncakeConnectorMetadata()
+        metadata.requests = (
+            mooncake_connector.PushReqMeta("a", "a", ((1,),), size, size),
+        )
+        worker.prepare_kv_writes(metadata)
+        worker.start_load_kv(metadata)
+        try:
+            worker.save_kv_layer(name)
+            assert entered.wait(10)
+            if complete_before_seal:
+                release.set()
+                for _, future in worker._pending_sends:
+                    future.result(timeout=10)
+                assert not acknowledged.is_set()
+            worker.wait_for_save()
+            if not complete_before_seal:
+                assert not acknowledged.is_set()
+                release.set()
+            # No get_finished(), next step, or subsequent layer hook.
+            assert acknowledged.wait(10)
+            assert len(responses) == 1
+            assert responses[0].ok_reqs == ["a"]
+            assert responses[0].err_reqs is None
+            assert torch.all(destination[3] == 11)
+        finally:
+            release.set()
+
+
+@pytest.mark.asyncio
+async def test_async_layerwise_completes_unrelated_request_without_duplicate_sends():
+    entered, release = Event(), Event()
+    blocked_sources = []
+    names = ("model.layers.0.self_attn", "model.layers.1.self_attn")
+
+    def before_copy(sources):
+        if int(sources[0]) == blocked_address:
+            blocked_sources.append(int(sources[0]))
+            entered.set()
+            assert release.wait(10), "test did not release the transport"
+
+    with _layerwise_copy_worker(
+        names=names,
+        before_copy=before_copy,
+    ) as worker:
+        sources = [worker.device_kv_caches[name] for name in names]
+        blocked_address = sources[0][1].data_ptr()
+        destinations = [torch.zeros_like(source) for source in sources]
+        for source in sources:
+            source[1].fill_(11)
+            source[2].fill_(22)
+        remote = _copy_destination_metadata(
+            worker, destinations, {"a": (3,), "b": (4,)}
+        )
+        await worker.send_kv_to_decode(b"decode", AsyncMock(), remote)
+        size = worker.logical_block_size
+        try:
+            for req_id, block in (("a", 1), ("b", 2)):
+                metadata = MooncakeConnectorMetadata()
+                metadata.requests = (
+                    mooncake_connector.PushReqMeta(
+                        req_id, req_id, ((block,),), size, size
+                    ),
+                )
+                worker.prepare_kv_writes(metadata)
+                worker.start_load_kv(metadata)
+                worker.save_kv_layer(names[0])
+                if req_id == "a":
+                    assert entered.wait(10)
+                    # Repeating a hook must not enqueue the same source range.
+                    worker.save_kv_layer(names[0])
+                worker.save_kv_layer(names[1])
+                worker.wait_for_save()
+            # Await only b's actual transport results, leaving a blocked.
+            for tasks, future in tuple(worker._pending_sends):
+                if any(task.transfer_id == "b" for task in tasks):
+                    future.result(timeout=10)
+            assert worker.get_finished()[0] == {"b"}
+            assert worker.get_finished()[0] is None
+            metadata = MooncakeConnectorMetadata()
+            metadata.reqs_to_send = {"a": ("a", [[1]]), "b": ("b", [[2]])}
+            metadata.finished_req_ids = {"a", "b"}
+            worker.prepare_kv_writes(metadata)
+            worker.start_load_kv(metadata)
+            assert worker.get_finished()[0] is None
+            assert "b" not in worker.requests_to_send
+            assert "a" in worker.requests_to_send
+            assert blocked_sources == [blocked_address]
+            assert not torch.any(destinations[0][3])
+            for destination in destinations:
+                assert torch.all(destination[4] == 22)
+        finally:
+            release.set()
+        worker._process_pending_transfers(wait=True)
+        assert worker.get_finished()[0] == {"a"}
+        for destination in destinations:
+            assert torch.all(destination[3] == 11)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_notice", ["reqs_not_processed", "finished_req_ids"])
+async def test_async_layerwise_cancellation_drains_recurrent_send_before_reuse(
+    cancel_notice,
+):
+    entered, release, fence_entered, overwritten = Event(), Event(), Event(), Event()
+
+    def before_copy(sources):
+        entered.set()
+        assert release.wait(10), "test did not release the transport"
+
+    spec = MambaSpec(block_size=16, shapes=((8,),), dtypes=(torch.float16,))
+    with _layerwise_copy_worker(
+        spec=spec,
+        manager_config=MambaManager.config(),
+        before_copy=before_copy,
+    ) as worker:
+        name = worker.registered_layer_names[0]
+        source = worker.device_kv_caches[name]
+        source[1].fill_(11)
+        destination = torch.zeros_like(source)
+        remote = _copy_destination_metadata(worker, [destination], {"a": (3,)})
+        await worker.send_kv_to_decode(b"decode", AsyncMock(), remote)
+        size = worker.logical_block_size
+        metadata = MooncakeConnectorMetadata()
+        metadata.requests = (
+            mooncake_connector.PushReqMeta("a", "a", ((1,),), size, 2 * size),
+        )
+        worker.prepare_kv_writes(metadata)
+        worker.start_load_kv(metadata)
+        worker.save_kv_layer(name)
+        worker.wait_for_save()
+        assert not worker._pending_sends  # No intermediate Mamba state transfer.
+        metadata = MooncakeConnectorMetadata()
+        metadata.requests = (
+            mooncake_connector.PushReqMeta(
+                "a", "a", ((1,),), 2 * size, 2 * size, num_computed_tokens=size
+            ),
+        )
+        worker.prepare_kv_writes(metadata)
+        worker.start_load_kv(metadata)
+        worker.save_kv_layer(name)
+        worker.wait_for_save()
+        next_step = MooncakeConnectorMetadata()
+        getattr(next_step, cancel_notice).add("a")
+
+        def overwrite():
+            fence_entered.set()
+            worker.prepare_kv_writes(next_step)
+            source[1].fill_(99)
+            overwritten.set()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            try:
+                assert entered.wait(10)
+                future = executor.submit(overwrite)
+                assert fence_entered.wait(10)
+                assert not overwritten.wait(0.1)
+            finally:
+                release.set()
+            future.result(timeout=10)
+        assert torch.all(destination[3] == 11)
+        assert torch.all(source[1] == 99)
+        worker.start_load_kv(next_step)
+        assert "a" not in worker.requests_to_send
+
+
+def test_async_layerwise_requires_early_hook_and_rejects_preemption():
+    with _layerwise_copy_worker() as worker:
+        metadata = MooncakeConnectorMetadata()
+        with pytest.raises(RuntimeError, match="runner pre-write hook"):
+            worker.start_load_kv(metadata)
+        metadata.preempted_req_ids = {"a"}
+        with pytest.raises(RuntimeError, match="preemption recovery"):
+            worker.prepare_kv_writes(metadata)

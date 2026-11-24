@@ -72,6 +72,39 @@ At the start of each step, P can send complete cached-prefix blocks, including b
 
 ### Layerwise limits
 
+- Use `MooncakeConnector` directly for layerwise transfer. Composition through
+  `MultiConnector` is not supported: the pre-write hook and early completion
+  accounting are not integrated with its multi-connector save barrier.
+  MultiConnector composition and KV-cache pooling integration are planned for
+  follow-up work.
+- Layerwise P requires the GPU runner's `prepare_kv_writes` hook and one output token.
+- `wait_for_save()` and empty steps submit and poll without
+  draining all sender Futures. Independent cache regions can be submitted
+  while other sends are pending. Each request/destination/cache region has
+  at most one in-flight range, and only completed ranges advance its progress.
+  Once the final chunk is sealed and submitted ranges cover every required
+  region, the sender loop sends the ACK when those Futures complete, without
+  waiting for another model-thread poll. Normal delayed block release remains
+  required, including while waiting for D to provide its destination buffers.
+  Workers report completed sends once through the existing `finished_sending` output,
+  without waiting for the scheduler's request-finished notification. The scheduler
+  releases blocks only after the request finishes and all worker ranks report
+  completion. Worker retirement does not report the same completion again.
+- Normal handoffs rely on retaining source blocks until sending completes;
+  no per-step block conflict scan is performed. Full-attention chunks send
+  complete blocks, and Mamba/window state is sent only at the final chunk.
+  If P cancels a request, the early runner hook waits for batches containing
+  that request before any zeroing, copies or forward can reuse its blocks.
+  Unrelated batches remain asynchronous. The worker then retires the cancelled
+  request without a second global drain.
+- Preemption recovery is unsupported and stops the worker before KV
+  writes. A send failure also stops the worker rather than treating an error
+  as proof of DMA drain. Use dedicated prefill with full-input admission and
+  monitor preemption metrics; the default scheduler policy does not guarantee
+  that preemption cannot happen. D cancellation keeps its existing protection:
+  an active remote KV load retains its destination blocks until reception ends.
+  Failure notifications still require separate DMA-drain guarantees;
+  timeout/restart recovery and attempt isolation are not extended here.
 - Use fixed `kv_producer` and `kv_consumer` roles.
 - P supports eager or PIECEWISE execution; D also supports FULL decode graphs. Computation/transfer overlap requires per-layer save hooks after KV writes.
 - Cache layers must be individually addressable, with stable storage and distinguishable writers. Opaque packed rows, sleep/wake, and replacing registered KV storage are unsupported.
