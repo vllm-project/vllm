@@ -94,6 +94,11 @@ impl SingleWriterShmObjectStorage {
         })
     }
 
+    /// See [`SingleWriterShmRingBuffer::unlink_name`].
+    pub fn unlink_name(&mut self) {
+        self.ring_buffer.unlink_name();
+    }
+
     pub fn set_n_readers(&mut self, n_readers: u32) {
         self.n_readers = n_readers;
     }

@@ -91,6 +91,12 @@ impl MmProcessorShmCache {
         self.inner.lock().set_n_readers(n_readers);
     }
 
+    /// Remove the segment's name once every reader has opened it, so a crash
+    /// cannot leak it; existing mappings stay valid.
+    pub fn unlink_name(&self) {
+        self.inner.lock().unlink_name();
+    }
+
     /// Check if the item with the given hash is cached.
     pub fn is_cached(&self, hash: &str) -> bool {
         if self.n_readers() == 0 {
