@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import functools
 import json
-from collections.abc import Sequence
+import math
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
@@ -66,12 +67,32 @@ def _strip_partial_delim(value: str) -> str:
     return value
 
 
-def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
-    return _parse_gemma4_fields(args_str, partial=partial)[0]
+def _decode_bare_value(value: str) -> object:
+    if not value or value[0] not in "-0123456789fnt":
+        return value
+    try:
+        decoded = json.loads(value)
+    except ValueError:
+        return value
+    if isinstance(decoded, float) and not math.isfinite(decoded):
+        return value
+    return decoded
+
+
+def _parse_gemma4_args(
+    args_str: str,
+    *,
+    partial: bool = False,
+    decode_bare: Callable[[str], object] = _decode_bare_value,
+) -> dict:
+    return _parse_gemma4_fields(args_str, partial=partial, decode_bare=decode_bare)[0]
 
 
 def _parse_gemma4_fields(
-    args_str: str, *, partial: bool = False
+    args_str: str,
+    *,
+    partial: bool = False,
+    decode_bare: Callable[[str], object] = _decode_bare_value,
 ) -> tuple[dict, str | None]:
     """Parse Gemma4's custom key:value format into a Python dict.
 
@@ -88,6 +109,7 @@ def _parse_gemma4_fields(
         partial: When True (streaming), bare values at end of string are
             omitted because they may be incomplete and type-unstable
             (e.g. partial boolean parsed as bare string).
+        decode_bare: Conversion applied to complete bare values.
 
     Returns a dict ready for `json.dumps()` and the key of the trailing
     top-level `STRING_DELIM` value left unterminated, if any.
@@ -160,12 +182,11 @@ def _parse_gemma4_fields(
                 elif args_str[i] == "}":
                     depth -= 1
                 i += 1
-            if depth > 0:
-                # Incomplete nested object — use i (not i-1) to avoid
-                # dropping the last char, and recurse as partial.
-                result[key] = _parse_gemma4_args(args_str[obj_start:i], partial=True)
-            else:
-                result[key] = _parse_gemma4_args(args_str[obj_start : i - 1])
+            # An incomplete container has no closing character to drop.
+            end = i if depth > 0 else i - 1
+            result[key] = _parse_gemma4_args(
+                args_str[obj_start:end], partial=depth > 0, decode_bare=decode_bare
+            )
 
         elif args_str[i] == "[":
             depth = 1
@@ -182,10 +203,10 @@ def _parse_gemma4_fields(
                 elif args_str[i] == "]":
                     depth -= 1
                 i += 1
-            if depth > 0:
-                result[key] = _parse_gemma4_array(args_str[arr_start:i], partial=True)
-            else:
-                result[key] = _parse_gemma4_array(args_str[arr_start : i - 1])
+            end = i if depth > 0 else i - 1
+            result[key] = _parse_gemma4_array(
+                args_str[arr_start:end], partial=depth > 0, decode_bare=decode_bare
+            )
 
         else:
             val_start = i
@@ -207,12 +228,17 @@ def _parse_gemma4_fields(
                 # Digits may still arrive (e.g. "108." -> "108.2");
                 # withhold to avoid corrupting the streaming diff.
                 break
-            result[key] = raw_val
+            result[key] = decode_bare(raw_val)
 
     return result, open_key
 
 
-def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
+def _parse_gemma4_array(
+    arr_str: str,
+    *,
+    partial: bool = False,
+    decode_bare: Callable[[str], object] = _decode_bare_value,
+) -> list:
     items: list = []
     i = 0
     n = len(arr_str)
@@ -247,10 +273,12 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
                 elif arr_str[i] == "}":
                     depth -= 1
                 i += 1
-            if depth > 0:
-                items.append(_parse_gemma4_args(arr_str[obj_start:i], partial=True))
-            else:
-                items.append(_parse_gemma4_args(arr_str[obj_start : i - 1]))
+            end = i if depth > 0 else i - 1
+            items.append(
+                _parse_gemma4_args(
+                    arr_str[obj_start:end], partial=depth > 0, decode_bare=decode_bare
+                )
+            )
 
         elif arr_str[i] == "[":
             depth = 1
@@ -267,10 +295,12 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
                 elif arr_str[i] == "]":
                     depth -= 1
                 i += 1
-            if depth > 0:
-                items.append(_parse_gemma4_array(arr_str[sub_start:i], partial=True))
-            else:
-                items.append(_parse_gemma4_array(arr_str[sub_start : i - 1]))
+            end = i if depth > 0 else i - 1
+            items.append(
+                _parse_gemma4_array(
+                    arr_str[sub_start:end], partial=depth > 0, decode_bare=decode_bare
+                )
+            )
 
         else:
             val_start = i
@@ -288,7 +318,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             raw_val = arr_str[val_start:i].strip()
             if partial and raw_val.endswith("."):
                 break
-            items.append(raw_val)
+            items.append(decode_bare(raw_val))
 
     return items
 
