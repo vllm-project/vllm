@@ -59,6 +59,8 @@ def test_plain_blockscale_gemm_has_priority(
         rocm_aiter_ops, "is_triton_gemm_w8a8_tuned", lambda n, k: triton
     )
     monkeypatch.setattr(rocm_aiter_ops, "is_linear_fp8_enabled", lambda: True)
+    # The kernel is gated to gfx950; CI may run on another arch.
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
     config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=kFp8Static128BlockSym,
         activation_quant_key=kFp8Dynamic128Sym,

@@ -149,7 +149,9 @@ class QuantFP8(CustomOp):
         use_aiter_per_group_quant = use_aiter_quant and self.group_shape.is_per_group()
 
         if use_aiter_per_group_quant:
-            return rocm_aiter_ops.group_fp8_quant(x, self.group_size)
+            return rocm_aiter_ops.group_fp8_quant(
+                x, self.group_size, transpose_scale=self.column_major_scales
+            )
         if use_aiter_per_tensor_quant:
             return rocm_aiter_ops.per_tensor_quant(x, _FP8_DTYPE, scale)
         if use_aiter_per_token_quant:

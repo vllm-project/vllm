@@ -1446,7 +1446,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             kernel = getattr(getattr(linear, "quant_method", None), "fp8_linear", None)
             if not isinstance(kernel, Fp8BlockScaledMMLinearKernel):
                 return None
-            layouts.add(bool(getattr(kernel, "wants_transposed_act_scale", False)))
+            layouts.add(kernel.quant_fp8.column_major_scales)
         if len(layouts) != 1:
             logger.warning_once(
                 "DeepSeek-V4 wq_b consumers disagree on activation-scale layout; "

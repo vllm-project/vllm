@@ -251,9 +251,12 @@ class MonoDecodeLayer:
             logger.info_once("DSv4 mono decode off for some layers: %s", why)
             return None
         logger.info_once("DSv4 mono decode: the whole backbone layers")
-        # the kernels read the shared down_proj in the checkpoint layout, so
-        # no FP8 linear kernel may relayout it at load
-        ffn.shared_experts.down_proj.skip_weight_relayout = True
+        # the kernels read wq_b and the shared down_proj in the checkpoint
+        # layout, so no FP8 linear kernel may relayout them at load
+        shared = ffn.shared_experts
+        assert shared is not None
+        attn.wq_b.skip_weight_relayout = True
+        shared.down_proj.skip_weight_relayout = True
         return cls(_hca_width(vllm_config))
 
     def prepare(self, layer: "DeepseekV4DecoderLayer") -> None:

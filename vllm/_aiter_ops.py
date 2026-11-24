@@ -5202,18 +5202,25 @@ class rocm_aiter_ops:
         """
         if not current_platform.is_rocm():
             return 0
-        from aiter.jit.core import AITER_CONFIGS
-        from aiter.ops.gemm_op_a8w8 import get_CKGEMM_config
+        try:
+            from aiter.jit.core import AITER_CONFIGS
+            from aiter.ops.gemm_op_a8w8 import get_CKGEMM_config
 
-        config_file = (
-            AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
-            if preshuffled
-            else AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_FILE
-        )
-        return sum(
-            get_CKGEMM_config(m, n, k, config_file) is not None
-            for m in _BLOCKSCALE_SAMPLE_M
-        )
+            config_file = (
+                AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
+                if preshuffled
+                else AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_FILE
+            )
+            return sum(
+                get_CKGEMM_config(m, n, k, config_file) is not None
+                for m in _BLOCKSCALE_SAMPLE_M
+            )
+        except (AttributeError, ImportError, OSError):
+            logger.warning_once(
+                "Could not read aiter's blockscale GEMM configs; treating all "
+                "shapes as untuned."
+            )
+            return 0
 
     @staticmethod
     def is_blockscale_bpreshuffle_tuned(n: int, k: int) -> bool:

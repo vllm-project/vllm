@@ -259,6 +259,7 @@ def _decoder_layer(layer_id=5, **attn):
             compress_ratio=md.CSA,
             indexer=object(),
             kv_cache_dtype="fp8_ds_mla",
+            wq_b=SimpleNamespace(),
         )
         | attn
     )
@@ -363,12 +364,13 @@ def test_opt_in_outside_the_kernels_raises(monkeypatch, case, match):
         md.MonoDecodeLayer.create(_decoder_layer(), _config())
 
 
-def test_shared_down_proj_keeps_the_checkpoint_layout(monkeypatch):
-    """The kernels read the shared down_proj as stored, so its FP8 linear
-    kernel must not preshuffle it at load."""
+def test_plain_read_linears_keep_the_checkpoint_layout(monkeypatch):
+    """The kernels read wq_b and the shared down_proj as stored, so their FP8
+    linear kernels must not preshuffle them at load."""
     _deployment(monkeypatch)
     layer = _decoder_layer()
     assert md.MonoDecodeLayer.create(layer, _config()) is not None
+    assert layer.attn.wq_b.skip_weight_relayout
     assert layer.ffn.shared_experts.down_proj.skip_weight_relayout
 
 

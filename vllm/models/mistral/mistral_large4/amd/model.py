@@ -208,6 +208,21 @@ class MistralLarge4Model(nn.Module, EagleModelMixin):
             )
             for spec in self.layer_specs
         )
+        if self.specialized_decode_config is not None:
+            # The specialized decode reads these weights in the checkpoint
+            # layout, so no FP8 linear kernel may relayout them at load.
+            for layer in self.layers:
+                attn = layer.self_attn
+                shared = getattr(layer.mlp, "shared_experts", None)
+                for linear in (
+                    attn.q_proj,
+                    attn.o_proj,
+                    getattr(attn.indexer, "wq_b", None),
+                    getattr(shared, "gate_up_proj", None),
+                    getattr(shared, "down_proj", None),
+                ):
+                    if linear is not None:
+                        linear.skip_weight_relayout = True
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def build_specialized_decode(self, vllm_config: VllmConfig) -> None:
