@@ -107,6 +107,7 @@ def _build_layer(
     output_gate_activation: str,
 ):
     layer = types.SimpleNamespace(
+        beta_scale=1.0,
         prefix=PREFIX,
         enable_packed_recurrent_decode=False,
         disable_tp_for_ba_proj=False,
@@ -165,6 +166,7 @@ def test_fused_mtp_head_ratio_guard(num_v_heads: int, expected: bool) -> None:
         pytest.skip("fused GDN decode MTP op is not built")
 
     layer = types.SimpleNamespace(
+        beta_scale=1.0,
         num_k_heads=2,
         num_v_heads=num_v_heads,
         kv_cache=(None, torch.empty(1, dtype=torch.float32, device="cuda")),

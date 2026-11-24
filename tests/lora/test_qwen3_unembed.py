@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from safetensors.torch import save_file
 
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
@@ -60,39 +60,41 @@ def create_qwen3_lora_with_lm_head(save_dir: str, rank: int = 8) -> None:
     save_file(lora_weights, os.path.join(save_dir, "adapter_model.safetensors"))
 
 
-def test_qwen3_unembed_lora():
+def test_qwen3_unembed_lora(vllm_runner):
     """Verify Qwen3 can load and generate with LoRA adapters with lm_head."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Initialize engine first (before creating torch tensors)
-        llm = LLM(
-            model=MODEL_PATH,
+    # Initialize engine first (before creating torch tensors)
+    with (
+        tempfile.TemporaryDirectory() as tmpdir,
+        vllm_runner(
+            MODEL_PATH,
             enable_lora=True,
             max_loras=4,
             max_lora_rank=8,
             max_model_len=128,
             gpu_memory_utilization=0.8,
             enforce_eager=True,
-        )
-
+            enable_chunked_prefill=None,
+        ) as runner,
+    ):
         # Create LoRA weights after engine init
         create_qwen3_lora_with_lm_head(tmpdir, rank=8)
 
         lora_request = LoRARequest("lm_head_lora", 1, tmpdir)
-        llm.llm_engine.add_lora(lora_request)
+        runner.llm.llm_engine.add_lora(lora_request)
 
-        assert 1 in llm.llm_engine.list_loras(), "lm_head LoRA should be loaded"
+        assert 1 in runner.llm.llm_engine.list_loras(), "lm_head LoRA should be loaded"
 
         # Test generation
         sampling_params = SamplingParams(temperature=0, max_tokens=32)
         prompts = ["Hello, my name is"]
 
         # Generate with base model (no LoRA)
-        base_outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
+        base_outputs = runner.llm.generate(prompts, sampling_params, use_tqdm=False)
         assert len(base_outputs) == 1
         assert len(base_outputs[0].outputs[0].text) > 0
 
         # Generate with lm_head LoRA
-        lora_outputs = llm.generate(
+        lora_outputs = runner.llm.generate(
             prompts, sampling_params, lora_request=lora_request, use_tqdm=False
         )
         assert len(lora_outputs) == 1

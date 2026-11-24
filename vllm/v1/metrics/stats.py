@@ -693,14 +693,14 @@ class LoRAStats:
 class LoRARequestStates:
     """A per-LoRA count of running and waiting requests."""
 
-    def __init__(self, log_stats: bool = False):
-        self.log_stats = log_stats
+    def __init__(self, collect_stats: bool = False):
+        self.collect_stats = collect_stats
         self.requests: defaultdict[str, LoRAStats] = defaultdict(LoRAStats)
 
     def _request_update(
         self, req_id: str, lora_name: str | None, waiting: bool, running: bool
     ):
-        if not self.log_stats or lora_name is None:
+        if not self.collect_stats or lora_name is None:
             return
 
         lora_stats = self.requests[lora_name]
@@ -718,7 +718,7 @@ class LoRARequestStates:
         self._request_update(req_id, lora_name, waiting=False, running=False)
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
-        if not self.log_stats or scheduler_stats is None:
+        if not self.collect_stats or scheduler_stats is None:
             return
         for lora_name, stats in self.requests.items():
             scheduler_stats.waiting_lora_adapters[lora_name] = len(stats.waiting)
