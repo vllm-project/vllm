@@ -1,18 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GDN prefill: the causal conv1d and the post-conv prep in one kernel.
+"""Fused GDN prefill causal conv1d + post-conv prep (csrc/mamba/gdn_prefill_conv.cu).
 
-Replaces `causal_conv1d_fn` followed by `fused_post_conv_prep` on pure-prefill
-batches. A warp streams a chunk of one sequence's tokens over one head's
-channels and writes that head's final tensor: Q and K L2-normalized, V as is,
-and g and beta for V heads. The conv output never goes to HBM. The CUDA kernel
-lives in `csrc/mamba/gdn_prefill_conv.cu`; see its header comment for the
-numerics contract (g, beta and the conv state follow the stock formulas with
-fast __expf/__logf lowerings; q, k, v deviate by ~2 bf16 ulp via FP32 conv
-products and a tanh.approx SiLU).
-
-Supported: bf16, head dim 128, width-4 conv, no bias, SiLU; everything else
-falls back to the stock two-kernel path in the caller.
+Covers bf16, head dim 128, width-4 conv without bias, and SiLU; callers fall
+back to `causal_conv1d_fn` + `fused_post_conv_prep` otherwise.
 """
 
 import torch
@@ -31,9 +22,8 @@ def gdn_prefill_conv_supported(
     head_k_dim: int,
     head_v_dim: int,
 ) -> bool:
-    """Whether `gdn_prefill_conv` covers this conv: width 4, no bias
-    (checked by the caller), bf16 state and weights, head dim 128, and the
-    8-byte row alignment the kernel's vectorized loads need."""
+    """Whether the kernel covers these tensors. Bias and activation are checked
+    by the caller."""
     return (
         current_platform.is_cuda()
         # older precompiled extensions may lack the op
@@ -53,7 +43,7 @@ def gdn_prefill_conv_supported(
         and head_k_dim == head_v_dim == 128
         and x.size(1) % head_k_dim == 0
         and weight.stride(1) == 1
-        and weight.stride(0) == 4  # kernel reads weight rows with stride 4
+        and weight.stride(0) == 4
         and (x.stride(0) * x.element_size()) % 8 == 0
         and x.data_ptr() % 8 == 0  # vectorized 8B loads
     )
@@ -76,12 +66,10 @@ def gdn_prefill_conv(
     beta_scale: float = 1.0,
     null_block_id: int | None = NULL_BLOCK_ID,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """SiLU causal conv of the packed (tokens, [Q | K | V]) projection `x`, then
-    the post-conv prep; `conv_states` (cache lines, dim, >= 3) is updated in
-    place.
+    """SiLU causal conv of `x` (tokens, [Q | K | V]), then the post-conv prep.
 
-    Returns q, k (tokens, H, D), v (tokens, HV, D), and g, beta (tokens, HV)
-    in FP32.
+    Updates `conv_states` in place. Returns q, k (tokens, H, D), v
+    (tokens, HV, D), and fp32 g, beta (tokens, HV).
     """
     num_tokens = x.size(0)
     H, HV, D = num_k_heads, A_log.size(0), head_dim

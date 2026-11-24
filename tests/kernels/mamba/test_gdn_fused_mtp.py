@@ -463,8 +463,8 @@ def test_fused_prefill_conv_matches_stock(
     draft_tokens: list[int],
     beta_scale: float,
 ) -> None:
-    """`_forward_core` with the fused prefill conv matches stock `causal_conv1d_fn`
-    + `fused_post_conv_prep`, alone and next to MTP spec decodes."""
+    """Fused prefill conv in `_forward_core` matches the stock chain, alone and
+    next to MTP spec decodes."""
     gen = torch.Generator(device="cuda")
     gen.manual_seed(2)
     device = torch.device("cuda")
@@ -551,8 +551,7 @@ def test_fused_prefill_conv_matches_stock(
                 mixed_qkv, conv_weights, kv_conv_state, K, V
             )
         else:
-            # A zero conv bias is numerically exact and fails the fused gate
-            # (`conv1d.bias is None`), forcing the stock two-kernel path.
+            # A zero bias is exact and fails the fused gate: stock path.
             layer.conv1d.bias = torch.zeros(
                 CONV_DIM, dtype=torch.bfloat16, device=device
             )
@@ -571,14 +570,9 @@ def test_fused_prefill_conv_matches_stock(
     torch.testing.assert_close(ssm, ref_ssm, atol=2e-3, rtol=2e-3)
 
 
-# -------------------------------------------------------------------------
-# The prefill conv kernel (csrc/mamba/gdn_prefill_conv.cu) against the stock
-# two-kernel chain. bf16 ulp is 2**-8 of the value's binade; the kernel's
-# deviations are ~2 ulp of the local magnitude, with near-cancellation
-# elements bounded absolutely. Measured bounds over this matrix (bf16, L up
-# to 35008): max |dq|, |dk| <= 5.9e-3, |dv| <= 6.3e-2, g rel <= 5e-5,
+# Kernel vs the stock chain. Measured max error over this matrix (bf16,
+# L <= 35008): |dq|, |dk| <= 5.9e-3, |dv| <= 6.3e-2, g rel <= 5e-5,
 # beta rel <= 4e-7.
-# -------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "seqlens,dim_first,output_g_exp,num_spec,beta_scale",
     [
@@ -602,9 +596,7 @@ def test_gdn_prefill_conv_kernel_matches_stock(
     num_seqs = len(seqlens)
     num_lines = 2 * num_seqs + 2
 
-    # Row-strided [Q | K | V] and [b | a] views of wider projections, as in the
-    # layer. (bf16 dt_bias and a 2-D cache-indices view are covered by the
-    # model-path test above.)
+    # Row-strided views of wider projections, as in the layer.
     proj = torch.randn(
         num_tokens, dim + HV * D, device=device, dtype=torch.bfloat16, generator=gen
     )
@@ -629,8 +621,7 @@ def test_gdn_prefill_conv_kernel_matches_stock(
 
     qsl = torch.zeros(num_seqs + 1, dtype=torch.int32, device=device)
     qsl[1:] = torch.tensor(seqlens, device=device).cumsum(0)
-    # Distinct non-null lines; with several sequences the last one sits on the
-    # null block (padding: neither its outputs nor its state are written).
+    # With > 2 sequences the last sits on the null block: nothing is written.
     lines = torch.randperm(num_lines - 1, device=device, generator=gen)[:num_seqs] + 1
     if num_seqs > 2:
         lines[-1] = NULL_BLOCK_ID

@@ -836,7 +836,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? last_chunk_indices) -> ()");
 
 #ifndef USE_ROCM
-  // GDN prefill: fused causal conv1d + post-conv prep (Qwen3.8 GDN)
+  // GDN prefill: fused causal conv1d + post-conv prep
   ops.def(
       "gdn_prefill_conv(Tensor x, Tensor weight,"
       "Tensor! conv_states, Tensor query_start_loc,"

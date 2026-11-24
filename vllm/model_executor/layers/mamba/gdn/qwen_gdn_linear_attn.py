@@ -2026,8 +2026,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 mixed_qkv, conv_weights, conv_state, self.head_k_dim, self.head_v_dim
             )
         ):
-            # Every non-spec row is a prefill: conv + post-conv prep in one
-            # kernel.
+            # Pure prefill: conv + post-conv prep in one kernel.
             assert mixed_qkv_non_spec is not None
             if spec_sequence_masks is not None:
                 a_non_spec = a.index_select(0, non_spec_token_indx)

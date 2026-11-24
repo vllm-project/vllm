@@ -1,18 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-// GDN prefill: the causal conv1d and the post-conv prep in one kernel.
-// Replaces `causal_conv1d_fn` + `fused_post_conv_prep` on pure-prefill batches
-// (see QwenGatedDeltaNetAttention). One warp per (sequence chunk, head); a
-// thread owns 4 channels of the head for the whole chunk, so the width-4 taps
-// stay in registers, rows stream through an 8-deep fp32 prefetch queue, and
-// programs find their (sequence, chunk) by a radix-32 ballot search over
-// `query_start_loc` (no host chunk table). Only a sequence's first chunk
-// reads conv state and writes the update. The conv output never hits HBM.
-//
-// Numerics: conv state bit-identical to stock; q/k/v within ~2 bf16 ulp
-// (fp32x2 products instead of bf16-rounded ones, SiLU via tanh.approx); g/beta
-// within 1e-4 rel (__expf/__logf vs Triton's tl.exp/tl.log lowerings).
-//
+// GDN prefill: causal conv1d + post-conv prep in one kernel, replacing
+// causal_conv1d_fn + fused_post_conv_prep on pure-prefill batches. One warp per
+// (sequence chunk, head), 4 channels per lane; H and HV are runtime values.
+// Numerics: conv state bit-exact; q/k/v within ~2 bf16 ulp (fp32 conv,
+// tanh.approx SiLU); g/beta within 1e-4 rel (__expf/__logf).
 #include <cuda_bf16.h>
 
 #include "../torch_utils.h"
@@ -44,11 +36,9 @@ DEVINL float2 bf16x2_to_f32x2(unsigned v) {
   return {__uint_as_float(v << 16), __uint_as_float(v & 0xFFFF0000u)};
 }
 
-// Packed 2xFP32 (FFMA2/FMUL2) for the conv taps and SiLU only (packing the
-// q/k norm's shuffle reduction measured worse).
-// sm_103a only: on nvcc 13.1 and 13.4, plain sm_100/100a/100f cubins spill
-// the pair state into the hot loop (+20%); sm_110/120 lack the hardware.
-// Empirical, root cause unknown.
+// Packed FFMA2/FMUL2 for the conv taps and SiLU, sm_103a only: sm_100a/100f
+// cubins spill in the hot loop (+20%, nvcc 13.1 and 13.4, cause unknown), and
+// sm_110/120 lack the instructions.
 #define GDN_HAS_F32X2 \
   (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1030) && (__CUDA_ARCH__ < 1100))
 
@@ -104,8 +94,7 @@ struct Ptrs {
   float beta_scale;
 };
 
-// noinline, measured: inlining these epilogues slows the main loop ~13%
-// (119 -> 135 us at 16K tokens) - ptxas schedules globally per function.
+// noinline: inlining the epilogues slows the main loop ~13% at 16K tokens.
 __device__ __noinline__ void gbeta_epilogue(
     const __nv_bfloat16* a, const __nv_bfloat16* b, const float* A_log_p,
     const void* dt_bias_p, bool dt_bias_bf16, float* g, float* beta,
@@ -136,8 +125,8 @@ __device__ __noinline__ void state_epilogue(long stride_state_dim,
                                             __nv_bfloat16* state_head, int c0,
                                             int seqlen, bool load_init,
                                             const char* x_head, long xstep) {
-  // New state = the last 3 inputs (old state shifted in for short sequences).
-  // All old-state reads precede the stores.
+  // Last 3 inputs, with old state shifted in for short sequences. All reads
+  // precede the stores.
   auto hist_row = [&](int pos) -> float4 {
     if (pos >= 0)
       return bf16x4_to_f32(
@@ -165,14 +154,12 @@ __device__ __noinline__ void state_epilogue(long stride_state_dim,
 }
 
 template <int CHUNK>
-// 25 CTAs x 32 threads x 80 regs = the 64K-reg SM file: keeps ptxas under the
-// allocation that measured best (it uses 72).
+// Caps ptxas at 80 regs (uses 72), which measured best.
 __global__ void __launch_bounds__(32, 25) gdn_prefill_conv_kernel(Ptrs p) {
   constexpr int D = 128;
   constexpr int PF = 8;  // rows prefetched ahead in the register queue
   const int lane = threadIdx.x & 31;
-  // 1D grid, head fastest: consecutive CTAs cover whole x rows, and the chunk
-  // count is not capped by grid.y's 65535 limit.
+  // 1D grid, head fastest: adjacent CTAs share x rows; no grid.y 65535 cap.
   const int head = blockIdx.x % (2 * p.H + p.HV);
   const int pid = blockIdx.x / (2 * p.H + p.HV);
 
@@ -214,7 +201,6 @@ __global__ void __launch_bounds__(32, 25) gdn_prefill_conv_kernel(Ptrs p) {
     out_head = p.v + (long)seq_start * (p.HV * D) + c0 - 2 * p.H * D;
     out_stride = p.HV * D;
   }
-  // Strength-reduced byte cursors: advance by a constant stride per row.
   const long xstep = p.stride_x_token * 2;
   const long ostep = (long)out_stride * 2;
   const char* x_base = reinterpret_cast<const char*>(x_head);
@@ -222,7 +208,7 @@ __global__ void __launch_bounds__(32, 25) gdn_prefill_conv_kernel(Ptrs p) {
   const char* x_pf_end = x_base + (long)end * xstep;
   char* o_cur = reinterpret_cast<char*>(out_head) + (long)row0 * ostep;
 
-  // Weights for the 4 channels x 4 taps, fp32 pairs (w is (dim, 4) row-major).
+  // 4 channels x 4 taps, as fp32 pairs.
   float2 wt[4][2];  // [tap][channel pair]
 #pragma unroll
   for (int pr = 0; pr < 2; pr++) {
@@ -249,8 +235,7 @@ __global__ void __launch_bounds__(32, 25) gdn_prefill_conv_kernel(Ptrs p) {
     return r;
   };
 
-  // History and rows are kept as float2 channel pairs end to end, so the
-  // packed taps never pay a register-pairing move in the loop.
+  // Channel pairs stay float2 throughout: no pairing moves in the loop.
   float2 h0[2], h1[2], h2[2];  // [channel pair]
   {
     float4 t0 = hist_row(row0 - 3);
@@ -290,8 +275,7 @@ __global__ void __launch_bounds__(32, 25) gdn_prefill_conv_kernel(Ptrs p) {
     a1 = ffma2(h1[1], wt[1][1], a1);
     a0 = ffma2(h0[0], wt[0][0], a0);
     a1 = ffma2(h0[1], wt[0][1], a1);
-    // SiLU(x) = x/2 * (1 + tanh(x/2)) = x/2 + (x/2)tanh(x/2): hardware tanh
-    // (scalar MUFU), packed around it.
+    // SiLU(x) = h + h * tanh(h), h = x / 2.
     float2 hf0 = fmul2(a0, {0.5f, 0.5f});
     float2 hf1 = fmul2(a1, {0.5f, 0.5f});
     float2 t0 = {tanh_approx(hf0.x), tanh_approx(hf0.y)};
@@ -300,7 +284,7 @@ __global__ void __launch_bounds__(32, 25) gdn_prefill_conv_kernel(Ptrs p) {
     a1 = ffma2(hf1, t1, hf1);
     float4 y32 = {a0.x, a0.y, a1.x, a1.y};
     if (head < 2 * p.H) {
-      // L2-normalize the 128-channel head: full-warp reduction.
+      // L2-normalize q/k over the head.
       float s = y32.x * y32.x + y32.y * y32.y + y32.z * y32.z + y32.w * y32.w;
 #pragma unroll
       for (int off = 16; off > 0; off >>= 1)
@@ -339,7 +323,7 @@ void launch(const Ptrs& p, int num_tokens, cudaStream_t stream) {
 }
 
 void launch_auto(const Ptrs& p, int num_tokens, cudaStream_t stream) {
-  // Chunk by token count; a chunk x M sweep on GB300 picked {16, 32, 64}.
+  // Chunk sizes from a GB300 sweep.
   if (num_tokens <= 512)
     launch<16>(p, num_tokens, stream);
   else if (num_tokens <= 2048)
@@ -350,8 +334,7 @@ void launch_auto(const Ptrs& p, int num_tokens, cudaStream_t stream) {
 
 }  // namespace gdn_conv
 
-// _C entry: out-params are allocated by the Python wrapper
-// (vllm/model_executor/layers/mamba/ops/gdn_prefill_conv.py).
+// Outputs are allocated by the Python wrapper.
 void gdn_prefill_conv(
     const torch::stable::Tensor& x, const torch::stable::Tensor& weight,
     const torch::stable::Tensor& conv_states,
