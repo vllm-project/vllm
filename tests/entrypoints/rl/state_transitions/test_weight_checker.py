@@ -402,6 +402,11 @@ def test_eagle_shared_weights_reset_and_recover(eagle_checkpoints, pp_size):
                 compare.raise_for_status()
                 assert set(compare.json()["mismatches"]) == mismatches
 
+                if model == "both":
+                    reset_checksums = checksums(url, "both")
+                    weight_checker(url, "reset", model="both").raise_for_status()
+                    assert checksums(url, "both") == reset_checksums
+
                 if pp_size > 1:
                     requests.post(
                         f"{url}/collective_rpc",

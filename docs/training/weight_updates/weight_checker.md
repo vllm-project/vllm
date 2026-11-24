@@ -36,9 +36,9 @@ both models' keys.
 
 | Reset selection | Weights cleared | Recovery |
 | --- | --- | --- |
-| `target` | Target-private and target-owned shared weights | Transfer target weights. The draft's aliases see the restored values. |
-| `draft` | Draft-private and shared weights visible to the draft | Include shared parameters in the draft transfer to verify that the draft update restores them. |
-| `both` | Target and draft weights. Both passes clear shared weights. | Complete the target transfer, then transfer the draft-private weights. |
+| `target` | All visible target weights, including shared weights | Transfer target weights. The draft's aliases see the restored values. |
+| `draft` | All visible draft weights, including shared weights | Include shared parameters in the draft transfer to verify that the draft update restores them. |
+| `both` | All visible target and draft weights. Clearing a shared tensor from both models is idempotent. | Complete the target transfer, then transfer the draft-private weights. |
 
 Draft reset also clears the target's view of shared parameters. If the draft
 transfer omits them, compare reports any omitted weight whose baseline differs
@@ -46,9 +46,13 @@ from zero. Restore omitted shared parameters through a target weight update
 before resuming inference.
 
 Draft-only reset returns HTTP 409 if there are no resettable draft weights.
-Reset also returns HTTP 409 for ambiguous overlapping views or a write through
-an alias to a buffer in the other model. Views with provably disjoint bytes can
-be reset independently.
+Reset allows exact shared parameter mappings and views with disjoint address
+ranges. Nonidentical strided views with overlapping address ranges return HTTP
+409 even when their individual elements are disjoint.
+
+Every selected parameter is checked against the other model's buffers before
+any local write. Overlapping address ranges return HTTP 409, including when
+both models are selected and the parameter is shared.
 
 Private quantized copies created with `draft_lm_head_quantization` are refreshed
 in place after a target reload or weight update, and after a draft weight update.

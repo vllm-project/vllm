@@ -93,19 +93,24 @@ def test_reset_covers_selected_model_weights(model):
     draft.embed_tokens = target.embed_tokens
     draft.lm_head = nn.Linear(2, 4, bias=False)
     draft.lm_head.weight = nn.Parameter(target.lm_head.weight.detach())
-    # An independent copy with equal values is still draft-owned.
+    # Equal values in separate storage do not make this a shared weight.
     draft.private = nn.Parameter(target.private.detach().clone())
     draft.already_zero = nn.Parameter(torch.zeros(1))
     before_target = compute_tensor_digests(target)
     before_draft = compute_tensor_digests(draft)
+    addresses = [
+        p.data_ptr() for module in (target, draft) for p in module.parameters()
+    ]
     shared = {"embed_tokens.weight", "lm_head.weight"}
     assert all(before_target[name] == before_draft[name] for name in shared)
 
     plan = select_reset_weights(target, draft, model)
     assert not isinstance(plan, str)
-    assert len(plan) == {"target": 3, "draft": 4, "both": 7}[model]
     zero_selected_weights(plan)
 
+    assert addresses == [
+        p.data_ptr() for module in (target, draft) for p in module.parameters()
+    ]
     assert draft.embed_tokens is target.embed_tokens
     assert draft.lm_head.weight.data_ptr() == target.lm_head.weight.data_ptr()
     after_target = compute_tensor_digests(target)
@@ -134,11 +139,13 @@ def test_reset_accepts_a_draft_with_only_shared_weights(model):
     target = nn.Linear(2, 2, bias=False)
     nn.init.ones_(target.weight)
     draft = nn.Sequential(target)
+    address = target.weight.data_ptr()
     plan = select_reset_weights(target, draft, model)
     assert not isinstance(plan, str)
-    assert len(plan) == (2 if model == "both" else 1)
-    assert all(weight is target.weight for weight in plan)
     zero_selected_weights(plan)
+    zero_selected_weights(plan)
+    assert draft[0].weight is target.weight
+    assert target.weight.data_ptr() == address
     torch.testing.assert_close(target.weight, torch.zeros_like(target.weight))
 
 
@@ -151,17 +158,20 @@ def test_draft_only_reset_requires_nonempty_weights():
     )
 
 
-def test_draft_reset_checks_new_shared_writes_against_target_buffers():
+@pytest.mark.parametrize("writer", ["target", "draft"])
+def test_reset_checks_shared_writes_against_the_other_models_buffers(writer):
     target = nn.Linear(2, 2, bias=False)
-    target.register_buffer("alias", target.weight.detach())
     draft = nn.Module()
     draft.weight = target.weight
+    other = target if writer == "draft" else draft
+    other.register_buffer("alias", target.weight.detach())
+    before = other.alias.clone()
 
-    error = select_reset_weights(target, draft, "draft")
-    assert isinstance(error, str) and "overlaps buffer 'alias'" in error
-    plan = select_reset_weights(target, draft, "both")
-    assert not isinstance(plan, str)
-    assert len(plan) == 2 and all(weight is target.weight for weight in plan)
+    for model in (writer, "both"):
+        error = select_reset_weights(target, draft, model)
+        assert isinstance(error, str)
+        assert f"{writer} parameter 'weight' overlaps buffer 'alias'" in error
+    torch.testing.assert_close(other.alias, before)
 
 
 @pytest.mark.parametrize("model", ["target", "draft", "both"])
@@ -175,15 +185,9 @@ def test_reset_rejects_partial_overlap_before_mutation(model):
     torch.testing.assert_close(storage, torch.ones(8))
 
 
-@pytest.mark.parametrize("kind", ["contiguous", "interleaved", "columns"])
-def test_reset_treats_disjoint_views_as_independent(kind):
+def test_reset_allows_views_with_disjoint_address_ranges():
     storage = torch.ones(2, 4)
-    if kind == "contiguous":
-        left, right = storage[0], storage[1]
-    elif kind == "interleaved":
-        left, right = storage[:, ::2], storage[:, 1::2]
-    else:
-        left, right = storage[:, :2], storage[:, 2:]
+    left, right = storage[0], storage[1]
     target, draft = nn.Module(), nn.Module()
     target.weight = nn.Parameter(left)
     draft.weight = nn.Parameter(right)
@@ -192,6 +196,21 @@ def test_reset_treats_disjoint_views_as_independent(kind):
     zero_selected_weights(plan)
     torch.testing.assert_close(target.weight, torch.ones_like(left))
     torch.testing.assert_close(draft.weight, torch.zeros_like(right))
+
+
+@pytest.mark.parametrize("kind", ["interleaved", "columns"])
+def test_reset_conservatively_rejects_strided_views_with_overlapping_ranges(kind):
+    storage = torch.ones(2, 4)
+    if kind == "interleaved":
+        left, right = storage[:, ::2], storage[:, 1::2]
+    else:
+        left, right = storage[:, :2], storage[:, 2:]
+    target, draft = nn.Module(), nn.Module()
+    target.weight = nn.Parameter(left)
+    draft.weight = nn.Parameter(right)
+    error = select_reset_weights(target, draft, "draft")
+    assert isinstance(error, str) and "ambiguous overlapping storage" in error
+    torch.testing.assert_close(storage, torch.ones_like(storage))
 
 
 @pytest.mark.parametrize("owner", ["target", "draft"])

@@ -4,7 +4,6 @@
 
 import hashlib
 from collections.abc import Iterable, Iterator
-from math import gcd
 from typing import TYPE_CHECKING, NamedTuple
 
 import torch
@@ -61,6 +60,7 @@ class _TensorSpan(NamedTuple):
 
 
 def _tensor_spans(tensors: Iterable[tuple[str, torch.Tensor]]) -> list[_TensorSpan]:
+    """Bound each tensor's bytes, including gaps between strided elements."""
     spans = []
     for name, tensor in tensors:
         start = tensor.data_ptr()  # Includes the storage offset.
@@ -71,32 +71,6 @@ def _tensor_spans(tensors: Iterable[tuple[str, torch.Tensor]]) -> list[_TensorSp
             end = start + (last + 1) * tensor.element_size()
             spans.append(_TensorSpan(str(tensor.device), start, end, name, tensor))
     return sorted(spans, key=lambda span: (span.device, span.start))
-
-
-def _strided_blocks(tensor: torch.Tensor) -> tuple[int, int]:
-    # Collapse contiguous dimensions into a byte block. The remaining strides
-    # put each block at a multiple of their gcd from the first one.
-    width = itemsize = tensor.element_size()
-    step = 0
-    for stride, size in sorted(zip(tensor.stride(), tensor.shape)):
-        if size <= 1:
-            continue
-        stride *= itemsize
-        if not step and stride <= width:
-            width += (size - 1) * stride
-        else:
-            step = gcd(step, stride)
-    return width, step
-
-
-def _may_overlap(a: _TensorSpan, b: _TensorSpan) -> bool:
-    a_width, a_step = _strided_blocks(a.tensor)
-    b_width, b_step = _strided_blocks(b.tensor)
-    step = gcd(a_step, b_step)
-    if not step:
-        return True
-    offset = (a.start - b.start) % step
-    return offset < b_width or step - offset < a_width
 
 
 def _possible_aliases(
@@ -117,7 +91,7 @@ def _possible_aliases(
             other = other_spans[index]
             if other.device != weight.device or other.start >= weight.end:
                 break
-            if other.end > weight.start and _may_overlap(weight, other):
+            if other.end > weight.start:
                 yield weight, other
 
 
@@ -139,7 +113,6 @@ def select_reset_weights(
     if model == "draft" and not draft_weights:
         return "Weight Checker found no resettable draft weights."
 
-    shared_draft = set()
     for target_span, draft_span in _possible_aliases(target_weights, draft_weights):
         if _tensor_mapping(target_span) != _tensor_mapping(draft_span):
             return (
@@ -147,30 +120,24 @@ def select_reset_weights(
                 f"and draft parameter {draft_span.name!r} have ambiguous "
                 "overlapping storage."
             )
-        shared_draft.add(id(draft_span.tensor))
 
-    selected = []
-    for owner, weights, other in (
-        ("target", target_weights if model != "draft" else [], draft),
-        ("draft", draft_weights if model != "target" else [], target),
+    selected_target = target_weights if model != "draft" else []
+    selected_draft = draft_weights if model != "target" else []
+    for model_name, weights, other in (
+        ("target", selected_target, draft),
+        ("draft", selected_draft, target),
     ):
-        if weights and other is not None:
-            buffers = (
-                item
-                for name, buffer in other.named_buffers()
-                for item in _tensors(name, buffer)
+        if other is None or not weights:
+            continue
+        buffers = (
+            item
+            for name, buffer in other.named_buffers()
+            for item in _tensors(name, buffer)
+        )
+        if alias := next(_possible_aliases(weights, buffers), None):
+            param, buffer = alias
+            return (
+                f"Cannot reset {model} weights: {model_name} parameter {param.name!r} "
+                f"overlaps buffer {buffer.name!r} in the other model."
             )
-            for param, buffer in _possible_aliases(weights, buffers):
-                # With both selected, the target write already covers this alias.
-                if (
-                    model == "both"
-                    and owner == "draft"
-                    and id(param.tensor) in shared_draft
-                ):
-                    continue
-                return (
-                    f"Cannot reset {model} weights: {owner} parameter {param.name!r} "
-                    f"overlaps buffer {buffer.name!r} in the other model."
-                )
-        selected.extend(weight for _, weight in weights)
-    return tuple(selected)
+    return tuple(weight for _, weight in selected_target + selected_draft)
