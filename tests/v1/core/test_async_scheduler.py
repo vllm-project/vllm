@@ -302,6 +302,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     request.num_output_placeholders = 1
 
     scheduler.perf_metrics = None
+    scheduler.adaptive_prefill = None
     scheduler.connector = None
     scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()

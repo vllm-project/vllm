@@ -117,6 +117,38 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", max_num_batched_tokens=16384
 
 See related papers for more details (<https://arxiv.org/pdf/2401.08671> or <https://arxiv.org/pdf/2308.16369>).
 
+### Experimental Adaptive Prefill Admission
+
+`--adaptive-prefill` enables an experimental prompt-time controller, disabled by
+default. It keeps the existing token and KV limits and visits decode work first.
+`--adaptive-prefill-target-ms` sets a **soft** step-time target (default 40 ms),
+not a request-level decode-p99 guarantee.
+
+The predictor separates fixed step overhead, decode population cost and
+context-weighted prefill cost. It retains the bootstrap
+`--adaptive-prefill-token-ms` estimate until timing samples identify overhead;
+the prefill update uses a short median to reduce isolated timing spikes. A
+single decode population supplies a batch baseline, not a cost to multiply by
+every decoding request.
+
+Prefill-only work may occupy two consecutive steps with separate allowances.
+When mixed with decode, pending prompt work is reserved. After
+`--adaptive-prefill-max-wait-ms` (default 250 ms), bounded service credit from
+`--adaptive-prefill-min-share` (default 0.1) can permit one token beyond the soft
+allowance with at most one earlier step outstanding. No additional prompt work
+is admitted with two outstanding steps. This can trade queued latency for
+progress; it does not promise deadlines or starvation freedom under overload or
+KV exhaustion.
+
+Initial scope is text-only chunked generation, FCFS, one KV group, PP=DP=CP=1,
+without microbatching, speculation or KV connectors. Unsupported combinations
+are rejected. Tensor parallelism is permitted but not GPU-validated.
+
+The real-scheduler CPU regressions use synthetic worker timing. Real GPU
+execution, model-quality checks and latency/throughput validation remain
+pending. Do not infer GPU improvements from these tests or the declared policy
+simulation in `benchmarks/adaptive_prefill/`.
+
 ## Parallelism Strategies
 
 vLLM supports multiple parallelism strategies that can be combined to optimize performance across different hardware configurations.
