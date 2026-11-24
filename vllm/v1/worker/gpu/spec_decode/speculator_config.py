@@ -219,6 +219,9 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
         MTP), which may then also give `num_speculative_tokens`."""
         if spec.num_speculative_tokens is None:
             return None
+        method = spec.method
+        if method and (draft := spec.get_subfolder_checkpoint(method, required=False)):
+            return draft
         raise ValueError(
             "num_speculative_tokens was provided but without speculative model."
         )
