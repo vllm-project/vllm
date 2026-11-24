@@ -252,9 +252,7 @@ def test_truncation_keeps_jinavl_score_token(
     processor = llm_reranker_processor
     processor.supports_score_template = True
     processor.model = JinaVLForSequenceClassification
-    processor.renderer = SimpleNamespace(
-        process_for_engine=lambda prompt, _, skip_mm_cache=False: prompt
-    )
+    processor.renderer = SimpleNamespace(process_for_engine=lambda prompt, _: prompt)
     engine_input = processor.render(
         ScoringRenderParams(
             data_1="a",
@@ -649,34 +647,7 @@ class TestCrossEncoderMediaIoKwargsFallback:
 
 
 class TestCrossEncoderRenderExtrasAndCacheFlags:
-    """`CrossEncoderIOProcessor.render` preserves `skip_mm_cache` and prompt extras."""
-
-    @pytest.mark.parametrize("skip_mm_cache", [True, False])
-    def test_render_forwards_skip_mm_cache_to_process_for_engine(
-        self,
-        llm_reranker_processor: CrossEncoderIOProcessor,
-        monkeypatch,
-        skip_mm_cache,
-    ):
-        from vllm.entrypoints.pooling.scoring import io_processor as score_io_mod
-
-        seen_flags: list[bool] = []
-        monkeypatch.setattr(score_io_mod, "extract_target_prompt", lambda mc, ep: ep)
-
-        def _mock_process_for_engine(prompt, arrival_time, skip_mm_cache=False):
-            seen_flags.append(skip_mm_cache)
-            return prompt
-
-        llm_reranker_processor.renderer = SimpleNamespace(
-            process_for_engine=_mock_process_for_engine
-        )
-
-        render_params = _make_render_params_with_extras(
-            prompt_extras={"skip_mm_cache": skip_mm_cache}
-        )
-        llm_reranker_processor.render(render_params)
-
-        assert seen_flags == [skip_mm_cache]
+    """`CrossEncoderIOProcessor.render` preserves prompt extras."""
 
     def test_render_attaches_mm_processor_kwargs_and_cache_salt(
         self, llm_reranker_processor: CrossEncoderIOProcessor, monkeypatch
@@ -688,7 +659,7 @@ class TestCrossEncoderRenderExtrasAndCacheFlags:
             score_io_mod, "extract_target_prompt", lambda mc, ep: target_prompt
         )
         llm_reranker_processor.renderer = SimpleNamespace(
-            process_for_engine=lambda prompt, arrival_time, skip_mm_cache=False: prompt
+            process_for_engine=lambda prompt, arrival_time: prompt
         )
 
         render_params = _make_render_params_with_extras(
@@ -739,7 +710,6 @@ class TestOfflineScoreContextForwarding:
         llm.score(
             "a",
             "bc",
-            skip_mm_cache=True,
             cache_salt="score-salt",
             media_io_kwargs=media_kwargs,
             mm_processor_kwargs=mm_kwargs,
@@ -748,7 +718,6 @@ class TestOfflineScoreContextForwarding:
 
         assert len(captured) == 1
         ctx = captured[0]
-        assert ctx.skip_mm_cache is True
         assert ctx.cache_salt == "score-salt"
         assert ctx.media_io_kwargs == media_kwargs
         assert ctx.mm_processor_kwargs == mm_kwargs

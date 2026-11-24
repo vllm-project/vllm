@@ -598,7 +598,6 @@ async def test_score_api_mm_and_cache_kwargs(
             "model": MODEL_NAME,
             "queries": query,
             "documents": {"content": [documents[1]]},
-            "skip_mm_cache": True,
             "cache_salt": "test-salt-value",
             "media_io_kwargs": {},
             "mm_processor_kwargs": {},

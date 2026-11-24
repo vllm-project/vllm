@@ -637,7 +637,6 @@ class TestEmbedPromptExtrasAndCache:
     def test_context_preserves_mm_and_cache_prompt_extras(self):
         # Verify context holds explicit cache and multimodal extras as passed.
         extras = {
-            "skip_mm_cache": True,
             "cache_salt": "embed-salt-01",
             "mm_processor_kwargs": {"do_rescale": False},
             "media_io_kwargs": {"image": {"resize": [64, 64]}},
@@ -645,18 +644,6 @@ class TestEmbedPromptExtrasAndCache:
         ctx = _make_embed_serve_context(prompt_extras=extras)
 
         assert ctx.prompt_extras == extras
-
-    @pytest.mark.parametrize("skip_flag", [True, False, None])
-    def test_skip_mm_cache_variants_in_prompt_extras(self, skip_flag):
-        # Distinguish explicit True/False from omitted/None cache bypass flag.
-        extras = {"skip_mm_cache": skip_flag} if skip_flag is not None else None
-        ctx = _make_embed_serve_context(prompt_extras=extras)
-
-        if skip_flag is None:
-            assert ctx.prompt_extras is None
-        else:
-            assert ctx.prompt_extras is not None
-            assert ctx.prompt_extras["skip_mm_cache"] is skip_flag
 
 
 class TestEmbedRequestCacheSaltValidation:

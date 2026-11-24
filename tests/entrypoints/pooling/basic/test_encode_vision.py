@@ -122,8 +122,8 @@ class TestBasicVisionEncode:
 
 
 class TestMultimodalCombinations:
-    """`media_io_kwargs`, `mm_processor_kwargs`, and `skip_mm_cache` must
-    compose cleanly on the offline `llm.encode` path.
+    """`media_io_kwargs`, `mm_processor_kwargs` must compose cleanly on the
+    offline `llm.encode` path.
 
     `mm_processor_kwargs` is deliberately passed as `{}`: the accepted key
     set is processor-specific, and validating it is out of scope here.
@@ -135,38 +135,6 @@ class TestMultimodalCombinations:
             _prompt(img=image),
             media_io_kwargs={"image": {"timeout": 10}},
             mm_processor_kwargs={},
-            pooling_task="embed",
-            use_tqdm=False,
-        )
-        _assert_valid(outputs, 1)
-
-    @pytest.mark.skip_global_cleanup
-    @pytest.mark.parametrize("skip_mm_cache", [False, True])
-    def test_skip_mm_cache_variants(self, llm: LLM, image, skip_mm_cache: bool):
-        outputs = llm.encode(
-            _prompt(img=image),
-            skip_mm_cache=skip_mm_cache,
-            pooling_task="embed",
-            use_tqdm=False,
-        )
-        _assert_valid(outputs, 1)
-
-
-# ---------------------------------------------------------------------------
-# Caching combinations
-# ---------------------------------------------------------------------------
-
-
-class TestCachingCombinations:
-    """`cache_salt` and `skip_mm_cache` must compose cleanly."""
-
-    @pytest.mark.skip_global_cleanup
-    @pytest.mark.parametrize("skip_mm_cache", [False, True])
-    def test_cache_salt_with_skip_mm_cache(self, llm: LLM, image, skip_mm_cache: bool):
-        outputs = llm.encode(
-            _prompt(img=image),
-            cache_salt="test-salt-value",
-            skip_mm_cache=skip_mm_cache,
             pooling_task="embed",
             use_tqdm=False,
         )
@@ -187,7 +155,6 @@ class TestFullCombination:
             _prompt(img=image),
             media_io_kwargs={"image": {"timeout": 10}},
             mm_processor_kwargs={},
-            skip_mm_cache=True,
             cache_salt="test-salt-value",
             pooling_task="embed",
             use_tqdm=False,

@@ -149,7 +149,6 @@ class OfflineInputsContext:
     tokenization_kwargs: dict[str, Any] | None = None
 
     # mm_params->prompt_extras:
-    skip_mm_cache: bool = False
     cache_salt: str | None = None
     media_io_kwargs: dict[str, dict[str, Any]] | None = None
     mm_processor_kwargs: dict[str, Any] | None = None
@@ -177,7 +176,7 @@ class OfflineInputsContext:
         )
         merged = {
             k: v
-            for k in ("skip_mm_cache", "cache_salt", "mm_processor_kwargs")
+            for k in ("cache_salt", "mm_processor_kwargs")
             if (v := prompt_extras.get(k)) is not None
         }
 
@@ -192,9 +191,6 @@ class OfflineInputsContext:
         )
         if merged_media_io_kwargs is not None:
             merged["media_io_kwargs"] = merged_media_io_kwargs
-
-        if self.skip_mm_cache is not None:
-            merged["skip_mm_cache"] = self.skip_mm_cache
 
         if self.cache_salt is not None:
             merged["cache_salt"] = self.cache_salt

@@ -256,13 +256,10 @@ class TestOnlineBuildPromptExtras:
     def test_defaults_with_no_mm_config_returns_empty_without_key_error(self):
         req = _make_online_request()
         result = _call_online_build_prompt_extras(req, mm_config=None)
-
-        # Default `skip_mm_cache=False` and None fields are omitted.
         assert result == {}
 
     def test_explicit_mm_and_caching_fields_merges_media_io_kwargs(self):
         req = _make_online_request(
-            skip_mm_cache=True,
             cache_salt="salt-abc-123",
             media_io_kwargs={"image": {"resize": [224, 224]}},
             mm_processor_kwargs={"do_rescale": False},
@@ -280,36 +277,17 @@ class TestOnlineBuildPromptExtras:
             {"image": {"resize": [224, 224]}},
         )
         assert result == {
-            "skip_mm_cache": True,
             "cache_salt": "salt-abc-123",
             "mm_processor_kwargs": {"do_rescale": False},
             "media_io_kwargs": {"image": {"fps": 2, "resize": [224, 224]}},
         }
-
-    @pytest.mark.parametrize(
-        ("skip_flag", "expected_present"),
-        [
-            (False, False),
-            (True, True),
-        ],
-        ids=["false-omitted", "true-included"],
-    )
-    def test_skip_mm_cache_bool_distinguishes_true_and_false(
-        self, skip_flag: bool, expected_present: bool
-    ):
-        req = _make_online_request(skip_mm_cache=skip_flag)
-        result = _call_online_build_prompt_extras(req, mm_config=None)
-
-        assert ("skip_mm_cache" in result) is expected_present
-        if expected_present:
-            assert result["skip_mm_cache"] is True
 
 
 class TestOfflineBuildPromptExtras:
     """Offline (`OfflineInputsContext.build_prompt_extras`) precedence tests."""
 
     def test_empty_inputs_returns_empty_without_key_error(self):
-        ctx = _make_offline_context(skip_mm_cache=None)
+        ctx = _make_offline_context()
         result = _call_offline_build_prompt_extras(ctx, params=None, mm_config=None)
 
         assert result == {}
@@ -317,7 +295,6 @@ class TestOfflineBuildPromptExtras:
     def test_context_fields_override_pooling_params_extra_kwargs(self):
         params = _make_pooling_params(
             extra_kwargs={
-                "skip_mm_cache": True,
                 "cache_salt": "from-params",
                 "mm_processor_kwargs": {"from_params": True},
                 "media_io_kwargs": {"image": {"source": "params"}},
@@ -325,7 +302,6 @@ class TestOfflineBuildPromptExtras:
         )
         mm_cfg = _make_mm_config(media_io_kwargs={"image": {"source": "mm_config"}})
         ctx = _make_offline_context(
-            skip_mm_cache=False,
             cache_salt="from-context",
             mm_processor_kwargs={"from_context": True},
             media_io_kwargs={"image": {"source": "context"}},
@@ -345,7 +321,6 @@ class TestOfflineBuildPromptExtras:
             {"image": {"source": "context"}},
         )
         assert result == {
-            "skip_mm_cache": False,
             "cache_salt": "from-context",
             "mm_processor_kwargs": {"from_context": True},
             "media_io_kwargs": {"image": {"source": "merged-context"}},
@@ -354,14 +329,12 @@ class TestOfflineBuildPromptExtras:
     def test_none_context_fields_fall_back_to_extra_kwargs(self):
         params = _make_pooling_params(
             extra_kwargs={
-                "skip_mm_cache": True,
                 "cache_salt": "from-params",
                 "mm_processor_kwargs": {"from_params": 1},
                 "media_io_kwargs": {"image": {"from_params": "yes"}},
             }
         )
         ctx = _make_offline_context(
-            skip_mm_cache=None,
             cache_salt=None,
             mm_processor_kwargs=None,
             media_io_kwargs=None,
@@ -380,36 +353,10 @@ class TestOfflineBuildPromptExtras:
             {"image": {"from_params": "yes"}},
         )
         assert result == {
-            "skip_mm_cache": True,
             "cache_salt": "from-params",
             "mm_processor_kwargs": {"from_params": 1},
             "media_io_kwargs": {"image": {"from_params": "yes"}},
         }
-
-    @pytest.mark.parametrize(
-        ("ctx_skip", "extra_skip", "expected_skip"),
-        [
-            (False, True, False),
-            (True, False, True),
-            (None, True, True),
-            (None, False, False),
-        ],
-        ids=[
-            "ctx-false-overrides-true",
-            "ctx-true-overrides-false",
-            "ctx-none-falls-back-true",
-            "ctx-none-falls-back-false",
-        ],
-    )
-    def test_skip_mm_cache_none_vs_explicit_bool_precedence(
-        self, ctx_skip: bool | None, extra_skip: bool, expected_skip: bool
-    ):
-        params = _make_pooling_params(extra_kwargs={"skip_mm_cache": extra_skip})
-        ctx = _make_offline_context(skip_mm_cache=ctx_skip)
-
-        result = _call_offline_build_prompt_extras(ctx, params=params, mm_config=None)
-
-        assert result["skip_mm_cache"] is expected_skip
 
 
 # =============================================================================

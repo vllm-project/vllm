@@ -275,24 +275,18 @@ class PoolingIOProcessor:
     ) -> PoolingEngineInput:
         if "conversations" in render_params:
             render_params = cast(EncodeChatRenderParams, render_params)
-            prompt_extras = render_params.get("prompt_extras") or {}
-            skip_mm_cache = prompt_extras.pop("skip_mm_cache", False)
             (_,), engine_input = self.renderer.render_chat(
                 conversations=[render_params["conversations"]],
                 chat_params=render_params["chat_params"],
                 tok_params=render_params["tok_params"],
                 prompt_extras=render_params["prompt_extras"],
-                skip_mm_cache=skip_mm_cache,
             )
         elif "prompts" in render_params:
             render_params = cast(EncodeCMPLRenderParams, render_params)
-            prompt_extras = render_params.get("prompt_extras") or {}
-            skip_mm_cache = prompt_extras.pop("skip_mm_cache", False)
             engine_input = self.renderer.render_cmpl(
                 prompts=[render_params["prompts"]],
                 tok_params=render_params["tok_params"],
                 prompt_extras=render_params["prompt_extras"],
-                skip_mm_cache=skip_mm_cache,
             )
         else:
             raise ValueError(

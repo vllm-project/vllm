@@ -239,7 +239,6 @@ def test_offline_score_mm_and_cache_kwargs(llm: tuple[LLM, str]):
         {"content": [documents[1]]},
         media_io_kwargs={"image": {"timeout": 10}},
         mm_processor_kwargs={},
-        skip_mm_cache=True,
         cache_salt="test-salt-value",
         use_tqdm=False,
     )

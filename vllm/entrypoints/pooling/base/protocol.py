@@ -66,10 +66,6 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
-    skip_mm_cache: bool = Field(
-        default=False,
-        description=("If true, skip the multimodal processor cache for this request."),
-    )
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
@@ -151,9 +147,6 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
         )
         if merged_media_io_kwargs is not None:
             merged["media_io_kwargs"] = merged_media_io_kwargs
-
-        if self.skip_mm_cache:
-            merged["skip_mm_cache"] = self.skip_mm_cache
 
         if self.cache_salt is not None:
             merged["cache_salt"] = self.cache_salt

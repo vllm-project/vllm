@@ -726,7 +726,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
         prompt_extras = {
             k: v
-            for k in ("mm_processor_kwargs", "cache_salt", "skip_mm_cache")
+            for k in ("mm_processor_kwargs", "cache_salt")
             if (v := prompt_extras.get(k)) is not None
         }
 
@@ -734,10 +734,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             target_prompt = extract_target_prompt(self.model_config, engine_prompt)
             target_prompt.update(prompt_extras)
 
-        skip_mm_cache = prompt_extras.pop("skip_mm_cache", False)
-        engine_input = self.renderer.process_for_engine(
-            engine_prompt, arrival_time, skip_mm_cache=skip_mm_cache
-        )
+        engine_input = self.renderer.process_for_engine(engine_prompt, arrival_time)
 
         return PoolingEngineInput(
             prompts=engine_input,

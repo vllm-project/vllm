@@ -71,7 +71,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         pooling_task: PoolingTask | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
-        skip_mm_cache: bool = False,
         cache_salt: str | None = None,
         media_io_kwargs: dict[str, dict[str, Any]] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
@@ -96,8 +95,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             lora_request: LoRA request to use for generation, if any.
             pooling_task: Override the pooling task to use.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
-            skip_mm_cache: If true, skip the multimodal processor cache for
-                this request.
             cache_salt: If set, the prefix cache is salted with this string to
                 prevent prompt guessing in multi-user environments.
             media_io_kwargs: Extra kwargs forwarded to media IO connectors,
@@ -128,7 +125,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 pooling_params=pooling_params,
                 lora_request=lora_request,
                 priorities=None,
-                skip_mm_cache=skip_mm_cache,
                 cache_salt=cache_salt,
                 media_io_kwargs=media_io_kwargs,
                 mm_processor_kwargs=mm_processor_kwargs,
@@ -141,7 +137,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 pooling_params=pooling_params,
                 lora_request=lora_request,
                 priorities=None,
-                skip_mm_cache=skip_mm_cache,
                 cache_salt=cache_salt,
                 media_io_kwargs=media_io_kwargs,
                 mm_processor_kwargs=mm_processor_kwargs,
@@ -225,7 +220,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
-        skip_mm_cache: bool = False,
         cache_salt: str | None = None,
         media_io_kwargs: dict[str, dict[str, Any]] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
@@ -248,8 +242,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
-            skip_mm_cache: If true, skip the multimodal processor cache for
-                this request.
             cache_salt: If set, the prefix cache is salted with this string to
                 prevent prompt guessing in multi-user environments.
             media_io_kwargs: Extra kwargs forwarded to media IO connectors,
@@ -274,7 +266,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             if self.pooling_task == "token_embed"
             else "embed",
             tokenization_kwargs=tokenization_kwargs,
-            skip_mm_cache=skip_mm_cache,
             cache_salt=cache_salt,
             media_io_kwargs=media_io_kwargs,
             mm_processor_kwargs=mm_processor_kwargs,
@@ -292,7 +283,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
-        skip_mm_cache: bool = False,
         cache_salt: str | None = None,
         media_io_kwargs: dict[str, dict[str, Any]] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
@@ -315,8 +305,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
-            skip_mm_cache: If true, skip the multimodal processor cache for
-                this request.
             cache_salt: If set, the prefix cache is salted with this string to
                 prevent prompt guessing in multi-user environments.
             media_io_kwargs: Extra kwargs forwarded to media IO connectors,
@@ -336,7 +324,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             lora_request=lora_request,
             pooling_task="classify",
             tokenization_kwargs=tokenization_kwargs,
-            skip_mm_cache=skip_mm_cache,
             cache_salt=cache_salt,
             media_io_kwargs=media_io_kwargs,
             mm_processor_kwargs=mm_processor_kwargs,
@@ -356,7 +343,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         tokenization_kwargs: dict[str, Any] | None = None,
         chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        skip_mm_cache: bool = False,
         cache_salt: str | None = None,
         media_io_kwargs: dict[str, dict[str, Any]] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
@@ -399,8 +385,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 structured content blocks, or "auto" to detect from the
                 template. Defaults to "auto".
             tokenization_kwargs: Overrides for `tokenizer.encode`.
-            skip_mm_cache: If true, skip the multimodal processor cache for
-                this request.
             cache_salt: If set, the prefix cache is salted with this string to
                 prevent prompt guessing in multi-user environments.
             media_io_kwargs: Extra kwargs forwarded to media IO connectors,
@@ -465,7 +449,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
             priorities=None,
-            skip_mm_cache=skip_mm_cache,
             cache_salt=cache_salt,
             media_io_kwargs=media_io_kwargs,
             mm_processor_kwargs=mm_processor_kwargs,
