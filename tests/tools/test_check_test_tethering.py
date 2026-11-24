@@ -620,6 +620,74 @@ def test_amd_mirror_only_command_is_collected(tmp_path, monkeypatch):
     assert is_tethered("kernels/test_amd_only.py", selections)
 
 
+def test_devices_step_collects_each_jobs_commands(tmp_path, monkeypatch):
+    """Each device and variant of a `devices:` step is a job: one with its
+    own `commands` runs them instead of the step's, a `same_as` device runs
+    its sibling's, and the others run the step's."""
+    selections = _write_area(
+        tmp_path,
+        monkeypatch,
+        """
+        steps:
+        - label: Base
+          key: base
+          devices:
+            h100:
+              commands:
+                - pytest -v -s kernels/test_nvidia.py
+              variants:
+                extended:
+                  commands:
+                    - pytest -v -s kernels/test_extended.py
+            b200-k8s:
+              same_as: h100
+            mi355_1:
+              commands:
+                - pytest -v -s kernels/test_amd.py
+            mi355_dpx:
+              same_as: mi355_1
+              variants:
+                eager:
+                  env:
+                    VLLM_ENFORCE_EAGER: "1"
+        - label: Shared
+          key: shared
+          devices:
+            h100:
+            mi300_1:
+          commands:
+            - pytest -v -s kernels/test_shared.py
+        """,
+    )
+    for path in (
+        "kernels/test_nvidia.py",
+        "kernels/test_extended.py",
+        "kernels/test_amd.py",
+        "kernels/test_shared.py",
+    ):
+        assert is_tethered(path, selections)
+    assert not is_tethered("kernels/test_other.py", selections)
+
+
+def test_devices_same_as_copies_the_siblings_commands():
+    step = {
+        "label": "Base",
+        "key": "base",
+        "commands": ["pytest -v -s kernels/test_step.py"],
+        "devices": {
+            "mi355_1": {"commands": ["pytest -v -s kernels/test_amd.py"]},
+            "mi355_dpx": {"same_as": "mi355_1", "timeout_in_minutes": 30},
+            "h100": None,
+        },
+    }
+    jobs = list(checker._iter_job_steps({"steps": [step]}))
+    assert [job["commands"] for job in jobs] == [
+        ["pytest -v -s kernels/test_amd.py"],
+        ["pytest -v -s kernels/test_amd.py"],
+        ["pytest -v -s kernels/test_step.py"],
+    ]
+
+
 def test_shell_script_continuation_vars_and_nesting(tmp_path, monkeypatch):
     """The v1 P/D integration scripts name their test through a `\\`-continued
     line, a literal shell var, and a nested `bash "$SCRIPT"`. Each indirection

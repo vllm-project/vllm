@@ -10,8 +10,9 @@ rots.
 
 How it works
 ------------
-1. Parse every job in every Buildkite pipeline yaml (and each `mirror.amd`
-   sub-step), and turn each shell command into a `Selection` describing
+1. Parse every job in every Buildkite pipeline yaml (each `mirror.amd`
+   sub-step, and each device and variant of a `devices:` step, counting as a
+   job of its own), and turn each shell command into a `Selection` describing
    which test files it runs. The pipeline directories are read from
    `.buildkite/ci_config*.yaml` (`job_dirs:`) - currently `test_areas/`,
    `hardware_tests/` and `intel_jobs/` across the CUDA, ROCm and Intel
@@ -665,12 +666,47 @@ def _parse_command(command: str, visited: set[str] | None = None) -> list[Select
     return selections
 
 
+def _device_jobs(step: dict):
+    """Yield every job of a `devices:` step: each device, then its variants.
+
+    A job's `commands` are, in this order of precedence, its variant's, its
+    device's, those of the device it names in `same_as`, or the step's (the
+    pipeline generator's resolution, reduced to what this check reads).
+    `same_as` copies neither key, label nor variants.
+    """
+    devices = step.get("devices")
+    devices = devices if isinstance(devices, dict) else {}
+    shared = {name: value for name, value in step.items() if name != "devices"}
+    for entry in devices.values():
+        entry = entry if isinstance(entry, dict) else {}
+        sibling = devices.get(entry.get("same_as"))
+        job = dict(shared)
+        for level in (sibling, entry):
+            if isinstance(level, dict):
+                job.update(
+                    {
+                        name: value
+                        for name, value in level.items()
+                        if name not in ("key", "label", "same_as", "variants")
+                    }
+                )
+        yield job
+        variants = entry.get("variants")
+        for variant in (variants if isinstance(variants, dict) else {}).values():
+            if isinstance(variant, dict):
+                yield {**job, **variant}
+
+
 def _iter_job_steps(yaml_doc: dict):
     """Yield each job step in a test_areas yaml, plus a merged view of each
     `mirror.*` sub-step. The AMD mirror can override `commands`, so it has to
-    be checked as its own step."""
+    be checked as its own step. A `devices:` step yields each of its jobs,
+    since a device or variant can run commands of its own."""
     for step in yaml_doc.get("steps") or []:
         if not isinstance(step, dict):
+            continue
+        if "devices" in step:
+            yield from _device_jobs(step)
             continue
         yield step
 

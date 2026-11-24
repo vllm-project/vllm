@@ -36,7 +36,12 @@
   selects never runs, which looks like passing. Check that the step's
   `commands` and pytest markers (`core_model`, `slow_test`, `distributed`)
   select the test and its `source_file_dependencies` cover the changed files;
-  update the step if not. When a command names more than one test path
+  update the step if not. A step's hardware is the keys of its `devices:`
+  map, each one job (plus one per name under that device's `variants:`). A
+  job runs the first `commands` among its variant's, its device's, the
+  `same_as` device's and the step's; its dependencies are the step's plus its
+  device's (and its `same_as` sibling's and its variant's). Check the job the
+  test should run on. When a command names more than one test path
   (including `--ignore` / `--deselect`), write it as a `>-` block with
   `pytest -v -s` on the first line and one path per line, so concurrent PRs
   adding tests do not conflict on the same line.
