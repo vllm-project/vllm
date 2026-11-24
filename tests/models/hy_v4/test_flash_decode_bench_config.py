@@ -7,8 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.models.hy_v4.amd import dfly_speculator as amd_dfly_speculator
-from vllm.models.hy_v4.nvidia import dfly_speculator as nvidia_dfly_speculator
+from vllm.models.hy_v4.common import dfly_speculator
 from vllm.v1.worker.gpu.spec_decode.dfly.config import DFlySpeculatorConfig
 
 
@@ -32,14 +31,7 @@ def test_dfly_speculator_config_rejects_unknown_rejection_method():
         DFlySpeculatorConfig.apply_options(spec)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize(
-    "dfly_speculator",
-    [nvidia_dfly_speculator, amd_dfly_speculator],
-    ids=["nvidia", "amd"],
-)
-def test_dfly_speculator_allows_decode_bench_connector_and_rejects_pd(
-    monkeypatch, dfly_speculator
-):
+def test_dfly_speculator_allows_decode_bench_connector_and_rejects_pd(monkeypatch):
     def make_cfg(connector: str) -> SimpleNamespace:
         return SimpleNamespace(
             cache_config=SimpleNamespace(cache_dtype="fp8_ds_mla"),

@@ -16,9 +16,18 @@ from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="HY4 DFly requires CUDA or ROCm"
 )
-# The engine-level checks use NVFP4 targets.
-requires_cuda = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="NVFP4 targets require CUDA"
+
+
+def _dfly_engine_supported() -> bool:
+    if not current_platform.is_rocm():
+        return True
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
+requires_dfly_engine = pytest.mark.skipif(
+    not _dfly_engine_supported(), reason="HYV4 DFly on ROCm requires gfx950"
 )
 
 EXPERTS = r"re:.*mlp\.experts\.\d+\.(gate_proj|up_proj|down_proj)$"
@@ -87,14 +96,14 @@ def _create_engine_config(path, quantization_config):
     ).create_engine_config()
 
 
-@requires_cuda
+@requires_dfly_engine
 @pytest.mark.parametrize("scheme", [NVFP4, INT4], ids=["nvfp4", "int4"])
 def test_target_scheme_is_unrestricted(tmp_path, scheme):
     config = _create_engine_config(tmp_path, _quantization_config(scheme, EXPERTS))
     assert config.speculative_config.method == "dfly"
 
 
-@requires_cuda
+@requires_dfly_engine
 def test_target_kv_cache_scheme_is_rejected(tmp_path):
     kv_scheme = {**FLOAT_ARGS, "num_bits": 8, "strategy": "tensor"}
     quant = _quantization_config(NVFP4, EXPERTS, kv_cache_scheme=kv_scheme)

@@ -225,7 +225,7 @@ def can_initialize(
 
     from vllm.platforms import current_platform
 
-    # Flash runs on CUDA and on ROCm gfx950; other ROCm targets must reject it.
+    # Flash runs on CUDA and on ROCm gfx950; other platforms must reject it.
     initialization_result = nullcontext()
     if model_arch in (
         "HYV4FlashForCausalLM",
@@ -240,7 +240,9 @@ def can_initialize(
                     NotImplementedError, match="gfx950"
                 )
         elif not current_platform.is_cuda():
-            pytest.skip("HY4 Flash is only supported on CUDA and ROCm")
+            initialization_result = pytest.raises(
+                NotImplementedError, match="HYV4 Flash requires NVIDIA CUDA"
+            )
     with (
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,
