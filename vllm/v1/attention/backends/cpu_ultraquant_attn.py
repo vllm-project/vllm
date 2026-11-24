@@ -183,9 +183,9 @@ class CPUUltraQuantAttentionMetadataBuilder(CPUAttentionMetadataBuilder):
     ) -> torch.Tensor | None:
         """One bf16 paged buffer for the group's staged K/V, grown as needed.
 
-        Zero-filled because the CPU kernel reads the unwritten tail of a
-        prompt's last block before masking it; stale finite values a previous
-        layer or request left there are masked out and so are harmless.
+        Zero-filled rather than empty: the kernel reads the unwritten tail of a
+        prompt's last block and masks it only in the scores, so a stale finite
+        value there is harmless but an uninitialized NaN reaches the output.
         """
         bs = self.block_size
         # A scattered prefill group is staged a request at a time, so the
@@ -276,51 +276,52 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
         prefill_rows = attn_metadata.prefill_rows
         cont_rows = attn_metadata.cont_rows
         decode_rows = attn_metadata.decode_rows
-        scratch = attn_metadata.scratch
+        # Both staging routes share the one page the builder sized for them.
         if prefill_rows or cont_rows:
+            scratch = attn_metadata.scratch
             assert scratch is not None
 
-        if prefill_rows:
-            lo, hi = qsl[prefill_rows[0]], qsl[prefill_rows[-1] + 1]
-            lens = [qsl[r + 1] - qsl[r] for r in prefill_rows]
-            # The scratch page is addressed by a dense token range, so a
-            # scattered set of prefill rows has to go one request at a time.
-            if hi - lo == sum(lens):
-                self._prefill(
-                    layer,
-                    query[lo:hi],
-                    key[lo:hi],
-                    value[lo:hi],
-                    output[lo:hi],
-                    lens,
-                    scratch,
-                )
-            else:
-                for r in prefill_rows:
-                    s, e = qsl[r], qsl[r + 1]
+            if prefill_rows:
+                lo, hi = qsl[prefill_rows[0]], qsl[prefill_rows[-1] + 1]
+                lens = [qsl[r + 1] - qsl[r] for r in prefill_rows]
+                # The scratch page is addressed by a dense token range, so a
+                # scattered set of prefill rows has to go one request at a time.
+                if hi - lo == sum(lens):
                     self._prefill(
                         layer,
-                        query[s:e],
-                        key[s:e],
-                        value[s:e],
-                        output[s:e],
-                        [e - s],
+                        query[lo:hi],
+                        key[lo:hi],
+                        value[lo:hi],
+                        output[lo:hi],
+                        lens,
                         scratch,
                     )
+                else:
+                    for r in prefill_rows:
+                        s, e = qsl[r], qsl[r + 1]
+                        self._prefill(
+                            layer,
+                            query[s:e],
+                            key[s:e],
+                            value[s:e],
+                            output[s:e],
+                            [e - s],
+                            scratch,
+                        )
 
-        for r in cont_rows:
-            s, e = qsl[r], qsl[r + 1]
-            self._continuation(
-                layer,
-                query[s:e],
-                key[s:e],
-                value[s:e],
-                output[s:e],
-                kv_cache,
-                attn_metadata.block_table[r],
-                ctx_lens[r],
-                scratch,
-            )
+            for r in cont_rows:
+                s, e = qsl[r], qsl[r + 1]
+                self._continuation(
+                    layer,
+                    query[s:e],
+                    key[s:e],
+                    value[s:e],
+                    output[s:e],
+                    kv_cache,
+                    attn_metadata.block_table[r],
+                    ctx_lens[r],
+                    scratch,
+                )
 
         if decode_rows:
             idx = torch.tensor(decode_rows, dtype=torch.int64)
@@ -408,7 +409,7 @@ class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
             seq_lens=seq_lens,
             scale=self.scale,
             causal=True,
-            alibi_slopes=self.alibi_slopes,
+            alibi_slopes=self.alibi_slopes,  # type: ignore
             sliding_window=self.sliding_window,
             block_table=block_table,
             softcap=self.logits_soft_cap,
