@@ -31,6 +31,10 @@ _QWEN_MODEL_TYPES = frozenset(
 # Covers L=1 constexpr, non-divisible runtime L, and divisible runtime L.
 _FLA_POST_CONV_WARMUP_LENGTHS = (1, 2, 16)
 
+# Cover the gfx1151 W4A16 skinny-GEMM selector buckets used by decode and
+# speculative verification. The actual N/K shapes come from loaded layers.
+_W4A16_WARMUP_M = (1, 4, 8, 16, 32)
+
 
 @dataclass(frozen=True, slots=True)
 class _QwenGDNWarmupConfig:
@@ -387,6 +391,196 @@ def _warm_state_gather_scatter_kernels(
         scatter_states(state, gathered, idx)
 
 
+def _warm_qwen_w4a16_skinny_kernels(runner: "GPUModelRunner") -> None:
+    """Compile the loaded Qwen W4A16 skinny-GEMM shapes on gfx1151.
+
+    The generic warmup runs before the first model request, but it does not
+    know the quantized layer shapes selected by the RDNA hybrid W4A16 path.
+    Use one loaded layer for each distinct (N, K, group, zero-point) shape and
+    exercise the M buckets selected by the gfx1151 tile table.
+    """
+    if not current_platform.is_rocm():
+        return
+
+    from vllm.platforms.rocm import on_gfx1151
+
+    if not on_gfx1151():
+        return
+
+    from vllm.model_executor.kernels.linear.mixed_precision.rdna_hybrid_w4a16 import (
+        RDNAHybridW4A16LinearKernel,
+        triton_w4a16_skinny_fmt_gemm,
+    )
+
+    model = runner.get_model()
+    max_num_reqs = max(1, int(runner.max_num_reqs))
+    m_values = tuple(
+        sorted({min(m, max_num_reqs) for m in _W4A16_WARMUP_M})
+    )
+    warmed: set[tuple[int, int, int, torch.dtype, bool, bool]] = set()
+    layer_count = 0
+
+    for layer in model.modules():
+        # Quark stores the selected MPLinearKernel on the scheme. Other
+        # quantization paths may expose it directly as quant_method.
+        quant_method = getattr(layer, "quant_method", None)
+        kernel = getattr(getattr(layer, "scheme", None), "kernel", None)
+        if isinstance(kernel, RDNAHybridW4A16LinearKernel):
+            quant_method = kernel
+        if not isinstance(quant_method, RDNAHybridW4A16LinearKernel):
+            continue
+
+        w_q, w_s, w_zp = quant_method._get_weight_params(layer)
+        if w_q.dtype != torch.int8 or w_q.ndim != 2:
+            continue
+
+        w_q_i32 = w_q.view(torch.int32)
+        n, k8 = w_q_i32.shape
+        group_size = int(quant_method.config.group_size)
+        carrier = getattr(layer, "_hybrid_w_scale_zp_carrier", None)
+        key = (
+            n,
+            k8 * 8,
+            group_size,
+            w_s.dtype,
+            w_zp is not None,
+            carrier is not None,
+        )
+        if key in warmed:
+            continue
+        warmed.add(key)
+        layer_count += 1
+
+        for m in m_values:
+            x = torch.empty(
+                (m, k8 * 8),
+                dtype=runner.vllm_config.model_config.dtype,
+                device=runner.device,
+            )
+            triton_w4a16_skinny_fmt_gemm(
+                a=x,
+                b_q=w_q_i32,
+                scales=w_s,
+                group_size=group_size,
+                zp=w_zp,
+                scale_zp_carrier=carrier,
+            )
+
+    if layer_count:
+        logger.info(
+            "Warmed Qwen gfx1151 W4A16 Triton kernels for %d layer shapes and M=%s.",
+            layer_count,
+            m_values,
+        )
+    else:
+        logger.info("Skipping Qwen W4A16 Triton warmup: no RDNA hybrid layers found.")
+
+
+def _warm_qwen_unified_attention_kernel(
+    runner: "GPUModelRunner", model_config: "ModelConfig"
+) -> None:
+    """Compile the Qwen hybrid-cache attention block-size specialization.
+
+    The generic attention warmup does not necessarily see the nonstandard
+    block size selected when Qwen attention and Mamba pages are unified.
+    """
+    if not current_platform.is_rocm():
+        return
+
+    from vllm.platforms.rocm import on_gfx1151
+
+    if not on_gfx1151():
+        return
+
+    text_config = getattr(model_config, "hf_text_config", None)
+    num_query_heads = getattr(text_config, "num_attention_heads", None)
+    num_kv_heads = getattr(text_config, "num_key_value_heads", None)
+    head_size = getattr(text_config, "head_dim", None)
+    if not all((num_query_heads, num_kv_heads, head_size)):
+        logger.info("Skipping Qwen attention warmup: incomplete head metadata.")
+        return
+
+    from vllm.v1.core.kv_cache_utils import is_mamba_group
+
+    attention_group = next(
+        (
+            group
+            for group in runner.kv_cache_config.kv_cache_groups
+            if not is_mamba_group(group)
+        ),
+        None,
+    )
+    if attention_group is None:
+        logger.info("Skipping Qwen attention warmup: no attention KV group found.")
+        return
+
+    block_size = int(attention_group.block_size)
+    if block_size <= 0:
+        return
+
+    from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+
+    device = runner.device
+    dtype = model_config.dtype
+    group_id = runner.kv_cache_config.kv_cache_groups.index(attention_group)
+    block_table = runner.block_tables.input_block_tables[group_id][:1, :1]
+    key_cache = value_cache = None
+    for layer_name, layer in runner.compilation_config.static_forward_context.items():
+        kv_cache = getattr(layer, "kv_cache", None)
+        if not isinstance(kv_cache, torch.Tensor) or kv_cache.ndim != 4:
+            continue
+        if layer_name not in attention_group.layer_names:
+            continue
+        if (
+            kv_cache.shape[1] == int(num_kv_heads)
+            and kv_cache.shape[2] == block_size
+            and kv_cache.shape[3] == 2 * int(head_size)
+        ):
+            kv_cache = kv_cache[:1].transpose(1, 2)
+            key_cache, value_cache = kv_cache.split(int(head_size), dim=-1)
+            break
+    if key_cache is None or value_cache is None:
+        logger.info("Skipping Qwen attention warmup: no bound attention KV cache found.")
+        return
+
+    # Runtime prefill JIT keys specialize the query length. Cover the
+    # small-request range used by first requests and decode verification.
+    query_lengths = tuple(range(1, min(32, max(1, int(runner.max_num_tokens))) + 1))
+    for query_len in query_lengths:
+        query = torch.empty(
+            (query_len, int(num_query_heads), int(head_size)),
+            dtype=dtype,
+            device=device,
+        )
+        output = torch.empty_like(query)
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output,
+            cu_seqlens_q=torch.tensor(
+                [0, query_len], dtype=torch.int32, device=device
+            ),
+            max_seqlen_q=query_len,
+            seqused_k=torch.tensor([query_len], dtype=torch.int32, device=device),
+            max_seqlen_k=query_len,
+            softmax_scale=int(head_size) ** -0.5,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=block_table,
+            softcap=0,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+        )
+    logger.info(
+        "Warmed Qwen gfx1151 unified attention Triton kernel for block_size=%d "
+        "and query_lengths=%s.",
+        block_size,
+        query_lengths,
+    )
+
+
 def _synchronize_device(device: torch.device) -> None:
     if device.type == "cuda":
         torch.accelerator.synchronize(device)
@@ -405,7 +599,9 @@ def qwen_triton_warmup(
         return
 
     device = runner.device
-    logger.info("Warming up Qwen GDN Triton kernels for model_type=%s.", model_type)
+    logger.info("Warming up Qwen Triton kernels for model_type=%s.", model_type)
+    _warm_qwen_w4a16_skinny_kernels(runner)
+    _warm_qwen_unified_attention_kernel(runner, model_config)
 
     gdn_config = _qwen_gdn_warmup_config(
         runner.compilation_config.static_forward_context
