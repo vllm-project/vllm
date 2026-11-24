@@ -21,7 +21,6 @@ from vllm.model_executor.layers.fused_moe.oracle.int8 import (
 )
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
-    pad_expert_statistic,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTokenSym,
@@ -48,36 +47,69 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
             activation_key=kInt8DynamicTokenSym,
         )
 
-    def expert_statistics(
-        self, w13: torch.Tensor, w2: torch.Tensor
-    ) -> dict[str, torch.Tensor]:
-        # w2 is sharded along its input dim: its rows span the TP ranks.
-        return {"w2_amax": weight_amax(w2, dim=-1)}
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
 
-    def quantize_expert(
-        self,
-        layer: Module,
-        w13: torch.Tensor,
-        w2: torch.Tensor,
-        statistics: dict[str, torch.Tensor],
-    ) -> tuple[torch.Tensor, ...]:
-        vmax = torch.iinfo(torch.int8).max
-        # Per-row quantization, over hidden_size for w13, intermediate_size for w2.
-        w13_scale = weight_amax(w13, dim=1) / vmax
-        w2_scale = pad_expert_statistic(statistics["w2_amax"], w2.shape[0]) / vmax
-        w13_q, w2_q = (
-            weight.div(scale.unsqueeze(1)).round().clamp(-vmax, vmax).to(torch.int8)
-            for weight, scale in ((w13, w13_scale), (w2, w2_scale))
-        )
-        return w13_q, w2_q, w13_scale.float(), w2_scale.float()
-
-    def setup_quantized_weights(self, layer: Module, *weights: torch.Tensor) -> None:
-        w13, w2, w13_scale, w2_scale = weights
+        w13, w2, w13_scale, w2_scale = self.quantize_weights(layer)
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w13_scale", w13_scale)
         replace_parameter(layer, "w2_scale", w2_scale)
         self._setup_kernel(layer)
+        self.release_requantization_source_weights(layer)
+
+        layer._already_called_process_weights_after_loading = True
+
+    def expert_statistics(
+        self, w13_weight: torch.Tensor, w2_weight: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        return {"w2_amax": weight_amax(w2_weight, dim=-1)}
+
+    def quantize_experts(
+        self,
+        layer: Module,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
+        statistics: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, ...]:
+        vmax = torch.iinfo(torch.int8).max
+
+        w13 = torch.empty_like(w13_weight, dtype=torch.int8)
+        w2 = torch.empty_like(w2_weight, dtype=torch.int8)
+        w13_scale = torch.zeros(
+            w13_weight.shape[0],
+            w13_weight.shape[1],
+            device=w13.device,
+            dtype=torch.float32,
+        )
+        w2_scale = torch.zeros(
+            w2_weight.shape[0],
+            w2_weight.shape[1],
+            device=w2.device,
+            dtype=torch.float32,
+        )
+
+        # Zero for the rows padding the hidden size.
+        w2_amax = statistics["w2_amax"]
+        padding = w2_weight.shape[1] - w2_amax.shape[1]
+        w2_amax = torch.nn.functional.pad(w2_amax, (0, padding))
+
+        for expert in range(w13_weight.shape[0]):
+            # w13: per-row quantization over hidden_size dim
+            w = w13_weight[expert, :, :]
+            scales = w.abs().amax(dim=1) / vmax
+            q = w.div(scales.unsqueeze(1)).round().clamp(-vmax, vmax)
+            w13[expert, :, :] = q.to(torch.int8)
+            w13_scale[expert, :] = scales
+
+            # w2: per-row quantization over intermediate_size dim
+            w = w2_weight[expert, :, :]
+            scales = w2_amax[expert] / vmax
+            q = w.div(scales.unsqueeze(1)).round().clamp(-vmax, vmax)
+            w2[expert, :, :] = q.to(torch.int8)
+            w2_scale[expert, :] = scales
+        return w13, w2, w13_scale, w2_scale
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
         w13, w2 = convert_to_int8_moe_kernel_format(

@@ -21,37 +21,23 @@ from vllm.model_executor.layers.quantization.online.requantization import (
 )
 from vllm.model_executor.model_loader.reload.layerwise import (
     get_layerwise_info,
-    get_layerwise_info,
     initialize_online_processing,
 )
 from vllm.model_executor.utils import set_weight_attrs
 
 
-def pad_expert_statistic(statistic: torch.Tensor, size: int) -> torch.Tensor:
-    """Zero-pad the first dim of an unsharded expert statistic, e.g. a per
-    channel amax over the hidden size, to the layer's padded `size`."""
-    padding = size - statistic.shape[0]
-    if padding == 0:
-        return statistic
-    return torch.cat([statistic, statistic.new_zeros(padding, *statistic.shape[1:])])
-
-
 class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
-    """Base for MoE methods that quantize their experts online.
-
-    The experts are created on the meta device, and quantized one at a time as
-    they load by an `ExpertWeightStream`: subclasses implement
-    `quantize_expert`, `expert_statistics` if their scales span a TP-sharded
-    dimension, and `setup_quantized_weights` for the layer-wide conversion to
-    the kernel format.
+    """Base for MoE methods that load full-precision weights on meta device
+    and quantize them one expert at a time as they load, via the QeRL layerwise
+    processing system (see `ExpertWeightStream`).
     """
 
     uses_meta_device: bool = True
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        # Checkpoint parameters of one routed expert, which the stream decodes
-        # into full-precision weights, and checkpoint activation scales, unused.
+        # Checkpoint parameters of a routed expert, which `ExpertWeightStream`
+        # decodes, and unused checkpoint activation scales.
         self.expert_weight_names: tuple[str, ...] = ("w13_weight", "w2_weight")
         self.expert_activation_scale_names: tuple[str, ...] = ()
 
@@ -80,14 +66,12 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
                 **extra_weight_attrs,
             )
             layer.num_experts = num_experts
-            source_names = tuple(self.requantization_source_parameters)
+            names = tuple(self.requantization_source_parameters)
             self.expert_weight_names = tuple(
-                name
-                for name in source_names
-                if "input" not in name and "bias" not in name
+                name for name in names if "input" not in name and "bias" not in name
             )
             self.expert_activation_scale_names = tuple(
-                name for name in source_names if "input" in name
+                name for name in names if "input" in name
             )
             # The source describes its serialized weights (e.g. a block size) on the
             # layer: the target owns the layer's quantization attributes.
@@ -156,73 +140,53 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         initialize_online_processing(layer)
 
     def create_weight_stream(self, device: torch.device) -> ExpertWeightStream | None:
-        """Stream loading the layer's experts, for `initialize_online_processing`."""
+        """Stream quantizing the layer's experts one at a time as they load."""
         return ExpertWeightStream(self, device)
 
     def expert_statistics(
-        self, w13: torch.Tensor, w2: torch.Tensor
+        self, w13_weight: torch.Tensor, w2_weight: torch.Tensor
     ) -> dict[str, torch.Tensor]:
-        """Statistics that the scales of one expert depend on beyond its TP shard.
-
-        Args:
-            w13: Unsharded `[num_shards * intermediate_size, hidden_size]` weight.
-            w2: Unsharded `[hidden_size, intermediate_size]` weight.
-
-        Returns:
-            Statistics passed to `quantize_expert`. As they are computed on the
-            unsharded expert, the scales do not depend on the TP configuration.
-
-        """
+        """Statistics of unsharded experts that their scales depend on, e.g. an
+        amax over a dimension that TP shards, so that the scales do not depend on
+        the TP configuration. Passed to `quantize_experts`."""
         return {}
 
     @abstractmethod
-    def quantize_expert(
+    def quantize_experts(
         self,
         layer: torch.nn.Module,
-        w13: torch.Tensor,
-        w2: torch.Tensor,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
         statistics: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, ...]:
-        """Quantize one expert.
-
-        Args:
-            layer: Layer of the expert.
-            w13: This rank's `[num_shards * intermediate_size_per_partition,
-                hidden_size]` weight, zero-padded to the layer's sizes.
-            w2: This rank's `[hidden_size, intermediate_size_per_partition]`
-                weight, zero-padded to the layer's sizes.
-            statistics: The `expert_statistics` of the unsharded expert.
+        """Quantize this rank's (padded) `(w13, w2)` of a group of experts, with
+        the `expert_statistics` of the unsharded experts.
 
         Returns:
-            The quantized tensors of the expert, e.g. `(w13, w2, w13_scale,
-            w2_scale)`, stacked over the experts for `setup_quantized_weights`.
+            Tensors with a leading expert dim, e.g. `(w13, w13_scale, w2,
+            w2_scale)`, as returned for all local experts by `quantize_weights`.
 
         """
 
-    @abstractmethod
-    def setup_quantized_weights(
-        self, layer: torch.nn.Module, *weights: torch.Tensor
-    ) -> None:
-        """Convert the stacked `quantize_expert` outputs of all local experts to
-        the kernel format, and set up the kernel."""
+    def quantize_weights(self, layer: torch.nn.Module) -> tuple[torch.Tensor, ...]:
+        """Return the `quantize_experts` outputs of all local experts.
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-
+        The experts are quantized one at a time as they load. Layers loaded
+        outside of the layerwise loader (e.g. with dummy weights) are quantized
+        one expert at a time from their materialized weights.
+        """
         info = get_layerwise_info(layer)
         stream = info.weight_stream
         if not isinstance(stream, ExpertWeightStream) or stream.method is not self:
-            # The weights were loaded outside of layerwise processing, into the
-            # materialized layer: quantize them one expert at a time all the same.
             stream = ExpertWeightStream(self, info.restore_device)
-        self.setup_quantized_weights(layer, *stream.quantized_weights(layer))
-        self.release_requantization_source_weights(layer)
+        outputs = stream.quantized_weights(layer)
         if (loader := getattr(layer, "shared_expert_online_loader", None)) is not None:
             loader.release_staging(layer)
+        return outputs
 
-        # Prevent duplicate processing (e.g., during weight reload).
-        layer._already_called_process_weights_after_loading = True
+    @abstractmethod
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
 
     @property
     def supports_eplb(self) -> bool:

@@ -1254,7 +1254,7 @@ def test_online_moe_stream_places_routed_then_shared_experts(num_shared: int):
         expert_activation_scale_names=(),
         requantization_source=None,
         expert_statistics=lambda w13, w2: {},
-        quantize_expert=lambda layer, w13, w2, statistics: (
+        quantize_experts=lambda layer, w13, w2, statistics: (
             w13 * 2,
             w13.mean(-1),
             w2 * 2,

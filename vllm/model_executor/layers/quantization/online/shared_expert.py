@@ -187,13 +187,12 @@ class OnlineSharedExpertLoader:
         self, layer: torch.nn.Module
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the staged `(w13, w2)` shared experts, dequantized if needed."""
-        return tuple(  # type: ignore[return-value]
-            self.dequantize(
-                getattr(layer, f"online_{stem}_weight").data,
-                getattr(layer, f"online_{stem}_weight_scale", None),
-            )
-            for stem in ("w13", "w2")
-        )
+        w13 = layer.online_w13_weight.data
+        w2 = layer.online_w2_weight.data
+        if self.stored_key is not None:
+            w13 = self.dequantize(w13, layer.online_w13_weight_scale)
+            w2 = self.dequantize(w2, layer.online_w2_weight_scale)
+        return w13, w2
 
     def dequantize(
         self, weight: torch.Tensor, weight_scale: torch.Tensor | None

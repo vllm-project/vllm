@@ -415,7 +415,9 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Materialize layer tensors onto device
     materialize_layer(layer, info)
 
-    _unwrap_layerwise_loaders(layer)
+    # Unwrap layerwise loading wrappers
+    for param in get_layer_tensors(layer).values():
+        param.weight_loader = _get_original_loader(param)
 
     # Load all buffered weights into materialized layer (using original loaders)
     for name, args in info.loaded_weights:
@@ -429,15 +431,9 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
 
 def _process_streamed_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
     """Finalize a layer whose weights were loaded by its weight stream."""
-    _unwrap_layerwise_loaders(layer)
-    _process_loaded_layer(layer, info)
-    LOADING_LAYERS.discard(layer)
-    logger.debug("%s: Processed", layer.__class__.__name__)
-
-
-def _unwrap_layerwise_loaders(layer: torch.nn.Module) -> None:
     for param in get_layer_tensors(layer).values():
         param.weight_loader = _get_original_loader(param)
+    _process_loaded_layer(layer, info)
 
 
 def _process_loaded_layer(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:

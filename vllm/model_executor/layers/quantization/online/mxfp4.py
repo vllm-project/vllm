@@ -49,6 +49,36 @@ from vllm.model_executor.utils import replace_parameter
 MXFP4_BLOCK_SIZE = 32
 
 
+def _quantize_mxfp4_moe_weight(
+    weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Batch quantization: bf16/fp16 stacked expert weights -> MXFP4.
+
+    Returns packed FP4 weights (uint8, two values per byte) and per-block
+    (group-32) e8m0 scales (uint8), one pair per expert.
+    """
+    num_experts = weight.size(0)
+    first_quant, first_scale = mxfp4_quantize(weight[0])
+    # Pre-allocate the output tensors rather than stacking.
+    # This is important for consistent memory layout.
+    w_quant = torch.empty(
+        (num_experts, *first_quant.shape),
+        dtype=first_quant.dtype,
+        device=weight.device,
+    )
+    w_scales = torch.empty(
+        (num_experts, *first_scale.shape),
+        dtype=first_scale.dtype,
+        device=weight.device,
+    )
+    w_quant[0] = first_quant
+    w_scales[0] = first_scale
+    for i in range(1, num_experts):
+        w_quant[i], w_scales[i] = mxfp4_quantize(weight[i])
+
+    return w_quant, w_scales
+
+
 class Mxfp4OnlineLinearMethod(OnlineLinearBase, InputHadamardFusable):
     """Online MXFP4 linear method.
     Loads bf16/fp16 checkpoints and quantizes weights to MXFP4 (microscaling
@@ -298,28 +328,37 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             layer=layer,
         )
 
-    def quantize_expert(
+    def quantize_experts(
         self,
         layer: Module,
-        w13: torch.Tensor,
-        w2: torch.Tensor,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
         statistics: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, ...]:
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
-            # No MXFP4 kernel: keep the full-precision weights.
-            return w13, w2
-        return (*mxfp4_quantize(w13), *mxfp4_quantize(w2))
+            # No MXFP4 kernel: keep the full-precision experts.
+            return w13_weight, w2_weight
+        return (
+            *_quantize_mxfp4_moe_weight(w13_weight),
+            *_quantize_mxfp4_moe_weight(w2_weight),
+        )
 
-    def setup_quantized_weights(self, layer: Module, *weights: torch.Tensor) -> None:
-        if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
-            w13, w2 = weights
-            replace_parameter(layer, "w13_weight", w13)
-            replace_parameter(layer, "w2_weight", w2)
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        w13, w13_scale, w2, w2_scale = weights
+        if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
+            w13_weight, w2_weight = self.quantize_weights(layer)
+            replace_parameter(layer, "w13_weight", w13_weight)
+            replace_parameter(layer, "w2_weight", w2_weight)
+            layer._already_called_process_weights_after_loading = True
+            return
+
         layer.w13_input_scale = None
         layer.w2_input_scale = None
+
+        w13, w13_scale, w2, w2_scale = self.quantize_weights(layer)
+
         self._setup_kernel(
             layer,
             w13,
@@ -329,3 +368,6 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             getattr(layer, "w13_bias", None),
             getattr(layer, "w2_bias", None),
         )
+        self.release_requantization_source_weights(layer)
+
+        layer._already_called_process_weights_after_loading = True

@@ -5,8 +5,8 @@
 import importlib
 import inspect
 import json
-from pathlib import Path
 import types
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock
@@ -1318,13 +1318,13 @@ def test_weight_loading_requantization_moe(
     # Record the full-precision experts the target quantizes.
     quantized: list[tuple[torch.Tensor, torch.Tensor]] = []
 
-    def quantize_expert(layer, w13, w2, statistics):
-        quantized.append((w13.cpu(), w2.cpu()))
+    def quantize_experts(layer, w13, w2, statistics):
+        quantized.append((w13[0].cpu(), w2[0].cpu()))
         return w13, w2
 
-    monkeypatch.setattr(target, "quantize_expert", quantize_expert)
+    monkeypatch.setattr(target, "quantize_experts", quantize_experts)
     setup = Mock()
-    monkeypatch.setattr(target, "setup_quantized_weights", setup)
+    monkeypatch.setattr(target, "process_weights_after_loading", setup)
 
     with torch.device(device):
         loaded = set(layer.load_weights(checkpoint[:-1]))
@@ -1410,6 +1410,7 @@ def test_expert_stream_shards_and_pads_experts(
     torch.testing.assert_close(local_w13, expected_w13, rtol=0, atol=0)
     # The down projection is this rank's input slice, padded in both dims.
     torch.testing.assert_close(local_w2, expected_w2, rtol=0, atol=0)
+
 
 @pytest.mark.skipif(
     not (current_platform.is_cuda() or current_platform.is_rocm())
@@ -3227,7 +3228,10 @@ def test_modelopt_mxfp8_requantized_ptpc_tp_shards_match_unsharded() -> None:
 
 def _quantize_moe(weight, scheme, moe_tp_size):
     if scheme == "nvfp4":
-        return _quantize_moe_weight_to_nvfp4(weight, moe_tp_size)
+        amax = weight_amax(weight.flatten(1), dim=-1)
+        return _quantize_moe_weight_to_nvfp4(
+            weight, amax_for_moe_weight_quant(amax, moe_tp_size)
+        )
     if scheme == "per_tensor":
         amax = weight_amax(weight.flatten(1), dim=-1)
         scale = _fp8_scale(amax_for_moe_weight_quant(amax, moe_tp_size))
@@ -3756,15 +3760,16 @@ def test_online_int8_moe_w2_scale_matches_unsharded() -> None:
     # Outside of the first shard: a shard-local scale would miss it.
     w2[-1, -1] = 64.0
     method = Int8OnlineMoEMethod.__new__(Int8OnlineMoEMethod)
+    w13, w2 = w13[None], w2[None]
     statistics = method.expert_statistics(w13, w2)
 
-    _, full_weight, _, full_scale = method.quantize_expert(None, w13, w2, statistics)
-    shard_size = w2.shape[1] // 2
-    _, tp_weight, _, tp_scale = method.quantize_expert(
-        None, w13, w2[:, :shard_size].contiguous(), statistics
+    _, full_weight, _, full_scale = method.quantize_experts(None, w13, w2, statistics)
+    shard_size = w2.shape[2] // 2
+    _, tp_weight, _, tp_scale = method.quantize_experts(
+        None, w13, w2[:, :, :shard_size].contiguous(), statistics
     )
 
-    assert torch.equal(tp_weight, full_weight[:, :shard_size])
+    assert torch.equal(tp_weight, full_weight[:, :, :shard_size])
     assert torch.equal(tp_scale, full_scale)
 
 

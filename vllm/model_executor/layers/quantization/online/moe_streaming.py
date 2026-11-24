@@ -185,6 +185,7 @@ class ExpertWeightStream:
         """Expert weight parameters of the kind of expert `param_name` loads:
         fused shared experts stored quantized, else the routed experts."""
         if param_name.startswith(_SHARED_PREFIX):
+            assert layer.shared_expert_online_loader is not None
             return tuple(layer.shared_expert_online_loader.staging_parameters)
         return self.method.expert_weight_names
 
@@ -245,11 +246,21 @@ class ExpertWeightStream:
         tensors: dict[tuple[str, str], torch.Tensor],
     ) -> None:
         """Quantize one local expert from its unsharded checkpoint tensors."""
-        method = self.method
         w13, w2 = self._decode(layer, tensors)
-        statistics = method.expert_statistics(w13, w2)
-        w13, w2 = self._shard(layer, w13, w2)
-        self._store(layer, expert, method.quantize_expert(layer, w13, w2, statistics))
+        statistics = self.method.expert_statistics(w13[None], w2[None])
+        self._quantize(layer, expert, *self._shard(layer, w13, w2), statistics)
+
+    def _quantize(
+        self,
+        layer: "RoutedExperts",
+        expert: int,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        statistics: dict[str, torch.Tensor],
+    ) -> None:
+        """Quantize this rank's padded `(w13, w2)` of one expert into its slot."""
+        quantized = self.method.quantize_experts(layer, w13[None], w2[None], statistics)
+        self._store(layer, expert, tuple(tensor[0] for tensor in quantized))
 
     def quantized_weights(self, layer: "RoutedExperts") -> tuple[torch.Tensor, ...]:
         """The quantized outputs of all local experts."""
@@ -270,6 +281,7 @@ class ExpertWeightStream:
 
         if any(name.startswith(_SHARED_PREFIX) for name in names):
             loader = layer.shared_expert_online_loader
+            assert loader is not None
             w13, w2 = (
                 loader.dequantize(
                     expert[f"{_SHARED_PREFIX}{stem}_weight"],
@@ -316,9 +328,7 @@ class ExpertWeightStream:
         config = layer.moe_config
         shard_ids = ("w1", "w3") if config.is_act_and_mul else ("w1",)
         intermediate_size = config.intermediate_size_per_partition
-        local_w13 = w13.new_zeros(
-            len(shard_ids) * intermediate_size, config.hidden_dim
-        )
+        local_w13 = w13.new_zeros(len(shard_ids) * intermediate_size, config.hidden_dim)
         local_w2 = w2.new_zeros(config.hidden_dim, intermediate_size)
         for shard_id, weight in zip(shard_ids, w13.chunk(len(shard_ids)), strict=True):
             layer._load_model_weight_or_group_weight_scale(
@@ -366,6 +376,7 @@ class ExpertWeightStream:
         def staged_shared_expert(stem: str, index: int) -> torch.Tensor:
             weight = getattr(layer, f"{_SHARED_PREFIX}{stem}_weight")
             scale = getattr(layer, f"{_SHARED_PREFIX}{stem}_weight_scale", None)
+            assert loader is not None
             return loader.dequantize(
                 weight[index], None if scale is None else scale[index]
             )
@@ -389,11 +400,8 @@ class ExpertWeightStream:
                 ((_, w13, w2),) = source.dequantize_weight(checkpoint)
                 w13, w2 = w13[0], w2[0]
             w13, w2 = w13.to(layer.orig_dtype), w2.to(layer.orig_dtype)
-            statistics = method.expert_statistics(w13, w2)
-            w13, w2 = self._pad(layer, w13, w2)
-            self._store(
-                layer, expert, method.quantize_expert(layer, w13, w2, statistics)
-            )
+            statistics = method.expert_statistics(w13[None], w2[None])
+            self._quantize(layer, expert, *self._pad(layer, w13, w2), statistics)
 
     @staticmethod
     def _pad(

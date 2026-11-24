@@ -83,27 +83,32 @@ class LutBOnlineMoEMethod(OnlineMoEMethodBase):
         # carry their codebooks and scales inline.
         return FUSED_MOE_UNQUANTIZED_CONFIG
 
-    def quantize_expert(
+    def quantize_experts(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         w13: torch.Tensor,
         w2: torch.Tensor,
         statistics: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, ...]:
-        return self._quantize(w13), self._quantize(w2)
+        weights = []
+        for weight in (w13, w2):
+            packed, codebooks, scales = quantize_lut_b(weight)
+            if self.experts_cls is LutBSm107Experts:
+                weight = lut_b_to_sm107_tiles(packed, codebooks, scales)
+            else:
+                weight = dequantize_lut_b(packed, codebooks, scales, weight.dtype)
+            weights.append(weight)
+        return tuple(weights)
 
-    def _quantize(self, weight: torch.Tensor) -> torch.Tensor:
-        packed, codebooks, scales = quantize_lut_b(weight)
-        if self.experts_cls is LutBSm107Experts:
-            return lut_b_to_sm107_tiles(packed[None], codebooks[None], scales[None])[0]
-        return dequantize_lut_b(packed, codebooks, scales, weight.dtype)
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
 
-    def setup_quantized_weights(
-        self, layer: torch.nn.Module, *weights: torch.Tensor
-    ) -> None:
-        w13, w2 = weights
-        replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w2_weight", w2)
+        w13, w2 = self.quantize_weights(layer)
+        for name, weight in (("w13_weight", w13), ("w2_weight", w2)):
+            replace_parameter(layer, name, weight)
+        self.release_requantization_source_weights(layer)
+
         quant_config = self.get_fused_moe_quant_config(layer)
         self.moe_quant_config = quant_config
         self.moe_kernel = make_lut_b_moe_kernel(
@@ -112,3 +117,4 @@ class LutBOnlineMoEMethod(OnlineMoEMethodBase):
             quant_config,
             layer._expert_routing_tables(),
         )
+        layer._already_called_process_weights_after_loading = True
