@@ -34,14 +34,16 @@ use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_managed_engine::ManagedEngineConfig;
-use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
+use vllm_managed_engine::cli::{
+    ManagedEngineArgs, parse_human_readable_int, repartition_managed_engine_args,
+};
 use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopology};
 use vllm_server::{
-    AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
-    CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, FingerprintMode,
-    HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection,
-    ReasoningEffort, RenderConfig, RendererSelection,
+    AccessLogConfig, AdmissionLimits, ApiServerOptions, ChatTemplateContentFormatOption, Config,
+    CoordinatorMode, CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT,
+    DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
+    DefaultMmLoras, FingerprintMode, HttpListenerMode, LoraModulePath, OutputLogConfig,
+    OutputLogging, ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -432,6 +434,19 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t = NonZeroU32::MIN)]
     #[serde(default = "default_stream_interval")]
     pub stream_interval: NonZeroU32,
+    /// Maximum number of requests that can be in-flight (waiting or running)
+    /// at the same time. A request with `n` samples counts as `n`. When the
+    /// limit is reached, new requests are rejected with HTTP 503 so the
+    /// client can retry on another instance.
+    #[arg(long)]
+    #[serde(default)]
+    pub max_num_queued_reqs: Option<u64>,
+    /// Maximum total prompt tokens of requests currently in the prefill phase.
+    /// Once the backlog reaches it, new requests are rejected with HTTP 503.
+    /// Accepts human-readable counts such as `32k`, like Python.
+    #[arg(long, value_parser = parse_token_count)]
+    #[serde(default)]
+    pub max_num_queued_tokens: Option<u64>,
     /// Maximum time to wait for active requests to drain during shutdown.
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -1052,6 +1067,7 @@ impl SharedRuntimeArgs {
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
         let fingerprint_mode = self.fingerprint_mode_config();
+        let admission_limits = self.admission_limits();
         let cors = self.cors_config();
         let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
@@ -1108,6 +1124,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
+            admission_limits,
             api_server_options,
             fingerprint_mode,
             cors,
@@ -1147,6 +1164,7 @@ impl SharedRuntimeArgs {
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
         let fingerprint_mode = self.fingerprint_mode_config();
+        let admission_limits = self.admission_limits();
         let cors = self.cors_config();
         let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
@@ -1202,6 +1220,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
+            admission_limits,
             api_server_options,
             fingerprint_mode,
             cors,
@@ -1274,6 +1293,13 @@ impl SharedRuntimeArgs {
         }
     }
 
+    fn admission_limits(&self) -> AdmissionLimits {
+        AdmissionLimits {
+            max_num_queued_reqs: self.max_num_queued_reqs,
+            max_num_queued_tokens: self.max_num_queued_tokens,
+        }
+    }
+
     fn access_log_config(&self) -> AccessLogConfig {
         AccessLogConfig {
             enabled: !self.disable_access_log,
@@ -1313,6 +1339,13 @@ fn default_engine_ready_timeout_secs() -> u64 {
 
 fn default_enable_log_deltas() -> bool {
     true
+}
+
+/// Parse a token count written as Python's `human_readable_int`.
+fn parse_token_count(value: &str) -> Result<u64, String> {
+    parse_human_readable_int(value)
+        .and_then(|count| u64::try_from(count).ok())
+        .ok_or_else(|| format!("expected a token count such as 32768 or 32k, got `{value}`"))
 }
 
 fn default_stream_interval() -> NonZeroU32 {

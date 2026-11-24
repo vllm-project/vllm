@@ -2776,6 +2776,62 @@ async fn completions_reject_missing_prompt() {
     engine_task.abort_and_join().await;
 }
 
+/// A request over a queue limit gets a retryable 503 before it reaches the
+/// engine, on both the text and the chat path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn requests_over_a_queue_limit_return_503() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-queue-limit".to_vec(),
+        |_dealer, _push| boxed_test_future(async {}),
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let llm = test_llm(client).with_admission_limits(crate::AdmissionLimits {
+        max_num_queued_reqs: Some(0),
+        max_num_queued_tokens: None,
+    });
+    let chat = ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new()))
+        .with_served_model_name("test-model");
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let mut results = Vec::new();
+    for (uri, body) in [
+        (
+            "/v1/completions",
+            json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello"}),
+        ),
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": "hello"}],
+            }),
+        ),
+    ] {
+        let (status, json) = post_json(&mut app, uri, body).await;
+        results.push(format!("{uri} -> {status} {json}"));
+    }
+    expect_test::expect![[r#"
+        /v1/completions -> 503 Service Unavailable {"error":{"message":"The engine is currently busy and cannot accept new requests. Please try again later or on a different instance.","type":"ServiceUnavailableError","param":null,"code":503}}
+        /v1/chat/completions -> 503 Service Unavailable {"error":{"message":"The engine is currently busy and cannot accept new requests. Please try again later or on a different instance.","type":"ServiceUnavailableError","param":null,"code":503}}"#]].assert_eq(&results.join("\n"));
+    engine_task.abort_and_join().await;
+}
+
 /// The render route lowers the same request, so it rejects a missing prompt
 /// too and shows the tokens of the accepted ones. Unlike Python, which rejects
 /// `prompt: ""` before tokenizing, an empty text prompt is left to
