@@ -1454,7 +1454,7 @@ def test_candidate_indexer_matches_dense(
             live_before_window: list[int] = []
             with monkeypatch.context() as memory_check:
                 if batch_kind == "full_prefill":
-                    monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "1")
+                    memory_check.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "1")
                     dense_logits = sparse_indexer.fp8_fp4_mqa_logits
 
                     def record_live_memory(*args, **kwargs):

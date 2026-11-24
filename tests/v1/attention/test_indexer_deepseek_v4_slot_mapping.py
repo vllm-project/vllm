@@ -731,13 +731,13 @@ def test_indexer_prefill_budget_matches_compressed_workspace(
     )
     vllm_config = create_vllm_config(
         max_model_len=max_model_len,
-        tensor_parallel_size=max(1, dcp // pcp),
         hf_config_override={
             "index_n_heads": 32,
             "index_head_dim": 128,
             "index_topk": 2048,
         },
     )
+    vllm_config.parallel_config.tensor_parallel_size = max(1, dcp // pcp)
     vllm_config.parallel_config.prefill_context_parallel_size = pcp
     vllm_config.parallel_config.decode_context_parallel_size = dcp
     vllm_config.parallel_config.cp_kv_cache_interleave_size = compress_ratio
