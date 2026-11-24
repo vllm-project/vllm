@@ -62,12 +62,8 @@ MERGE_AB = "DSV41_MONO_MERGE_AB"
 def _decodes(tp: int) -> int:
     """Decodes an engine runs, so that `_decodes(tp) ** 2` pairs are pooled.
 
-    vLLM's path is not deterministic here, so one decode's flipped share is a
-    draw rather than a rate. On gfx950 AITER has no tuned MoE config for the
-    TP8 per-rank shape and falls back to a non-deterministic kernel, which
-    widens that draw enough to cross a quarter on its own: the reference's
-    first layer is never bit identical between two runs at TP8, against 89%
-    of compared tokens at TP4. So pool there and nowhere else.
+    vLLM's path is not deterministic at TP8, so one decode's flipped share is
+    a draw rather than a rate.
     """
     return 4 if tp == 8 else 1
 
@@ -650,11 +646,9 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
         # pooled like the flips: a pair comparing few tokens contributes
         # few flips with them, so what has to hold is the total
         assert pooled_keys >= len(prompts) * decodes**2, (rank, pooled_keys)
+        # a string, so that pytest prints every pair: which flipped what
         assert pooled_flips <= pooled_keys // flip_divisor, (
-            rank,
-            pooled_flips,
-            pooled_keys,
-            per_pair,  # which pair flipped what, so a failure is triageable
+            f"rank {rank}: {pooled_flips}/{pooled_keys} flipped, {per_pair}"
         )
 
     if (tp, rows) == (8, 8):
