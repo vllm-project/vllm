@@ -4,7 +4,7 @@ Serve the BF16 weights of [Qwen3-Omni-30B-A3B-Instruct](https://huggingface.co/Q
 
 ## Prepare the runtime and checkpoint
 
-The reference deployment used an eight-device host with devices 0 through 3 selected for the engine. It ran in a custom Linux AArch64 container with the following software:
+The reference deployment used devices 0 through 3 on an eight-device Ascend 910B4-1 host (64 GiB HBM per device). It ran the Linux AArch64 image `quay.io/ascend/vllm-omni:v0.30.0` with the following software:
 
 | Component | Tested version |
 | --- | --- |
@@ -14,9 +14,28 @@ The reference deployment used an eight-device host with devices 0 through 3 sele
 | PyTorch / torch-npu | `2.10.0+cpu` / `2.10.0.post4` |
 | Transformers | `5.14.1` |
 
-Use a compatible [vLLM Ascend runtime](https://github.com/vllm-project/vllm-ascend) with the host driver and device access configured. In the tested Docker deployment the Ascend container runtime received `ASCEND_VISIBLE_DEVICES=0,1,2,3,4,5,6,7` at container creation. The engine received `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3` inside the container. Adapt the device IDs to your allocation.
+## Pull the image and start the container
 
-Mount the full Instruct checkpoint at `/models/Qwen3-Omni-30B-A3B-Instruct` or change the path below. The checkpoint declares BF16 and loads with `quantization=None`. Use its default dtype and omit `--quantization`.
+Run these commands on a Linux AArch64 host with the Ascend driver installed and the `ascend` runtime registered with Docker. Check the devices with `npu-smi info`. The [upstream NPU installation guide](https://docs.vllm.ai/projects/vllm-omni/en/latest/getting_started/installation/npu/) lists the images by hardware family.
+
+```bash
+docker pull --platform linux/arm64 quay.io/ascend/vllm-omni:v0.30.0
+docker image inspect --format '{{.Id}}' quay.io/ascend/vllm-omni:v0.30.0
+```
+
+The tested arm64 image ID is `sha256:96c8901953dbe758199d97795279762131b58faadb02fa593289ea01e3e68dbd`. Set `CHECKPOINT` to the absolute host path containing the full Instruct checkpoint. The container mounts it read-only. This checkpoint declares BF16 and loads with `quantization=None`.
+
+```bash
+export CHECKPOINT=/absolute/path/to/Qwen3-Omni-30B-A3B-Instruct
+docker run --rm -it --name qwen3-omni-910b \
+  --runtime=ascend --privileged --network=host --shm-size=16g \
+  -e ASCEND_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+  -e ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 \
+  --mount "type=bind,src=${CHECKPOINT},dst=/models/Qwen3-Omni-30B-A3B-Instruct,readonly" \
+  --entrypoint /bin/bash quay.io/ascend/vllm-omni:v0.30.0
+```
+
+The reference host granted the container privileged access to all eight devices and selected four for the engine. Adapt both device lists to your allocation. Host networking lets a client on the same host reach the loopback address used below.
 
 ## Start the server
 
@@ -63,7 +82,7 @@ The tested plugin reported that `enable_flashcomm1` was deprecated. The value ab
 
 ## Verify text and audio inputs
 
-Run the client in a second shell in the same container. Once `/health` succeeds, send a short chat request.
+Run the client on the Docker host or open a second container shell with `docker exec -it qwen3-omni-910b bash`. Once `/health` succeeds, send a short chat request.
 
 ```bash
 curl -fsS http://127.0.0.1:40000/health
