@@ -39,6 +39,13 @@ if [[ "$has_detect_hardware" == false && \
     args+=(--detect-hardware)
 fi
 
+# Explicit opt-in for XPU TP/DP fallback; no behavior change for other hardware.
+if [[ "${hardware,,}" == "arc_pro_b70" &&
+      ( "${RECIPE_AUTO_FIT_XPU_PARALLELISM:-false}" == "true" ||
+        "${RECIPE_AUTO_FIT_XPU_PARALLELISM:-false}" == "1" ) ]]; then
+    args+=(--auto-fit-xpu-parallelism)
+fi
+
 # Opt-in protocol for validation harnesses; normal CLI use is unchanged.
 if [[ -n "${RECIPE_VALIDATION_RESULT_OUT:-}" ]]; then
     args+=(--validation-result-out "$RECIPE_VALIDATION_RESULT_OUT")

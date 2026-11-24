@@ -172,6 +172,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     tuning.add_argument(
+        "--auto-fit-xpu-parallelism",
+        action="store_true",
+        help="Opt in to conservative B70 TP/DP fallback using model, VRAM checks.",
+    )
+    tuning.add_argument(
         "--input-tokens",
         type=int,
         help="Expected input-token length. Optional workload hint.",
@@ -913,6 +918,8 @@ def main() -> int:
                 raise ValueError("--max-model-len must be positive")
             config["max-model-len"] = args.max_model_len
 
+        if args.auto_fit_xpu_parallelism and not args.detect_hardware:
+            raise ValueError("--auto-fit-xpu-parallelism requires --detect-hardware")
         tuning_requested = (
             args.detect_hardware
             or args.tune_scheduler
@@ -931,6 +938,7 @@ def main() -> int:
         )
 
         tuning = None
+        parallelism_adjustment = None
         sweep_config = None
         workload = None
         sweep_writer = None
@@ -986,6 +994,27 @@ def main() -> int:
                     hardware = detect_xpu_hardware()
                 else:
                     raise ValueError(f"No detector registered for {recipe_hardware!r}")
+
+            if args.auto_fit_xpu_parallelism:
+                if recipe_hardware != "arc_pro_b70" or hardware is None:
+                    raise ValueError(
+                        "Automatic XPU TP/DP fallback requires B70 hardware detection"
+                    )
+                from xpu_parallel_fallback import select_xpu_fallback
+
+                parallelism_adjustment = select_xpu_fallback(config, hardware)
+                if parallelism_adjustment["changed"]:
+                    config["tensor-parallel-size"] = parallelism_adjustment[
+                        "effective"
+                    ]["tp"]
+                    config["data-parallel-size"] = parallelism_adjustment["effective"][
+                        "dp"
+                    ]
+                    print(
+                        "B70 parallelism downgrade (estimated, startup not verified):"
+                    )
+                    print(f"  recipe: {parallelism_adjustment['recipe']}")
+                    print(f"  effective: {parallelism_adjustment['effective']}")
 
             tuning = finetune_runtime_config(
                 config,
@@ -1106,7 +1135,15 @@ def main() -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    write_validation_result(args.validation_result_out, "READY")
+    write_validation_result(
+        args.validation_result_out,
+        "READY",
+        **(
+            {"parallelism_adjustment": parallelism_adjustment}
+            if parallelism_adjustment
+            else {}
+        ),
+    )
     print(f"Wrote {args.config_out}")
     print(f"Wrote {args.env_out}")
     if sweep_files:

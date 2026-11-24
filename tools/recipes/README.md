@@ -129,6 +129,16 @@ The B70 policy validates that enough devices are visible for the recipe's
 TP/PP/DP layout and conservatively reduces `gpu-memory-utilization` if needed.
 It does not prove that the model and KV cache fit.
 
+On a B70 system with fewer cards than the recipe requests, opt into conservative
+TP/DP fallback with `--auto-fit-xpu-parallelism` (requires `--detect-hardware`).
+The selector reduces DP first, then supported power-of-two TP layouts after
+model-head, actual safetensors size and KV/VRAM estimates. Unsupported or
+unverifiable candidates are skipped; estimates are never a startup guarantee.
+`RECIPE_AUTO_FIT_XPU_PARALLELISM=true` enables this option through
+`serve_with_recipe.sh`. A READY validation JSON contains `parallelism_adjustment`
+with original and effective TP/DP, evidence and `fit_status`. A successful
+startup and inference benchmark are required before calling the layout validated.
+
 ```bash
 python3 tools/recipes/recipe_json_to_vllm_config.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
