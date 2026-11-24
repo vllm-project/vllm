@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from copy import copy
 from functools import partial
@@ -128,13 +129,11 @@ class ActiveKVConnector(KVConnector):
             and (model_config is None or model_config.runner_type != "pooling")
         )
         self._results_lock = threading.Lock()
-        self._held_results = KVConnectorOutput()
         # Outputs that take held results once their GPU work is done are numbered
-        # in step order. Those before _first_taker leave the results of a later
-        # step's synchronous loads to that step.
+        # in step order. Results are held with the first one that may take them.
+        self._held_results = deque[tuple[int, KVConnectorOutput]]()
         self._last_taker = 0
         self._last_taken = 0
-        self._first_taker = 0
         self._has_sync_loads = False
         # From an output's take until the next post_forward(), which finds the
         # same results, polls would only contend with sending that output.
@@ -303,11 +302,18 @@ class ActiveKVConnector(KVConnector):
     def _hold_transfer_results(self, results: KVConnectorOutput) -> None:
         # Failures are held with their requests' completions, so the scheduler
         # never sees a load finish before learning that it failed.
+        if results.is_empty():
+            return
         with self._results_lock:
+            # Failed sync loads must be reported with this step's output. Later
+            # results must not overtake them.
+            first_taker = self._held_results[-1][0] if self._held_results else 0
             if self._has_sync_loads:
-                # Failed sync loads must be reported with this step's output.
-                self._first_taker = self._last_taker
-            _merge_transfer_results(self._held_results, results)
+                first_taker = self._last_taker
+            if self._held_results and self._held_results[-1][0] == first_taker:
+                _merge_transfer_results(self._held_results[-1][1], results)
+            else:
+                self._held_results.append((first_taker, results))
 
     def transfer_results_taker(self) -> Callable[[ModelRunnerOutput], None] | None:
         # Warmup outputs are never collected.
@@ -331,17 +337,16 @@ class ActiveKVConnector(KVConnector):
             if taker is not None:
                 self._last_taken = taker
                 self._polls_paused = True
-                if taker < self._first_taker:
-                    return
             elif self._last_taken < self._last_taker:
                 return
-            if self._held_results.is_empty():
-                return
-            held, self._held_results = self._held_results, KVConnectorOutput()
-        if output.kv_connector_output is None:
-            output.kv_connector_output = held
-        else:
-            _merge_transfer_results(output.kv_connector_output, held)
+            else:
+                taker = self._last_taker
+            while self._held_results and self._held_results[0][0] <= taker:
+                _, held = self._held_results.popleft()
+                if output.kv_connector_output is None:
+                    output.kv_connector_output = held
+                else:
+                    _merge_transfer_results(output.kv_connector_output, held)
 
     def set_disabled(self, disabled: bool) -> None:
         # Ensure that layer-wise connector hooks aren't called when disabled.

@@ -376,3 +376,38 @@ def test_uncollected_outputs_do_not_strand_results(monkeypatch: pytest.MonkeyPat
     output = connector.no_forward(_scheduler_output(False))
     assert output.kv_connector_output is not None
     assert output.kv_connector_output.finished_recving == {"b"}
+
+
+def test_consecutive_sync_load_failures_stay_with_their_steps(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """With async scheduling, the next step's results are collected before this
+    step's output takes its own."""
+    connector = _polling_connector(monkeypatch)
+    backend = connector.kv_connector
+    assert isinstance(backend, Mock)
+    takes = []
+    for block_id in (1, 2, 3):
+        connector.pre_forward(_scheduler_output(True, has_pending_kv_transfers=True))
+        takes.append(connector.transfer_results_taker())
+        backend.get_block_ids_with_load_errors.return_value = {block_id}
+        connector.post_forward(set())
+    backend.get_block_ids_with_load_errors.return_value = set()
+    connector.pre_forward(_scheduler_output(False, has_pending_kv_transfers=True))
+    last_take = connector.transfer_results_taker()
+    backend.get_transfer_results.side_effect = [
+        KVConnectorTransferResults(finished_recving={"async"})
+    ]
+    connector.post_forward(set())
+
+    outputs = []
+    # Outputs are collected on another thread, which doesn't poll.
+    connector._model_thread = -1
+    for take in (*takes, last_take):
+        assert take is not None
+        output = _empty_output()
+        take(output)
+        outputs.append(output.kv_connector_output)
+    assert [o.invalid_block_ids for o in outputs] == [{1}, {2}, {3}, set()]
+    assert outputs[2].finished_recving == {"async"}
+    assert not (outputs[0].finished_recving or outputs[1].finished_recving)
