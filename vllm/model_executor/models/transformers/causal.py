@@ -19,7 +19,7 @@
 import copy
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -127,11 +127,11 @@ class OutputHead:
     """The `ForCausalLM` with its base model stubbed out, or `None` if it applies
     nothing but its output embeddings, `scale` and `soft_cap`, which `lm_head` and
     `LogitsProcessor` compute on their own."""
-    output_embeddings: _OutputEmbeddings
-    """Stands in for the output embeddings in `model`."""
     in_features: int
     """The input size of the output embeddings."""
-    renames: dict[str, str]
+    output_embeddings: _OutputEmbeddings = field(default_factory=_OutputEmbeddings)
+    """Stands in for the output embeddings in `model`."""
+    renames: dict[str, str] = field(default_factory=dict)
     """Checkpoint name -> vLLM name of the head's weights and their modules."""
     scale: float = 1.0
     soft_cap: float | None = None
@@ -225,24 +225,17 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         output_head = self._output_head
         if not self.pp_group.is_last_rank:
             self.lm_head = PPMissingLayer()
-            if output_head is not None and output_head.model is not None:
+            if output_head.model is not None:
                 setattr(self, OUTPUT_HEAD_ATTR, PPMissingLayer())
             return
 
         vocab_size = self.text_config.vocab_size
-        if output_head is None:
-            in_features = self.text_config.hidden_size
-            scale = getattr(self.text_config, "logit_scale", 1.0)
-            soft_cap = getattr(self.text_config, "final_logit_softcapping", None)
-        else:
-            in_features = output_head.in_features
-            scale, soft_cap = output_head.scale, output_head.soft_cap
         self.logits_processor = LogitsProcessor(
-            vocab_size, scale=scale, soft_cap=soft_cap
+            vocab_size, scale=output_head.scale, soft_cap=output_head.soft_cap
         )
         self.lm_head = ParallelLMHead(
             vocab_size,
-            in_features,
+            output_head.in_features,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
@@ -251,10 +244,15 @@ class CausalMixin(VllmModelForTextGeneration, Base):
                 if isinstance(module, VocabParallelEmbedding):
                     self.lm_head = self.lm_head.tie_weights(module)
                     break
-        if output_head is not None:
-            self._use_output_head(output_head)
-        # Batch-sharded sampling checks for this, and kept heads need the full vocab
-        if output_head is None or output_head.model is None:
+        if (model := output_head.model) is not None:
+            # The head runs after the projection, so every rank needs all logits
+            self.logits_processor.use_all_gather = True
+            output_head.output_embeddings.project = self._project
+            self.replace_modules(model, prefix=OUTPUT_HEAD_ATTR)
+            self.init_parameters(model)
+            setattr(self, OUTPUT_HEAD_ATTR, model)
+        else:
+            # Batch-sharded sampling checks for this, and kept heads need the full vocab
             self.compute_logits_local = lambda hidden_states: self.logits_processor(
                 self.lm_head, hidden_states, self.lm_head.bias, skip_gather=True
             )
@@ -263,31 +261,36 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         super()._create_hf_to_vllm_mapper()
         # Created here so the quantization config also gets the head's renames
         self._output_head = self._create_output_head()
-        if self._output_head is not None:
-            # Before the base model's mappings, which expect the base model's names
-            mapper = self._output_head.weights_mapper()
-            self.hf_to_vllm_mapper = mapper | self.hf_to_vllm_mapper
+        # Before the base model's mappings, which expect the base model's names
+        mapper = self._output_head.weights_mapper()
+        self.hf_to_vllm_mapper = mapper | self.hf_to_vllm_mapper
 
-    def _create_output_head(self) -> OutputHead | None:
-        """The output head of the model's Transformers class, or `None` if there is
-        none, in which case `lm_head` and the config's logit scaling are assumed."""
+    def _create_output_head(self) -> OutputHead:
+        """The output head of the model's Transformers class, or `lm_head` with the
+        config's logit scaling if it has none or it cannot be run."""
+        hidden_size = self.text_config.hidden_size
+        fallback = OutputHead(
+            model=None,
+            in_features=hidden_size,
+            scale=getattr(self.text_config, "logit_scale", 1.0),
+            soft_cap=getattr(self.text_config, "final_logit_softcapping", None),
+        )
         for architecture in self.config.architectures or []:
             model_cls = get_transformers_model_class(architecture, self.model_config)
             if model_cls is not None:
                 break
         else:
-            return None
+            return fallback
         # Tying would look for the input embeddings in the base model, a stub
         config = copy.deepcopy(self.config)
         config.tie_word_embeddings = False
         config.get_text_config().tie_word_embeddings = False
-        hidden_size = self.text_config.hidden_size
         try:
             with init_on_device_without_buffers("meta"), stub_base_model(self.model):
                 model = model_cls._from_config(config, dtype=self.model_config.dtype)
             output_head = to_output_head(model.eval())
             if output_head is None:
-                return None
+                return fallback
             # Fails for heads which need more of the base model than its output
             hidden_states = torch.empty(1, 3, hidden_size, device="meta")
             model(inputs_embeds=hidden_states)
@@ -298,23 +301,11 @@ class CausalMixin(VllmModelForTextGeneration, Base):
                 model_cls.__name__,
                 e,
             )
-            return None
+            return fallback
         if logit_transform := probe_output_head(output_head, hidden_size):
             output_head.scale, output_head.soft_cap = logit_transform
             output_head.model = None
         return output_head
-
-    def _use_output_head(self, output_head: OutputHead):
-        """Run the head on the logits of `lm_head`, unless it is only the output
-        embeddings."""
-        if (model := output_head.model) is None:
-            return
-        # The head runs after the projection, so every rank needs all logits
-        self.logits_processor.use_all_gather = True
-        output_head.output_embeddings.project = self._project
-        self.replace_modules(model, prefix=OUTPUT_HEAD_ATTR)
-        self.init_parameters(model)
-        setattr(self, OUTPUT_HEAD_ATTR, model)
 
     def _project(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """The output embeddings, which give the logits on every TP rank."""
