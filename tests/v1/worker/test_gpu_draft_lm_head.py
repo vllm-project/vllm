@@ -8,6 +8,9 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    Fp8PtpcOnlineLinearMethod,
+)
 from vllm.model_executor.layers.quantization.online.lm_head import (
     quantized_lm_head_copy,
     refresh_quantized_lm_heads,
@@ -32,6 +35,10 @@ requires_nvfp4 = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="nvfp4 needs a CUDA W4A16 kernel"
 )
 NVFP4 = pytest.param("nvfp4", marks=requires_nvfp4)
+# The FP8 W8A16 kernel table has no ROCm entries yet.
+requires_cuda_w8a16 = pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="FP8 W8A16 needs a CUDA kernel"
+)
 
 
 def _target_head(monkeypatch, seed: int = 0) -> ParallelLMHead:
@@ -79,7 +86,7 @@ def test_tracks_bf16_head_through_logits_processor(
     assert top1 > min_top1
 
 
-@requires_cuda
+@requires_cuda_w8a16
 def test_fp8_is_weight_only_without_fp8_gemm(
     default_vllm_config, dist_init, monkeypatch
 ):
@@ -87,6 +94,7 @@ def test_fp8_is_weight_only_without_fp8_gemm(
     monkeypatch.setattr(current_platform, "supports_fp8", lambda: False)
     head = _target_head(monkeypatch)
     draft_head = quantized_lm_head_copy(head, "fp8")
+    assert isinstance(draft_head.quant_method, Fp8PtpcOnlineLinearMethod)
     assert draft_head.quant_method.activation_quant_key is None
     # About one byte per weight (Marlin and Humming repack and may pad it).
     nbytes = draft_head.weight.numel() * draft_head.weight.element_size()
