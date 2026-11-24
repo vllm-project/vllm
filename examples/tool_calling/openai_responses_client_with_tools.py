@@ -53,24 +53,22 @@ def main():
         model=model, input=input_messages, tools=tools, tool_choice="required"
     )
 
+    tool_outputs = []
     for out in response.output:
         if out.type == "function_call":
             print("Function call:", out.name, out.arguments)
-            tool_call = out
-    args = json.loads(tool_call.arguments)
-    result = get_weather(args["latitude"], args["longitude"])
-
-    input_messages.append(tool_call)  # append model's function call message
-    input_messages.append(
-        {  # append result message
-            "type": "function_call_output",
-            "call_id": tool_call.call_id,
-            "output": str(result),
-        }
-    )
+            args = json.loads(out.arguments)
+            result = get_weather(args["latitude"], args["longitude"])
+            tool_outputs.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": out.call_id,
+                    "output": result,
+                }
+            )
     response_2 = client.responses.create(
         model=model,
-        input=input_messages,
+        input=[*input_messages, *response.output, *tool_outputs],
         tools=tools,
     )
     print(response_2.output_text)
