@@ -844,6 +844,13 @@ class KVCacheManager:
         """Release every live pin, e.g. before a prefix cache reset or sleep.
 
         Returns the released pins so the caller can tell their readers.
+
+        Only safe when no peer can still be reading the pinned blocks: they go
+        back to the free queue and can be overwritten under a NIXL read in
+        flight. Nothing calls this for that reason. While pins are live
+        `reset_prefix_cache` returns False (the pinned blocks are not free) and
+        succeeds once read-done or lease expiry releases them; see
+        docs/design/nixl_peer_lookup_pin.md.
         """
         pins = list(self._pins)
         for pin in pins:
@@ -900,7 +907,7 @@ class KVCacheManager:
 
         Returns:
             bool: True if the prefix cache is successfully reset,
-            False otherwise.
+            False otherwise, e.g. while requests or peer pins hold blocks.
 
         """
         if not self.coordinator.reset_prefix_cache():

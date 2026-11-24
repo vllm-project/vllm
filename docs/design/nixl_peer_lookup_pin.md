@@ -38,6 +38,11 @@ sequenceDiagram
     note over R: At startup: GET /kv_event_sources on A,<br/>keep A's peer_lookup record
     R->>B: HTTP request with kv_transfer_params<br/>(do_remote_prefill, peer_lookup, A's address)
     B->>B: get_num_new_matched_tokens:<br/>check preconditions, take prompt block hashes
+    opt A's capability is not cached
+        B->>AL: ZMQ: (b"get_meta_msg", 0, 0)
+        AL->>B: NixlHandshakePayload (peer_lookup=true?)
+        note over B: peer_lookup false or absent:<br/>no lookup is sent, compute locally
+    end
     B->>AL: ZMQ: (b"lookup_pin", LookupPinRequest)
     note over B: Returns (None, False):<br/>request skipped until the reply
     AL->>AS: inbox + engine wake-up
@@ -149,6 +154,30 @@ The router sends no block hashes. B hashes its own prompt (`Request.block_hashes
 
 After the lookup, B writes these back into the request's params: `peer_lookup` (set to `false`), `do_remote_prefill` (`false` on a miss), `peer_miss_reason` (on a miss), and on a hit `remote_block_ids`, `remote_request_id`, `remote_num_tokens`, `remote_blocks_expiry_time` and `remote_lease_extension`.
 
+## Consumer to producer: the capability probe
+
+A `lookup_pin` frame sent to an engine that predates this feature does not get a miss. That engine's listener decodes every frame as `(msg, pp_rank, tp_rank)` outside any `try`, so the two-element frame raises and the listener thread ends for good, which also breaks that engine's ordinary P/D handshakes. The `peer_lookup` record only tells the router which engines serve lookups. It cannot protect an engine from a stale address or a router that is wrong, so B never sends a lookup unprobed.
+
+The probe is a separate request that every engine answers safely: `msgpack((b"get_meta_msg", 0, 0))`, the handshake request. The reply is the engine's `NixlHandshakePayload`, which now has one optional field:
+
+```python
+@dataclass
+class NixlHandshakePayload:
+    compatibility_hash: str
+    agent_metadata_bytes: bytes
+    peer_lookup: bool = False     # True on an engine that serves lookups
+```
+
+A producer sets it when `peer_lookup` is enabled (pull mode). msgspec skips unknown fields, so an older engine still decodes a newer engine's payload, and a new decoder reads an older engine's payload as `peer_lookup=False`. `NIXL_CONNECTOR_VERSION` stays 17. Both directions are covered by `test_handshake_payload_peer_lookup_is_compatible_both_ways`.
+
+`PeerLookupClient` runs the probe on its background thread, so the scheduler never waits for it:
+
+1. The first lookup to a peer sends the probe and holds. Lookups that arrive for the same peer meanwhile wait for that probe instead of sending another.
+2. If the payload advertises `peer_lookup`, the lookup goes out as before. Otherwise the lookup fails with `peer_unsupported`, no `lookup_pin` frame is sent, and B computes the whole prompt.
+3. The verdict is cached per `(host, port)` and the peer's `engine_id`, so a restarted engine at the same address is probed again. A yes lasts 60 s, a no 30 s (so a peer that upgrades is found), and a failed probe (`timeout`, `send_failed`, `bad_reply`) 5 s.
+
+The probe has its own timeout, `min(peer_lookup_timeout, 2.0)` s, and the lookup that follows gets `peer_lookup_timeout`. The scheduler's deadline for the whole lookup covers both.
+
 ## Consumer to producer: the lookup
 
 B's lookup thread (`PeerLookupClient`, `peer_lookup_client.py`) opens one ZMQ `REQ` socket per lookup and sends one frame:
@@ -172,6 +201,7 @@ class LookupPinRequest:
     block_hashes: list[bytes]   # prefix-cache hashes, prefix order
     identity: PeerKVIdentity
     lease_duration: float | None = None   # seconds; None = producer default
+    lookup_id: str | None = None          # echoed in the reply
 ```
 
 | Field | Type | Set by B from |
@@ -182,8 +212,9 @@ class LookupPinRequest:
 | `identity.hash_algo` | `str` | B's `prefix_caching_hash_algo` |
 | `identity.cache_salt` | `str \| None` | `request.cache_salt` |
 | `lease_duration` | `float \| None` | B's `kv_lease_duration` |
+| `lookup_id` | `str \| None` | A fresh random id per lookup |
 
-One socket per lookup is deliberate: A answers misses at once but hits only after its fence, so replies can arrive out of order, and the reply carries no correlation id. The scheduler thread never blocks: `get_num_new_matched_tokens` returns `(None, False)` while the lookup is out, so the scheduler skips the request for that step.
+One socket per lookup is deliberate: A answers misses at once but hits only after its fence, so replies can arrive out of order. A socket per lookup correlates by construction. The reply now echoes `lookup_id` and the client checks it, so a reply for another lookup fails the lookup (`lookup_id_mismatch`, logged) rather than being used. That also makes it possible for a later client to share one `DEALER` socket per peer and route replies by id. The scheduler thread never blocks: `get_num_new_matched_tokens` returns `(None, False)` while the lookup is out, so the scheduler skips the request for that step.
 
 ## Producer to consumer: the reply
 
@@ -198,6 +229,7 @@ class LookupPinReply:
     miss_reason: PeerMissReason
     remote_blocks_expiry_time: float | None = None
     remote_lease_extension: int | None = None
+    lookup_id: str | None = None        # the request's lookup_id, echoed
 ```
 
 | Field | Type | Meaning |
@@ -208,6 +240,7 @@ class LookupPinReply:
 | `miss_reason` | `PeerMissReason` | See [Response labels](#response-labels). Can be set on a partial hit |
 | `remote_blocks_expiry_time` | `float \| None` | Lease deadline, in A's scheduler `perf_counter` |
 | `remote_lease_extension` | `int \| None` | Seconds each heartbeat renews the lease by |
+| `lookup_id` | `str \| None` | The request's `lookup_id`; every reply path, misses and refusals included, echoes it |
 
 The last two have the same meaning as the `kv_transfer_params` fields of the same name in a P/D handoff, so the stale-read check applies to pins unchanged.
 
@@ -220,8 +253,8 @@ The last two have the same meaning as the `kv_transfer_params` fields of the sam
 | `none` | Every requested block was pinned |
 | `not_cached` | The run stops at a block A never held (or held too long ago to remember), or a pending pin's block failed to load |
 | `evicted` | The run stops at a block A evicted recently. The router's index is stale |
-| `pin_refused` | A holds it but cannot pin it now: pin budget reached, free-block floor, or the fence did not pass in `peer_lookup_serve_timeout`. On a partial hit, the budget cut the run |
-| `identity_mismatch` | Compatibility hash, block size or hash algorithm differ, A's hashes are not reproducible across processes, A does not serve lookups, or A's KV layout cannot be pinned |
+| `pin_refused` | A holds it but cannot pin it now: pin budget reached, free-block floor, the fence did not pass in `peer_lookup_serve_timeout`, or A serves lookups but has no KV cache manager bound yet (startup). On a partial hit, the budget cut the run |
+| `identity_mismatch` | Compatibility hash, block size or hash algorithm differ, A's hashes are not reproducible across processes, A does not serve lookups (a permanent setting, unlike the transient `pin_refused` before binding), or A's KV layout cannot be pinned |
 
 `evicted` comes from a bounded record of recently evicted hashes in `BlockPool` (`enable_evicted_hash_tracking`, `was_evicted`). It holds up to as many hashes as the pool has blocks, is cleared on a prefix-cache reset, and ignores blocks dropped because their load failed.
 
@@ -234,6 +267,8 @@ The last two have the same meaning as the `kv_transfer_params` fields of the sam
 | `send_failed` | The connect or send failed |
 | `bad_reply` | The reply did not decode, or a hit was not whole blocks of one group within the prompt |
 | `closed` | The lookup client shut down |
+| `peer_unsupported` | The capability probe says the peer does not serve lookups (an older engine, or one started without `peer_lookup`). No `lookup_pin` frame was sent |
+| `lookup_id_mismatch` | The reply's `lookup_id` was not the one sent |
 
 Every label above makes B compute the whole prompt. A lookup never fails the request.
 
@@ -364,5 +399,12 @@ PYTHONHASHSEED=0 vllm serve <MODEL> \
 - **GPU blocks only.** Blocks in a CPU offload tier are not looked up.
 - **Pull mode only.** The push connector does not serve lookups.
 - **No lookup metrics.** Pins only appear inside the existing NIXL transfer and lease metrics.
-- **One TCP connect per lookup** on the consumer.
-- **`NIXL_CONNECTOR_VERSION` is not bumped**, so mixed-version P/D pairs keep working. A lookup must only go to an engine that reports a `peer_lookup` record: others answer `identity_mismatch`, and older ones may not answer.
+- **One TCP connect per lookup** on the consumer, and one more per peer whenever its cached probe verdict expires.
+- **`NIXL_CONNECTOR_VERSION` is not bumped**, so mixed-version P/D pairs keep working. The price is that an older engine cannot say it does not understand a lookup: it dies instead. That is why a lookup is only sent after the [capability probe](#consumer-to-producer-the-capability-probe) finds `peer_lookup` set.
+- **`reset_prefix_cache` stalls while peer pins are live.** See [below](#prefix-cache-reset-and-live-pins).
+
+## Prefix cache reset and live pins
+
+Pinned blocks are held through `block_pool.touch`, so each has `ref_cnt >= 1` and is not on the free queue. `BlockPool.reset_prefix_cache` only proceeds when every block but the null block is free (`num_gpu_blocks - get_num_free_blocks() == 1`). While any peer pin is live it logs "Failed to reset prefix cache because some blocks are not freed yet" and returns `False`, and so does `KVCacheManager.reset_prefix_cache`. The caller (for example the `/reset_prefix_cache` endpoint after an RLHF weight update) sees the failure and can retry. Pins end on their own: the peer's read-done notification releases a pin, and a pin whose peer never reads or heartbeats expires with its lease, so a retry succeeds within about `kv_lease_duration` (30 s by default) of the last pin's creation, or of its last heartbeat if the peer keeps renewing it.
+
+`KVCacheManager.release_all_pins` exists but nothing calls it, on purpose. Releasing a pin returns its blocks to the free queue, where the next request can overwrite them. A peer that holds the pin may be in the middle of a NIXL read of those blocks, and it cannot be recalled, so it would load a mixture of old and new KV and carry on as if it were valid. A stall that clears itself within the lease is the safer failure, so there is no revocation path. Callers that need a reset to succeed immediately must stop routing lookups to the engine and wait out the lease, or accept that `release_all_pins` is only safe when no peer can still be reading (for example during a full engine shutdown).
