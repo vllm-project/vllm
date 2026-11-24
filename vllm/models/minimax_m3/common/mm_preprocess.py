@@ -242,13 +242,12 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
         max_frames_per_video: int = _MAX_FRAMES_PER_VIDEO,
     ) -> int:
-        max_videos = mm_counts.get("video", 0)
         max_total_frames = self._get_max_video_frames(seq_len)
         max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1), max_frames_per_video
+            max_total_frames // max(num_videos, 1), max_frames_per_video
         )
         return max(max_frames_per_video, 1)
 
@@ -262,7 +261,9 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
         return self.get_num_video_tokens(
             image_width=size.width,
             image_height=size.height,
-            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
+            num_frames=self.get_num_frames_with_most_features(
+                seq_len, mm_counts.get("video", 0)
+            ),
             image_processor=video_processor,
             # Worst case (detail=high); see get_max_image_tokens.
             mm_kwargs={"max_long_side_pixel": _VIDEO_MAX_LONG_SIDE_PIXEL},
@@ -285,7 +286,9 @@ class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessing
     ) -> MultiModalDataDict:
         size = self.info.get_image_size_with_most_features()
         video_size = self.info.get_video_size_with_most_features()
-        num_frames = self.info.get_num_frames_with_most_features(seq_len, mm_counts)
+        num_frames = self.info.get_num_frames_with_most_features(
+            seq_len, mm_counts.get("video", 0)
+        )
         return {
             "image": self._get_dummy_images(
                 width=size.width,
