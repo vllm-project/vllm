@@ -896,7 +896,8 @@ def test_hisparse_import_promotion_keeps_cached_prefixes():
     )
 
     coordinator.finish_host_import(imported.request_id, failed=False)
-    assert coordinator.build_offload_command().page_transfers
+    command = coordinator.build_offload_command()
+    assert command is not None and command.page_transfers
 
     again = make_request("again", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256)
     _, num_computed, _ = manager.get_computed_blocks(again)

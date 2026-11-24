@@ -186,6 +186,9 @@ class ParserEngine(Parser):
         self._deferred_reasoning: str = ""
         self._content_has_nonws: bool = False
         self._suppress_tool_calls: bool = False
+        # Off during a single-pass parse: `_build_extracted_result` converts
+        # each call's raw arguments once, so argument deltas would go unused.
+        self._emit_arg_deltas: bool = True
 
         self._arg_converter = parser_engine_config.arg_converter
         self._complete_tool_call_validator = (
@@ -848,7 +851,11 @@ class ParserEngine(Parser):
         events = self._feed(text, token_ids)
         events.extend(self._engine.finish())
 
-        delta = self._events_to_delta(events, finished=True)
+        self._emit_arg_deltas = False
+        try:
+            delta = self._events_to_delta(events, finished=True)
+        finally:
+            self._emit_arg_deltas = True
         tool_call_info = self._build_extracted_result()
 
         reasoning = delta.reasoning if delta else None
@@ -1041,7 +1048,7 @@ class ParserEngine(Parser):
                 # Name not yet known — try to extract from accumulated args
                 name = self._try_extract_name(idx)
                 self._emit_name_delta(idx, deltas, name)
-        elif event.value:
+        elif event.value and self._emit_arg_deltas:
             # Name already sent — emit arg delta
             arg_delta = self._compute_arg_delta(idx, event.value)
             if arg_delta:
@@ -1061,7 +1068,7 @@ class ParserEngine(Parser):
         if idx >= len(self._tool_slots):
             return
 
-        remaining = self._flush_arg_converter(idx)
+        remaining = self._flush_arg_converter(idx) if self._emit_arg_deltas else None
         slot = self._tool_slots[idx]
 
         if not slot.name_sent:
