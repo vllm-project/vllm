@@ -3,10 +3,10 @@
 """Model-local attention backend for the Beam DFlash2 drafter on ROCm.
 
 The drafter runs a handful of query tokens per request against a long context
-under a non-causal sliding window. Generic prefix-prefill kernels walk the
-whole context serially from position 0 with one program per (request, head);
-this backend splits only the visible window across segments instead (see
-``dflash2_attention_ops``).
+under a non-causal sliding window. The generic prefix-prefill kernel walks the
+visible window serially with one program per (request, head), which leaves
+most of the GPU idle at decode batch sizes; this backend splits the window
+across segments instead (see ``dflash2_attention_ops``).
 
 The KV cache uses the default ``[num_blocks, num_kv_heads, block_size,
 2 * head_size]`` layout so the fused QK-norm/RoPE/KV-insert path can write it.
