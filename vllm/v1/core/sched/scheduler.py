@@ -3,7 +3,7 @@
 import itertools
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import replace
 from typing import Any
 
@@ -262,6 +262,9 @@ class Scheduler(SchedulerInterface):
         # With either async-load limit, keep requests that may load KV async
         # separate so throttling their loads doesn't block local requests.
         self.async_kv_waiting = create_request_queue(self.policy, tally)
+        # Waiting request IDs whose async external KV promotion completed and
+        # are prioritized in `self.async_kv_waiting` ahead of cold requests.
+        self._promoted_waiting_req_ids: set[str] = set()
         # Waiting requests that are deferred, i.e. were skipped by the scheduling
         # scan or enqueued in a blocked status.
         self.deferred_waiting: set[Request] = set()
@@ -1065,6 +1068,12 @@ class Scheduler(SchedulerInterface):
         if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             if self.cache_aware_window and not defer_prefills:
                 self._reorder_waiting_by_cached_prefix()
+            if self.connector is not None:
+                promoted_req_ids = self.connector.pop_newly_promoted_req_ids()
+                if promoted_req_ids and isinstance(
+                    promoted_req_ids, (set, list, tuple)
+                ):
+                    self._promote_waiting_requests(promoted_req_ids)
 
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
@@ -1106,8 +1115,15 @@ class Scheduler(SchedulerInterface):
                         request_queue = self._next_waiting_queue(take_async_kv)
                 elif (
                     take_async_kv
-                    and self.scheduler_config.max_num_inflight_kv_loads
                     and self._pause_state == PauseState.UNPAUSED
+                    and (
+                        self.scheduler_config.max_num_inflight_kv_loads
+                        or (
+                            self.async_kv_waiting
+                            and self.async_kv_waiting.peek_request().request_id
+                            in self._promoted_waiting_req_ids
+                        )
+                    )
                 ):
                     # No running slot or token budget left: start async KV loads
                     # only, which take neither until their KV has arrived.
@@ -1331,6 +1347,26 @@ class Scheduler(SchedulerInterface):
                 # rewriting its cached KV. An async load replays once the KV
                 # has arrived (_update_waiting_for_remote_kv).
                 num_replay_tokens = 0
+
+                if (
+                    loads_only
+                    and not load_kv_async
+                    and request_queue is self.async_kv_waiting
+                    and request_id in self._promoted_waiting_req_ids
+                    and num_external_computed_tokens == 0
+                ):
+                    self._promoted_waiting_req_ids.discard(request_id)
+                    if not (
+                        (
+                            self.scheduler_config.max_num_inflight_kv_loads
+                            or self.scheduler_config.max_async_kv_loads_per_step
+                        )
+                        and self.connector is not None
+                        and self.connector.may_load_async(request)
+                    ):
+                        self.async_kv_waiting.pop_request()
+                        self.waiting.add_request(request)
+                        continue
 
                 if (
                     load_kv_async
@@ -1614,10 +1650,12 @@ class Scheduler(SchedulerInterface):
                         )
                     self._reserve_parked(request)
                     self._set_kv_fetch_stage(request, KV_FETCH_IN_PROGRESS)
+                    self._promoted_waiting_req_ids.discard(request_id)
                     skip_request(request_queue)
                     continue
 
                 request = request_queue.pop_request()
+                self._promoted_waiting_req_ids.discard(request_id)
                 self.deferred_waiting.discard(request)
                 self.running.append(request)
                 if num_external_computed_tokens > 0:
@@ -2961,6 +2999,57 @@ class Scheduler(SchedulerInterface):
         for request in reversed(reordered):
             self.waiting.prepend_request(request)
 
+    def _promote_waiting_requests(self, promoted_req_ids: Collection[str]) -> None:
+        """Move newly promoted WAITING requests into async_kv_waiting ahead of
+        non-promoted requests, keeping FIFO order among promoted requests.
+        """
+        new_ids = {
+            req_id
+            for req_id in promoted_req_ids
+            if req_id not in self._promoted_waiting_req_ids
+        }
+        if not new_ids:
+            return
+
+        from_waiting = [
+            req
+            for req in self.waiting
+            if req.request_id in new_ids and req.status == RequestStatus.WAITING
+        ]
+        if from_waiting:
+            self.waiting.remove_requests(from_waiting)
+
+        from_async = [
+            req
+            for req in self.async_kv_waiting
+            if req.request_id in new_ids and req.status == RequestStatus.WAITING
+        ]
+        if from_async:
+            self.async_kv_waiting.remove_requests(from_async)
+
+        promoted = from_async + from_waiting
+        if not promoted:
+            return
+
+        # Under FCFS, place newly promoted requests behind any already-promoted
+        # prefix so earlier promotions drain FIFO instead of LIFO.
+        existing_promoted_head: list[Request] = []
+        if self.policy == SchedulingPolicy.FCFS:
+            while (
+                self.async_kv_waiting
+                and self.async_kv_waiting.peek_request().request_id
+                in self._promoted_waiting_req_ids
+            ):
+                existing_promoted_head.append(self.async_kv_waiting.pop_request())
+
+        for req in reversed(promoted):
+            self.async_kv_waiting.prepend_request(req)
+            self.deferred_waiting.discard(req)
+            self._promoted_waiting_req_ids.add(req.request_id)
+
+        for req in reversed(existing_promoted_head):
+            self.async_kv_waiting.prepend_request(req)
+
     def _next_waiting_queue(self, take_async_kv: bool) -> RequestQueue:
         """self.waiting or self.async_kv_waiting, whichever head goes first."""
         async_kv = self.async_kv_waiting
@@ -2969,6 +3058,14 @@ class Scheduler(SchedulerInterface):
         if not self.waiting:
             return async_kv
         async_head, head = async_kv.peek_request(), self.waiting.peek_request()
+        if async_head.request_id in self._promoted_waiting_req_ids:
+            if head.status == RequestStatus.PREEMPTED:
+                return self.waiting
+            if (
+                self.policy != SchedulingPolicy.PRIORITY
+                or async_head.priority <= head.priority
+            ):
+                return async_kv
         if self.policy == SchedulingPolicy.PRIORITY:
             return async_kv if async_head < head else self.waiting
         return async_kv if async_head.arrival_time < head.arrival_time else self.waiting
@@ -3279,6 +3376,8 @@ class Scheduler(SchedulerInterface):
             self.kv_holding_waiting.remove_requests(waiting_requests_to_remove)
             self.async_kv_waiting.remove_requests(waiting_requests_to_remove)
             self.deferred_waiting.difference_update(waiting_requests_to_remove)
+            for request in waiting_requests_to_remove:
+                self._promoted_waiting_req_ids.discard(request.request_id)
 
         # Second pass: set status and free requests
         for request in valid_requests:
@@ -3532,6 +3631,7 @@ class Scheduler(SchedulerInterface):
         if self.connector.reset_cache() is False:
             return False
 
+        self._promoted_waiting_req_ids.clear()
         if self.collect_stats:
             assert self.connector_prefix_cache_stats is not None
             self.connector_prefix_cache_stats.reset = True

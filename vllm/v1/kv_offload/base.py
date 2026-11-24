@@ -183,6 +183,7 @@ class OffloadPolicy(Enum):
 @dataclass(slots=True)
 class RequestOffloadingContext:
     policy: OffloadPolicy = OffloadPolicy.CHUNK_LEVEL
+    may_load_async: bool = False
 
 
 class ScheduleEndContext(NamedTuple):
@@ -387,6 +388,12 @@ class OffloadingManager(ABC):
         compatible while making unknown provenance explicit.
         """
         return CacheHitSource.EXTERNAL_UNSPECIFIED
+
+    def pop_newly_promoted_req_ids(self) -> set[str]:
+        """Return and clear request IDs whose async secondary-to-primary
+        promotion completed since the last call.
+        """
+        return set()
 
     @abstractmethod
     def prepare_load(

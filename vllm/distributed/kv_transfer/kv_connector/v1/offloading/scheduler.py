@@ -943,6 +943,22 @@ class OffloadingConnectorScheduler:
             req_context, request, self.config.kv_group_configs
         )
 
+    def may_load_async(self, request: Request) -> bool:
+        if (
+            not self._offloading_enabled
+            or not self.access_mode.can_read
+            or request.skip_reading_external_kv
+        ):
+            return False
+        req_status = self._req_status.get(request.request_id)
+        return req_status is not None and req_status.offloading_context.may_load_async
+
+    def pop_newly_promoted_req_ids(self) -> set[str]:
+        if not self._offloading_enabled or not self.access_mode.can_read:
+            return set()
+        self._acquire_step()
+        return self.manager.pop_newly_promoted_req_ids()
+
     def get_num_new_matched_tokens(
         self,
         request: Request,

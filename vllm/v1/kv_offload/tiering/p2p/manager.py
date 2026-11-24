@@ -494,14 +494,23 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         """
         _annotate_req_context(req_context)
         source = req_context.get_state(P2PSourceInfo)
+        may_load_async = False
         if source is not None:
             session = self._get_or_create_session(source.peer_id)
             if session is None:
                 self._failed_req_ids.add(source.kv_request_id)
+            else:
+                may_load_async = True
         dest = req_context.get_state(P2PDestInfo)
         if dest is not None and dest.kv_request_id:
-            return SecondaryTierRequestContext(policy=OffloadPolicy.REQUEST_LEVEL)
-        return SecondaryTierRequestContext(receives_stores=dest is not None)
+            return SecondaryTierRequestContext(
+                policy=OffloadPolicy.REQUEST_LEVEL,
+                may_load_async=may_load_async,
+            )
+        return SecondaryTierRequestContext(
+            may_load_async=may_load_async,
+            receives_stores=dest is not None,
+        )
 
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:

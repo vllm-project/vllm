@@ -227,6 +227,7 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager.on_schedule_end.return_value = StepResult()
         self.manager.config_info.return_value = [{}]
         self.manager.on_new_request.return_value = RequestOffloadingContext()
+        self.manager.pop_newly_promoted_req_ids.return_value = set()
 
         self._gpu_spec_map: dict[int, GPULoadStoreSpec] = {}
         self.handler = MockOffloadingWorker(self._gpu_spec_map)
