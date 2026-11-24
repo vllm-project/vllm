@@ -89,7 +89,7 @@ def test_engine_core():
 
     with set_default_torch_num_threads(1):
         engine_core = EngineCore(
-            vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+            vllm_config=vllm_config, executor_class=executor_class, collect_stats=True
         )
     """Test basic request lifecycle."""
 
@@ -246,7 +246,7 @@ def test_engine_core_advanced_sampling():
 
     with set_default_torch_num_threads(1):
         engine_core = EngineCore(
-            vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+            vllm_config=vllm_config, executor_class=executor_class, collect_stats=True
         )
     """Test basic request lifecycle."""
     # First request.
@@ -361,7 +361,7 @@ def test_engine_core_concurrent_batches():
         ),
     ):
         engine_core = EngineCore(
-            vllm_config=vllm_config, log_stats=False, executor_class=DummyExecutor
+            vllm_config=vllm_config, collect_stats=False, executor_class=DummyExecutor
         )
     assert engine_core.batch_queue is not None
 
@@ -512,7 +512,7 @@ def test_engine_core_tp():
 
     with set_default_torch_num_threads(1):
         engine_core = EngineCore(
-            vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+            vllm_config=vllm_config, executor_class=executor_class, collect_stats=True
         )
 
     def get_worker_cache_config_field(worker, key: str):
@@ -537,7 +537,7 @@ def test_engine_core_invalid_request_id_type():
 
     with set_default_torch_num_threads(1):
         engine_core = EngineCore(
-            vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+            vllm_config=vllm_config, executor_class=executor_class, collect_stats=True
         )
 
     # Test with UUID object (common mistake)
@@ -640,7 +640,7 @@ def test_encoder_instance_zero_kv_cache(
 
     with set_default_torch_num_threads(1):
         engine_core = EngineCore(
-            vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+            vllm_config=vllm_config, executor_class=executor_class, collect_stats=True
         )
 
     # Check encoder cache manager exists

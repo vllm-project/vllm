@@ -6,6 +6,7 @@ from collections.abc import Iterable
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -17,13 +18,12 @@ from vllm.distributed import (
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.deepseek_v41.common.engram import NgramHashState
-from vllm.models.qwen4_exp.common.ngram_embedding import (
-    _lookup_ple_embedding_from_pinned_kernel,
+from vllm.models.hy_v4_flash.nvidia.engram_ops import (
+    gated_update,
+    lookup_norm,
+    ngram_hashes,
 )
-from vllm.triton_utils import triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
@@ -99,15 +99,13 @@ def head_range(sizes, tp, rank):
     return boundaries[rank], boundaries[rank + 1]
 
 
-class FlashNgramHashState(NgramHashState):
+class FlashNgramHashState(nn.Module):
+    """Global Engram buckets of the n-grams ending at each token."""
+
     def __init__(self, config, *, dummy=False):
-        nn.Module.__init__(self)
-        layout = FlashEngramLayout(config)
-        self.layout: FlashEngramLayout = layout  # type: ignore[assignment]
+        super().__init__()
+        self.layout = FlashEngramLayout(config)
         self.lookback_depth = self.layout.max_ngram_size - 1
-        self.block_size = 1
-        self.use_slot_cache = False
-        self._cache = None
         self.pad_id = 0
         self.visual_token_ids: tuple[int, ...] = ()
         self.register_buffer(
@@ -124,13 +122,16 @@ class FlashNgramHashState(NgramHashState):
             ),
             persistent=False,
         )
-        for name, values in (
-            ("primes", self.layout.primes),
-            ("offsets", self.layout.offsets),
-        ):
-            self.register_buffer(
-                name, torch.tensor(values, dtype=torch.int64), persistent=False
-            )
+        self.register_buffer(
+            "primes",
+            torch.tensor(self.layout.primes, dtype=torch.int64).flatten(1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "offsets",
+            torch.tensor(self.layout.offsets, dtype=torch.int64),
+            persistent=False,
+        )
         if dummy:
             self.load_lookup(torch.arange(config.vocab_size, device="cpu"))
 
@@ -151,62 +152,41 @@ class FlashNgramHashState(NgramHashState):
     @eager_break_during_capture
     def prepare_hashes_with_output(self, input_ids, lookback, layer_name, output):
         metadata = get_forward_context().attn_metadata
-        output.copy_(
-            self.prepare_hashes(
-                input_ids,
-                lookback,
-                metadata[layer_name] if isinstance(metadata, dict) else None,
-            )
+        self.prepare_hashes(
+            input_ids,
+            lookback,
+            metadata[layer_name] if isinstance(metadata, dict) else None,
+            output,
         )
 
-    def prepare_hashes(self, input_ids, lookback, metadata):
-        tokens = input_ids.numel()
+    def prepare_hashes(self, input_ids, lookback, metadata, output):
+        """Fill `output` (`[layers, T, columns]`) with each token's buckets."""
         if (
             metadata is None
-            or tokens == 0
+            or input_ids.numel() == 0
             or metadata.num_actual_tokens == 0
             or metadata.seq_lens.numel() == 0
         ):
-            return input_ids.new_full(
-                (len(self.layout.layer_ids), tokens, self.offsets.shape[1]),
-                -1,
-                dtype=torch.int32,
-            )
+            output.fill_(-1)
+            return
         if self.layout.lookup_table is None:
             raise ValueError("Missing checkpoint Engram token map")
         if lookback is None or lookback.shape[1] != self.lookback_depth:
             raise ValueError("Flash Engram requires V2 lookback_token_ids")
-        starts = metadata.query_start_loc
-        rows = torch.arange(tokens, device=input_ids.device)
-        requests = torch.searchsorted(starts[1:], rows, right=True)
-        requests = requests.clamp_max(starts.numel() - 2).long()
-        logical = (
-            metadata.seq_lens[requests]
-            - (starts[requests + 1] - starts[requests])
-            + rows
-            - starts[requests]
-        ).long()
-        dead = (input_ids < 0) | (input_ids >= self.token_map.numel())
-        safe_ids = input_ids.clamp(0, self.token_map.numel() - 1)
-        lookback_dead = lookback >= self.token_map.numel()
-        safe_lookback = lookback.clamp(-1, self.token_map.numel() - 1)
-        hashes = super().forward(
-            safe_ids,
-            logical,
-            starts,
-            dead,
-            safe_lookback,
-            lookback_dead,
+        ngram_hashes(
+            input_ids,
+            lookback,
+            metadata.query_start_loc,
+            metadata.seq_lens,
+            metadata.num_actual_tokens,
+            self.token_map,
+            self.multipliers,
+            self.primes,
+            self.offsets,
+            self.pad_id,
+            (self.layout.pad_token_id, *self.visual_token_ids),
+            output,
         )
-        offsets = self.offsets.unsqueeze(0)
-        primes = self.primes.flatten(1).unsqueeze(0)
-        hashes = torch.where(hashes < offsets, hashes + primes, hashes).int()
-        no_hash = dead | (rows >= metadata.num_actual_tokens) | (rows >= starts[-1])
-        no_hash |= input_ids == self.layout.pad_token_id
-        for token_id in self.visual_token_ids:
-            no_hash |= input_ids == token_id
-        hashes.masked_fill_(no_hash[:, None, None], -1)
-        return hashes.permute(1, 0, 2).contiguous()
 
 
 class FlashEmbedding(nn.Module):
@@ -313,46 +293,35 @@ class FlashEmbedding(nn.Module):
         self._uva_weight = None
         self._uva_scale = None
 
-    def _lookup(self, parameter, indices, out, *, scale=False):
-        view_name = "_uva_scale" if scale else "_uva_weight"
-        view = getattr(self, view_name)
-        if view is None:
+    def tables(self) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """CUDA views of the local table rows and their FP8 row scales."""
+        if self._uva_weight is None:
             view = (
-                get_accelerator_view_from_cpu_tensor(parameter)
+                get_accelerator_view_from_cpu_tensor
                 if self.cpu_offload
-                else parameter
+                else lambda tensor: tensor
             )
-            setattr(self, view_name, view)
-        row_bytes = parameter.element_size() * (1 if scale else self.dim)
-        _lookup_ple_embedding_from_pinned_kernel[(indices.numel(),)](
-            view.view(torch.uint8),
-            indices,
-            out.view(torch.uint8),
-            row_bytes,
-            self.vocab_start,
-            self.vocab_end,
-            BLOCK_D=triton.next_power_of_2(row_bytes),
-        )
-
-    def forward(self, hashes):
-        indices = hashes[:, self.head_start : self.head_end].long().contiguous()
-        shape = (*indices.shape, self.dim)
-        rows = torch.empty(
-            shape, dtype=self.embedding.weight.dtype, device=hashes.device
-        )
-        if indices.numel() == 0:
-            return rows.float()
-        self._lookup(self.embedding.weight, indices, rows)
-        if self.fp8:
-            scales = torch.empty(
-                indices.shape, dtype=torch.bfloat16, device=hashes.device
-            )
-            self._lookup(self.embedding.weight_scale_inv, indices, scales, scale=True)
-            return rows.float() * scales.float().unsqueeze(-1)
-        return rows.float()
+            self._uva_weight = view(self.embedding.weight)
+            if self.fp8:
+                self._uva_scale = view(self.embedding.weight_scale_inv)
+        return self._uva_weight, self._uva_scale
 
 
 class FlashEngram(nn.Module):
+    # Checkpoint (family, leaf) -> stacked parameter holding it, one row per
+    # hyper-connection stream (keys first, then the value) or hash head.
+    _PARAMETERS = {
+        ("key_projs", "weight"): "proj_weight",
+        ("value_proj", "weight"): "proj_weight",
+        ("key_projs", "bias"): "proj_bias",
+        ("value_proj", "bias"): "proj_bias",
+        ("norm_key", "weight"): "key_norm_weight",
+        ("norm_query", "weight"): "query_norm_weight",
+        ("unified_per_hc_scales", ""): "hc_scale_weight",
+        ("lookup_per_head_norms", "weight"): "lookup_norm_weight",
+        ("unified_pre_gamma", ""): "unified_pre_gamma",
+    }
+
     def __init__(self, vllm_config, layout, layer_id, prefix):
         super().__init__()
         config = vllm_config.model_config.hf_text_config
@@ -377,110 +346,101 @@ class FlashEngram(nn.Module):
             sizes, layout.head_dim, dtype, storage.cpu_offload
         )
         self.hidden_size, self.hc_mult = config.hidden_size, config.hc_mult
-        local = (
-            self.multi_head_embedding.head_end - self.multi_head_embedding.head_start
-        )
-        self.lookup_per_head_norms = nn.ModuleList(
-            [nn.RMSNorm(layout.head_dim) for _ in range(local)]
-        )
-        self.value_proj = nn.Linear(local * layout.head_dim, self.hidden_size)
-        self.key_projs = nn.ModuleList(
-            [
-                nn.Linear(local * layout.head_dim, self.hidden_size)
-                for _ in range(self.hc_mult)
-            ]
-        )
-        self.norm_key = nn.ModuleList(
-            [nn.RMSNorm(self.hidden_size) for _ in range(self.hc_mult)]
-        )
-        self.norm_query = nn.ModuleList(
-            [nn.RMSNorm(self.hidden_size) for _ in range(self.hc_mult)]
-        )
-        self.unified_pre_gamma = nn.Parameter(torch.empty(self.hidden_size))
-        self.unified_per_hc_scales = nn.ParameterList(
-            [nn.Parameter(torch.empty(self.hidden_size)) for _ in range(self.hc_mult)]
-        )
+        local = self.multi_head_embedding
+        local_heads = local.head_end - local.head_start
         self.total_width = len(sizes) * layout.head_dim
-        self.start = self.multi_head_embedding.head_start * layout.head_dim
-        self.stop = self.multi_head_embedding.head_end * layout.head_dim
+        self.start = local.head_start * layout.head_dim
+        self.stop = local.head_end * layout.head_dim
         self.rank = get_tensor_model_parallel_rank()
-        for projection in [self.value_proj, *self.key_projs]:
-            set_weight_attrs(
-                projection.weight, {"weight_loader": self._load_projection}
-            )
-            set_weight_attrs(projection.bias, {"weight_loader": self._load_bias})
+        shapes = {
+            "proj_weight": (self.hc_mult + 1, self.hidden_size, self.stop - self.start),
+            "proj_bias": (self.hc_mult + 1, self.hidden_size),
+            "lookup_norm_weight": (local_heads, layout.head_dim),
+            "key_norm_weight": (self.hc_mult, self.hidden_size),
+            "query_norm_weight": (self.hc_mult, self.hidden_size),
+            "hc_scale_weight": (self.hc_mult, self.hidden_size),
+            "unified_pre_gamma": (self.hidden_size,),
+        }
+        for name, shape in shapes.items():
+            setattr(self, name, nn.Parameter(torch.empty(shape), requires_grad=False))
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        parameters = dict(self.named_parameters())
+    def load_weight(
+        self, name: str, value: torch.Tensor
+    ) -> tuple[str, int | None] | None:
+        """Load one checkpoint tensor.
+
+        Returns:
+            The filled parameter and its row, or None for a hash head that
+            another TP rank owns.
+
+        """
         embedding = self.multi_head_embedding
-
-        def local_weights():
-            for name, value in weights:
-                if name.startswith("lookup_per_head_norms."):
-                    _, head, leaf = name.split(".", 2)
-                    if not head.isdigit() or not 0 <= int(head) < embedding.n_hash_cols:
-                        raise ValueError(f"Invalid Engram hash head weight: {name}")
-                    if not embedding.head_start <= int(head) < embedding.head_end:
-                        continue
-                    local_head = int(head) - embedding.head_start
-                    name = f"lookup_per_head_norms.{local_head}.{leaf}"
-                # Embedding scales can materialize during loading; other parameters
-                # must already exist, including biases AutoWeightsLoader may ignore.
-                if (
-                    not name.startswith("multi_head_embedding.")
-                    and name not in parameters
-                ):
-                    raise ValueError(f"Unknown Flash Engram checkpoint weight: {name}")
-                yield name, value
-
-        return AutoWeightsLoader(self).load_weights(local_weights())
-
-    def _load_projection(self, parameter, value):
-        if value.shape != (self.hidden_size, self.total_width):
-            raise ValueError("Flash Engram projection weight shape mismatch")
-        default_weight_loader(parameter, value[:, self.start : self.stop])
-
-    def _load_bias(self, parameter, value):
-        default_weight_loader(
-            parameter, value if self.rank == 0 else torch.zeros_like(value)
-        )
+        if name.startswith("multi_head_embedding."):
+            embedding.load_weights(
+                [(name.removeprefix("multi_head_embedding."), value)]
+            )
+            return name, None
+        family, _, leaf = name.partition(".")
+        index = None
+        if family == "value_proj":
+            index = self.hc_mult
+        elif family != "unified_pre_gamma":
+            number, _, leaf = leaf.partition(".")
+            if not number.isdigit():
+                raise ValueError(f"Invalid Flash Engram checkpoint weight: {name}")
+            index = int(number)
+        target = self._PARAMETERS.get((family, leaf))
+        if target is None:
+            raise ValueError(f"Unknown Flash Engram checkpoint weight: {name}")
+        if index is None:
+            pass
+        elif family == "lookup_per_head_norms":
+            if index >= embedding.n_hash_cols:
+                raise ValueError(f"Invalid Engram hash head weight: {name}")
+            if not embedding.head_start <= index < embedding.head_end:
+                return None
+            index -= embedding.head_start
+        elif family == "key_projs" and index >= self.hc_mult:
+            raise ValueError(f"Invalid Flash Engram stream weight: {name}")
+        if family in ("key_projs", "value_proj"):
+            if leaf == "weight":
+                if value.shape != (self.hidden_size, self.total_width):
+                    raise ValueError("Flash Engram projection weight shape mismatch")
+                value = value[:, self.start : self.stop]
+            elif self.rank != 0:
+                # The partial projections are summed across ranks.
+                value = torch.zeros_like(value)
+        parameter = getattr(self, target).data
+        if index is not None:
+            if index >= parameter.shape[0]:
+                raise ValueError(f"Invalid Flash Engram stream weight: {name}")
+            parameter = parameter[index]
+        if parameter.shape != value.shape:
+            raise ValueError(f"Flash Engram weight shape mismatch: {name}")
+        parameter.copy_(value)
+        return target, index
 
     def forward(self, hidden, hashes):
-        rows = self.multi_head_embedding(hashes)
-        eps = torch.finfo(torch.float32).eps
-        gamma = torch.stack(
-            [norm.weight for norm in self.lookup_per_head_norms]
-        ).float()
         local = self.multi_head_embedding
-        local_hashes = hashes[:, local.head_start : local.head_end]
-        x = rows.masked_fill(local_hashes.unsqueeze(-1) < 0, 0)
-        x = (x * (x.square().mean(-1, keepdim=True) + eps).rsqrt() * gamma).to(
-            hidden.dtype
+        table, scales = local.tables()
+        x = lookup_norm(
+            table,
+            scales,
+            hashes[:, local.head_start : local.head_end],
+            local.vocab_start,
+            local.vocab_end,
+            self.lookup_norm_weight,
+            hidden.dtype,
         )
-        x = x.flatten(1)
-        gates = []
-        for channel in range(self.hc_mult):
-            key = self.key_projs[channel](x)
-            if local.tp_size > 1:
-                key = tensor_model_parallel_all_reduce(key)
-            gate = (
-                self.norm_key[channel](key)
-                * self.norm_query[channel](hidden[:, channel])
-            ).sum(-1)
-            gate = gate * self.hidden_size**-0.5
-            gates.append((gate.abs().clamp_min(1e-6).sqrt() * gate.sign()).sigmoid())
-        gate = torch.stack(gates, dim=1)
-        value = self.value_proj(x)
+        proj = F.linear(x, self.proj_weight.flatten(0, 1), self.proj_bias.flatten())
         if local.tp_size > 1:
-            value = tensor_model_parallel_all_reduce(value)
-        value = value.float()
-        signal = (
-            self.unified_pre_gamma.float()
-            * value
-            * (value.square().mean(-1, keepdim=True) + eps).rsqrt()
+            proj = tensor_model_parallel_all_reduce(proj)
+        return gated_update(
+            hidden,
+            proj,
+            hashes,
+            self.key_norm_weight,
+            self.query_norm_weight,
+            self.unified_pre_gamma,
+            self.hc_scale_weight,
         )
-        scales = torch.stack(list(self.unified_per_hc_scales)).float()
-        result = ((gate.float().unsqueeze(-1) + scales) * signal.unsqueeze(1)).to(
-            hidden.dtype
-        )
-        return hidden + result.masked_fill((hashes < 0).all(-1)[:, None, None], 0)
