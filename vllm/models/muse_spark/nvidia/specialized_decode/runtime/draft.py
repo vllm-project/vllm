@@ -624,7 +624,7 @@ def may_fuse_qkv_front(attn: nn.Module) -> bool:
         and attn.use_o_gate
         and attn.head_dim == cute_ops.HEAD_DIM
         and attn.default_dtype == torch.bfloat16
-        and attn.attn.kv_cache_dtype in ("auto", "bfloat16")
+        and cute_ops.unsupported_kv_cache(attn.attn) is None
         and cute_ops.unsupported_projection(attn) is None
     )
 
@@ -645,6 +645,7 @@ def _fused_qkv_projection(
         assert attn.rotary_emb is not None
         cos_sin_cache = attn.rotary_emb.cos_sin_cache
     weight = attn.qkv_proj.weight
+    kv_quant = cute_ops.kv_quant(attn.attn)
     if not cute_ops.supports_call(
         hidden_states,
         weight,
@@ -653,6 +654,7 @@ def _fused_qkv_projection(
         slot_mapping,
         kv_cache,
         attn.num_kv_heads,
+        kv_quant=kv_quant,
     ):
         return None
     # Allocated only for a call the front takes; the checked launch also
@@ -667,6 +669,7 @@ def _fused_qkv_projection(
         kv_cache,
         out,
         attn.rms_norm_eps,
+        kv_quant,
     )
     return out
 
@@ -981,7 +984,13 @@ class DraftDecode:
 
         for fused_qkv, layer in zip(self.fused_qkv, self.layers):
             if fused_qkv:
-                cute_ops.prepare_qkv_front(layer.self_attn.qkv_proj.weight.shape[0])
+                attn = layer.self_attn
+                # The cache's page size is not known yet: the default layout
+                # here, any other compiles at the warmup run before capture.
+                kind = cute_ops.KV_CACHE_KINDS[attn.attn.kv_cache_dtype]
+                cute_ops.prepare_qkv_front(
+                    attn.qkv_proj.weight.shape[0], fmt=cute_ops.KvLayout(kind)
+                )
         plan = self.plan
         if plan.input_norm is not None:
             # InputNorm compiles its kernel at construction.

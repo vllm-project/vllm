@@ -84,7 +84,9 @@ def _run_check(
     assert pixel_shape[0] == total_expected_num_patches
 
 
-@pytest.mark.parametrize("model_id", ["OpenGVLab/InternVL2-2B"])
+@pytest.mark.parametrize(
+    "model_id", ["OpenGVLab/InternVL2-2B", "OpenGVLab/InternVL3-1B"]
+)
 @pytest.mark.parametrize(
     "size_factors",
     [

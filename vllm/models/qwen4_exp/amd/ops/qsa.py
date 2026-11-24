@@ -11,19 +11,25 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import get_cdna_version
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import cdiv, round_up
 
-from .qsa_mfma_scorer import launch_qsa_mqa_paged_mfma, mfma_scorer_applies
+from .qsa_mfma_scorer import (
+    MFMA_SCORER_MIN_ROWS,
+    launch_qsa_mqa_paged_mfma,
+    mfma_scorer_applies,
+)
 
 if TYPE_CHECKING:
     from ...common.qsa import QSAPrefillLayout
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
-# Scoring programs a launch aims for: a row's programs stride over its visible
-# column tiles, so the grid does not grow with the page table's capacity.
-_SCORE_PROGRAMS = 4096
+# CDNA version -> (max rows, BLOCK_N, warps) for scoring single-row decode
+# row by row. Up to max rows this beats the tiled kernel; measured with the
+# 168-page decode table on MI300X and MI325X (CDNA3) and MI355X (CDNA4).
+_ROWS_KERNEL_PROFILES = {3: (32, 32, 4), 4: (128, 128, 2)}
 
 
 @triton.jit
@@ -54,12 +60,140 @@ def _qsa_mqa_paged_kernel(
     PAGE_TABLE_WIDTH: tl.constexpr,
     NUM_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    UPCAST_FP8: tl.constexpr,
+) -> None:
+    rows = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_valid = rows < num_rows
+    requests = tl.load(token_to_req_ptr + rows, mask=row_valid, other=-1)
+    request_valid = row_valid & (requests >= 0) & (requests < num_requests)
+    safe_requests = tl.minimum(tl.maximum(requests, 0), num_requests - 1)
+    query_positions = tl.load(query_positions_ptr + rows, mask=row_valid, other=0)
+    sequence_lengths = tl.load(
+        sequence_lengths_ptr + safe_requests,
+        mask=request_valid,
+        other=0,
+    )
+    visible = tl.minimum(
+        (query_positions + 1) // COMPRESS_RATIO,
+        sequence_lengths // COMPRESS_RATIO,
+    )
+    if tl.program_id(1) == 0:
+        tl.store(visible_blocks_ptr + rows, visible, mask=row_valid)
+    if tl.program_id(1) * BLOCK_N >= tl.max(tl.where(row_valid, visible, 0), axis=0):
+        return
+    columns = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    dims = tl.arange(0, BLOCK_D)
+    logical_page = columns // PAGE_SIZE
+    page_offset = columns % PAGE_SIZE
+    column_valid = (columns < num_columns) & (logical_page < PAGE_TABLE_WIDTH)
+    safe_logical_page = tl.minimum(logical_page, PAGE_TABLE_WIDTH - 1)
+    score = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    valid = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.int1)
+
+    # Rows are request-major; a block spanning requests scores each with its keys.
+    request = tl.min(tl.where(request_valid, safe_requests, num_requests), axis=0)
+    while request < num_requests:
+        in_request = request_valid & (safe_requests == request)
+        request_visible = tl.max(tl.where(in_request, visible, 0), axis=0)
+        if tl.program_id(1) * BLOCK_N < request_visible:
+            physical_page = tl.load(
+                page_table_ptr
+                + request * stride_table_req
+                + safe_logical_page * stride_table_page,
+                mask=column_valid,
+                other=-1,
+            )
+            key_valid = (
+                column_valid & (physical_page >= 0) & (physical_page < num_pages)
+            )
+            # physical_page * block stride can overflow int32 for large caches.
+            safe_physical_page = tl.maximum(physical_page, 0).to(tl.int64)
+            keys = tl.load(
+                k_cache_ptr
+                + safe_physical_page[:, None] * stride_cache_block
+                + page_offset[:, None] * stride_cache_token
+                + dims[None, :] * stride_cache_dim,
+                mask=key_valid[:, None] & (dims[None, :] < HEAD_DIM),
+                other=0.0,
+            )
+            keys = tl.trans(keys)
+            if UPCAST_FP8:
+                keys = keys.to(tl.bfloat16)
+            else:
+                keys = keys.to(q_ptr.dtype.element_ty)
+            request_score = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for head in tl.static_range(0, NUM_HEADS):
+                query = tl.load(
+                    q_ptr
+                    + rows[:, None] * stride_q_row
+                    + head * stride_q_head
+                    + dims[None, :] * stride_q_dim,
+                    mask=in_request[:, None] & (dims[None, :] < HEAD_DIM),
+                    other=0.0,
+                )
+                if UPCAST_FP8:
+                    query = query.to(tl.bfloat16)
+                dot = tl.dot(query, keys, out_dtype=tl.float32)
+                request_score += tl.maximum(dot, 0.0)
+            request_valid_2d = (
+                in_request[:, None]
+                & key_valid[None, :]
+                & (columns[None, :] < visible[:, None])
+            )
+            score = tl.where(request_valid_2d, request_score, score)
+            valid |= request_valid_2d
+        request = tl.min(
+            tl.where(
+                request_valid & (safe_requests > request), safe_requests, num_requests
+            ),
+            axis=0,
+        )
+
+    score /= score_divisor
+    tl.store(
+        logits_ptr + rows[:, None] * stride_logits_row + columns[None, :],
+        tl.where(valid, score, -float("inf")),
+        mask=row_valid[:, None] & (columns[None, :] < num_columns),
+    )
+
+
+@triton.jit
+def _qsa_mqa_paged_rows_kernel(
+    q_ptr,
+    k_cache_ptr,
+    page_table_ptr,
+    token_to_req_ptr,
+    query_positions_ptr,
+    sequence_lengths_ptr,
+    visible_blocks_ptr,
+    logits_ptr,
+    stride_q_row,
+    stride_q_head,
+    stride_q_dim,
+    stride_cache_block,
+    stride_cache_token,
+    stride_cache_dim,
+    stride_table_req,
+    stride_table_page,
+    stride_logits_row,
+    num_columns,
+    num_pages,
+    num_requests,
+    score_divisor,
+    PAGE_SIZE: tl.constexpr,
+    PAGE_TABLE_WIDTH: tl.constexpr,
+    NUM_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
-    first_tile = tl.program_id(1)
+    columns = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     dims = tl.arange(0, BLOCK_D)
     request = tl.load(token_to_req_ptr + row)
     safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
@@ -73,29 +207,38 @@ def _qsa_mqa_paged_kernel(
         (query_position + 1) // COMPRESS_RATIO,
         sequence_length // COMPRESS_RATIO,
     )
-    if first_tile == 0:
+    if tl.program_id(1) == 0:
         tl.store(visible_blocks_ptr + row, visible)
-    # The top-k reads a row's first ``visible`` columns only, so the program
-    # scores just those tiles, striding by the grid's programs per row; the
-    # columns past ``visible`` are left unwritten.
-    live_row = (row < num_rows) & (request >= 0) & (request < num_requests)
-    end = tl.where(live_row, tl.minimum(visible, num_columns), 0)
-    for tile in range(first_tile, tl.cdiv(end, BLOCK_N), tl.num_programs(1)):
-        columns = tile * BLOCK_N + tl.arange(0, BLOCK_N)
-        logical_page = columns // PAGE_SIZE
-        page_offset = columns % PAGE_SIZE
-        valid = (columns < end) & (logical_page < PAGE_TABLE_WIDTH)
-        safe_logical_page = tl.minimum(logical_page, PAGE_TABLE_WIDTH - 1)
-        physical_page = tl.load(
-            page_table_ptr
-            + safe_request * stride_table_req
-            + safe_logical_page * stride_table_page,
-            mask=valid,
-            other=-1,
-        )
-        valid &= (physical_page >= 0) & (physical_page < num_pages)
-        # physical_page * block stride can overflow int32 for large caches.
-        safe_physical_page = tl.maximum(physical_page, 0).to(tl.int64)
+    if tl.program_id(1) * BLOCK_N >= visible:
+        return
+    logical_page = columns // PAGE_SIZE
+    page_offset = columns % PAGE_SIZE
+    valid = (
+        (columns < num_columns)
+        & (columns < visible)
+        & (request >= 0)
+        & (request < num_requests)
+        & (logical_page < PAGE_TABLE_WIDTH)
+    )
+    safe_logical_page = tl.minimum(logical_page, PAGE_TABLE_WIDTH - 1)
+    physical_page = tl.load(
+        page_table_ptr
+        + safe_request * stride_table_req
+        + safe_logical_page * stride_table_page,
+        mask=valid,
+        other=-1,
+    )
+    valid &= (physical_page >= 0) & (physical_page < num_pages)
+    # physical_page * block stride can overflow int32 for large caches.
+    safe_physical_page = tl.maximum(physical_page, 0).to(tl.int64)
+    score = tl.zeros((BLOCK_N,), dtype=tl.float32)
+
+    for head in tl.static_range(0, NUM_HEADS):
+        query = tl.load(
+            q_ptr + row * stride_q_row + head * stride_q_head + dims * stride_q_dim,
+            mask=dims < HEAD_DIM,
+            other=0.0,
+        ).to(tl.float32)
         keys = tl.load(
             k_cache_ptr
             + safe_physical_page[:, None] * stride_cache_block
@@ -104,22 +247,15 @@ def _qsa_mqa_paged_kernel(
             mask=valid[:, None] & (dims[None, :] < HEAD_DIM),
             other=0.0,
         ).to(tl.float32)
-        score = tl.zeros((BLOCK_N,), dtype=tl.float32)
-        for head in tl.static_range(0, NUM_HEADS):
-            query = tl.load(
-                q_ptr + row * stride_q_row + head * stride_q_head + dims * stride_q_dim,
-                mask=dims < HEAD_DIM,
-                other=0.0,
-            ).to(tl.float32)
-            dot = tl.sum(keys * query[None, :], axis=1)
-            score += tl.maximum(dot, 0.0)
+        dot = tl.sum(keys * query[None, :], axis=1)
+        score += tl.maximum(dot, 0.0)
 
-        score /= score_divisor
-        tl.store(
-            logits_ptr + row * stride_logits_row + columns,
-            tl.where(valid, score, -float("inf")),
-            mask=columns < end,
-        )
+    score /= score_divisor
+    tl.store(
+        logits_ptr + row * stride_logits_row + columns,
+        tl.where(valid, score, -float("inf")),
+        mask=columns < num_columns,
+    )
 
 
 @triton.jit
@@ -616,14 +752,24 @@ def qsa_mqa_paged(
     compress_ratio: int,
     num_columns: int | None = None,
     score_scale: float | None = None,
+    single_row_decode: bool = False,
     allow_mfma: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute QSA scores directly from a paged compressed-key cache.
+
+    `single_row_decode` marks a batch of decode requests with one query row
+    each and no prefill. Small ones are scored row by row on CDNA3 and CDNA4.
 
     `allow_mfma` marks rows of prefill requests: such a call with at least
     `MFMA_SCORER_MIN_ROWS` rows and a bf16 or fp16 query and cache is scored
     by the MFMA tile kernel (`qsa_mfma_scorer.py`), which is not bitwise
     equal to the per-row kernel.
+
+    Returns:
+        `logits` `[rows, columns]` fp32 and `visible_blocks` `[rows]` int32.
+        Logits at or past `visible_blocks[row]` are undefined; read only
+        `[0, visible_blocks[row])`.
+
     """
     _validate_mqa(q)
     if not q.is_cuda or not HAS_TRITON:
@@ -632,6 +778,8 @@ def qsa_mqa_paged(
         raise ValueError("QSA cache must be [pages, page_size, 1, head_dim]")
     if k_cache.shape[3] != q.shape[2]:
         raise ValueError("QSA query and cache dimensions must match")
+    if torch.float32 in (q.dtype, k_cache.dtype):
+        raise ValueError("QSA paged scoring takes bf16, fp16 or fp8 inputs")
     if page_table.ndim != 2:
         raise ValueError("QSA page table must be two-dimensional")
     if q.shape[0] and (not all(k_cache.shape[:2]) or not all(page_table.shape)):
@@ -670,12 +818,48 @@ def qsa_mqa_paged(
             float(score_divisor),
         )
         return logits, visible_blocks
-    block_n = 32
-    # A fixed grid for the shapes (CUDA graph safe): the programs of a row
-    # stride over its visible tiles, wherever ``visible`` ends.
-    tiles = triton.cdiv(columns, block_n)
-    per_row = max(1, min(tiles, _SCORE_PROGRAMS // q.shape[0]))
-    _qsa_mqa_paged_kernel[(q.shape[0], per_row)](
+    rows_profile = (
+        _ROWS_KERNEL_PROFILES.get(get_cdna_version()) if single_row_decode else None
+    )
+    if rows_profile is not None and q.shape[0] <= rows_profile[0]:
+        # Rows from different requests share no keys, so a 16-row tl.dot tile is
+        # mostly padding.
+        _, block_n, rows_warps = rows_profile
+        _qsa_mqa_paged_rows_kernel[(q.shape[0], triton.cdiv(columns, block_n))](
+            q,
+            k_cache,
+            page_table,
+            token_to_req,
+            query_positions,
+            sequence_lengths,
+            visible_blocks,
+            logits,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k_cache.stride(0),
+            k_cache.stride(1),
+            k_cache.stride(3),
+            page_table.stride(0),
+            page_table.stride(1),
+            logits.stride(0),
+            columns,
+            k_cache.shape[0],
+            page_table.shape[0],
+            float(score_divisor),
+            PAGE_SIZE=k_cache.shape[1],
+            PAGE_TABLE_WIDTH=page_table.shape[1],
+            NUM_HEADS=q.shape[1],
+            HEAD_DIM=q.shape[2],
+            BLOCK_N=block_n,
+            BLOCK_D=triton.next_power_of_2(q.shape[2]),
+            COMPRESS_RATIO=compress_ratio,
+            num_warps=rows_warps,
+        )
+        return logits, visible_blocks
+    block_m, block_n = 16, 64
+    grid = (triton.cdiv(q.shape[0], block_m), triton.cdiv(columns, block_n))
+    _qsa_mqa_paged_kernel[grid](
         q,
         k_cache,
         page_table,
@@ -702,9 +886,13 @@ def qsa_mqa_paged(
         PAGE_TABLE_WIDTH=page_table.shape[1],
         NUM_HEADS=q.shape[1],
         HEAD_DIM=q.shape[2],
+        BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_D=triton.next_power_of_2(q.shape[2]),
         COMPRESS_RATIO=compress_ratio,
+        UPCAST_FP8=(
+            q.dtype == current_platform.fp8_dtype() and get_cdna_version() != 3
+        ),
         num_warps=4,
     )
     return logits, visible_blocks
@@ -777,6 +965,7 @@ def qsa_select_paged_tokens(
     token_topk: int,
     compress_ratio: int,
     out: torch.Tensor | None = None,
+    single_row_decode: bool = False,
     max_seq_len: int | None = None,
     num_decode_tokens: int | None = None,
 ) -> torch.Tensor:
@@ -803,9 +992,13 @@ def qsa_select_paged_tokens(
     if not rows:
         return out
 
+    prefill_start = rows if num_decode_tokens is None else num_decode_tokens
     columns = page_table.shape[1] * k_cache.shape[1]
     if max_seq_len is not None and not torch.cuda.is_current_stream_capturing():
-        columns = min(max(64, round_up(cdiv(max_seq_len, compress_ratio), 64)), columns)
+        bounded = cdiv(max_seq_len, compress_ratio)
+        if rows - prefill_start >= MFMA_SCORER_MIN_ROWS:
+            bounded = max(64, round_up(bounded, 64))
+        columns = min(columns, bounded)
     block_topk = token_topk // compress_ratio
     rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1))
     chunk_rows = min(rows, rows_per_chunk)
@@ -815,7 +1008,6 @@ def qsa_select_paged_tokens(
     topk_workspace = torch.empty(
         (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
     )
-    prefill_start = rows if num_decode_tokens is None else num_decode_tokens
     chunks = [
         (row_start, min(row_start + rows_per_chunk, end))
         for begin, end in ((0, prefill_start), (prefill_start, rows))
@@ -832,6 +1024,7 @@ def qsa_select_paged_tokens(
             sequence_lengths,
             compress_ratio,
             num_columns=columns,
+            single_row_decode=single_row_decode,
             allow_mfma=row_start >= prefill_start,
         )
         blocks = blocks_buffer[: row_end - row_start]
@@ -959,11 +1152,26 @@ def qsa_sparse_paged_attention(
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
     base_programs = q.shape[0] * k_cache.shape[2]
+    cdna_version = get_cdna_version()
+    cdna_bf16 = cdna_version in (3, 4) and k_cache.dtype == torch.bfloat16
+    if cdna_bf16:
+        # tl.dot with fewer than 16 rows is slow on CDNA3/4; pad the head group.
+        block_m = max(block_m, 16)
     small_profile_limit = 8 if block_m <= 8 else 4
 
-    # Tuned on GB300 for the Qwen-Air TP1, TP2, and TP4 attention shapes.
-    # Narrow tiles favor decode; wide tiles improve throughput for prefill.
-    if base_programs <= small_profile_limit:
+    if cdna_bf16 and base_programs >= 32:
+        # Narrow tiles, one warp, and enough splits for about 2048 programs.
+        # CDNA4 decode prefers about 1024 programs with four warps.
+        block_n = 16
+        target_splits = min(16, triton.next_power_of_2(-(-2048 // base_programs)))
+        partial_warps = 2 if base_programs <= 128 else 1
+        if cdna_version == 4 and base_programs <= 128:
+            target_splits = triton.next_power_of_2(-(-1024 // base_programs))
+            partial_warps = 4
+    # The shared profiles were tuned on GB300 for the Qwen-Air TP1, TP2, and TP4
+    # attention shapes. Narrow tiles favor decode; wide tiles improve throughput
+    # for prefill.
+    elif base_programs <= small_profile_limit:
         block_n, target_splits, partial_warps = 16, 64, 4
     elif base_programs < 32:
         block_n, target_splits, partial_warps = 16, 32, 4
@@ -973,6 +1181,9 @@ def qsa_sparse_paged_attention(
         block_n, target_splits, partial_warps = 64, 4, 2
     else:
         block_n, target_splits, partial_warps = 64, 1, 2
+        if cdna_version in (3, 4):
+            # FP8 K/V on CDNA3 and CDNA4 is faster with one warp per program.
+            partial_warps = 1
     # gfx942 and gfx950 have a 64 KiB LDS limit. One software-pipelining
     # stage keeps the wide TP4 tile within that shared-memory budget.
     partial_stages = 1 if current_platform.is_rocm() else 2

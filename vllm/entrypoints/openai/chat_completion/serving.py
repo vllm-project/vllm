@@ -57,7 +57,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     resolve_finish_reason,
 )
-from vllm.exceptions import GenerationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -69,6 +69,7 @@ from vllm.renderers.chat_utils import (
     ConversationMessage,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers.params import TokenizeParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
@@ -265,8 +266,7 @@ class OpenAIServingChat(GenerateBaseServing):
         }
 
     async def render_chat_request(
-        self,
-        request: ChatCompletionRequest,
+        self, request: ChatCompletionRequest, tok_params: TokenizeParams | None = None
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
@@ -285,7 +285,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
         self._preflight(request.n or 1)
 
-        return await self.online_renderer.render_chat(request)
+        return await self.online_renderer.render_chat(request, tok_params=tok_params)
 
     async def create_chat_completion(
         self,
@@ -298,6 +298,17 @@ class OpenAIServingChat(GenerateBaseServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        # An empty `messages` list would otherwise pass validation and only
+        # raise an IndexError in get_chat_request_role() after a full
+        # generation. Reject it before any work is scheduled. This is checked
+        # here rather than on the request model because internal callers
+        # (renderers, adapters) construct ChatCompletionRequest directly.
+        if not request.messages:
+            return self.create_error_response(
+                VLLMValidationError(
+                    "messages must be a non-empty list.", parameter="messages"
+                )
+            )
         return await self._with_kv_transfer_rejection_cleanup(
             self._create_chat_completion(request, raw_request), request, raw_request
         )
@@ -394,6 +405,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     trace_headers=trace_headers,
                     session_id=session_id,
                     priority=self._get_priority(request, raw_request),
+                    data_parallel_rank=data_parallel_rank,
                 )
             else:
                 generator = self.engine_client.generate(
