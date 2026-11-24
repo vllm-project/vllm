@@ -1076,6 +1076,7 @@ def test_lora_load_failure_fails_only_that_request():
         o for o in engine_outputs[lost.client_index].outputs if o.request_id == "lost"
     )
     assert lost_output.finish_reason == FinishReason.ERROR
+    assert lost_output.error is not None
     assert "'lost'" in lost_output.error.message
     assert not scheduler.has_request("lost")
     assert kept.status == RequestStatus.RUNNING
