@@ -159,6 +159,7 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
                     "HYV4ForCausalLM",
                     "HYV4VLForConditionalGeneration",
                     "HYV4MTPModel",
+                    # GLM DSA benefits from breakable CUDA graphs on ROCm.
                     "GlmMoeDsaForCausalLM",
                     "DeepseekV32MTPModel",
                 }
