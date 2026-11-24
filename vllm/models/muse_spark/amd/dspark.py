@@ -8,6 +8,7 @@ from copy import copy
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -33,6 +34,11 @@ from vllm.model_executor.utils import refill_derived
 from vllm.models.muse_spark.amd.model import MuseSparkDecoderLayer
 from vllm.models.muse_spark.amd.mono.drafter import maybe_attach_drafter
 from vllm.models.muse_spark.amd.ops import fused_markov
+from vllm.models.muse_spark.amd.ops.dspark_context import (
+    ContextNorms,
+    context_kv_insert,
+    context_kv_insert_supported,
+)
 from vllm.models.muse_spark.common.layers import (
     MuseSparkRMSNorm,
     materialize_residual_path_constants,
@@ -97,6 +103,8 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         self._context_kv_proj = None
         # derived from the weights after loading, refilled in place on reloads
         self._stacked_kv_weight: torch.Tensor
+        self._context_norms: ContextNorms | None = None
+        self._fused_context_kv = False
         assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
         if not isinstance(config, MuseSparkDSparkConfig):
@@ -206,16 +214,37 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
                 or attn.qk_norm.variance_epsilon != self._rms_norm_eps
             ):
                 raise ValueError("Muse Spark DSpark layers must share KV geometry")
+        if envs.VLLM_MUSE_DSPARK_FUSED_CTX_KV:
+            self._fused_context_kv = context_kv_insert_supported(self)
+            if self._fused_context_kv:
+                logger.info_once("The DSpark draft context K/V insert is fused.")
+            else:
+                logger.warning_once(
+                    "VLLM_MUSE_DSPARK_FUSED_CTX_KV=1 ignored: the draft "
+                    "attention layers cannot take the fused KV insert."
+                )
+        if envs.VLLM_MUSE_DSPARK_FUSED_CTX_NORMS:
+            if self._context_norms is None:
+                self._context_norms = ContextNorms(
+                    self.hidden_norm, self._context_pre_norms
+                )
+                logger.info_once("The DSpark draft context norms are fused.")
+            else:
+                self._context_norms.refresh()
 
     def context_kv_modules(self) -> list[nn.Module]:
         return [self.fc, self.hidden_norm, *self._context_pre_norms, *self._attn_layers]
 
     def _project_muse_context_kv(self, context_states: torch.Tensor) -> torch.Tensor:
         """Apply the two trained Muse input norms, then each layer's K/V map."""
-        fc_output = self.hidden_norm(context_states)
-        per_layer_context = torch.stack(
-            [norm(fc_output) for norm in self._context_pre_norms], dim=0
-        )
+        norms = self._context_norms
+        if norms is not None and norms.supports(context_states):
+            per_layer_context = norms(context_states)
+        else:
+            fc_output = self.hidden_norm(context_states)
+            per_layer_context = torch.stack(
+                [norm(fc_output) for norm in self._context_pre_norms], dim=0
+            )
         return torch.bmm(per_layer_context, self._stacked_kv_weight.transpose(1, 2))
 
     def precompute_and_store_context_kv(
@@ -227,6 +256,14 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         num_ctx = context_states.shape[0]
         num_layers = self._num_attn_layers
         all_kv_flat = self._project_muse_context_kv(context_states)
+        if (
+            self._fused_context_kv
+            and context_slot_mapping is not None
+            and context_kv_insert(
+                self, all_kv_flat, context_positions, context_slot_mapping
+            )
+        ):
+            return
         all_kv = (
             all_kv_flat.view(
                 num_layers,

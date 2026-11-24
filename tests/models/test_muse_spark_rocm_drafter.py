@@ -560,3 +560,74 @@ def test_other_draft_steps_run_stock(tiny_draft, query_lens, mode) -> None:
     kernel, mono = _run_drafter(tiny_draft, step, mode=mode)
     assert kernel.calls == []
     _assert_same_step(stock, mono)
+
+
+@requires_gfx950
+def test_fused_context_kv_matches_the_stock_path(tiny_draft, monkeypatch) -> None:
+    """VLLM_MUSE_DSPARK_FUSED_CTX_NORMS / _CTX_KV on the context K/V of two
+    requests: the fused norms are bitwise the stock ones; the fused insert
+    writes the same slots with bitwise V and K within one bf16 rounding (K is
+    rounded once after norm and RoPE instead of twice). RoPE can cancel, so the
+    bound is absolute: one bf16 ulp at the normed K's magnitude (|k| < 4,
+    ulp 2^-6). Measured on MI355X: 128 of 561152 K elements differ, at most
+    0.0098."""
+    from vllm.models.muse_spark.amd import dspark
+    from vllm.models.muse_spark.amd.ops.dspark_context import (
+        ContextNorms,
+        context_kv_insert_supported,
+    )
+
+    inserted = []
+
+    def recording_insert(*args):
+        inserted.append(dspark_insert(*args))
+        return inserted[-1]
+
+    dspark_insert = dspark.context_kv_insert
+    monkeypatch.setattr(dspark, "context_kv_insert", recording_insert)
+    model = tiny_draft.model
+    step = DraftStep(tiny_draft, [QUERY_ROWS] * 2, seed=31)
+    step.run(tiny_draft)  # binds the step's KV caches to the draft layers
+    generator = torch.Generator(device="cuda").manual_seed(31)
+    num_ctx = 40
+    states = torch.randn(
+        num_ctx,
+        TINY_DSPARK["hidden_size"],
+        generator=generator,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    positions = torch.randint(0, 2048, (num_ctx,), generator=generator, device="cuda")
+    num_slots = next(iter(step.kv_caches.values())).shape[0] * 16
+    slots = torch.randperm(num_slots, generator=generator, device="cuda")[:num_ctx]
+
+    def store() -> dict[str, torch.Tensor]:
+        for name, cache in step.kv_caches.items():
+            cache.copy_(step.kv_init[name])
+        with set_current_vllm_config(tiny_draft.vllm_config):
+            model.precompute_and_store_context_kv(states, positions, slots)
+        return {name: cache.clone() for name, cache in step.kv_caches.items()}
+
+    stock_norms = model._project_muse_context_kv(states)
+    stock_kv = store()
+    with set_current_vllm_config(tiny_draft.vllm_config):
+        assert context_kv_insert_supported(model)
+    monkeypatch.setattr(
+        model,
+        "_context_norms",
+        ContextNorms(model.hidden_norm, model._context_pre_norms),
+    )
+    monkeypatch.setattr(model, "_fused_context_kv", True)
+    torch.testing.assert_close(
+        model._project_muse_context_kv(states), stock_norms, rtol=0, atol=0
+    )
+    fused_kv = store()
+    assert inserted == [True]
+
+    head_dim = 64
+    for name in tiny_draft.names:
+        k_s, v_s = stock_kv[name].split(head_dim, dim=-1)
+        k_f, v_f = fused_kv[name].split(head_dim, dim=-1)
+        torch.testing.assert_close(v_f, v_s, rtol=0, atol=0)
+        torch.testing.assert_close(k_f, k_s, rtol=0, atol=2**-6)
+        assert not torch.equal(stock_kv[name], step.kv_init[name])
