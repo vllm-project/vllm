@@ -13,11 +13,9 @@ for a helper that implementation also reaches for, or a shared bug cancels and
 the test passes. That is about where a definition comes from, not about which
 library writes it down.
 
-Formats, the order a reduction is defined to run in, the error metrics, and
-the first of the layer math. The rest of the layer math lands here next,
-shared rather than once per model, so that the `DecodeNumerics` contract (T2)
-measures every model the same way. How far from a definition here a kernel may
-land is `bounds.py`."""
+Formats, reduction orders, error metrics and the first of the layer math,
+shared across models for the `DecodeNumerics` contract (T2). Error bounds
+are in `bounds.py`."""
 
 import torch
 import torch.nn.functional as F
@@ -71,12 +69,6 @@ def dequant_fp8(
 def dequant_mxfp4(codes: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
     """fp4x2 bytes [..., K / 2] (the low nibble the lower K) with E8M0 codes
     [..., K / 32] -> float64 [..., K]."""
-    # uint8 only, not the wider byte set `quantize_e4m3` accepts: the nibble
-    # split below is `& 15` and `>> 4`, and a float8 dtype has neither, so it
-    # would raise out of torch rather than here. int8 would quietly work --
-    # its arithmetic shift lands on a negative index that wraps to the same
-    # table entry -- but it is nobody's layout for packed fp4 pairs, and
-    # accepting it would leave that coincidence load-bearing.
     assert codes.dtype == torch.uint8, f"`codes` holds fp4x2 bytes, got {codes.dtype}"
     assert not scales.is_floating_point(), (
         f"`scales` holds E8M0 codes, got {scales.dtype}"
@@ -152,35 +144,23 @@ def mx_code_vllm(amax: torch.Tensor, fmax: float) -> torch.Tensor:
 
 # ---------------------------------------------------------------- route
 def sqrt_softplus_score(logits: torch.Tensor) -> torch.Tensor:
-    """The sqrt-softplus router score of `logits`, which is what DeepSeek-V4.1
-    routes on. `F.softplus` returns the logit itself past 20, which is the
-    same shortcut the kernels take, so the two agree there by construction
-    rather than inside a tolerance.
-
-    Named after the formula rather than the model: a router that scores some
-    other way belongs next to this one, not behind a flag on it.
-    """
+    """`sqrt(softplus(logits))`, the DeepSeek-V4.1 router score. Like the
+    kernels, `F.softplus` returns the logit itself above 20."""
     return torch.sqrt(F.softplus(logits.double()))
 
 
 # ---------------------------------------------------------------- reductions
-# Lanes per wave on CDNA, which is what a lane-xor butterfly folds over.
+# Lanes per wave on CDNA.
 WAVE = 64
 
 
 def wave_butterfly(
     values: torch.Tensor, offsets: tuple[int, ...], op: str
 ) -> torch.Tensor:
-    """`values` (float32, whole waves) folded by the lane-xor butterfly over
-    `offsets` in turn: lane l combines with lane l ^ offset, in float32, in
-    the order given. 'add' or 'max'.
-
-    Offsets covering all six lane bits leave every lane holding its wave's
-    reduction. The order is part of the contract rather than an implementation
-    detail, because float32 addition does not associate: a kernel that folds
-    the same offsets in another order returns other bits, and the kernels this
-    checks document which order they fold in.
-    """
+    """Lane-xor butterfly reduction of `values` (float32, whole waves) with
+    `op` ('add' or 'max'): for each offset in order, lane l combines with lane
+    `l ^ offset`. The order matters because float32 addition is not
+    associative."""
     assert op in ("add", "max"), f"unknown butterfly op {op!r}"
     assert values.numel() % WAVE == 0, (
         f"the butterfly folds whole waves, got {values.numel()} values"
@@ -194,18 +174,13 @@ def wave_butterfly(
 
 
 # ---------------------------------------------------------------- metrics
-# Mantissa bits and minimum normal exponent of the dtypes an error is measured
-# in, in the pair `round_float` takes. Only f32 so far; a format is added here
-# when a test measures in it, so that an unsupported dtype fails the assert
-# below rather than picking up a figure nothing has checked.
+# (mantissa bits, minimum normal exponent) per dtype, as `round_float` takes.
 _FORMATS = {torch.float32: (23, -126)}
 
 
 def ulp(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    """The `dtype` spacing at |x|, the subnormal spacing below its smallest
-    normal. `dtype` is explicit rather than read off `x` because `x` is a
-    float64 reference and the spacing wanted is that of the narrower format
-    the kernel returned -- the two differ by 2^29 for f32."""
+    """The ulp of `dtype` at `|x|` (the denormal spacing below its smallest
+    normal). `x` is usually a float64 reference, hence the explicit `dtype`."""
     assert dtype in _FORMATS, f"no ulp for {dtype}"
     mantissa_bits, min_exponent = _FORMATS[dtype]
     exponent = torch.floor(torch.log2(x.double().abs())).clamp(min=min_exponent)

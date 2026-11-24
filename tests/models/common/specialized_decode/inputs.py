@@ -51,11 +51,8 @@ def _log_uniform(
     return x.float()
 
 
-# Every generator below takes a seed rather than a `torch.Generator` and draws
-# everything one call site needs in that one call. Handing the generator out
-# instead would let a caller draw two operands of one instruction from two
-# seeds -- which, with the same seed, is two identical operands and an
-# instruction that was never really exercised.
+# Generators take a seed and draw all of a call site's operands in one call,
+# so that two operands can't accidentally come from the same seed.
 def log_uniform(
     count: int,
     low_exponent: float,
@@ -75,14 +72,9 @@ def mixed_floats(
     log_exponents: tuple[float, float],
     seed: int,
 ) -> torch.Tensor:
-    """Half of `count` uniform on [`low`, `high`], half log-uniform over
-    +-2^`log_exponents`.
-
-    The uniform half covers the range a helper is actually used over; the
-    log-uniform half covers the binades near zero, which a uniform draw over a
-    range of hundreds reaches essentially never and where a helper's flat
-    regions and cancellations live.
-    """
+    """Half of `count` uniform on [`low`, `high`] (the range a helper is used
+    over), half log-uniform over +-2^`log_exponents` (to reach small
+    magnitudes)."""
     g = _gen(seed)
     uniform = torch.empty(count // 2, device=DEV).uniform_(low, high, generator=g)
     rest = _log_uniform(count - count // 2, log_exponents[0], log_exponents[1], g)
@@ -148,13 +140,9 @@ def e2m1_bytes(codes: torch.Tensor) -> torch.Tensor:
 
 
 # ------------------------------------------------- MFMA operands and layouts
-# The lane layouts below are the CDNA matrix instructions' own, and say where
-# in the register file an operand element has to sit for the instruction to
-# multiply the matrix the caller meant. Getting one wrong is the most likely
-# way to wire up an MFMA incorrectly, and the way that still produces
-# plausible-looking numbers, so they are written here once.
+# Lane layouts of the CDNA MFMA operands, as documented in the ISA.
 
-# The f8f6f4 MFMA's operand format codes, as the CDNA4 ISA numbers them.
+# Operand format codes of the f8f6f4 MFMA (CDNA4 ISA).
 MX_FP8, MX_FP4 = 0, 4
 
 
@@ -207,26 +195,21 @@ def _wide_bf16(
 def wide_bf16(
     shape: tuple[int, ...], exponents: tuple[int, int], seed: int
 ) -> torch.Tensor:
-    """bf16 normals of `shape` spread over the binades `exponents`.
-
-    A plain `randn` draws almost everything within four binades of 1, where a
-    float32 accumulation of them loses nothing and so says nothing about the
-    order it accumulated in, or about how many bits it kept.
-    """
+    """bf16 normals of `shape` scaled by random powers of two in `exponents`,
+    so that a float32 accumulation of them actually rounds."""
     return _wide_bf16(shape, exponents, _gen(seed))
 
 
 def bf16_mfma_operands(tiles: int, seed: int) -> Bf16MfmaOperands:
-    """A, B and C for a 16 x 16 x 32 bf16 MFMA, all off one stream so that A
-    and B differ."""
+    """A, B and C for a 16 x 16 x 32 bf16 MFMA."""
     g = _gen(seed)
     a, b = (_wide_bf16((tiles, 16, 32), (-20, 20), g) for _ in range(2))
     return Bf16MfmaOperands(a, b, torch.randn(tiles, 16, 16, device=DEV, generator=g))
 
 
 class MxMfmaOperands(NamedTuple):
-    """Operands of a 16 x 16 x 128 scaled (f8f6f4) MFMA. The values are the
-    operands before their scale is applied, in float64, exactly."""
+    """Operands of a 16 x 16 x 128 scaled (f8f6f4) MFMA. The `*_values` are
+    the exact unscaled operands in float64."""
 
     a_words: torch.Tensor  # [tiles 64, n] int32 lane operands
     b_words: torch.Tensor
@@ -240,8 +223,8 @@ class MxMfmaOperands(NamedTuple):
 def _mx_operand(
     tiles: int, fmt: int, g: torch.Generator
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Random MXFP8 (no NaN) or MXFP4 [tiles, 16, 128] -> (lane words, the
-    float64 values they hold, before any scale)."""
+    """Random MXFP8 (no NaN) or MXFP4 `[tiles, 16, 128]` -> (lane words,
+    unscaled float64 values)."""
     assert fmt in (MX_FP8, MX_FP4), f"unknown f8f6f4 operand format {fmt}"
     if fmt == MX_FP8:
         quantized = torch.randint(0, 256, (tiles, 16, 128), device=DEV, generator=g)
@@ -252,29 +235,24 @@ def _mx_operand(
     packed = torch.randint(
         0, 256, (tiles, 16, 64), device=DEV, generator=g, dtype=torch.uint8
     )
-    # Code 127 is 2^0, so these are the values the nibbles hold themselves.
+    # E8M0 code 127 is a scale of 1.
     unscaled = packed.new_full((tiles, 16, 4), 127)
     words = mfma_lanes(packed, 16).contiguous().view(I32)
     return words, R.dequant_mxfp4(packed, unscaled)
 
 
 def mx_mfma_operands(tiles: int, formats: tuple[int, int], seed: int) -> MxMfmaOperands:
-    """A, B, their E8M0 scale words and C for a 16 x 16 x 128 scaled MFMA, all
-    off one stream so that A and B differ.
+    """A, B, their E8M0 scale words and C for a 16 x 16 x 128 scaled MFMA.
 
-    The scale codes run over 100 .. 154 rather than a narrow band around 127:
-    a scale word holds four codes and the instruction picks one of them, so
-    codes that were all nearly equal would not show a kernel picking the wrong
-    byte.
+    Scale codes span 100 .. 154 so that selecting the wrong byte of a scale
+    word changes the result.
     """
     g = _gen(seed)
     (a_words, a_values), (b_words, b_values) = (
         _mx_operand(tiles, fmt, g) for fmt in formats
     )
     codes = torch.randint(100, 155, (2, tiles * 64, 4), device=DEV, generator=g)
-    # Packed as the four bytes they are: shifting and summing leaves an int64
-    # past INT32_MAX whenever the top code is 128 or more, and only the
-    # wrap-around of the cast to int32 puts the bit pattern back.
+    # Reinterpret the four bytes as one int32 word.
     words = codes.to(torch.uint8).contiguous().view(I32).squeeze(-1)
     return MxMfmaOperands(
         a_words,
