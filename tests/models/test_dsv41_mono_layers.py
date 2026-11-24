@@ -623,6 +623,7 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
                 keys: list[tuple[int, int]] = sorted(
                     same & {k[1:] for k in got} & {k[1:] for k in want}
                 )
+                assert len(keys) >= len(prompts), (rank, a, b, keys)
                 flipped: set = set()
                 for i in sorted(WHOLE + FFN):
                     for k in keys:
@@ -643,9 +644,6 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
                 pooled_flips += len(flipped)
                 pooled_keys += len(keys)
                 per_pair.append((a, b, sorted(flipped), len(keys)))
-        # pooled like the flips: a pair comparing few tokens contributes
-        # few flips with them, so what has to hold is the total
-        assert pooled_keys >= len(prompts) * decodes**2, (rank, pooled_keys)
         # every pair's (flipped, compared), on passing runs too
         counts = [(len(flips), n) for _, _, flips, n in per_pair]
         print(f"rank {rank}: {pooled_flips}/{pooled_keys} flipped, per pair {counts}")
