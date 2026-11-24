@@ -397,10 +397,7 @@ class MoEBlockFuser:
         )
 
     def gate(
-        self,
-        moe_block: nn.Module,
-        prefix: str,
-        router_dtype: torch.dtype | None = None,
+        self, moe_block: nn.Module, prefix: str, router_dtype: torch.dtype | None = None
     ) -> GateLinear:
         """Rebuild the HF gate as a `GateLinear` for vLLM's fused MoE, with logits in
         `router_dtype` (default: detected) and the weight in the dtype Transformers
