@@ -99,7 +99,9 @@ class FlashInferWarmupCache(WarmupCache):
             flashinfer_autotune(
                 runner,
                 skip_attn=True,
-                autotune_kernels=get_kernel_warmup(runner).autotune_kernels,
+                autotune_flashinfer_kernels=(
+                    get_kernel_warmup(runner).autotune_flashinfer_kernels
+                ),
             )
             logger.info(
                 "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "

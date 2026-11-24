@@ -8,7 +8,6 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
-from vllm.model_executor.warmup.qwen_triton_warmup import QwenGDNKernelWarmup
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
@@ -69,7 +68,3 @@ class Qwen3VLKernelWarmup(KernelWarmup):
             _warm_vision(self.model, device)
         if device.type == "cuda":
             torch.accelerator.synchronize(device)
-
-
-class QwenGDNVLKernelWarmup(QwenGDNKernelWarmup, Qwen3VLKernelWarmup):
-    """Kernel warmup for Qwen GDN models with a Qwen3-VL vision tower."""

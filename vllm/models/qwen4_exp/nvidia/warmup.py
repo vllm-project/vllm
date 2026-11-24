@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.qwen_triton_warmup import QwenGDNKernelWarmup
 from vllm.model_executor.warmup.qwen_vl_triton_warmup import Qwen3VLKernelWarmup
 
 from .qsa import Qwen4ExpQSAAttention
@@ -18,19 +17,12 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class Qwen4ExpKernelWarmup(QwenGDNKernelWarmup):
+class Qwen4ExpKernelWarmup(Qwen3VLKernelWarmup):
     def warmup_jit_kernels(self, worker: "Worker") -> None:
         super().warmup_jit_kernels(worker)
-        owner = next(
-            (m for m in self.model.modules() if isinstance(m, Qwen4ExpQSAAttention)),
-            None,
-        )
-        if owner is not None and self.vllm_config.kernel_config.enable_jit_warmup:
-            _warm_qsa_kernels(owner, worker)
-
-
-class Qwen4ExpVLKernelWarmup(Qwen4ExpKernelWarmup, Qwen3VLKernelWarmup):
-    pass
+        owners = self.find_modules(Qwen4ExpQSAAttention)
+        if owners and self.vllm_config.kernel_config.enable_jit_warmup:
+            _warm_qsa_kernels(owners[0], worker)
 
 
 def _warm_qsa_kernels(owner: Qwen4ExpQSAAttention, worker: "Worker") -> None:

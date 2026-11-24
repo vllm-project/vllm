@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import torch
 
@@ -36,6 +36,7 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
 from vllm.model_executor.warmup.mrope_warmup import mrope_triton_warmup
+from vllm.model_executor.warmup.qwen_triton_warmup import qwen_gdn_triton_warmup
 from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
     replayssm_lifecycle_warmup,
@@ -55,6 +56,8 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
+
+_ModuleT = TypeVar("_ModuleT", bound=torch.nn.Module)
 
 _LL_BF16_WARMUP_M_RANGE = range(1, 17)
 
@@ -280,16 +283,20 @@ def _rocm_aiter_gemm_warmup(worker: "Worker") -> None:
 class KernelWarmup:
     """Warms up the kernels a model compiles or autotunes while serving.
 
-    Like `ModelState`, a model can return a subclass from
-    `get_kernel_warmup_cls()` that adds warmups for the kernels only it uses.
-    This class warms the kernels models share (JIT registry, DeepGEMM,
-    FlashInfer, ...), so a subclass extends a phase by calling `super()`.
+    This class warms the kernels of shared layers and libraries (JIT registry,
+    Qwen GDN, M-RoPE, DeepGEMM, FlashInfer, ...), each only if the model uses
+    it. Like `ModelState`, a model can return a subclass from
+    `get_kernel_warmup_cls()` to also warm the kernels in its own code,
+    extending a phase with `super()`.
     """
 
     def __init__(self, runner: "GPUModelRunner") -> None:
         self.runner = runner
         self.vllm_config = runner.vllm_config
         self.model = runner.get_model()
+
+    def find_modules(self, module_type: type[_ModuleT]) -> list[_ModuleT]:
+        return [m for m in self.model.modules() if isinstance(m, module_type)]
 
     def warmup_jit_kernels(self, worker: "Worker") -> None:
         """Compile kernels by launching them directly.
@@ -313,6 +320,7 @@ class KernelWarmup:
                 time.perf_counter() - jit_warmup_start,
             )
 
+        qwen_gdn_triton_warmup(self.runner)
         mrope_triton_warmup(self.runner)
         replayssm_lifecycle_warmup(self.runner)
         if enable_jit_warmup and self.vllm_config.cache_config.enable_prefix_caching:
@@ -395,13 +403,16 @@ class KernelWarmup:
             logger.info_once("Skipping FlashInfer autotune because it is disabled.")
         elif has_flashinfer() and current_platform.has_device_capability(90):
             with _outside_kv_cache_transient_window(worker):
-                flashinfer_autotune(self.runner, autotune_kernels=self.autotune_kernels)
+                flashinfer_autotune(
+                    self.runner,
+                    autotune_flashinfer_kernels=self.autotune_flashinfer_kernels,
+                )
 
         _warmup_flashinfer_attention(worker)
 
-    def autotune_kernels(self) -> None:
-        """Autotune the model's own kernels inside the FlashInfer autotune
-        context.
+    def autotune_flashinfer_kernels(self) -> None:
+        """Autotune the model's own FlashInfer kernels inside the FlashInfer
+        autotune context.
 
         Also run by the weight-cache daemon, which has no worker.
         """
@@ -624,7 +635,7 @@ def flashinfer_autotune(
     runner: "GPUModelRunner",
     *,
     skip_attn: bool = False,
-    autotune_kernels: Callable[[], None] | None = None,
+    autotune_flashinfer_kernels: Callable[[], None] | None = None,
 ) -> None:
     """Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
@@ -637,7 +648,8 @@ def flashinfer_autotune(
     Args:
         runner: The model runner to tune.
         skip_attn: Additionally skip attention in the tuning dummy runs.
-        autotune_kernels: The model's `KernelWarmup.autotune_kernels`.
+        autotune_flashinfer_kernels: The model's
+            `KernelWarmup.autotune_flashinfer_kernels`.
 
     With PP > 1, stages run different layers and may profile different ops,
     so each stage's TP group tunes separately with its own cache file;
@@ -718,8 +730,8 @@ def flashinfer_autotune(
                 _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
                 _run_flashinfer_autotune_mm_encoder(runner)
             replayssm_autotune_warmup(runner)
-            if autotune_kernels is not None:
-                autotune_kernels()
+            if autotune_flashinfer_kernels is not None:
+                autotune_flashinfer_kernels()
     finally:
         set_autotune_process_group(None)
 

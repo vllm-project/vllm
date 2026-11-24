@@ -26,12 +26,9 @@ class KimiK3KernelWarmup(KernelWarmup):
         # XPU shares this model class but not these kernels.
         if not current_platform.is_rocm():
             return
-        layer = next(
-            (m for m in self.model.modules() if isinstance(m, KimiK3DeltaAttention)),
-            None,
-        )
-        if layer is not None and self.vllm_config.kernel_config.enable_jit_warmup:
-            _warm_gluon_chunk_kda(layer, self.vllm_config.model_config.dtype)
+        layers = self.find_modules(KimiK3DeltaAttention)
+        if layers and self.vllm_config.kernel_config.enable_jit_warmup:
+            _warm_gluon_chunk_kda(layers[0], self.vllm_config.model_config.dtype)
 
 
 @torch.inference_mode()

@@ -84,16 +84,9 @@ def _msa_prebuild_kwargs(
 class MiniMaxM3KernelWarmup(KernelWarmup):
     def warmup_model_runs(self, worker: "Worker") -> None:
         super().warmup_model_runs(worker)
-        sparse_module = next(
-            (
-                m
-                for m in self.model.modules()
-                if isinstance(m, MiniMaxM3SparseAttention)
-            ),
-            None,
-        )
-        if sparse_module is not None:
-            _warmup_msa(sparse_module, worker)
+        sparse_modules = self.find_modules(MiniMaxM3SparseAttention)
+        if sparse_modules:
+            _warmup_msa(sparse_modules[0], worker)
 
 
 @instrument(span_name="MiniMax M3 MSA warmup")

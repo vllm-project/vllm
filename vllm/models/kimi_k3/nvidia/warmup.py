@@ -27,18 +27,15 @@ class KimiK3KernelWarmup(KernelWarmup):
         # XPU shares this model class but not these kernels.
         if not current_platform.is_cuda():
             return
-        layers = self._kda_layers()
+        layers = self.find_modules(KimiK3DeltaAttention)
         if layers and self.vllm_config.kernel_config.enable_jit_warmup:
             with torch.inference_mode():
                 _warm_attn_res(worker)
                 _warm_recurrent_kda(layers[0], worker.model_config.dtype)
 
-    def autotune_kernels(self) -> None:
-        super().autotune_kernels()
-        autotune_kda_qkvg(self._kda_layers())
-
-    def _kda_layers(self) -> list[KimiK3DeltaAttention]:
-        return [m for m in self.model.modules() if isinstance(m, KimiK3DeltaAttention)]
+    def autotune_flashinfer_kernels(self) -> None:
+        super().autotune_flashinfer_kernels()
+        autotune_kda_qkvg(self.find_modules(KimiK3DeltaAttention))
 
 
 def _warm_attn_res(worker: Worker) -> None:

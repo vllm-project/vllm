@@ -15,9 +15,7 @@ if TYPE_CHECKING:
 class Step5KernelWarmup(KernelWarmup):
     def warmup_model_runs(self, worker: "Worker") -> None:
         super().warmup_model_runs(worker)
-        step5_dsa_warmup(
-            [m for m in self.model.modules() if isinstance(m, Step5Attention)], worker
-        )
+        step5_dsa_warmup(self.find_modules(Step5Attention), worker)
 
 
 def step5_dsa_warmup(layers: list["Step5Attention"], worker: "Worker") -> None:

@@ -381,10 +381,10 @@ def test_flashinfer_autotune_lifecycle(
     )
 
     if failure is None:
-        warmup.flashinfer_autotune(runner, autotune_kernels=events.model)
+        warmup.flashinfer_autotune(runner, autotune_flashinfer_kernels=events.model)
     else:
         with pytest.raises(RuntimeError, match="warmup failed"):
-            warmup.flashinfer_autotune(runner, autotune_kernels=events.model)
+            warmup.flashinfer_autotune(runner, autotune_flashinfer_kernels=events.model)
 
     kwargs = {"skip_ops": set(skip_ops)} if skip_ops else {}
     expected = []
