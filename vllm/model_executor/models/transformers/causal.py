@@ -35,7 +35,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.interfaces_base import VllmModelForTextGeneration
-from vllm.model_executor.models.transformers.fx_utils import forward_parameters
 from vllm.model_executor.models.transformers.utils import (
     init_on_device_without_buffers,
 )
@@ -55,13 +54,6 @@ logger = init_logger(__name__)
 
 OUTPUT_HEAD_ATTR = "output_head"
 """Attribute in which to store the output head."""
-
-_FORWARD_KWARGS = {
-    "return_dict": True,
-    "use_cache": False,
-    "output_router_logits": False,
-}
-"""`ForCausalLM.forward` arguments which must not ask the base model for more."""
 
 
 class _BaseModelOutput(BaseModelOutputWithPast):
@@ -141,8 +133,6 @@ class OutputHead:
     """The input size of the output embeddings."""
     renames: dict[str, str]
     """Checkpoint name -> vLLM name of the head's weights and their modules."""
-    forward_kwargs: dict[str, bool]
-    """The `_FORWARD_KWARGS` which `module.forward` takes."""
     scale: float = 1.0
     soft_cap: float | None = None
 
@@ -205,13 +195,11 @@ def to_output_head(
     for name, new_name in list(renames.items()):
         if "." in name:
             renames.setdefault(name.rpartition(".")[0], new_name.rpartition(".")[0])
-    parameters = forward_parameters(type(model))
     return OutputHead(
         model=model,
         output_embeddings=output_embeddings,
         in_features=embeddings.in_features,
         renames=renames,
-        forward_kwargs={k: v for k, v in _FORWARD_KWARGS.items() if k in parameters},
     )
 
 
@@ -227,7 +215,7 @@ def probe_output_head(
         return None
     hidden_states = 50 * torch.randn(1, 3, hidden_size)
     hidden_states[0, 0, :2] = torch.tensor([1.0, 1e6])
-    logits = model(inputs_embeds=hidden_states, **output_head.forward_kwargs).logits
+    logits = model(inputs_embeds=hidden_states).logits
     # A scale maps 1 to itself and a soft cap maps large logits to itself
     scale, soft_cap = logits[0, 0, :2].tolist()
     if torch.allclose(logits, scale * hidden_states):
@@ -314,7 +302,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
                 return None
             # Fails for heads which need more of the base model than its output
             hidden_states = torch.empty(1, 3, hidden_size, device="meta")
-            model(inputs_embeds=hidden_states, **output_head.forward_kwargs)
+            model(inputs_embeds=hidden_states)
         except Exception as e:
             logger.warning(
                 "Could not run the output head of %s, so `lm_head` and the "
@@ -338,7 +326,6 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         output_head.output_embeddings.project = self._project
         self.replace_modules(model, prefix=OUTPUT_HEAD_ATTR)
         self.init_parameters(model)
-        self.output_head_kwargs = output_head.forward_kwargs
         setattr(self, OUTPUT_HEAD_ATTR, model)
 
     def _project(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -371,7 +358,4 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         output_head = getattr(self, OUTPUT_HEAD_ATTR, None)
         if output_head is None:
             return self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
-        output = output_head(
-            inputs_embeds=hidden_states.unsqueeze(0), **self.output_head_kwargs
-        )
-        return output.logits.squeeze(0)
+        return output_head(inputs_embeds=hidden_states.unsqueeze(0)).logits.squeeze(0)
