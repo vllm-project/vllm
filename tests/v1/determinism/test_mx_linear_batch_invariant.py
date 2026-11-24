@@ -3,13 +3,26 @@
 """The MX linear kernels used under batch invariance must not depend on the
 number of rows."""
 
+import functools
+
 import pytest
 import torch
 from utils import requires_mx, skip_if_not_cuda
 
-from vllm.model_executor.kernels.linear import HummingMxfp8LinearKernel
+from vllm.model_executor.kernels.linear import (
+    EmulationMxfp8LinearKernel,
+    HummingMxfp8LinearKernel,
+    init_mxfp8_linear_kernel,
+)
+from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+    _FlashInferMmMxfp8LinearKernel,
+)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    mxfp8_e4m3_quantize,
+)
+from vllm.utils.flashinfer import has_flashinfer_batch_invariant_quantizers
 from vllm.utils.import_utils import has_humming
 from vllm.utils.torch_utils import set_random_seed
 
@@ -167,6 +180,86 @@ def test_mxfp8_linear_is_batch_invariant(n: int, k: int, dtype: torch.dtype):
         f"MXFP8 linear depends on the row count (N={n}, K={k}, {dtype}):\n  "
         + "\n  ".join(failures)
     )
+
+
+requires_flashinfer_batch_invariant = pytest.mark.skipif(
+    not has_flashinfer_batch_invariant_quantizers(),
+    reason="FlashInfer's batch-invariant MXFP8 quantizer and GEMM need FlashInfer "
+    ">= 0.7.4 on SM100 / SM103 / SM107",
+)
+
+
+@skip_if_not_cuda
+@requires_flashinfer_batch_invariant
+def test_flashinfer_mxfp8_linear_is_batch_invariant(default_vllm_config, dist_init):
+    """Under VLLM_BATCH_INVARIANT (set by conftest) on SM100-family parts the
+    layer selects the FlashInfer MXFP8 kernel, whose quantizer is the one a
+    direct `flashinfer.mxfp8_quantize(..., batch_invariant=True)` call runs, and
+    row 0 alone gives the bits it has inside a 257-row batch: quantizer codes
+    and scales, and the GEMM output."""
+    from flashinfer import mxfp8_quantize
+
+    n, k = 4096, 2048
+    set_random_seed(SEED)
+    layer = ColumnParallelLinear(
+        input_size=k,
+        output_size=n,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        quant_config=ModelOptMxFp8Config(
+            is_checkpoint_mxfp8_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        ),
+        prefix="model.layers.0.self_attn.o_proj",
+        disable_tp=True,
+    ).cuda()
+    kernel = getattr(layer.quant_method, "kernel", None)
+    assert isinstance(kernel, _FlashInferMmMxfp8LinearKernel), type(kernel)
+    weight, weight_scale = _mxfp8_weights(n, k)
+    layer.weight.data.copy_(weight)
+    layer.weight_scale.data.copy_(weight_scale)
+    layer.quant_method.process_weights_after_loading(layer)
+    x = torch.randn(257, k, device="cuda", dtype=torch.bfloat16)
+
+    # the layer's quantizer: FlashInfer's batch-invariant one, row 0 alone == inside
+    quantize = functools.partial(
+        mxfp8_e4m3_quantize, is_sf_swizzled_layout=True, batch_invariant=True
+    )
+    codes, sf = quantize(x)
+    ref_codes, ref_sf = mxfp8_quantize(
+        x,
+        is_sf_swizzled_layout=True,
+        alignment=32,
+        backend="auto",
+        batch_invariant=True,
+    )
+    assert torch.equal(codes.view(torch.uint8), ref_codes.view(torch.uint8))
+    assert torch.equal(sf, ref_sf)
+    codes_0, sf_0 = quantize(x[:1])
+    assert torch.equal(codes_0[0].view(torch.uint8), codes[0].view(torch.uint8))
+    # row 0's scale bytes sit in the first 128-row tile of the swizzled buffer
+    first_tile = sf[: sf_0.numel()]
+    assert torch.equal(
+        sf_0.view(-1, 32, 4, 4)[:, 0, 0], first_tile.view(-1, 32, 4, 4)[:, 0, 0]
+    )
+    # the layer path (quantizer + GEMM)
+    out = layer.quant_method.apply(layer, x)
+    out_0 = layer.quant_method.apply(layer, x[:1])
+    assert torch.equal(out_0[0], out[0])
+
+
+@skip_if_not_cuda
+@requires_flashinfer_batch_invariant
+def test_flashinfer_mxfp8_selection_under_mode(default_vllm_config):
+    """Under the mode the FlashInfer MXFP8 kernel is selected for a layer inside
+    its shape rules; K % 32 != 0, N or K below 128 and activation rows over
+    128 KiB keep the Emulation fallback."""
+    kernel = init_mxfp8_linear_kernel(weight_shape=(4096, 2048))
+    assert isinstance(kernel, _FlashInferMmMxfp8LinearKernel), type(kernel)
+    for weight_shape in [(4096, 4112), (64, 4096), (4096, 64), (256, 65568)]:
+        kernel = init_mxfp8_linear_kernel(weight_shape=weight_shape)
+        assert type(kernel) is EmulationMxfp8LinearKernel, weight_shape
 
 
 @skip_if_not_cuda

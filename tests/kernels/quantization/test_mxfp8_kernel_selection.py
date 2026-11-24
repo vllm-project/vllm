@@ -34,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import PlatformEnum
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.flashinfer import has_flashinfer_batch_invariant_quantizers
 
 pytestmark = pytest.mark.cpu_test
 
@@ -160,15 +161,18 @@ def test_init_mxfp8_linear_kernel(capability, weight_shape, expected_kernel_cls)
     [
         (80, "auto", EmulationMxfp8LinearKernel),
         (90, "auto", HummingMxfp8LinearKernel),
-        (100, "auto", EmulationMxfp8LinearKernel),
-        (100, "flashinfer_cutedsl", EmulationMxfp8LinearKernel),
+        (100, "auto", None),
+        (100, "flashinfer_cutedsl", None),
     ],
 )
 def test_batch_invariance_selects_batch_invariant_kernel(
     monkeypatch, capability, linear_backend, expected_kernel_cls
 ):
-    """Marlin (SM80 default) and FlashInfer (SM100 default) tile by row count,
-    so VLLM_BATCH_INVARIANT must not select them, even when requested. SM90
+    """Marlin (SM80 default) and FlashInfer's default MXFP8 backends (SM100
+    default) tile by row count, so VLLM_BATCH_INVARIANT must not select them,
+    even when requested, unless FlashInfer's batch-invariant MXFP8 quantizer and
+    GEMM are available on this machine (FlashInfer >= 0.7.4, SM100 / SM103 /
+    SM107): then the FlashInfer CuTe-DSL kernel runs them and is selected. SM90
     must keep Humming, its default, instead of falling to Emulation."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     with (
@@ -191,6 +195,12 @@ def test_batch_invariance_selects_batch_invariant_kernel(
         ),
     ):
         kernel = init_mxfp8_linear_kernel(weight_shape=_SUPPORTED_SHAPE)
+        if expected_kernel_cls is None:
+            expected_kernel_cls = (
+                FlashInferCutedslMxfp8LinearKernel
+                if has_flashinfer_batch_invariant_quantizers()
+                else EmulationMxfp8LinearKernel
+            )
 
     assert type(kernel) is expected_kernel_cls
 

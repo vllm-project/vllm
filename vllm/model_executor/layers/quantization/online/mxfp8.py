@@ -22,6 +22,9 @@ if TYPE_CHECKING:
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
+from vllm.model_executor.determinism.batch_invariant import (
+    flashinfer_quantizers_enabled,
+)
 from vllm.model_executor.kernels.linear import init_mxfp8_linear_kernel
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
@@ -99,7 +102,11 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
             return
 
         weight = self.get_weight_for_quantization(layer)
-        weight_fp8, weight_scale = mxfp8_e4m3_quantize(weight.contiguous())
+        # Under the mode the weights are quantized by the same batch-invariant
+        # quantizer as the activations.
+        weight_fp8, weight_scale = mxfp8_e4m3_quantize(
+            weight.contiguous(), batch_invariant=flashinfer_quantizers_enabled()
+        )
 
         layer.input_scale = None
         replace_parameter(layer, "weight", weight_fp8.data)

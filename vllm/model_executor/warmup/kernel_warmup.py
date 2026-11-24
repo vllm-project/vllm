@@ -58,6 +58,9 @@ from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 
 if TYPE_CHECKING:
     from vllm.config import MultiModalConfig
+    from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+        _FlashInferMmMxfp8LinearKernel,
+    )
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -166,6 +169,74 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     ll_bf16_gemm_kernel.warmup(
         shapes=shapes,
         m_values=_LL_BF16_WARMUP_M_RANGE,
+    )
+
+
+def _flashinfer_mxfp8_kernel(
+    module: torch.nn.Module,
+) -> "_FlashInferMmMxfp8LinearKernel | None":
+    """The FlashInfer `mm_mxfp8` kernel of a linear layer's quant method (held
+    by the method or by its compressed-tensors / Quark scheme), or None."""
+    from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+        _FlashInferMmMxfp8LinearKernel,
+    )
+
+    quant_method = getattr(module, "quant_method", None)
+    for holder in (quant_method, getattr(quant_method, "scheme", None)):
+        for attr in ("kernel", "ocp_mx_linear"):
+            kernel = getattr(holder, attr, None)
+            if isinstance(kernel, _FlashInferMmMxfp8LinearKernel):
+                return kernel
+    return None
+
+
+def _warmup_flashinfer_batch_invariant_mxfp8(
+    models: list[torch.nn.Module], m_values: list[int]
+) -> None:
+    """Under VLLM_BATCH_INVARIANT=1 with FlashInfer's batch-invariant kernels:
+    run the MXFP8 linear layers (quantizer and GEMM) at the CUDA graph sizes
+    before capture, since FlashInfer compiles one kernel per configuration on
+    first use and the configuration follows the batch."""
+    if not envs.VLLM_BATCH_INVARIANT or not m_values:
+        return
+    from vllm.model_executor.determinism import batch_invariant as bi
+
+    if not bi.flashinfer_quantizers_enabled():
+        return
+    layers: dict[
+        tuple[int, int, torch.dtype],
+        tuple[_FlashInferMmMxfp8LinearKernel, torch.nn.Module],
+    ] = {}
+    for model in models:
+        for module in model.modules():
+            kernel = _flashinfer_mxfp8_kernel(module)
+            weight = getattr(module, "weight", None)
+            dtype = getattr(module, "params_dtype", None)
+            if kernel is None or not isinstance(weight, torch.Tensor):
+                continue
+            if weight.dim() != 2 or not isinstance(dtype, torch.dtype):
+                continue
+            _, k = kernel.config.weight_shape
+            # the GEMM runs the padded N of the stored weight ([K, N] or [N, K])
+            n = weight.shape[1] if weight.shape[0] == k else weight.shape[0]
+            layers.setdefault((n, k, dtype), (kernel, module))
+    if not layers:
+        return
+
+    start = time.perf_counter()
+    max_m = max(m_values)
+    with torch.inference_mode():
+        for (_, k, dtype), (kernel, layer) in layers.items():
+            x = torch.zeros((max_m, k), dtype=dtype, device=layer.weight.device)
+            for m in m_values:
+                kernel.apply_weights(layer, x[:m])
+    torch.accelerator.synchronize()
+    logger.info(
+        "FlashInfer batch-invariant MXFP8: warmed %d linear shapes at %d batch "
+        "sizes in %.1fs.",
+        len(layers),
+        len(m_values),
+        time.perf_counter() - start,
     )
 
 
@@ -344,6 +415,14 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         # https://github.com/vllm-project/vllm/pull/47451
         _warmup_skinny_gemm(worker.get_model())
         cutedsl_warmup()
+
+    _warmup_flashinfer_batch_invariant_mxfp8(
+        [m for m in (worker.get_model(), worker.get_draft_model()) if m is not None],
+        sorted(
+            set(cudagraph_capture_sizes)
+            | {worker.scheduler_config.max_num_batched_tokens}
+        ),
+    )
 
     if process_local_only:
         return
