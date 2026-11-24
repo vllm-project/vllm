@@ -957,16 +957,17 @@ class GemmRsAr:
             FlashInferCutlassMxfp8LinearKernel,
         )
 
-        # Batch-invariant runs keep the linear followed by the reduce-scatter:
-        # the fused kernel switches by token count.
-        if envs.VLLM_BATCH_INVARIANT:
-            return False
         # Called before weight loading; online quantization starts on meta.
         if isinstance(linear.quant_method, UnquantizedLinearMethod):
             dtype, k_alignment = "bf16", 64
             if linear.weight.dtype != torch.bfloat16:
                 return False
         else:
+            # Batch-invariant runs keep the MXFP8 linear followed by the
+            # reduce-scatter: the fused kernel quantizes the activation itself
+            # and switches by token count.
+            if envs.VLLM_BATCH_INVARIANT:
+                return False
             method = getattr(linear, "scheme", linear.quant_method)
             kernel = getattr(method, "kernel", None)
             if not isinstance(

@@ -325,6 +325,44 @@ def test_minimax_m3_fused_gemm1_off_under_batch_invariance(
 
 
 @skip_if_not_cuda
+@requires_flashinfer_batch_invariant
+@pytest.mark.parametrize("n,k", [(4096, 2048), (512, 32768)])
+def test_flashinfer_mxfp8_warmup_covers_the_runtime(
+    default_vllm_config, dist_init, n: int, k: int
+):
+    """Under the mode the layer registers a compile-only warm-up of its
+    quantizer and GEMM; after it a sweep over every token count up to
+    max_num_batched_tokens compiles nothing: FlashInfer's compile caches (the
+    quantizer's, the GEMM's and the chunked-K fixup's, which (512, 32768) takes)
+    hold what the runtime asks for."""
+    from flashinfer.batch_invariant.quantization import mx_kernel
+    from flashinfer.gemm.batch_invariant import fixup
+    from flashinfer.gemm.batch_invariant.blocks import compile_blockscaled
+
+    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+
+    max_tokens = 1024
+    default_vllm_config.scheduler_config.max_num_batched_tokens = max_tokens
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8, 16]
+    registry = JitWarmupRegistry(default_vllm_config)
+    with registry.activate():
+        layer = _mxfp8_column_linear(n, k, "model.layers.0.self_attn.o_proj")
+    assert len(registry) == 1
+    registry.warmup()
+
+    caches = (
+        mx_kernel._compile_bucket,
+        compile_blockscaled.get_compiled_blockscaled,
+        fixup.get_fixup,
+    )
+    misses = [cache.cache_info().misses for cache in caches]
+    x = torch.randn(max_tokens, k, device="cuda", dtype=torch.bfloat16)
+    for num_tokens in range(1, max_tokens + 1):
+        layer.quant_method.apply(layer, x[:num_tokens])
+    assert [cache.cache_info().misses for cache in caches] == misses
+
+
+@skip_if_not_cuda
 @pytest.mark.skipif(not has_humming(), reason="requires Humming")
 @pytest.mark.parametrize("n,k", MXFP8_CASES)
 def test_humming_mxfp8_linear_is_batch_invariant(

@@ -157,23 +157,26 @@ def test_init_mxfp8_linear_kernel(capability, weight_shape, expected_kernel_cls)
 
 
 @pytest.mark.parametrize(
-    ("capability", "linear_backend", "expected_kernel_cls"),
+    ("capability", "linear_backend", "params_dtype", "expected_kernel_cls"),
     [
-        (80, "auto", EmulationMxfp8LinearKernel),
-        (90, "auto", HummingMxfp8LinearKernel),
-        (100, "auto", None),
-        (100, "flashinfer_cutedsl", None),
+        (80, "auto", torch.bfloat16, EmulationMxfp8LinearKernel),
+        (90, "auto", torch.bfloat16, HummingMxfp8LinearKernel),
+        (100, "auto", torch.bfloat16, None),
+        (100, "flashinfer_cutedsl", torch.bfloat16, None),
+        (100, "auto", torch.float32, EmulationMxfp8LinearKernel),
     ],
 )
 def test_batch_invariance_selects_batch_invariant_kernel(
-    monkeypatch, capability, linear_backend, expected_kernel_cls
+    monkeypatch, capability, linear_backend, params_dtype, expected_kernel_cls
 ):
     """Marlin (SM80 default) and FlashInfer's default MXFP8 backends (SM100
     default) tile by row count, so VLLM_BATCH_INVARIANT must not select them,
     even when requested, unless FlashInfer's batch-invariant MXFP8 quantizer and
     GEMM are available on this machine (FlashInfer >= 0.7.4, SM100 / SM103 /
-    SM107): then the FlashInfer CuTe-DSL kernel runs them and is selected. SM90
-    must keep Humming, its default, instead of falling to Emulation."""
+    SM107): then the FlashInfer CuTe-DSL kernel runs them and is selected, for
+    bf16 and fp16 layers; an fp32 layer keeps Emulation, as the batch-invariant
+    GEMM writes bf16 / fp16. SM90 must keep Humming, its default, instead of
+    falling to Emulation."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     with (
         _patch_cuda_platform(capability),
@@ -194,7 +197,9 @@ def test_batch_invariance_selects_batch_invariant_kernel(
             HummingMxfp8LinearKernel, "executed_activation_key", return_value=None
         ),
     ):
-        kernel = init_mxfp8_linear_kernel(weight_shape=_SUPPORTED_SHAPE)
+        kernel = init_mxfp8_linear_kernel(
+            weight_shape=_SUPPORTED_SHAPE, params_dtype=params_dtype
+        )
         if expected_kernel_cls is None:
             expected_kernel_cls = (
                 FlashInferCutedslMxfp8LinearKernel

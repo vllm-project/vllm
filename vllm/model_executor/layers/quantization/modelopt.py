@@ -3108,6 +3108,7 @@ def select_linear_kernel(
             weight_shape=weight_shape or layer.weight.shape,
             bmm_batch_size=getattr(layer, "bmm_batch_size", None),
             activation_quant_key=spec.activation,
+            params_dtype=getattr(layer, "params_dtype", None),
         )
     # fp8 family: init_fp8 routes block-vs-plain itself off the activation key,
     # and needs a real key -- weight-only fp8 is not a ModelOpt format.

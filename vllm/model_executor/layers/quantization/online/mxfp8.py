@@ -87,7 +87,9 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
             **extra_weight_attrs,
         )
 
-        self.kernel = init_mxfp8_linear_kernel(weight_shape=layer.weight.shape)
+        self.kernel = init_mxfp8_linear_kernel(
+            weight_shape=layer.weight.shape, params_dtype=params_dtype
+        )
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if is_weights_pre_processed():

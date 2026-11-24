@@ -56,25 +56,29 @@ def _check_mm_mxfp8_shape(weight_shape: tuple[int, int]) -> tuple[bool, str | No
         )
     if N < 128:
         return False, f"mm_mxfp8 requires N >= 128, got N={N}."
-    return _check_batch_invariant_shape(weight_shape)
+    return True, None
 
 
-def _check_batch_invariant_shape(
-    weight_shape: tuple[int, int],
-) -> tuple[bool, str | None]:
+def _check_batch_invariant_rules(c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
     """Under VLLM_BATCH_INVARIANT with FlashInfer's batch-invariant kernels, the
-    limit they add to `_check_mm_mxfp8_shape`'s rules (activation rows of at
-    most 128 KiB; bf16 and fp16 activations have the same row bytes); a layer
-    outside it falls through to the next batch-invariant kernel as before."""
+    limits they add to `_check_mm_mxfp8_shape`'s rules: activation rows of at
+    most 128 KiB (bf16 and fp16 activations have the same row bytes) and a bf16
+    or fp16 layer, the GEMM's output types; a layer outside them falls through
+    to the next batch-invariant kernel as before."""
     if not (envs.VLLM_BATCH_INVARIANT and has_flashinfer_batch_invariant_quantizers()):
         return True, None
-    _, K = weight_shape
+    _, K = c.weight_shape
     if not flashinfer_batch_invariant_quantizer_fits(
         K, torch.bfloat16, MXFP8_BLOCK_SIZE
     ):
         return (
             False,
             f"FlashInfer's batch-invariant MXFP8 quantizer does not take K={K} rows.",
+        )
+    if c.params_dtype not in (None, torch.bfloat16, torch.float16):
+        return False, (
+            "FlashInfer's batch-invariant MXFP8 GEMM does not write "
+            f"{c.params_dtype} outputs."
         )
     return True, None
 
@@ -173,20 +177,24 @@ class _FlashInferBatchInvariantMxfp8Warmup(
         m_values: tuple[int, ...],
     ) -> list[CompileKey]:
         trace = self._trace_dispatch(self.dispatch)
-        keys = trace(
-            num_tokens=WarmupIntRange(1, max_tokens + 1, advance=_next_row_count),
-            n=n,
-            k=k,
-            dtype=dtype,
-            device_index=device_index,
-        )
-        keys += trace(
-            num_tokens=WarmupChoices(*m_values),
-            n=n,
-            k=k,
-            dtype=dtype,
-            device_index=device_index,
-        )
+        try:
+            keys = trace(
+                num_tokens=WarmupIntRange(1, max_tokens + 1, advance=_next_row_count),
+                n=n,
+                k=k,
+                dtype=dtype,
+                device_index=device_index,
+            )
+            keys += trace(
+                num_tokens=WarmupChoices(*m_values),
+                n=n,
+                k=k,
+                dtype=dtype,
+                device_index=device_index,
+            )
+        except Exception as exc:
+            _warn_warmup_skipped(exc)
+            return []
         return list(dict.fromkeys(keys))
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -204,13 +212,36 @@ class _FlashInferBatchInvariantMxfp8Warmup(
 
         if compile_key in self._compiled_cache:
             return
-        dtype_str, k, quant_cfg, pdl = compile_key.quant
-        get_compiled_kernel(dtype_str, k, quant_cfg, MXFP8, DEFAULT_RULE, "128x4", pdl)
-        gemm_cfg, chunks, clusters, in_fmt, out_fmt, family = compile_key.gemm
-        get_compiled_blockscaled(gemm_cfg, chunks, clusters, in_fmt, out_fmt, family)
-        if chunks > 1 and not (gemm_cfg.cluster_k > 1 or gemm_cfg.cta_chunks):
-            get_fixup(chunks, out_fmt, False, False)
+        # The entries are cached on their arguments, so the calls below take
+        # FlashInfer's own positional / keyword split (mx_api.mx_quantize and
+        # gemm.batch_invariant.api._run_mx).
+        try:
+            dtype_str, k, quant_cfg, pdl = compile_key.quant
+            get_compiled_kernel(
+                dtype_str, k, quant_cfg, MXFP8, DEFAULT_RULE, "128x4", pdl
+            )
+            gemm_cfg, chunks, clusters, in_fmt, out_fmt, family = compile_key.gemm
+            get_compiled_blockscaled(
+                gemm_cfg, chunks, clusters, in_fmt, out_fmt, family=family
+            )
+            if not gemm_cfg.swap_ab and not (
+                chunks == 1 or gemm_cfg.cta_chunks or gemm_cfg.cluster_k > 1
+            ):
+                # The fixed-chunk split folds fp32 partials in the fixup kernel.
+                get_fixup(chunks, out_fmt, alpha_given=False)
+        except Exception as exc:
+            _warn_warmup_skipped(exc)
+            return
         self._compiled_cache[compile_key] = True
+
+
+def _warn_warmup_skipped(exc: Exception) -> None:
+    logger.warning_once(
+        "Skipping the compile-only warm-up of FlashInfer's batch-invariant MXFP8 "
+        "kernels (%s: %s); they compile on first use instead.",
+        type(exc).__name__,
+        str(exc),
+    )
 
 
 _BATCH_INVARIANT_WARMUP = _FlashInferBatchInvariantMxfp8Warmup()
@@ -223,7 +254,8 @@ class _FlashInferMmMxfp8LinearKernel(Mxfp8LinearKernel):
     activations with `mxfp8_quantize(..., batch_invariant=True)` and run
     `mm_mxfp8(..., batch_invariant=True)` in place of the backend named below:
     a row's output bits then do not depend on the batch. The shape rules are
-    `_check_mm_mxfp8_shape`'s with N padded to a multiple of 8.
+    `_check_mm_mxfp8_shape`'s with N padded to a multiple of 8, plus
+    `_check_batch_invariant_rules` under the mode.
     """
 
     supports_pre_processed_weights = True
@@ -305,7 +337,7 @@ class FlashInferCutlassMxfp8LinearKernel(_FlashInferMmMxfp8LinearKernel):
                 False,
                 f"mm_mxfp8 on SM12x requires N to be divisible by 32, got N={N}.",
             )
-        return True, None
+        return _check_batch_invariant_rules(c)
 
     # The CUTLASS MXFP8 GEMM requires N (output features) to be a multiple of 32.
     _N_ALIGNMENT = 32
@@ -383,7 +415,10 @@ class FlashInferCutedslMxfp8LinearKernel(_FlashInferMmMxfp8LinearKernel):
 
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
-        return _check_mm_mxfp8_shape(c.weight_shape)
+        can_implement, reason = _check_mm_mxfp8_shape(c.weight_shape)
+        if not can_implement:
+            return False, reason
+        return _check_batch_invariant_rules(c)
 
     # The CuTe-DSL MXFP8 GEMM stores its bf16/fp16 output with TMA, which needs
     # 16-byte aligned rows, so N must be a multiple of 8.

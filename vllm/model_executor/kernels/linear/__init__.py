@@ -1077,12 +1077,14 @@ def init_mxfp8_linear_kernel(
     weight_shape: tuple[int, int],
     bmm_batch_size: int | None = None,
     activation_quant_key: QuantKey | None = kMxfp8Dynamic,
+    params_dtype: torch.dtype | None = None,
 ) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
     current platform and `(N, K)` weight shape.
 
     Omitted activation keys preserve the existing W8A8 selection and A16
-    fallback. Explicit None requests weight-only execution.
+    fallback. Explicit None requests weight-only execution. `params_dtype`
+    is the layer's parameter and output dtype, None if unknown.
     Returns a placeholder for requantization sources, which have no kernel.
     """
     # TODO: migrate to oracle base method.
@@ -1094,6 +1096,7 @@ def init_mxfp8_linear_kernel(
         weight_shape=weight_shape,
         bmm_batch_size=bmm_batch_size,
         activation_quant_key=activation_quant_key,
+        params_dtype=params_dtype,
     )
 
     platform = current_platform._enum

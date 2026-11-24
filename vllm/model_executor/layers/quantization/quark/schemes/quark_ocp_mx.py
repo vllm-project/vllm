@@ -252,6 +252,7 @@ class QuarkOCP_MX(QuarkScheme, InputHadamardFusable):
             self.ocp_mx_linear = init_mxfp8_linear_kernel(
                 weight_shape=layer.weight.shape,
                 activation_quant_key=self.activation_quant_key,
+                params_dtype=params_dtype,
             )
             if current_platform.is_rocm():
                 expose_input_quant_key(layer, self.ocp_mx_linear)
