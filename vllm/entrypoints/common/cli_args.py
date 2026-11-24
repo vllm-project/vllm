@@ -176,7 +176,7 @@ class BaseFrontendArgs:
     `--enable-log-requests`. Output text and finish reasons are logged at INFO,
     while output token IDs are logged at DEBUG."""
     enable_log_deltas: bool = True
-    """If set to False, output deltas will not be logged. Relevant only if 
+    """If set to False, output deltas will not be logged. Relevant only if
     --enable-log-outputs is set.
     """
     cohere_is_reasoning_model: bool = True
@@ -234,6 +234,13 @@ class BaseFrontendArgs:
     """
     fingerprint_value: str | None = None
     """Literal fingerprint string used when `--fingerprint-mode=custom`."""
+    max_tokenize_tokens: int | None = None
+    """Maximum number of tokens allowed in `/tokenize`, `/detokenize`, and
+    `/v1/messages/count_tokens` requests. Defaults to `VLLM_MAX_TOKENIZE_TOKENS`
+    if set, otherwise `max(max_model_len * 2, 131072)`. Set to `<= 0` to
+    disable the limit.
+    Currently enforced on standard template rendering paths
+    in the Python frontend (GPT-OSS Harmony rendering is not yet covered)."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -422,10 +429,15 @@ class FrontendArgs(BaseFrontendArgs):
 
 def resolve_default_chat_template_kwargs(
     args: argparse.Namespace,
+    tokenizer_mode: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve renderer defaults, including the dedicated Cohere format flag."""
+    """Resolve renderer defaults, including the dedicated Cohere format flag.
+
+    `cohere_format` is only injected for `--tokenizer-mode cohere`; other
+    renderers don't consume it.
+    """
     kwargs = dict(args.default_chat_template_kwargs or {})
-    if getattr(args, "cohere_format", None):
+    if getattr(args, "cohere_format", None) and tokenizer_mode == "cohere":
         kwargs.setdefault("cohere_format", args.cohere_format)
     return kwargs
 

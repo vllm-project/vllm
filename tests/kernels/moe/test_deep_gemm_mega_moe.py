@@ -12,6 +12,7 @@ import torch.nn.functional as F
 
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_BF16,
+    MEGA_MOE_FP8_BLOCK_SM90,
     MEGA_MOE_MXFP4,
     MEGA_MOE_MXFP4_SM90,
     MEGA_MOE_NVFP4,
@@ -1561,6 +1562,131 @@ def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_n
             _expert(
                 x[token], w13[e], w2[e], topk_weights[token, slot], fmt, act, l2_scale
             ),
+        )
+
+    assert output.dtype == torch.bfloat16
+    assert _calc_diff(output, expected) < 1e-3
+    assert F.cosine_similarity(output.float(), expected, dim=-1).min() > 0.99
+
+
+def _block_fp8_checkpoint(n: int, k: int, device: torch.device):
+    """Block-FP8 weight, its 128x128 scales (spread so a misplaced one shows)
+    and the dequantized weight."""
+    weight = torch.randn(n, k, device=device).to(torch.float8_e4m3fn)
+    scale = (torch.rand(n // 128, k // 128, device=device) + 0.5) / k**0.5
+    full = scale.repeat_interleave(128, 0).repeat_interleave(128, 1)
+    return weight, scale, weight.float() * full
+
+
+@pytest.mark.skipif(
+    not (
+        has_sm90_mega_moe
+        and hasattr(_import_deep_gemm(), "transform_fp8_block_sf_for_sm90_mega_moe")
+    ),
+    reason="The SM90 block-FP8 MegaMoE kernel requires SM90 and DeepGEMM",
+)
+@pytest.mark.parametrize("fuse_shared", [False, True])
+@pytest.mark.parametrize(
+    "act_name",
+    [
+        name
+        for name, act in ACTIVATIONS.items()
+        if act.name in MEGA_MOE_FP8_BLOCK_SM90.activations
+    ],
+)
+def test_deep_gemm_mega_moe_fp8_block_sm90_matches_reference(
+    dist_init, act_name, fuse_shared
+):
+    """A 128x128 block-FP8 checkpoint loaded through the GLM experts matches
+    the dequantized reference."""
+    from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
+
+    fmt, act = MEGA_MOE_FP8_BLOCK_SM90, ACTIVATIONS[act_name]
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=NUM_TOKENS),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    with torch.device(device):
+        experts = Glm5NextMegaMoEExperts(
+            vllm_config,  # type: ignore[arg-type]
+            weight_block_size=(128, 128),
+            num_shared_experts=int(fuse_shared),
+            num_experts=NUM_EXPERTS,
+            num_local_experts=NUM_EXPERTS,
+            experts_start_idx=0,
+            top_k=TOP_K,
+            hidden_size=HIDDEN,
+            intermediate_size=INTER,
+            activation=act,
+            prefix=f"model.layers.0.{fmt.name}.{act_name}.{fuse_shared}",
+        )
+    assert experts.weight_format == fmt
+    assert experts.has_fused_shared_experts == fuse_shared
+
+    def shards(w13_ckpt, w2_ckpt):
+        """`(shard_id, param name, weight, block scale)` of one expert."""
+        (w13, s13, _), (w2, s2, _) = w13_ckpt, w2_ckpt
+        blocks = INTER // 128
+        return (
+            ("w1", "w13", w13[:INTER], s13[:blocks]),
+            ("w3", "w13", w13[INTER:], s13[blocks:]),
+            ("w2", "w2", w2, s2),
+        )
+
+    w13 = torch.empty(NUM_EXPERTS, 2 * INTER, HIDDEN, device=device)
+    w2 = torch.empty(NUM_EXPERTS, HIDDEN, INTER, device=device)
+    for e in range(NUM_EXPERTS):
+        w13_ckpt = _block_fp8_checkpoint(2 * INTER, HIDDEN, device)
+        w2_ckpt = _block_fp8_checkpoint(HIDDEN, INTER, device)
+        w13[e], w2[e] = w13_ckpt[2], w2_ckpt[2]
+        for shard_id, name, weight, scale in shards(w13_ckpt, w2_ckpt):
+            for suffix, tensor in (("weight", weight), ("weight_scale_inv", scale)):
+                param = getattr(experts, f"{name}_{suffix}")
+                assert experts.weight_loader(
+                    param,
+                    tensor,
+                    f"experts.{name}_{suffix}",
+                    shard_id=shard_id,
+                    expert_id=e,
+                    return_success=True,
+                )
+
+    shared_ckpt = (
+        _block_fp8_checkpoint(2 * INTER, HIDDEN, device),
+        _block_fp8_checkpoint(HIDDEN, INTER, device),
+    )
+    reference_shared = _ReferenceSharedExpert(
+        shared_ckpt[0][2], shared_ckpt[1][2], fmt.hidden_quant, act
+    )
+    if fuse_shared:
+        projs = {"w1": "gate_proj", "w3": "up_proj", "w2": "down_proj"}
+        for shard_id, _, weight, scale in shards(*shared_ckpt):
+            prefix = f"mlp.shared_experts.{projs[shard_id]}"
+            experts.load_shared_expert_weight(f"{prefix}.weight", weight)
+            experts.load_shared_expert_weight(f"{prefix}.weight_scale_inv", scale)
+    experts.finalize_block_fp8_weights()
+
+    hidden_states = torch.randn(NUM_TOKENS, HIDDEN, device=device).bfloat16()
+    scores = torch.randn(NUM_TOKENS, NUM_EXPERTS, device=device)
+    topk_weights, topk_ids = torch.topk(scores.softmax(-1), TOP_K, dim=-1)
+
+    output = experts(
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        None if fuse_shared else reference_shared,
+    )
+
+    x = _round_trip(hidden_states.float(), fmt.hidden_quant)
+    expected = reference_shared(hidden_states).float()
+    for e in range(NUM_EXPERTS):
+        token, slot = (topk_ids == e).nonzero(as_tuple=True)
+        expected.index_add_(
+            0,
+            token,
+            _expert(x[token], w13[e], w2[e], topk_weights[token, slot], fmt, act, 1.0),
         )
 
     assert output.dtype == torch.bfloat16

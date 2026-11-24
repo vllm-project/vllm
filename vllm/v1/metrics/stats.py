@@ -203,7 +203,8 @@ class SchedulerIterationDetails:
     num_ctx_tokens: int
     num_generation_requests: int
     num_generation_tokens: int
-    elapsed_ms: float
+    # GPU time, measured by the output worker; None where it does not time.
+    elapsed_ms: float | None = None
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
     is_dummy: bool = False
@@ -238,7 +239,9 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
-    iteration_details: SchedulerIterationDetails | None = None
+    # Iterations to report: timed on the GPU by the output worker, or untimed
+    # from EngineCore.
+    iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
@@ -690,14 +693,14 @@ class LoRAStats:
 class LoRARequestStates:
     """A per-LoRA count of running and waiting requests."""
 
-    def __init__(self, log_stats: bool = False):
-        self.log_stats = log_stats
+    def __init__(self, collect_stats: bool = False):
+        self.collect_stats = collect_stats
         self.requests: defaultdict[str, LoRAStats] = defaultdict(LoRAStats)
 
     def _request_update(
         self, req_id: str, lora_name: str | None, waiting: bool, running: bool
     ):
-        if not self.log_stats or lora_name is None:
+        if not self.collect_stats or lora_name is None:
             return
 
         lora_stats = self.requests[lora_name]
@@ -715,7 +718,7 @@ class LoRARequestStates:
         self._request_update(req_id, lora_name, waiting=False, running=False)
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
-        if not self.log_stats or scheduler_stats is None:
+        if not self.collect_stats or scheduler_stats is None:
             return
         for lora_name, stats in self.requests.items():
             scheduler_stats.waiting_lora_adapters[lora_name] = len(stats.waiting)

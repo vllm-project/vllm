@@ -123,11 +123,14 @@ def sliding_window_layer(
 
 
 def mamba_layer(
-    *, mamba_cache_mode: str = "none", num_speculative_blocks: int = 0, **spec_kwargs
+    *,
+    enable_prefix_caching: bool = False,
+    num_speculative_blocks: int = 0,
+    **spec_kwargs,
 ) -> KVCacheLayerConfig:
     return MambaManager.layer_config(
         MambaSpec(**spec_kwargs),
-        mamba_cache_mode=mamba_cache_mode,
+        enable_prefix_caching=enable_prefix_caching,
         num_speculative_blocks=num_speculative_blocks,
     )
 
@@ -218,6 +221,7 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
         self.manager.lookup.return_value = LookupResult.MISS
+        self.manager.prepare_store.return_value.keys_to_retry = []
         self.manager.get_load_source.return_value = CacheHitSource.EXTERNAL_UNSPECIFIED
         self.manager.get_stats.return_value = None
         self.manager.config_info.return_value = [{}]
@@ -381,7 +385,7 @@ class RequestRunner:
         self.scheduler = scheduler_cls(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
-            log_stats=True,
+            collect_stats=True,
             structured_output_manager=StructuredOutputManager(vllm_config),
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
