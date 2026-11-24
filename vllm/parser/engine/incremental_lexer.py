@@ -176,11 +176,6 @@ class IncrementalLexer:
             counts[0] = token_count
         return counts
 
-    def _pop_token_count(self, length: int) -> int:
-        token_count = sum(self._token_counts[:length])
-        del self._token_counts[:length]
-        return token_count
-
     def _drain(self, *, final: bool = False) -> list[LexToken]:
         tokens: list[LexToken] = []
         first_chars = self._literal_first_chars
@@ -188,27 +183,40 @@ class IncrementalLexer:
         has_only_literals = self._has_only_literals
         literals_by_first = self._literals_by_first
         prefix_set = self._prefix_set
+        max_literal_len = self._max_literal_len
 
-        while self.buffer:
+        # Emit against a cursor instead of re-slicing ``self.buffer`` for every
+        # token: a whole non-streaming output arrives in one ``feed`` call, so
+        # slicing would make ``_drain`` quadratic in its length.
+        buf = self.buffer
+        counts = self._token_counts
+        end = len(buf)
+        pos = 0
+        count_pos = 0
+
+        def pop_count(length: int) -> int:
+            nonlocal count_pos
+            total = sum(counts[count_pos : count_pos + length])
+            count_pos += length
+            return total
+
+        while pos < end:
             if has_only_literals and first_chars:
-                has_potential = False
-                for ch in self.buffer:
-                    if ch in first_chars:
-                        has_potential = True
+                for i in range(pos, end):
+                    if buf[i] in first_chars:
                         break
-                if not has_potential:
+                else:
                     tokens.append(
-                        LexToken(content_terminal, self.buffer, sum(self._token_counts))
+                        LexToken(content_terminal, buf[pos:], sum(counts[count_pos:]))
                     )
-                    self.buffer = ""
-                    self._token_counts.clear()
+                    pos = end
                     break
 
             best_match: tuple[str, str, int] | None = None
 
-            first = self.buffer[0]
+            first = buf[pos]
             for lit, name in literals_by_first.get(first, ()):
-                if self.buffer.startswith(lit) and (
+                if buf.startswith(lit, pos) and (
                     best_match is None or len(lit) > best_match[2]
                 ):
                     best_match = (name, lit, len(lit))
@@ -217,11 +225,12 @@ class IncrementalLexer:
             # of a longer literal, wait for the next chunk. For example,
             # "<invoke name=" should not be emitted before the next chunk
             # proves whether this is the quoted form '<invoke name="'.
-            if self.buffer in prefix_set and not final:
+            rest = buf[pos:] if end - pos <= max_literal_len else ""
+            if rest and rest in prefix_set and not final:
                 if best_match is not None:
                     longer_match = False
                     for lit, _ in literals_by_first.get(first, ()):
-                        if len(lit) > best_match[2] and lit.startswith(self.buffer):
+                        if len(lit) > best_match[2] and lit.startswith(rest):
                             longer_match = True
                             break
                     if not longer_match:
@@ -229,10 +238,10 @@ class IncrementalLexer:
                             LexToken(
                                 best_match[0],
                                 best_match[1],
-                                self._pop_token_count(best_match[2]),
+                                pop_count(best_match[2]),
                             )
                         )
-                        self.buffer = self.buffer[best_match[2] :]
+                        pos += best_match[2]
                         continue
                     break
                 else:
@@ -243,38 +252,42 @@ class IncrementalLexer:
                     LexToken(
                         best_match[0],
                         best_match[1],
-                        self._pop_token_count(best_match[2]),
+                        pop_count(best_match[2]),
                     )
                 )
-                self.buffer = self.buffer[best_match[2] :]
+                pos += best_match[2]
             else:
-                content_end = self._find_content_boundary()
-                if content_end > 0:
+                content_end = self._find_content_boundary(buf, pos)
+                if content_end > pos:
                     tokens.append(
                         LexToken(
                             content_terminal,
-                            self.buffer[:content_end],
-                            self._pop_token_count(content_end),
+                            buf[pos:content_end],
+                            pop_count(content_end - pos),
                         )
                     )
-                    self.buffer = self.buffer[content_end:]
+                    pos = content_end
                 else:
                     tokens.append(
                         LexToken(
                             content_terminal,
-                            self.buffer[0],
-                            self._pop_token_count(1),
+                            buf[pos],
+                            pop_count(1),
                         )
                     )
-                    self.buffer = self.buffer[1:]
+                    pos += 1
 
+        self.buffer = buf[pos:]
+        if count_pos:
+            del counts[:count_pos]
+        if not self.buffer:
+            self._token_counts.clear()
         return tokens
 
-    def _find_content_boundary(self) -> int:
-        buf = self.buffer
+    def _find_content_boundary(self, buf: str, start: int = 0) -> int:
         n = len(buf)
         first_chars = self._literal_first_chars
-        for i in range(1, n):
+        for i in range(start + 1, n):
             if buf[i] not in first_chars:
                 continue
             remaining = n - i

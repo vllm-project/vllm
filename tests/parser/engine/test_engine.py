@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the streaming parser engine core pipeline."""
 
+import time
 from dataclasses import replace
 from unittest.mock import MagicMock
 
@@ -10,6 +11,7 @@ import pytest
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.incremental_lexer import (
+    IncrementalLexer,
     LexerShape,
     TerminalDef,
     terminals_from_literals,
@@ -1013,3 +1015,25 @@ class TestTerminalAliases:
             EventType.ARG_VALUE_CHUNK,
             EventType.TOOL_CALL_END,
         ]
+
+
+class TestLexerDrainScaling:
+    def test_large_single_feed_is_linear(self):
+        """A whole non-streaming output arrives in one `feed` call.
+
+        `_drain` used to re-slice the remaining buffer once per token, which
+        is quadratic in the buffer length and stalls the API server event
+        loop on long tool arguments (issue #67988). At 400k characters the
+        quadratic version took ~31 s; the cursor version takes < 1 s, so the
+        bound below only trips when the copying behaviour comes back.
+        """
+        text = "a>" * 200_000
+        lexer = IncrementalLexer(terminals_from_literals({"GT": ">"}))
+
+        start = time.perf_counter()
+        tokens = lexer.feed(text) + lexer.flush()
+        elapsed = time.perf_counter() - start
+
+        assert "".join(token.value for token in tokens) == text
+        assert len(tokens) == 2 * 200_000
+        assert elapsed < 10.0
