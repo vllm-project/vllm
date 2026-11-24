@@ -16,6 +16,7 @@ from vllm.multimodal.media import AudioMediaIO
 from vllm.multimodal.media import audio as audio_module
 from vllm.multimodal.media.audio import (
     load_audio,
+    load_audio_pyav,
     load_audio_soundfile,
     load_audio_torchcodec,
 )
@@ -457,3 +458,82 @@ def test_torchcodec_max_decode_bytes_rejected(dummy_audio_bytes):
             sr=None,
             max_decode_bytes=audio.nbytes - 1,
         )
+
+
+def _make_pcm_bytes(
+    signal: np.ndarray,
+    samplerate: int,
+    *,
+    fmt: str = "WAV",
+    subtype: str = "PCM_16",
+) -> bytes:
+    buf = BytesIO()
+    sf.write(buf, signal, samplerate, format=fmt, subtype=subtype)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("fmt", "subtype"),
+    [
+        ("WAV", "PCM_U8"),
+        ("WAV", "PCM_16"),
+        ("WAV", "PCM_24"),
+        ("WAV", "PCM_32"),
+        ("WAV", "FLOAT"),
+        ("FLAC", "PCM_16"),
+    ],
+)
+@pytest.mark.parametrize("channels", [1, 2], ids=["mono", "stereo"])
+@pytest.mark.parametrize("mono", [True, False], ids=["downmix", "preserve_ch"])
+def test_load_audio_pyav_pcm_matches_soundfile(fmt, subtype, channels, mono):
+    """PyAV must normalize integer PCM and de-interleave packed multi-channel
+    frames to float32 in [-1, 1], matching soundfile at native sample rate."""
+    t = np.linspace(0, 0.25, 4000, endpoint=False, dtype=np.float32)
+    left = 0.6 * np.sin(2 * np.pi * 440 * t)
+    if channels == 1:
+        sig = left
+    else:
+        right = 0.4 * np.cos(2 * np.pi * 880 * t)
+        sig = np.stack([left, right], axis=-1)
+
+    raw = _make_pcm_bytes(sig, samplerate=16000, fmt=fmt, subtype=subtype)
+    ref_audio, ref_sr = load_audio_soundfile(BytesIO(raw), sr=None, mono=mono)
+    pyav_audio, pyav_sr = load_audio_pyav(BytesIO(raw), sr=None, mono=mono)
+
+    assert pyav_sr == ref_sr == 16000
+    assert pyav_audio.dtype == np.float32
+    expected = ref_audio[np.newaxis, :] if (not mono and channels == 1) else ref_audio
+    assert pyav_audio.shape == expected.shape
+    np.testing.assert_allclose(pyav_audio, expected, atol=1e-5)
+
+
+def test_load_audio_pyav_stereo_duration_guard_counts_per_channel_samples():
+    """Packed stereo PCM frames must count per-channel samples, not interleaved
+    total samples, when enforcing `max_duration_s`."""
+    t = np.linspace(0, 1.0, 16000, endpoint=False, dtype=np.float32)
+    stereo = np.stack([0.5 * np.sin(2 * np.pi * 440 * t), np.zeros_like(t)], axis=-1)
+    raw = _make_pcm_bytes(stereo, samplerate=16000, fmt="WAV", subtype="PCM_16")
+
+    # 1.0s stereo audio must pass a 1.2s limit (previously counted 32000 samples
+    # on packed s16 and falsely rejected as 2.0s).
+    audio, sr = load_audio_pyav(BytesIO(raw), sr=None, mono=True, max_duration_s=1.2)
+    assert sr == 16000
+    assert audio.shape == (16000,)
+
+
+def test_load_audio_pyav_resample_preserves_channels_when_mono_false():
+    """Resampling with `mono=False` must preserve multi-channel layout instead
+    of forcing `layout='mono'`."""
+    t = np.linspace(0, 0.25, 11025, endpoint=False, dtype=np.float32)
+    stereo = np.stack(
+        [0.6 * np.sin(2 * np.pi * 440 * t), 0.4 * np.cos(2 * np.pi * 880 * t)],
+        axis=-1,
+    )
+    raw = _make_pcm_bytes(stereo, samplerate=44100, fmt="WAV", subtype="PCM_16")
+
+    audio, sr = load_audio_pyav(BytesIO(raw), sr=16000, mono=False)
+    assert sr == 16000
+    assert audio.dtype == np.float32
+    assert audio.ndim == 2
+    assert audio.shape[0] == 2
+    assert np.max(np.abs(audio)) <= 1.0
