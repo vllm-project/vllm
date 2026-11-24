@@ -46,7 +46,6 @@ def test_ngram_and_suffix_correctness(
         model_name,
         block_size=None,
         # Keep LLM defaults; VllmRunner only provides lifecycle cleanup here.
-        trust_remote_code=False,
         enable_chunked_prefill=None,
         speculative_config=speculative_config,
         max_model_len=4096,
@@ -71,7 +70,6 @@ def test_ngram_gpu_default_with_async_scheduling(
     with vllm_runner(
         qwen3_model,
         block_size=None,
-        trust_remote_code=False,
         speculative_config={
             "method": "ngram_gpu",
             "prompt_lookup_max": 3,
@@ -105,7 +103,6 @@ def test_suffix_cross_request_acceptance(
     with vllm_runner(
         model_name,
         block_size=None,
-        trust_remote_code=False,
         speculative_config={"method": "suffix", "num_speculative_tokens": k},
         max_model_len=1024,
         disable_log_stats=False,
