@@ -517,11 +517,17 @@ def test_kvcr_tier_serves_primary_pin_request(
         def on_request_finished(self, req_context):
             lifecycle.append("finished")
 
+        def on_demand(self, demanded_keys, at):
+            demands.append(set(demanded_keys))
+
+    demands: list[set] = []
     bindings = kvcr.constructor_bindings
     assert bindings is not None
     request = bindings.request_pin(keys)
 
     tier.serve_external_requests(Parent())
+    # A pin request that is served is a demand for the hit keys.
+    assert demands == ([set(hit_keys)] if success else [])
 
     [(queued_request, result)] = bindings.poll_pin_results()
     assert queued_request == request

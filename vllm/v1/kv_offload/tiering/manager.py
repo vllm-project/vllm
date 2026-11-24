@@ -121,7 +121,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
     """CPUOffloadingManager with a primary/secondary transfer interface.
 
     The inherited prepare_store/complete_store/prepare_load/complete_load are the
-    GPU-facing OffloadingManager interface. The read/write methods expose operations
+    GPU-facing OffloadingManager interface. These aliases expose the same operations
     from the secondary tier perspective, where read/write refers to secondary
     accessing primary. This avoids confusion when reading TieringOffloadingManager
     code (e.g. calling prepare_load inside a cascade/store path would be misleading).
@@ -144,6 +144,10 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
             info=info,
         )
         self._mmap_region = mmap_region
+        # read/write is for CPU<->secondary transfers,
+        # load/store is for CPU<->GPU transfers.
+        # These aliases avoid calling prepare_load inside a store path.
+        self.complete_read = self.complete_load
         # Chunks of failed writes the writer may still be filling; their
         # release to the free pool is deferred until release_deferred_write().
         self._deferred_release_chunk_ids: set[int] = set()
@@ -174,24 +178,6 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         request accesses, so they must not alter request-scoped recency.
         """
         return self._prepare_load(keys, req_context, record_access=False)
-
-    def complete_read(
-        self,
-        keys: Collection[OffloadKey],
-        req_context: ReqContext,
-        *,
-        peer_read_keys: Collection[OffloadKey] = (),
-    ) -> None:
-        """Record confirmed peer reads before releasing the primary pins."""
-        if peer_read_keys:
-            state = self._get_request_cache_access(req_context)
-            now = time.monotonic()
-            for key in peer_read_keys:
-                chunk = self._policy.get(key)
-                assert chunk is not None
-                chunk.reused = True
-                state.record_demand_access(key, chunk, now)
-        self._release_read(keys, reused=False)
 
     def defer_write_release(self, keys: Collection[OffloadKey]) -> list[int]:
         """Fail pending writes like `complete_write(False)`, deferring the release.
@@ -286,6 +272,9 @@ class _SecondaryTierFacingParent(ParentManager):
         return self._m.on_request_finished(
             req_context, exclude_tier_idx=self._origin_idx
         )
+
+    def on_demand(self, keys: Collection[OffloadKey], at: float) -> None:
+        self._m.primary_tier.on_demand(keys, at)
 
 
 class TieringOffloadingManager(OffloadingManager):
@@ -665,9 +654,7 @@ class TieringOffloadingManager(OffloadingManager):
                     # primary→secondary transfer completed.
                     # Decrement ref_cnt on primary chunks.
                     self.primary_tier.complete_read(
-                        transfer_job.keys,
-                        transfer_job.req_context,
-                        peer_read_keys=completed_job.peer_read_keys,
+                        transfer_job.keys, transfer_job.req_context
                     )
                     self._update_backpressure(tier, job_metadata, completed_job)
             if self._deferred_releases:
@@ -936,10 +923,6 @@ class TieringOffloadingManager(OffloadingManager):
 
         """
         self.primary_tier.complete_load(keys, req_context)
-
-    @override
-    def fail_load(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
-        self.primary_tier.fail_load(keys, req_context)
 
     @override
     def prepare_store(

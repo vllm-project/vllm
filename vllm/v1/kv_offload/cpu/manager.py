@@ -50,16 +50,7 @@ class _RequestCacheAccess:
     # per request: a retry of a failed offer, or a re-offer after preemption,
     # is not another use of the content.
     counted_keys: set[OffloadKey] = field(default_factory=set)
-    # A new ChunkStatus identifies a new residency, even for the same key and slot.
-    accessed_chunks: dict[OffloadKey, ChunkStatus] = field(default_factory=dict)
     finished: bool = False
-
-    def record_demand_access(
-        self, key: OffloadKey, chunk: ChunkStatus, now: float
-    ) -> None:
-        if self.accessed_chunks.get(key) is not chunk:
-            self.accessed_chunks[key] = chunk
-            chunk.last_access_time = now
 
 
 class CPUOffloadingManager(OffloadingManager):
@@ -104,7 +95,7 @@ class CPUOffloadingManager(OffloadingManager):
         self.max_tracker_size: int = max_tracker_size
         self.stores_skipped_in_current_batch: int = 0
         self.allocation_sizes_in_current_batch: list[int] = []
-        self._eviction_stats = OffloadingConnectorStats()
+        self._chunk_stats = OffloadingConnectorStats()
         self._cache_generation = 0
 
         # Number of chunk references. It is ordered so can evict the LRU entry in O(1).
@@ -212,6 +203,25 @@ class CPUOffloadingManager(OffloadingManager):
             key for key in reused_keys if key not in state.inserted_keys
         )
 
+    def _mark_demand(self, chunk: ChunkStatus, at: float) -> None:
+        if not chunk.ever_used:
+            chunk.ever_used = True
+            self._chunk_stats.observe_histogram(
+                CPUOffloadingMetrics.CPU_CHUNK_TIME_TO_FIRST_DEMAND,
+                at - chunk.ready_time,
+            )
+        chunk.last_demand_time = max(chunk.last_demand_time, at)
+
+    def on_demand(self, keys: Iterable[OffloadKey], at: float) -> None:
+        """Record that a consumer demanded these keys at monotonic time `at`.
+
+        Keys that are no longer cached, or were stored again since, are skipped.
+        """
+        for key in keys:
+            chunk = self._policy.get(key)
+            if chunk is not None and chunk.is_ready and at >= chunk.ready_time:
+                self._mark_demand(chunk, at)
+
     # --- OffloadingManager interface ---
 
     @override
@@ -250,21 +260,19 @@ class CPUOffloadingManager(OffloadingManager):
         record_access: bool,
     ) -> LoadStoreSpec:
         chunks = []
-        if record_access:
-            state = self._get_request_cache_access(req_context)
-            now = monotonic()
+        now = monotonic()
         for key in keys:
             chunk = self._policy.get(key)
             assert chunk is not None, f"Chunk {key!r} not found in cache"
             assert chunk.is_ready, f"Chunk {key!r} is not ready for reading"
+            if record_access:
+                self._mark_demand(chunk, now)
             if chunk.ref_cnt == 0:
                 self._policy.mark_non_evictable(key)
                 self._num_evictable_cache_chunks -= 1  # ref_cnt 0 -> 1
                 assert self._num_evictable_cache_chunks >= 0
             chunk.ref_cnt += 1
             chunks.append(chunk)
-            if record_access:
-                state.record_demand_access(key, chunk, now)
         if record_access:
             self._record_request_cache_access(keys, req_context, reused_keys=keys)
         return self._get_load_store_spec(keys, chunks)
@@ -273,19 +281,10 @@ class CPUOffloadingManager(OffloadingManager):
     def complete_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> None:
-        self._release_read(keys, reused=True)
-
-    @override
-    def fail_load(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
-        self._release_read(keys, reused=False)
-
-    def _release_read(self, keys: Collection[OffloadKey], *, reused: bool) -> None:
         for key in keys:
             chunk = self._policy.get(key)
             assert chunk is not None, f"Chunk {key!r} not found"
             assert chunk.ref_cnt > 0, f"Chunk {key!r} ref_cnt is already 0"
-            if reused:
-                chunk.reused = True
             chunk.ref_cnt -= 1
             if chunk.ref_cnt == 0:
                 self._num_evictable_cache_chunks += 1  # ref_cnt 1 -> 0
@@ -318,7 +317,6 @@ class CPUOffloadingManager(OffloadingManager):
         keys_to_store: list[OffloadKey] = []
         ready_existing_keys: list[OffloadKey] = []
         evictable_existing_keys: set[OffloadKey] = set()
-        now = monotonic()
         for key in keys:
             chunk = self._policy.get(key)
             if chunk is None:
@@ -326,7 +324,6 @@ class CPUOffloadingManager(OffloadingManager):
             else:
                 if chunk.is_ready:
                     ready_existing_keys.append(key)
-                    state.record_demand_access(key, chunk, now)
                 if chunk.ref_cnt == 0:
                     evictable_existing_keys.add(key)
 
@@ -430,17 +427,19 @@ class CPUOffloadingManager(OffloadingManager):
             self._num_evictable_cache_chunks -= len(evicted)
             assert self._num_evictable_cache_chunks >= 0
 
+            now = monotonic()
             for key, chunk in evicted:
-                self._eviction_stats.observe_histogram(
-                    CPUOffloadingMetrics.CPU_CHUNK_IDLE_BEFORE_EVICT,
-                    now - chunk.last_access_time,
-                )
-                self._eviction_stats.observe_histogram(
+                self._chunk_stats.observe_histogram(
                     CPUOffloadingMetrics.CPU_CHUNK_LIFETIME, now - chunk.ready_time
                 )
-                self._eviction_stats.increase_counter(
+                if chunk.ever_used:
+                    self._chunk_stats.observe_histogram(
+                        CPUOffloadingMetrics.CPU_CHUNK_IDLE_BEFORE_EVICT,
+                        now - chunk.last_demand_time,
+                    )
+                self._chunk_stats.increase_counter(
                     CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS,
-                    labelvalues=("true" if chunk.reused else "false",),
+                    labelvalues=("true" if chunk.ever_used else "false",),
                 )
                 self._free_chunk(chunk)
                 to_evict.append(key)
@@ -500,7 +499,7 @@ class CPUOffloadingManager(OffloadingManager):
                 chunk = self._policy.get(key)
                 if chunk is not None and not chunk.is_ready:
                     chunk.ref_cnt = 0
-                    chunk.ready_time = chunk.last_access_time = now
+                    chunk.ready_time = chunk.last_demand_time = now
                     self._num_write_pending_chunks -= 1
                     self._num_evictable_cache_chunks += 1
                     self._policy.mark_evictable(key)
@@ -601,7 +600,7 @@ class CPUOffloadingManager(OffloadingManager):
         return [self._config_info]
 
     def get_stats(self) -> OffloadingConnectorStats | None:
-        stats, self._eviction_stats = self._eviction_stats, OffloadingConnectorStats()
+        stats, self._chunk_stats = self._chunk_stats, OffloadingConnectorStats()
 
         # Compute cache usage.
         num_used = (

@@ -90,8 +90,8 @@ class CPUOffloadingSpec(OffloadingSpec):
             CPUOffloadingMetrics.CPU_CHUNK_IDLE_BEFORE_EVICT: (
                 OffloadingHistogramMetadata(
                     documentation=(
-                        "Seconds from last demand access (or readiness if unused) "
-                        "to CPU chunk eviction."
+                        "Seconds from the last demand of a CPU chunk to its "
+                        "capacity eviction. Not observed for unused chunks."
                     ),
                     buckets=_CHUNK_AGE_BUCKETS,
                 )
@@ -102,9 +102,18 @@ class CPUOffloadingSpec(OffloadingSpec):
             ),
             CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS: OffloadingCounterMetadata(
                 documentation=(
-                    "Capacity evictions by whether a GPU load or peer read succeeded."
+                    "Capacity evictions by whether a GPU load or a peer ever "
+                    "demanded the chunk."
                 ),
-                labelnames=("reused",),
+                labelnames=("ever_used",),
+            ),
+            CPUOffloadingMetrics.CPU_CHUNK_TIME_TO_FIRST_DEMAND: (
+                OffloadingHistogramMetadata(
+                    documentation=(
+                        "Seconds from CPU chunk readiness to its first demand."
+                    ),
+                    buckets=(0.1, 0.5, 1, 5, 15, 60, 300, 1800, 3600, 14400),
+                )
             ),
         }
         store_threshold = int(extra_config.get("store_threshold", 0))

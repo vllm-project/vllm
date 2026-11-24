@@ -289,6 +289,7 @@ class FakeParent:
         self.retry: set[OffloadKey] = set(retry or ())
         self._next_job_id: int = 1000
         self.calls: list[tuple] = []
+        self.demands: list[list[OffloadKey]] = []
 
     def on_new_request(self, ctx: ReqContext) -> RequestOffloadingContext:
         self.calls.append(("on_new_request", ctx.req_id))
@@ -324,6 +325,9 @@ class FakeParent:
 
     def on_request_finished(self, ctx: ReqContext) -> None:
         self.calls.append(("on_request_finished", ctx.req_id))
+
+    def on_demand(self, keys: Sequence[OffloadKey], at: float) -> None:
+        self.demands.append(list(keys))
 
 
 def _released(result: LoadResult) -> bool:
@@ -1144,7 +1148,7 @@ class TestLookupFlow:
         result = session.poll()
         assert not session.alive
         assert result.loads == [LoadResult(1, "load", True)]
-        expected_stores = [StoreResult(2, True, [OffloadKey(b"key")])]
+        expected_stores = [StoreResult(2, True)]
         if partial_fetch:
             expected_stores.append(StoreResult(3, True))
         assert result.stores == expected_stores
@@ -1904,7 +1908,7 @@ class TestServerFlows:
         tid = next(iter(transport._transfers))
         transport._poll_done.append(tid)
         stores = session.poll().stores
-        assert StoreResult(1, True, [OffloadKey(b"k1")]) in stores
+        assert StoreResult(job_id=1, success=True) in stores
         assert any(m[TYPE_KEY] == TransferDoneMsg.TYPE for m in conn._sent)
 
     def test_abort_fetch_replies_with_ack(self):
@@ -1935,7 +1939,7 @@ class TestServerFlows:
             _InflightXfer(
                 kv_request_id="req-1",
                 block_count=1,
-                keys_by_job={1: [OffloadKey(b"k")]},
+                job_ids={1},
                 round=_OutboundRequestState(inflight=1),
             ),
         )
@@ -1968,7 +1972,7 @@ class TestServerFlows:
             _InflightXfer(
                 kv_request_id="req-1",
                 block_count=1,
-                keys_by_job={1: [OffloadKey(b"k")]},
+                job_ids={1},
                 round=_OutboundRequestState(inflight=1),
             ),
         )
@@ -2009,7 +2013,7 @@ class TestServerFlows:
             _InflightXfer(
                 kv_request_id="req-1",
                 block_count=1,
-                keys_by_job={1: [OffloadKey(b"k")]},
+                job_ids={1},
                 round=_OutboundRequestState(inflight=1),
             ),
         )
@@ -2058,7 +2062,7 @@ class TestServerFlows:
             _InflightXfer(
                 kv_request_id="req-1",
                 block_count=1,
-                keys_by_job={1: [OffloadKey(b"k")]},
+                job_ids={1},
                 round=_OutboundRequestState(inflight=1),
             ),
         )
@@ -2749,7 +2753,7 @@ class TestFinishRequestServerSide:
         msg = self._last_transfer_done(conn)
         assert msg is not None
         assert msg[TransferDoneMsg.SUCCESS] is True
-        assert StoreResult(7, True, [OffloadKey(b"k1")]) in stores
+        assert StoreResult(job_id=7, success=True) in stores
         assert _srv_outbound(session, "req-1") is None
 
     @pytest.mark.parametrize(
@@ -2833,7 +2837,7 @@ class TestFinishRequestServerSide:
         # Transfer 1 completes.
         transport._poll_done.append(tid_1)
         stores = session.poll().stores
-        assert StoreResult(100, True, [OffloadKey(b"k1")]) in stores
+        assert StoreResult(job_id=100, success=True) in stores
         assert session._server._inflight == {}
         assert outbound.remaining == 2
         # Not yet finalized — still 2 blocks demanded.
@@ -2851,12 +2855,44 @@ class TestFinishRequestServerSide:
         # Transfer 2 completes — request now fully satisfied.
         transport._poll_done.append(tid_2)
         stores = session.poll().stores
-        assert StoreResult(200, True, [OffloadKey(b"k2"), OffloadKey(b"k3")]) in stores
+        assert StoreResult(job_id=200, success=True) in stores
         # _finalize_outbound fired — request gone, peer notified with success.
         assert _srv_outbound(session, "req-1") is None
         done = next(m for m in conn._sent if m.get(TYPE_KEY) == TransferDoneMsg.TYPE)
         assert done[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert done[TransferDoneMsg.SUCCESS] is True
+
+        # Every round's keys are reported as demand, once.
+        parent = FakeParent()
+        session.serve_external_requests(parent)
+        session.serve_external_requests(parent)
+        assert parent.demands == [
+            [OffloadKey(b"k1")],
+            [OffloadKey(b"k2"), OffloadKey(b"k3")],
+        ]
+
+    def test_only_fetched_keys_are_reported_as_demand(self):
+        """A job stores [k1, k2] and the peer fetches k1 alone. The demand is
+        reported when it is matched, before the transfer finishes."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        k1, k2 = OffloadKey(b"k1"), OffloadKey(b"k2")
+        session.add_stored_blocks("req-1", [k1, k2], [0, 1], job_id=100)
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.ROUND_SEQ: 0,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.KEYS: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [10],
+            }
+        )
+        session.poll()
+        assert len(session._server._inflight) == 1
+
+        parent = FakeParent()
+        session.serve_external_requests(parent)
+        assert parent.demands == [[k1]]
 
     def test_write_blocks_failure_finalizes_after_last_inflight_completes(
         self, monkeypatch
@@ -2905,7 +2941,7 @@ class TestFinishRequestServerSide:
         # Both the k1 success and the deferred k2 failure surface in this poll.
         transport._poll_done.append(tid_1)
         assert session.poll().stores == [
-            StoreResult(100, True, [OffloadKey(b"k1")]),
+            StoreResult(job_id=100, success=True),
             StoreResult(job_id=200, success=False),
         ]
         # Outbound state cleaned up; peer notified with success=False.
@@ -2983,7 +3019,7 @@ class TestBidirectional:
         stores = result_.stores
 
         assert LoadResult(job_id=200, kv_request_id="req-cli", success=True) in loads
-        assert StoreResult(100, True, [OffloadKey(b"served")]) in stores
+        assert StoreResult(job_id=100, success=True) in stores
 
 
 # ---------------------------------------------------------------------------
@@ -3635,7 +3671,7 @@ class TestInflightPerReqInvariant:
                     _InflightXfer(
                         kv_request_id=kv_id,
                         block_count=1,
-                        keys_by_job={tid: [OffloadKey(b"k")]},
+                        job_ids={tid},
                         round=_OutboundRequestState(inflight=1),
                     ),
                 )
@@ -4021,7 +4057,7 @@ class TestPeerFaultEscalation:
         stores = session.poll().stores
         assert session.alive
         assert session._server.peer_fault is None
-        assert StoreResult(1, True, [OffloadKey(b"k1")]) in stores
+        assert StoreResult(job_id=1, success=True) in stores
 
     def test_stalled_transfer_faults_peer_without_releasing(self):
         """A WRITE past the stall timeout faults the peer at once (no drain
@@ -4097,9 +4133,7 @@ def test_drain_stores_keeps_inflight_pins_until_transport_finishes(success):
     assert transport._cancel_calls == []
 
     (transport._poll_done if success else transport._poll_failed).append(tid)
-    assert session.poll().stores == [
-        StoreResult(1, success, [OffloadKey(b"active")] if success else ())
-    ]
+    assert session.poll().stores == [StoreResult(1, success)]
     assert not session.has_pending_work
     assert session.drain_stores().stores == []
     _fetch(conn, "req-1", [b"extra"], [6])
@@ -4160,7 +4194,7 @@ def test_drain_rejects_unfetched_lookup_round_without_timeout():
     session.poll()
     (tid,) = transport._transfers
     transport._poll_done.append(tid)
-    assert session.poll().stores == [StoreResult(1001, True, [key])]
+    assert session.poll().stores == [StoreResult(1001, True)]
     assert conn._sent[-1][TransferDoneMsg.SUCCESS] is True
 
 

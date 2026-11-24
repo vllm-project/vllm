@@ -18,7 +18,6 @@ coordinator's `_dispatch_message` can reuse its existing
 from __future__ import annotations
 
 import time
-from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
@@ -26,7 +25,6 @@ from typing import TYPE_CHECKING, NamedTuple
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
-from vllm.v1.kv_offload.tiering.base import JobResult
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
     AbortAckMsg,
@@ -58,10 +56,6 @@ class StoreResult(NamedTuple):
 
     job_id: int
     success: bool
-    peer_read_keys: Sequence[OffloadKey] = ()
-
-    def as_job_result(self) -> JobResult:
-        return JobResult(self.job_id, self.success, peer_read_keys=self.peer_read_keys)
 
 
 class StoreDrainResult(NamedTuple):
@@ -76,7 +70,9 @@ class _MatchResult(NamedTuple):
 
     local_idxs: list[int]
     remote_idxs: list[int]
-    keys_by_job: dict[int, list[OffloadKey]]
+    # The set of store job IDs that contributed blocks
+    job_ids: set[int]
+    keys: list[OffloadKey]
 
 
 @dataclass(slots=True)
@@ -137,7 +133,8 @@ class _OutboundRequestState:
         return _MatchResult(
             local_idxs=local_idxs,
             remote_idxs=remote_idxs,
-            keys_by_job={job_id: matched_keys} if matched_keys else {},
+            job_ids={job_id} if local_idxs else set(),
+            keys=matched_keys,
         )
 
     def add_fetch_demand(
@@ -151,20 +148,23 @@ class _OutboundRequestState:
 
         local_idxs: list[int] = []
         remote_idxs: list[int] = []
-        keys_by_job: dict[int, list[OffloadKey]] = defaultdict(list)
+        job_ids: set[int] = set()
+        matched_keys: list[OffloadKey] = []
         for key, remote_idx in zip(keys, block_indexes):
             stored_entry = self.available.pop(key, None)
             if stored_entry is not None:
                 stored_job_id, local_idx = stored_entry
                 local_idxs.append(local_idx)
                 remote_idxs.append(remote_idx)
-                keys_by_job[stored_job_id].append(key)
+                job_ids.add(stored_job_id)
+                matched_keys.append(key)
             else:
                 self.demanded[key] = remote_idx
         return _MatchResult(
             local_idxs=local_idxs,
             remote_idxs=remote_idxs,
-            keys_by_job=keys_by_job,
+            job_ids=job_ids,
+            keys=matched_keys,
         )
 
 
@@ -174,7 +174,8 @@ class _InflightXfer:
 
     kv_request_id: str
     block_count: int
-    keys_by_job: dict[int, list[OffloadKey]]
+    # The set of store job IDs that contributed blocks to this transfer.
+    job_ids: set[int]
     # Round this transfer serves and its key in ``st.outbound``;
     # remaining/finalize apply only while the round is still registered.
     # Dummy default for test-seeded entries.
@@ -294,6 +295,9 @@ class ServerRole:
         # finish popped their parked lookup). Drained via
         # ``parent.on_request_finished`` in ``serve_external_requests``.
         self._finished_lookup_ctxs: list[ReqContext] = []
+        # Keys a peer demanded and when, reported to the parent on the next
+        # serve_external_requests.
+        self._demands: list[tuple[list[OffloadKey], float]] = []
         self._lookup_id_counter: int = 0
         # Parked aborts awaiting drain, keyed by (kv_request_id, round)
         # with the abort start time.
@@ -363,6 +367,8 @@ class ServerRole:
         if from_lookup:
             rnd.lookup_supplied = True
         result = rnd.add_stored_blocks(keys, block_ids, job_id)
+        if result.keys:
+            self._demands.append((result.keys, time.monotonic()))
         if result.local_idxs and rnd.demand_received:
             self._submit_transfer(kv_request_id, result, rnd, round_seq)
 
@@ -400,6 +406,8 @@ class ServerRole:
         if req is None:
             req = st.outbound[round_seq] = _OutboundRequestState()
         result = req.add_fetch_demand(keys, block_indexes)
+        if result.keys:
+            self._demands.append((result.keys, time.monotonic()))
         if not keys:
             # Terminal empty fetch: close the lookup phase and drain
             # every round with no TransferDoneMsg (nothing waits on it).
@@ -517,6 +525,10 @@ class ServerRole:
             for ctx in self._finished_lookup_ctxs:
                 parent.on_request_finished(ctx)
             self._finished_lookup_ctxs = []
+
+        for keys, at in self._demands:
+            parent.on_demand(keys, at)
+        self._demands.clear()
 
     def _poll_lookup_keys(
         self,
@@ -924,9 +936,7 @@ class ServerRole:
         retained: dict[int, frozenset[int]] = {}
         if self._inflight:
             still = self._transport.cancel(list(self._inflight.keys()), mode="wait")
-            retained = {
-                tid: frozenset(self._inflight[tid].keys_by_job) for tid in still
-            }
+            retained = {tid: frozenset(self._inflight[tid].job_ids) for tid in still}
         held = set().union(*retained.values())
         failed_stores = [jid for jid in self._store_jobs if jid not in held]
         self._store_jobs.clear()
@@ -993,12 +1003,12 @@ class ServerRole:
         """
         results: list[StoreResult] = []
         still_pinned = self._read_job_ids() if xfer.round.cancelled else set()
-        for job_id, keys in xfer.keys_by_job.items():
+        for job_id in xfer.job_ids:
             if job_id in still_pinned:
                 continue
             if self._store_jobs.pop(job_id, None) is None:
                 continue
-            results.append(StoreResult(job_id, success, keys if success else ()))
+            results.append(StoreResult(job_id=job_id, success=success))
             xfer.round.pending_job_ids.discard(job_id)
         return results
 
@@ -1036,7 +1046,7 @@ class ServerRole:
             jid
             for xfer in self._inflight.values()
             if rnd is None or xfer.round is rnd
-            for jid in xfer.keys_by_job
+            for jid in xfer.job_ids
         }
 
     def _fail_unwritten_round_jobs(
@@ -1250,7 +1260,7 @@ class ServerRole:
                 _InflightXfer(
                     kv_request_id=kv_request_id,
                     block_count=len(result.local_idxs),
-                    keys_by_job=result.keys_by_job,
+                    job_ids=result.job_ids,
                     round=rnd,
                     round_key=round_key,
                 ),
@@ -1321,7 +1331,7 @@ class ServerRole:
         rounds = {
             (xfer.kv_request_id, xfer.round_key): xfer.round
             for xfer in self._inflight.values()
-            if xfer.round.cancelled or not expired.isdisjoint(xfer.keys_by_job)
+            if xfer.round.cancelled or expired.intersection(xfer.job_ids)
         }
         for (kv_request_id, round_key), rnd in rounds.items():
             rnd.cancelled = True

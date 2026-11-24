@@ -396,6 +396,9 @@ class _RecordingParent:
     def on_request_finished(self, ctx) -> None:
         self.finished.append(ctx.req_id)
 
+    def on_demand(self, keys, at) -> None:
+        pass
+
 
 class _RecordingSession:
     """Fake P2PSession that records the parent it was served with."""
@@ -3418,7 +3421,7 @@ def _peer_hit(
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("fetch", [False, True])
-def test_peer_lookup_counts_as_reuse_only_after_fetch(fetch):
+def test_peer_lookup_counts_as_demand_only_after_fetch(fetch):
     key = OffloadKey(b"resident")
     consumer, tiering = _producer_with_cpu_hit(key, tier_poll_interval_s=0)
     try:
@@ -3443,6 +3446,10 @@ def test_peer_lookup_counts_as_reuse_only_after_fetch(fetch):
         assert stats is not None
         evictions = stats.data["data"][CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS]
         assert evictions == {("true" if fetch else "false",): 1}
+        first_demands = stats.data["data"].get(
+            CPUOffloadingMetrics.CPU_CHUNK_TIME_TO_FIRST_DEMAND, {}
+        )
+        assert len(first_demands.get((), [])) == int(fetch)
     finally:
         tiering.shutdown()
         consumer.shutdown()
@@ -3571,9 +3578,7 @@ def test_drain_fails_unfetched_stores_and_rejects_late_fetch(drain_peers, bound)
         producer.submit_store(
             _job_metadata(11, [first], [0], _remote_decoder_kv_params())
         )
-        assert list(producer.get_finished_jobs()) == [
-            JobResult(11, True, peer_read_keys=[first])
-        ]
+        assert list(producer.get_finished_jobs()) == [JobResult(11, True)]
         assert list(consumer.get_finished_jobs()) == [JobResult(10, True)]
 
     for job_id in (20, 21):
@@ -3667,9 +3672,7 @@ def test_drain_rejects_fetch_arriving_mid_poll(drain_peers, drain_transports):
 
     data.on_poll = peer_traffic
     producer.drain_jobs()
-    assert list(producer.get_finished_jobs()) == [
-        JobResult(2, True, peer_read_keys=[key])
-    ]
+    assert list(producer.get_finished_jobs()) == [JobResult(2, True)]
     assert sorted(consumer.get_finished_jobs(), key=lambda result: result.job_id) == [
         JobResult(1, True),
         JobResult(3, False),

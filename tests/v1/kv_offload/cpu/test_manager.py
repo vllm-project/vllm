@@ -368,41 +368,34 @@ def test_cpu_manager_reports_chunk_eviction_metrics(monkeypatch):
     clock = 10.0
     monkeypatch.setattr(manager_module, "monotonic", lambda: clock)
     manager = make_cpu_manager(num_chunks=1)
-    writer = make_req_context("writer")
-    reader = make_req_context("reader")
     trigger = StoreTrigger.ON_COMPUTE
     offer = partial(manager.prepare_store, trigger=trigger)
 
     def store(key: int, success: bool = True) -> None:
         keys = to_keys([key])
-        assert offer(keys, writer)
-        manager.complete_store(keys, writer, trigger=trigger, success=success)
+        assert offer(keys, _EMPTY_REQ_CTX)
+        manager.complete_store(keys, _EMPTY_REQ_CTX, trigger=trigger, success=success)
 
+    # Chunk 1 is never demanded.
     store(1)
     clock = 30.0
     store(2)
-    # A failed read cannot clear another reader's successful reuse.
+    # Chunk 2 is loaded; an earlier peer demand does not move its last demand
+    # back, and offering it is not a demand.
     clock = 40.0
-    keys = to_keys([2])
-    manager.prepare_load(keys, reader)
-    reuse_keys(manager, keys)
-    manager.fail_load(keys, reader)
+    reuse_keys(manager, to_keys([2]))
+    manager.on_demand(to_keys([2]), 35.0)
+    clock = 45.0
+    offer(to_keys([2]), _EMPTY_REQ_CTX)
     clock = 100.0
     store(3)
-    keys = to_keys([3])
-    clock = 110.0
-    offer(keys, writer)
-    clock = 115.0
-    manager.prepare_load(keys, reader)
-    manager.fail_load(keys, reader)
-    clock = 130.0
-    offer(keys, writer)  # Retry within the same residency.
+    # A failed store evicts chunk 3 and is not an eviction itself.
     clock = 150.0
     store(4, success=False)
-    # Reinserting the same key in the same slot starts a new residency.
+    # The same key in the same slot starts unused; a demand that predates it,
+    # or names a key that is gone, is skipped.
     store(3)
-    clock = 160.0
-    offer(keys, writer)
+    manager.on_demand(to_keys([3, 1]), 120.0)
     clock = 180.0
     store(5)
     manager.reset_cache()
@@ -410,12 +403,13 @@ def test_cpu_manager_reports_chunk_eviction_metrics(monkeypatch):
     stats = manager.get_stats()
     assert stats is not None
     values = stats.data["data"]
-    idle = values[CPUOffloadingMetrics.CPU_CHUNK_IDLE_BEFORE_EVICT][()]
-    lifetime = values[CPUOffloadingMetrics.CPU_CHUNK_LIFETIME][()]
-    evictions = values[CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS]
-    assert idle == [20, 60, 35, 20]
-    assert lifetime == [20, 70, 50, 30]
-    assert evictions == {("false",): 3, ("true",): 1}
+    assert values[CPUOffloadingMetrics.CPU_CHUNK_LIFETIME][()] == [20, 70, 50, 30]
+    assert values[CPUOffloadingMetrics.CPU_CHUNK_IDLE_BEFORE_EVICT][()] == [60]
+    assert values[CPUOffloadingMetrics.CPU_CHUNK_TIME_TO_FIRST_DEMAND][()] == [10]
+    assert values[CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS] == {
+        ("false",): 3,
+        ("true",): 1,
+    }
 
 
 def test_cpu_manager_reports_allocation_size_on_allocation_failure(monkeypatch):

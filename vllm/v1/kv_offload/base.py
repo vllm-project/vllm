@@ -242,7 +242,6 @@ The class provides the following primitives:
         information required for performing the load.
     complete_load() - mark blocks which were previously prepared to be
         loaded as done loading. This is to re-allow their eviction.
-    fail_load() - release blocks prepared for a load that failed.
     prepare_store() - prepare the given blocks to be written.
         Returns a StoreSpec encapsulating offloading information,
         as well as a list of blocks that were evicted as a result.
@@ -384,7 +383,7 @@ class OffloadingManager(ABC):
     ) -> LoadStoreSpec:
         """Prepare the given blocks to be read.
         The given blocks will be protected from eviction until
-        complete_load or fail_load is called.
+        complete_load is called.
         It assumes all given blocks are offloaded.
 
         Args:
@@ -407,10 +406,6 @@ class OffloadingManager(ABC):
 
         """
         return
-
-    def fail_load(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
-        """Release a failed load using the manager's normal cleanup by default."""
-        self.complete_load(keys, req_context)
 
     @abstractmethod
     def prepare_store(
@@ -481,7 +476,7 @@ class OffloadingManager(ABC):
         By the time this is called, the scheduler will issue no more
         submit-side calls for this request, such as prepare_store() and
         prepare_load(). Completion callbacks for already-submitted transfers
-        (complete_store(), complete_load(), or fail_load()) may still arrive afterward.
+        (complete_store() and complete_load()) may still arrive afterward.
 
         This hook does NOT imply the data has been persisted. Asynchronous
         transfers already submitted for this request may still be in flight.

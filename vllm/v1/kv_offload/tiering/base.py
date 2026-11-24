@@ -103,8 +103,6 @@ class JobResult:
     # I/O can no longer touch those chunks; the manager applies the release on
     # its own polling path.
     deferred_release: threading.Event | None = None
-    # Primary keys confirmed transferred to a requesting peer by this job.
-    peer_read_keys: Collection[OffloadKey] = ()
 
 
 class ParentManager(ABC):
@@ -142,6 +140,13 @@ class ParentManager(ABC):
 
     @abstractmethod
     def on_request_finished(self, req_context: ReqContext) -> None: ...
+
+    @abstractmethod
+    def on_demand(self, keys: Collection[OffloadKey], at: float) -> None:
+        """A consumer demanded these keys at local monotonic time `at`.
+
+        Only a tier that is polled every step may report demand.
+        """
 
 
 class SecondaryTierManager(ABC):
