@@ -1431,7 +1431,13 @@ def _moved_tensors(llm, ptrs: list[dict[str, int]]) -> list[list[str]]:
             "inference-optimization/DeepSeek-V3-debug-empty-NVFP4A16",
             "inference-optimization/DeepSeek-V3-debug-multiply-NVFP4A16",
             "inference-optimization/DeepSeek-V3-debug-add-NVFP4A16",
-            marks=[pytest.mark.slow_test],
+            marks=[
+                pytest.mark.slow_test,
+                pytest.mark.skipif(
+                    current_platform.is_rocm(),
+                    reason="No NVFP4 W4A16 linear kernel on ROCm.",
+                ),
+            ],
         ),
     ],
 )
