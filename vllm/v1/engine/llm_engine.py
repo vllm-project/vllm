@@ -75,6 +75,8 @@ class LLMEngine:
             init_tracer("vllm.llm_engine", tracing_endpoint)
 
         self.log_stats = log_stats
+        # Tracing reads the collected stats without enabling stat logging.
+        self.collect_stats = log_stats or tracing_endpoint is not None
 
         parallel_config = vllm_config.parallel_config
         executor_backend = parallel_config.distributed_executor_backend
@@ -105,7 +107,7 @@ class LLMEngine:
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
             renderer.tokenizer,
-            log_stats=self.log_stats,
+            collect_stats=self.collect_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
         )
@@ -120,7 +122,7 @@ class LLMEngine:
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=self.log_stats,
+            collect_stats=self.collect_stats,
             renderer=renderer,
         )
         self._profile_session_active = False
@@ -339,7 +341,7 @@ class LLMEngine:
         # 2) Process EngineCoreOutputs.
         with record_function_or_nullcontext("llm_engine step: process_outputs"):
             iteration_stats = (
-                IterationStats() if self.log_stats and outputs.outputs else None
+                IterationStats() if self.collect_stats and outputs.outputs else None
             )
             processed_outputs = self.output_processor.process_outputs(
                 outputs.outputs,
