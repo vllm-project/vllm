@@ -5957,9 +5957,9 @@ def test_full_sequence_admission_counts_the_first_decode_step(
         num_blocks=5,  # Four usable blocks after the null block.
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,

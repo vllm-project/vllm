@@ -2517,11 +2517,7 @@ def test_full_sequence_admission_covers_the_first_decode_step():
             output,
             ModelRunnerOutput(
                 req_ids=req_ids,
-                req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
                 sampled_token_ids=[[7] if s else [] for s in sampled],
-                logprobs=None,
-                prompt_logprobs_dict={},
-                pooler_output=[],
             ),
         )
         scheduler.update_draft_token_ids(
