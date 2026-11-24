@@ -7,19 +7,19 @@ import torch
 
 from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
 from vllm.exceptions import VLLMValidationError
-from vllm.model_executor.models.nemotron3_6_academia import (
-    Nemotron3_6AcademiaLoopConditioning,
-    Nemotron3_6AcademiaLoopSeam,
+from vllm.model_executor.models.dory1_5 import (
+    Dory1_5LoopConditioning,
+    Dory1_5LoopSeam,
 )
-from vllm.transformers_utils.configs.nemotron3_6_academia import (
-    Nemotron3_6AcademiaConfig,
+from vllm.transformers_utils.configs.dory1_5 import (
+    Dory1_5Config,
 )
 
 
 @pytest.mark.parametrize("seam", [False, True])
 @torch.no_grad()
 def test_loop_table_reload_preserves_captured_storage(seam):
-    config = Nemotron3_6AcademiaConfig(
+    config = Dory1_5Config(
         hidden_size=8,
         loop_conditioning_hidden_size=4,
         loop_adapter_rank=0,
@@ -27,9 +27,7 @@ def test_loop_table_reload_preserves_captured_storage(seam):
     )
     with set_current_vllm_config(VllmConfig(device_config=DeviceConfig(device="cpu"))):
         module = (
-            Nemotron3_6AcademiaLoopSeam(config)
-            if seam
-            else Nemotron3_6AcademiaLoopConditioning(config, "test")
+            Dory1_5LoopSeam(config) if seam else Dory1_5LoopConditioning(config, "test")
         )
     steps = [0, 1, 0, 1, 2]
     conds = [torch.randn(4) for _ in steps]
@@ -69,8 +67,8 @@ def test_loop_cache_modes(vllm_runner, tmp_path, cache_mode, gdp_dims):
     """Last-loop attention must retain independent GDP state through decoding."""
     from vllm import SamplingParams
 
-    Nemotron3_6AcademiaConfig(
-        architectures=["Nemotron3_6AcademiaForCausalLM"],
+    Dory1_5Config(
+        architectures=["Dory1_5ForCausalLM"],
         vocab_size=64,
         hidden_size=128,
         intermediate_size=256,
@@ -153,7 +151,7 @@ def test_mixed_request_loops_match_separate_requests(
         for count in (1, 2, 3)
     ]
     with vllm_runner(
-        f"nvidia/NVIDIA-Nemotron-3.6-Academia-4B-{precision}",
+        f"nvidia/NVIDIA-Nemotron-Labs-Dory1.5-4B-{precision}",
         dtype="bfloat16",
         max_model_len=512,
         max_num_seqs=4,
@@ -184,7 +182,7 @@ def test_mixed_request_loops_match_separate_requests(
         )
 
     with vllm_runner(
-        f"nvidia/NVIDIA-Nemotron-3.6-Academia-4B-{precision}",
+        f"nvidia/NVIDIA-Nemotron-Labs-Dory1.5-4B-{precision}",
         dtype="bfloat16",
         max_model_len=512,
         max_num_seqs=4,
@@ -230,7 +228,7 @@ def test_request_loops_isolate_prefixes_at_engine_admission(
         )
 
     with vllm_runner(
-        "nvidia/NVIDIA-Nemotron-3.6-Academia-4B-BF16",
+        "nvidia/NVIDIA-Nemotron-Labs-Dory1.5-4B-BF16",
         dtype="bfloat16",
         max_model_len=1024,
         max_num_seqs=2,
@@ -305,7 +303,7 @@ def test_request_loops_isolate_prefixes_at_engine_admission(
     ],
 )
 def test_packed_loader_rejects_inconsistent_tensors(case, match):
-    from vllm.model_executor.models.nemotron3_6_academia import _load_per_matrix_weights
+    from vllm.model_executor.models.dory1_5 import _load_per_matrix_weights
 
     module = torch.nn.Linear(16, 8, dtype=torch.bfloat16)
     tensors = [(name, torch.ones_like(p)) for name, p in module.named_parameters()]
@@ -338,12 +336,12 @@ def test_packed_model_rejects_invalid_allocation(
     import json
 
     from vllm.config import ModelConfig
-    from vllm.model_executor.models.nemotron3_6_academia import (
-        Nemotron3_6AcademiaForCausalLM,
+    from vllm.model_executor.models.dory1_5 import (
+        Dory1_5ForCausalLM,
     )
 
-    Nemotron3_6AcademiaConfig(
-        architectures=["Nemotron3_6AcademiaForCausalLM"],
+    Dory1_5Config(
+        architectures=["Dory1_5ForCausalLM"],
         vocab_size=64,
         hidden_size=128,
         intermediate_size=256,
@@ -369,4 +367,4 @@ def test_packed_model_rejects_invalid_allocation(
         )
     )
     with set_current_vllm_config(config), pytest.raises(ValueError, match=match):
-        Nemotron3_6AcademiaForCausalLM(vllm_config=config)
+        Dory1_5ForCausalLM(vllm_config=config)

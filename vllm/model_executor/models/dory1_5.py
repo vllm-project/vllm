@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
-"""Inference-only Nemotron 3.6 Academia model."""
+"""Inference-only Dory1.5 model."""
 
 import math
 import types
@@ -41,8 +41,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron3_6_academia import (
-    Nemotron3_6AcademiaConfig,
+from vllm.transformers_utils.configs.dory1_5 import (
+    Dory1_5Config,
 )
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 from vllm.v1.core.sched.output import NewRequestData
@@ -62,7 +62,7 @@ GDP_PROJECTION_ROLES = ("z_proj", "v_proj", "k_proj", "q_proj", "b_proj", "a_pro
 QKV_PROJECTION_ROLES = ("q_proj", "k_proj", "v_proj")
 
 
-class Nemotron3_6AcademiaPackedMethod(LinearMethodBase):
+class Dory1_5PackedMethod(LinearMethodBase):
     kernel: "MarlinMxfp8LinearKernel | MarlinNvFp4LinearKernel"
 
     def __init__(self, shape):
@@ -70,7 +70,7 @@ class Nemotron3_6AcademiaPackedMethod(LinearMethodBase):
 
     def create_weights(self, *args, **kwargs):
         raise RuntimeError(
-            "Nemotron 3.6 Academia packed weights are installed before checkpoint load"
+            "Dory1.5 packed weights are installed before checkpoint load"
         )
 
     def process_weights_after_loading(self, layer):
@@ -82,7 +82,7 @@ class Nemotron3_6AcademiaPackedMethod(LinearMethodBase):
         return self.kernel.apply_weights(layer, x, bias)
 
 
-class Nemotron3_6AcademiaMxFp8Method(Nemotron3_6AcademiaPackedMethod):
+class Dory1_5MxFp8Method(Dory1_5PackedMethod):
     def __init__(self, shape):
         super().__init__(shape)
         from vllm.model_executor.kernels.linear.mxfp8 import Mxfp8LinearLayerConfig
@@ -93,7 +93,7 @@ class Nemotron3_6AcademiaMxFp8Method(Nemotron3_6AcademiaPackedMethod):
         self.kernel = MarlinMxfp8LinearKernel(Mxfp8LinearLayerConfig(shape))
 
 
-class Nemotron3_6AcademiaNvFp4Method(Nemotron3_6AcademiaPackedMethod):
+class Dory1_5NvFp4Method(Dory1_5PackedMethod):
     def __init__(self, shape):
         super().__init__(shape)
         from vllm.model_executor.kernels.linear.nvfp4 import NvFp4LinearLayerConfig
@@ -110,7 +110,7 @@ class Nemotron3_6AcademiaNvFp4Method(Nemotron3_6AcademiaPackedMethod):
         super().process_weights_after_loading(layer)
 
 
-class Nemotron3_6AcademiaPackedLinear(nn.Linear):
+class Dory1_5PackedLinear(nn.Linear):
     def forward(self, x):
         return self.quant_method.apply(self, x, self.bias)
 
@@ -121,16 +121,14 @@ class PackedFormat:
     elements_per_byte: int
     weight_dtype: torch.dtype
     scale_dtype: torch.dtype
-    method: type[Nemotron3_6AcademiaPackedMethod]
+    method: type[Dory1_5PackedMethod]
     tensor_scale: bool = False
 
 
 PACKED_FORMATS = {
-    "MXFP8": PackedFormat(
-        32, 1, torch.float8_e4m3fn, torch.uint8, Nemotron3_6AcademiaMxFp8Method
-    ),
+    "MXFP8": PackedFormat(32, 1, torch.float8_e4m3fn, torch.uint8, Dory1_5MxFp8Method),
     "NVFP4": PackedFormat(
-        16, 2, torch.uint8, torch.float8_e4m3fn, Nemotron3_6AcademiaNvFp4Method, True
+        16, 2, torch.uint8, torch.float8_e4m3fn, Dory1_5NvFp4Method, True
     ),
 }
 
@@ -165,7 +163,7 @@ def install_packed_linear(module, fmt):
         )
     module.quant_method = spec.method((n, k))
     if isinstance(module, nn.Linear):
-        module.__class__ = Nemotron3_6AcademiaPackedLinear
+        module.__class__ = Dory1_5PackedLinear
 
 
 class SplitProjection(nn.Module):
@@ -197,30 +195,22 @@ def _install_per_matrix_weights(model, vllm_config):
         vllm_config.parallel_config.tensor_parallel_size != 1
         or vllm_config.parallel_config.pipeline_parallel_size != 1
     ):
-        raise ValueError("Nemotron 3.6 Academia packed weights require TP=PP=1")
+        raise ValueError("Dory1.5 packed weights require TP=PP=1")
     if vllm_config.model_config.dtype != torch.bfloat16:
-        raise ValueError(
-            "Nemotron 3.6 Academia packed weights require --dtype bfloat16"
-        )
+        raise ValueError("Dory1.5 packed weights require --dtype bfloat16")
     if model.config.tie_word_embeddings:
-        raise ValueError(
-            "Per-matrix Nemotron 3.6 Academia checkpoints require untied embeddings"
-        )
+        raise ValueError("Per-matrix Dory1.5 checkpoints require untied embeddings")
     allocation = get_hf_file_to_dict(
         marker["allocation"],
         vllm_config.model_config.model,
         revision=vllm_config.model_config.revision,
     )
     if allocation is None:
-        raise ValueError(
-            "Nemotron 3.6 Academia quantization allocation file was not found"
-        )
+        raise ValueError("Dory1.5 quantization allocation file was not found")
     if not isinstance(allocation, dict) or not isinstance(
         allocation.get("formats"), dict
     ):
-        raise ValueError(
-            "Nemotron 3.6 Academia quantization allocation requires a formats mapping"
-        )
+        raise ValueError("Dory1.5 quantization allocation requires a formats mapping")
     for i, layer in enumerate(model.model.layers):
         mixer = layer.mixer
         kind = model.config.layer_types[i]
@@ -248,18 +238,14 @@ def _install_per_matrix_weights(model, vllm_config):
         if fmt == "BF16":
             continue
         if fmt not in PACKED_FORMATS:
-            raise ValueError(
-                f"Unsupported Nemotron 3.6 Academia matrix format {fmt!r}: {name}"
-            )
+            raise ValueError(f"Unsupported Dory1.5 matrix format {fmt!r}: {name}")
         module = modules.get(mapped_name(model, name).rsplit(".", 1)[0])
         if (
             not name.endswith(".weight")
             or not isinstance(module, (nn.Linear, LinearBase, ParallelLMHead))
             or module.weight.ndim != 2
         ):
-            raise ValueError(
-                f"Nemotron 3.6 Academia can only pack linear matrix weights: {name}"
-            )
+            raise ValueError(f"Dory1.5 can only pack linear matrix weights: {name}")
         install_packed_linear(module, fmt)
 
 
@@ -286,7 +272,7 @@ def _load_per_matrix_weights(model, weights):
     return loaded
 
 
-class Nemotron3_6AcademiaAttention(nn.Module):
+class Dory1_5Attention(nn.Module):
     """Grouped-query attention without positional embeddings."""
 
     def __init__(self, config, vllm_config, prefix, cache_prefixes):
@@ -359,7 +345,7 @@ def _sinusoidal_embedding(value: float, dim: int, like: torch.Tensor) -> torch.T
     return torch.cat([torch.cos(args), torch.sin(args)]).to(like.dtype)
 
 
-class Nemotron3_6AcademiaLoopConditioner(nn.Module):
+class Dory1_5LoopConditioner(nn.Module):
     """`(progress, budget) -> c`: sinusoidal embeddings, Linear, SiLU, Linear."""
 
     def __init__(self, cond_dim: int) -> None:
@@ -381,10 +367,10 @@ class Nemotron3_6AcademiaLoopConditioner(nn.Module):
         )
 
 
-class Nemotron3_6AcademiaLoopConditioning(nn.Module):
+class Dory1_5LoopConditioning(nn.Module):
     """Adaptive normalization and a gated low-rank adapter."""
 
-    def __init__(self, config: Nemotron3_6AcademiaConfig, prefix: str):
+    def __init__(self, config: Dory1_5Config, prefix: str):
         super().__init__()
         hidden, cond, rank = (
             config.hidden_size,
@@ -437,10 +423,10 @@ class Nemotron3_6AcademiaLoopConditioning(nn.Module):
         return hidden_states, gate
 
 
-class Nemotron3_6AcademiaLoopSeam(nn.Module):
+class Dory1_5LoopSeam(nn.Module):
     """Conditioned recurrent entry and exit."""
 
-    def __init__(self, config: Nemotron3_6AcademiaConfig):
+    def __init__(self, config: Dory1_5Config):
         super().__init__()
         hidden, cond = config.hidden_size, config.loop_conditioning_hidden_size
         self.hidden_size = hidden
@@ -483,11 +469,11 @@ class Nemotron3_6AcademiaLoopSeam(nn.Module):
         return state + gate * (new_state - state)
 
 
-class Nemotron3_6AcademiaStateUpdate(nn.Module):
+class Dory1_5StateUpdate(nn.Module):
     """`state + sigmoid(W x + b) * softplus(base_alpha_raw) * (new - state)`, with
     `x` the loop input."""
 
-    def __init__(self, config: Nemotron3_6AcademiaConfig, prefix: str) -> None:
+    def __init__(self, config: Dory1_5Config, prefix: str) -> None:
         super().__init__()
         self.proj = ReplicatedLinear(
             config.hidden_size, config.hidden_size, bias=True, prefix=f"{prefix}.proj"
@@ -502,7 +488,7 @@ class Nemotron3_6AcademiaStateUpdate(nn.Module):
         return state + beta * (new_state - state)
 
 
-class Nemotron3_6AcademiaDecoderLayer(nn.Module):
+class Dory1_5DecoderLayer(nn.Module):
     def __init__(self, config, vllm_config, prefix, layer_idx):
         super().__init__()
         self.layer_type = config.layer_types[layer_idx]
@@ -523,7 +509,7 @@ class Nemotron3_6AcademiaDecoderLayer(nn.Module):
                 cache_prefixes=cache_prefixes,
             )
         elif self.layer_type == "full_attention":
-            self.mixer = Nemotron3_6AcademiaAttention(
+            self.mixer = Dory1_5Attention(
                 config, vllm_config, f"{prefix}.mixer", cache_prefixes
             )
         else:
@@ -535,7 +521,7 @@ class Nemotron3_6AcademiaDecoderLayer(nn.Module):
                 prefix=f"{prefix}.mixer",
             )
         self.loop_conditioning = (
-            Nemotron3_6AcademiaLoopConditioning(config, f"{prefix}.loop_conditioning")
+            Dory1_5LoopConditioning(config, f"{prefix}.loop_conditioning")
             if layer_idx >= n_in
             else None
         )
@@ -579,7 +565,7 @@ def loop_table_row(num_loops, step):
 
 
 @support_torch_compile
-class Nemotron3_6AcademiaInputBlock(nn.Module):
+class Dory1_5InputBlock(nn.Module):
     def __init__(self, *, vllm_config, prefix, model):
         super().__init__()
         self.embed_tokens = model.embed_tokens
@@ -598,7 +584,7 @@ class Nemotron3_6AcademiaInputBlock(nn.Module):
 
 
 @support_torch_compile
-class Nemotron3_6AcademiaLoop(nn.Module):
+class Dory1_5Loop(nn.Module):
     def __init__(self, *, vllm_config, prefix, model, loop):
         super().__init__()
         config = model.config
@@ -626,7 +612,7 @@ class Nemotron3_6AcademiaLoop(nn.Module):
 
 
 @support_torch_compile
-class Nemotron3_6AcademiaOutputBlock(nn.Module):
+class Dory1_5OutputBlock(nn.Module):
     def __init__(self, *, vllm_config, prefix, model):
         super().__init__()
         config = model.config
@@ -640,7 +626,7 @@ class Nemotron3_6AcademiaOutputBlock(nn.Module):
         return self.norm(state)
 
 
-class Nemotron3_6AcademiaStages(nn.Module):
+class Dory1_5Stages(nn.Module):
     """Separately compiled stages sharing physical weights and distinct loop caches."""
 
     def __init__(self, model, vllm_config, prefix):
@@ -656,21 +642,17 @@ class Nemotron3_6AcademiaStages(nn.Module):
                     **kwargs,
                 )
 
-        self.input_block = stage(
-            Nemotron3_6AcademiaInputBlock, "nemotron3_6_academia_input"
-        )
+        self.input_block = stage(Dory1_5InputBlock, "dory1_5_input")
         self.loops = nn.ModuleList(
             [
-                stage(Nemotron3_6AcademiaLoop, f"nemotron3_6_academia_loop_{i}", loop=i)
+                stage(Dory1_5Loop, f"dory1_5_loop_{i}", loop=i)
                 for i in range(model.config.n_recurrent_loops)
             ]
         )
-        self.output_block = stage(
-            Nemotron3_6AcademiaOutputBlock, "nemotron3_6_academia_output"
-        )
+        self.output_block = stage(Dory1_5OutputBlock, "dory1_5_output")
 
 
-class Nemotron3_6AcademiaModel(nn.Module):
+class Dory1_5Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -680,21 +662,17 @@ class Nemotron3_6AcademiaModel(nn.Module):
         )
         self.layers = nn.ModuleList(
             [
-                Nemotron3_6AcademiaDecoderLayer(
-                    config, vllm_config, f"{prefix}.layers.{i}", i
-                )
+                Dory1_5DecoderLayer(config, vllm_config, f"{prefix}.layers.{i}", i)
                 for i in range(config.num_hidden_layers)
             ]
         )
         self.norm_f = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.loop_conditioner = Nemotron3_6AcademiaLoopConditioner(
+        self.loop_conditioner = Dory1_5LoopConditioner(
             config.loop_conditioning_hidden_size
         )
-        self.loop_seam = Nemotron3_6AcademiaLoopSeam(config)
-        self.state_update = Nemotron3_6AcademiaStateUpdate(
-            config, f"{prefix}.state_update"
-        )
-        self.stages = Nemotron3_6AcademiaStages(self, vllm_config, prefix)
+        self.loop_seam = Dory1_5LoopSeam(config)
+        self.state_update = Dory1_5StateUpdate(config, f"{prefix}.state_update")
+        self.stages = Dory1_5Stages(self, vllm_config, prefix)
         tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.register_buffer(
             "input_h",
@@ -733,7 +711,7 @@ class Nemotron3_6AcademiaModel(nn.Module):
         return self.stages.output_block(state, loop_counts)
 
 
-class Nemotron3_6AcademiaModelState(MambaHybridModelState):
+class Dory1_5ModelState(MambaHybridModelState):
     """Hybrid model state plus each request's loop count, delivered to the forward as
     a per-token `loop_counts` tensor (persistent, so CUDA graphs see each step's
     values)."""
@@ -811,12 +789,12 @@ class Nemotron3_6AcademiaModelState(MambaHybridModelState):
         return inputs
 
 
-class Nemotron3_6AcademiaForCausalLM(nn.Module, HasInnerState, IsHybrid):
+class Dory1_5ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     @staticmethod
     def get_model_state_cls():
-        return Nemotron3_6AcademiaModelState
+        return Dory1_5ModelState
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -824,14 +802,12 @@ class Nemotron3_6AcademiaForCausalLM(nn.Module, HasInnerState, IsHybrid):
         config.validate()
         if vllm_config.quant_config is not None:
             raise ValueError(
-                "Nemotron 3.6 Academia quantization uses per_tensor_quantization; "
+                "Dory1.5 quantization uses per_tensor_quantization; "
                 "do not pass --quantization"
             )
         if vllm_config.speculative_config is not None:
-            raise ValueError(
-                "Nemotron 3.6 Academia currently supports plain decoding only"
-            )
-        self.model = Nemotron3_6AcademiaModel(
+            raise ValueError("Dory1.5 currently supports plain decoding only")
+        self.model = Dory1_5Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.lm_head = ParallelLMHead(
