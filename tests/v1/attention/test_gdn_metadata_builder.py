@@ -237,13 +237,13 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
         assert len(meta.spec_state_indices_tensor) == meta.num_spec_decodes
 
 
-@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+@pytest.mark.parametrize("enable_prefix_caching", [False, True])
 @pytest.mark.parametrize("full_cuda_graph", [False, True])
 @pytest.mark.parametrize(
     "test_case", GDN_BUILD_TEST_CASES.values(), ids=GDN_BUILD_TEST_CASES.keys()
 )
 def test_update_block_table_matches_build(
-    test_case: GDNBuildTestCase, full_cuda_graph: bool, mamba_cache_mode: str
+    test_case: GDNBuildTestCase, full_cuda_graph: bool, enable_prefix_caching: bool
 ):
     """update_block_table() on another group's metadata matches build()."""
     batch = BatchSpec(seq_lens=test_case.seq_lens, query_lens=test_case.query_lens)
@@ -252,16 +252,16 @@ def test_update_block_table_matches_build(
         for _ in range(3)
     )
     for builder in (src, dst, ref):
-        builder.vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+        builder.vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     common = _common_attn_metadata(ref, batch)
-    if mamba_cache_mode == "align":
+    if enable_prefix_caching:
         # MRV2 precomputes these for every Mamba group each step.
         dst.mamba_aligned_state_indices = ref.mamba_aligned_state_indices = (
             mamba_get_block_table_tensor(
                 common.block_table_tensor,
                 common.seq_lens,
                 ref.kv_cache_spec,
-                "align",
+                True,
                 ref.num_speculative_blocks,
             )
         )
@@ -481,7 +481,7 @@ def _create_checkpoint_builder_and_batch(
             method="ngram",
             num_speculative_tokens=num_spec,
         )
-    vllm_config.cache_config.mamba_cache_mode = "align"
+    vllm_config.cache_config.enable_prefix_caching = True
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
     mamba_spec = MambaSpec(
         block_size=64,
@@ -555,7 +555,7 @@ def test_update_block_table_regathers_checkpoint(num_spec):
         other_table,
         other.seq_lens,
         dst.kv_cache_spec,
-        "align",
+        True,
         dst.num_speculative_blocks,
     )
 
@@ -576,18 +576,82 @@ def test_update_block_table_regathers_checkpoint(num_spec):
     )
 
 
-def test_plan_flashinfer_checkpoints_selects_the_state_at_each_offset():
-    """Each checkpoint row maps to the state FlashInfer emits at its offset.
+@pytest.mark.parametrize("num_spec", [0, 3])
+def test_build_packs_flashinfer_checkpoint_plan(num_spec):
+    """The builder uploads the plan's cu_starts, rows and slots intact.
 
-    The leading decode row is not in the prefill kernel and never checkpoints;
-    the 50-token prefill is shorter than the stride and emits no states.
+    Rows: a decode (spec when `num_spec`), two prefills checkpointing at
+    192 and 256 tokens (interval 64: 7 states, 2 used), a short prefill.
     """
-    every_n_tokens, cu_starts, rows = plan_flashinfer_checkpoints(
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B", block_size=64)
+    if num_spec:
+        vllm_config.speculative_config = SpeculativeConfig(
+            method="ngram", num_speculative_tokens=num_spec
+        )
+    vllm_config.cache_config.enable_prefix_caching = True
+    vllm_config.cache_config.prefix_match_unit = 64
+    register_mamba_layers(vllm_config, ["layer.0"], 64)
+    builder = GDNAttentionMetadataBuilder(
+        kv_cache_spec=MambaSpec(
+            block_size=64, shapes=((16, 64),), dtypes=(torch.float16,)
+        ),
+        layer_names=["layer.0"],
+        vllm_config=vllm_config,
+        device=DEVICE,
+    )
+    builder.plan_flashinfer_checkpoints = True  # FlashInfer may be unavailable
+    vllm_config.cache_config.hash_block_size = 64
+    vllm_config.cache_config.cache_hit_alignment_tokens = 64
+    batch = BatchSpec(
+        seq_lens=[80, 200, 260, 50], query_lens=[1 + num_spec, 200, 260, 50]
+    )
+    common = create_common_attn_metadata(batch, 64, DEVICE, arange_block_indices=True)
+    table = common.block_table_tensor + 1
+    kwargs = {}
+    if num_spec:
+        table = torch.cat([table, torch.zeros(4, num_spec, dtype=table.dtype)], dim=1)
+        kwargs = dict(
+            num_decode_draft_tokens_cpu=torch.tensor(
+                [num_spec, -1, -1, -1], dtype=torch.int32
+            ),
+            num_accepted_tokens=torch.ones(4, dtype=torch.int32),
+        )
+    common = common.replace(block_table_tensor=table)
+
+    plan = builder.build(0, common, **kwargs).flashinfer_checkpoint_plan
+
+    assert plan is not None
+    assert plan.every_n_tokens == 64
+    assert plan.num_checkpoints == 2
+    assert plan.cu_starts.tolist() == [0, 3, 7, 7]
+    # The spec decode row is not a checkpoint row; a plain decode row is.
+    assert plan.rows.tolist() == ([0, 1, 0] if num_spec else [0, 0, 1, 0])
+    assert plan.slots is not None
+    assert plan.slots.tolist() == [-1, -1, 0, -1, -1, -1, 1]
+
+
+def test_plan_flashinfer_checkpoints_writes_only_used_states():
+    """Only the 2 used of 7 emitted states are written, packed in row order.
+
+    The leading decode row never checkpoints; the 50-token prefill emits none.
+    """
+    every_n_tokens, cu_starts, rows, slots = plan_flashinfer_checkpoints(
         offsets=[0, 128, 0, 192], query_lens=[200, 50, 300]
     )
 
     assert every_n_tokens == 64
     assert cu_starts == [0, 3, 3, 7]
-    # Row 1: state after 128 tokens of the first prefill. Row 3: after 192
-    # tokens of the third prefill, whose states start at index 3.
-    assert rows == [0, 1, 0, 5]
+    assert slots == [-1, 0, -1, -1, -1, 1, -1]
+    assert rows == [0, 0, 0, 1]
+
+
+def test_plan_flashinfer_checkpoints_keeps_cp_without_unused_states():
+    """No slots when every emitted state is used, keeping the CP route."""
+    every_n_tokens, cu_starts, rows, slots = plan_flashinfer_checkpoints(
+        offsets=[5888, 5888], query_lens=[5920, 5920]
+    )
+
+    assert every_n_tokens == 5888
+    assert cu_starts == [0, 1, 2]
+    assert rows == [0, 1]
+    assert slots is None
