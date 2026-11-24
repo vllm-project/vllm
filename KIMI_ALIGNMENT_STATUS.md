@@ -1,61 +1,64 @@
-# Kimi K3.1 BF16 alignment experiment
+# Kimi server source snapshot: attempt34
 
-This branch preserves a coordinated four-layer experiment across yeyunu/verl,
-yeyunu/vllm-ascend, yeyunu/vllm, and yeyunu/FSDPTurbo.
-Use branch codex/kimi-k31-bf16-alignment-20261123 in all four repositories.
+The retained result is attempt34 (2026-11-23 20:20:05 +08:00), four layers,
+16 experts/top16, BF16, one 8-device server using <term>Ascend 950PR&950DT系列产品</term> (950DT). Actor/reference use
+FSDP8/EP8/eFSDP1; vLLM uses TP8/EP8/DP1. Two steps each had 1024 valid response
+tokens, no nonfinite values, no differing independent old/rollout logprobs and
+zero mean/max absolute difference. Old/gradient and actor/reference checks each
+covered 32 pairs / 2048 valid tokens with zero differences.
 
-## Measured scope
+Same-side checks covered one image/prompt, eight generated positions, A/A,
+actual batch1/batch2, and one full-prefill/decode corresponding history.
+The actual scheduler target row did not change. Full BI/PD coverage (longer
+trajectories, batch16, actual row reordering, chunked prefill) is NOT complete.
+Reward, advantage and gradient norm were zero: effective updates and subsequent
+weight synchronization are NOT validated. Neither 93-layer nor model-quality
+or performance acceptance is claimed.
 
-- 4 layers, 16 experts, top16, BF16 on one Ascend 950DT 8-device server.
-- Actor/reference FSDP8 and EP8, rollout TP8/EP8/DP1.
-- Attempts 32, 33 and 34 each completed two steps. Every step had 1024 valid
-  response tokens, zero nonfinite values, zero differing old/rollout logprobs,
-  and zero mean/max absolute difference.
-- Attempt 34 compared 32 actor old/grad response-score pairs and 32 actor/reference
-  pairs. Every valid response comparison was exactly equal.
-- Same-side attempt 34 covered one prompt/image and eight generated positions.
-  A/A and actual batch1/batch2 prefill/decode logits and selected scores were
-  equal. Full-prefill versus decode at the corresponding history was equal.
-- Reversed submission did not change the actual target row in attempt 34.
-  Actual row reordering, longer BI trajectories and batch16 remain pending.
-- Chunked-prefill probe code is included as work in progress. Attempt 35 failed
-  during HCCL initialization before that probe executed.
-- Reward, advantage and actor grad norm were zero. Effective policy update and
-  post-update synchronization acceptance remain pending.
-- Full 93-layer, model-quality and performance acceptance remain pending.
+## Source provenance
 
-## Source provenance and review
+The source branches retain the original server-era ancestry, not current main.
+This is the user's requested source-review snapshot, not an upstream-ready port.
+Inherited fork/baseline changes are not alignment fixes. Do not resolve conflicts
+against current main by rewriting these source files.
 
-Inherited runtime overlays have their own commit before task changes. These
-overlays came from the existing reference environment and must not be attributed
-to the alignment fixes. The task copy had no Git metadata.
+Original provenance: verl uses wangdongleix/verl d854d22c3a01359970e6b0fb05a59ce74555d4dd;
+vLLM uses ced6857afa0ea7b2e3f0846a62e1394e90f15607; FSDPTurbo uses GitCode
+c43ebadabb74f85ca131189c8d439ab2fae617b6. Installed vLLM-Ascend reported
+0.30.0rc2.dev252+g9a0b3fbd6; that exact public Git commit is unavailable.
+Its Git scaffold is d1da39542603433dc8251b30f12af0131a74589e with inherited
+runtime overlays and captured server source. The scaffold is NOT asserted to
+be the installed runtime commit.
 
-The vLLM base is ced6857afa0ea7b2e3f0846a62e1394e90f15607.
-The verl base is wangdongleix/verl commit
-d854d22c3a01359970e6b0fb05a59ce74555d4dd.
-FSDPTurbo history comes from https://gitcode.com/Ascend/FSDPTurbo.git,
-base c43ebadabb74f85ca131189c8d439ab2fae617b6.
-The installed vLLM-Ascend reported 0.30.0rc2.dev252+g9a0b3fbd6.
-That exact commit was unavailable in the public GitHub repository, so its changed
-runtime files were captured in a separate inherited-overlay commit on the existing
-fork. This is an experimental source export, not a fresh-install validation.
+The run manifest hashed 53 files, all reproduced exactly across these four PRs.
+Other package source files are a later read-only capture with capture-time hashes;
+they are NOT retroactively covered by the attempt34 manifest. Source mtimes were
+checked, but mtimes alone are not proof of historical content. The recovered
+serving_invariance_probe.py matches its attempt34 hash. vLLM engine/core.py is
+the pre-attempt35 backup, also byte-identical to the pre-task captured baseline;
+its scheduler-budget method was added only for the unsuccessful attempt35.
+Attempt35 failed HCCL initialization before probes and supplies no new acceptance.
 
-The shared helpers live in verl/examples/kimi_alignment/runtime. Add that
-directory to PYTHONPATH alongside the four source checkouts. Scripts under
-verl/examples/kimi_alignment/scripts preserve the task's existing workspace
-layout and require the original model, environment and task paths.
-model-code.patch applies to the original four-layer checkpoint's Python files.
-It contains code only, with no model weights.
+Original runtime imports and APIs are preserved. Standalone helpers reside in
+verl/examples/kimi_alignment/runtime and correspond to source/alignment_runtime
+on the server. Checkpoint Python/config files reside in
+FSDPTurbo/examples/kimi_alignment/checkpoint-code and correspond to the server's
+model/ directory; do not merge these files into fsdp_turbo/models. The package
+MoE source and the checkpoint MC2 adapter intentionally remain separate.
+These are export storage locations, not changes to the server's loading path.
 
-No rollout logprob reuse was used for the independent acceptance comparisons.
-The diagnostic scheduler budget control is opt-in and belongs to the pending
-chunked-prefill experiment. The BF16 alignment switches and extensive audit
-captures need normal upstream review before production integration.
+The three manifest-hashed launcher/environment scripts retain their original
+absolute paths. Restore the original workspace layout to use them. Ancillary
+scripts are current captured files, not independently historically attested;
+record_run.py includes the later added core.py hash entry, without changing model
+execution. No loader, import, signature, environment-variable or operator-layout
+refactor has been introduced by this reconstruction.
 
-Code export checks cover syntax, file hashes and secret-pattern scanning.
-The reported device results belong to the retained 423 runs. Upstream CI and
-fresh-branch NPU validation have not been run.
+Weights, tokenizer assets, compiled libraries, installed CANN custom-op artifacts,
+and other external dependencies are not vendored. The installed CANN text-file
+inventory is retained separately as provenance; it is not task-authored source.
+This snapshot is not a self-contained environment or fresh-install validation.
 
-The vLLM-Ascend format.sh ci command was attempted during export and exited
-because pre-commit was unavailable. Python syntax and runtime-source byte checks
-passed. Upstream lint and CI remain unverified.
+No tests, runtime imports, training, inference, device jobs or writes to server423 were
+performed for this update. Only source reading, SHA256/AST inspection, Git changes
+and draft-PR updates were performed. New checks do not constitute numerical reruns.

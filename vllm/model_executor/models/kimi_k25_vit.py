@@ -133,6 +133,8 @@ class Learnable2DInterpPosEmbDivided_fixed(nn.Module):
             persistent=False,
         )
 
+        # This deterministic, non-persistent buffer is not a checkpoint weight.
+        self._layerwise_unloaded_numel = self.time_weight.numel()
         self.reset_parameters()
 
     def reset_parameters(self):

@@ -40,6 +40,8 @@ def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
             "experts-per-token counts, got "
             f"{num_layers=}, {num_experts=}, {num_experts_per_tok=}."
         )
+    if getattr(model_config.hf_config, "model_type", None) in {"kimi_k3", "kimi_k31"}:
+        num_experts_per_tok *= 5  # IDs + four exact FP32 byte lanes.
     return num_layers, num_experts, num_experts_per_tok
 
 
@@ -86,6 +88,7 @@ class RoutedExpertsCapturer:
             num_experts_per_tok,
             vllm_config.model_config.hf_text_config.model_type,
         )
+        self.kimi_full_r3 = getattr(vllm_config.model_config.hf_config, "model_type", None) in {"kimi_k3", "kimi_k31"}
         self.device_buffer = torch.zeros(
             (
                 max_num_batched_tokens,
@@ -221,6 +224,29 @@ class RoutedExpertsCapturer:
             start_loc:end_loc, :
         ]
 
+    def capture_pair(self, layer_id: int, ids: torch.Tensor, weights: torch.Tensor) -> None:
+        """Record exact executed FP32 weights without changing the router output."""
+        if weights.dtype != torch.float32 or weights.shape != ids.shape:
+            raise TypeError("Kimi R3 requires matching IDs and executed FP32 weights")
+        bits = weights.contiguous().view(torch.uint8).reshape(*weights.shape, 4)
+        packed = torch.cat((ids.to(torch.int32), *(bits[..., i].to(torch.int32) for i in range(4))), dim=-1)
+        ctx = get_forward_context()
+        if ctx.dp_metadata is None and self.tp_size > 1:
+            descriptor = getattr(ctx, "batch_descriptor", None)
+            expected = getattr(descriptor, "num_tokens", None) or getattr(ctx, "num_tokens", None)
+            if expected is None:
+                metadata = ctx.attn_metadata
+                if isinstance(metadata, dict):
+                    metadata = next(iter(metadata.values()))
+                expected = metadata.num_actual_tokens
+            n = packed.shape[0]
+            if n < expected:
+                if n != (expected + self.tp_size - 1) // self.tp_size:
+                    raise ValueError(f"Kimi R3 cannot reconstruct SP rows: local={n}, total={expected}, tp={self.tp_size}")
+                packed = get_tp_group().all_gather(packed, dim=0)
+            packed = packed[:expected]
+        self.capture(layer_id, packed)
+
     def get_device_buffer(self) -> torch.Tensor:
         """Return the underlying device buffer so the model runner can
         issue the D2H copy. The tensor is shared; callers must either
@@ -260,6 +286,20 @@ def bind_routed_experts_capturer(
     from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
     num_bound = 0
+    if capturer.kimi_full_r3:
+        import re
+        for name, module in model.named_modules():
+            if type(module).__name__ != "AscendRoutedExperts":
+                continue
+            match = re.search(r"(?:^|\.)layers\.(\d+)(?:\.|$)", name)
+            if match is None:
+                raise ValueError(f"Cannot resolve Kimi routed layer index: {name}")
+            module.kimi_full_r3_capture_fn = partial(capturer.capture_pair, int(match.group(1)))
+            num_bound += 1
+        if num_bound == 0:
+            raise ValueError("Kimi full R3 requires an executed-weight Ascend capture source")
+        logger.info("Kimi full R3 capture bound %d layers, FP32 weight payload", num_bound)
+        return
     for module in model.modules():
         if isinstance(module, RoutedExpertsCaptureSource):
             module.capture_fn = partial(capturer.capture, module.layer_id)

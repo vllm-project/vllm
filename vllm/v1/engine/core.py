@@ -970,40 +970,6 @@ class EngineCore:
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
-    def alignment_scheduler_budget(self, value: int | None = None) -> int:
-        if __import__("os").environ.get("KIMI_ALIGNMENT_SERVING_PROBE") != "1":
-            raise RuntimeError("Alignment scheduler probe is not enabled")
-        if not self.is_scheduler_paused():
-            raise RuntimeError("Change diagnostic budget only while paused")
-        if not hasattr(self.scheduler, "_alignment_original_schedule"):
-            import json
-            import os
-            from pathlib import Path
-            scheduler = self.scheduler
-            original = scheduler.schedule
-            def trace_schedule():
-                output = original()
-                if scheduler.max_num_scheduled_tokens == 512:
-                    record = {"budget": 512, "requests": [
-                        {"id": key, "scheduled": count,
-                         "computed": scheduler.requests[key].num_computed_tokens,
-                         "tokens": list(scheduler.requests[key].all_token_ids[
-                             scheduler.requests[key].num_computed_tokens:
-                             scheduler.requests[key].num_computed_tokens + count])}
-                        for key, count in output.num_scheduled_tokens.items()]}
-                    path = Path(os.environ["KIMI_ALIGNMENT_AUDIT_DIR"]) / "serving_invariance" / "scheduler-chunks.jsonl"
-                    with path.open("a") as handle:
-                        handle.write(json.dumps(record) + "\n")
-                return output
-            scheduler._alignment_original_schedule = original
-            scheduler.schedule = trace_schedule
-        before = self.scheduler.max_num_scheduled_tokens
-        if value is not None:
-            if not 0 < value <= self.scheduler.scheduler_config.max_num_batched_tokens:
-                raise ValueError("Diagnostic token budget out of range")
-            self.scheduler.max_num_scheduled_tokens = value
-        return before
-
     def set_weight_version(self, weight_version: str) -> None:
         self._weight_version = weight_version
 

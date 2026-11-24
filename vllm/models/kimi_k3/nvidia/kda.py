@@ -637,6 +637,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         if self.in_proj_padding:
             self.in_proj_qkvgfab.weight.data[-self.in_proj_padding :].zero_()
+            # Alignment-only rows have no source tensor in the weight stream.
+            self.in_proj_qkvgfab._layerwise_unloaded_numel = (
+                self.in_proj_padding * self.in_proj_qkvgfab.weight.shape[1]
+            )
 
         self.f_b_proj = ColumnParallelLinear(
             self.head_dim,

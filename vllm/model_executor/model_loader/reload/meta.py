@@ -30,7 +30,11 @@ SKIP_LOAD_TENSORS: set[str] = {
     "expert_global_to_physical",
     "expert_physical_to_global",
     "expert_local_to_global",
+    # Deterministic Ascend EP dispatch metadata, never loaded from weights.
+    "expert_ids_per_ep_rank",
     "e_score_correction_bias",
+    # Repacked from conv1d weights after reload; never supplied by the stream.
+    "ascend_conv1d_weight",
 }
 
 # Tensors which are never moved to, or materialized from, the meta device.

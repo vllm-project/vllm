@@ -1,0 +1,426 @@
+[
+  {
+    "server_path": "source/verl/verl/workers/rollout/vllm_rollout/vllm_async_server.py",
+    "repository": "verl",
+    "repository_path": "verl/workers/rollout/vllm_rollout/vllm_async_server.py",
+    "sha256": "b50d4e930efd3f0c2e4007e2af407e03a36f841fa38ade40d517dc08cea18424",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm-ascend/vllm_ascend/ascend_forward_context.py",
+    "repository": "vllm-ascend",
+    "repository_path": "vllm_ascend/ascend_forward_context.py",
+    "sha256": "4f4e0353b43828bd550928c930109d71df3ef59ed2775a28c641d729f00864f1",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/alignment_runtime/serving_invariance_probe.py",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/runtime/serving_invariance_probe.py",
+    "sha256": "df0db17b511f07e157aeb280ce124c82d6c7dd27f5690d242de18534865553c6",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": true
+  },
+  {
+    "server_path": "source/verl/verl/workers/rollout/llm_server.py",
+    "repository": "verl",
+    "repository_path": "verl/workers/rollout/llm_server.py",
+    "sha256": "7ce8f9143b8dabe91070dd966191792133e258df203b3577cb6b5620b98cbe7a",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/verl/verl/experimental/agent_loop/single_turn_agent_loop.py",
+    "repository": "verl",
+    "repository_path": "verl/experimental/agent_loop/single_turn_agent_loop.py",
+    "sha256": "792b161eeeb9600d3d03bb9515a75dddd2aeccd6379b5d409381b8b24dabb67b",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/alignment_runtime/dsa_alignment.py",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/runtime/dsa_alignment.py",
+    "sha256": "d82906981cd7029321d486af134a4fb3269127fab872272a02df3302b9116d69",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "model/dsa.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "examples/kimi_alignment/checkpoint-code/dsa.py",
+    "sha256": "1c046f1573c8efe6dfd519581a73b8b4277325bdc3043660dca555bce3c5e8a4",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/FSDPTurbo/fsdp_turbo/ops/sparse_mla.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "fsdp_turbo/ops/sparse_mla.py",
+    "sha256": "51192de70a26f3e2767a88d7fbc5e3042aab7e105abb82a2473a587503e0b7ed",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/FSDPTurbo/fsdp_turbo/ops/sparse_attention.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "fsdp_turbo/ops/sparse_attention.py",
+    "sha256": "42a876ab1c85848e0f57e4323ab5f01c986205fca32a369dc3d84d809d94d33a",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/alignment_runtime/dsa_trace.py",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/runtime/dsa_trace.py",
+    "sha256": "4dba0a01e28c80a0ce92fdb7142431df6e41a3e635a466ee421c9ff4b72be53e",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm-ascend/vllm_ascend/attention/sfa_v1.py",
+    "repository": "vllm-ascend",
+    "repository_path": "vllm_ascend/attention/sfa_v1.py",
+    "sha256": "f5c0c413dfe87c612c3867361b7550d3cb74ae234ef51d030ef5863d52b914bf",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/alignment_runtime/moe_alignment.py",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/runtime/moe_alignment.py",
+    "sha256": "2ddd0f0340691d91892fbaf095fa197901e01f4e70c182d130a16a0020bba280",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm-ascend/vllm_ascend/ops/fused_moe/gate_linear.py",
+    "repository": "vllm-ascend",
+    "repository_path": "vllm_ascend/ops/fused_moe/gate_linear.py",
+    "sha256": "f908a45ab6c64adf84fbd9b818434f9163915c8eb409b975128f1b6826e917b0",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm-ascend/vllm_ascend/ops/fused_moe/shared_experts.py",
+    "repository": "vllm-ascend",
+    "repository_path": "vllm_ascend/ops/fused_moe/shared_experts.py",
+    "sha256": "edc5ccd8bdffe85188fd321e08afc4d3ffda78ca936310524a68a79c5d8bb0f2",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/alignment_runtime/moe_trace.py",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/runtime/moe_trace.py",
+    "sha256": "574319ca6652f364f9532c27ad865b456a4293e3089b68a18ec648376c4bafb1",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm-ascend/vllm_ascend/ops/fused_moe/moe_mlp.py",
+    "repository": "vllm-ascend",
+    "repository_path": "vllm_ascend/ops/fused_moe/moe_mlp.py",
+    "sha256": "21207fafacda08c017e045441e461d5aec58277981bc820c1c234a0d75800262",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm-ascend/vllm_ascend/ops/fused_moe/moe_comm_method.py",
+    "repository": "vllm-ascend",
+    "repository_path": "vllm_ascend/ops/fused_moe/moe_comm_method.py",
+    "sha256": "0d93faa0710ae59c3ccbdfca3c0bb1228f5bf68f8e7f14f2a4b5a4cf5ee21fbe",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm-ascend/vllm_ascend/ops/fused_moe/token_dispatcher.py",
+    "repository": "vllm-ascend",
+    "repository_path": "vllm_ascend/ops/fused_moe/token_dispatcher.py",
+    "sha256": "1dcfd8181cb2d34c584d8336c3379dbeefba75c0bf664f924063701b93295cbb",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/alignment_runtime/residual_alignment.py",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/runtime/residual_alignment.py",
+    "sha256": "a73cf9aa23ffd59f44844ec2c73bbcf60221204d7c802f9579dc09a4e788969f",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/alignment_runtime/linear_alignment.py",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/runtime/linear_alignment.py",
+    "sha256": "4b3af01b594f7d84c477a5c88e7806bd35cef25cc822e505348d5f5c1be81ab7",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm-ascend/vllm_ascend/ops/linear_op.py",
+    "repository": "vllm-ascend",
+    "repository_path": "vllm_ascend/ops/linear_op.py",
+    "sha256": "b07472888dae2b54f2a670c50078f3a938bb3d5400c59e2c319fb72ce6a0c60d",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm-ascend/vllm_ascend/ops/mm_encoder_attention.py",
+    "repository": "vllm-ascend",
+    "repository_path": "vllm_ascend/ops/mm_encoder_attention.py",
+    "sha256": "207e59301df3d67b372e9d89c8a02ac387165b8456c46c278e1a48c46f166be2",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/alignment_runtime/package_metadata_cache.py",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/runtime/package_metadata_cache.py",
+    "sha256": "ed266b620ca4dd18291c8d1b8aa20880f238d672e4553c635905ce6c5ab528a8",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/FSDPTurbo/fsdp_turbo/models/kimi/kimi_k31/dsa.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "fsdp_turbo/models/kimi/kimi_k31/dsa.py",
+    "sha256": "3dda8ed668ec9d558ff4ca56865a1b4e2e51d5c72b064e6cdc21dc039d872419",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/FSDPTurbo/fsdp_turbo/models/kimi/kimi_k31/modeling_kimi_k31.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "fsdp_turbo/models/kimi/kimi_k31/modeling_kimi_k31.py",
+    "sha256": "7e642dd296c2502c05ceb601f3d767b74b044431446762fa74e0ea5f398a5fe1",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/FSDPTurbo/fsdp_turbo/models/kimi/kimi_k31/modeling_kimi_linear.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "fsdp_turbo/models/kimi/kimi_k31/modeling_kimi_linear.py",
+    "sha256": "1167b6c6ae86fb835f74acc30a799339e7b0773d8439a2191a809e3a835eece5",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/FSDPTurbo/fsdp_turbo/models/kimi/kimi_k31/moe.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "fsdp_turbo/models/kimi/kimi_k31/moe.py",
+    "sha256": "944ef0233c96e97032ed61c4d224700c779938b948ea099115ed7417d383fa06",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/FSDPTurbo/fsdp_turbo/ops/npu/flash_attn.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "fsdp_turbo/ops/npu/flash_attn.py",
+    "sha256": "a839156e8e3ed0d51cf76838440e117f87c5c26979c74fcdef2f874f2c1d74f3",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/FSDPTurbo/fsdp_turbo/ops/rope.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "fsdp_turbo/ops/rope.py",
+    "sha256": "f4e724ba282f652e25b3cf8e55a2d7995e373660e13622034ccbd9f443af9178",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm-ascend/vllm_ascend/worker/worker.py",
+    "repository": "vllm-ascend",
+    "repository_path": "vllm_ascend/worker/worker.py",
+    "sha256": "4a89bc5a7eff14120228793a69e5244cdafc845920399669e2ea9fff8468f281",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm/vllm/model_executor/models/kimi_k25_vit.py",
+    "repository": "vllm",
+    "repository_path": "vllm/model_executor/models/kimi_k25_vit.py",
+    "sha256": "7ab9542c5f7bb1b79391a3f070b802be5d532935c8f1c00438164d7bae006525",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "model/modeling_kimi_k31.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "examples/kimi_alignment/checkpoint-code/modeling_kimi_k31.py",
+    "sha256": "e709eb94b1e60184050698c587114203d7bedd5487aec7bca376784bbbfcbfbc",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "results/cann-view-provenance.json",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/evidence/cann-view-provenance.json",
+    "sha256": "89aeb2c13fc48d6b0ae49f1ce7d083292ae8e4cac8e2c16c52ff2d9cb8d36c61",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/alignment_runtime/mm_trace.py",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/runtime/mm_trace.py",
+    "sha256": "7a66a983b910d69e1a236bfdcb21cf1ebecfbd9b13106485987983fb54defc61",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm-ascend/vllm_ascend/models/kimi_k3.py",
+    "repository": "vllm-ascend",
+    "repository_path": "vllm_ascend/models/kimi_k3.py",
+    "sha256": "73fe3f5f7c3d79b1db40cae6ce5e9c6e3141b988422f6d92459370496ee1fa42",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/alignment_runtime/kda_alignment.py",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/runtime/kda_alignment.py",
+    "sha256": "ff45bec6255669d2fddbd39bbda83816f1f798acfbd4f0cc80e3acd70ebcbe78",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/alignment_runtime/kimi_scoring.py",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/runtime/kimi_scoring.py",
+    "sha256": "beba32a7c9edad031e64d2e70a66e64fa4be3b42e9c65a30f1264fca0e357dbc",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/alignment_runtime/kda_trace.py",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/runtime/kda_trace.py",
+    "sha256": "c8e9846076e91e61d4e0d6142652edc6b2c4365417f3196b9c2fb2d80f0a8635",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/alignment_runtime/alignment_audit.py",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/runtime/alignment_audit.py",
+    "sha256": "16d9ed1c6c2fc6ed0f843e041b943d96e3ed0d8308adfb583f5c954765d951f5",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/FSDPTurbo/fsdp_turbo/ops/kda.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "fsdp_turbo/ops/kda.py",
+    "sha256": "574cf65aa1f01ebec452cbdd4f38253d1e4e08f635f7456f59977687a1244788",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/FSDPTurbo/fsdp_turbo/ops/npu/lightning_indexer.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "fsdp_turbo/ops/npu/lightning_indexer.py",
+    "sha256": "fa5151b5aaf47de8aaa79020f844fbfca7899cc5c4f08686635b53b98c08838c",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/FSDPTurbo/fsdp_turbo/ops/npu/sparse_flash_attention.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "fsdp_turbo/ops/npu/sparse_flash_attention.py",
+    "sha256": "145d53ed1cb9e1b8b5ccf7e6bf3d60e7c528930923b5e40f5c7e0572fd67eda5",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm-ascend/vllm_ascend/ops/kimi_kda.py",
+    "repository": "vllm-ascend",
+    "repository_path": "vllm_ascend/ops/kimi_kda.py",
+    "sha256": "752878c46910465a407ad0a9f06dac7f9aa405bdee986e4b1606bbbc54b5aa98",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm-ascend/vllm_ascend/worker/v2/model_runner.py",
+    "repository": "vllm-ascend",
+    "repository_path": "vllm_ascend/worker/v2/model_runner.py",
+    "sha256": "33ec55d99752af1632fd10301fb3ba1a004b3fc59333205026961be111b1323a",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/vllm/vllm/models/kimi_k3/amd/linear.py",
+    "repository": "vllm",
+    "repository_path": "vllm/models/kimi_k3/amd/linear.py",
+    "sha256": "bccfd39bd10bd366f0b4b4cee5da80a3b568b2ff3cb3279dfb91c7f0b7bc0bae",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/verl/verl/utils/kimi_logprob.py",
+    "repository": "verl",
+    "repository_path": "verl/utils/kimi_logprob.py",
+    "sha256": "b98815e7de1ecaaf89f19bcfe85fae96a5d9744340054c0b69c6e5a3a7133300",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "source/verl/verl/workers/engine/fsdp/transformer_impl.py",
+    "repository": "verl",
+    "repository_path": "verl/workers/engine/fsdp/transformer_impl.py",
+    "sha256": "effaad923ea5655150a57bdb28f03bd85ac8c6f8790e147d6c7eae282a2f4037",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "model/modeling_kimi_linear.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "examples/kimi_alignment/checkpoint-code/modeling_kimi_linear.py",
+    "sha256": "3446dde270fcf3ee75cec6d3e8816756da32baa4d363710cfed90996d9a4f39f",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "model/moe.py",
+    "repository": "FSDPTurbo",
+    "repository_path": "examples/kimi_alignment/checkpoint-code/moe.py",
+    "sha256": "9ef94b8365266378b5461fa1932e25b4b92adc553fac35f8c7ef88ee581732e9",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "model/config.json",
+    "repository": "FSDPTurbo",
+    "repository_path": "examples/kimi_alignment/checkpoint-code/config.json",
+    "sha256": "94e5abab77387bdef2ff81d9aec90681ca6264002320064fa085e77b434b7dc6",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "scripts/launch.sh",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/scripts/launch.sh",
+    "sha256": "73c94ab375b7de8b07c61726f4793e17ad0f58820b37029f89bb52a1f019aa5f",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "scripts/run-alignment.sh",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/scripts/run-alignment.sh",
+    "sha256": "0d8269dada6e7fb014e204bd7bb406f9601bdf67e75dfa2c1cc2c536228f9545",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  },
+  {
+    "server_path": "scripts/env-resolved.sh",
+    "repository": "verl",
+    "repository_path": "examples/kimi_alignment/scripts/env-resolved.sh",
+    "sha256": "c067c158d7a41521464a29c1c846d030e4477af642419b6a2d9f20af71dc5f40",
+    "attempt34_manifest_match": true,
+    "recovered_historical_file": false
+  }
+]

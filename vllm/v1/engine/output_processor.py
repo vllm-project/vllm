@@ -430,6 +430,14 @@ class RequestState:
         routed_experts = None
         if finished and self.routed_experts_chunks:
             routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
+# WB-TOPK-AGG-PATCH
+            try:
+                from vllm._wb_topk_agg import aggregate as _wb_agg, drop_response as _wb_drop
+                _wb_agg(routed_experts)
+                if _wb_drop():
+                    routed_experts = None
+            except Exception:
+                pass
 
         return CompletionOutput(
             index=self.request_index,

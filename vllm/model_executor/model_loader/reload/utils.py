@@ -38,11 +38,24 @@ def get_layer_size(layer: torch.nn.Module) -> int:
     """
     from .meta import SKIP_LOAD_TENSORS
 
-    return sum(
+    total_numel = sum(
         tensor.numel()
         for name, tensor in get_layer_tensors(layer).items()
         if name not in SKIP_LOAD_TENSORS
     )
+    # Some model-format tensors contain padding or deterministic buffers which
+    # never arrive through weight_loader. Do not wait for those elements.
+    unloaded_numel = getattr(layer, "_layerwise_unloaded_numel", 0)
+    if (
+        not isinstance(unloaded_numel, int)
+        or isinstance(unloaded_numel, bool)
+        or not 0 <= unloaded_numel <= total_numel
+    ):
+        raise ValueError(
+            f"Invalid _layerwise_unloaded_numel={unloaded_numel!r} "
+            f"for {type(layer).__name__} with {total_numel} loadable elements"
+        )
+    return total_numel - unloaded_numel
 
 
 def has_device_tensors(bound_args: BoundArguments) -> bool:

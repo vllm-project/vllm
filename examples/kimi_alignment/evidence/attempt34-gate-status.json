@@ -1,0 +1,686 @@
+{
+  "run": "kimi31_4layer_alignment_423_20261123_202005",
+  "updated_at": "2026-11-23T20:33:17.556336+08:00",
+  "independent_audits": [
+    {
+      "comparison": "independent_actor_old_logprob_vs_rollout",
+      "valid_tokens": 1024,
+      "nonfinite_tokens": 0,
+      "different_tokens": 0,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0.0,
+      "first_difference": null,
+      "actor_dtype": "torch.float32",
+      "rollout_dtype": "torch.float32",
+      "passed": true
+    },
+    {
+      "comparison": "independent_actor_old_logprob_vs_rollout",
+      "valid_tokens": 1024,
+      "nonfinite_tokens": 0,
+      "different_tokens": 0,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0.0,
+      "first_difference": null,
+      "actor_dtype": "torch.float32",
+      "rollout_dtype": "torch.float32",
+      "passed": true
+    }
+  ],
+  "actor_old_vs_grad": {
+    "pairs": 32,
+    "valid_response_tokens": 2048,
+    "nonfinite": 0,
+    "different": 0
+  },
+  "actor_vs_reference": {
+    "pairs": 32,
+    "valid_response_tokens": 2048,
+    "nonfinite": 0,
+    "different": 0
+  },
+  "same_side": {
+    "scope": "One image/prompt; greedy generated positions; fixed policy, BF16 TP8/EP8.",
+    "version": 0,
+    "comparisons": [
+      {
+        "comparison": "AA",
+        "group": "repeat",
+        "positions": [
+          {
+            "position": 192,
+            "phase": "prefill",
+            "batches": [
+              1,
+              1
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-repeat-target-95bb4570"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 193,
+            "phase": "decode",
+            "batches": [
+              1,
+              1
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-repeat-target-95bb4570"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 194,
+            "phase": "decode",
+            "batches": [
+              1,
+              1
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-repeat-target-95bb4570"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 195,
+            "phase": "decode",
+            "batches": [
+              1,
+              1
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-repeat-target-95bb4570"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 196,
+            "phase": "decode",
+            "batches": [
+              1,
+              1
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-repeat-target-95bb4570"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 197,
+            "phase": "decode",
+            "batches": [
+              1,
+              1
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-repeat-target-95bb4570"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 198,
+            "phase": "decode",
+            "batches": [
+              1,
+              1
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-repeat-target-95bb4570"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 199,
+            "phase": "decode",
+            "batches": [
+              1,
+              1
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-repeat-target-95bb4570"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          }
+        ],
+        "generated_tokens_equal": true,
+        "selected_logprobs": {
+          "different": 0,
+          "different_bits": 0,
+          "finite_mask_different": 0,
+          "nan_count": 0,
+          "maximum": 0.0
+        }
+      },
+      {
+        "comparison": "BI",
+        "group": "mixed",
+        "positions": [
+          {
+            "position": 192,
+            "phase": "prefill",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-mixed-target-a42e1a59",
+                "alignment-probe-mixed-peer-8513e636"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 193,
+            "phase": "decode",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-mixed-target-a42e1a59",
+                "alignment-probe-mixed-peer-8513e636"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 194,
+            "phase": "decode",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-mixed-target-a42e1a59",
+                "alignment-probe-mixed-peer-8513e636"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 195,
+            "phase": "decode",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-mixed-target-a42e1a59",
+                "alignment-probe-mixed-peer-8513e636"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 196,
+            "phase": "decode",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-mixed-target-a42e1a59",
+                "alignment-probe-mixed-peer-8513e636"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 197,
+            "phase": "decode",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-mixed-target-a42e1a59",
+                "alignment-probe-mixed-peer-8513e636"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 198,
+            "phase": "decode",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-mixed-target-a42e1a59",
+                "alignment-probe-mixed-peer-8513e636"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 199,
+            "phase": "decode",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-mixed-target-a42e1a59",
+                "alignment-probe-mixed-peer-8513e636"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          }
+        ],
+        "generated_tokens_equal": true,
+        "selected_logprobs": {
+          "different": 0,
+          "different_bits": 0,
+          "finite_mask_different": 0,
+          "nan_count": 0,
+          "maximum": 0.0
+        }
+      },
+      {
+        "comparison": "BI",
+        "group": "reordered",
+        "positions": [
+          {
+            "position": 192,
+            "phase": "prefill",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-reordered-target-9db7c5d9",
+                "alignment-probe-reordered-peer-bcb99520"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 193,
+            "phase": "decode",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-reordered-peer-bcb99520",
+                "alignment-probe-reordered-target-9db7c5d9"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 194,
+            "phase": "decode",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-reordered-peer-bcb99520",
+                "alignment-probe-reordered-target-9db7c5d9"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 195,
+            "phase": "decode",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-reordered-peer-bcb99520",
+                "alignment-probe-reordered-target-9db7c5d9"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 196,
+            "phase": "decode",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-reordered-peer-bcb99520",
+                "alignment-probe-reordered-target-9db7c5d9"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 197,
+            "phase": "decode",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-reordered-peer-bcb99520",
+                "alignment-probe-reordered-target-9db7c5d9"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 198,
+            "phase": "decode",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-reordered-peer-bcb99520",
+                "alignment-probe-reordered-target-9db7c5d9"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          },
+          {
+            "position": 199,
+            "phase": "decode",
+            "batches": [
+              1,
+              2
+            ],
+            "batch_members": [
+              [
+                "alignment-probe-single-target-beacf29c"
+              ],
+              [
+                "alignment-probe-reordered-peer-bcb99520",
+                "alignment-probe-reordered-target-9db7c5d9"
+              ]
+            ],
+            "logits": {
+              "different": 0,
+              "different_bits": 0,
+              "finite_mask_different": 0,
+              "nan_count": 0,
+              "maximum": 0.0
+            }
+          }
+        ],
+        "generated_tokens_equal": true,
+        "selected_logprobs": {
+          "different": 0,
+          "different_bits": 0,
+          "finite_mask_different": 0,
+          "nan_count": 0,
+          "maximum": 0.0
+        }
+      }
+    ],
+    "chunked_prefill": "pending",
+    "full_prefill_vs_decode": {
+      "position": 196,
+      "decode_queries": 1,
+      "prefill_queries": 197,
+      "logits": {
+        "different": 0,
+        "different_bits": 0,
+        "finite_mask_different": 0,
+        "nan_count": 0,
+        "maximum": 0.0
+      }
+    },
+    "actual_target_row": {
+      "mixed": 0,
+      "reordered": 0
+    },
+    "request_order_changed": false,
+    "numerical_checks_passed": true,
+    "coverage": {
+      "generated_positions": 8,
+      "batch16": false,
+      "request_order_changed": false,
+      "chunked_prefill": false
+    },
+    "complete_matrix_passed": false
+  },
+  "request_order": "Submitted reversed, but actual scheduler target index unchanged. Retest with shorter peer in attempt35.",
+  "effective_update": "not verified; original recipe retained at user request"
+}
