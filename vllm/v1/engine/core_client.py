@@ -1500,8 +1500,47 @@ class AsyncMPClient(MPClient):
         return [worker for workers in per_engine for worker in workers]
 
     async def reset_weights_async(self, model: WeightCheckerModel) -> str | None:
-        errors = await self.call_utility_all_async("reset_weights", model)
-        return next((error for error in errors if error is not None), None)
+        # Keep the commit and release running if the HTTP waiter is cancelled.
+        return await asyncio.shield(self._reset_weights(model))
+
+    async def _reset_weights(self, model: WeightCheckerModel) -> str | None:
+        reset_id = uuid.uuid4().hex
+        engines = tuple(self.core_engines)
+
+        async def call_phase(method: str, *args: str) -> list[Any]:
+            # Drain every result before dispatching the next phase or cleanup.
+            results = await asyncio.gather(
+                *(self._call_utility_async(method, *args, engine=e) for e in engines),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+            return results
+
+        try:
+            errors = await call_phase("prepare_weight_reset", model, reset_id)
+            message = next((err for err in errors if err is not None), None)
+            if message is None:
+                await call_phase("commit_weight_reset", reset_id)
+        except BaseException:
+            # Cleanup must not hide the failure that stopped the reset.
+            try:
+                await call_phase("release_weight_reset", reset_id)
+            except BaseException:
+                logger.warning(
+                    "Releasing the weight reset %s failed.", reset_id, exc_info=True
+                )
+            raise
+        try:
+            await call_phase("release_weight_reset", reset_id)
+        except BaseException:
+            if message is None:
+                raise
+            logger.warning(
+                "Releasing the weight reset %s failed.", reset_id, exc_info=True
+            )
+        return message
 
     async def handle_fault(
         self, ft_request: FaultToleranceRequest

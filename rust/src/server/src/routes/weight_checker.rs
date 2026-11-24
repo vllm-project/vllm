@@ -8,6 +8,8 @@ use axum::Json;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
+use uuid::Uuid;
 
 use crate::error::{ApiError, invalid_request};
 use crate::state::AppState;
@@ -62,22 +64,50 @@ pub(crate) enum WeightCheckerResponse {
     },
 }
 
+async fn reset_weights(state: Arc<AppState>, model: WeightCheckerModel) -> Result<(), ApiError> {
+    let client = state.engine_core_client();
+    let reset_id = Uuid::new_v4().simple().to_string();
+    let prepared: Result<Vec<Option<String>>, _> =
+        client.call_utility("prepare_weight_reset", (model, &reset_id)).await;
+    let result = match prepared {
+        Err(error) => Err(utility_call_error("prepare_weight_reset", error)),
+        Ok(errors) => match errors.into_iter().flatten().next() {
+            Some(message) => Err(ApiError::Conflict { message }),
+            None => client
+                .call_utility::<(), _>("commit_weight_reset", (&reset_id,))
+                .await
+                .map(|_| ())
+                .map_err(|error| utility_call_error("commit_weight_reset", error)),
+        },
+    };
+    match client
+        .call_utility::<(), _>("release_weight_reset", (&reset_id,))
+        .await
+    {
+        Ok(()) => result,
+        // Cleanup must not hide the failure that stopped the reset.
+        Err(error) => {
+            warn!("releasing weight reset {reset_id} failed: {error}");
+            match result {
+                Err(operation_error) => Err(operation_error),
+                Ok(()) => Err(utility_call_error("release_weight_reset", error)),
+            }
+        }
+    }
+}
+
 /// Checksum, reset, or compare model weights against a baseline.
 pub async fn weight_checker(
     State(state): State<Arc<AppState>>,
     body: Result<Json<WeightCheckerRequest>, JsonRejection>,
 ) -> Result<Json<WeightCheckerResponse>, ApiError> {
     let Json(body) = body?;
-    let client = state.engine_core_client();
 
     if body.action == WeightCheckerAction::Reset {
-        let errors: Vec<Option<String>> = client
-            .call_utility("reset_weights", (body.model,))
-            .await
-            .map_err(|error| utility_call_error("reset_weights", error))?;
-        if let Some(message) = errors.into_iter().flatten().next() {
-            return Err(ApiError::Conflict { message });
-        }
+        // Finish the reset and release its reservations if the HTTP waiter drops.
+        tokio::spawn(reset_weights(state, body.model)).await.map_err(|error| {
+            ApiError::server_error(format!("weight reset task failed: {error}"))
+        })??;
         return Ok(Json(WeightCheckerResponse::Reset { status: "reset" }));
     }
     if body.action == WeightCheckerAction::Compare && body.baseline.is_none() {
@@ -87,7 +117,8 @@ pub async fn weight_checker(
         ));
     }
 
-    let results: Vec<Vec<WorkerChecksums>> = client
+    let results: Vec<Vec<WorkerChecksums>> = state
+        .engine_core_client()
         .call_utility("compute_weight_checksums", (body.model,))
         .await
         .map_err(|error| utility_call_error("compute_weight_checksums", error))?;

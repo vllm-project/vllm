@@ -11131,6 +11131,7 @@ async fn weight_checker_route_merges_worker_checksums_and_compares() {
                 (Value::from("target:tp0:a"), Value::from("1")),
                 (Value::from("draft:tp0:a"), Value::from("2")),
             ])]);
+            let mut reset_id = Value::Nil;
             for (method, args, result) in [
                 (
                     "compute_weight_checksums",
@@ -11138,17 +11139,32 @@ async fn weight_checker_route_merges_worker_checksums_and_compares() {
                     workers,
                 ),
                 ("compute_weight_checksums", vec![Value::from("both")], both),
-                ("reset_weights", vec![Value::from("draft")], Value::Nil),
                 (
-                    "reset_weights",
+                    "prepare_weight_reset",
+                    vec![Value::from("draft")],
+                    Value::Nil,
+                ),
+                ("commit_weight_reset", vec![], Value::Nil),
+                ("release_weight_reset", vec![], Value::Nil),
+                (
+                    "prepare_weight_reset",
                     vec![Value::from("both")],
                     Value::from("Missing resident draft model"),
                 ),
+                ("release_weight_reset", vec![], Value::Nil),
             ] {
                 let utility = recv_engine_message(dealer).await;
                 let payload = decode_value(&utility[1]).expect("decode utility payload");
                 let array = payload.as_array().expect("utility payload array");
                 assert_eq!(array[2], Value::from(method));
+                let mut args = args;
+                if method == "prepare_weight_reset" {
+                    reset_id = array[3].as_array().expect("reset args")[1].clone();
+                    assert!(reset_id.as_str().is_some());
+                }
+                if method.ends_with("_weight_reset") {
+                    args.push(reset_id.clone());
+                }
                 assert_eq!(array[3], Value::Array(args));
                 let call_id = array[1].as_u64().expect("call id");
                 let envelope = UtilityResultEnvelope::without_type_info(result);

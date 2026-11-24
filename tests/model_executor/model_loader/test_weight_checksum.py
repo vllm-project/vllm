@@ -123,6 +123,76 @@ def test_reset_rejects_single_model_when_storage_is_shared(shared, monkeypatch):
     assert worker._models_for_weight_reset("both") == (target, draft)
 
 
+def test_prepare_weight_reset_holds_models_until_the_matching_commit(monkeypatch):
+    models = (nn.Linear(2, 2, bias=False),)
+    zeroed: list[tuple[nn.Module, ...]] = []
+
+    worker = object.__new__(Worker)
+    worker._prepared_weight_reset = None
+    worker._weight_update_active = False
+    worker._incomplete_weight_updates = set()
+    monkeypatch.setattr(worker, "_models_for_weight_reset", lambda model: models)
+    monkeypatch.setattr(worker, "_zero_reset_models", zeroed.append)
+
+    assert worker.prepare_weight_reset("both", "first") is None
+    assert zeroed == []
+
+    with pytest.raises(RuntimeError, match="not prepared"):
+        worker.commit_weight_reset("second")
+    assert zeroed == []
+
+    worker.release_weight_reset("second")
+    assert worker._prepared_weight_reset == ("first", models)
+
+    worker.commit_weight_reset("first")
+    assert zeroed == [models]
+
+    worker.release_weight_reset("first")
+    assert worker._prepared_weight_reset is None
+    worker.release_weight_reset("first")
+    assert worker._prepared_weight_reset is None
+
+
+def test_prepare_weight_reset_rejects_a_second_reservation():
+    models = (nn.Linear(2, 2, bias=False),)
+    worker = object.__new__(Worker)
+    worker._prepared_weight_reset = ("first", models)
+    worker._weight_update_active = False
+    worker._incomplete_weight_updates = set()
+    worker.parallel_config = ParallelConfig(pipeline_parallel_size=1)
+
+    assert (
+        worker.prepare_weight_reset("target", "second")
+        == "Another weight reset is in progress."
+    )
+
+
+@pytest.mark.parametrize(
+    "active, incomplete",
+    [(True, set()), (False, {False})],
+)
+def test_prepare_weight_reset_rejects_an_unfinished_weight_update(active, incomplete):
+    worker = object.__new__(Worker)
+    worker._prepared_weight_reset = None
+    worker._weight_update_active = active
+    worker._incomplete_weight_updates = incomplete
+    worker.parallel_config = ParallelConfig(pipeline_parallel_size=1)
+
+    assert worker.prepare_weight_reset("target", "first") == (
+        "Cannot reset weights during an active or incomplete weight update."
+    )
+
+
+def test_weight_update_and_reload_are_rejected_while_a_reset_is_prepared():
+    worker = object.__new__(Worker)
+    worker._prepared_weight_reset = ("first", ())
+
+    with pytest.raises(RuntimeError, match="weight reset"):
+        worker.reload_weights()
+    with pytest.raises(RuntimeError, match="weight reset"):
+        worker._start_weight_update()
+
+
 def test_dense_dp_replicas_get_distinct_key_prefixes(monkeypatch):
     for name in ("get_tp_group", "get_pp_group", "get_pcp_group"):
         monkeypatch.setattr(gpu_worker, name, lambda: SimpleNamespace(rank_in_group=0))

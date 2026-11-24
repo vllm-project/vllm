@@ -1221,9 +1221,19 @@ class EngineCore:
         args = () if model == "target" else (model,)
         return self.collective_rpc("compute_weight_checksums", args=args)
 
-    def reset_weights(self, model: WeightCheckerModel) -> str | None:
-        errors: list[str | None] = self.collective_rpc("reset_weights", args=(model,))
+    def prepare_weight_reset(
+        self, model: WeightCheckerModel, reset_id: str
+    ) -> str | None:
+        errors: list[str | None] = self.collective_rpc(
+            "prepare_weight_reset", args=(model, reset_id)
+        )
         return next((error for error in errors if error is not None), None)
+
+    def commit_weight_reset(self, reset_id: str) -> None:
+        self.collective_rpc("commit_weight_reset", args=(reset_id,))
+
+    def release_weight_reset(self, reset_id: str) -> None:
+        self.collective_rpc("release_weight_reset", args=(reset_id,))
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)

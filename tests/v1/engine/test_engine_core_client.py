@@ -245,23 +245,138 @@ def test_dplb_weight_checksums_gather_every_engine(model):
     ]
 
 
-def test_dplb_reset_sends_the_selection_to_every_engine():
-    """A reset without preflight must still reach every engine, not only the first."""
+def test_dplb_reset_prepares_commits_and_releases_every_engine():
+    """Every engine prepares before any engine commits, under one reset id."""
     client = _make_dplb_client(num_engines=2)
     calls = []
 
     async def call_utility(method, *args, engine):
         calls.append((method, args, engine))
-        if engine == client.core_engines[1]:
+        return []
+
+    client._call_utility_async = call_utility
+    assert asyncio.run(client.reset_weights_async("both")) is None
+
+    methods = [method for method, _, _ in calls]
+    phases: dict[str, list[int]] = {method: [] for method in set(methods)}
+    for index, method in enumerate(methods):
+        phases[method].append(index)
+    prepares = phases["prepare_weight_reset"]
+    commits = phases["commit_weight_reset"]
+    releases = phases["release_weight_reset"]
+    assert len(prepares) == len(commits) == len(releases) == 2
+    assert max(prepares) < min(commits) < max(commits) < min(releases)
+
+    assert len({args[-1] for _, args, _ in calls}) == 1
+    committed = {
+        engine for method, _, engine in calls if method == "commit_weight_reset"
+    }
+    assert committed == set(client.core_engines)
+
+
+def test_dplb_reset_cancels_every_commit_when_a_prepare_fails():
+    """One engine rejecting the selection must prevent every commit."""
+    client = _make_dplb_client(num_engines=2)
+    calls = []
+
+    async def call_utility(method, *args, engine):
+        calls.append((method, engine))
+        if method == "prepare_weight_reset" and engine == client.core_engines[1]:
             return "Missing resident draft model"
+        return []
 
     client._call_utility_async = call_utility
     assert (
         asyncio.run(client.reset_weights_async("both"))
         == "Missing resident draft model"
     )
+    methods = [method for method, _ in calls]
+    assert "commit_weight_reset" not in methods
+    assert methods.count("release_weight_reset") == 2
+
+
+def test_dplb_reset_releases_every_engine_when_commit_fails():
+    """A commit failure is reported, and the reservation is still released."""
+    client = _make_dplb_client(num_engines=2)
+    calls = []
+
+    async def call_utility(method, *args, engine):
+        calls.append(method)
+        if method == "commit_weight_reset":
+            raise RuntimeError("commit failed")
+        return []
+
+    client._call_utility_async = call_utility
+    with pytest.raises(RuntimeError, match="commit failed"):
+        asyncio.run(client.reset_weights_async("both"))
+    assert calls.count("release_weight_reset") == 2
+
+
+def test_dplb_reset_keeps_the_commit_error_when_release_also_fails():
+    """Cleanup failures must not mask the failure that stopped the reset."""
+    client = _make_dplb_client(num_engines=2)
+
+    async def call_utility(method, *args, engine):
+        if method == "commit_weight_reset":
+            raise RuntimeError("commit failed")
+        if method == "release_weight_reset":
+            raise RuntimeError("release failed")
+        return []
+
+    client._call_utility_async = call_utility
+    with pytest.raises(RuntimeError, match="commit failed"):
+        asyncio.run(client.reset_weights_async("both"))
+
+
+def test_dplb_reset_keeps_the_prepare_error_when_release_also_fails():
+    client = _make_dplb_client(num_engines=1)
+
+    async def call_utility(method, *args, engine):
+        if method == "prepare_weight_reset":
+            return "Missing resident draft model"
+        if method == "release_weight_reset":
+            raise RuntimeError("release failed")
+        return []
+
+    client._call_utility_async = call_utility
+    assert (
+        asyncio.run(client.reset_weights_async("both"))
+        == "Missing resident draft model"
+    )
+
+
+def test_dplb_reset_survives_cancellation_of_the_waiter():
+    """Cancelling the HTTP waiter must not cancel the shielded reset."""
+    client = _make_dplb_client(num_engines=1)
+    prepared = asyncio.Event()
+    finished = asyncio.Event()
+    calls = []
+
+    async def call_utility(method, *args, engine):
+        calls.append(method)
+        if method == "prepare_weight_reset":
+            prepared.set()
+            return []
+        if method == "release_weight_reset":
+            finished.set()
+        return []
+
+    async def scenario():
+        client._call_utility_async = call_utility
+        task = asyncio.create_task(client.reset_weights_async("both"))
+        await asyncio.wait_for(prepared.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(finished.wait(), timeout=5)
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    asyncio.run(scenario())
     assert calls == [
-        ("reset_weights", ("both",), engine) for engine in client.core_engines
+        "prepare_weight_reset",
+        "commit_weight_reset",
+        "release_weight_reset",
     ]
 
 

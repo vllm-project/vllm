@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import os
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import pytest
@@ -25,6 +26,9 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_worker import Worker
 
 
 def weight_checker(
@@ -212,6 +216,9 @@ def draft_args():
 class DraftWeightSyncClient(HTTPVLLMWeightSyncClient):
     def start_weight_update(self) -> None:
         self._post("start_draft_weight_update")
+        response = weight_checker(self.base_url, "reset", model="both")
+        assert response.status_code == 409, response.text
+        assert "active or incomplete weight update" in response.text
 
 
 @pytest.mark.skipif(
@@ -271,9 +278,26 @@ def test_ipc_transfer_restores_target_and_draft_weights():
         assert ok(gen(url))
 
 
+class WeightCheckerWorkerExtension:
+    def prepare_weight_reset_on_dp(self, rank: int, reset_id: str) -> None:
+        worker = cast("Worker", self)
+        if worker.parallel_config.data_parallel_index == rank:
+            error = worker.prepare_weight_reset("both", reset_id)
+            assert error is None, error
+
+
 @multi_gpu_test(num_gpus=4)
 def test_both_checksums_cover_every_dp_tp_shard():
-    args = [*draft_args(), "--data-parallel-size", "2", "--tensor-parallel-size", "2"]
+    args = [
+        *draft_args(),
+        "--data-parallel-size",
+        "2",
+        "--tensor-parallel-size",
+        "2",
+        "--worker-extension-cls",
+        "tests.entrypoints.rl.state_transitions.test_weight_checker"
+        ".WeightCheckerWorkerExtension",
+    ]
     with server(extra_args=args, port=8771, timeout=600) as url:
         requests.post(f"{url}/pause?mode=abort", timeout=30).raise_for_status()
         expected = {
@@ -284,6 +308,38 @@ def test_both_checksums_cover_every_dp_tp_shard():
         }
         baseline = checksums(url, "both")
         assert ranks(baseline) == expected
+
+        def worker_rpc(method, *rpc_args):
+            response = requests.post(
+                f"{url}/collective_rpc",
+                json={"method": method, "args": list(rpc_args)},
+                timeout=60,
+            )
+            assert response.status_code == 200, response.text
+
+        # Reserve one DP replica through the real worker RPC. The HTTP reset
+        # must leave every replica untouched and release its own reservations.
+        worker_rpc("prepare_weight_reset_on_dp", 1, "busy-dp")
+        conflict = weight_checker(url, "reset", model="both")
+        assert conflict.status_code == 409, conflict.text
+        assert "Another weight reset is in progress" in conflict.text
+        assert checksums(url, "both") == baseline
+
+        # Another transaction's id neither commits nor releases that reservation.
+        wrong_commit = requests.post(
+            f"{url}/collective_rpc",
+            json={"method": "commit_weight_reset", "args": ["other-dp"]},
+            timeout=60,
+        )
+        assert wrong_commit.status_code >= 400, wrong_commit.text
+        worker_rpc("release_weight_reset", "other-dp")
+        still_conflict = weight_checker(url, "reset", model="both")
+        assert still_conflict.status_code == 409, still_conflict.text
+        assert checksums(url, "both") == baseline
+
+        # Releasing twice is safe, and the next reset then succeeds.
+        worker_rpc("release_weight_reset", "busy-dp")
+        worker_rpc("release_weight_reset", "busy-dp")
         weight_checker(url, "reset", model="both").raise_for_status()
         comparison = weight_checker(url, "compare", baseline, model="both")
         comparison.raise_for_status()

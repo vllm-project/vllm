@@ -21,14 +21,38 @@ All three actions accept `"model": "target"`, `"draft"`, or `"both"`. Omitting
 
 For a single model, keys have the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:{tensor_name}`.
 Selecting `both` adds a `target:` or `draft:` prefix to each key. With pipeline
-parallelism, draft keys come from the last stage. The endpoint keeps no state,
-so the caller holds the baseline.
+parallelism, draft keys come from the last stage. The caller holds the baseline.
 
 Invalid requests return HTTP 400, and selecting a draft without resident draft
-weights returns HTTP 409. Reset also returns HTTP 409 for draft and both
-selections under pipeline parallelism, or if a single-model reset would overwrite
-storage shared with the other model. Use `both` for shared weights and restore
-both models before resuming.
+weights returns HTTP 409. Reset also returns HTTP 409 during another reset or an
+active or incomplete weight update, for draft and both selections under pipeline
+parallelism, or if a single-model reset would overwrite storage shared with the
+other model. Use `both` for shared weights and restore both models before
+resuming.
+
+## Reset coordination
+
+`reset` runs as prepare, commit and release across every engine the API server
+reaches:
+
+1. Prepare validates the selection on every worker (model residency, shared
+   storage, pipeline parallelism) and records the models to clear. It writes no
+   weights.
+2. Commit clears the recorded models and synchronizes their devices.
+3. Release drops the reservation, on success and on failure.
+
+The API server starts commit only after every engine has prepared successfully,
+so a selection rejected on any worker leaves every worker's weights untouched.
+A reservation belongs to one reset transaction and is held by the worker until
+that transaction releases it. While it is held, the endpoint rejects another
+reset with HTTP 409, and the worker refuses a weight update or reload. A reset
+is also rejected with HTTP 409 while a weight update is active or incomplete, so
+finish or abort the update before resetting.
+
+Cleanup is best effort. If commit fails after some workers have already zeroed
+their weights, the endpoint reports the failure and releases the reservations,
+but the zeroed weights are not rolled back. Verify the checksums and restore the
+affected weights before resuming inference.
 
 ## RL weight-update check
 
