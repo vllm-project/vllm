@@ -6,7 +6,7 @@ import os
 import threading
 import weakref
 from collections.abc import Callable, Generator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
@@ -1221,6 +1221,9 @@ class CoreEngineLaunch:
     # Frontend processes to watch during engine startup; may be assigned by
     # the caller before the startup barrier runs on context manager exit.
     watched_frontend_processes: Sequence[FrontendProcess] = ()
+    # Whether to give each engine private KV event addresses for the Rust
+    # frontend; may be set like `watched_frontend_processes`.
+    assign_kv_event_addresses: bool = False
 
 
 @contextlib.contextmanager
@@ -1564,9 +1567,19 @@ def wait_for_engine_startup(
                         "Elastic EP startup requires a coordination TCPStore "
                         "port before engine handshake."
                     )
+            addresses = launch.addresses
+            if launch.assign_kv_event_addresses:
+                kv_events, kv_events_replay = (
+                    (get_open_zmq_ipc_path(), get_open_zmq_ipc_path())
+                    if local
+                    else ("tcp://*:0", "tcp://*:0")
+                )
+                addresses = replace(
+                    addresses, kv_events=kv_events, kv_events_replay=kv_events_replay
+                )
             init_message = msgspec.msgpack.encode(
                 EngineHandshakeMetadata(
-                    addresses=launch.addresses,
+                    addresses=addresses,
                     parallel_config=parallel_config_payload,
                 )
             )

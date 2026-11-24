@@ -498,6 +498,8 @@ def test_frontend_endpoints_carry_the_same_stream(random_port, tmp_path):
         user.close()
         frontend.close()
         publisher.shutdown()
+    assert not (tmp_path / "kv").exists()
+    assert not (tmp_path / "kvr").exists()
 
     # With KV events off, the frontend's addresses are not bound.
     config.enable_kv_cache_events = False

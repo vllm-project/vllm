@@ -27,6 +27,8 @@ service KvEvents {
   //   `stream_id` is not the current one.
   // DATA_LOSS: batches after the last one sent can no longer be recovered,
   //   because the subscriber fell too far behind or the server lost them.
+  // UNAVAILABLE: the engine's publisher or replay socket did not answer, or
+  //   the server is shutting down.
   rpc SubscribeKvEvents (SubscribeKvEventsRequest) returns (stream SubscribeKvEventsResponse) {}
 }
 
@@ -50,7 +52,7 @@ message SubscribeKvEventsResponse {
 }
 
 message KvEventStreamStart {
-  // Changes when the server loses batches for good or restarts.
+  // Changes when the server restarts.
   string stream_id = 1;
   uint32 data_parallel_rank = 2;
 }

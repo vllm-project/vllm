@@ -12,7 +12,7 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::utility::{PauseMode as EnginePauseMode, SleepLevel};
 
-use super::kv_events::frontend_events_endpoint;
+use super::kv_events::PublisherAddresses;
 use super::{ControlServer, pb};
 use crate::config::LoraModulePath;
 use crate::lora::{
@@ -546,7 +546,7 @@ pub(super) fn kv_event_sources(response: &EngineCoreReadyResponse) -> Vec<pb::Kv
         hwm: config.hwm,
         max_queue_size: config.max_queue_size,
     }];
-    if frontend_events_endpoint(Some(config)).is_some() {
+    if PublisherAddresses::of(Some(config)).is_some() {
         sources.push(pb::KvEventSource {
             transport: "grpc".to_string(),
             data_parallel_rank: Some(response.data_parallel_rank),

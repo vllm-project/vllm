@@ -363,6 +363,7 @@ def run_multi_api_server(args: argparse.Namespace):
         )
 
         if rust_frontend_path:
+            engine_launch.assign_kv_event_addresses = True
             if parallel_config.local_engines_only:
                 expected_engine_start_index = parallel_config.data_parallel_rank
                 expected_engine_count = parallel_config.data_parallel_size_local

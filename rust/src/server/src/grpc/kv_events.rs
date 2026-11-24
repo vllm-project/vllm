@@ -13,7 +13,7 @@ use thiserror_ext::AsReport as _;
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
-use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEventsConfig};
+use vllm_engine_core_client::protocol::handshake::KvEventsConfig;
 use vllm_engine_core_client::protocol::kv_events::{
     BlockRemoved, BlockStored, ExternalBlockHash, ExtraKeyValue, KvCacheEvent, KvEventBatch,
 };
@@ -27,74 +27,44 @@ pub(crate) type KvEventsGrpcService = KvEventsServer<KvEventsServiceImpl>;
 /// gRPC KV event service: re-publishes each engine's ZMQ KV events as typed
 /// streams.
 pub struct KvEventsServiceImpl {
-    state: Arc<AppState>,
-    /// Relays by data-parallel rank, each started by its first subscriber.
-    relays: BTreeMap<u32, OnceCell<KvEventRelay>>,
+    /// By data-parallel rank: the private addresses its engine publishes on
+    /// for this frontend, and its relay, started by its first subscriber.
+    ranks: BTreeMap<u32, (Option<PublisherAddresses>, OnceCell<KvEventRelay>)>,
     /// Ends the streams, which would otherwise hold up a graceful shutdown.
     shutdown: CancellationToken,
 }
 
-impl KvEventsServiceImpl {
-    pub fn new(state: Arc<AppState>, shutdown: CancellationToken) -> Self {
-        let relays = (state.engine_core_client().ready_responses().into_iter())
-            .map(|ready| (ready.data_parallel_rank, OnceCell::new()))
-            .collect();
-        Self {
-            state,
-            relays,
-            shutdown,
-        }
-    }
+/// Where an engine publishes its KV events for this frontend.
+pub(super) struct PublisherAddresses {
+    endpoint: String,
+    replay_endpoint: Option<String>,
+    topic: String,
+}
 
-    fn engine(&self, data_parallel_rank: u32) -> Result<&EngineCoreReadyResponse, Status> {
-        let engines = self.state.engine_core_client().ready_responses();
-        engines
-            .iter()
-            .find(|ready| ready.data_parallel_rank == data_parallel_rank)
-            .copied()
-            .ok_or_else(|| {
-                Status::invalid_argument(format!(
-                    "data parallel rank {data_parallel_rank} is not connected to this frontend; \
-                     connected ranks: {:?}",
-                    engines.iter().map(|ready| ready.data_parallel_rank).collect::<Vec<_>>()
-                ))
-            })
-    }
-
-    /// The relay of one connected rank, connecting it on first use. A failed
-    /// connect is retried by the next subscriber.
-    async fn relay(
-        &self,
-        rank: u32,
-        endpoint: &str,
-        config: &KvEventsConfig,
-    ) -> Result<&KvEventRelay, Status> {
-        let relay = self.relays.get(&rank).expect("every connected rank has a relay cell");
-        relay
-            .get_or_try_init(|| {
-                KvEventRelay::connect(
-                    endpoint,
-                    config.frontend_replay_endpoint.as_deref(),
-                    &config.topic,
-                )
-            })
-            .await
-            .map_err(|error| {
-                Status::unavailable(format!(
-                    "failed to connect to the KV event publisher of rank {rank}: {}",
-                    error.as_report()
-                ))
-            })
+impl PublisherAddresses {
+    /// The private addresses of an engine that publishes KV events to this
+    /// frontend.
+    pub(super) fn of(config: Option<&KvEventsConfig>) -> Option<Self> {
+        let config =
+            config.filter(|config| config.enable_kv_cache_events && config.publisher == "zmq")?;
+        Some(Self {
+            endpoint: config.frontend_endpoint.clone()?,
+            replay_endpoint: config.frontend_replay_endpoint.clone(),
+            topic: config.topic.clone(),
+        })
     }
 }
 
-/// The private address the engine publishes its KV events on for this
-/// frontend, if it publishes them.
-pub(super) fn frontend_events_endpoint(config: Option<&KvEventsConfig>) -> Option<&str> {
-    config
-        .filter(|config| config.enable_kv_cache_events && config.publisher == "zmq")?
-        .frontend_endpoint
-        .as_deref()
+impl KvEventsServiceImpl {
+    pub fn new(state: Arc<AppState>, shutdown: CancellationToken) -> Self {
+        let ranks = (state.engine_core_client().ready_responses().into_iter())
+            .map(|ready| {
+                let publisher = PublisherAddresses::of(ready.kv_events_config.as_ref());
+                (ready.data_parallel_rank, (publisher, OnceCell::new()))
+            })
+            .collect();
+        Self { ranks, shutdown }
+    }
 }
 
 #[tonic::async_trait]
@@ -108,21 +78,32 @@ impl pb::kv_events_server::KvEvents for KvEventsServiceImpl {
     ) -> Result<Response<Self::SubscribeKvEventsStream>, Status> {
         let request = request.into_inner();
         let rank = request.data_parallel_rank;
-        let config = self.engine(rank)?.kv_events_config.as_ref();
-        let endpoint = frontend_events_endpoint(config).ok_or_else(|| {
+        let (publisher, relay) = self.ranks.get(&rank).ok_or_else(|| {
+            Status::invalid_argument(format!(
+                "data parallel rank {rank} is not connected to this frontend; \
+                 connected ranks: {:?}",
+                self.ranks.keys().collect::<Vec<_>>()
+            ))
+        })?;
+        let publisher = publisher.as_ref().ok_or_else(|| {
             Status::failed_precondition(format!(
                 "the engine of rank {rank} does not publish KV cache events; \
                  enable them with --kv-events-config"
             ))
         })?;
-        let config = config.expect("an events endpoint comes from a config");
+        // A failed connect is retried by the next subscriber.
+        let relay =
+            relay
+                .get_or_try_init(|| KvEventRelay::connect(publisher))
+                .await
+                .map_err(|error| {
+                    Status::unavailable(format!(
+                        "failed to connect to the KV event publisher of rank {rank}: {}",
+                        error.as_report()
+                    ))
+                })?;
 
-        let reader = self
-            .relay(rank, endpoint, config)
-            .await?
-            .reader(request.resume)
-            .await
-            .map_err(read_status)?;
+        let reader = relay.reader(request.resume).await.map_err(read_status)?;
         Ok(Response::new(Box::pin(kv_event_responses(
             reader,
             rank,

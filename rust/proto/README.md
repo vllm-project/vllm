@@ -76,7 +76,7 @@ frontend first replays the batches the engine still buffers (`buffer_steps`)
 from the cursor, then continues live; it keeps no history of its own, and fills
 batches its own subscription misses from the same buffer. A cursor older than
 the buffer fails with `OUT_OF_RANGE`; batches that can no longer be recovered
-end the stream with `DATA_LOSS` and start a new `stream_id`.
+end the stream with `DATA_LOSS`.
 
 Each batch is one gRPC message. Requests that set `kv_cache_report_mode=full`
 can produce batches above the 4 MiB that gRPC clients accept by default, so

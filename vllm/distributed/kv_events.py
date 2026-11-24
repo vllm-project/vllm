@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
+import os
 import queue
 import threading
 import time
@@ -436,6 +438,11 @@ class ZmqEventPublisher(EventPublisher):
                 self._replay.close(linger=0)
         finally:
             pass  # Do not terminate context; other sockets may use it
+        # Nobody else removes the socket files of the frontend's addresses.
+        for endpoint in (self._frontend_endpoint, self._frontend_replay_endpoint):
+            if endpoint is not None and endpoint.startswith("ipc://"):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(endpoint.removeprefix("ipc://"))
 
     def _socket_setup(self) -> None:
         """Initialize sockets

@@ -3833,8 +3833,10 @@ async fn publish_kv_events_until_received(
     stream: &mut KvEventStream,
 ) -> Result<pb::KvEventBatch, Status> {
     let batch = kv_event_batch(vec![]);
+    publisher.retain(sequence_number, &batch);
+    let payload = bytes::Bytes::from(rmp_serde::to_vec_named(&batch).unwrap());
     loop {
-        publisher.publish(sequence_number, &batch).await;
+        publisher.publish_payload(sequence_number, payload.clone()).await;
         let received = tokio::time::timeout(Duration::from_millis(20), next_kv_event_batch(stream));
         if let Ok(batch) = received.await {
             return batch;
@@ -4133,9 +4135,12 @@ async fn kv_events_resume_replays_the_engine_buffer_then_continues_live() {
         .unwrap();
     assert_eq!(status.code(), Code::OutOfRange);
 
-    // The engine no longer buffers batch 0.
+    // The engine no longer buffers batch 0, then nothing at all.
     publisher.forget_before(1);
     let status = subscribe_kv_events(&service, kv_event_cursor("", 0)).await.err().unwrap();
+    assert_eq!(status.code(), Code::OutOfRange);
+    publisher.forget_before(u64::MAX);
+    let status = subscribe_kv_events(&service, kv_event_cursor("", 2)).await.err().unwrap();
     assert_eq!(status.code(), Code::OutOfRange);
 }
 
@@ -4188,7 +4193,7 @@ async fn kv_events_catch_up_a_slow_subscriber_until_the_buffer_no_longer_covers_
     let mut slow = subscribe_kv_events(&service, None).await.unwrap();
     kv_event_stream_id(&mut slow).await;
     publish_and_forward(&mut publisher, count + 1..=2 * count).await;
-    publisher.forget_before(2 * count);
+    publisher.forget_before(u64::MAX);
     assert_eq!(
         next_kv_event_batch(&mut slow).await.unwrap_err().code(),
         Code::DataLoss
@@ -4196,7 +4201,7 @@ async fn kv_events_catch_up_a_slow_subscriber_until_the_buffer_no_longer_covers_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kv_events_lost_batch_ends_streams_and_starts_a_new_one() {
+async fn kv_events_unrecoverable_gap_ends_the_stream() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     // Without a replay socket, a batch the PUB socket drops is gone.
     let mut publisher = MockKvEventPublisher::bind(&ipc, false).await;
@@ -4218,7 +4223,7 @@ async fn kv_events_lost_batch_ends_streams_and_starts_a_new_one() {
     assert_eq!(status.code(), Code::OutOfRange);
 
     let mut stream = subscribe_kv_events(&service, None).await.unwrap();
-    assert_ne!(kv_event_stream_id(&mut stream).await, stream_id);
+    assert_eq!(kv_event_stream_id(&mut stream).await, stream_id);
     publisher.publish(3, &kv_event_batch(vec![])).await;
     assert_eq!(next_kv_event_sequence_numbers(&mut stream, 1).await, [3]);
 }

@@ -67,8 +67,6 @@ pub enum Error {
         context: &'static str,
         field: &'static str,
     },
-    #[error("unsupported KV event endpoint `{endpoint}`: {message}")]
-    UnsupportedKvEventEndpoint { endpoint: String, message: String },
     #[error("unexpected KV event message: {message}")]
     UnexpectedKvEventMessage { message: String },
     #[error("KV event replay timed out after {timeout:?}")]

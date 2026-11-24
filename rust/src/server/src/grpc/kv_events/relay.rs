@@ -12,7 +12,7 @@ use tracing::warn;
 use uuid::Uuid;
 use vllm_engine_core_client::kv_events::{KvEventSubscriber, decode_batch, replay};
 
-use super::{batch_to_proto, pb};
+use super::{PublisherAddresses, batch_to_proto, pb};
 
 /// Live batches a subscriber may fall behind by before it is caught up from
 /// the engine's replay buffer.
@@ -43,47 +43,28 @@ struct Forwarded {
     next: u64,
 }
 
-#[derive(Clone)]
-struct LiveBatch {
-    stream_id: Arc<str>,
-    batch: Arc<pb::KvEventBatch>,
-}
-
-/// Follows one engine's KV-event publisher and fans its batches out to any
-/// number of readers. It keeps no history: catch-ups are served from the
-/// engine's own replay buffer.
+/// Forwards one engine's KV event batches, as its PUB socket delivers them,
+/// to any number of readers. It keeps no history: readers fill gaps and catch
+/// up from the engine's own replay buffer.
 pub(super) struct KvEventRelay {
-    live: broadcast::Sender<LiveBatch>,
-    stream_id: watch::Receiver<Arc<str>>,
+    live: broadcast::Sender<Arc<pb::KvEventBatch>>,
+    stream_id: Arc<str>,
     forwarded: watch::Receiver<Option<Forwarded>>,
     replay_endpoint: Option<String>,
     _task: AbortOnDropHandle<()>,
 }
 
 impl KvEventRelay {
-    pub async fn connect(
-        endpoint: &str,
-        replay_endpoint: Option<&str>,
-        topic: &str,
-    ) -> vllm_engine_core_client::Result<Self> {
-        let subscriber = KvEventSubscriber::connect(endpoint, replay_endpoint, topic).await?;
-        let replay_endpoint = replay_endpoint
-            .map(vllm_engine_core_client::kv_events::connect_endpoint)
-            .transpose()?;
+    pub async fn connect(publisher: &PublisherAddresses) -> vllm_engine_core_client::Result<Self> {
+        let subscriber = KvEventSubscriber::connect(&publisher.endpoint, &publisher.topic).await?;
         let (live, _) = broadcast::channel(LIVE_CAPACITY);
-        let (stream_id_sender, stream_id) = watch::channel(new_stream_id());
         let (forwarded_sender, forwarded) = watch::channel(None);
-        let task = tokio::spawn(follow(
-            subscriber,
-            live.clone(),
-            stream_id_sender,
-            forwarded_sender,
-        ));
+        let task = tokio::spawn(follow(subscriber, live.clone(), forwarded_sender));
         Ok(Self {
             live,
-            stream_id,
+            stream_id: Uuid::new_v4().to_string().into(),
             forwarded,
-            replay_endpoint,
+            replay_endpoint: publisher.replay_endpoint.clone(),
             _task: AbortOnDropHandle::new(task),
         })
     }
@@ -99,14 +80,14 @@ impl KvEventRelay {
         let mut reader = KvEventReader {
             live,
             replay_endpoint: self.replay_endpoint.clone(),
-            stream_id: self.stream_id.borrow().clone(),
+            stream_id: self.stream_id.clone(),
             // Live from the next batch the relay forwards.
             next: self.forwarded.borrow().map(|forwarded| forwarded.next),
             forwarded: self.forwarded.clone(),
             pending: VecDeque::new(),
         };
         if let Some(cursor) = resume {
-            if !cursor.stream_id.is_empty() && *cursor.stream_id != *reader.stream_id {
+            if !cursor.stream_id.is_empty() && *cursor.stream_id != *self.stream_id {
                 return Err(ReadError::OutOfRange);
             }
             reader.next = Some(cursor.next_sequence_number);
@@ -116,52 +97,39 @@ impl KvEventRelay {
     }
 }
 
-fn new_stream_id() -> Arc<str> {
-    Uuid::new_v4().to_string().into()
-}
-
 async fn follow(
     mut subscriber: KvEventSubscriber,
-    live: broadcast::Sender<LiveBatch>,
-    stream_id: watch::Sender<Arc<str>>,
+    live: broadcast::Sender<Arc<pb::KvEventBatch>>,
     forwarded: watch::Sender<Option<Forwarded>>,
 ) {
     loop {
-        match subscriber.next().await {
-            Ok(batch) => {
-                if batch.follows_gap {
-                    warn!(
-                        sequence_number = batch.sequence_number,
-                        "KV event batches were lost; starting a new stream"
-                    );
-                    stream_id.send_replace(new_stream_id());
-                }
-                let sequence_number = batch.sequence_number;
-                forwarded.send_modify(|forwarded| {
-                    let first = forwarded.map_or(sequence_number, |forwarded| forwarded.first);
-                    *forwarded = Some(Forwarded {
-                        first,
-                        next: sequence_number + 1,
-                    });
-                });
-                let batch = LiveBatch {
-                    stream_id: stream_id.borrow().clone(),
-                    batch: Arc::new(batch_to_proto(sequence_number, batch.batch)),
-                };
-                // No receiver is not an error: readers come and go.
-                let _ = live.send(batch);
-            }
+        let (sequence_number, payload) = match subscriber.next().await {
+            Ok(published) => published,
             Err(error) => {
                 warn!(error = %error.as_report(), "failed to read KV events from the engine");
                 tokio::time::sleep(RETRY_DELAY).await;
+                continue;
             }
-        }
+        };
+        // A batch that cannot be decoded is a gap that readers cannot fill.
+        let Some(batch) = decode_batch(sequence_number, &payload) else {
+            continue;
+        };
+        forwarded.send_modify(|forwarded| {
+            let first = forwarded.map_or(sequence_number, |forwarded| forwarded.first);
+            *forwarded = Some(Forwarded {
+                first,
+                next: sequence_number + 1,
+            });
+        });
+        // No receiver is not an error: readers come and go.
+        let _ = live.send(Arc::new(batch_to_proto(sequence_number, batch)));
     }
 }
 
 /// One subscriber's position in a relay's stream.
 pub(super) struct KvEventReader {
-    live: broadcast::Receiver<LiveBatch>,
+    live: broadcast::Receiver<Arc<pb::KvEventBatch>>,
     replay_endpoint: Option<String>,
     stream_id: Arc<str>,
     /// Sequence number of the next batch to yield; `None` until the relay
@@ -184,8 +152,8 @@ impl KvEventReader {
                 self.next = Some(batch.sequence_number + 1);
                 return Ok(batch);
             }
-            let item = match self.live.recv().await {
-                Ok(item) => item,
+            let batch = match self.live.recv().await {
+                Ok(batch) => batch,
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     // A reader that started before the relay's first batch
                     // missed everything from that one on.
@@ -196,29 +164,26 @@ impl KvEventReader {
                 }
                 Err(broadcast::error::RecvError::Closed) => return Err(ReadError::RelayStopped),
             };
-            if *item.stream_id != *self.stream_id {
-                return Err(ReadError::DataLoss);
-            }
-            let sequence_number = item.batch.sequence_number;
+            let sequence_number = batch.sequence_number;
             match self.next {
                 Some(next) if sequence_number < next => {}
                 Some(next) if sequence_number > next => {
                     self.catch_up(ReadError::DataLoss).await?;
                     if self.pending.back().is_none_or(|last| last.sequence_number < sequence_number)
                     {
-                        self.pending.push_back(item.batch);
+                        self.pending.push_back(batch);
                     }
                 }
                 _ => {
                     self.next = Some(sequence_number + 1);
-                    return Ok(item.batch);
+                    return Ok(batch);
                 }
             }
         }
     }
 
     /// Queue the engine's buffered batches from `next` on. `missing` is the
-    /// error when the buffer no longer starts at `next`.
+    /// error when the buffer no longer holds `next` although it was published.
     async fn catch_up(&mut self, missing: ReadError) -> Result<(), ReadError> {
         let next = self.next.expect("catch-up needs a position");
         let Some(endpoint) = &self.replay_endpoint else {
@@ -227,8 +192,11 @@ impl KvEventReader {
         let batches = replay(endpoint, next)
             .await
             .map_err(|error| ReadError::ReplayFailed(error.to_report_string()))?;
-        if batches.first().is_some_and(|(sequence_number, _)| *sequence_number != next) {
-            return Err(missing);
+        let published = self.forwarded.borrow().is_some_and(|forwarded| next < forwarded.next);
+        match batches.first() {
+            Some((sequence_number, _)) if *sequence_number != next => return Err(missing),
+            None if published => return Err(missing),
+            _ => {}
         }
         self.pending.clear();
         for (sequence_number, payload) in batches {
