@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 from copy import copy
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -321,3 +322,32 @@ def test_poll_error_fails_next_step(monkeypatch: pytest.MonkeyPatch):
     with pytest.raises(RuntimeError, match="lost transfer"):
         connector.post_forward(set())
     assert connector.post_forward(set()) is not None
+
+
+@pytest.mark.parametrize("on_model_thread", [True, False])
+def test_output_polls_only_on_model_thread(
+    monkeypatch: pytest.MonkeyPatch, on_model_thread: bool
+):
+    """Outputs collected by the model thread (uniproc or synchronous scheduling)
+    poll first; the connector must not be called from another thread."""
+    connector = _polling_connector(
+        monkeypatch,
+        KVConnectorTransferResults(),
+        KVConnectorTransferResults(finished_recving={"a"}),
+    )
+    connector.pre_forward(_scheduler_output(False, has_pending_kv_transfers=True))
+    take = connector.transfer_results_taker()
+    assert take is not None
+    connector.post_forward(set())
+
+    output = _empty_output()
+    if on_model_thread:
+        take(output)
+    else:
+        thread = threading.Thread(target=take, args=(output,))
+        thread.start()
+        thread.join()
+    assert output.kv_connector_output is not None
+    assert output.kv_connector_output.finished_recving == (
+        {"a"} if on_model_thread else None
+    )

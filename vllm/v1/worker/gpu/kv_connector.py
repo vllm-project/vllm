@@ -142,6 +142,7 @@ class ActiveKVConnector(KVConnector):
         # Raised by the next post_forward(); polls have no RPC to fail.
         self._poll_error: Exception | None = None
         self._has_pending_transfers = False
+        self._model_thread = threading.get_ident()
         self._last_step_time = 0.0
         self._next_poll_time = 0.0
 
@@ -155,6 +156,7 @@ class ActiveKVConnector(KVConnector):
             return
 
         self._has_pending_transfers = scheduler_output.has_pending_kv_transfers
+        self._model_thread = threading.get_ident()
         self._last_step_time = time.monotonic()
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
@@ -320,6 +322,11 @@ class ActiveKVConnector(KVConnector):
     ) -> None:
         """Move held results to `output`. Outputs are processed in step order,
         so one without pending GPU work (no `taker`) leaves them to pending ones."""
+        if (
+            taker is not None and threading.get_ident() == self._model_thread
+        ) and self.next_poll_time() is not None:
+            # Model thread was blocked, not polling (uniproc or sync scheduling).
+            self.poll()
         with self._results_lock:
             if taker is not None:
                 self._num_pending_takers -= 1
