@@ -1340,6 +1340,7 @@ def test_aiter_fa_metadata_build_does_not_sync(sliding_window):
     assert common.seq_lens_cpu_upper_bound is not None
     common.seq_lens_cpu_upper_bound[0] += 100
 
+    # Fails the test if build() blocks the CPU waiting on queued GPU work.
     torch.cuda.set_sync_debug_mode("error")
     try:
         metadata = builder.build(0, common)
