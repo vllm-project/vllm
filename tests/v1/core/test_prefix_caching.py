@@ -3749,18 +3749,18 @@ def test_reset_prefix_cache():
 
 
 def test_prefix_cache_stats_disabled():
-    """Test that prefix_cache_stats is None when log_stats is False."""
+    """Test that prefix_cache_stats is None when collect_stats is False."""
     block_size = 16
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, 11),
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
-        log_stats=False,  # Disable logging stats
+        collect_stats=False,  # Disable logging stats
     )
     assert manager.prefix_cache_stats is None
 
-    # Call all functions that check whether log_stats is disabled.
+    # Call all functions that check whether collect_stats is disabled.
     req = make_request("0", list(range(16)), block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req)
     assert not computed_blocks.blocks[0]

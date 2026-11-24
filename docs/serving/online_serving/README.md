@@ -196,7 +196,7 @@ When using the flag VLLM_SERVER_DEV_MODE=1, you enable development endpoints.
 
 ### Weight Transfer APIs (RL Training)
 
-For further details on Weight Transfer, please refer to [this page](../../training/weight_transfer/README.md).
+For further details on Weight Transfer, please refer to [this page](../../training/weight_updates/README.md).
 
 - `/pause` - Pause generation (causes denial of service)
 - `/resume` - Resume generation
