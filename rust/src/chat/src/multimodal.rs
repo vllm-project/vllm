@@ -26,12 +26,14 @@ use llm_multimodal::{
     TransparencyPolicy, VideoClip, VisionPreProcessor, VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{Instrument as _, warn};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, MmKwargsItem};
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
+use vllm_tokenizer::parse_checkpoint_json;
 
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 use crate::renderer::{MediaPartSource, RenderedPrompt};
@@ -316,6 +318,16 @@ pub struct MultimodalConfigFiles<'a> {
     pub processor_config: Option<&'a Path>,
 }
 
+/// A modality's processor config as the checkpoint writes it, kept as JSON
+/// until startup options are merged in, so they use the checkpoint's own key
+/// names (`resample`, not the parsed config's `resampling`).
+#[derive(Debug, Clone, Default)]
+struct CheckpointProcessorConfig {
+    /// Where the config came from, for parse errors.
+    source: String,
+    config: serde_json::Map<String, Value>,
+}
+
 /// Load a modality's section from the combined processor config, falling back
 /// to its legacy standalone file.
 fn load_preprocessor_config(
@@ -323,19 +335,17 @@ fn load_preprocessor_config(
     dedicated_name: &str,
     processor_config_path: Option<&Path>,
     processor_section: &str,
-) -> Result<Option<PreProcessorConfig>> {
+) -> Result<Option<CheckpointProcessorConfig>> {
     if let Some(path) = processor_config_path {
         let text = fs::read_to_string(path)
             .map_err(|error| multimodal!("failed to read processor_config.json: {error}"))?;
-        let value: serde_json::Value = serde_json::from_str(&text)
+        let value: serde_json::Value = parse_checkpoint_json(&text)
             .map_err(|error| multimodal!("failed to parse processor_config.json: {error}"))?;
         if let Some(processor) = value.get(processor_section).filter(|value| !value.is_null()) {
-            let config = PreProcessorConfig::from_value(processor.clone()).map_err(|error| {
-                multimodal!(
-                    "failed to parse {processor_section} from processor_config.json: {error}"
-                )
-            })?;
-            return Ok(Some(config));
+            let source = format!("{processor_section} from processor_config.json");
+            let config = serde_json::from_value(processor.clone())
+                .map_err(|error| multimodal!("failed to parse {source}: {error}"))?;
+            return Ok(Some(CheckpointProcessorConfig { source, config }));
         }
     }
     let Some(path) = dedicated_path else {
@@ -343,9 +353,56 @@ fn load_preprocessor_config(
     };
     let text = fs::read_to_string(path)
         .map_err(|error| multimodal!("failed to read {dedicated_name}: {error}"))?;
-    let config = PreProcessorConfig::from_json(&text)
+    let config = parse_checkpoint_json(&text)
         .map_err(|error| multimodal!("failed to parse {dedicated_name}: {error}"))?;
-    Ok(Some(config))
+    Ok(Some(CheckpointProcessorConfig {
+        source: dedicated_name.to_owned(),
+        config,
+    }))
+}
+
+/// Resolve startup options into an effective config.
+fn resolve_processor_config_overrides(
+    checkpoint: CheckpointProcessorConfig,
+    kwargs: &HashMap<String, Value>,
+    scope: &str,
+) -> Result<PreProcessorConfig> {
+    if kwargs.get("text_kwargs").is_some_and(|value| {
+        !value.is_null() && !value.as_object().is_some_and(|values| values.is_empty())
+    }) {
+        bail_multimodal!("mm_processor_kwargs.text_kwargs is not supported");
+    }
+    let flat = kwargs
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "images_kwargs" | "videos_kwargs" | "audio_kwargs" | "text_kwargs"
+            )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    let mut effective = Value::Object(checkpoint.config);
+    merge_processor_config(&mut effective, &Value::Object(flat));
+    if let Some(scoped) = kwargs.get(scope).filter(|value| !value.is_null()) {
+        if !scoped.is_object() {
+            bail_multimodal!("mm_processor_kwargs.{scope} must be an object");
+        }
+        merge_processor_config(&mut effective, scoped);
+    }
+    PreProcessorConfig::from_value(effective)
+        .map_err(|error| multimodal!("failed to parse {}: {error}", checkpoint.source))
+}
+
+/// Recursively merge mappings; other values replace the checkpoint value.
+fn merge_processor_config(config: &mut Value, overrides: &Value) {
+    if let (Value::Object(config), Value::Object(overrides)) = (&mut *config, overrides) {
+        for (key, value) in overrides {
+            merge_processor_config(config.entry(key.clone()).or_insert(Value::Null), value);
+        }
+    } else {
+        *config = overrides.clone();
+    }
 }
 
 /// Request-scoped fetched media, split per modality with tracker UUID
@@ -389,12 +446,13 @@ impl MultimodalModelInfo {
         files: MultimodalConfigFiles<'_>,
         tokenizer: DynTokenizer,
         limit_mm_per_prompt: MmLimitPerPrompt,
+        mm_processor_kwargs: &HashMap<String, serde_json::Value>,
     ) -> Result<Option<Self>> {
         let config = match files.config {
             Some(path) => {
                 let text = fs::read_to_string(path)
                     .map_err(|error| multimodal!("failed to read config.json: {error}"))?;
-                serde_json::from_str(&text)
+                parse_checkpoint_json(&text)
                     .map_err(|error| multimodal!("failed to parse config.json: {error}"))?
             }
             None => serde_json::Value::Object(Default::default()),
@@ -431,9 +489,21 @@ impl MultimodalModelInfo {
 
         Self::from_loaded(
             context,
-            preprocessor_config,
-            video_preprocessor_config,
-            audio_preprocessor_config,
+            resolve_processor_config_overrides(
+                preprocessor_config,
+                mm_processor_kwargs,
+                "images_kwargs",
+            )?,
+            resolve_processor_config_overrides(
+                video_preprocessor_config,
+                mm_processor_kwargs,
+                "videos_kwargs",
+            )?,
+            resolve_processor_config_overrides(
+                audio_preprocessor_config,
+                mm_processor_kwargs,
+                "audio_kwargs",
+            )?,
             limit_mm_per_prompt,
         )
     }
@@ -611,6 +681,46 @@ impl MultimodalModelInfo {
         }
     }
 
+    /// Rewrite the text a chat template writes for each media item to the
+    /// modality's placeholder token, for specs that declare one (Nemotron's
+    /// `<video>`). Such text cannot be matched as a multi-token marker: its
+    /// tokens depend on the text around it. Like Python, at most one
+    /// occurrence per item is rewritten.
+    fn rewrite_rendered_markers(
+        &self,
+        mut prompt: String,
+        media_parts: &[MediaContentPart],
+    ) -> String {
+        let lanes = [
+            (
+                self.image.as_ref().map(|support| (&support.spec, &support.placeholder)),
+                MmModality::Image,
+            ),
+            (
+                self.video.as_ref().map(|support| (&support.spec, &support.placeholder)),
+                MmModality::Video,
+            ),
+            (
+                self.audio.as_ref().map(|support| (&support.spec, &support.placeholder)),
+                MmModality::Audio,
+            ),
+        ];
+        for (lane, modality) in lanes {
+            let Some((spec, placeholder)) = lane else {
+                continue;
+            };
+            let Some(marker) = spec.raw.rendered_marker_for(spec.modality) else {
+                continue;
+            };
+            let items = media_parts
+                .iter()
+                .filter(|part| media_part_limit_modality(part) == Some(modality))
+                .count();
+            prompt = prompt.replacen(marker, &placeholder.token, items);
+        }
+        prompt
+    }
+
     fn vision_preprocessing_context(
         &self,
         prompt_token_ids: &[u32],
@@ -647,7 +757,10 @@ pub(crate) async fn finalize_rendered_prompt(
         Prompt::Text(prompt) => info
             .context
             .tokenizer()
-            .encode(&prompt, request.add_special_tokens)
+            .encode(
+                &info.rewrite_rendered_markers(prompt, &media_parts),
+                request.add_special_tokens,
+            )
             .map_err(|error| multimodal!("{error}"))?,
         Prompt::TokenIds(token_ids) => token_ids,
     };
@@ -729,23 +842,23 @@ fn extract_media_parts(
                 detail,
                 uuid,
             } => Ok(MediaContentPart::ImageUrl {
-                url: image_url.clone(),
+                url: Arc::new(image_url.clone()),
                 detail: *detail,
                 uuid: uuid.clone(),
                 max_long_side_pixel: None,
             }),
             ChatContentPart::VideoUrl { video_url, uuid } => Ok(MediaContentPart::VideoUrl {
-                url: video_url.clone(),
+                url: Arc::new(video_url.clone()),
                 uuid: uuid.clone(),
                 fps: None,
                 max_long_side_pixel: None,
             }),
             ChatContentPart::InputAudio { data, format, uuid } => Ok(MediaContentPart::AudioUrl {
-                url: input_audio_data_url(data, format.as_deref())?,
+                url: Arc::new(input_audio_data_url(data, format.as_deref())?),
                 uuid: uuid.clone(),
             }),
             ChatContentPart::AudioUrl { audio_url, uuid } => Ok(MediaContentPart::AudioUrl {
-                url: audio_url.clone(),
+                url: Arc::new(audio_url.clone()),
                 uuid: uuid.clone(),
             }),
         })
@@ -776,11 +889,12 @@ fn media_part_limit_modality(part: &MediaContentPart) -> Option<MmModality> {
     match part {
         MediaContentPart::Text { .. } => None,
         MediaContentPart::ImageUrl { .. }
+        | MediaContentPart::ImageBase64 { .. }
         | MediaContentPart::ImageData { .. }
         | MediaContentPart::ImageEmbeds { .. } => Some(MmModality::Image),
-        MediaContentPart::AudioUrl { .. } | MediaContentPart::AudioData { .. } => {
-            Some(MmModality::Audio)
-        }
+        MediaContentPart::AudioUrl { .. }
+        | MediaContentPart::AudioBase64 { .. }
+        | MediaContentPart::AudioData { .. } => Some(MmModality::Audio),
         MediaContentPart::VideoUrl { .. } | MediaContentPart::VideoData { .. } => {
             Some(MmModality::Video)
         }
@@ -1170,6 +1284,7 @@ mod tests {
     use std::sync::Arc;
 
     use llm_multimodal::TokenId;
+    use serde_json::json;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
@@ -1328,7 +1443,7 @@ mod tests {
     #[test]
     fn request_video_fps_scopes_the_uuid_and_needs_a_rate_based_sampling() {
         let part = |fps| MediaContentPart::VideoUrl {
-            url: "https://example.com/clip.mp4".to_owned(),
+            url: "https://example.com/clip.mp4".to_owned().into(),
             uuid: Some("clip".to_owned()),
             fps,
             max_long_side_pixel: None,
@@ -1521,18 +1636,18 @@ mod tests {
         );
     }
 
-    fn nemotron_omni_info() -> MultimodalModelInfo {
+    pub(super) fn nemotron_omni_info() -> MultimodalModelInfo {
         let tokenizer = TestTokenizer::new()
             .with_regular_token("<image>", 1018)
             .with_regular_token("<img>", 1019)
-            .with_regular_token("</img>", 1020);
-        // The upstream spec refuses a config whose geometry differs from the
-        // checkpoint family it implements, so the test config spells the real
-        // checkpoint values.
+            .with_regular_token("</img>", 1020)
+            .with_regular_token("<SPECIAL_30>", 1030);
+        // The fields of the Nemotron 3 Nano Omni config the spec reads.
         let config = serde_json::json!({
             "model_type": "NemotronH_Nano_Omni_Reasoning_V3",
             "patch_size": 16,
             "downsample_ratio": 0.5,
+            "force_image_size": 512,
             "norm_mean": [0.48145466, 0.4578275, 0.40821073],
             "norm_std": [0.26862954, 0.26130258, 0.27577711],
             "vision_config": {
@@ -1559,13 +1674,15 @@ mod tests {
         .expect("Nemotron-H Omni multimodal support")
     }
 
+    const ONE_PIXEL_PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
     #[tokio::test]
     async fn nemotron_preprocessing_builds_engine_features() {
         use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
 
         let info = nemotron_omni_info();
         let media = MediaContentPart::ImageUrl {
-            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".to_string(),
+            url: ONE_PIXEL_PNG.to_string().into(),
             detail: None,
             uuid: None,
             max_long_side_pixel: None,
@@ -1591,16 +1708,16 @@ mod tests {
         // The 1x1 image is upscaled to the 1024-patch minimum grid of 16px
         // patches; the 2x2 pixel shuffle turns them into 256 feature tokens.
         assert!(matches!(
-            data["pixel_values"].data.as_ref(),
+            data["pixel_values_flat"].data.as_ref(),
             Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [1024, 3 * 16 * 16]
         ));
         assert!(matches!(
-            data["patches_per_image"].data.as_ref(),
-            Some(MmKwargValue::Tensor(tensor)) if tensor.shape.is_empty()
+            data["imgs_sizes"].data.as_ref(),
+            Some(MmKwargValue::List(size)) if size.len() == 2
         ));
         assert!(matches!(
-            data["image_grid_hw"].data.as_ref(),
-            Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [2]
+            data["num_tokens_per_image"].data.as_ref(),
+            Some(MmKwargValue::Int(256))
         ));
     }
 
@@ -1608,7 +1725,7 @@ mod tests {
     /// `<img>`) on Nemotron-H Omni when the token budget allows.
     fn png_640x480() -> MediaContentPart {
         MediaContentPart::ImageUrl {
-            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string(),
+            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string().into(),
             detail: None,
             uuid: None,
             max_long_side_pixel: None,
@@ -1638,9 +1755,9 @@ mod tests {
                 .unwrap();
             let feature = &features[0];
             let Some(MmKwargValue::Tensor(pixel_values)) =
-                feature.data.as_ref().unwrap()["pixel_values"].data.as_ref()
+                feature.data.as_ref().unwrap()["pixel_values_flat"].data.as_ref()
             else {
-                panic!("pixel_values should be a tensor");
+                panic!("pixel_values_flat should be a tensor");
             };
             (feature.mm_position.length, pixel_values.shape[0])
         }
@@ -1657,6 +1774,78 @@ mod tests {
         // Python's tiler does, and the length check refuses the prompt
         // downstream.
         assert_eq!(prepare(&info, Some(100)).await, (254, 1008));
+    }
+
+    /// One flat preprocessing batch is split into per-image engine items,
+    /// preserving each image's patch count and identifier.
+    #[tokio::test]
+    async fn nemotron_images_of_different_sizes_are_separate_items() {
+        use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
+
+        let info = nemotron_omni_info();
+        let small = MediaContentPart::ImageUrl {
+            url: ONE_PIXEL_PNG.to_string().into(),
+            detail: None,
+            uuid: Some("small".to_string()),
+            max_long_side_pixel: None,
+        };
+        let mut tokens = vec![1018, 11, 1018];
+        let features = info
+            .prepare_multimodal(
+                vec![small, png_640x480()],
+                &mut tokens,
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let summary = features
+            .iter()
+            .map(|feature| {
+                let Some(MmKwargValue::Tensor(pixel_values)) =
+                    feature.data.as_ref().unwrap()["pixel_values_flat"].data.as_ref()
+                else {
+                    panic!("pixel_values_flat should be a tensor");
+                };
+                let position = &feature.mm_position;
+                (
+                    feature.identifier == "uuid:small",
+                    position.offset,
+                    position.length,
+                    pixel_values.shape.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            summary,
+            [
+                (true, 0, 258, vec![1024, 3 * 16 * 16]),
+                (false, 259, 302, vec![1200, 3 * 16 * 16]),
+            ]
+        );
+    }
+
+    /// The template's `<video>` text becomes the video placeholder token
+    /// before tokenizing, once per video in the request.
+    #[test]
+    fn rewrites_one_rendered_marker_per_media_item() {
+        let info = nemotron_omni_info();
+        let video = MediaContentPart::VideoUrl {
+            url: "https://example.com/clip.mp4".to_owned().into(),
+            uuid: None,
+            fps: None,
+            max_long_side_pixel: None,
+        };
+        let prompt = "<image> <video>\nwhat is a <video> tag?".to_string();
+        assert_eq!(
+            info.rewrite_rendered_markers(prompt.clone(), &[video]),
+            "<image> <SPECIAL_30>\nwhat is a <video> tag?"
+        );
+        assert_eq!(
+            info.rewrite_rendered_markers(prompt.clone(), &[png_640x480()]),
+            prompt
+        );
     }
 
     /// Prepare a full-size 640x480 image after 100 text tokens, then append
@@ -1708,9 +1897,9 @@ mod tests {
         let info = nemotron_omni_info();
         let (mut tokens, mut features) = nemotron_prompt_with_preprocessed_image(&info).await;
         let data = features[0].data.as_mut().unwrap();
-        match &mut data.get_mut("pixel_values").unwrap().field {
+        match &mut data.get_mut("pixel_values_flat").unwrap().field {
             MmField::Flat(field) => field.dim = 1,
-            other => panic!("unexpected pixel_values batching: {other:?}"),
+            other => panic!("unexpected pixel_values_flat batching: {other:?}"),
         }
 
         let error = info
@@ -1726,7 +1915,7 @@ mod tests {
 
         assert_eq!(
             error.to_report_string(),
-            r#"invalid inline multimodal features: incompatible batching for image field "pixel_values""#
+            r#"invalid inline multimodal features: incompatible batching for image field "pixel_values_flat""#
         );
     }
 
@@ -1779,6 +1968,62 @@ mod tests {
     }
 
     #[test]
+    fn model_specific_values_survive_scoped_config_merging() {
+        let kwargs = serde_json::from_value(json!({
+            "custom_options": {"width": 512, "height": 256},
+            "images_kwargs": {"custom_options": {"width": 1024}},
+            "audio_kwargs": {"max_samples": 16000},
+        }))
+        .unwrap();
+        let checkpoint = CheckpointProcessorConfig {
+            source: "preprocessor_config.json".to_owned(),
+            config: serde_json::from_value(json!({"custom_options": {"checkpoint": true}}))
+                .unwrap(),
+        };
+        let config = |scope| {
+            resolve_processor_config_overrides(checkpoint.clone(), &kwargs, scope)
+                .unwrap()
+                .extra
+        };
+        let configs = json!({
+            "audio": config("audio_kwargs"),
+            "image": config("images_kwargs"),
+            "video": config("videos_kwargs"),
+        });
+        assert_eq!(
+            configs,
+            json!({
+                "audio": {
+                    "custom_options": {"checkpoint": true, "height": 256, "width": 512},
+                    "max_samples": 16000,
+                },
+                "image": {
+                    "custom_options": {"checkpoint": true, "height": 256, "width": 1024},
+                },
+                "video": {
+                    "custom_options": {"checkpoint": true, "height": 256, "width": 512},
+                },
+            })
+        );
+    }
+
+    /// Options use the HF key names the checkpoint config uses, including
+    /// ones the parsed config renames (`resample` → `resampling`).
+    #[test]
+    fn processor_kwargs_override_checkpoint_keys_by_hf_name() {
+        let kwargs = serde_json::from_value(json!({"resample": 3})).unwrap();
+        for checkpoint in [json!({"resample": 2}), json!({})] {
+            let checkpoint = CheckpointProcessorConfig {
+                source: "preprocessor_config.json".to_owned(),
+                config: serde_json::from_value(checkpoint).unwrap(),
+            };
+            let config =
+                resolve_processor_config_overrides(checkpoint, &kwargs, "images_kwargs").unwrap();
+            assert_eq!(config.resampling, Some(3));
+        }
+    }
+
+    #[test]
     fn processor_sections_take_precedence_over_legacy_files() {
         let dir = tempfile::tempdir().unwrap();
         let legacy = dir.path().join("preprocessor_config.json");
@@ -1798,7 +2043,7 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-            assert_eq!(config.get_extra::<usize>("sampling_rate"), Some(24000));
+            assert_eq!(config.config["sampling_rate"], 24000);
         }
         fs::write(&combined, "{}").unwrap();
         let config = load_preprocessor_config(
@@ -1809,7 +2054,35 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(config.get_extra::<usize>("sampling_rate"), Some(8000));
+        assert_eq!(config.config["sampling_rate"], 8000);
+    }
+
+    #[test]
+    fn processor_configs_accept_python_json_non_finite_literals() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("preprocessor_config.json");
+        let combined = dir.path().join("processor_config.json");
+        fs::write(&legacy, r#"{"sampling_rate":8000,"max_value":Infinity}"#).unwrap();
+        fs::write(
+            &combined,
+            r#"{"image_processor":{"sampling_rate":24000,"min_value":-Infinity},"eps":NaN}"#,
+        )
+        .unwrap();
+
+        let config = load_preprocessor_config(
+            Some(&legacy),
+            "preprocessor_config.json",
+            Some(&combined),
+            "image_processor",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.config["sampling_rate"], 24000);
+
+        let config = load_preprocessor_config(Some(&legacy), "preprocessor_config.json", None, "")
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.config["sampling_rate"], 8000);
     }
 
     #[tokio::test]
@@ -1848,6 +2121,7 @@ mod tests {
             },
             Arc::new(muse_spark_tokenizer()),
             HashMap::new(),
+            &std::collections::HashMap::new(),
         )
         .unwrap()
         .unwrap();
@@ -2141,7 +2415,7 @@ mod tests {
 
     fn image_url_part() -> MediaContentPart {
         MediaContentPart::ImageUrl {
-            url: "https://example.com/image.png".to_string(),
+            url: "https://example.com/image.png".to_string().into(),
             detail: None,
             uuid: None,
             max_long_side_pixel: None,
@@ -2371,7 +2645,7 @@ mod tests {
 
         let info = hy4_vl_info();
         let media = MediaContentPart::ImageUrl {
-            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string(),
+            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string().into(),
             detail: None,
             uuid: None,
             max_long_side_pixel: None,

@@ -88,15 +88,23 @@ class CompileArtifactWarmupCache(WarmupCache):
 
     def prepare(self) -> None:
         self._payload = None
-        manifest = _manifest(self.roots)
         stores = self.store_sources
-        if not manifest["entries"] or not stores:
+        if not stores:
             return
-        bundle = _bundle(self.roots, manifest)
-        digest = hashlib.sha256(bundle).hexdigest()
-        key = artifact_key(self.kind, digest, "bundle.tar")
-        for store in stores:
-            store.put(key, bundle)
+        try:
+            manifest = _manifest(self.roots)
+            if not manifest["entries"]:
+                return
+            bundle = _bundle(self.roots, manifest)
+            digest = hashlib.sha256(bundle).hexdigest()
+            key = artifact_key(self.kind, digest, "bundle.tar")
+            for store in stores:
+                store.put(key, bundle)
+        except Exception as error:
+            logger.warning(
+                "Cannot publish compile cache; continuing without it: %s", error
+            )
+            return
         self._payload = {
             "manifest": manifest,
             "key": key,

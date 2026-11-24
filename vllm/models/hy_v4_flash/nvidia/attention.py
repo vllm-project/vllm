@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.kernels.triton.fused_sigmoid_gate_mul import fused_sigmoid_gate_mul
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.hpc import hpc_gated_mla_gemm, hpc_gated_mla_supported
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -18,7 +19,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
+from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.hy_v4.nvidia.attention import HYV4MLAAttention
+from vllm.models.hy_v4.nvidia.mrope import fused_mrope_norm, rope_into
 from vllm.models.hy_v4_flash.configs import SLIDING_ATTENTION
 from vllm.platforms import current_platform
 
@@ -136,11 +139,16 @@ class HYV4FlashAttention(HYV4MLAAttention):
         self.use_hpc_gated_mla = hpc_gated_mla_supported(
             config.gating_type, self.linear_gate
         )
+        has_post_proj_norm = config.sandwich_norm and (
+            self.is_window_layer or not config.dsa_skip_attn_post_norm
+        )
+        # With a post-projection norm, the all-reduce is fused into it.
         self.o_proj = RowParallelLinear(
             self.num_heads * self.v_head_dim,
             config.hidden_size,
             bias=False,
             quant_config=quant,
+            reduce_results=not has_post_proj_norm,
             prefix=f"{prefix}.o_proj",
         )
         self.rotary_emb = get_rope(
@@ -186,33 +194,32 @@ class HYV4FlashAttention(HYV4MLAAttention):
         )
         self.post_proj_norm = (
             RMSNorm(config.hidden_size, config.rms_norm_eps)
-            if config.sandwich_norm
-            and (self.is_window_layer or not config.dsa_skip_attn_post_norm)
+            if has_post_proj_norm
             else None
         )
 
     def forward(self, positions, hidden_states, llama_4_scaling=None):
-        q_c = self.q_a_layernorm(self.q_a_proj(hidden_states)[0])
-        q = self.q_b_proj(q_c)[0].reshape(-1, self.num_local_heads, self.qk_head_dim)
+        q_c = self.q_a_proj(hidden_states)[0]
         kv = self.kv_a_proj_with_mqa(hidden_states)[0]
-        kv_c, k_pe = kv.split((self.kv_lora_rank, self.qk_rope_head_dim), -1)
-        kv_c = self.kv_a_layernorm(kv_c)
         if positions.ndim == 2:
-            q_pe, k_pe = self.rotary_emb(
+            q_c, kv_c, k_pe, rope_pos, cos_sin = fused_mrope_norm(
+                self.rotary_emb,
                 positions,
-                q[..., self.qk_nope_head_dim :].reshape(q.shape[0], -1),
-                k_pe,
+                q_c,
+                kv,
+                self.q_a_layernorm,
+                self.kv_a_layernorm,
             )
-            q[..., self.qk_nope_head_dim :] = q_pe.reshape(
-                -1, self.num_local_heads, self.qk_rope_head_dim
-            )
-            k_pe = k_pe.reshape(-1, 1, self.qk_rope_head_dim)
+            q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+            q_pe = q[..., self.qk_nope_head_dim :]
+            rope_into(rope_pos, q_pe, cos_sin, q_pe)
         else:
-            k_pe = k_pe.unsqueeze(1)
+            q_c = self.q_a_layernorm(q_c)
+            q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+            kv_c, k_pe = kv.split((self.kv_lora_rank, self.qk_rope_head_dim), -1)
+            kv_c = self.kv_a_layernorm(kv_c)
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions,
-                q[..., self.qk_nope_head_dim :],
-                k_pe,
+                positions, q[..., self.qk_nope_head_dim :], k_pe.unsqueeze(1)
             )
         if llama_4_scaling is not None:
             q *= llama_4_scaling
@@ -226,6 +233,8 @@ class HYV4FlashAttention(HYV4MLAAttention):
             assert hidden_states.is_contiguous() and out.is_contiguous()
             out = hpc_gated_mla_gemm(hidden_states, self.linear_gate.weight, out)
         else:
-            out = out * torch.sigmoid(self.linear_gate(hidden_states)[0])
+            out = fused_sigmoid_gate_mul(out, self.linear_gate(hidden_states)[0])
         out = self.o_proj(out)[0]
-        return self.post_proj_norm(out) if self.post_proj_norm is not None else out
+        if self.post_proj_norm is None:
+            return out
+        return fused_allreduce_rms_norm(out, None, self.post_proj_norm)[0]
