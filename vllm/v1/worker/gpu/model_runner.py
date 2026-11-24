@@ -1760,7 +1760,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return block_tables, slot_mappings
 
     def set_spec_resources(self, resources: SpecResources) -> None:
-        """Run speculation with the adapted ``resources``, before capture."""
+        """Run speculation with the adapted `resources`, before capture."""
         assert self.spec_round is not None
         if self.cudagraph_manager is not None:
             self.cudagraph_manager.set_spec_resources(resources)
@@ -2482,10 +2482,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.speculator is not None:
             assert self.sampler is not None
-            if isinstance(self.speculator, DraftModelSpeculator):
-                self.speculator.prepare_propose(
-                    input_batch, num_sampled, num_rejected, self.sampler
-                )
+            self.speculator.prepare_propose(
+                input_batch, num_sampled, num_rejected, self.sampler
+            )
         if self.speculator is not None and skip_drafter:
             # index_fill_, not `draft_tokens[idx] = -1`: index_put_ copies the
             # scalar to the device from pageable memory, a stream sync that

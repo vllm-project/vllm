@@ -96,7 +96,7 @@ class BaseSpeculator(ABC):
     resources: SpecResources | None = None
 
     def bind_resources(self, resources: SpecResources) -> None:
-        """Run with ``resources`` (``SpeculatorConfig.adapt_resources``); called
+        """Run with `resources` (`SpeculatorConfig.adapt_resources`); called
         once per worker, before capture."""
         self.resources = resources
 
@@ -107,6 +107,20 @@ class BaseSpeculator(ABC):
     @abstractmethod
     def capture(self) -> None:
         pass
+
+    def prepare_propose(
+        self,
+        input_batch: InputBatch,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        sampler: "Sampler",
+    ) -> None:
+        """Called after sampling each step, before any call to `propose`.
+
+        Read the batch, its sampled and rejected token counts, and the sampler
+        state even when no drafts are requested. The default does nothing.
+        """
+        return
 
     @abstractmethod
     def propose(
@@ -151,13 +165,13 @@ class BaseSpeculator(ABC):
         return
 
     def plan(self, inputs: PlanInputs) -> VerifyPlan | None:
-        """The rows the target verifies this step (``round_contract.md``, step 2).
+        """The rows the target verifies this step (`round_contract.md`, step 2).
 
         Called eagerly once per batch with drafts, before its inputs are built.
         None (the default) verifies every scheduled draft as a chain. Request
-        ``r`` verifies ``plan.rows[r] <= inputs.scheduled_rows[r]`` rows; the
-        rest count as rejected. A branching plan needs ``max_branching > 1`` and
-        a batch that is not ``inputs.chain_only``.
+        `r` verifies `plan.rows[r] <= inputs.scheduled_rows[r]` rows; the
+        rest count as rejected. A branching plan needs `max_branching > 1` and
+        a batch that is not `inputs.chain_only`.
         """
         return None
 
@@ -165,8 +179,8 @@ class BaseSpeculator(ABC):
         self, plan: VerifyPlan, target: TargetTokens, width: int
     ) -> AcceptResult:
         """The accepted path of each request of a plan that is not a chain
-        (``round_contract.md``, step 4), from the target's token at every row.
-        ``sampled`` is ``[R, width]``. Not overriding it runs every plan as a
+        (`round_contract.md`, step 4), from the target's token at every row.
+        `sampled` is `[R, width]`. Not overriding it runs every plan as a
         chain: the model runner lowers the speculator at startup.
         """
         raise NotImplementedError

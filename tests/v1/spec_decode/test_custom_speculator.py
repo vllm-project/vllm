@@ -8,6 +8,7 @@ import sys
 import textwrap
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
@@ -17,6 +18,8 @@ from vllm.config import AttentionConfig, SpeculativeConfig, VllmConfig
 from vllm.config.utils import hash_config
 from vllm.model_executor.models.registry import ModelRegistry
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.gpu import model_runner
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode import speculator_config as speculator_config_module
 from vllm.v1.worker.gpu.spec_decode.ngram.config import NgramGPUSpeculatorConfig
@@ -44,6 +47,60 @@ class DummySpeculator(BaseSpeculator):
 
     def propose(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         raise NotImplementedError
+
+
+def test_prepare_propose_defaults_to_no_op():
+    speculator = DummySpeculator(VllmConfig(), torch.device("cpu"), None)
+    sampled, rejected = torch.tensor([2]), torch.tensor([1])
+    batch = InputBatch.make_dummy(1, 3, InputBuffers(1, 3, torch.device("cpu")))
+    sampler = Mock(spec_set=[])
+    speculator.prepare_propose(batch, sampled, rejected, sampler)
+    assert (sampled.item(), rejected.item()) == (2, 1)
+    assert sampler.mock_calls == []
+
+
+def test_runner_prepares_custom_speculator_before_propose(monkeypatch):
+    device = torch.device("cpu")
+    batch = InputBatch.make_dummy(1, 3, InputBuffers(1, 3, device))
+    sampled, rejected = torch.tensor([2]), torch.tensor([1])
+    observations = []
+
+    class ObservingSpeculator(DummySpeculator):
+        def prepare_propose(self, input_batch, num_sampled, num_rejected, sampler):
+            observations.append((input_batch, num_sampled, num_rejected, sampler))
+
+        def propose(self, *args, **kwargs):
+            assert observations == [(batch, sampled, rejected, runner.sampler)]
+            return torch.tensor([[42]])
+
+    runner = MagicMock(
+        speculator=ObservingSpeculator(VllmConfig(), device, None),
+        is_last_pp_rank=True,
+        pcp_manager=None,
+        pp_handler=None,
+        spec_round=None,
+        aux_output_connector=None,
+        adaptive_verification=None,
+        num_speculative_steps=1,
+    )
+    runner.req_states.draft_tokens = torch.full((1, 1), -1)
+    runner.sample.return_value = (Mock(), sampled, rejected)
+    runner._get_num_drafted_and_verified.return_value = (None, None)
+    monkeypatch.setattr(model_runner, "AsyncOutput", Mock())
+    runner.execute_model_state = model_runner.ExecuteModelState(
+        input_batch=batch,
+        attn_metadata={},
+        slot_mappings_by_layer={},
+        hidden_states=torch.ones(3, 2),
+        aux_hidden_states=None,
+        dp_sync_state=None,
+        finished_req_ids=set(),
+        ec_connector_output=None,
+        cudagraph_stats=None,
+        num_spec_tokens_to_schedule=1,
+    )
+    model_runner.GPUModelRunner.sample_tokens(runner, None)
+    assert runner.req_states.draft_tokens.tolist() == [[42]]
 
 
 class DummySpeculatorConfig(SpeculatorConfig):

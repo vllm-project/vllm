@@ -198,6 +198,9 @@ the result: a chain commits nothing. A plan that is not a chain runs the bound
 
 ### 6. Propose: `BaseSpeculator.propose`
 
+After sampling, the runner calls `prepare_propose` on every speculator, even when
+no drafts are requested. The default does nothing.
+
 The runner calls `propose(..., num_speculative_tokens=)` with the number of drafts
 this step's budget allows. It does not call it when the drafter is skipped (step 1).
 `propose` returns the draft tokens. The scheduler schedules them, and step 2 of the
