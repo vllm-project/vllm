@@ -303,7 +303,7 @@ def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
 def test_parallel_sampling_skips_child_without_prefill_stats():
     """An n>1 child that fails before prefill reports no prefill stats; it must
     not pull the parent's num_cached_tokens down to 0."""
-    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    output_processor = OutputProcessor(tokenizer=None, collect_stats=False)
     prompt_tokens = [1, 2, 3, 4, 5, 6, 7, 8]
 
     def make_request(request_id: str, params: SamplingParams) -> EngineCoreRequest:
