@@ -1499,5 +1499,21 @@ def test_distributed_direct_dcp_topk_matches_all_gather():
     _distributed_run(_distributed_direct_dcp_topk_worker, world_size=4, extra_env={})
 
 
+def test_query_gather_into_storage_matches_head_gather():
+    world_size, num_heads, head_dim, storage_heads = 8, 12, 576, 128
+    queries = [torch.randn(5, num_heads, head_dim) for _ in range(world_size)]
+    manager = object.__new__(dcp.MLADCPManager)
+    manager.query_storage_heads = storage_heads
+    manager.group = MagicMock(
+        world_size=world_size,
+        all_gather=lambda query, dim: torch.cat(queries, dim=dim),
+    )
+
+    gathered = manager._gather_query_into_storage(queries[0])
+
+    assert torch.equal(gathered, torch.cat(queries, dim=1))
+    assert gathered.stride() == (storage_heads * head_dim, head_dim, 1)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

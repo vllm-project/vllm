@@ -591,3 +591,20 @@ def test_plan_flashinfer_checkpoints_selects_the_state_at_each_offset():
     # Row 1: state after 128 tokens of the first prefill. Row 3: after 192
     # tokens of the third prefill, whose states start at index 3.
     assert rows == [0, 1, 0, 5]
+
+
+@pytest.mark.parametrize(
+    "seq_lens, query_lens, draft_tokens, expected",
+    [
+        ([20, 30, 100], [3, 3, 50], [2, 2, -1], 6),
+        ([100, 20], [50, 3], [-1, 2], None),
+        ([20, 65, 30, 100], [3, 1, 3, 50], [2, -1, 2, -1], None),
+    ],
+)
+def test_num_spec_tokens_set_only_for_leading_spec_tokens(
+    seq_lens, query_lens, draft_tokens, expected
+):
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+    meta = _build(builder, batch, num_decode_draft_tokens=draft_tokens)
+    assert meta.num_spec_tokens == expected

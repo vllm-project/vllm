@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
+import vllm.models.kimi_k3.amd.kda as amd_kda
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.linear import KimiDecoderLayer
 
@@ -70,3 +72,91 @@ def test_k3_kda_forward_returns_output_projection_storage() -> None:
 
     assert output is projected
     assert output.data_ptr() == projected.data_ptr()
+
+
+def _conv_update(x, *_, out, **__):
+    return out.copy_(x * 2)
+
+
+def _qkv_conv(x, *_, **__):
+    y = x.t() * 3
+    kd = y.shape[1] // 3
+    return y[:, :kd], y[:, kd : 2 * kd], y[:, 2 * kd :]
+
+
+def _recurrent(q, k, v, raw_g, raw_beta, out=None, **_):
+    o = q + k * v + raw_g + raw_beta[..., None]
+    return (o if out is None else out.copy_(o)), None
+
+
+def _chunk(q, k, v, raw_g, raw_beta, out=None, **_):
+    o = q * k - v + 2 * raw_g + raw_beta[..., None]
+    return (o if out is None else out.copy_(o)), None
+
+
+def _run_spec_then_prefill(monkeypatch, num_spec_tokens):
+    num_heads, head_dim, num_tokens = 2, 4, 11
+    proj = num_heads * head_dim
+    torch.manual_seed(0)
+    mixed_qkv = torch.randn(num_tokens, 3 * proj + 5)[:, : 3 * proj]
+    g1 = torch.randn(1, num_tokens, num_heads, head_dim)
+    g2 = torch.randn(num_tokens, num_heads, head_dim)
+    beta = torch.randn(1, num_tokens, num_heads)
+    core_attn_out = torch.zeros(1, num_tokens, num_heads, head_dim)
+    conv_state = torch.zeros(8, 3 * proj, 3)
+    if not is_conv_state_dim_first():
+        conv_state = conv_state.transpose(-1, -2).contiguous()
+    views = num_spec_tokens is not None
+    metadata = amd_kda.GDNAttentionMetadata(
+        num_prefills=1,
+        num_prefill_tokens=5,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=2,
+        num_spec_decode_tokens=6,
+        num_actual_tokens=num_tokens,
+        has_initial_state=torch.tensor([True]),
+        spec_query_start_loc=torch.tensor([0, 3, 6], dtype=torch.int32),
+        non_spec_query_start_loc=torch.tensor([0, 5], dtype=torch.int32),
+        spec_state_indices_tensor=torch.tensor([[1, 2, 3], [4, 5, 6]]),
+        non_spec_state_indices_tensor=torch.tensor([7]),
+        spec_sequence_masks=torch.tensor([True, True, False]),
+        spec_token_indx=None if views else torch.arange(6),
+        non_spec_token_indx=None if views else torch.arange(6, num_tokens),
+        num_spec_tokens=num_spec_tokens,
+        num_accepted_tokens=torch.tensor([1, 2], dtype=torch.int32),
+        uniform_spec_sequence_length=3,
+    )
+    monkeypatch.setattr(
+        amd_kda,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"kda": metadata}),
+    )
+    monkeypatch.setattr(amd_kda, "causal_conv1d_update", _conv_update)
+    monkeypatch.setattr(amd_kda, "fused_recurrent_kda", _recurrent)
+    monkeypatch.setattr(amd_kda, "chunk_kda_prefill", _chunk)
+    layer = SimpleNamespace(
+        prefix="kda",
+        kv_cache=(conv_state, torch.zeros(8, num_heads, head_dim, head_dim)),
+        use_aiter_decode=False,
+        decode_conv1d_weight=None,
+        decode_norm_weight=None,
+        conv1d=SimpleNamespace(weight=torch.randn(3 * proj, 1, 4), bias=None),
+        local_projection_size=proj,
+        head_dim=head_dim,
+        A_log=None,
+        dt_bias=None,
+        gate_lower_bound=None,
+        _fused_qkv_conv_fn=_qkv_conv,
+        kda_prefill_backend=None,
+        o_norm=lambda x, _: x,
+    )
+    KimiK3DeltaAttention._forward(layer, mixed_qkv, g1, g2, beta, core_attn_out)
+    return core_attn_out
+
+
+def test_leading_spec_tokens_split_with_views(monkeypatch):
+    gathered = _run_spec_then_prefill(monkeypatch, num_spec_tokens=None)
+    viewed = _run_spec_then_prefill(monkeypatch, num_spec_tokens=6)
+    assert gathered.abs().sum() > 0
+    torch.testing.assert_close(viewed, gathered, rtol=0, atol=0)
