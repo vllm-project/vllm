@@ -153,22 +153,6 @@ class MultiModalCache:
         return size
 
     @classmethod
-    def get_item_complexity(cls, value: MultiModalCacheValue) -> int:
-        """Get the number of leaf elements in a multi-modal cache value.
-
-        This provides a measure of structural complexity that can be useful
-        for debugging cache performance and understanding data patterns.
-
-        Args:
-            value: The multi-modal cache value to analyze.
-
-        Returns:
-            The number of leaf elements in the nested structure.
-
-        """
-        return json_count_leaves(value)
-
-    @classmethod
     def get_lru_cache(
         cls,
         capacity_gb: float,
