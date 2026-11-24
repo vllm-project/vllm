@@ -24,6 +24,58 @@ def _require_sm90_and_cutedsl():
 # ===== Helpers =====
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (7, 61, 256),
+        (5, 40, 264),
+        (17, 384, 5120),
+        (33, 2048, 5120),
+        (17, 129280, 5120),
+    ],
+)
+@torch.inference_mode()
+def test_fixed_bf16_projection_preserves_rows_in_batches_and_graph(shape):
+    """Fixed CuTe reduction covers tails, compile dispatch and changed replay data."""
+    from vllm.model_executor.kernels.linear.cute_dsl.batch_invariant import (
+        bf16_fixed_mm,
+    )
+
+    m, n, k = shape
+    torch.manual_seed(81)
+    a = torch.randint(-4, 5, (m, k), device="cuda").bfloat16()
+    weight = torch.randint(-4, 5, (n, k), device="cuda").bfloat16()
+    actual = bf16_fixed_mm(a, weight)
+    # Integer inputs keep each FP32 partial exact, independently of its tree.
+    oracle = (a.cpu().double() @ weight.cpu().double().T).float()
+    assert actual.dtype == torch.float32
+    assert torch.equal(actual.cpu(), oracle)
+    from vllm.model_executor.determinism.batch_invariant import linear_batch_invariant
+
+    linear = linear_batch_invariant(a.unsqueeze(0), weight)
+    assert torch.equal(linear.cpu(), oracle.bfloat16().unsqueeze(0))
+    assert torch.equal(actual[:1], bf16_fixed_mm(a[:1], weight))
+    assert torch.equal(bf16_fixed_mm(a.t().contiguous().t(), weight), actual)
+    torch.library.opcheck(
+        torch.ops.vllm.bf16_fixed_mm.default,
+        (a, weight),
+        test_utils=("test_faketensor", "test_aot_dispatch_dynamic"),
+    )
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        replayed = bf16_fixed_mm(a, weight)
+    a.zero_()
+    replayed.fill_(float("nan"))
+    graph.replay()
+    assert torch.count_nonzero(replayed).item() == 0
+    # Real BF16 distributions can expose rounding hidden by the exact oracle.
+    a.normal_()
+    weight.normal_()
+    actual = bf16_fixed_mm(a, weight)
+    assert torch.equal(actual[:1], bf16_fixed_mm(a[:1], weight))
+
+
 def _ref(a, b):
     return torch.mm(a.float(), b.float().T)
 
@@ -607,3 +659,48 @@ def test_bf16_output_and_fp32_cache_coexist(M, N):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@torch.inference_mode(False)
+def test_fixed_bf16_projection_runs_on_autograd_backward_stream():
+    """The CuTe launch follows torch's current stream on autograd threads.
+
+    The autograd engine sets its backward threads' stream from C++, which
+    vLLM's thread-local stream cache never sees; a launch taken from that
+    cache runs on a stream that does not wait for the kernel's inputs. The
+    producer below is long enough that a wrong stream reads stale data.
+    """
+    from vllm.model_executor.kernels.linear.cute_dsl.batch_invariant import (
+        bf16_fixed_mm,
+    )
+
+    torch.manual_seed(5)
+    m, n, k = 16, 384, 5120
+    weight = torch.randn(n, k, device="cuda").bfloat16()
+    big = torch.randn(8192, 8192, device="cuda")
+    seen: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    class _Proj(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x):
+            return x * 2
+
+        @staticmethod
+        def backward(ctx, grad):
+            h = big
+            for _ in range(6):
+                h = h @ big
+            a = (h[:m, :k] * 1e-3).bfloat16()
+            seen.append((a, bf16_fixed_mm(a, weight)))
+            return grad
+
+    for _ in range(3):
+        x = torch.ones(m, k, device="cuda", requires_grad=True)
+        _Proj.apply(x).sum().backward()
+    torch.accelerator.synchronize()
+    for a, out in seen:
+        ref = a.float() @ weight.float().T
+        assert torch.allclose(out, ref, rtol=1e-2, atol=1e-2), (
+            "backward-thread launch read stale inputs"
+        )
+    assert torch.equal(seen[1][1], seen[2][1])

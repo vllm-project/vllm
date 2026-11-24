@@ -44,10 +44,10 @@ def cute_context():
 
 
 def current_cuda_stream():
+    # Ask torch, not vLLM's thread-local stream cache: the autograd engine sets
+    # the stream from C++ on its backward threads, which that cache misses.
     _, CUstream = cute_context()
-    from vllm.utils.torch_utils import current_stream
-
-    return CUstream(current_stream().cuda_stream)
+    return CUstream(torch.cuda.current_stream().cuda_stream)
 
 
 def use_pdl() -> bool:
