@@ -355,6 +355,10 @@ def test_output_polls_only_on_model_thread(
 
 def test_uncollected_outputs_do_not_strand_results(monkeypatch: pytest.MonkeyPatch):
     """Warmup outputs, and ones lost to a failed step, are never collected."""
+    # set_disabled() changes the global connector.
+    monkeypatch.setattr(
+        kv_connector_module.kv_transfer_state, "_KV_CONNECTOR_AGENT", None
+    )
     connector = _polling_connector(
         monkeypatch, KVConnectorTransferResults(finished_recving={"a"})
     )
