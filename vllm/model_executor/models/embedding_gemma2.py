@@ -440,16 +440,6 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
         if (processor_max_frames := video_kwargs.get("max_frames")) is not None:
             max_frames = max(max_frames, int(processor_max_frames))
         max_frames = min(max_frames, 128)
-        overflow_strategies = (
-            video_media_io.get("overflow_strategy", "uniform"),
-            video_kwargs.get("overflow_strategy", "uniform"),
-        )
-        if None in overflow_strategies:
-            max_frames = max(
-                1,
-                self.ctx.model_config.max_model_len
-                // self.get_video_frame_tokens(video_kwargs),
-            )
 
         video_opts = mm_config.limit_per_prompt.get("video") if mm_config else None
         if video_opts is not None:
@@ -468,10 +458,6 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
         if not isinstance(video_max_soft, int):
             video_max_soft = _VIDEO_MAX_SOFT_TOKENS
         return video_max_soft
-
-    def get_video_frame_tokens(self, video_kwargs: Mapping[str, Any]) -> int:
-        ts_slack = 7 if video_kwargs.get("add_timestamps", False) else 0
-        return self.get_video_max_soft_tokens(video_kwargs) + 2 + ts_slack
 
     def get_mm_max_tokens_per_item(
         self, seq_len: int, mm_counts: Mapping[str, int]
@@ -494,13 +480,16 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
             "videos_kwargs", {}
         )
         max_frames = self.get_max_video_frames(video_kwargs)
+        video_max_soft = self.get_video_max_soft_tokens(video_kwargs)
 
         # Token allocation per video frame verified against HF EmbeddingGemma2Processor:
         # - Without timestamps: boi (1) + video_token * num_soft_tokens + eoi (1)
         #   Total = num_soft_tokens + 2
         # - With timestamps: timestamp prefix string (e.g. ' 01:23 ' = up to 7 tokens)
         #   Total = num_soft_tokens + 2 + 7
-        tokens["video"] = max_frames * self.get_video_frame_tokens(video_kwargs)
+        add_ts = video_kwargs.get("add_timestamps", False)
+        ts_slack = 7 if add_ts else 0
+        tokens["video"] = max_frames * (video_max_soft + 2 + ts_slack)
         return tokens
 
     def get_video_frame_size_with_most_features(
