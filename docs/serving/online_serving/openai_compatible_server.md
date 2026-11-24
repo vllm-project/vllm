@@ -19,7 +19,7 @@ We currently support the following OpenAI APIs:
 
 - [Completions API](#completions-api) (`/v1/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md).
-    - The DeepSeek V4 and V4.1 renderers support `suffix` with a text prompt or a batch of text prompts. It is incompatible with `echo=true`, `prompt_embeds`, and `truncate_prompt_tokens`.
+    - *Note: `suffix` parameter is only supported by models with fill-in-the-middle rendering, such as DeepSeek V4.*
 - [Chat Completions API](#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md) with a [chat template](../online_serving/README.md#chat-template).
     - *Note: `user` parameter is ignored.*

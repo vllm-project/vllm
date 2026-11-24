@@ -61,9 +61,9 @@ pub(crate) fn lower_completion_request(
     request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
-    state: &impl RenderContext,
+    processors: &impl RenderContext,
 ) -> Result<Vec<TextRequest>, ApiError> {
-    let prepared = prepare_completion_request(request, lora_resolution, ctx, state)?;
+    let prepared = prepare_completion_request(request, lora_resolution, ctx, processors)?;
     Ok(prepared.prompts.into_iter().map(|prompt| prompt.text_request).collect())
 }
 

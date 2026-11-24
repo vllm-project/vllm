@@ -83,15 +83,16 @@ pub trait ChatRenderer: Send + Sync {
     /// backend.
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt>;
 
-    /// Render a fill-in-the-middle text completion, when supported.
-    fn render_completion_suffix(&self, _prefix: &str, _suffix: &str) -> Option<String> {
-        None
-    }
-
     /// Whether [`render`](Self::render) renders a request's `chat_template`
     /// override. Requests carrying one are rejected for other renderers.
     fn renders_request_chat_template(&self) -> bool {
         false
+    }
+
+    /// Render an OpenAI completions `prompt` and `suffix` into the model's
+    /// fill-in-the-middle prompt text, or `None` if the model has none.
+    fn render_completion_suffix(&self, _prompt: &str, _suffix: &str) -> Option<String> {
+        None
     }
 }
 
