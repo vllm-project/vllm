@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.27@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
@@ -597,7 +598,9 @@ WORKDIR /workspace
 
 # Copy pre-built csrc wheel directly
 COPY --from=csrc-build /workspace/dist /precompiled-wheels
-COPY . .
+# Exclude .git (~362 MB) so it is not exported in the mode=max cache
+# layer on every commit; the RUNs below bind-mount .git when needed.
+COPY --exclude=.git . .
 
 # Drop the pre-built Rust artifacts into the source tree. setup.py detects
 # them and ships them as-is, skipping the local Rust build.
@@ -1198,7 +1201,10 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
 # See the matching comment in the vllm-base stage.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
 
-ADD . /vllm-workspace/
+# Exclude .git (~362 MB) so it never enters the test image or mode=max cache.
+# The one thing tests read from it, the merge base with main, is recorded in
+# .ci-merge-base from a read-only bind mount below.
+COPY --exclude=.git . /vllm-workspace/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/opt/uv/cache \
@@ -1225,8 +1231,9 @@ COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 # Source code is used in the `python_only_compile.sh` test
 # We hide it inside `src/` so that this source code
 # will not be imported by other tests
-RUN mkdir src
-RUN mv vllm src/vllm
+RUN --mount=type=bind,source=.git,target=/git \
+    mkdir src && mv vllm src/vllm \
+    && { git -c safe.directory='*' --git-dir=/git merge-base HEAD origin/main > .ci-merge-base 2>/dev/null || rm -f .ci-merge-base; }
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
