@@ -249,6 +249,9 @@ class SchedulerStats:
     # iterations in iteration_records ran. Only with
     # --enable-logging-iteration-details.
     queued_workload: QueuedWorkload | None = None
+    # Prefix-affinity routing keys admitted since the last publish, so the
+    # coordinator can tell front-ends which engine owns which prefix.
+    recent_prefix_keys: list[int] | None = None
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None

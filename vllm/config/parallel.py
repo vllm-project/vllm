@@ -44,6 +44,7 @@ def get_min_num_redundant_experts(num_logical_experts: int, ep_size: int) -> int
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
+DataParallelLBPolicy = Literal["load", "prefix-affinity"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
 DBOSchedule = Literal["dispatch-combine-overlap", "all-reduce-overlap"]
@@ -291,6 +292,12 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
+    data_parallel_lb_policy: DataParallelLBPolicy = "load"
+    """Policy of the internal DP load balancer. "load" picks the engine with
+    the lowest load score. "prefix-affinity" sends requests that share a
+    prompt prefix to the engine that already caches it, while that engine's
+    load score is at most 1.25x the mean plus the API server count and its KV
+    cache usage is below 90%, falling back to "load" otherwise."""
     is_moe_model: bool | None = None
     """Whether the deployed model is MoE (if known)."""
     enable_hc_sp: bool = False

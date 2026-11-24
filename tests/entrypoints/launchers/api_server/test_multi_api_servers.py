@@ -48,6 +48,49 @@ def server(default_server_args):
         yield remote_server
 
 
+def _finished_per_engine(server: RemoteOpenAIServer) -> dict[str, float]:
+    text = requests.get(server.url_for("metrics")).text
+    counts: dict[str, float] = {}
+    for family in text_string_to_metric_families(text):
+        if family.name == "vllm:request_success":
+            for sample in family.samples:
+                if sample.name.endswith("_total"):
+                    engine = sample.labels["engine"]
+                    counts[engine] = counts.get(engine, 0.0) + sample.value
+    return counts
+
+
+@pytest.mark.skipif(int(DP_SIZE) < 2, reason="needs data parallelism")
+def test_prefix_affinity_keeps_shared_prefix_on_one_engine(default_server_args):
+    """Requests sharing a prompt prefix finish on one engine although each one
+    opens a new connection and so may reach any of the API server processes,
+    while distinct prefixes still use every engine."""
+    args = [*default_server_args, "--data-parallel-lb-policy", "prefix-affinity"]
+    with RemoteOpenAIServer(MODEL_NAME, args) as server:
+
+        def complete(prompt: list[int]) -> None:
+            with server.get_client() as client:
+                client.completions.create(
+                    model=MODEL_NAME, prompt=prompt, max_tokens=1, temperature=0
+                )
+
+        def finished_after(prompts: list[list[int]]) -> dict[str, float]:
+            before = _finished_per_engine(server)
+            for prompt in prompts:
+                complete(prompt)
+            after = _finished_per_engine(server)
+            return {e: after[e] - before.get(e, 0.0) for e in after}
+
+        shared = list(range(100, 164))
+        same_prefix = finished_after([[*shared, 1000 + i] for i in range(8)])
+        assert sorted(same_prefix.values())[-1] == 8, same_prefix
+
+        distinct = finished_after(
+            [[*range(2000 + 64 * p, 2064 + 64 * p), 1] for p in range(16)]
+        )
+        assert all(n > 0 for n in distinct.values()), distinct
+
+
 @pytest_asyncio.fixture
 async def client(server):
     async with server.get_async_client() as async_client:

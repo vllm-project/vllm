@@ -74,7 +74,17 @@ There are several notable differences when using Ray:
 - When a single DP group requires multiple nodes, *e.g.* in case a single model replica needs to run on at least two nodes, make sure to set `VLLM_RAY_DP_PACK_STRATEGY="span"` in which case `--data-parallel-size-local` is ignored and will be automatically determined
 - Remote DP ranks will be allocated based on node resources of the Ray cluster
 
-Currently, the internal DP load balancing is done within the API server process(es) and is based on the running and waiting queues in each of the engines. This could be made more sophisticated in future by incorporating KV cache aware logic.
+By default, the internal DP load balancing is done within the API server process(es) and is based on the running and waiting queues in each of the engines.
+
+### Prefix-affinity routing
+
+Each DP engine has its own prefix cache, so requests that share a prompt prefix (multi-turn conversations, a shared system prompt, few-shot templates) only hit the cache if they reach the same engine. With `--data-parallel-lb-policy prefix-affinity`, the load balancer hashes the leading prompt blocks to a preferred engine and sends the request there while that engine's load score is at most 1.25 times the mean (plus the API server count) and its KV cache usage is below 90%. Otherwise it falls back to the default least-loaded choice. Engines report which prefixes they admitted, so all API server processes (`--api-server-count`) follow the same owner. A prefix that alone would send more than its fair share of traffic to one engine, such as a system prompt shared by every request, is hashed over more blocks so those requests spread out. The default policy is `load`.
+
+```bash
+vllm serve $MODEL --data-parallel-size 4 --data-parallel-lb-policy prefix-affinity
+```
+
+Prefix-affinity routing is implemented in the Python frontend only; the Rust frontend rejects `--data-parallel-lb-policy` at startup.
 
 When deploying large DP sizes using this method, the API server process can become a bottleneck. In this case, the orthogonal `--api-server-count` command line option can be used to scale this out (for example `--api-server-count=4`). This is transparent to users - a single HTTP endpoint / port is still exposed. Note that this API server scale-out is "internal" and still confined to the "head" node.
 

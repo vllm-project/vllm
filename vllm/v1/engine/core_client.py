@@ -56,6 +56,7 @@ from vllm.v1.engine import (
 )
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
+from vllm.v1.engine.dp_affinity import PrefixAffinityRouter
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.engine.tensor_ipc import TensorIpcSender
 from vllm.v1.engine.utils import (
@@ -1542,6 +1543,8 @@ class DPAsyncMPClient(AsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
     EngineCore. Assumes external load-balancing by default."""
 
+    affinity_router: PrefixAffinityRouter | None = None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1648,16 +1651,20 @@ class DPAsyncMPClient(AsyncMPClient):
 
                     buf = None
                     while True:
-                        # Drain all stats events (we only care about latest).
+                        # Drain all stats events (we only care about latest
+                        # counts, but prefix keys are only sent once).
                         future: asyncio.Future[bytes] = socket.recv(flags=zmq.NOBLOCK)
                         if isinstance(future.exception(), zmq.Again):
                             break
+                        if buf is not None and self.affinity_router is not None:
+                            self._observe_prefix_owners(msgspec.msgpack.decode(buf))
                         buf = future.result()
                     if buf is None:
                         continue
 
                     # Update local load-balancing state.
-                    counts, wave, running = msgspec.msgpack.decode(buf)
+                    decoded = msgspec.msgpack.decode(buf)
+                    counts, wave, running = decoded[:3]
                     self.current_wave = wave
                     self.engines_running = running
                     if counts is not None:
@@ -1671,10 +1678,24 @@ class DPAsyncMPClient(AsyncMPClient):
                         logger.debug(
                             "Received counts: %s (%s)", sliced_counts, count_slice
                         )
+                        if self.affinity_router is not None:
+                            self._observe_prefix_owners(decoded)
 
         resources.stats_update_task = asyncio.create_task(
             run_engine_stats_update_task()
         )
+
+    def _observe_prefix_owners(self, decoded: list) -> None:
+        """Record the engines that admitted each prefix key since the last
+        coordinator publish (the optional fourth element of its broadcast)."""
+        assert self.affinity_router is not None
+        prefix_keys = decoded[3] if len(decoded) > 3 else None
+        if not prefix_keys:
+            return
+        ranks = self.engine_ranks_managed
+        for eng_index, keys in enumerate(prefix_keys):
+            if keys and ranks[0] <= eng_index <= ranks[-1]:
+                self.affinity_router.observe_owners(eng_index - ranks[0], keys)
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         self._ensure_stats_update_task()
@@ -1818,6 +1839,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             len(self.core_engines) * self.client_index
         ) // client_count
 
+        if vllm_config.parallel_config.data_parallel_lb_policy == "prefix-affinity":
+            self.affinity_router = PrefixAffinityRouter()
+
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         if request.resumable:
             self.streaming_reqs.add(request.request_id)
@@ -1838,12 +1862,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
-            min_score: float = sys.maxsize
-            eng_index = 0
-            for i in range(num_engines):
-                # Start from client_index to help with balancing when engines
-                # are empty.
-                idx = (self.eng_start_index + i) % num_engines
+            scores: list[float] = []
+            for idx in range(num_engines):
                 waiting, running, kv_cache_usage = current_counts[idx]
                 # Estimate engine load as the greater of the coordinator's
                 # latest (waiting + running) snapshot and this client's own
@@ -1862,18 +1882,48 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     # the penalty stays off, preserving exact round-robin.
                     # Ramps from 0 at <=50% usage to 3x waiting at 100%.
                     score += waiting * 6.0 * max(0.0, kv_cache_usage - 0.5)
-                if score < min_score:
-                    min_score = score
-                    eng_index = idx
-            # Increment local waiting count for better balancing between stats
-            # updates from the coordinator (which happen every 100ms).
-            current_counts[eng_index][0] += self.client_count
-            # Rotate the scan start so that ties (equal scores, e.g. right
-            # after a coordinator stats reset when engines look equally loaded)
-            # don't systematically favor the same engine. This removes the
-            # fixed tie-break bias without affecting load-aware decisions when
-            # scores actually differ.
-            self.eng_start_index = (self.eng_start_index + 1) % num_engines
+                scores.append(score)
+
+            affinity_index: int | None = None
+            if self.affinity_router is not None:
+                # Prefer the engine that owns this prompt's prefix, but only
+                # while its load stays within the bounded-load cap.
+                affinity_index = self.affinity_router.pick(
+                    scores,
+                    [counts[2] for counts in current_counts],
+                    self.affinity_router.candidates(
+                        request,
+                        self.vllm_config.cache_config.block_size,
+                        num_engines,
+                    ),
+                    self.client_count,
+                )
+
+            if affinity_index is not None:
+                # No optimistic waiting bump: engine_inflight already counts
+                # this client's requests exactly, and a bump left over from
+                # finished requests would push same-prefix bursts off their
+                # engine before the next snapshot.
+                eng_index = affinity_index
+            else:
+                min_score: float = sys.maxsize
+                eng_index = 0
+                for i in range(num_engines):
+                    # Start from client_index to help with balancing when
+                    # engines are empty.
+                    idx = (self.eng_start_index + i) % num_engines
+                    if scores[idx] < min_score:
+                        min_score = scores[idx]
+                        eng_index = idx
+                # Rotate the scan start so that ties (equal scores, e.g. right
+                # after a coordinator stats reset when engines look equally
+                # loaded) don't systematically favor the same engine. This
+                # removes the fixed tie-break bias without affecting
+                # load-aware decisions when scores actually differ.
+                self.eng_start_index = (self.eng_start_index + 1) % num_engines
+                # Increment local waiting count for better balancing between
+                # stats updates from the coordinator (which happen every 100ms).
+                current_counts[eng_index][0] += self.client_count
 
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.
