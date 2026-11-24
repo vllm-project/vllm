@@ -41,6 +41,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_per_token_head_quant,
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
+    BI_SPLIT_KV_TOKENS,
     MAX_3D_QUERY_LEN,
     unified_attention,
 )
@@ -57,6 +58,9 @@ logger = init_logger(__name__)
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
+# Batch invariance splits the whole context into fixed BI_SPLIT_KV_TOKENS
+# segments; longer contexts decode in 2D (same bits) rather than grow scratch.
+MAX_BI_SPLIT_KV_SEGMENTS = 128
 
 
 @dataclass
@@ -149,13 +153,21 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
+            bi_segments = cdiv(model_config.max_model_len, BI_SPLIT_KV_TOKENS)
+            if bi_segments <= MAX_BI_SPLIT_KV_SEGMENTS:
+                self.num_par_softmax_segments = bi_segments
+            else:
+                self.seq_threshold_3D = 0
         # On SM120, batches whose 16-segment decode grid under-fills the SMs use
         # 64. This counts requests, not Q blocks, on purpose: for 1..11 verify
         # requests (K=3/5, 8 q / 1 KV head, 2k-128k context) 64 segments were
         # faster or within 6% at 2k, and 1.1-3.6x faster from 8k up.
         self.max_seqs_64_segments = 0
-        if current_platform.is_cuda() and current_platform.is_device_capability(
-            (12, 0)
+        if (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability((12, 0))
+            and not envs.VLLM_BATCH_INVARIANT
         ):
             self.max_seqs_64_segments = (current_platform.num_compute_units() - 1) // (
                 NUM_PAR_SOFTMAX_SEGMENTS * self.num_heads_kv

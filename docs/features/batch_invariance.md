@@ -158,6 +158,7 @@ When batch invariance is enabled, vLLM:
 5. On CUDA devices with tuned matmul table entries for the model's bf16 unquantized forward linear layers (Ada, Hopper, Blackwell),
    runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out.
 6. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
+7. With `TRITON_ATTN` on CUDA, splits attention over fixed 1024-token KV segments that both the split-KV decode kernel and the 2D kernel fold in the same order, so small decode batches keep split-KV parallelism and every row matches its prefill and any batch; contexts above 128k tokens run without the split
 
 !!! warning
     Batch invariance under tensor parallelism is not yet supported for all-reduces whose size isn't a multiple of 16 bytes, for example a hidden size that isn't a multiple of 8 in fp16/bf16. Such tensors can switch between NCCL and custom all-reduce depending on batch size. All validated models meet this requirement.

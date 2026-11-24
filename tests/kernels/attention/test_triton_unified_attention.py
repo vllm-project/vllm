@@ -19,6 +19,7 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
     split_k_segment_layout,
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
+    BI_SPLIT_KV_TOKENS,
     MAX_3D_QUERY_LEN,
     reduce_segments,
     unified_attention,
@@ -64,6 +65,7 @@ def _launch_kwargs(
     chunk_lookback=-1,
     rswa_window=None,
     window_aware_segments=True,
+    max_seqlen_k=128,
 ):
     """Run the launcher with both kernels mocked. Returns the launch kwargs of
     kernel_unified_attention and of reduce_segments (None if not launched)."""
@@ -75,6 +77,7 @@ def _launch_kwargs(
     reduce = MagicMock()
     monkeypatch.setattr(attention, "kernel_unified_attention", kernel)
     monkeypatch.setattr(attention, "reduce_segments", reduce)
+    monkeypatch.setattr(attention, "reduce_segments_in_order", reduce)
     unified_attention(
         query,
         cache,
@@ -82,8 +85,8 @@ def _launch_kwargs(
         torch.empty_like(query),
         torch.arange(num_seqs + 1, dtype=torch.int32, device="cpu") * query_len,
         query_len,
-        torch.full((num_seqs,), 128, dtype=torch.int32, device="cpu"),
-        128,
+        torch.full((num_seqs,), max_seqlen_k, dtype=torch.int32, device="cpu"),
+        max_seqlen_k,
         128**-0.5,
         causal,
         window_size,
@@ -144,7 +147,18 @@ def _spy_reduce_segments(monkeypatch):
         (5, {"causal": False}, False),
         (5, {"causal": "per_sequence"}, False),
         (5, {"threshold": 1}, False),
-        (5, {"batch_invariant": True}, False),
+        # On CUDA, batch invariance keeps split-K while its segments cover the KV.
+        (5, {"batch_invariant": True}, current_platform.is_cuda()),
+        (
+            1,
+            {"batch_invariant": True, "max_seqlen_k": 16 * BI_SPLIT_KV_TOKENS},
+            current_platform.is_cuda(),
+        ),
+        (
+            1,
+            {"batch_invariant": True, "max_seqlen_k": 16 * BI_SPLIT_KV_TOKENS + 1},
+            False,
+        ),
         (5, {"mm_prefix": True}, False),
         # BLOCK_Q is 2 for 8 query heads per KV head: 4 * ceil(4 / 2) <= 8.
         (4, {"num_seqs": 4}, True),
@@ -1513,3 +1527,231 @@ def test_triton_unified_attn_window_aware_segments(
             sliding_window=sliding_window,
         )
         torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)
+
+
+# (num_query_heads, num_kv_heads), head_size, block_size, sliding_window,
+# use_sinks, soft_cap
+BI_SPLIT_KV_CASES = [
+    ((32, 8), 128, 64, None, False, None),
+    ((32, 8), 128, 16, 1000, True, None),
+    ((8, 1), 128, 64, None, True, 50.0),
+    ((8, 1), 256, 16, 4096, False, 50.0),
+    ((12, 4), 96, 32, None, False, None),
+]
+BI_CASE_ARGS = "num_heads,head_size,block_size,sliding_window,use_sinks,soft_cap"
+BI_MAX_LEN = 32 * BI_SPLIT_KV_TOKENS
+
+
+class _BatchInvariantAttention:
+    """A shared paged KV pool in TRITON_ATTN's cache layout (K and V of a head
+    side by side) and one query per absolute position, so a request (seq id,
+    length) has the same inputs in every batch it is launched in."""
+
+    def __init__(
+        self, num_heads, head_size, block_size, sliding_window, use_sinks, soft_cap
+    ):
+        set_random_seed(0)
+        self.num_query_heads, num_kv_heads = num_heads
+        self.head_size = head_size
+        self.window_size = (
+            (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
+        )
+        self.soft_cap = soft_cap or 0.0
+        blocks_per_seq = BI_MAX_LEN // block_size
+        num_blocks = 8 * blocks_per_seq
+        kv_cache = torch.randn(
+            (num_blocks, block_size, num_kv_heads, 2 * head_size),
+            dtype=torch.bfloat16,
+            device=DEVICE_TYPE,
+        )
+        self.key_cache = kv_cache[..., :head_size]
+        self.value_cache = kv_cache[..., head_size:]
+        self.block_tables = torch.randperm(
+            num_blocks, dtype=torch.int32, device=DEVICE_TYPE
+        ).view(8, blocks_per_seq)
+        self.queries = torch.randn(
+            (BI_MAX_LEN, self.num_query_heads, head_size),
+            dtype=torch.bfloat16,
+            device=DEVICE_TYPE,
+        )
+        self.sinks = (
+            torch.randn(self.num_query_heads, dtype=torch.float32, device=DEVICE_TYPE)
+            if use_sinks
+            else None
+        )
+        self.num_segments = triton.cdiv(BI_MAX_LEN, BI_SPLIT_KV_TOKENS)
+
+    def scratch(self, rows):
+        shape = (rows, self.num_query_heads, self.num_segments)
+        return (
+            torch.full(
+                (*shape, next_power_of_2(self.head_size)),
+                float("nan"),
+                device=DEVICE_TYPE,
+            ),
+            torch.full(shape, float("nan"), device=DEVICE_TYPE),
+            torch.full(shape, float("nan"), device=DEVICE_TYPE),
+        )
+
+    def run(self, seq_ids, seq_lens, query_lens, seq_threshold_3D, out=None):
+        query = torch.cat(
+            [self.queries[s - q : s] for s, q in zip(seq_lens, query_lens)]
+        )
+        output = torch.empty_like(query) if out is None else out
+        scratch = self.scratch(max(query.shape[0], 1))
+        unified_attention(
+            q=query,
+            k=self.key_cache,
+            v=self.value_cache,
+            out=output,
+            cu_seqlens_q=torch.tensor(
+                [0, *query_lens], dtype=torch.int32, device=DEVICE_TYPE
+            ).cumsum(0, dtype=torch.int32),
+            max_seqlen_q=max(query_lens),
+            seqused_k=torch.tensor(seq_lens, dtype=torch.int32, device=DEVICE_TYPE),
+            max_seqlen_k=max(seq_lens),
+            softmax_scale=self.head_size**-0.5,
+            causal=True,
+            window_size=self.window_size,
+            block_table=self.block_tables[seq_ids],
+            softcap=self.soft_cap,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            seq_threshold_3D=seq_threshold_3D,
+            num_par_softmax_segments=self.num_segments,
+            softmax_segm_output=scratch[0],
+            softmax_segm_max=scratch[1],
+            softmax_segm_expsum=scratch[2],
+            sinks=self.sinks,
+        )
+        return output
+
+
+def _assert_bitwise(actual, expected):
+    assert torch.isfinite(actual).all() and torch.isfinite(expected).all()
+    assert torch.equal(actual, expected)
+
+
+def _bi_seq_lens():
+    generator = torch.Generator().manual_seed(1)
+    random_lens = torch.randint(2, BI_MAX_LEN, (2,), generator=generator).tolist()
+    return [1, 777, BI_SPLIT_KV_TOKENS, BI_SPLIT_KV_TOKENS + 1, 4097, *random_lens]
+
+
+@pytest.mark.parametrize(BI_CASE_ARGS, BI_SPLIT_KV_CASES)
+def test_batch_invariant_split_kv_decode(
+    monkeypatch, num_heads, head_size, block_size, sliding_window, use_sinks, soft_cap
+):
+    """Under batch invariance a decode row has the same bits from the split-KV
+    (3D) and 2D kernels, alone or in batches of 7 and 64."""
+    monkeypatch.setattr(attention, "is_batch_invariant", True)
+    attn = _BatchInvariantAttention(
+        num_heads, head_size, block_size, sliding_window, use_sinks, soft_cap
+    )
+    seq_lens = _bi_seq_lens()
+    seq_ids = list(range(len(seq_lens)))
+    decode_2d = attn.run(seq_ids, seq_lens, [1] * 7, seq_threshold_3D=0)
+    _assert_bitwise(
+        attn.run(seq_ids, seq_lens, [1] * 7, seq_threshold_3D=64), decode_2d
+    )
+    for i in seq_ids:
+        alone = attn.run([i], [seq_lens[i]], [1], seq_threshold_3D=64)
+        _assert_bitwise(alone, decode_2d[i : i + 1])
+    generator = torch.Generator().manual_seed(2)
+    filler_lens = torch.randint(1, 4096, (57,), generator=generator).tolist()
+    filler_ids = torch.randint(0, 8, (57,), generator=generator).tolist()
+    for threshold in (0, 64):
+        batch_64 = attn.run(
+            seq_ids + filler_ids, seq_lens + filler_lens, [1] * 64, threshold
+        )
+        _assert_bitwise(batch_64[:7], decode_2d)
+
+
+@pytest.mark.parametrize(BI_CASE_ARGS, BI_SPLIT_KV_CASES)
+def test_batch_invariant_split_kv_prefill_rows_match_decode(
+    monkeypatch, num_heads, head_size, block_size, sliding_window, use_sinks, soft_cap
+):
+    """Every row of a 2D prefill chunk equals the split-KV decode of the same
+    position, also across a segment boundary; verify-sized queries agree too."""
+    monkeypatch.setattr(attention, "is_batch_invariant", True)
+    attn = _BatchInvariantAttention(
+        num_heads, head_size, block_size, sliding_window, use_sinks, soft_cap
+    )
+    chunk = 300
+    for seq_id, seq_len in [(0, 4097), (1, 13 * BI_SPLIT_KV_TOKENS + 150), (2, chunk)]:
+        prefill = attn.run([seq_id], [seq_len], [chunk], seq_threshold_3D=chunk)
+        positions = range(seq_len - chunk + 1, seq_len + 1)
+        decode = attn.run(
+            [seq_id] * chunk, list(positions), [1] * chunk, seq_threshold_3D=chunk
+        )
+        _assert_bitwise(prefill, decode)
+    seq_lens = [4097, 9000, 31000, 5]
+    verify_3d = attn.run([0, 1, 2, 3], seq_lens, [4] * 4, seq_threshold_3D=64)
+    _assert_bitwise(verify_3d, attn.run([0, 1, 2, 3], seq_lens, [4] * 4, 0))
+
+
+@pytest.mark.parametrize(BI_CASE_ARGS, BI_SPLIT_KV_CASES[:3])
+def test_batch_invariant_split_kv_cuda_graph_padding(
+    monkeypatch, num_heads, head_size, block_size, sliding_window, use_sinks, soft_cap
+):
+    """A split-KV decode captured in a CUDA graph with padding requests and
+    padding token rows replays to the bits of an eager, unpadded 2D launch."""
+    monkeypatch.setattr(attention, "is_batch_invariant", True)
+    attn = _BatchInvariantAttention(
+        num_heads, head_size, block_size, sliding_window, use_sinks, soft_cap
+    )
+    num_reqs, num_padded_reqs, num_padded_tokens = 5, 8, 10
+    seq_lens = [3000, 1, 2049, 31000, 1024]
+    query = torch.zeros(
+        (num_padded_tokens, attn.num_query_heads, head_size),
+        dtype=torch.bfloat16,
+        device=DEVICE_TYPE,
+    )
+    output = torch.zeros_like(query)
+    query_starts = torch.tensor(
+        [*range(num_reqs + 1)] + [num_reqs] * (num_padded_reqs - num_reqs),
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
+    )
+    kv_lens = torch.ones(num_padded_reqs, dtype=torch.int32, device=DEVICE_TYPE)
+    kv_lens[num_reqs:] = 0
+    block_tables = attn.block_tables[[0, 1, 2, 3, 4, 5, 6, 7]].clone()
+    scratch = attn.scratch(num_padded_tokens)
+
+    def launch():
+        unified_attention(
+            q=query,
+            k=attn.key_cache,
+            v=attn.value_cache,
+            out=output,
+            cu_seqlens_q=query_starts,
+            max_seqlen_q=1,
+            seqused_k=kv_lens,
+            max_seqlen_k=BI_MAX_LEN,
+            softmax_scale=head_size**-0.5,
+            causal=True,
+            window_size=attn.window_size,
+            block_table=block_tables,
+            softcap=attn.soft_cap,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            seq_threshold_3D=num_padded_reqs,
+            num_par_softmax_segments=attn.num_segments,
+            softmax_segm_output=scratch[0],
+            softmax_segm_max=scratch[1],
+            softmax_segm_expsum=scratch[2],
+            sinks=attn.sinks,
+        )
+
+    launch()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        launch()
+    for lens in (seq_lens, [7, 1025, 5000, 2, 32 * BI_SPLIT_KV_TOKENS]):
+        query[:num_reqs] = torch.stack([attn.queries[s - 1] for s in lens])
+        kv_lens[:num_reqs] = torch.tensor(lens, dtype=torch.int32)
+        graph.replay()
+        eager_2d = attn.run(list(range(num_reqs)), lens, [1] * num_reqs, 0)
+        _assert_bitwise(output[:num_reqs], eager_2d)

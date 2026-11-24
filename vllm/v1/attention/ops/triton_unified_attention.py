@@ -24,6 +24,7 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
     find_seq_idx,
     init_softmax_M,
     load_qq_bias_tile,
+    merge_softmax_state,
     resolve_seq_and_query_len,
     softmax_step,
     split_k_segment_layout,
@@ -36,6 +37,9 @@ is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
 # Longest per-request query (e.g. 1 + num_speculative_tokens) run by split-K.
 MAX_3D_QUERY_LEN = 8
+# Batch-invariant split-KV segment length: segment s holds KV tokens
+# [s * BI_SPLIT_KV_TOKENS, (s + 1) * BI_SPLIT_KV_TOKENS) in every batch.
+BI_SPLIT_KV_TOKENS = 1024
 
 # RDNA launch tuning: TRITON_ATTN's launch configs for gfx1201 (RDNA4) and gfx1100
 # (RDNA3).
@@ -415,6 +419,11 @@ def kernel_unified_attention(
     v_cache_delta: tl.int64 = 0,
     K_ALIGN: tl.constexpr = 1,
     V_ALIGN: tl.constexpr = 1,
+    # Batch invariance: > 0 splits the KV into segments of this many tiles at
+    # fixed positions. 3D programs each run one segment; the 2D tile loop folds
+    # each segment into a running state at the segment boundary, with the same
+    # ``merge_softmax_state`` that ``reduce_segments_in_order`` uses.
+    BI_SEGMENT_TILES: tl.constexpr = 0,
 ):
     # Strides as visible multiples of the alignment found by kv_tile_alignment,
     # and V addressed from K, let the K/V tile loads compile to vector loads.
@@ -459,7 +468,12 @@ def kernel_unified_attention(
 
     if IS_3D:
         segm_base_tile, tiles_per_segment, num_active_segments = split_k_segment_layout(
-            seq_len, NUM_SEGMENTS_PER_SEQ, SLIDING_WINDOW, TILE_SIZE, WINDOW_SEGMENTS
+            seq_len,
+            NUM_SEGMENTS_PER_SEQ,
+            SLIDING_WINDOW,
+            TILE_SIZE,
+            WINDOW_SEGMENTS,
+            BI_SEGMENT_TILES,
         )
         if segm_idx >= num_active_segments:
             return
@@ -515,9 +529,20 @@ def kernel_unified_attention(
 
     block_table_offset = seq_idx * block_table_stride
 
-    M = init_softmax_M(
-        sink_ptr, query_offset_1, query_mask_1, segm_idx, BLOCK_M, USE_SINKS, IS_3D
-    )
+    if BI_SEGMENT_TILES > 0:
+        # M, L, acc hold the current KV segment. Sinks seed the running state
+        # (2D) or the fold in reduce_segments_in_order (3D), never a segment.
+        M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+        if not IS_3D:
+            M_run = init_softmax_M(
+                sink_ptr, query_offset_1, query_mask_1, 0, BLOCK_M, USE_SINKS, False
+            )
+            L_run = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
+            acc_run = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
+    else:
+        M = init_softmax_M(
+            sink_ptr, query_offset_1, query_mask_1, segm_idx, BLOCK_M, USE_SINKS, IS_3D
+        )
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     # acc : (BLOCK_M, HEAD_SIZE_PADDED)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
@@ -565,6 +590,15 @@ def kernel_unified_attention(
 
     # iterate through tiles (now limited to the sliding window range)
     for j in range(loop_lo, loop_hi):
+        # Compile-time branch outside, runtime branch inside.
+        if BI_SEGMENT_TILES > 0 and not IS_3D:  # noqa: SIM102
+            if j % BI_SEGMENT_TILES == 0:
+                M_run, L_run, acc_run = merge_softmax_state(
+                    M_run, L_run, acc_run, M, L, acc
+                )
+                M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+                L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
+                acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
         seq_offset = j * TILE_SIZE + offs_t
         tile_mask = seq_offset < max_seq_prefix_len
 
@@ -738,6 +772,9 @@ def kernel_unified_attention(
                 p_scale = 1.0
             acc += tl.dot((P * p_scale).to(V.dtype), V) / p_scale
 
+    if BI_SEGMENT_TILES > 0 and not IS_3D:
+        M, L, acc = merge_softmax_state(M_run, L_run, acc_run, M, L, acc)
+
     # ---- Epilogue ---------------------------------------------------------
     if IS_3D:
         if USE_FP8_Q_DESCALE:
@@ -834,6 +871,83 @@ def kernel_unified_attention(
                 acc,
                 mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
             )
+
+
+@triton.jit
+def reduce_segments_in_order(
+    output_ptr,  # [num_tokens, num_query_heads, head_size]
+    segm_output_ptr,
+    # [num_tokens, num_query_heads, max_num_segments, head_size]
+    segm_max_ptr,  # [num_tokens, num_query_heads, max_num_segments]
+    segm_expsum_ptr,  # [num_tokens, num_query_heads, max_num_segments]
+    seq_lens_ptr,  # [num_seqs]
+    sink_ptr,  # [num_query_heads] or None
+    num_seqs,  # int
+    num_query_heads: tl.constexpr,  # int
+    out_scale_inv,  # float32
+    output_stride_0: tl.int64,  # int
+    output_stride_1: tl.int64,  # int, should be equal to head_size
+    TILE_SIZE: tl.constexpr,  # int
+    HEAD_SIZE: tl.constexpr,  # int
+    HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
+    query_start_len_ptr,  # [num_seqs+1]
+    NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
+    BI_SEGMENT_TILES: tl.constexpr,  # int, as in kernel_unified_attention
+    USE_SINKS: tl.constexpr,  # bool
+    USE_FP8: tl.constexpr,  # bool
+    FP8_MIN: tl.constexpr = float8_info.min,
+    FP8_MAX: tl.constexpr = float8_info.max,
+):
+    """Batch-invariant `reduce_segments`: fold the fixed KV segments 0, 1, ...
+    of one query row into the running state with `merge_softmax_state`,
+    starting from the sink, exactly as the 2D kernel's tile loop does."""
+    query_token_idx = tl.program_id(0)
+    query_head_idx = tl.program_id(1)
+
+    # Graph padding must be rejected before sequence lookup or scratch access.
+    if query_token_idx >= tl.load(query_start_len_ptr + num_seqs):
+        return
+    seq_idx = find_seq_idx(query_start_len_ptr, query_token_idx, num_seqs, 1, False)
+    seq_len = tl.load(seq_lens_ptr + seq_idx)
+    if seq_len <= 0:
+        return
+    _, _, act_num_segments = split_k_segment_layout(
+        seq_len, NUM_SEGMENTS_PER_SEQ, 0, TILE_SIZE, False, BI_SEGMENT_TILES
+    )
+
+    # One query row as [1] / [1, HEAD_SIZE_PADDED], the shapes the helper takes.
+    offs_r = tl.arange(0, 1)
+    offs_d = tl.arange(0, HEAD_SIZE_PADDED)
+    dim_mask = offs_d < HEAD_SIZE
+    M = tl.full([1], float("-inf"), dtype=tl.float32)
+    if USE_SINKS:
+        M = tl.load(sink_ptr + query_head_idx + offs_r).to(tl.float32)
+    L = tl.full([1], 1.0, dtype=tl.float32)
+    acc = tl.zeros([1, HEAD_SIZE_PADDED], dtype=tl.float32)
+    row = query_token_idx.to(tl.int64) * num_query_heads + query_head_idx
+    for s in tl.static_range(NUM_SEGMENTS_PER_SEQ):
+        active = (offs_r + s) < act_num_segments
+        segm_offset = row * NUM_SEGMENTS_PER_SEQ + s + offs_r
+        M_s = tl.load(segm_max_ptr + segm_offset, mask=active, other=float("-inf"))
+        L_s = tl.load(segm_expsum_ptr + segm_offset, mask=active, other=0.0)
+        acc_s = tl.load(
+            segm_output_ptr + segm_offset[:, None] * HEAD_SIZE_PADDED + offs_d[None, :],
+            mask=active[:, None] & dim_mask[None, :],
+            other=0.0,
+        )
+        M, L, acc = merge_softmax_state(M, L, acc, M_s, L_s, acc_s)
+
+    acc = acc / L[:, None]
+    if USE_FP8:
+        acc = acc * tl.load(out_scale_inv)
+        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
+    output_offset = (
+        query_token_idx * output_stride_0
+        + query_head_idx * output_stride_1
+        + offs_r[:, None] * 0
+        + offs_d[None, :]
+    )
+    tl.store(output_ptr + output_offset, acc, mask=dim_mask[None, :])
 
 
 @triton.jit
@@ -1222,6 +1336,18 @@ def unified_attention(
         TILE_SIZE_PREFILL = min(TILE_SIZE_PREFILL, block_size)
         TILE_SIZE_DECODE = min(TILE_SIZE_DECODE, block_size)
 
+    # Batch invariance (CUDA): both kernels reduce a query row over the same
+    # fixed KV segments with the same tile size, so its bits do not depend on
+    # the 2D/3D choice, the batch, or the query length. Elsewhere it runs 2D.
+    bi_segment_tiles = 0
+    if is_batch_invariant and current_platform.is_cuda():
+        # 64-token tiles keep batch-invariant prefill at main's speed on A100;
+        # 16-bit KV up to head size 128 fits shared memory.
+        if head_size_padded <= 128 and q.element_size() == 2:
+            TILE_SIZE_PREFILL = 64
+        TILE_SIZE_DECODE = TILE_SIZE_PREFILL
+        bi_segment_tiles = BI_SPLIT_KV_TOKENS // TILE_SIZE_PREFILL
+
     # Tensor descriptors for Q load / output store require every element
     # of ``block_shape`` to be a power of 2.  ``num_queries_per_kv`` is
     # not always pow2 (e.g. Qwen2-7B: 28 / 4 = 7), so gate the Q/O paths
@@ -1278,7 +1404,8 @@ def unified_attention(
     #    non-causal, per-sequence causal, or mm-prefix, or the tuned
     #    large-head path applies, or
     # 3. The number of Q blocks exceeds seq_threshold_3D, or
-    # 4. Batch invariance is enabled
+    # 4. Batch invariance is enabled off CUDA, or its segments do not cover
+    #    max_seqlen_k, or the fp8 value scale would apply before the reduce
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
@@ -1296,7 +1423,17 @@ def unified_attention(
             )
         )
         or num_seqs * triton.cdiv(max_seqlen_q, BLOCK_Q) > seq_threshold_3D
-        or is_batch_invariant
+        or (
+            is_batch_invariant
+            and (
+                not bi_segment_tiles
+                or num_par_softmax_segments * BI_SPLIT_KV_TOKENS < max_seqlen_k
+                or (
+                    kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+                    and q.dtype == current_platform.fp8_dtype()
+                )
+            )
+        )
     )
     if use_3d and softmax_segm_max.shape[0] < q.shape[0]:
         logger.debug_once("Split-K scratch rows < query tokens; using 2D.")
@@ -1422,6 +1559,7 @@ def unified_attention(
     # instead. Every other case keeps the whole-sequence split.
     window_segments = (
         use_3d
+        and not is_batch_invariant
         and window_aware_segments
         and max_seqlen_q == 1
         and sliding_window_val > 0
@@ -1554,10 +1692,33 @@ def unified_attention(
         v_cache_delta=v_cache_delta,
         K_ALIGN=k_align,
         V_ALIGN=v_align,
+        BI_SEGMENT_TILES=bi_segment_tiles,
         **launch_kwargs,
     )
 
-    if use_3d:
+    if use_3d and bi_segment_tiles:
+        reduce_segments_in_order[(q.shape[0], num_query_heads)](
+            output_ptr=out,
+            segm_output_ptr=softmax_segm_output,
+            segm_max_ptr=softmax_segm_max,
+            segm_expsum_ptr=softmax_segm_expsum,
+            seq_lens_ptr=seqused_k,
+            sink_ptr=sinks,
+            num_seqs=num_seqs,
+            num_query_heads=num_query_heads,
+            out_scale_inv=1 / output_scale if output_scale is not None else 1.0,
+            output_stride_0=out.stride(0),
+            output_stride_1=out.stride(1),
+            TILE_SIZE=TILE_SIZE_DECODE,
+            HEAD_SIZE=head_size,
+            HEAD_SIZE_PADDED=head_size_padded,
+            query_start_len_ptr=cu_seqlens_q,
+            NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
+            BI_SEGMENT_TILES=bi_segment_tiles,
+            USE_SINKS=sinks is not None,
+            USE_FP8=output_scale is not None,
+        )
+    elif use_3d:
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,
             segm_output_ptr=softmax_segm_output,
