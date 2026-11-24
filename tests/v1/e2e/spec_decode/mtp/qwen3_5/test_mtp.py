@@ -65,6 +65,21 @@ class MTPInputRecorder:
         return self.mtp_inputs
 
 
+class GDNStateInspector:
+    model_runner: "GPUModelRunner"
+
+    def get_gdn_state_modes(self) -> list[tuple[str, bool]]:
+        from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+            QwenGatedDeltaNetAttention,
+        )
+
+        return [
+            (layer.gdn_decode_kernel, layer.defer_gdn_spec_state)
+            for layer in self.model_runner.model.modules()
+            if isinstance(layer, QwenGatedDeltaNetAttention)
+        ]
+
+
 def _add_random_mtp_module(model_name: str, path: Path) -> Path:
     """Copy of `model_name` with a second MTP module of random weights."""
     src = Path(download_weights_from_hf(model_name, None, allow_patterns=["*"]))
@@ -179,6 +194,48 @@ def test_multi_module_mtp_reused_slot_has_only_current_request_inputs(
             ([5001, 42, 42], [0, 1, 2]),
         ]
         assert list(output.outputs[0].token_ids) == [42] * 8
+
+
+@single_gpu_only
+def test_mtp_triton_large_window_preserves_outputs(monkeypatch, vllm_runner):
+    """An oversized deferred-state window must retain per-token state storage."""
+    outputs = {}
+    for backend in ("cuda", "triton"):
+        monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", backend)
+        with vllm_runner(
+            "Qwen/Qwen3.5-0.8B-Base",
+            block_size=None,
+            max_model_len=256,
+            max_num_batched_tokens=256,
+            max_num_seqs=2,
+            enable_prefix_caching=False,
+            enforce_eager=True,
+            mamba_ssm_cache_dtype="float32",
+            additional_config={"gdn_prefill_backend": "triton"},
+            limit_mm_per_prompt={"image": 0, "video": 0},
+            worker_extension_cls=f"{__name__}.GDNStateInspector",
+            speculative_config={"method": "mtp", "num_speculative_tokens": 15},
+            disable_log_stats=False,
+        ) as runner:
+            (modes,) = runner.llm.collective_rpc("get_gdn_state_modes")
+            assert modes and all(
+                kernel == backend and not deferred for kernel, deferred in modes
+            )
+            outputs[backend] = runner.generate_w_logprobs(
+                ["The capital of France is", "The sequence 1, 2, 3, 4 continues with"],
+                SamplingParams(
+                    temperature=0, max_tokens=48, ignore_eos=True, logprobs=5
+                ),
+            )
+            assert compute_acceptance_len(runner.llm.get_metrics()) > 1
+
+    check_logprobs_close(
+        outputs_0_lst=outputs["cuda"],
+        outputs_1_lst=outputs["triton"],
+        name_0="cuda_fallback",
+        name_1="triton_fallback",
+        always_check_logprobs=True,
+    )
 
 
 @pytest.mark.parametrize(
