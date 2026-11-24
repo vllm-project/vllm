@@ -11,6 +11,10 @@ import torch
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.models.deepseek_v4.attention import (
+    DeepseekV4Attention,
+    DeepseekV4IndexerCache,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
@@ -26,6 +30,27 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.utils import allocate_kv_cache, customize_layer_config
 
 pytestmark = pytest.mark.skip_global_cleanup
+
+
+@pytest.mark.parametrize("dtype, alignment", [("fp8_ds_mla", 576), ("bfloat16", None)])
+def test_deepseek_v4_packed_specs_require_aligned_stride(dtype, alignment):
+    config = SimpleNamespace(cache_config=CacheConfig(block_size=64, cache_dtype=dtype))
+    mla = SimpleNamespace(
+        compress_ratio=4,
+        kv_cache_dtype=dtype,
+        kv_cache_torch_dtype=torch.bfloat16,
+        head_dim=512,
+    )
+    indexer = SimpleNamespace(
+        cache_config=config.cache_config,
+        compress_ratio=4,
+        dtype=torch.uint8,
+        head_dim=132,
+    )
+    mla_spec = DeepseekV4Attention.get_kv_cache_config(mla, config).spec
+    index_spec = DeepseekV4IndexerCache.get_kv_cache_config(indexer, config).spec
+    assert mla_spec.block_stride_alignment == alignment
+    assert index_spec.block_stride_alignment == alignment
 
 
 @pytest.mark.parametrize(
