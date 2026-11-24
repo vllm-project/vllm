@@ -786,7 +786,19 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         libnuma-dev \
         # numactl CLI for NUMA binding at runtime
         numactl && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    # Drop unused CUDA static archives (~1.2 GB) that runtime JIT never links
+    # (FlashInfer/DeepGEMM/DeepEP link the shared libraries, not *_static.a).
+    # Exact filenames, NOT a *_static.a wildcard: nvcc links libcudart_static.a
+    # by default and -rdc device linking needs libcudadevrt.a, so both stay.
+    # libnvptxcompiler_static.a moves to libnvptxcompiler-dev in CUDA 13.5, so
+    # remove it only when present.
+    rm /usr/local/cuda/lib64/libcublas_static.a \
+       /usr/local/cuda/lib64/libcublasLt_static.a \
+       /usr/local/cuda/lib64/libcurand_static.a \
+       /usr/local/cuda/lib64/libnvrtc_static.a \
+       /usr/local/cuda/lib64/libnvrtc-builtins_static.a && \
+    rm -f /usr/local/cuda/lib64/libnvptxcompiler_static.a
 
 # Ensures nvcc/ptxas (installed above, needed at runtime for FlashInfer/
 # DeepGEMM/EP kernel JIT compilation) are reachable on PATH. Harmless no-op
