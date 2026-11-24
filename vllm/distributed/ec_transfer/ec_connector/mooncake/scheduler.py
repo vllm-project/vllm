@@ -409,8 +409,7 @@ class ECMooncakeScheduler:
                 self._scheduler_pending_work = True
                 all_ready = False
             elif getattr(request, "ec_transfer_params", None):
-                # Without EC params no encoder pushes; the media is encoded
-                # locally.
+                # Only requests with EC params expect a push.
                 waiting_id = transfer_id or f"{request.request_id}:{index}"
                 self._note_awaiting_push(mm_hash, waiting_id, request.request_id, now)
                 all_ready = False
