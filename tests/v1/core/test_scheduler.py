@@ -57,7 +57,12 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    get_request_block_hasher,
+    init_none_hash,
+    maybe_convert_block_hash,
+)
 from vllm.v1.core.sched.diffusion_scheduler import (
     DiffusionAsyncScheduler,
     DiffusionScheduler,
@@ -733,6 +738,91 @@ def test_aux_outputs_opt_out_marks_survive_rowless_pruning():
     scheduler.add_request(late)
     (new_request,) = scheduler.schedule().scheduled_new_reqs
     assert new_request.num_computed_tokens == 16
+
+
+def _aux_step(scheduler: Scheduler) -> None:
+    scheduler_output = scheduler.schedule()
+    req_ids = list(scheduler_output.num_scheduled_tokens)
+    requests = [scheduler.requests[req_id] for req_id in req_ids]
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=req_ids,
+            sampled_token_ids=[
+                [] if r.num_computed_tokens < r.num_prompt_tokens else [0]
+                for r in requests
+            ],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+
+def _opt_out_request(request_id: str) -> Request:
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=32,
+        req_ids=[request_id],
+        sampling_params=_aux_outputs_params(False, max_tokens=1),
+    )
+    return request
+
+
+@pytest.mark.parametrize("reset", [False, True], ids=["evicted", "cache-reset"])
+def test_aux_outputs_opt_out_lookup_is_not_admission(reset):
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    connector = AuxOutputSchedulerConnector(scheduler.kv_cache_manager, 1)
+    scheduler.aux_output_connector = connector
+    first = _opt_out_request("first")
+    scheduler.add_request(first)
+    while not first.is_finished():
+        _aux_step(scheduler)
+
+    # Looked up while its blocks are cached, admitted after they left the GPU.
+    waiting = _opt_out_request("waiting")
+    connector.max_cache_hit(waiting)
+    if reset:
+        assert scheduler.reset_prefix_cache()
+    else:
+        assert scheduler.kv_cache_manager.reset_prefix_cache()
+        connector._release_unheld()
+    scheduler.add_request(waiting)
+    while not waiting.is_finished():
+        _aux_step(scheduler)
+
+    (late,) = create_requests(
+        num_requests=1, num_tokens=33, max_tokens=1, req_ids=["late"]
+    )
+    scheduler.add_request(late)
+    (new_request,) = scheduler.schedule().scheduled_new_reqs
+    assert new_request.num_computed_tokens == 0
+
+
+def test_aux_outputs_flip_after_recording_delivers_finish():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
+    (request,) = create_requests(num_requests=1, num_tokens=32, max_tokens=4)
+    scheduler.add_request(request)
+    scheduler.schedule()
+    request.sampling_params.return_aux_outputs = False
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+
+    metadata = scheduler.schedule().aux_output_connector_metadata
+    assert metadata.finished_requests == (request.request_id,)
+
+
+def test_aux_outputs_opt_out_rechecks_rewritten_block_hashes():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    connector = _aux_output_connector(scheduler)
+    request = _opt_out_request("session")
+    connector.max_cache_hit(request)
+    # A session turn rewrites the hash of its last block.
+    rewritten = BlockHash(bytes([7]) * 32)
+    request.block_hashes[-1] = rewritten
+
+    connector.take_output(request, None)
+    assert maybe_convert_block_hash(rewritten) in connector._rowless
 
 
 @pytest.mark.parametrize("return_aux_outputs", [True, False])

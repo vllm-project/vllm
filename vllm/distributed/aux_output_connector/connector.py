@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from itertools import chain, islice
@@ -108,10 +108,11 @@ class AuxOutputSchedulerConnector:
         self._rowless: dict[ExternalBlockHash, BlockHash] = {}
         # First token each active request computes here.
         self._computed_from: dict[str, int] = {}
-        # KV blocks of each active opted-out request already checked, and the
-        # ones it marked rowless, kept until it finishes.
-        self._skip_marked: dict[str, int] = {}
+        # Per active opted-out request: KV blocks checked and the last one's
+        # hash, and the blocks it marked rowless, held through pruning.
+        self._skip_marked: dict[str, tuple[int, BlockHash | None]] = {}
         self._skip_rowless: dict[str, list[ExternalBlockHash]] = {}
+        self._skip_held: Counter[ExternalBlockHash] = Counter()
         self._capacity = num_objects // (self._block_size // self._hash_block_size)
         self._retained_hashes: list[bytes] = []
         self._released_hashes: list[bytes] = []
@@ -180,7 +181,7 @@ class AuxOutputSchedulerConnector:
 
     def max_cache_hit(self, request: Request) -> int:
         if self._skips(request):
-            self._mark_rowless(request, hits_cache=True)
+            self._mark_rowless(request, lookup=True)
             return request.num_tokens - 1
         num_blocks = 0
         for block, keys in self._kv_blocks(request.block_hashes):
@@ -223,11 +224,12 @@ class AuxOutputSchedulerConnector:
         loading = set().union(*self._loading.values())
         if len(self._rowless) > self._capacity:
             # An opted-out request may cache its marked blocks only later.
-            held = loading.union(*self._skip_rowless.values())
             self._rowless = {
                 block: block_hash
                 for block, block_hash in self._rowless.items()
-                if block in held or self._gpu_cached(block_hash)
+                if block in loading
+                or block in self._skip_held
+                or self._gpu_cached(block_hash)
             }
         excess = len(self._kv_cached) - self._capacity
         if excess <= 0:
@@ -300,11 +302,10 @@ class AuxOutputSchedulerConnector:
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
-        if self._skips(request):
-            self._skip_marked.pop(request.request_id, None)
-            self._skip_rowless.pop(request.request_id, None)
-            return
         request_id = request.request_id
+        # A session can change return_aux_outputs between chunks: drop all state.
+        self._skip_marked.pop(request_id, None)
+        self._drop_skip_holds(request_id)
         self._loading.pop(request_id, None)
         if request_id in self._sent_hash_counts:
             # The next metadata delivers this terminal event to the worker.
@@ -313,6 +314,8 @@ class AuxOutputSchedulerConnector:
             )
             del self._sent_hash_counts[request_id]
         computed_from = self._computed_from.pop(request_id, request.num_tokens)
+        if self._skips(request):
+            return
         num_blocks = request.num_computed_tokens // self._block_size
         blocks = islice(self._kv_blocks(request.block_hashes), num_blocks)
         for index, (block, keys) in enumerate(blocks):
@@ -327,19 +330,44 @@ class AuxOutputSchedulerConnector:
                 self._retained_hashes.extend(keys)
         self._release_unheld()
 
-    def _mark_rowless(self, request: Request, hits_cache: bool = False) -> None:
-        """Mark the KV blocks an opted-out request computes as rowless. Only its
-        prefix lookup can hit cached blocks; every later block is its own."""
-        num_checked = self._skip_marked.get(request.request_id, 0)
+    def _mark_rowless(self, request: Request, lookup: bool = False) -> None:
+        """Mark the KV blocks an opted-out request computes as rowless: from the
+        first block its prefix lookup misses on, or every new block later."""
+        request_id = request.request_id
         step = self._block_size // self._hash_block_size
         hashes = request.block_hashes
-        marked = self._skip_rowless.setdefault(request.request_id, [])
+        num_checked, last = self._skip_marked.get(request_id, (0, None))
+        if lookup or (
+            num_checked
+            and (
+                len(hashes) < num_checked * step
+                or hashes[num_checked * step - 1] != last
+            )
+        ):
+            # A lookup is not an admission, and a session turn can rewrite
+            # hashes: recheck from the start.
+            self._drop_skip_holds(request_id)
+            num_checked = 0
+        marked = self._skip_rowless.setdefault(request_id, [])
+        hit = lookup
         for block, keys in self._kv_blocks(hashes[num_checked * step :]):
-            if block in self._kv_cached or (hits_cache and self._gpu_cached(keys[-1])):
+            hit = hit and self._gpu_cached(keys[-1]) is not None
+            if hit or block in self._kv_cached:
                 continue
             self._rowless[block] = keys[-1]
             marked.append(block)
-        self._skip_marked[request.request_id] = len(hashes) // step
+            self._skip_held[block] += 1
+        num_blocks = len(hashes) // step
+        self._skip_marked[request_id] = (
+            num_blocks,
+            hashes[num_blocks * step - 1] if num_blocks else None,
+        )
+
+    def _drop_skip_holds(self, request_id: str) -> None:
+        for block in self._skip_rowless.pop(request_id, ()):
+            self._skip_held[block] -= 1
+            if not self._skip_held[block]:
+                del self._skip_held[block]
 
     @staticmethod
     def _skips(request: Request) -> bool:
@@ -374,3 +402,6 @@ class AuxOutputSchedulerConnector:
         self._released_hashes.extend(chain.from_iterable(self._kv_cached.values()))
         self._kv_cached.clear()
         self._rowless.clear()
+        self._skip_marked.clear()
+        self._skip_rowless.clear()
+        self._skip_held.clear()
