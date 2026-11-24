@@ -36,9 +36,9 @@ _LMCACHE_CACHE_SALT_TAG = "lmcache.tag.cache_salt"
 
 
 def _sampling_params_with_cache_salt(sampling_params: Any, cache_salt: str) -> Any:
-    """Return sampling params whose LMCache tag carries ``cache_salt``.
+    """Return sampling params whose LMCache tag carries `cache_salt`.
 
-    Existing params are updated in place. When ``sampling_params`` is None, a
+    Existing params are updated in place. When `sampling_params` is None, a
     new object is returned and the caller must not leave it on the request.
     """
     from vllm.sampling_params import SamplingParams
@@ -351,7 +351,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 request.sampling_params = None
 
     def _bind_cache_salt(self, request: "Request") -> bool:
-        """Attach ``cache_salt`` to the request's LMCache tag namespace.
+        """Attach `cache_salt` to the request's LMCache tag namespace.
 
         Returns True when a temporary sampling-params object was installed
         and must be removed before the request is handed to the worker.
@@ -371,7 +371,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     ) -> list[tuple[Any, Any]]:
         """Temporarily tag new requests that could not keep sampling params.
 
-        Returns ``(new_request, original_sampling_params)`` pairs to restore.
+        Returns `(new_request, original_sampling_params)` pairs to restore.
         """
         restores: list[tuple[Any, Any]] = []
         pending = self._pending_external_cache_salts
