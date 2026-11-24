@@ -681,8 +681,9 @@ class Attention(nn.Module, AttentionLayerBase):
             )
             # SW chooses its own block_size, decoupled from the user's
             # ``--block-size`` (which only constrains primary attention).
-            # When this SW layer is a padded spec (skip-quant: its page is
-            # padded up to ``skip_page_size_padded``), pick the largest kernel
+            # When this SW layer is a padded spec (skip-quant or a KV cache
+            # dtype recipe: its page is padded up to
+            # ``skip_page_size_padded``), pick the largest kernel
             # block that still fits the shared page so we waste fewer padding
             # bytes per block. Otherwise (page_size_padded is None) take the
             # primary block size when the backend can run it unsplit: if this

@@ -316,9 +316,9 @@ class CacheConfig:
     models to ensure exact alignment with attention page size."""
     skip_page_size_padded: int | None = None
     """Optional override for the page size of layers skipped from KV cache
-    quantization (`--kv-cache-dtype-skip-layers`); set during block-size
-    alignment so unquantized skip layers pad up to the quantized primary's
-    page."""
+    quantization (`--kv-cache-dtype-skip-layers`) and of sliding-window layers
+    under a `KV_CACHE_DTYPE_RECIPES` recipe; set during block-size alignment so
+    these higher-precision layers pad up to the quantized primary's page."""
     mamba_block_size: int | None = Field(default=None, gt=0)
     """Size of a contiguous cache block in number of tokens for mamba cache.
     Can be set only when prefix caching is enabled."""

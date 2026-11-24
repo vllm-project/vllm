@@ -190,6 +190,30 @@ def test_kv_cache_dtype_recipe_pads_sliding_window_to_full_page(
 
 
 @pytest.mark.parametrize(
+    ("group_quant_dtype", "expected"), [("nvfp4", "nvfp4"), ("fp8", "fp8")]
+)
+def test_flashinfer_resolves_kv_cache_dtype_recipe_per_group(
+    monkeypatch, group_quant_dtype, expected
+):
+    """Under nvfp4_swa_fp8, the FP8 sliding-window group takes its layers' dtype
+    instead of the global NVFP4 `cache_dtype`, and the NVFP4 group keeps it."""
+    from vllm.config import CacheConfig
+    from vllm.v1.attention.backends import flashinfer
+
+    monkeypatch.setattr(flashinfer, "get_kv_cache_dtype_from_layers", lambda *_: "fp8")
+    builder = SimpleNamespace(
+        cache_config=CacheConfig(cache_dtype="nvfp4_swa_fp8"),
+        kv_cache_spec=SimpleNamespace(
+            kv_quant_mode=get_kv_quant_mode(group_quant_dtype)
+        ),
+        vllm_config=None,
+        layer_names=["layer.0"],
+    )
+    resolved = flashinfer.FlashInferMetadataBuilder._resolve_cache_dtype(builder)
+    assert resolved == expected
+
+
+@pytest.mark.parametrize(
     "signals,expected",
     [
         (dict(use_mla=False, has_sliding_window=False), "full"),
