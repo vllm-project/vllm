@@ -16,9 +16,8 @@ Bitwise parity: cudnn's Conv2d (patch embed and merger) is not
 invariant to input shape, and cuBLAS GEMMs are only row-count invariant, so
 the two convs run eagerly on the real unpadded shapes (patch conv during
 replay-buffer preparation, the per-item merger in postprocess) while the
-graph covers everything in between. All in-graph ops (position-embed add,
-per-layer LayerNorm/GEMM/RoPE, FlashAttn varlen with a trailing padding
-sequence) are verified bitwise-identical to the eager path on real rows.
+graph covers everything in between. Unused sequence slots repeat the final
+real cumulative offset, leaving padded rows outside the attention sequences.
 
 Budgets are in units of *patches* (rows of the packed ViT input). Video item
 specs charge `_FRAME_CHARGE` merge cells per frame against the budget so
@@ -81,15 +80,6 @@ class HYV4VLEncoderCudaGraphMixin:
     model_config: "ModelConfig"
     multimodal_config: "MultiModalConfig | None"
 
-    @property
-    def _encoder_cg_pad_totals(self) -> dict[int, int]:
-        """Row count of each captured buffer set, keyed by cu_seqlens ptr."""
-        totals = self.__dict__.get("_encoder_cg_pad_totals_dict")
-        if totals is None:
-            totals = {}
-            self.__dict__["_encoder_cg_pad_totals_dict"] = totals
-        return totals
-
     # -- helpers --
 
     def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
@@ -138,25 +128,6 @@ class HYV4VLEncoderCudaGraphMixin:
                 "cudagraph_mm_encoder."
             )
 
-        pad_totals = self._encoder_cg_pad_totals
-
-        def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
-            # Varlen attention requires cu_seqlens[-1] to equal the number of
-            # rows actually passed in. The captured buffers are sized for the
-            # full token budget, so a smaller real batch is completed with one
-            # trailing padding sequence; declaring fewer rows than the buffer
-            # holds is undefined behaviour and returns NaN on FlashAttn.
-            total = pad_totals.get(dst.data_ptr())
-            if total is None:
-                raise RuntimeError(
-                    "cu_seqlens replay buffer was not registered at capture "
-                    "time; the manager must replay into the capture-time "
-                    "buffers."
-                )
-            n = min(src.shape[0], dst.shape[0])
-            dst[:n].copy_(src[:n])
-            dst[n:] = total
-
         buffer_keys = ["patches", "pos_embeds"]
         if self.visual.rotary_pos_emb is not None:
             buffer_keys += ["rope_cos", "rope_sin"]
@@ -178,7 +149,6 @@ class HYV4VLEncoderCudaGraphMixin:
             modalities=["image", "video"],
             buffer_keys=buffer_keys,
             out_hidden_size=self.config.text_config.hidden_size,
-            padding_logics={"cu_seqlens": pad_cu_seqlens},
             max_frames_per_video=self.get_max_frames_per_video(),
             capture_axes=capture_axes,
         )
@@ -340,16 +310,6 @@ class HYV4VLEncoderCudaGraphMixin:
             max_seqlen_override=max_seqlen_override,
         )
 
-        # Spare cu_seqlens slot lets replay append a padding sequence that
-        # covers the rows a smaller real batch does not fill.
-        real_cu = metadata.pop("cu_seqlens")
-        assert real_cu is not None
-        cu_seqlens = torch.full(
-            (real_cu.numel() + 1,), total_patches, dtype=torch.int32, device=device
-        )
-        cu_seqlens[: real_cu.numel()] = real_cu
-        self._encoder_cg_pad_totals[cu_seqlens.data_ptr()] = total_patches
-
         # The buffer holds *embedded* patches (input norm + patch conv are
         # applied eagerly at replay time, because cudnn conv results are not
         # invariant to input shape and would break bitwise parity).
@@ -362,7 +322,6 @@ class HYV4VLEncoderCudaGraphMixin:
 
         values: dict[str, torch.Tensor] = {"patches": patches}
         values.update({k: v for k, v in metadata.items() if v is not None})
-        values["cu_seqlens"] = cu_seqlens
         return EncoderCudaGraphCaptureInputs(values=values)
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -383,12 +342,13 @@ class HYV4VLEncoderCudaGraphMixin:
         patches = self.visual.embeddings._patch_conv(
             self.visual.input_norm(pixel_values, self.visual.dtype)
         ).squeeze(0)
-        # Unpadded: the manager zero-pads the other buffers, and
-        # pad_cu_seqlens appends the padding sequence covering the tail rows.
+        # Repeating the final cumulative offset leaves padding rows outside
+        # every sequence, as in the other packed vision encoders.
         metadata = self.visual.prepare_encoder_cudagraph_metadata(
             grids,
             device=pixel_values.device,
         )
+        metadata.pop("max_seqlen")
         values: dict[str, torch.Tensor | None] = {"patches": patches}
         values.update(metadata)
         return EncoderCudaGraphReplayBuffers(values=values)
@@ -406,7 +366,7 @@ class HYV4VLEncoderCudaGraphMixin:
             inputs.get("rope_sin"),
             inputs["cu_seqlens"],
             inputs["max_seqlen"],
-        )
+        ).squeeze(0)
 
     def encoder_eager_forward(
         self,

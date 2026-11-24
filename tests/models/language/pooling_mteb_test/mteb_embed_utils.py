@@ -14,6 +14,7 @@ from tests.models.utils import (
     check_embeddings_close,
     get_vllm_extra_kwargs,
 )
+from vllm.utils.collection_utils import chunk_list
 
 # Most embedding models on the STS12 task (See #17175):
 # - Model implementation and minor changes in tensor dtype
@@ -116,9 +117,10 @@ class VllmMtebEncoder(MtebEmbedMixin):
 
 
 class OpenAIClientMtebEncoder(MtebEmbedMixin):
-    def __init__(self, model_name: str, client):
+    def __init__(self, model_name: str, client, *, batch_size: int):
         self.model_name = model_name
         self.client = client
+        self.batch_size = batch_size
         self.rng = np.random.default_rng(seed=42)
 
     def encode(
@@ -133,10 +135,12 @@ class OpenAIClientMtebEncoder(MtebEmbedMixin):
         r = self.rng.permutation(len(sentences))
         sentences = [sentences[i] for i in r]
 
-        embeddings = self.client.embeddings.create(
-            model=self.model_name, input=sentences
-        )
-        outputs = [d.embedding for d in embeddings.data]
+        outputs: list[list[float]] = []
+        for batch in chunk_list(sentences, self.batch_size):
+            embeddings = self.client.embeddings.create(
+                model=self.model_name, input=batch
+            )
+            outputs.extend(item.embedding for item in embeddings.data)
         embeds = np.array(outputs)
         embeds = embeds[np.argsort(r)]
         return embeds
