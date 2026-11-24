@@ -109,10 +109,13 @@ pub(super) fn prepare_completion_request(
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
     let include_prompt_logprobs = prompt_logprobs.is_some();
+    /// Default `max_tokens` when omitted or null, matching Python vLLM / OpenAI.
+    const DEFAULT_COMPLETION_MAX_TOKENS: u32 = 16;
+
     let max_tokens = if prompt_only {
         Some(1)
     } else {
-        request.max_tokens
+        Some(request.max_tokens.unwrap_or(DEFAULT_COMPLETION_MAX_TOKENS))
     };
     let logprob_token_ids = request.logprob_token_ids.filter(|ids| !ids.is_empty());
     let logprobs = if logprob_token_ids.is_some() {
@@ -446,22 +449,27 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_coerces_null_max_tokens_to_default() {
-        // An absent `max_tokens` gets the serde default.
-        let absent: CompletionRequest =
-            serde_json::from_value(base_request_json()).expect("parse request");
-        assert_eq!(absent.max_tokens, Some(16));
-
-        // An explicit `null` is coerced to the same default during
-        // deserialization to match Python vLLM.
-        let request: CompletionRequest = serde_json::from_value(json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "prompt": "hello",
-            "stream": true,
-            "max_tokens": null
-        }))
-        .expect("parse request");
-        assert_eq!(request.max_tokens, Some(16));
+    fn prepare_completion_request_defaults_absent_or_null_max_tokens() {
+        for value in [
+            base_request_json(),
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "prompt": "hello",
+                "stream": true,
+                "max_tokens": null
+            }),
+        ] {
+            let request: CompletionRequest = serde_json::from_value(value).expect("parse request");
+            assert_eq!(request.max_tokens, None);
+            let prepared = prepare_completion_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+                &test_processor(),
+            )
+            .expect("prepare request");
+            assert_eq!(prepared.text_request().sampling_params.max_tokens, Some(16));
+        }
     }
 
     #[test]

@@ -18,21 +18,6 @@ use crate::routes::openai::utils::types::{
     default_true, deserialize_request_top_k,
 };
 
-/// Serde default for `CompletionRequest::max_tokens`, matching the Python vLLM
-/// / OpenAI default.
-fn default_completion_max_tokens() -> Option<u32> {
-    Some(16)
-}
-
-/// Coerce an explicit `"max_tokens": null` back to the default, so it behaves
-/// like an absent field, matching Python vLLM's `normalize_null_max_tokens`.
-fn deserialize_completion_max_tokens<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Option::<u32>::deserialize(deserializer)?.or_else(default_completion_max_tokens))
-}
-
 /// The `prompt` of a completions request: one prompt, or a batch of prompts
 /// that each get `n` choices.
 ///
@@ -93,11 +78,7 @@ pub struct CompletionRequest {
     pub logprobs: Option<i32>,
 
     /// The maximum number of tokens to generate (defaults to 16 when absent or
-    /// null, matching the Python vLLM / OpenAI API convention)
-    #[serde(
-        default = "default_completion_max_tokens",
-        deserialize_with = "deserialize_completion_max_tokens"
-    )]
+    /// null during lowering, matching the Python vLLM / OpenAI API convention)
     pub max_tokens: Option<u32>,
 
     /// How many completions to generate for each prompt
