@@ -20,14 +20,16 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
     selective_state_update,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
     KVCacheLayout,
     MambaSpec,
 )
@@ -44,6 +46,12 @@ try:
     HAS_FLASHINFER = True
 except ImportError:
     HAS_FLASHINFER = False
+
+DEVICE = current_platform.device_type
+requires_gpu = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires CUDA or XPU",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -69,12 +77,14 @@ def _kv_cache_config_with_ssu(
     return KVCacheConfig(
         num_blocks=1,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=["l0"], kv_cache_spec=spec)],
+        kv_cache_groups=[
+            KVCacheGroup.from_layers({"l0": MambaManager.layer_config(spec)})
+        ],
     )
 
 
-def _cuda_ints(values):
-    return torch.tensor(values, dtype=torch.int32, device="cuda")
+def _device_ints(values):
+    return torch.tensor(values, dtype=torch.int32, device=DEVICE)
 
 
 def _replayssm_mixer(kv_cache, ring_start, committed, A):
@@ -85,6 +95,7 @@ def _replayssm_mixer(kv_cache, ring_start, committed, A):
         replayssm_buffer_len=16,
         A=A,
         mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+        use_flashinfer_replayssm=True,
     )
 
 
@@ -132,7 +143,6 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
             torch.float32,
             torch.bfloat16,
         ),
-        mamba_cache_mode="align",
         state_alignment=16,
         block_stride_alignment=16,
     )
@@ -149,7 +159,15 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
     ]
     config = get_kv_cache_config_from_groups(
         vllm_config,
-        [KVCacheGroupSpec(names, spec) for names in layer_names],
+        [
+            KVCacheGroup.from_layers(
+                {
+                    name: MambaManager.layer_config(spec, enable_prefix_caching=True)
+                    for name in names
+                }
+            )
+            for names in layer_names
+        ],
         slots * (2 * spec.page_size_bytes + 24),
     )
     pages = allocate_kv_cache(config, torch.device("cuda"), layout)
@@ -205,22 +223,24 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         starts, committed = [0] * slots, [0] * slots
         for slot, (start, count) in history.items():
             starts[slot], committed[slot] = start, count
-        starts, committed = _cuda_ints(starts), _cuda_ints(committed)
+        starts, committed = _device_ints(starts), _device_ints(committed)
         mixers = [
             _replayssm_mixer(caches[name], starts, committed, A) for name in names
         ]
-        grouped.append((mixers, spec, _cuda_ints(table)))
-    context = ReplaySSMModelContext.create(grouped, max_num_reqs=6)
+        grouped.append((mixers, spec, _device_ints(table)))
+    context = ReplaySSMModelContext.create(
+        grouped, max_num_reqs=6, materialize_prefixes=True
+    )
     # Row 0 crosses token 16, but only later groups have a destination.
     # Row 1 rejects all drafts and stops at 15.
     # Row 2 uses in-place replay; row 3 has null slots in every group.
     # Row 4 is a padded request, and row 5 is unused buffer capacity.
-    mapping = _cuda_ints([2, 0, 1, 3, -1])
+    mapping = _device_ints([2, 0, 1, 3, -1])
     # Groups use different slots but preserve equal logical replay histories.
     context.reset_new_slots(
         idx_mapping=mapping,
-        src_cols=_cuda_ints([0, 1, 1, 1]),
-        dst_cols=_cuda_ints([1, 0, 0, 0]),
+        src_cols=_device_ints([0, 1, 1, 1]),
+        dst_cols=_device_ints([1, 0, 0, 0]),
         num_reqs=5,
     )
     reset_histories = [
@@ -237,17 +257,17 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         ]
     metadata = dict(
         idx_mapping=mapping,
-        query_metadata=_cuda_ints([0, 4, 8, 12, 16, 20])
+        query_metadata=_device_ints([0, 4, 8, 12, 16, 20])
         if post_step
-        else _cuda_ints([4] * 5),
+        else _device_ints([4] * 5),
         query_metadata_is_cumulative=post_step,
-        num_computed_tokens=_cuda_ints([15, 17, 17, 17])
+        num_computed_tokens=_device_ints([15, 17, 17, 17])
         if post_step
-        else _cuda_ints([14] * 4),
+        else _device_ints([14] * 4),
         num_computed_is_post_step=post_step,
-        num_accepted_tokens=_cuda_ints([1, 3, 3, 3]),
+        num_accepted_tokens=_device_ints([1, 3, 3, 3]),
         is_prefilling=torch.zeros(5, dtype=torch.bool, device="cuda"),
-        live_cols=_cuda_ints([1] * 4),
+        live_cols=_device_ints([1] * 4),
         num_reqs=5,
     )
     context.postprocess(**metadata)
@@ -314,29 +334,28 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         torch.testing.assert_close(states[1], before_shrink[name], atol=0, rtol=0)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 @pytest.mark.parametrize("post_step", [False, True], ids=["v1", "v2"])
 def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_step):
     """Skip prefill self-copies, reset trackers, and preserve in-place MTP replay."""
     mixer = _replayssm_mixer(
         kv_cache=(
-            torch.empty(0, device="cuda"),
-            torch.empty(6, 1, 1, 1, device="cuda"),
-            torch.empty(6, 1, 20, 1, device="cuda"),
-            torch.empty(6, 1, 20, device="cuda"),
-            torch.empty(6, 1, 20, 1, device="cuda"),
+            torch.empty(0, device=DEVICE),
+            torch.empty(6, 1, 1, 1, device=DEVICE),
+            torch.empty(6, 1, 20, 1, device=DEVICE),
+            torch.empty(6, 1, 20, device=DEVICE),
+            torch.empty(6, 1, 20, 1, device=DEVICE),
         ),
-        ring_start=_cuda_ints([3] * 6),
-        committed=_cuda_ints([2] * 6),
-        A=torch.empty(1, device="cuda"),
+        ring_start=_device_ints([3] * 6),
+        committed=_device_ints([2] * 6),
+        A=torch.empty(1, device=DEVICE),
     )
     spec = MambaSpec(
         block_size=16,
         shapes=tuple(tensor.shape[1:] for tensor in mixer.kv_cache),
         dtypes=tuple(tensor.dtype for tensor in mixer.kv_cache),
-        mamba_cache_mode="align",
     )
-    table = _cuda_ints(
+    table = _device_ints(
         [
             [0, 1, 2],
             [3, 4, 5],
@@ -344,16 +363,20 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_st
             [NULL_BLOCK_ID] * 3,
         ]
     )
-    context = ReplaySSMModelContext.create([([mixer], spec, table)], max_num_reqs=4)
+    context = ReplaySSMModelContext.create(
+        [([mixer], spec, table)], max_num_reqs=4, materialize_prefixes=True
+    )
     # Reordered rows: canonical prefill in slot 2; in-place MTP replay in slot 4;
     # padded slot; padded request.
     _postprocess_replayssm_kernel[(4, 1)](
-        _cuda_ints([1, 2, 0, -1]),
-        _cuda_ints([0, 48, 52, 68, 68]) if post_step else _cuda_ints([48, 4, 16, 0]),
-        _cuda_ints([16, 48, 32]) if post_step else _cuda_ints([0, 0, 28]),
-        _cuda_ints([1, 1, 4]),
-        torch.tensor([True, False, True, True], device="cuda"),
-        _cuda_ints([0, 2, 1]),
+        _device_ints([1, 2, 0, -1]),
+        _device_ints([0, 48, 52, 68, 68])
+        if post_step
+        else _device_ints([48, 4, 16, 0]),
+        _device_ints([16, 48, 32]) if post_step else _device_ints([0, 0, 28]),
+        _device_ints([1, 1, 4]),
+        torch.tensor([True, False, True, True], device=DEVICE),
+        _device_ints([0, 2, 1]),
         context.block_table_ptrs,
         context.ring_start_ptrs,
         context.num_committed_ptrs,
@@ -496,13 +519,13 @@ def test_flashinfer_import_error():
         FlashInferSSUBackend(MambaConfig())
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 def test_triton_basic_call():
     set_random_seed(0)
     initialize_mamba_ssu_backend(
         MambaConfig(backend=MambaBackendEnum.TRITON), _kv_cache_config_with_ssu()
     )
-    device = "cuda"
+    device = DEVICE
     batch_size = 2
     dim = 64
     dstate = 16
@@ -561,29 +584,28 @@ def test_replayssm_physical_ring_shape(
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 @pytest.mark.parametrize("post_step", [False, True])
 def test_replayssm_postprocess_commits_staged_transition(post_step):
     """Keep group histories equal across checkpoints without touching other slots."""
-    ring_start = [_cuda_ints([11, 3, 7, 13]), _cuda_ints([11, 7, 3, 13])]
-    committed = [_cuda_ints([9, 2, 9, 17]), _cuda_ints([9, 9, 2, 17])]
+    ring_start = [_device_ints([11, 3, 7, 13]), _device_ints([11, 7, 3, 13])]
+    committed = [_device_ints([9, 2, 9, 17]), _device_ints([9, 9, 2, 17])]
     cache = (
-        torch.empty(4, 1, device="cuda"),
-        torch.empty(4, 1, 1, 1, device="cuda"),
-        torch.empty(4, 1, 20, 1, device="cuda"),
-        torch.empty(4, 1, 20, device="cuda"),
-        torch.empty(4, 1, 20, 1, device="cuda"),
+        torch.empty(4, 1, device=DEVICE),
+        torch.empty(4, 1, 1, 1, device=DEVICE),
+        torch.empty(4, 1, 20, 1, device=DEVICE),
+        torch.empty(4, 1, 20, device=DEVICE),
+        torch.empty(4, 1, 20, 1, device=DEVICE),
     )
     spec = MambaSpec(
         block_size=256,
         shapes=tuple(tensor.shape[1:] for tensor in cache),
         dtypes=tuple(tensor.dtype for tensor in cache),
-        mamba_cache_mode="none",
     )
     # Neighboring request rows provide valid canary IDs, making erroneous
     # column reads deterministically corrupt another slot rather than crash.
     block_tables = [
-        torch.full((256, 1), 3, dtype=torch.int32, device="cuda") for _ in range(2)
+        torch.full((256, 1), 3, dtype=torch.int32, device=DEVICE) for _ in range(2)
     ]
     grouped = []
     for group_idx, table in enumerate(block_tables):
@@ -592,10 +614,12 @@ def test_replayssm_postprocess_commits_staged_transition(post_step):
             cache,
             ring_start[group_idx],
             committed[group_idx],
-            torch.empty(1, device="cuda"),
+            torch.empty(1, device=DEVICE),
         )
         grouped.append(([mixer], spec, table))
-    context = ReplaySSMModelContext.create(grouped, max_num_reqs=1)
+    context = ReplaySSMModelContext.create(
+        grouped, max_num_reqs=1, materialize_prefixes=False
+    )
     computed = 50_000
     history_tokens = checkpoint_tokens = 0
     # Reset a later prefill chunk, then reject, partially accept, and fully accept.
@@ -608,15 +632,17 @@ def test_replayssm_postprocess_commits_staged_transition(post_step):
             history_tokens += accepted
         computed_after = computed + (query_len if prefilling else accepted)
         context.postprocess(
-            idx_mapping=_cuda_ints([0]) if post_step else None,
-            query_metadata=_cuda_ints([0, query_len])
+            idx_mapping=_device_ints([0]) if post_step else None,
+            query_metadata=_device_ints([0, query_len])
             if post_step
-            else _cuda_ints([query_len]),
+            else _device_ints([query_len]),
             query_metadata_is_cumulative=post_step,
-            num_computed_tokens=_cuda_ints([computed_after if post_step else computed]),
+            num_computed_tokens=_device_ints(
+                [computed_after if post_step else computed]
+            ),
             num_computed_is_post_step=post_step,
-            num_accepted_tokens=_cuda_ints([accepted]),
-            is_prefilling=torch.tensor([prefilling], device="cuda"),
+            num_accepted_tokens=_device_ints([accepted]),
+            is_prefilling=torch.tensor([prefilling], device=DEVICE),
             live_cols=None,
             num_reqs=1,
         )
@@ -667,10 +693,12 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.ssm_state_size = 8
     mixer.num_spec = 3
     mixer.use_replayssm = True
-    mixer.use_flashinfer_replayssm = True
+    mixer.use_flashinfer_replayssm = mixer.use_replayssm_trackers = True
     mixer.replayssm_buffer_len = 16
     mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
-    mixer.cache_config = SimpleNamespace(mamba_block_size=16, mamba_cache_mode="none")
+    mixer.cache_config = SimpleNamespace(
+        mamba_block_size=16, enable_prefix_caching=False
+    )
     mixer.conv_weights = torch.empty(0)
     mixer.conv1d = SimpleNamespace(bias=None)
     mixer.activation = "silu"
@@ -679,6 +707,8 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.D = torch.empty(2)
     mixer._replayssm_ring_start = torch.zeros(3, dtype=torch.int32)
     mixer._replayssm_prev_num_accepted = torch.zeros(3, dtype=torch.int32)
+    mixer._replayssm_rand_seed = None
+    mixer._replayssm_rand_seeds = None
     mixer.kv_cache = (
         torch.empty(3, 1),
         torch.empty(3, 2, 4, 8),
