@@ -988,6 +988,28 @@ def find_mm_placeholders(
     return dict(full_groupby_modality(it))
 
 
+class MultiModalProcessorCacheMissError(ValueError):
+    """A processor cache miss for an item whose media data was omitted."""
+
+
+class MultiModalMissingDataError(ValueError):
+    """An item has no media data, and the processor does not use its cache."""
+
+
+MULTIMODAL_DATA_OMITTED_ERRORS = (
+    MultiModalProcessorCacheMissError,
+    MultiModalMissingDataError,
+)
+"""Errors raised when media data was omitted and the processor needs it."""
+
+
+def _describe_missing_idxs(missing_idxs: Mapping[str, Sequence[int]]) -> str:
+    return "; ".join(
+        f"{modality} at index {', '.join(map(str, idxs))}"
+        for modality, idxs in missing_idxs.items()
+    )
+
+
 MultiModalIsCached = dict[str, list[bool]]
 """
 A collection of the `is_cached` flag for each item, with a similar structure as
@@ -1380,11 +1402,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_missing_data[modality] = missing_modality_data
 
         if mm_missing_idxs_without_data:
-            missing_items = "; ".join(
-                f"{modality} at index {', '.join(map(str, idxs))}"
-                for modality, idxs in mm_missing_idxs_without_data.items()
-            )
-            raise ValueError(
+            missing_items = _describe_missing_idxs(mm_missing_idxs_without_data)
+            raise MultiModalProcessorCacheMissError(
                 f"Cache miss for {missing_items} but data is not provided."
             )
 
@@ -1480,6 +1499,25 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
     ) -> MultiModalProcessingResult:
+        """Apply the HF processor on the full prompt text, without the cache.
+
+        Raises:
+            MultiModalMissingDataError: If an item has no media data, since the
+                HF processor needs every item.
+
+        """
+        mm_idxs_without_data = {
+            modality: idxs
+            for modality, items in inputs.mm_data_items.items()
+            if (idxs := [i for i in range(len(items)) if items[i] is None])
+        }
+        if mm_idxs_without_data:
+            missing_items = _describe_missing_idxs(mm_idxs_without_data)
+            raise MultiModalMissingDataError(
+                "This request does not use the processor cache, and data is not "
+                f"provided for {missing_items}."
+            )
+
         with timing_ctx.record("apply_hf_processor"):
             mm_processed_data = self._apply_hf_processor_main(
                 mm_items=inputs.mm_data_items,
