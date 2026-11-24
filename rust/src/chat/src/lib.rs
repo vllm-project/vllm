@@ -28,7 +28,7 @@ pub use multimodal::{mm_request_span, mm_timing_layer};
 use output::apply_output_grammar;
 pub use output::{
     ChatOutputProcessor, DefaultChatOutputProcessor, DynChatOutputProcessor,
-    HarmonyChatOutputProcessor,
+    HarmonyChatOutputProcessor, ResolvedParsers,
 };
 pub use parser::reasoning::{
     ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory,
@@ -83,10 +83,6 @@ pub struct ChatRequestProcessor {
     /// Effective runtime context length. Absent for render-only frontends
     /// without a configured `--max-model-len`.
     max_model_len: Option<usize>,
-    /// Tool-call parser selection used when preparing generation requests.
-    tool_call_parser: ParserSelection,
-    /// Reasoning parser selection used when preparing generation requests.
-    reasoning_parser: ParserSelection,
     /// Server-side floor for tool-call structural tags, or `None` for the
     /// tool parser's default level.
     tool_strict_level: Option<ToolStrictLevel>,
@@ -112,23 +108,10 @@ impl ChatRequestProcessor {
             backend,
             model_dtype,
             max_model_len: max_model_len.map(|len| len as usize),
-            tool_call_parser: ParserSelection::Auto,
-            reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
             reasoning_effort_map: HashMap::new(),
             exclude_tools_when_tool_choice_none: false,
         }
-    }
-
-    /// Configure the parser selections used to prepare generation requests.
-    pub fn with_parser_selections(
-        mut self,
-        tool_call_parser: ParserSelection,
-        reasoning_parser: ParserSelection,
-    ) -> Self {
-        self.tool_call_parser = tool_call_parser;
-        self.reasoning_parser = reasoning_parser;
-        self
     }
 
     /// Configure the server-side floor for tool-call structural tags, or
@@ -303,8 +286,6 @@ impl ChatRequestProcessor {
                 self.backend.new_chat_output_processor(
                     &mut request,
                     NewChatOutputProcessorOptions {
-                        tool_call_parser: &self.tool_call_parser,
-                        reasoning_parser: &self.reasoning_parser,
                         tool_strict_level: self.tool_strict_level,
                     },
                 )
@@ -391,18 +372,6 @@ impl ChatLlm {
         self
     }
 
-    /// Set tool-call parser selection.
-    pub fn with_tool_call_parser(mut self, selection: ParserSelection) -> Self {
-        self.processor.tool_call_parser = selection;
-        self
-    }
-
-    /// Set reasoning parser selection.
-    pub fn with_reasoning_parser(mut self, selection: ParserSelection) -> Self {
-        self.processor.reasoning_parser = selection;
-        self
-    }
-
     /// Set the server-side floor for tool-call structural tags, or `None` for
     /// the tool parser's default level.
     pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
@@ -482,12 +451,12 @@ impl ChatLlm {
 
     /// Effective tool-call parser name for this model, if parsing is enabled.
     pub fn tool_call_parser_name(&self) -> Option<&str> {
-        self.processor.tool_call_parser.resolve_tool_name(self.model_id())
+        self.processor.backend.tool_call_parser_name()
     }
 
     /// Effective reasoning parser name for this model, if parsing is enabled.
     pub fn reasoning_parser_name(&self) -> Option<&str> {
-        self.processor.reasoning_parser.resolve_reasoning_name(self.model_id())
+        self.processor.backend.reasoning_parser_name()
     }
 
     /// Render, tokenize, and submit one chat request.

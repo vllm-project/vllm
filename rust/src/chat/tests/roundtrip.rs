@@ -887,6 +887,8 @@ async fn load_roundtrip_backends(case: &RoundtripCase) -> Result<vllm_chat::Load
         case.model_id,
         LoadModelBackendsOptions {
             renderer: RendererSelection::Auto,
+            tool_call_parser: case.tool_call_parser.clone(),
+            reasoning_parser: case.reasoning_parser.clone(),
             // Roundtrips render and parse text only; some cases are multimodal
             // checkpoints the Rust frontend serves only as text.
             language_model_only: true,
@@ -1067,8 +1069,6 @@ async fn parse_completion(
             // Pin every tool schema so that builder-backed parsers build an
             // output grammar for replay. The strict level does not affect parsing.
             tool_strict_level: Some(ToolStrictLevel::Parameter),
-            tool_call_parser: &case.tool_call_parser,
-            reasoning_parser: &case.reasoning_parser,
         },
     )?;
     processor.initialize(&prompt_token_ids)?;

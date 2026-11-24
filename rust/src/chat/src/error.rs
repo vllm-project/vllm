@@ -6,7 +6,7 @@ use thiserror_ext::{AsReport as _, Macro};
 
 use crate::RendererSelection;
 
-type BoxedError = Box<dyn std::error::Error + Send + Sync>;
+pub(crate) type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Error, Macro)]
 #[thiserror_ext(macro(path = "crate::error"))]
