@@ -37,7 +37,7 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
         return None
     if backend != "latency_specialized":
         raise ValueError("Supported decode_backend values are auto/latency_specialized")
-    reason = unsupported(vllm_config)
+    reason = unsupported(vllm_config) or fabric_unsupported(vllm_config)
     if reason is not None:
         raise ValueError(f"Kimi K3 specialized decode does not support {reason}")
     spec = vllm_config.speculative_config
@@ -253,6 +253,25 @@ def dsa_unsupported(vllm_config) -> str | None:
             return (
                 f"DSA layers on a {dtype} cache without FlashInfer prims_ts: {reason}"
             )
+    return None
+
+
+def fabric_unsupported(vllm_config) -> str | None:
+    """Why the TP group cannot map the decode's symmetric buffers. The decode
+    rendezvouses its mailboxes over the TP group (and DCP groups within it), which
+    is safe only on one node or one NVLink fabric; elsewhere the rendezvous blocks
+    until the store timeout. Runs on every TP rank (a collective)."""
+    if vllm_config.parallel_config.tensor_parallel_size == 1:
+        return None
+    from vllm.distributed import get_tp_group
+    from vllm.distributed.device_communicators.nvlink_fabric import (
+        SymmetricMemoryTopology,
+        get_symmetric_memory_topology,
+    )
+
+    topology = get_symmetric_memory_topology(get_tp_group().cpu_group)
+    if topology is SymmetricMemoryTopology.UNSUPPORTED:
+        return "TP ranks on different nodes without a shared NVLink fabric"
     return None
 
 
