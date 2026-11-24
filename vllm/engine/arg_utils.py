@@ -46,6 +46,7 @@ from vllm.config import (
     EngramConfig,
     EPLBConfig,
     FaultToleranceConfig,
+    FineGrainedTPConfig,
     KernelConfig,
     KVEventsConfig,
     KVTransferConfig,
@@ -559,6 +560,9 @@ class EngineArgs:
     )
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
+    fine_grained_tp_config: FineGrainedTPConfig = get_field(
+        ParallelConfig, "fine_grained_tp_config"
+    )
     expert_placement_strategy: ExpertPlacementStrategy = (
         ParallelConfig.expert_placement_strategy
     )
@@ -887,6 +891,10 @@ class EngineArgs:
             self.ec_manager_config = EncoderCacheManagerConfig(**self.ec_manager_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
+        if isinstance(self.fine_grained_tp_config, dict):
+            self.fine_grained_tp_config = FineGrainedTPConfig(
+                **self.fine_grained_tp_config
+            )
         if isinstance(self.weight_transfer_config, dict):
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
@@ -1348,6 +1356,9 @@ class EngineArgs:
         )
         parallel_group.add_argument("--enable-eplb", **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--eplb-config", **parallel_kwargs["eplb_config"])
+        parallel_group.add_argument(
+            "--fine-grained-tp-config", **parallel_kwargs["fine_grained_tp_config"]
+        )
         parallel_group.add_argument(
             "--expert-placement-strategy",
             **parallel_kwargs["expert_placement_strategy"],
@@ -2608,6 +2619,7 @@ class EngineArgs:
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
+            fine_grained_tp_config=self.fine_grained_tp_config,
             expert_placement_strategy=self.expert_placement_strategy,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,

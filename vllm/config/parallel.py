@@ -245,6 +245,56 @@ class EPLBConfig:
 
 
 @config
+class FineGrainedTPConfig:
+    """Per-module fine-grained tensor-parallelism overrides.
+
+    Expands module tensor parallelism on top of `tensor_parallel_size` along
+    the `DP x PCP x TP` hierarchy (`TP` -> `PCP` -> `DP`). Given
+    `pcp_size = prefill_context_parallel_size` and `dp_size = data_parallel_size`,
+    each `*_tp_size` supports `{1, pcp_size, dp_size * pcp_size}`:
+    - `1`: shard across `TP` only
+    - `pcp_size`: shard across `PCP * TP`
+    - `dp_size * pcp_size`: shard across `DP * PCP * TP`
+    """
+
+    embedding_tp_size: int = Field(default=1, ge=1)
+    """Fine-grained tensor-parallel multiplier across `PCP` and `DP` for token
+    embedding weights (`1`, `prefill_context_parallel_size`, or
+    `data_parallel_size * prefill_context_parallel_size`)."""
+
+    lmhead_tp_size: int = Field(default=1, ge=1)
+    """Fine-grained tensor-parallel multiplier across `PCP` and `DP` for LM
+    head weights (`1`, `prefill_context_parallel_size`, or
+    `data_parallel_size * prefill_context_parallel_size`)."""
+
+    @property
+    def enabled(self) -> bool:
+        """Whether any fine-grained module sharding override is requested."""
+        return self.embedding_tp_size > 1 or self.lmhead_tp_size > 1
+
+    @staticmethod
+    def resolve_dp_pcp_factors(
+        fg_tp_size: int,
+        dp_size: int,
+        pcp_size: int,
+        field_name: str = "tp_size",
+    ) -> tuple[int, int]:
+        """Decompose `fg_tp_size` into `(dp_factor, pcp_factor)` along `DP x PCP`."""
+        if fg_tp_size == 1:
+            return 1, 1
+        if fg_tp_size == pcp_size:
+            return 1, pcp_size
+        if fg_tp_size == dp_size * pcp_size:
+            return dp_size, pcp_size
+        allowed = sorted({1, pcp_size, dp_size * pcp_size})
+        raise ValueError(
+            f"fine_grained_tp_config.{field_name} ({fg_tp_size}) must be one of "
+            f"{allowed} for data_parallel_size={dp_size} and "
+            f"prefill_context_parallel_size={pcp_size}."
+        )
+
+
+@config
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
@@ -319,6 +369,10 @@ class ParallelConfig:
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
+    fine_grained_tp_config: FineGrainedTPConfig = Field(
+        default_factory=FineGrainedTPConfig
+    )
+    """Per-module fine-grained tensor-parallelism configuration."""
     expert_placement_strategy: ExpertPlacementStrategy = "linear"
     """The expert placement strategy for MoE layers:
 
@@ -842,6 +896,32 @@ class ParallelConfig:
         return self.enable_dbo or self.ubatch_size > 1
 
     @property
+    def embedding_dp_pcp_factors(self) -> tuple[int, int]:
+        """Return `(dp_factor, pcp_factor)` for token embedding fine-grained TP."""
+        return FineGrainedTPConfig.resolve_dp_pcp_factors(
+            self.fine_grained_tp_config.embedding_tp_size,
+            self.data_parallel_size,
+            self.prefill_context_parallel_size,
+            "embedding_tp_size",
+        )
+
+    @property
+    def lmhead_dp_pcp_factors(self) -> tuple[int, int]:
+        """Return `(dp_factor, pcp_factor)` for LM head fine-grained TP."""
+        return FineGrainedTPConfig.resolve_dp_pcp_factors(
+            self.fine_grained_tp_config.lmhead_tp_size,
+            self.data_parallel_size,
+            self.prefill_context_parallel_size,
+            "lmhead_tp_size",
+        )
+
+    @property
+    def supports_prompt_logprobs(self) -> bool:
+        """Whether the parallel layout permits per-request prompt logprob scoring."""
+        lmhead_dp, _ = self.lmhead_dp_pcp_factors
+        return lmhead_dp <= 1
+
+    @property
     def num_ubatches(self) -> int:
         return 2 if self.enable_dbo else self.ubatch_size
 
@@ -1266,6 +1346,9 @@ class ParallelConfig:
             )
 
         self.data_parallel_index = self.data_parallel_rank
+
+        _ = self.embedding_dp_pcp_factors
+        _ = self.lmhead_dp_pcp_factors
 
         if self.distributed_executor_backend == "external_launcher":
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"

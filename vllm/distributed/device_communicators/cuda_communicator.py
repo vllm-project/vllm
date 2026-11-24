@@ -821,6 +821,47 @@ class CudaCommunicator(DeviceCommunicatorBase):
         output = self._get_symm_scratch(role, shape, dtype, device)
         return output if is_symmetric_memory_tensor(output) else None
 
+    def all_to_all_single(
+        self,
+        input_: torch.Tensor,
+        output_split_sizes: list[int] | None = None,
+        input_split_sizes: list[int] | None = None,
+    ) -> torch.Tensor:
+        if self.world_size == 1:
+            return input_
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled:
+            return super().all_to_all_single(
+                input_, output_split_sizes, input_split_sizes
+            )
+        input_ = input_.contiguous()
+        if input_split_sizes is None:
+            if input_.shape[0] % self.world_size != 0:
+                raise ValueError(
+                    f"Input dim 0 ({input_.shape[0]}) must be divisible by "
+                    f"world_size ({self.world_size}) when input_split_sizes is None."
+                )
+            in_splits = [input_.shape[0] // self.world_size] * self.world_size
+        else:
+            in_splits = input_split_sizes
+        if output_split_sizes is None:
+            if input_.shape[0] % self.world_size != 0:
+                raise ValueError(
+                    f"Input dim 0 ({input_.shape[0]}) must be divisible by "
+                    f"world_size ({self.world_size}) when output_split_sizes is None."
+                )
+            out_splits = [input_.shape[0] // self.world_size] * self.world_size
+            output = torch.empty_like(input_)
+        else:
+            out_splits = output_split_sizes
+            output = torch.empty(
+                (sum(out_splits), *input_.shape[1:]),
+                dtype=input_.dtype,
+                device=input_.device,
+            )
+        pynccl_comm.all_to_all_single(output, input_, out_splits, in_splits)
+        return output
+
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way."""
         """NOTE: `dst` is the local rank of the destination rank."""

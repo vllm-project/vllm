@@ -1658,6 +1658,7 @@ class Worker(WorkerBase):
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
             num_active_loras=0,
+            join_dp_sampling=True,
         )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

@@ -110,6 +110,12 @@ class BaseModelLoader(ABC):
             model_config=model_config,
             prefix=prefix,
         )
+        if vllm_config.parallel_config.fine_grained_tp_config.enabled:
+            from vllm.model_executor.layers.vocab_parallel_plan import (
+                validate_vocab_parallel_model,
+            )
+
+            validate_vocab_parallel_model(model, vllm_config)
         log_online_quantization(vllm_config)
         log_model_inspection(model)
         return model

@@ -37,7 +37,7 @@ from vllm.config.offload import (
     PrefetchOffloadConfig,
     UVAOffloadConfig,
 )
-from vllm.config.parallel import EPLBConfig, ParallelConfig
+from vllm.config.parallel import EPLBConfig, FineGrainedTPConfig, ParallelConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.profiler import ProfilerConfig
 from vllm.config.reasoning import ReasoningConfig
@@ -121,6 +121,7 @@ __all__ = [
     "UVAOffloadConfig",
     # From vllm.config.parallel
     "EPLBConfig",
+    "FineGrainedTPConfig",
     "ParallelConfig",
     # From vllm.config.pooler
     "PoolerConfig",
