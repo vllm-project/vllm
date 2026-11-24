@@ -282,21 +282,28 @@ def test_worker_reports_unexpected_heartbeat_exit(exit_kind):
     worker.is_producer = True
     worker.mode = MoRIIOMode.READ
     worker.moriio_wrapper = SimpleNamespace(
-        pop_finished_req_ids=lambda: [], shutdown=lambda: None
+        pop_finished_req_ids=lambda: [],
+        async_wait_reqid=lambda: None,
+        shutdown=lambda: None,
     )
     worker._pending_unmapped_acks = []
+    worker._consumer_notification_counts = {}
+    worker._completed_consumer_notifications = set()
     worker._heartbeat = MoRIIOHeartbeat("tcp://127.0.0.1:1", {"type": "P"}, 0.02)
     process = worker._heartbeat._process
+    metadata = SimpleNamespace(transfer_id_to_request_id={})
     try:
-        assert worker.get_finished() == (set(), set())
+        worker.start_load_kv(metadata)
         if exit_kind == "killed":
             process.kill()
         else:
             assert process.stdin is not None
             process.stdin.close()
         returncode = process.wait(timeout=5)
+        # Checked once per step, not by the (possibly polled) get_finished().
+        assert worker.get_finished() == (set(), set())
         with pytest.raises(RuntimeError, match=f"heartbeat.*{returncode}"):
-            worker.get_finished()
+            worker.start_load_kv(metadata)
     finally:
         worker.shutdown()
 

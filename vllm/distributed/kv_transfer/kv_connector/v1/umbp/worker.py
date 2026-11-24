@@ -342,7 +342,6 @@ class UMBPStoreConnectorWorker:
     ) -> tuple[set[str] | None, set[str] | None]:
         del finished_req_ids
         self._drain_load_jobs(wait=False)
-        self._drain_store_jobs(wait=False)
         recving = set(self._finished_recving)
         self._finished_recving.difference_update(recving)
         return None, recving or None
@@ -366,6 +365,8 @@ class UMBPStoreConnectorWorker:
         return failed
 
     def build_connector_worker_meta(self) -> UMBPConnectorWorkerMetadata:
+        # Store completions are only reported here.
+        self._drain_store_jobs(wait=False)
         result = self._worker_meta
         self._worker_meta = UMBPConnectorWorkerMetadata()
         return result
