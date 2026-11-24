@@ -59,13 +59,13 @@ STEPS = 5  # decode steps after the prefill's token
 MERGE_AB = "DSV41_MONO_MERGE_AB"
 
 
-def _decodes(tp: int) -> int:
-    """Decodes an engine runs, so that `_decodes(tp) ** 2` pairs are pooled.
+def _decodes(tp: int, arch: str) -> int:
+    """Decodes an engine runs, so that `_decodes(tp, arch) ** 2` pairs are pooled.
 
-    vLLM's path is not deterministic at TP8, so one decode's flipped share is
-    a draw rather than a rate.
+    vLLM's path is not deterministic at TP8 on cdna4, so one decode's flipped
+    share is a draw rather than a rate.
     """
-    return 4 if tp == 8 else 1
+    return 4 if (tp, arch) == (8, "cdna4") else 1
 
 
 def _arch() -> str:
@@ -419,8 +419,8 @@ if os.environ.get(MERGE_AB):
 def _decode(
     vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str, arch: str
 ):
-    """`_decodes(tp)` greedy decodes of `prompts` on one engine with the mono path
-    on or off: (each decode's outputs, the workers' mono layers); each decoder
+    """`_decodes(tp, arch)` greedy decodes of `prompts` on one engine with the
+    mono path on or off: (each decode's outputs, the workers' mono layers); each decoder
     layer's outputs for the decode tokens of decode-only steps, and vLLM's
     routing margins, saved under `path.d<decode>`."""
     from vllm import SamplingParams
@@ -462,7 +462,7 @@ def _decode(
         runner.llm.collective_rpc("capture_steps", args=([len(p) for p in prompts],))
         params = SamplingParams(temperature=0.0, max_tokens=STEPS + 1)
         decodes = []
-        for d in range(_decodes(tp)):
+        for d in range(_decodes(tp, arch)):
             runner.llm.collective_rpc("reset_capture")
             outs = runner.llm.generate(
                 [TokensPrompt(prompt_token_ids=p) for p in prompts], params
@@ -555,7 +555,7 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
             break
     prompts = [torch.randint(1000, 60000, (n,), generator=g).tolist() for n in lens]
 
-    decodes = _decodes(tp)
+    decodes = _decodes(tp, arch)
     on, probe_on = _decode(
         vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on", arch
     )
@@ -646,6 +646,9 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
         # pooled like the flips: a pair comparing few tokens contributes
         # few flips with them, so what has to hold is the total
         assert pooled_keys >= len(prompts) * decodes**2, (rank, pooled_keys)
+        # every pair's (flipped, compared), on passing runs too
+        counts = [(len(flips), n) for _, _, flips, n in per_pair]
+        print(f"rank {rank}: {pooled_flips}/{pooled_keys} flipped, per pair {counts}")
         # a string, so that pytest prints every pair: which flipped what
         assert pooled_flips <= pooled_keys // flip_divisor, (
             f"rank {rank}: {pooled_flips}/{pooled_keys} flipped, {per_pair}"
