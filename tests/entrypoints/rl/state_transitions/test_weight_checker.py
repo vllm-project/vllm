@@ -187,9 +187,22 @@ def test_ipc_weight_transfer_restores_reset_weights():
     ],
 )
 def test_checksum_and_reset_cover_every_worker(args, expected):
-    with server(extra_args=args, port=8771, timeout=600) as url:
+    with server(extra_args=[*draft_args(), *args], port=8771, timeout=600) as url:
+        requests.post(f"{url}/pause?mode=abort", timeout=30).raise_for_status()
         assert ranks(checksums(url)) == expected
         reset_reload_and_compare(url)
+
+        expected_both = {
+            f"{model}:{rank}" for model in ("target", "draft") for rank in expected
+        }
+        baseline = checksums(url, "both")
+        assert ranks(baseline) == expected_both
+        weight_checker(url, "reset", model="both").raise_for_status()
+        comparison = weight_checker(url, "compare", baseline, model="both")
+        comparison.raise_for_status()
+        result = comparison.json()
+        assert result["match"] is False
+        assert ranks(result["mismatches"]) == expected_both
 
 
 def test_weight_checker_rejects_a_draft_without_weight_parameters():
@@ -453,25 +466,6 @@ def test_eagle_target_reset_and_reload_with_pp(eagle_checkpoints):
             assert response.status_code == 409, response.text
             assert "pipeline parallelism" in response.text
             assert_eagle_mismatches(url, baseline, set())
-
-
-@multi_gpu_test(num_gpus=4)
-def test_both_checksums_cover_every_dp_tp_shard():
-    args = [*draft_args(), "--data-parallel-size", "2", "--tensor-parallel-size", "2"]
-    with server(extra_args=args, port=8771, timeout=600) as url:
-        requests.post(f"{url}/pause?mode=abort", timeout=30).raise_for_status()
-        expected = {
-            f"{model}:dp{dp}:pp0:pcp0:tp{tp}"
-            for model in ("target", "draft")
-            for dp in range(2)
-            for tp in range(2)
-        }
-        baseline = checksums(url, "both")
-        assert ranks(baseline) == expected
-        weight_checker(url, "reset", model="both").raise_for_status()
-        comparison = weight_checker(url, "compare", baseline, model="both")
-        comparison.raise_for_status()
-        assert ranks(comparison.json()["mismatches"]) == expected
 
 
 @multi_gpu_test(num_gpus=2)
