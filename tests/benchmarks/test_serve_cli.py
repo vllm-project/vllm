@@ -84,6 +84,14 @@ def server():
 
 
 @pytest.fixture(scope="function")
+def real_weight_server():
+    args = ["--max-model-len", "1024", "--enforce-eager", "--load-format", "auto"]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture(scope="function")
 def ssl_server():
     """Start a vLLM server with SSL enabled using a self-signed certificate."""
     with tempfile.TemporaryDirectory() as cert_dir:
@@ -233,7 +241,7 @@ def test_bench_serve_chat(server):
 
 @pytest.mark.benchmark
 @pytest.mark.asyncio
-async def test_multi_turn_non_streaming_json(server, monkeypatch):
+async def test_multi_turn_non_streaming_json(real_weight_server, monkeypatch):
     script_dir = Path(__file__).resolve().parents[2] / "benchmarks" / "multi_turn"
     monkeypatch.syspath_prepend(str(script_dir))
     from benchmark_serving_multi_turn import send_request
@@ -243,7 +251,8 @@ async def test_multi_turn_non_streaming_json(server, monkeypatch):
 
         async def pretty_completion(request):
             async with session.post(
-                f"{server.url_root}/v1/chat/completions", json=await request.json()
+                f"{real_weight_server.url_root}/v1/chat/completions",
+                json=await request.json(),
             ) as upstream:
                 upstream.raise_for_status()
                 data = await upstream.json()
