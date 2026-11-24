@@ -54,6 +54,7 @@ class _MMConfig:
     enable_mm_embeds = False
     mm_processor_cache_gb = 1
     mm_hasher_algorithm = "blake3"
+    limit_per_prompt: dict[str, int] = {}
 
     def merge_mm_processor_kwargs(self, kwargs):
         return dict(kwargs)

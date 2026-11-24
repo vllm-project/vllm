@@ -16,6 +16,11 @@ def unpinned_actions(value: object) -> Iterator[str]:
             if key == "uses" and isinstance(item, str):
                 if item.startswith("./"):
                     continue
+                if re.fullmatch(
+                    r"vllm-project/vllm/\.github/workflows/_reusable-[a-z0-9-]+\.yml@main",
+                    item,
+                ):
+                    continue
                 pattern = (
                     r"docker://[^\s@]+@sha256:[0-9a-f]{64}"
                     if item.startswith("docker://")
