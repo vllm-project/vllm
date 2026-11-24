@@ -510,6 +510,88 @@ def test_qsa_mqa_paged_matches_reference(
 
 
 @requires_qsa_kernels
+@pytest.mark.parametrize("dtype", ["bf16", "fp16"])
+@pytest.mark.parametrize(
+    "num_requests,rows_per_request,pad_rows",
+    [(1, 4, 0), (12, 4, 0), (12, 4, 4), (5, 2, 0), (3, 8, 0)],
+)
+def test_qsa_mqa_paged_grouped_verify_matches_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    dtype: str,
+    num_requests: int,
+    rows_per_request: int,
+    pad_rows: int,
+) -> None:
+    """MTP verify rows (runs of 1 + k rows per request) take the grouped kernel
+    and match the reference. Padded rows (request -1), as in a captured graph,
+    are left out of the store."""
+    from vllm.models.qwen4_exp.amd.ops import qsa_grouped_verify
+
+    spy = _KernelSpy(qsa_grouped_verify._qsa_mqa_paged_grouped_kernel)
+    monkeypatch.setattr(qsa_grouped_verify, "_qsa_mqa_paged_grouped_kernel", spy)
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    page_size, compress_ratio, table_width = 16, 4, 24
+    lengths = torch.randint(
+        rows_per_request,
+        1500,
+        (num_requests,),
+        device="cuda",
+        dtype=torch.int32,
+        generator=generator,
+    )
+    offsets = torch.arange(rows_per_request, device="cuda")
+    token_to_req = torch.arange(
+        num_requests, device="cuda", dtype=torch.int32
+    ).repeat_interleave(rows_per_request)
+    query_positions = (
+        lengths.repeat_interleave(rows_per_request).to(torch.int64)
+        - rows_per_request
+        + offsets.repeat(num_requests)
+    )
+    if pad_rows:
+        token_to_req = torch.cat(
+            [
+                token_to_req,
+                torch.full((pad_rows,), -1, device="cuda", dtype=torch.int32),
+            ]
+        )
+        query_positions = torch.cat(
+            [query_positions, torch.zeros(pad_rows, device="cuda", dtype=torch.int64)]
+        )
+    num_pages = num_requests * table_width + 8
+    q = _indexer_tensor((token_to_req.numel(), 4, 128), dtype, generator)
+    k_cache = _indexer_tensor((num_pages, page_size, 1, 128), dtype, generator)
+    page_table = torch.randperm(
+        num_pages, device="cuda", dtype=torch.int32, generator=generator
+    )[: num_requests * table_width].view(num_requests, table_width)
+
+    logits, visible_blocks = qsa_ops.qsa_mqa_paged(
+        q,
+        k_cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        lengths,
+        compress_ratio,
+        rows_per_request=rows_per_request,
+    )
+
+    assert spy.launches == 1
+    real = token_to_req >= 0
+    expected_visible = torch.minimum(
+        (query_positions[real] + 1) // compress_ratio,
+        lengths[token_to_req[real].long()] // compress_ratio,
+    ).to(torch.int32)
+    torch.testing.assert_close(visible_blocks[real], expected_visible, rtol=0, atol=0)
+    columns = torch.arange(logits.shape[1], device="cuda")
+    got = logits[real].masked_fill(columns >= expected_visible[:, None], -torch.inf)
+    expected = _qsa_mqa_paged_reference(
+        q[real], k_cache, page_table, token_to_req[real], expected_visible
+    )
+    torch.testing.assert_close(got, expected, rtol=1e-4, atol=1e-4)
+
+
+@requires_qsa_kernels
 @pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize(
     "num_rows,num_query_heads,num_kv_heads,page_size",
