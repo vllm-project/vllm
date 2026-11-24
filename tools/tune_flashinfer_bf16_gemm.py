@@ -395,7 +395,9 @@ def merge_tuning_files(paths: list[str], out: str) -> None:
         metadata = metadata or data.get("_metadata", {})
         for namespace, items in data.get("_records", {}).items():
             records.setdefault(namespace, {}).update(items)
-        configs.update({k: v for k, v in data.items() if not k.startswith("_")})
+        # FlashInfer reads only the runner and the tactic of an entry; the profiling
+        # policy and the timings after them are not used at serving time.
+        configs.update({k: v[:2] for k, v in data.items() if not k.startswith("_")})
     merged: dict = {"_metadata": metadata}
     if records:
         merged["_records"] = records
