@@ -853,6 +853,11 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | `OmniASRForConditionalGeneration` | Omnilingual ASR | `hf-audio/omniasr-llm-300m-v2` | ✅︎ | ✅︎ |
 | `VibeVoiceAsrForConditionalGeneration` | VibeVoice-ASR | `microsoft/VibeVoice-ASR-HF` | ✅︎ | ✅︎ |
 
+!!! note
+    The Transformers modeling backend can't tell how many audios per prompt a model's processor accepts.
+    For models that take one audio per prompt, such as `OmniASRForConditionalGeneration`, pass
+    `--limit-mm-per-prompt.audio 1` so that extra audios are rejected up front.
+
 #### Realtime Transcription
 
 Speech models that support streaming transcription via the
