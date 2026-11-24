@@ -827,6 +827,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "StableLmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "VaultGemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "YoutuForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Embedding models
     "LlamaModel": ("transformers", "TransformersEmbeddingModel"),
     "MistralModel": ("transformers", "TransformersEmbeddingModel"),
@@ -837,6 +838,10 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
         "TransformersMultiModalMoEForCausalLM",
     ),
     "Emu3ForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
+    ),
+    "GraniteDoclingForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForCausalLM",
     ),
