@@ -682,12 +682,17 @@ def test_extensible_kv_cache_with_nixl_needs_an_imex_channel_by_default(
 @pytest.mark.parametrize("multi", [False, True])
 @pytest.mark.parametrize("requested", [None, True])
 def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
-    """LMCacheMPConnector shares the KV cache through legacy CUDA IPC, which
-    cannot export driver-mapped memory on any platform."""
+    """With `lmcache.mp.use_vmm_api` off, LMCacheMPConnector shares the KV
+    cache through legacy CUDA IPC, which cannot export driver-mapped memory on
+    any platform."""
     import vllm.platforms
     from vllm.config.vllm import VllmConfig
 
-    lmcache = {"kv_connector": "LMCacheMPConnector", "kv_role": "kv_both"}
+    lmcache = {
+        "kv_connector": "LMCacheMPConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"lmcache.mp.use_vmm_api": False},
+    }
     transfer = (
         KVTransferConfig(
             kv_connector="MultiConnector",

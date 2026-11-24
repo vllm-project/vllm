@@ -1,5 +1,7 @@
 # The CUDA 12.9 wheels are published separately from the CUDA 13 PyPI build.
 --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v0.5.7-cu129
+# There is no CUDA 12.9 build of lmcache 0.5.8 yet. The builtin
+# LMCacheMPConnector imports modules that only work with 0.5.8 on this vLLM.
 lmcache == 0.5.7
 cuda-python >= 12, < 13
 cupy-cuda12x != 14.1.0
