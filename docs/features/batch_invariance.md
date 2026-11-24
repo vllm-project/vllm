@@ -157,7 +157,13 @@ When batch invariance is enabled, vLLM:
 4. Under tensor parallelism, keeps custom all-reduce on with a fixed reduction order (both custom kernels sum the ranks in the same order, and large inputs are reduced in fixed-size chunks), and disables FlashInfer, AITER and QuickReduce all-reduce
 5. On CUDA devices with tuned matmul table entries for the model's bf16 unquantized forward linear layers (Ada, Hopper, Blackwell),
    runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out.
+   This does not apply when FlashInfer's GEMM serves those layers (item 7).
 6. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
+7. On SM100, SM103 and SM107 with FlashInfer >= 0.7.4, runs the bf16 unquantized linear layers and the bf16 LM head on
+   FlashInfer's batch-invariant GEMM (`mm_bf16(..., batch_invariant=True)`) instead of the Triton persistent matmul. It computes
+   the same bits as the Triton kernel, compiles its kernels for the CUDA graph sizes during warmup and logs a fingerprint per
+   weight shape. Set `VLLM_BATCH_INVARIANT_GEMM_BACKEND=triton` to keep the Triton kernel, or `flashinfer` to fail at startup
+   when FlashInfer's GEMM is unavailable.
 
 !!! warning
     Batch invariance under tensor parallelism is not yet supported for all-reduces whose size isn't a multiple of 16 bytes, for example a hidden size that isn't a multiple of 8 in fp16/bf16. Such tensors can switch between NCCL and custom all-reduce depending on batch size. All validated models meet this requirement.

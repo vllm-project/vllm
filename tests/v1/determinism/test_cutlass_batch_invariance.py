@@ -314,6 +314,45 @@ def test_cutlass_nvfp4_scaled_mm_batch_invariant(
         )
 
 
+@_NVFP4_REQUIRES_SM100
+@pytest.mark.parametrize("dtype", _NVFP4_LINEAR_DTYPES)
+@pytest.mark.parametrize("shape", _NVFP4_LINEAR_CONSISTENCY_SHAPES)
+@torch.inference_mode()
+def test_flashinfer_nvfp4_scaled_mm_matches_cutlass(
+    dtype: torch.dtype,
+    shape: tuple[int, int, int],
+) -> None:
+    """FlashInfer's batch-invariant fp4 class computes the vLLM CUTLASS NVFP4
+    kernel's bits, row by row, so the batch-invariant mode's NVFP4 linear can
+    run either."""
+    from vllm.utils import flashinfer as fi
+
+    if not fi.has_flashinfer_batch_invariant_gemm():
+        pytest.skip("needs FlashInfer >= 0.7.4 on SM100 / SM103 / SM107")
+    set_random_seed(12345)
+    m, n, packed_k = shape
+    k = packed_k * 2
+    a = torch.randn((m, k), dtype=dtype, device="cuda")
+    b = torch.randn((n, k), dtype=dtype, device="cuda")
+    a_global_scale = get_nvfp4_global_scale(a)
+    b_global_scale = get_nvfp4_global_scale(b)
+    alpha = 1.0 / (a_global_scale * b_global_scale)
+    b_fp4, b_sf = ops.scaled_fp4_quant(b, b_global_scale)
+
+    def run(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x_fp4, x_sf = ops.scaled_fp4_quant(x, a_global_scale)
+        cutlass = ops.cutlass_scaled_fp4_mm(x_fp4, b_fp4, x_sf, b_sf, alpha, dtype)
+        flashinfer = fi.flashinfer_scaled_fp4_mm(
+            x_fp4, b_fp4, x_sf, b_sf, alpha, dtype, "auto", batch_invariant=True
+        )
+        return cutlass, flashinfer
+
+    cutlass_full, flashinfer_full = run(a)
+    assert torch.equal(flashinfer_full, cutlass_full)
+    for i in (0, m // 2, m - 1):
+        assert torch.equal(run(a[i : i + 1])[1][0], flashinfer_full[i]), f"row {i}"
+
+
 def _make_cutlass_fp4_moe_batch_invariant_case(
     case_config: dict[str, Any],
     activation: MoEActivation,

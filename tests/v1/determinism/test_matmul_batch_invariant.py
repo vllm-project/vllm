@@ -13,16 +13,38 @@ from utils import skip_unsupported
 import vllm.model_executor.determinism.batch_invariant as bi
 from vllm.model_executor.determinism.batch_invariant import (
     enable_batch_invariant_mode,
+    linear_batch_invariant,
     matmul_batch_invariant,
     matmul_persistent,
+    mm_batch_invariant,
 )
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS,
     _get_tuned_matmul_arch_family,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import (
+    has_flashinfer_batch_invariant_gemm,
+    use_flashinfer_batch_invariant_gemm,
+)
 
 DEVICE_TYPE = current_platform.device_type
+
+requires_flashinfer_gemm = pytest.mark.skipif(
+    not has_flashinfer_batch_invariant_gemm(),
+    reason="FlashInfer's batch-invariant GEMM needs FlashInfer >= 0.7.4 on "
+    "SM100 / SM103 / SM107",
+)
+
+# (N, K) of Qwen3-8B's qkv / o / down projections, an R1-Distill-1.5B-class
+# qkv, and an LM head
+FLASHINFER_GEMM_SHAPES = [
+    (6144, 4096),
+    (4096, 4096),
+    (4096, 12288),
+    (2048, 1536),
+    (151936, 1536),
+]
 
 
 @skip_unsupported
@@ -222,3 +244,75 @@ def test_mm_out_dtype_keeps_aten_dtype_checks():
     out = torch.empty((4, 32), dtype=torch.bfloat16, device=DEVICE_TYPE)
     with pytest.raises(RuntimeError, match="dtype of the provided out tensor"):
         torch.mm(a, b, out_dtype=torch.float32, out=out)
+
+
+def _flashinfer_weights(n, k, with_bias, seed=0):
+    torch.manual_seed(seed)
+    w = torch.randn((n, k), dtype=torch.bfloat16, device=DEVICE_TYPE) / k**0.5
+    b = torch.randn(n, dtype=torch.bfloat16, device=DEVICE_TYPE) if with_bias else None
+    return w, b
+
+
+@skip_unsupported
+@requires_flashinfer_gemm
+@pytest.mark.parametrize("n,k", FLASHINFER_GEMM_SHAPES)
+@pytest.mark.parametrize("with_bias", [False, True], ids=["no_bias", "bias"])
+def test_flashinfer_linear_matches_triton_bits(n, k, with_bias):
+    """FlashInfer's batch-invariant GEMM computes the Triton persistent matmul's
+    bits, so VLLM_BATCH_INVARIANT_GEMM_BACKEND changes speed, not outputs."""
+    w, b = _flashinfer_weights(n, k, with_bias)
+    for m in (1, 257):
+        x = torch.randn((m, k), dtype=torch.bfloat16, device=DEVICE_TYPE)
+        flashinfer_out = torch.ops.vllm.flashinfer_mm_bf16_batch_invariant(x, w, b)
+        triton_out = mm_batch_invariant(x, w.t(), bias=b)
+        assert torch.equal(flashinfer_out, triton_out), f"M={m}"
+
+
+@skip_unsupported
+@requires_flashinfer_gemm
+@pytest.mark.parametrize("with_bias", [False, True], ids=["no_bias", "bias"])
+def test_flashinfer_linear_batch_invariance(with_bias):
+    """linear_batch_invariant takes the FlashInfer path for every row count, and
+    a row's bits do not depend on the rows around it."""
+    n, k = 4096, 4096
+    w, b = _flashinfer_weights(n, k, with_bias)
+    x = torch.randn((2, 257, k), dtype=torch.bfloat16, device=DEVICE_TYPE)
+    assert bi.flashinfer_gemm_enabled() and bi._fits_flashinfer_gemm(x, w, b)
+    full = linear_batch_invariant(x, w, b)
+    assert full.shape == (2, 257, n)
+    flat = full.reshape(-1, n)
+    for m in (1, 7, 64, 300):
+        rows = linear_batch_invariant(x.reshape(-1, k)[:m], w, b)
+        assert torch.equal(rows, flat[:m]), f"M={m}"
+
+
+@skip_unsupported
+@requires_flashinfer_gemm
+def test_flashinfer_linear_under_torch_compile():
+    """The custom op traces with a dynamic row count and keeps the eager bits."""
+    n, k = 6144, 4096
+    w, b = _flashinfer_weights(n, k, with_bias=True)
+
+    def fn(x):
+        return linear_batch_invariant(x, w, b)
+
+    compiled = torch.compile(fn, fullgraph=True)
+    x = torch.randn((256, k), dtype=torch.bfloat16, device=DEVICE_TYPE)
+    for m in (64, 256, 128):
+        xs = x[:m].clone()
+        torch._dynamo.mark_dynamic(xs, 0)
+        assert torch.equal(compiled(xs), fn(xs)), f"M={m}"
+
+
+def test_batch_invariant_gemm_backend_env(monkeypatch):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT_GEMM_BACKEND", "triton")
+    assert not use_flashinfer_batch_invariant_gemm()
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT_GEMM_BACKEND", "flashinfer")
+    if has_flashinfer_batch_invariant_gemm():
+        assert use_flashinfer_batch_invariant_gemm()
+    else:
+        with pytest.raises(RuntimeError, match="needs FlashInfer"):
+            use_flashinfer_batch_invariant_gemm()
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT_GEMM_BACKEND", "cublas")
+    with pytest.raises(ValueError, match="VLLM_BATCH_INVARIANT_GEMM_BACKEND"):
+        use_flashinfer_batch_invariant_gemm()
