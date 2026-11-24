@@ -2361,7 +2361,18 @@ def test_new_request_save_does_not_count_scheduled_drafts(prompt_len):
     meta = scheduler.build_connector_meta(output)
 
     assert tracker.token_ids == list(range(num_tokens))
-    for req_meta in meta.requests:
+    # Prompts 44..47 reach 48..51 tokens and complete block [32, 48) in this
+    # step, so the step must save it; a 48-token prompt saved all its blocks in
+    # the first step and completes none here.
+    saves = [req_meta for req_meta in meta.requests if req_meta.can_save]
+    expected_save = (prompt_len // 16 * 16, num_tokens // 16 * 16)
+    if expected_save[0] < expected_save[1]:
+        assert [(m.token_ids_start, m.token_len_chunk) for m in saves] == [
+            expected_save
+        ]
+    else:
+        assert saves == []
+    for req_meta in saves:
         assert req_meta.token_ids == list(
             range(req_meta.token_ids_start, req_meta.token_len_chunk)
         )
