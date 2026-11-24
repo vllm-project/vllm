@@ -1492,7 +1492,14 @@ def test_cache_aware_admission_aging_bounds_cold_bypass(scheduler_clock, max_wai
         if warm.request_id in output.num_scheduled_tokens:
             # Admitted on its prefix-cache hit, not as a full prefill.
             assert output.num_scheduled_tokens[warm.request_id] == 16
-        _decode_one(scheduler, output, list(output.num_scheduled_tokens))
+        req_ids = list(output.num_scheduled_tokens)
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                sampled_token_ids=[[0] for _ in req_ids],
+            ),
+        )
 
     warms = ["warm@100.0", "warm@100.5", "warm@100.999"]
     if max_wait_ms:
