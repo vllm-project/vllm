@@ -6,7 +6,7 @@ import threading
 import time
 from contextlib import ExitStack
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
@@ -130,7 +130,8 @@ def test_tracing_collects_stats_without_stat_loggers(
     engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
 
     assert engine.logger_manager is None
-    assert async_llm_module.OutputProcessor.call_args.kwargs["collect_stats"]
+    output_processor = cast(MagicMock, async_llm_module.OutputProcessor)
+    assert output_processor.call_args.kwargs["collect_stats"]
     make_client = async_llm_module.EngineCoreClient.make_async_mp_client
     assert make_client.call_args.kwargs["collect_stats"]
 
