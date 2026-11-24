@@ -10,7 +10,7 @@
 
 ## Validation
 
-<!-- Show evidence that the claims are met by this change, and steps to reproduce validations. -->
+<!-- Show evidence that the claims are met by this change, and steps to reproduce validations. For added tests, paste the exact pytest summary (including the time of newly added tests and modified tests) and the commit SHA the tests were run on. -->
 
 ## Details
 
