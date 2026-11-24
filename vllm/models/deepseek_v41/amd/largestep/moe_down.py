@@ -24,7 +24,7 @@ from vllm.models.deepseek_v41.amd.mono.common.gfx942 import (
 from vllm.models.deepseek_v41.amd.mono.common.ops import CM_NT, bf16_pair, fresh, rsrc
 from vllm.models.deepseek_v41.amd.mono.stages.dims import MOE_INTER
 
-from .shapes import EXPERTS, GROUP, HIDDEN
+from .shapes import EXPERTS, GROUP_WORDS, HIDDEN
 
 # The default stream of a launch: the current one (`mono/layer.py`).
 _STREAM = fx.Stream(None)
@@ -35,7 +35,6 @@ WAVES = THREADS // 64
 CHUNK_TILES = 16  # 16-row tiles a unit: 256 output rows
 CHUNKS = HIDDEN // (16 * CHUNK_TILES)  # 20
 TILES_WAVE = CHUNK_TILES // WAVES  # 2
-GROUP_WORDS = 4 + GROUP
 
 
 def _w2_tile_loads(w2, w2_s, e, tile, inter, lane):
@@ -190,6 +189,10 @@ def build_moe_down(tp: int, experts: int = EXPERTS, inter: int | None = None):
                         # q * kc + b of the lane's 4 rows of codes
                         i = q * kc + b
                         cq = (sc[i // 4] >> (8 * (i % 4))) & 0xFF
+                        # 2^(code_h + 7 + code_w - 254) as f32 bits, as in
+                        # moe_ug: the f32 exponent field is code_h + code_w
+                        # - 120, a normal f32 while code_h + code_w lies in
+                        # 121..374. Outside it the bits wrap.
                         f = ((cq + cw[b] - 120) << 23).bitcast(fx.Float32)
                         vals.append(fx.Float32(fmath.fma(d[q], f, acc[q])))
                     acc = fx.Vector.from_elements(vals, fx.Float32)

@@ -132,6 +132,44 @@ def _host_reads(hook):
     return wrapper
 
 
+# Calls that took the large-step block, per decoder layer, in this worker:
+# all of them, and those made while a CUDA graph was being captured. Under
+# enforce_eager every decode step is a call. Under CUDA graphs the calls happen
+# at capture, and a replay runs the captured launches without a call.
+_LARGE_CALLS: dict[int, int] = {}
+_LARGE_CAPTURED: dict[int, int] = {}
+
+
+def _count_large() -> None:
+    """Wrap each large-step hook's forward as the model builds it at load, so
+    the counts cover graph capture, which runs before any probe call. The
+    model keeps no test state."""
+    from vllm.models.deepseek_v41.amd import mono_decode
+
+    build = mono_decode.MonoDecodeLayer.build_runner
+    if getattr(build, "_counted", False):
+        return
+
+    def build_and_count(self, device, layer=None):
+        build(self, device, layer)
+        ls = getattr(getattr(layer, "ffn", None), "largestep", None)
+        if ls is None:
+            return
+        i = layer.attn.layer_id
+        _LARGE_CALLS[i] = _LARGE_CAPTURED[i] = 0
+        fwd = ls.forward
+
+        def counted(*a, **kw):
+            _LARGE_CALLS[i] += 1
+            _LARGE_CAPTURED[i] += int(torch.cuda.is_current_stream_capturing())
+            return fwd(*a, **kw)
+
+        ls.forward = counted
+
+    build_and_count._counted = True  # type: ignore[attr-defined]
+    mono_decode.MonoDecodeLayer.build_runner = build_and_count  # type: ignore[method-assign]
+
+
 @register_model_loader(LOAD_FORMAT)
 class RandomWeightLoader(DummyModelLoader):
     """Dummy loading with weights in the checkpoint's ranges, before post-load
@@ -141,6 +179,7 @@ class RandomWeightLoader(DummyModelLoader):
     def load_weights(self, model, model_config) -> None:
         from vllm.distributed import get_tensor_model_parallel_world_size
 
+        _count_large()
         super().load_weights(model, model_config)
         for name, t in model.state_dict().items():
             _fill(name, t)
@@ -232,23 +271,7 @@ class MonoProbe:
             )
 
         self._gaps: dict = {}
-        # Calls that took the large-step block, per layer. The test counts them
-        # by wrapping the hook's forward, so the model keeps no test state.
-        # enforce_eager, so every step is a call.
-        self._large: dict = {}
         for i, layer in self._decoder_layers().items():
-            ls = getattr(layer.ffn, "largestep", None)
-            if ls is not None:
-                self._large[i] = 0
-
-                assert ls is not None  # mypy keeps the narrowing only so
-                fwd = ls.forward
-
-                def counted(*a, _f=fwd, _i=i, **kw):
-                    self._large[_i] += 1
-                    return _f(*a, **kw)
-
-                ls.forward = counted
             layer.register_forward_hook(_host_reads(hook(i)), with_kwargs=True)
             layer.register_forward_pre_hook(pos_hook, with_kwargs=True)
             gap = gap_hook(i, layer)
@@ -288,8 +311,9 @@ class MonoProbe:
         return {
             "layers": layers,
             "epoch": -1 if runner is None else int(runner.epoch[0]),
-            "large_steps": {
-                i: getattr(self, "_large", {}).get(i) for i in self._decoder_layers()
+            "large_steps": {i: _LARGE_CALLS.get(i) for i in self._decoder_layers()},
+            "large_captured": {
+                i: _LARGE_CAPTURED.get(i) for i in self._decoder_layers()
             },
         }
 
@@ -422,12 +446,22 @@ if os.environ.get(MERGE_AB):
 
 
 def _decode(
-    vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str, arch: str
+    vllm_runner,
+    monkeypatch,
+    tp: int,
+    mono: bool,
+    prompts,
+    path: str,
+    arch: str,
+    graph_sizes: list[int] | None = None,
 ):
     """Greedy decode of `prompts` with the mono path on or off: (each
     prompt's output, the workers' mono layers); each decoder layer's outputs
     for the decode tokens of decode-only steps, and vLLM's routing margins,
-    saved under `path`."""
+    saved under `path`. With `graph_sizes`, the run captures FULL_DECODE_ONLY
+    CUDA graphs of those sizes instead of running eagerly, and keeps only the
+    outputs and the block's call counts (a probe cannot read the GPU inside a
+    replay)."""
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 
@@ -455,7 +489,16 @@ def _decode(
         language_model_only=True,
         tokenizer_mode="deepseek_v41",
         **indexer,
-        enforce_eager=True,
+        **(
+            dict(enforce_eager=True)
+            if graph_sizes is None
+            else dict(
+                compilation_config={
+                    "cudagraph_mode": "FULL_DECODE_ONLY",
+                    "cudagraph_capture_sizes": graph_sizes,
+                }
+            )
+        ),
         max_model_len=4096,
         max_num_seqs=len(prompts),
         # All prompts prefill in one step, so that no decode token shares a
@@ -464,12 +507,15 @@ def _decode(
         enable_prefix_caching=False,
         gpu_memory_utilization=0.5,
     ) as runner:
-        runner.llm.collective_rpc("capture_steps", args=([len(p) for p in prompts],))
+        lens = [len(p) for p in prompts]
+        if graph_sizes is None:
+            runner.llm.collective_rpc("capture_steps", args=(lens,))
         params = SamplingParams(temperature=0.0, max_tokens=STEPS + 1)
         outs = runner.llm.generate(
             [TokensPrompt(prompt_token_ids=p) for p in prompts], params
         )
-        runner.llm.collective_rpc("save_capture", args=(path,))
+        if graph_sizes is None:
+            runner.llm.collective_rpc("save_capture", args=(path,))
         probe = runner.llm.collective_rpc("mono_layers")
     return [o.outputs[0] for o in outs], probe
 
@@ -647,3 +693,54 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
     # The K2 + K1 merge is CDNA4 only (`DSV41MonoLayer.merges`).
     if (tp, rows) == (8, 8) and arch == "cdna4":
         _merged_matches_two_launches(vllm_runner, monkeypatch)
+
+
+@pytest.mark.parametrize(
+    ("tp", "rows", "graph"),
+    [
+        pytest.param(4, 45, 48, id="TP4-45req-padded-to-48"),
+        pytest.param(4, 50, 56, id="TP4-50req-padded-to-56"),
+        pytest.param(8, 45, 48, id="TP8-45req-padded-to-48"),
+    ],
+)
+def test_largestep_in_padded_cuda_graphs(
+    vllm_runner, monkeypatch, tmp_path, tp, rows, graph
+):
+    """The large-step block as production runs it: FULL_DECODE_ONLY CUDA
+    graphs, a decode step of `rows` requests padded to the captured size
+    `graph`, the padding rows routed to expert -1 (VLLM_MOE_SKIP_PADDING).
+
+    The block must be captured into the graph in every layer (its calls happen
+    while the stream captures), and the decode must give the tokens of the same
+    run under enforce_eager, where every step is an unpadded call of the
+    block. A padding row that leaked into a real row, or a launch that read a
+    buffer the graph does not own, changes the greedy tokens."""
+    if _arch() != "gfx942":
+        pytest.skip("the large-step block is gfx942 only")
+    if torch.accelerator.device_count() < tp:
+        pytest.skip(f"needs {tp} GPUs")
+    import flydsl  # noqa: F401  # on gfx942 a missing FlyDSL fails, not skips
+
+    g = torch.Generator().manual_seed(1)
+    prompts = [
+        torch.randint(1000, 60000, (n,), generator=g).tolist()
+        for n in torch.randint(300, 2000, (rows,), generator=g).tolist()
+    ]
+    eager, _ = _decode(
+        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/eager", "gfx942"
+    )
+    graphs, probe = _decode(
+        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/g", "gfx942", [graph]
+    )
+    for rank in probe:
+        captured = [n for n in rank["large_captured"].values() if n is not None]
+        assert len(captured) == len(WHOLE + FFN), rank
+        assert all(n >= 1 for n in captured), rank
+    # Graph replays and eager calls run the same launches on the same inputs,
+    # so the greedy tokens agree. The first decoded token only reads the
+    # prefill and one decode step, so it must match for every request; later
+    # tokens may follow a near-tie in the sampler's logits differently.
+    first = [a.token_ids[:2] == b.token_ids[:2] for a, b in zip(eager, graphs)]
+    assert all(first), [i for i, ok in enumerate(first) if not ok]
+    same = sum(a.token_ids == b.token_ids for a, b in zip(eager, graphs))
+    assert same >= rows * 9 // 10, (same, rows)

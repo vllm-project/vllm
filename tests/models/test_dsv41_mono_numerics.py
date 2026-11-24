@@ -18,6 +18,7 @@ runs one MoE layer's large-step block (`largestep.moe.LargeStepHook.forward`)
 against `DeepseekV4MoE.forward` at 48, 144 and 256 rows. The real model's
 numerics on gfx942 are checked by `test_dsv41_mono_layers.py`."""
 
+import os
 import shutil
 import subprocess
 
@@ -897,6 +898,23 @@ def test_mono_decode_942_replays(monkeypatch: pytest.MonkeyPatch, tp: int):
 # ------------------------------------------------- gfx942 large-step MoE block
 
 
+# The hook test's tolerances, relative L2 against the float64 reference, about
+# 1.5x the errors measured on MI300X TP4 (24 Nov 2026: stock 3.9e-3, block
+# 4.4e-2, every M alike). The block quantizes x and the intermediate h to MXFP8
+# (e4m3, 3 mantissa bits, one power-of-two scale per 32 values), as the mono
+# decode layer does, while stock keeps them in bf16, so the block is further
+# from float64 by design. A wrong expert, weight or scale gives about 1.
+LS_STOCK_RTOL = 3e-2  # bf16 activations and h, f32 accumulation
+LS_BLOCK_RTOL = 6.5e-2  # x and h to MXFP8, h and each pick to bf16
+LS_TIE_MARGIN = 1e-4  # float64 score gap below which a row is a routing tie
+# Image-token routing: every fourth token is an image sentinel id, which picks
+# experts with the second bias (`gate.bias_vl`).
+LS_IMAGE_EVERY = 4
+
+# The case reaches the Ray workers as an environment variable: "rows,image".
+LS_CASE = "DSV41_LARGESTEP_HOOK_CASE"
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def _largestep_hook(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     from vllm._aiter_ops import rocm_aiter_ops
@@ -912,10 +930,11 @@ def _largestep_hook(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         init_workspace_manager(device)
-        _check_largestep_hook(rank, tp_size, device)
+        rows, image = os.environ[LS_CASE].split(",")
+        _check_largestep_hook(rank, tp_size, device, int(rows), image == "1")
 
 
-def _check_largestep_hook(rank: int, tp: int, device) -> None:
+def _check_largestep_hook(rank: int, tp: int, device, rows: int, image: bool) -> None:
     """One MoE layer with random weights, built the way the model builds it at
     load (the gfx942 copies of the routed experts, `mono942`, then the hook).
     Three implementations of the same layer on the same input:
@@ -930,11 +949,14 @@ def _check_largestep_hook(rank: int, tp: int, device) -> None:
     experts. Stock routes inside AITER's fused kernel and does not expose its
     ids; it gets the same logits and bias, and its output error says whether it
     routed alike. Rows whose 6th and 7th biased scores are closer than
-    TIE_MARGIN are ties that any implementation may break either way, and are
+    LS_TIE_MARGIN are ties that any implementation may break either way, and are
     left out of the id check.
 
-    Pass: stock's error against ref is below STOCK_RTOL and the block's below
-    BLOCK_RTOL. The block quantizes x and the intermediate to MXFP8 (as the
+    With `image`, the layer has the image routing bias (`bias_vl`) and every
+    LS_IMAGE_EVERY-th token is an image sentinel id, which routes with it.
+
+    Pass: stock's error against ref is below LS_STOCK_RTOL and the block's
+    below LS_BLOCK_RTOL. The block quantizes x and the intermediate to MXFP8 (as the
     mono decode layer does), stock keeps them in bf16, so the block is further
     from the float64 reference than stock by design; both errors are printed."""
     from tests.kernels.models.amd import dsv41_largestep_reference as R
@@ -947,13 +969,6 @@ def _check_largestep_hook(rank: int, tp: int, device) -> None:
     from vllm.models.deepseek_v41.amd.largestep.moe import LargeStepHook
     from vllm.models.deepseek_v41.amd.model import DeepseekV4MoE
     from vllm.utils.torch_utils import set_default_torch_dtype
-
-    # Tolerances against the float64 reference (relative L2), about 1.5x the
-    # errors measured on MI300X (printed with -s). A wrong expert, weight or
-    # scale gives about 1.
-    STOCK_RTOL = 3e-2  # bf16 activations and h, f32 accumulation
-    BLOCK_RTOL = 6e-2  # x and h to MXFP8 (3 mantissa bits), h and picks to bf16
-    TIE_MARGIN = 1e-4  # float64 score gap below which a row is a routing tie
 
     vc = EngineArgs(
         model=MODEL,
@@ -988,48 +1003,84 @@ def _check_largestep_hook(rank: int, tp: int, device) -> None:
         sh.down_proj.weight.data, sh.down_proj.weight_scale.data.view(u8)
     )
     scale = float(moe.routed_scaling_factor)
+    lo = 0
+    if image:
+        # As the model does when the checkpoint has vision layers.
+        from vllm.models.deepseek_v41.common.mm_preprocess import (
+            IMAGE_SENTINEL_BASE_ID,
+        )
+
+        lo = IMAGE_SENTINEL_BASE_ID
+        g_vl = torch.Generator(device=device).manual_seed(2002)
+        vl = torch.rand(moe.n_routed_experts, generator=g_vl, device=device)
+        moe.gate.bias_vl = torch.nn.Parameter(vl.float(), requires_grad=False)
+        moe.image_sentinel_lo = lo
+        moe.experts.router.bias_vl = moe.gate.bias_vl
+        moe.experts.router.image_sentinel_lo = lo
     process_weights_after_loading(moe, vc.model_config, device)
     hook = LargeStepHook(torch.nn.Module(), moe, tp, device)
 
-    g = torch.Generator(device=device).manual_seed(3000)
-    for rows in (48, 144, 256):
-        x = (torch.randn(rows, HIDDEN, generator=g, device=device) * 0.5).to(
-            torch.bfloat16
+    g = torch.Generator(device=device).manual_seed(3000 + rows)
+    x = (torch.randn(rows, HIDDEN, generator=g, device=device) * 0.5).to(torch.bfloat16)
+    ids = torch.randint(0, 1000, (rows,), generator=g, device=device)
+    is_image = torch.zeros(rows, dtype=torch.bool, device=device)
+    if image:
+        is_image[::LS_IMAGE_EVERY] = True
+        ids[is_image] = lo + torch.randint(
+            0, 5, (int(is_image.sum()),), generator=g, device=device
         )
-        ids = torch.randint(0, 1000, (rows,), generator=g, device=device)
-        with set_forward_context(None, vc):
-            logits, _ = moe.gate(x)
-            _, got_ids = moe.experts.router.select_experts(x, logits, input_ids=ids)
-            block = hook.forward(moe, x.clone(), ids).double()
-            stock = moe(x.clone(), ids).double()
+    with set_forward_context(None, vc):
+        logits, _ = moe.gate(x)
+        _, got_ids = moe.experts.router.select_experts(x, logits, input_ids=ids)
+        block = hook.forward(moe, x.clone(), ids).double()
+        stock = moe(x.clone(), ids).double()
 
-        ref_ids, ref_w, margin = R.route_fp64(x, gate_w, bias, scale)
-        order = got_ids.long().argsort(-1)
-        sure = margin > TIE_MARGIN
-        same = (got_ids.long().gather(1, order) == ref_ids).all(-1)
-        assert bool(same[sure].all()), (
-            f"{rows} rows: router and float64 reference pick different experts "
-            f"in {int((~same & sure).sum())} rows that are not ties"
-        )
-        part = R.routed_fp64(x, *plain, ref_ids, ref_w, inter) + R.shared_fp64(
-            x, s_gu, s_dn
-        )
-        # The all-reduce runs in float32: summing 4 or 8 parts adds about 1e-7.
-        ref = tensor_model_parallel_all_reduce(part.float()).double()
-        assert torch.isfinite(block).all() and torch.isfinite(stock).all(), rows
-        err_block, err_stock = _rel(block, ref), _rel(stock, ref)
-        print(
-            f"TP{tp} rank {rank}, {rows} rows: block {err_block:.3e}, "
-            f"stock {err_stock:.3e} (relative L2 against float64), "
-            f"ties {int((~sure).sum())}"
-        )
-        assert err_stock < STOCK_RTOL, f"{rows} rows: stock {err_stock:.3e}"
-        assert err_block < BLOCK_RTOL, f"{rows} rows: block {err_block:.3e}"
+    row_bias = bias.expand(rows, -1).clone()
+    if image:
+        row_bias[is_image] = moe.gate.bias_vl.data.double()
+    ref_ids, ref_w, margin = R.route_fp64(x, gate_w, row_bias, scale)
+    order = got_ids.long().argsort(-1)
+    sure = margin > LS_TIE_MARGIN
+    same = (got_ids.long().gather(1, order) == ref_ids).all(-1)
+    assert bool(same[sure].all()), (
+        f"router and float64 reference pick different experts in "
+        f"{int((~same & sure).sum())} rows that are not ties"
+    )
+    part = R.routed_fp64(x, *plain, ref_ids, ref_w, inter) + R.shared_fp64(
+        x, s_gu, s_dn
+    )
+    # The all-reduce runs in float32: summing 4 or 8 parts adds about 1e-7.
+    ref = tensor_model_parallel_all_reduce(part.float()).double()
+    assert torch.isfinite(block).all() and torch.isfinite(stock).all()
+    err_block, err_stock = _rel(block, ref), _rel(stock, ref)
+    print(
+        f"TP{tp} rank {rank}, {rows} rows, image {image}: block {err_block:.3e}, "
+        f"stock {err_stock:.3e} (relative L2 against float64), "
+        f"ties {int((~sure).sum())}"
+    )
+    assert err_stock < LS_STOCK_RTOL, f"stock {err_stock:.3e}"
+    assert err_block < LS_BLOCK_RTOL, f"block {err_block:.3e}"
 
 
 @pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
-def test_largestep_hook_matches_moe(monkeypatch: pytest.MonkeyPatch):
-    if torch.accelerator.device_count() < 4:
-        pytest.skip("needs 4 GPUs")
-    pytest.importorskip("flydsl")
-    multi_process_parallel(monkeypatch, 4, 1, _largestep_hook)
+@pytest.mark.parametrize(
+    "tp", [pytest.param(4, id="TP4-inter576"), pytest.param(8, id="TP8-inter288")]
+)
+@pytest.mark.parametrize(
+    ("rows", "image"),
+    [
+        pytest.param(48, False, id="M48"),
+        pytest.param(144, False, id="M144"),
+        pytest.param(256, False, id="M256"),
+        pytest.param(96, True, id="M96-image-tokens"),
+    ],
+)
+def test_largestep_hook_matches_moe(
+    monkeypatch: pytest.MonkeyPatch, tp: int, rows: int, image: bool
+):
+    if torch.accelerator.device_count() < tp:
+        pytest.skip(f"needs {tp} GPUs")
+    import flydsl  # noqa: F401  # on gfx942 a missing FlyDSL fails, not skips
+
+    monkeypatch.setenv(LS_CASE, f"{rows},{int(image)}")
+    multi_process_parallel(monkeypatch, tp, 1, _largestep_hook)

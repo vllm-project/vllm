@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The decode step's picks sorted into groups of 16 picks of one expert, on
 the GPU, bit for bit the table of `pick_groups` in the tests'
-`dsv41_largestep_ref`, so the routed MoE needs no host step inside a CUDA
+`dsv41_largestep_reference`, so the routed MoE needs no host step inside a CUDA
 graph. Table int32 [G, 4 + 16]: the
 expert, three zeros, then 16 picks (-1 past the last). `count` gets G.
 """
@@ -16,12 +16,11 @@ from flydsl.expr.typing import Int32, Int64, T
 from vllm.models.deepseek_v41.amd.mono.attention.device import kernel_symbol
 from vllm.models.deepseek_v41.amd.mono.common.ops import rsrc
 
-from .shapes import EXPERTS, GROUP, TOPK
+from .shapes import EXPERTS, GROUP, GROUP_WORDS, TOPK
 
 THREADS = 512
 MAX_ROWS = 256
 MAX_PICKS = MAX_ROWS * TOPK
-GROUP_WORDS = 4 + GROUP
 _STREAM = fx.Stream(None)
 
 

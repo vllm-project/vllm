@@ -30,9 +30,11 @@ class _Scratch:
     """Scratch of one block call for the largest step (MAX_ROWS rows),
     allocated once so that a captured graph keeps its addresses. All layers of
     a rank share one set (`_scratch`): the layers run one after another on one
-    stream, and a call's result is a new tensor, so no layer reads another
-    layer's scratch. One set is about 27 MB at TP4 and 25 MB at TP8 (the y
-    rows dominate), where one set a layer would be about 1.1 GB a rank."""
+    stream. A call returns a view of `routed`, which the next layer's call
+    overwrites, so the caller must consume it before then: `LargeStepHook`
+    adds the shared expert into a new tensor at once. One set is 22.4 MB at
+    TP4 and 21.1 MB at TP8 (the y rows dominate), where one set a layer would
+    be about 0.9 GB a rank over 40 layers."""
 
     def __init__(self, tp: int, device: torch.device):
         m, p, i = MAX_ROWS, MAX_ROWS * TOPK, MOE_INTER // tp
@@ -98,6 +100,11 @@ class LargeStepMoE:
             self.w2.data_ptr(), self.w2_s.data_ptr(), b.hq.data_ptr(),
             b.hqs.data_ptr(), wts.data_ptr(), tab, cnt, b.y.data_ptr(), st,
         )  # fmt: skip
+        # A CUDA graph padding row's picks are expert -1, which the sort drops,
+        # so the down kernel never writes their y rows: the combine sums
+        # whatever an earlier call left there. Those outputs are finite (the
+        # scratch starts zeroed and is only ever written with finite values)
+        # and the model discards padding rows, so they are not cleared.
         self.combine(b.y.data_ptr(), b.routed.data_ptr(), s, st)
         return b.routed[:s]
 
@@ -126,6 +133,9 @@ class LargeStepHook:
         self.block = LargeStepMoE(moe_layer.experts.routed_experts, tp, device)
 
     def takes(self, x: torch.Tensor) -> bool:
+        # The quantization kernels read x as bf16 bits.
+        if x.dtype != torch.bfloat16:
+            return False
         if x.dim() != 2 or not MIN_ROWS <= x.shape[0] <= MAX_ROWS:
             return False
         layer = self._layer()

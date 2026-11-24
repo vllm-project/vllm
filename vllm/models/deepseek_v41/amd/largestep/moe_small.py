@@ -3,7 +3,7 @@
 """The small launches around the gfx942 large-step stages.
 
 `build_quant_h`: bf16 rows to MXFP8 FNUZ per 32 columns, the rule of
-`quant_rows` in the tests' `dsv41_largestep_ref`. `build_combine`: each
+`quant_rows` in the tests' `dsv41_largestep_reference`. `build_combine`: each
 token's 6 weighted rows summed in f32 in top-k order, to bf16.
 """
 

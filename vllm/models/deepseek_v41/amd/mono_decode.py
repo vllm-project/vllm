@@ -545,7 +545,9 @@ class MonoDecodeLayer:
         logger.info_once("DSv4.1 mono decode: the whole standard backbone layers")
         return MonoDecodeLayer()
 
-    def build_runner(self, device: torch.device, layer=None) -> None:
+    def build_runner(
+        self, device: torch.device, layer: "DeepseekV4DecoderLayer | None" = None
+    ) -> None:
         """Build the layer's runner after loading rather than at its first
         decode step, which must not allocate, exchange handles or sync.
 
@@ -695,7 +697,8 @@ class MonoDecodeLayer:
         `max_rows` defaults to the mono decode layer's limit. The gfx942
         large-step MoE (`largestep.moe`) passes its own limit, so it takes the
         same decode-only steps above the mono limit."""
-        if not 1 <= rows <= (max_rows or _max_rows()):
+        limit = _max_rows() if max_rows is None else max_rows
+        if not 1 <= rows <= limit:
             return f"{rows} rows", None, None
         if not is_forward_context_available():
             return "no forward context", None, None

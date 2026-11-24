@@ -85,6 +85,7 @@ steps:
   - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
   - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py
+  - tests/kernels/models/amd/dsv41_largestep_reference.py
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py

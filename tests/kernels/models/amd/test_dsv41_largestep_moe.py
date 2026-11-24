@@ -37,6 +37,9 @@ STAGE1_RTOL = 5e-2  # x to MXFP8, swiglu, h to bf16: measured 3.8e-2
 STAGE2_RTOL = 3.5e-2  # h to MXFP8, down projection, a pick to bf16: 2.7e-2
 COMBINE_RTOL = 2.5e-3  # bf16 picks summed in f32, the token to bf16: 1.7e-3
 BLOCK_RTOL = 6.5e-2  # all of the above, x and h both quantized: 4.7e-2
+# The worst single row may sit above the global error: a row's error is the
+# mean of 5120 values, so its spread is small, and 1.5x the global bound holds.
+ROW_FACTOR = 1.5
 
 ROWS = [
     pytest.param(16, id="M16"),
@@ -46,6 +49,23 @@ ROWS = [
     pytest.param(256, id="M256-max"),
 ]
 TPS = [pytest.param(8, id="TP8-inter288"), pytest.param(4, id="TP4-inter576")]
+# Uniform: 6 distinct random experts a token, about 4 picks an expert at 256
+# rows. Skewed: every token picks expert 5, the other 5 from a Zipf draw, so
+# expert 5 fills up to 16 groups of 16 and the next experts fill several, as
+# real routing does.
+ROUTING = [pytest.param("uniform", id="uniform"), pytest.param("skewed", id="skewed")]
+
+
+def _routing(kind: str, rows: int, g, dev) -> torch.Tensor:
+    if kind == "uniform":
+        return torch.stack(
+            [torch.randperm(E, generator=g, device=dev)[:TOPK] for _ in range(rows)]
+        )
+    w = 1.0 / torch.arange(1, E, device=dev, dtype=torch.float64) ** 1.1
+    other = torch.multinomial(w.expand(rows, -1), TOPK - 1, generator=g)
+    other = other + (other >= 5).long()  # experts 0..383 without 5
+    five = torch.full((rows, 1), 5, device=dev, dtype=torch.long)
+    return torch.cat([five, other], 1)
 
 
 def _on_gfx942() -> bool:
@@ -61,15 +81,32 @@ needs_gfx942 = pytest.mark.skipif(
 )
 
 
+def _flydsl() -> None:
+    """The block's kernels are FlyDSL. On gfx942 a missing FlyDSL is an error,
+    not a skip, so that a CI image without it cannot pass with no test run."""
+    import flydsl  # noqa: F401
+
+
 def _rel(got: torch.Tensor, want: torch.Tensor) -> float:
     got, want = got.double(), want.double()
     return ((got - want).norm() / want.norm()).item()
 
 
+def _worst_row(got: torch.Tensor, want: torch.Tensor) -> float:
+    """The largest relative L2 error of any one row (token or pick). One wrong
+    pick moves its row by about 1 / sqrt(6) of the row or more, far above any
+    bound here, while it moves the global error only by about 1 / sqrt(rows)."""
+    got, want = got.double(), want.double()
+    return ((got - want).norm(dim=-1) / want.norm(dim=-1)).max().item()
+
+
 def _plain_weights(inter: int, dev, g):
     """Random MXFP4 expert weights in the layout vLLM loads: w13 [E, 2 Np,
     H / 2] (gate rows, then up rows, each padded to Np with zeros), w2 [E, H,
-    Np / 2], E8M0 codes 118..122 (scales 2^-9..2^-5)."""
+    Np / 2]. E8M0 codes 114..129: the DeepSeek-V4.1-Flash checkpoint's routed
+    expert codes are 119..124 (sampled over all 40 layers, 24 Nov 2026), and
+    the range is widened on both sides so that the kernels' code arithmetic is
+    checked past what the checkpoint holds."""
     np_ = -(-inter // 128) * 128
     u8 = torch.uint8
 
@@ -77,9 +114,9 @@ def _plain_weights(inter: int, dev, g):
         return torch.randint(lo, hi, shape, generator=g, device=dev, dtype=u8)
 
     w13 = ri(0, 256, (E, 2 * np_, HID // 2))
-    w13_s = ri(118, 123, (E, 2 * np_, HID // 32))
+    w13_s = ri(114, 130, (E, 2 * np_, HID // 32))
     w2 = ri(0, 256, (E, HID, np_ // 2))
-    w2_s = ri(118, 123, (E, HID, np_ // 32))
+    w2_s = ri(114, 130, (E, HID, np_ // 32))
     for half in (0, np_):
         w13[:, half + inter : half + np_] = 0
     w2[..., inter // 2 :] = 0
@@ -98,8 +135,8 @@ class _Case:
     """One TP share's weights, inputs and routing, plus `LargeStepMoE` built
     the way the model builds it."""
 
-    def __init__(self, tp: int, rows: int, seed: int):
-        pytest.importorskip("flydsl")
+    def __init__(self, tp: int, rows: int, seed: int, routing: str = "uniform"):
+        _flydsl()
         from vllm.models.deepseek_v41.amd.largestep.moe import LargeStepMoE
         from vllm.models.deepseek_v41.amd.mono.weights942 import moe_copies
 
@@ -114,9 +151,7 @@ class _Case:
         self.x = (torch.randn(rows, HID, generator=g, device=dev) * 0.5).to(
             torch.bfloat16
         )
-        self.topk = torch.stack(
-            [torch.randperm(E, generator=g, device=dev)[:TOPK] for _ in range(rows)]
-        )
+        self.topk = _routing(routing, rows, g, dev)
         self.tw = torch.rand(rows, TOPK, generator=g, device=dev) * 0.5
         self.picks = rows * TOPK
 
@@ -124,27 +159,57 @@ class _Case:
 @needs_gfx942
 @pytest.mark.parametrize("tp", TPS)
 @pytest.mark.parametrize("rows", ROWS)
-def test_block_matches_fp64_reference(tp: int, rows: int):
+@pytest.mark.parametrize("routing", ROUTING)
+def test_block_matches_fp64_reference(tp: int, rows: int, routing: str):
     """`LargeStepMoE` as the model calls it (pick sort, x quantization, both
     stages, combine, shared scratch) against the float64 reference."""
-    c = _Case(tp, rows, seed=1000 + rows + tp)
+    c = _Case(tp, rows, seed=1000 + rows + tp, routing=routing)
     got = c.block(c.x, c.topk, c.tw)
     torch.accelerator.synchronize()
     want = R.routed_fp64(c.x, c.w13, c.w13_s, c.w2, c.w2_s, c.topk, c.tw, c.inter)
     assert torch.isfinite(got).all()
-    err = _rel(got, want)
-    print(f"block {tp=} {rows=}: rel L2 {err:.3e}")
+    err, row = _rel(got, want), _worst_row(got, want)
+    print(f"block {tp=} {rows=} {routing}: rel L2 {err:.3e}, worst row {row:.3e}")
     assert err < BLOCK_RTOL, f"relative L2 {err:.3e}"
+    assert row < ROW_FACTOR * BLOCK_RTOL, f"worst row {row:.3e}"
+
+
+@needs_gfx942
+@pytest.mark.parametrize("tp", TPS)
+@pytest.mark.parametrize(
+    ("rows", "pad"),
+    [
+        pytest.param(45, 3, id="M45-pad3-to-48"),
+        pytest.param(50, 6, id="M50-pad6-to-56"),
+        pytest.param(250, 6, id="M250-pad6-to-max"),
+    ],
+)
+def test_block_padding_rows_change_nothing(tp: int, rows: int, pad: int):
+    """A CUDA graph step padded with rows the router marks expert -1 in every
+    pick (VLLM_MOE_SKIP_PADDING) gives the real rows bit for bit what the
+    unpadded call gives: the sort drops the padding picks, so stage 1, stage 2
+    and the combine never read them. The padding rows' outputs are not
+    checked: the model discards them."""
+    c = _Case(tp, rows, seed=5000 + rows + tp, routing="skewed")
+    want = c.block(c.x, c.topk, c.tw).clone()
+    g = torch.Generator(device=c.dev).manual_seed(rows)
+    xp = torch.cat([c.x, torch.randn(pad, HID, generator=g, device=c.dev).bfloat16()])
+    ids = torch.cat([c.topk, torch.full((pad, TOPK), -1, device=c.dev)])
+    wts = torch.cat([c.tw, torch.zeros(pad, TOPK, device=c.dev)])
+    got = c.block(xp, ids, wts)
+    torch.accelerator.synchronize()
+    assert torch.equal(got[:rows], want)
 
 
 @needs_gfx942
 @pytest.mark.parametrize("tp", TPS)
 @pytest.mark.parametrize("rows", ROWS)
-def test_stage_ug_matches_fp64_reference(tp: int, rows: int):
+@pytest.mark.parametrize("routing", ROUTING)
+def test_stage_ug_matches_fp64_reference(tp: int, rows: int, routing: str):
     """Stage 1 alone (`moe_ug`): h = swiglu(W_gate x, W_up x) of each pick.
     The kernel reads x as MXFP8 bytes, so its quantization is part of this
     stage's error."""
-    c = _Case(tp, rows, seed=2000 + rows + tp)
+    c = _Case(tp, rows, seed=2000 + rows + tp, routing=routing)
     b = c.block
     s = b.scratch
     st = torch.cuda.current_stream()
@@ -159,19 +224,21 @@ def test_stage_ug_matches_fp64_reference(tp: int, rows: int):
     got = s.h[: c.picks]
     want = R.stage1_fp64(c.x, c.w13, c.w13_s, c.topk, c.inter)
     assert torch.isfinite(got).all()
-    err = _rel(got, want)
-    print(f"stage ug {tp=} {rows=}: rel L2 {err:.3e}")
+    err, row = _rel(got, want), _worst_row(got, want)
+    print(f"stage ug {tp=} {rows=} {routing}: rel L2 {err:.3e}, worst row {row:.3e}")
     assert err < STAGE1_RTOL, f"relative L2 {err:.3e}"
+    assert row < ROW_FACTOR * STAGE1_RTOL, f"worst row {row:.3e}"
 
 
 @needs_gfx942
 @pytest.mark.parametrize("tp", TPS)
 @pytest.mark.parametrize("rows", ROWS)
-def test_stage_down_matches_fp64_reference(tp: int, rows: int):
+@pytest.mark.parametrize("routing", ROUTING)
+def test_stage_down_matches_fp64_reference(tp: int, rows: int, routing: str):
     """The h quantization and stage 2 (`quant_h`, `moe_down`) on a given h: each
     pick's routing weight x W_down h. The reference takes the same bf16 h, so
     only this stage's error is measured."""
-    c = _Case(tp, rows, seed=3000 + rows + tp)
+    c = _Case(tp, rows, seed=3000 + rows + tp, routing=routing)
     b = c.block
     s = b.scratch
     st = torch.cuda.current_stream()
@@ -196,9 +263,10 @@ def test_stage_down_matches_fp64_reference(tp: int, rows: int):
     got = s.y[: c.picks]
     want = R.stage2_fp64(h, c.w2, c.w2_s, c.topk, c.tw, c.inter)
     assert torch.isfinite(got).all()
-    err = _rel(got, want)
-    print(f"stage down {tp=} {rows=}: rel L2 {err:.3e}")
+    err, row = _rel(got, want), _worst_row(got, want)
+    print(f"stage down {tp=} {rows=} {routing}: rel L2 {err:.3e}, worst row {row:.3e}")
     assert err < STAGE2_RTOL, f"relative L2 {err:.3e}"
+    assert row < ROW_FACTOR * STAGE2_RTOL, f"worst row {row:.3e}"
 
 
 @needs_gfx942
@@ -214,9 +282,10 @@ def test_stage_combine_matches_fp64_reference(rows: int):
     b.combine(s.y.data_ptr(), s.routed.data_ptr(), rows, torch.cuda.current_stream())
     torch.accelerator.synchronize()
     want = y.double().view(rows, TOPK, HID).sum(1)
-    err = _rel(s.routed[:rows], want)
-    print(f"combine {rows=}: rel L2 {err:.3e}")
+    err, row = _rel(s.routed[:rows], want), _worst_row(s.routed[:rows], want)
+    print(f"combine {rows=}: rel L2 {err:.3e}, worst row {row:.3e}")
     assert err < COMBINE_RTOL, f"relative L2 {err:.3e}"
+    assert row < ROW_FACTOR * COMBINE_RTOL, f"worst row {row:.3e}"
 
 
 @needs_gfx942
@@ -233,7 +302,7 @@ def test_pick_sort_matches_reference_table(rows: int):
     """The GPU pick sort (`moe_sort`) writes the table and group count of
     `pick_groups` exactly. Every token picks expert 5 first, so expert 5 has
     `rows` picks and more than one group of 16 from 17 rows on."""
-    pytest.importorskip("flydsl")
+    _flydsl()
     from vllm.models.deepseek_v41.amd.largestep.moe_sort import build_moe_sort
 
     dev = torch.device("cuda:0")
@@ -273,7 +342,7 @@ def test_pick_sort_skips_padding_rows(rows: int, pad: int):
     router with expert -1 in every pick (VLLM_MOE_SKIP_PADDING). The sort
     leaves them out: the table and count equal those of the real rows alone,
     and no word past the table's groups is written."""
-    pytest.importorskip("flydsl")
+    _flydsl()
     from vllm.models.deepseek_v41.amd.largestep.moe_sort import build_moe_sort
 
     dev = torch.device("cuda:0")
@@ -305,7 +374,7 @@ def test_pick_sort_skips_padding_rows(rows: int, pad: int):
 def test_quant_x_matches_reference_bytes(rows: int):
     """`moe_xq.build_quant_x` writes the bytes and codes of `quant_rows`
     exactly, including an all-zero 32-value block (amax floor 1e-10)."""
-    pytest.importorskip("flydsl")
+    _flydsl()
     from vllm.models.deepseek_v41.amd.largestep.moe_xq import build_quant_x
 
     dev = torch.device("cuda:0")
@@ -356,9 +425,17 @@ def test_takes_decode_only_steps(rows, prefills, decodes, decode_tokens, takes):
     fc = ForwardContext.__new__(ForwardContext)
     fc.attn_metadata = {"l.swa": swa}  # type: ignore[dict-item]
     fc.cudagraph_runtime_mode = CUDAGraphMode.FULL
-    x = torch.empty(rows, 8)
+    x = torch.empty(rows, 8, dtype=torch.bfloat16)
     with override_forward_context(fc):
         assert hook.takes(x) is takes
+    # A PIECEWISE graph is replayed for mixed batches too: never the block.
+    fc.cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
+    with override_forward_context(fc):
+        assert hook.takes(x) is False
+    # The kernels read x as bf16 bits: any other dtype takes the original path.
+    fc.cudagraph_runtime_mode = CUDAGraphMode.FULL
+    with override_forward_context(fc):
+        assert hook.takes(x.half()) is False
     # No forward context (a profile or dummy run): the original path.
     with override_forward_context(None):
         assert hook.takes(x) is False

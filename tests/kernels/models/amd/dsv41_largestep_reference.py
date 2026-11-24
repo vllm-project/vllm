@@ -23,7 +23,6 @@ EXPERTS = 384
 TOPK = 6
 HIDDEN = 5120
 LIMIT = 10.0  # swiglu_limit
-ROUTE_SCALE = 1.5  # route_scale
 GROUP = 16  # picks a group in the kernels' table
 
 # 8-value chunk order of the kernels' MXFP8 bytes: even K first, then odd.
@@ -214,12 +213,3 @@ def quant_rows(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     b = torch.where(b == 0x80, torch.zeros_like(b), b)
     b = b.view(s, h // 8, 8)[..., EVEN_ODD].reshape(s, h)
     return b.contiguous(), (code + 1).to(torch.uint8)
-
-
-def dequant_rows(b: torch.Tensor, codes: torch.Tensor) -> torch.Tensor:
-    """`quant_rows`' output back to float64 values in natural K order."""
-    s, h = b.shape
-    inv = torch.argsort(torch.tensor(EVEN_ODD))
-    nat = b.view(s, h // 8, 8)[..., inv].reshape(s, h)
-    vals = nat.view(torch.float8_e4m3fnuz).double().view(s, h // 32, 32)
-    return (vals * torch.exp2(codes.double() - 127.0)[..., None]).view(s, h)
