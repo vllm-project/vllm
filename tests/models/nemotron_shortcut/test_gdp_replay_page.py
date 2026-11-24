@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from vllm.config import CacheConfig, VllmConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.abstract import get_mamba_num_speculative_blocks
 from vllm.models.nemotron_shortcut.nvidia import gdp as gdp_module
 from vllm.models.nemotron_shortcut.nvidia import gdp_replay as gdp_replay_module
@@ -247,3 +248,13 @@ def test_replayssm_selects_gdp_replay_only_on_gdp_models(
     config = _vllm_config(heads=heads)
     config.cache_config.use_replayssm = use_replayssm
     assert VllmConfig.use_gdp_replay.fget(config) is expected
+
+
+@pytest.mark.parametrize("heads,expected", [(16, False), (None, True)])
+def test_gdp_replay_stays_off_the_mamba2_flashinfer_replay(heads, expected):
+    """`--mamba-backend flashinfer` selects Mamba-2's FlashInfer ReplaySSM
+    (its page alignment and autotune runs) only on models without GDP layers."""
+    config = _vllm_config(heads=heads)
+    config.mamba_config = SimpleNamespace(backend=MambaBackendEnum.FLASHINFER)
+    config.use_gdp_replay = VllmConfig.use_gdp_replay.fget(config)
+    assert VllmConfig.use_flashinfer_replayssm.fget(config) is expected

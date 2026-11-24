@@ -638,15 +638,23 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
 
         num_decode_tokens = md.num_decode_tokens
         if md.num_decodes > 0:
-            # One token per row: only warmup batches decode without spec rows.
+            # One token per row. With spec decode on, decoding rows are spec
+            # rows, so only warmup batches get here; still commit what each
+            # row's previous step accepted, not an assumed single token.
             assert md.non_spec_state_indices_tensor is not None
             batch = md.num_decodes
+            device = projected.device
+            num_accepted = (
+                md.num_accepted_tokens[:batch]
+                if md.num_accepted_tokens is not None
+                else torch.ones(batch, dtype=torch.int32, device=device)
+            )
             step = self._replay_step(
                 md,
                 commits,
                 md.non_spec_state_indices_tensor[:batch],
-                torch.arange(batch + 1, dtype=torch.int32, device=projected.device),
-                torch.ones(batch, dtype=torch.int32, device=projected.device),
+                torch.arange(batch + 1, dtype=torch.int32, device=device),
+                num_accepted,
                 tokens=1,
                 num_rows=num_decode_tokens,
             )

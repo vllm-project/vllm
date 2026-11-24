@@ -670,6 +670,8 @@ class VllmConfig:
         return (
             self.cache_config.use_replayssm
             and self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+            # GDP replay runs its own FlashInfer op, not Mamba-2 ReplaySSM.
+            and not self.use_gdp_replay
         )
 
     @property

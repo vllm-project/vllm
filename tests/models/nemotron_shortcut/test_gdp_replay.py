@@ -353,7 +353,12 @@ def test_ragged_windows_are_padded_for_the_op(forward_context, fake_op):
     assert torch.equal(core_out, full[[0, 1, 2, 3, 4]])
 
 
-def test_decode_and_prefill_rows_without_spec(forward_context, fake_op, monkeypatch):
+@pytest.mark.parametrize("accepted,hist_len", [(None, 3), (2, 4)])
+def test_decode_and_prefill_rows_without_spec(
+    forward_context, fake_op, monkeypatch, accepted, hist_len
+):
+    """A plain decode row commits what its previous step accepted: one token
+    without drafts (no counts in the metadata), else the given count."""
     first, _ = _replay_group(num_spec=0)
     trackers = first.gdp_replay_trackers
     trackers.hist_len[7], trackers.prev_query_len[7] = 4, 1
@@ -374,6 +379,9 @@ def test_decode_and_prefill_rows_without_spec(forward_context, fake_op, monkeypa
         prefill_query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
         prefill_state_indices=torch.tensor([7], dtype=torch.int32),
         prefill_has_initial_state=torch.tensor([False]),
+        num_accepted_tokens=(
+            None if accepted is None else torch.tensor([accepted, 1], dtype=torch.int32)
+        ),
     )
     trackers.hist_len[5], trackers.prev_query_len[5] = 2, 1
 
@@ -381,11 +389,11 @@ def test_decode_and_prefill_rows_without_spec(forward_context, fake_op, monkeypa
 
     (args, kwargs) = fake_op.calls[0]
     assert args[0].size(0) == 1 and args[4].tolist() == [5]
-    assert args[12].tolist() == [3] and args[13].tolist() == [1]
+    assert args[12].tolist() == [hist_len] and args[13].tolist() == [1]
     (prefill_args,) = prefill_calls
     assert prefill_args[7].tolist() == [7] and prefill_args[9] is None
     # Prefilled block 7 starts over; decoded block 5 kept its history.
-    assert trackers.hist_len[[5, 7]].tolist() == [3, 0]
+    assert trackers.hist_len[[5, 7]].tolist() == [hist_len, 0]
     assert trackers.prev_query_len[7] == 0
     assert torch.all(core_out[1:] == 7.0)
 
