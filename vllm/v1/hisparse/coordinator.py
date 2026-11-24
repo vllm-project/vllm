@@ -1127,9 +1127,10 @@ class HiSparseCoordinator:
                 row_dropped.append(page_idx)
         if released:
             self.gpu_pool.unpin_blocks(released, self._reuse_watcher)
-        self.gpu_pool.deprioritize_blocks(
-            block for block in reclaimable if block.block_id not in self._owners
-        )
+        if reclaimable:
+            self.gpu_pool.deprioritize_blocks(
+                block for block in reclaimable if block.block_id not in self._owners
+            )
         for manager, row_dropped in zip(self.resident_managers, dropped):
             manager.drop_resident_pages(request_id, row_dropped)
 
