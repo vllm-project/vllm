@@ -210,7 +210,12 @@ class Inkling2DecoderLayer(nn.Module):
             if quant_config is not None and quant_config.is_mxfp8_layer(layer_id)
             else "nvfp4"
         )
-        self.mlp = Inkling2MoE(config, expert_format, config.layer_visit_ids(layer_id))
+        self.mlp = Inkling2MoE(
+            config,
+            expert_format,
+            config.layer_visit_ids(layer_id),
+            prefix=f"{prefix}.mlp",
+        )
         self.attn_sconv, self.mlp_sconv = (
             Inkling2ShortConv(
                 config.hidden_size, config.sconv_kernel_size, self.conv_state, stream
