@@ -67,6 +67,39 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
     --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
 ```
 
+## Reduced draft vocabulary
+
+MTP heads usually share the target's lm_head, so every draft token reads the
+full vocabulary. On bandwidth-bound GPUs with large vocabularies this is a large
+share of the draft step. `draft_token_map` restricts the drafter to a list of
+frequent token ids, and `draft_token_map_dynamic_rows` adds, per draft token,
+the rows a rank-256 projection of the lm_head scores highest:
+
+```bash
+vllm serve <mtp-model> \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 3,
+                           "draft_token_map": "draft_vocab_32k.pt",
+                           "draft_token_map_dynamic_rows": 16384}'
+```
+
+- Only drafting changes: the target verifies with its full lm_head, so outputs
+  follow the usual speculative decoding guarantees.
+- The list is SGLang's `--speculative-token-map` file (`.pt`) or a JSON list of
+  ids, for example the most frequent ids in text the model generated. EOS ids
+  are always added.
+- Requires Model Runner V2, an MTP drafter that shares the target's lm_head
+  (Qwen3.5, Qwen4Exp, NemotronH) and tensor parallel size 1.
+- A lm_head quantized in the checkpoint (for example ModelOpt NVFP4) keeps its
+  format: the listed rows are cut from the checkpoint tensors and run on the
+  head's own kernel. This needs a drafter that loads the lm_head itself
+  (Qwen3.5 MTP); dynamic rows need the ModelOpt NVFP4 format, and
+  `draft_lm_head_quantization` is rejected.
+- The dynamic rows are read per draft token, so the gain shrinks with batch
+  size. Measure decode speed and acceptance length at your concurrency.
+- With `draft_lm_head_quantization` (see the notes below), only the listed and
+  picked rows are quantized, not a full copy of the head: the listed rows like
+  that copy, the picked rows weight-only.
+
 ## Notes
 
 - MTP only works for model families that support MTP in vLLM.
