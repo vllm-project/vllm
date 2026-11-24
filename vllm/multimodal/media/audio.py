@@ -3,6 +3,7 @@
 import math
 from collections.abc import Callable
 from io import BytesIO
+from itertools import chain
 from pathlib import Path
 
 import numpy as np
@@ -178,6 +179,7 @@ def load_audio_pyav(
 
         max_samples = int(sr * max_duration_s) if max_duration_s is not None else None
         total_samples = 0
+        total_input_samples = 0
         total_decode_bytes = 0
 
         chunks: list[npt.NDArray] = []
@@ -193,15 +195,18 @@ def load_audio_pyav(
             else None
         )
         try:
-            for frame in container.decode(stream):
+            # A final None drains the resampler's delayed output.
+            for frame in chain(container.decode(stream), (None,)):
                 if needs_resampling:
                     assert resampler is not None
+                    if frame is not None:
+                        total_input_samples += frame.samples
                     for out_frame in resampler.resample(frame):
                         arr = out_frame.to_ndarray()
                         total_samples += arr.shape[-1]
                         total_decode_bytes += arr.nbytes
                         chunks.append(arr)
-                else:
+                elif frame is not None:
                     arr = frame.to_ndarray()
                     total_samples += arr.shape[-1]
                     total_decode_bytes += arr.nbytes
@@ -237,6 +242,15 @@ def load_audio_pyav(
         raise ValueError("No audio found in the input.")
 
     audio = np.concatenate(chunks, axis=-1).astype(np.float32)
+    if needs_resampling:
+        # Pin the length to the input so it does not depend on how many
+        # samples a given libswresample build emits around the flush.
+        expected_samples = math.ceil(total_input_samples * sr / native_sr)
+        audio = audio[..., :expected_samples]
+        shortfall = expected_samples - audio.shape[-1]
+        if shortfall > 0:
+            pad_width = [(0, 0)] * (audio.ndim - 1) + [(0, shortfall)]
+            audio = np.pad(audio, pad_width)
     if mono and audio.ndim > 1:
         audio = np.mean(audio, axis=0)
 

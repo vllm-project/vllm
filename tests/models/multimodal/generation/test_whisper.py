@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
+from io import BytesIO
 from typing import Any
 
+import numpy as np
 import pytest
+import soundfile as sf
 import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoTokenizer
 
@@ -12,7 +15,8 @@ from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.config.speech_to_text import SpeechToTextConfig, SpeechToTextParams
 from vllm.model_executor.models.whisper import WhisperForConditionalGeneration
-from vllm.multimodal.audio import AudioResampler
+from vllm.multimodal.audio import AudioResampler, resample_audio_pyav
+from vllm.multimodal.media.audio import load_audio
 from vllm.platforms import current_platform
 
 from ....conftest import HfRunner, PromptAudioInput, VllmRunner
@@ -128,6 +132,46 @@ def check_model_available(model: str) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
+
+
+@pytest.mark.core_model
+def test_pyav_resampled_audio_preserves_whisper_input(vllm_runner):
+    """Decode the complete resampled waveform before Whisper inference."""
+    audio, sample_rate = AudioAsset("mary_had_lamb").audio_and_sample_rate
+    source = resample_audio_pyav(audio, orig_sr=sample_rate, target_sr=48000)
+    reference_audio = resample_audio_pyav(
+        source, orig_sr=48000, target_sr=WHISPER_SAMPLE_RATE
+    )
+    buffer = BytesIO()
+    sf.write(buffer, source, 48000, format="WAV", subtype="FLOAT")
+    buffer.seek(0)
+    decoded, sample_rate = load_audio(buffer, sr=WHISPER_SAMPLE_RATE, backend="pyav")
+
+    with vllm_runner(
+        "openai/whisper-tiny",
+        dtype="float32",
+        max_model_len=448,
+        max_num_batched_tokens=2048,
+        max_num_seqs=1,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        mm_processor_cache_gb=0,
+    ) as vllm_model:
+        reference = vllm_model.generate_greedy_logprobs(
+            [VLLM_PROMPT], 16, num_logprobs=5, audios=[reference_audio]
+        )
+        result = vllm_model.generate_greedy_logprobs(
+            [VLLM_PROMPT], 16, num_logprobs=5, audios=[(decoded, sample_rate)]
+        )
+
+    np.testing.assert_array_equal(decoded, reference_audio)
+    assert result[0][0]
+    check_logprobs_close(
+        outputs_0_lst=reference,
+        outputs_1_lst=result,
+        name_0="complete waveform",
+        name_1="PyAV loader",
+    )
 
 
 @pytest.mark.core_model
