@@ -605,3 +605,388 @@ def triton_ihc_post(
         enable_fp_fusion=False,
     )
     return output
+
+
+@triton.jit
+def _ihc_post_pre_split_k(
+    x_ptr,
+    residual_ptr,
+    attn_post_ptr,
+    weight_ptr,
+    y_ptr,
+    partial_ptr,
+    HIDDEN_SIZE: tl.constexpr,
+    K_TOTAL: tl.constexpr,
+    HC_MULT: tl.constexpr,
+    TWO_HC_POW2: tl.constexpr,
+    NUM_SPLITS: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    PARTIAL_STRIDE: tl.constexpr,
+):
+    token = tl.program_id(0).to(tl.int64)
+    split = tl.program_id(1)
+    k = split * BLOCK_K + tl.arange(0, BLOCK_K)
+    mask = k < K_TOTAL
+    channel = k // HIDDEN_SIZE
+    gate = tl.load(attn_post_ptr + token * HC_MULT + channel, mask=mask, other=0.0)
+    x = tl.load(x_ptr + token * HIDDEN_SIZE + k % HIDDEN_SIZE, mask=mask, other=0.0).to(
+        tl.float32
+    )
+    residual = tl.load(residual_ptr + token * K_TOTAL + k, mask=mask, other=0.0).to(
+        tl.float32
+    )
+    y = (gate * x + residual).to(y_ptr.dtype.element_ty)
+    tl.store(y_ptr + token * K_TOTAL + k, y, mask=mask)
+    y = y.to(tl.float32)
+    rows = tl.arange(0, TWO_HC_POW2)
+    weight = tl.load(
+        weight_ptr + rows[:, None] * K_TOTAL + k[None, :],
+        mask=(rows[:, None] < 2 * HC_MULT) & mask[None, :],
+        other=0.0,
+    )
+    mixes = tl.sum(weight * y[None, :], axis=1)
+    partial = partial_ptr + (token * NUM_SPLITS + split) * PARTIAL_STRIDE
+    tl.store(partial, tl.sum(y * y, axis=0))
+    tl.store(partial + 1 + rows, mixes, mask=rows < 2 * HC_MULT)
+
+
+@triton.jit
+def _ihc_post_pre_projection(
+    x_ptr,
+    residual_ptr,
+    gates_ptr,
+    weight_ptr,
+    y_ptr,
+    partial_ptr,
+    N,
+    D: tl.constexpr,
+    BM: tl.constexpr,
+    BK: tl.constexpr,
+    SPLITS: tl.constexpr,
+    STAGES: tl.constexpr,
+):
+    tokens = tl.program_id(0).to(tl.int64) * BM + tl.arange(0, BM)
+    split = tl.program_id(1)
+    rows = tl.arange(0, 16)
+    squares = tl.zeros((BM,), tl.float32)
+    mixes = tl.zeros((BM, 16), tl.float64)
+    for off in tl.range(0, D // SPLITS, BK, num_stages=STAGES):
+        d = split * (D // SPLITS) + off + tl.arange(0, BK)
+        x = tl.load(
+            x_ptr + tokens[:, None] * D + d[None, :],
+            mask=(tokens[:, None] < N) & (d[None, :] < D),
+            other=0.0,
+        ).to(tl.float32)
+        for c in tl.range(0, 4, loop_unroll_factor=1):
+            gate = tl.load(gates_ptr + tokens * 4 + c, mask=tokens < N, other=0.0)
+            residual = tl.load(
+                residual_ptr + (tokens[:, None] * 4 + c) * D + d[None, :],
+                mask=(tokens[:, None] < N) & (d[None, :] < D),
+                other=0.0,
+            ).to(tl.float32)
+            y = (gate[:, None] * x + residual).to(y_ptr.dtype.element_ty)
+            tl.store(
+                y_ptr + (tokens[:, None] * 4 + c) * D + d[None, :],
+                y,
+                mask=(tokens[:, None] < N) & (d[None, :] < D),
+            )
+            y = y.to(tl.float32)
+            squares += tl.sum(y * y, axis=1)
+            offset = rows[None, :] * 4 * D + c * D + d[:, None]
+            valid = (rows[None, :] < 8) & (d[:, None] < D)
+            w_hi = tl.load(weight_ptr + offset, mask=valid, other=0.0)
+            w_lo = tl.load(weight_ptr + 8 * 4 * D + offset, mask=valid, other=0.0)
+            w_tail = tl.load(weight_ptr + 2 * 8 * 4 * D + offset, mask=valid, other=0.0)
+            mixes += tl.dot(y.to(tl.bfloat16), w_hi).to(tl.float64)
+            mixes += tl.dot(y.to(tl.bfloat16), w_lo).to(tl.float64)
+            mixes += tl.dot(y.to(tl.bfloat16), w_tail).to(tl.float64)
+    partial = partial_ptr + (tokens * SPLITS + split) * 9
+    tl.store(partial, squares, mask=tokens < N)
+    tl.store(
+        partial[:, None] + 1 + rows[None, :],
+        mixes,
+        mask=(tokens[:, None] < N) & (rows[None, :] < 8),
+    )
+
+
+@triton.jit
+def _ihc_pack_weight(w_ptr, out_ptr, K: tl.constexpr, BLOCK: tl.constexpr):
+    off = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    w = tl.load(w_ptr + off, mask=off < K, other=0.0)
+    hi = w.to(tl.bfloat16)
+    lo = (w - hi.to(tl.float32)).to(tl.bfloat16)
+    tail = (w - hi.to(tl.float32) - lo.to(tl.float32)).to(tl.bfloat16)
+    tl.store(out_ptr + off, hi, mask=off < K)
+    tl.store(out_ptr + K + off, lo, mask=off < K)
+    tl.store(out_ptr + 2 * K + off, tail, mask=off < K)
+
+
+@triton.jit
+def _ihc_post_pre_stage2(
+    y_ptr,
+    sumsq_ptr,
+    scale_ptr,
+    base_ptr,
+    norm_weight_ptr,
+    output_ptr,
+    post_ptr,
+    N,
+    HIDDEN_SIZE: tl.constexpr,
+    HC_MULT: tl.constexpr,
+    HC_POW2: tl.constexpr,
+    NUM_SPLITS: tl.constexpr,
+    BLOCK_S: tl.constexpr,
+    PARTIAL_STRIDE: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    MAGNITUDE: tl.constexpr,
+    HC_EPS: tl.constexpr,
+    NORM_EPS: tl.constexpr,
+    FUSE_NORM: tl.constexpr,
+    RMS_EPS: tl.constexpr,
+):
+    token = tl.program_id(0).to(tl.int64)
+    hidden_block = tl.program_id(1)
+    splits = tl.arange(0, BLOCK_S)
+    rows = tl.arange(0, 2 * HC_POW2)
+    partial = sumsq_ptr + (token * NUM_SPLITS + splits) * PARTIAL_STRIDE
+    squares = tl.load(partial, mask=splits < NUM_SPLITS, other=0.0)
+    mixes = tl.load(
+        partial[:, None] + 1 + rows[None, :],
+        mask=(splits[:, None] < NUM_SPLITS) & (rows[None, :] < 2 * HC_MULT),
+        other=0.0,
+    )
+    mixes = tl.sum(mixes, axis=0).to(tl.float32)
+    inv_rms = tl.rsqrt(
+        tl.sum(squares, axis=0).to(tl.float32) / (HC_MULT * HIDDEN_SIZE) + NORM_EPS
+    )
+    hc = tl.arange(0, HC_POW2)
+    pre_mix = tl.sum(tl.where(rows[None, :] == hc[:, None], mixes[None, :], 0), 1)
+    post_mix = tl.sum(
+        tl.where(rows[None, :] == hc[:, None] + HC_MULT, mixes[None, :], 0), 1
+    )
+    pre = (
+        tl.sigmoid(
+            pre_mix * inv_rms * tl.load(scale_ptr)
+            + tl.load(base_ptr + hc, mask=hc < HC_MULT, other=0.0)
+        )
+        + HC_EPS
+    )
+    if hidden_block == 0:
+        post = (
+            MAGNITUDE
+            * tl.sigmoid(
+                post_mix * inv_rms * tl.load(scale_ptr + 1)
+                + tl.load(base_ptr + HC_MULT + hc, mask=hc < HC_MULT, other=0.0)
+            )
+            + HC_EPS
+        )
+        tl.store(post_ptr + token * HC_MULT + hc, post, mask=hc < HC_MULT)
+    d = hidden_block * BLOCK_D + tl.arange(0, BLOCK_D)
+    output = tl.zeros((BLOCK_D,), dtype=tl.float32)
+    for channel in tl.static_range(HC_MULT):
+        y = tl.load(
+            y_ptr + (token * HC_MULT + channel) * HIDDEN_SIZE + d,
+            mask=d < HIDDEN_SIZE,
+            other=0.0,
+        ).to(tl.float32)
+        gate = tl.sum(tl.where(hc == channel, pre, 0.0), axis=0)
+        output += gate * y
+    output = output.to(output_ptr.dtype.element_ty).to(tl.float32)
+    if FUSE_NORM:
+        squares = tl.where(d < HIDDEN_SIZE, output * output, 0.0)
+        inv_rms = tl.rsqrt(tl.sum(squares, axis=0) / HIDDEN_SIZE + RMS_EPS)
+        norm_weight = tl.load(norm_weight_ptr + d, mask=d < HIDDEN_SIZE, other=0.0).to(
+            tl.float32
+        )
+        output = output * inv_rms * norm_weight
+    tl.store(output_ptr + token * HIDDEN_SIZE + d, output, mask=d < HIDDEN_SIZE)
+
+
+@triton.jit
+def _ihc_rms_norm(
+    x_ptr,
+    weight_ptr,
+    output_ptr,
+    D: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    EPS: tl.constexpr,
+):
+    token = tl.program_id(0).to(tl.int64)
+    d = tl.arange(0, BLOCK_D)
+    x = tl.load(x_ptr + token * D + d, mask=d < D, other=0.0).to(tl.float32)
+    weight = tl.load(weight_ptr + d, mask=d < D, other=0.0).to(tl.float32)
+    inv_rms = tl.rsqrt(tl.sum(x * x, axis=0) / D + EPS)
+    tl.store(output_ptr + token * D + d, x * inv_rms * weight, mask=d < D)
+
+
+def triton_ihc_post_pre_supported(x: torch.Tensor) -> bool:
+    """Use the measured fused schedule for the input shape and device."""
+    return (
+        triton_ihc_supported(x)
+        and x.ndim == 2
+        and 0 < x.shape[-1] <= 8192
+        and (
+            x.shape[0] <= 512
+            or (
+                x.dtype == torch.bfloat16
+                and x.shape[-1] == 3072
+                and _is_h100(x.device.index)
+            )
+        )
+    )
+
+
+def triton_ihc_post_pre(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    attn_post: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    magnitude: float,
+    hc_eps: float,
+    norm_eps: float,
+    norm_weight: torch.Tensor | None = None,
+    rms_eps: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fuse post, the next pre, and optional RMSNorm.
+
+    Returns the updated residual, reduced (optionally normalized) activation,
+    and the next post gates, in the same order as `hpc.fuse_ihc_post_pre`.
+    Post and pre outputs round to the activation dtype before the next step.
+    Large BF16 H100 batches reuse projection weights across token tiles.
+    """
+    assert x.ndim == 2 and residual.ndim == 3 and attn_post.ndim == 2
+    assert x.dtype in (torch.float16, torch.bfloat16)
+    assert residual.dtype == x.dtype and attn_post.dtype == torch.float32
+    n, d = x.shape
+    hc = residual.shape[1]
+    assert hc > 0 and d > 0
+    assert residual.shape == (n, hc, d) and attn_post.shape == (n, hc)
+    assert weight.shape == (2 * hc, hc * d)
+    assert scale.shape == (2,) and base.shape == (2 * hc,)
+    assert all(t.dtype == torch.float32 for t in (weight, scale, base))
+    tensors = (x, residual, attn_post, weight, scale, base)
+    assert all(t.is_cuda and t.device == x.device for t in tensors)
+    if norm_weight is not None:
+        assert norm_weight.shape == (d,)
+        assert norm_weight.dtype in (x.dtype, torch.float32)
+        assert norm_weight.device == x.device
+        norm_weight = norm_weight.contiguous()
+    x, residual, attn_post, weight, scale, base = (t.contiguous() for t in tensors)
+    use_projection = (
+        n >= 1024
+        and hc == 4
+        and d == 3072
+        and x.dtype == torch.bfloat16
+        and _is_h100(x.device.index)
+    )
+    if n > 512 and not use_projection and hc & (hc - 1) == 0:
+        y = triton_ihc_post(x, residual, attn_post)
+        reduced, post = triton_ihc_pre(
+            y, weight, scale, base, magnitude, hc_eps, norm_eps
+        )
+        if norm_weight is None:
+            return y, reduced, post
+        output = torch.empty_like(reduced)
+        _ihc_rms_norm[(n,)](
+            reduced,
+            norm_weight,
+            output,
+            d,
+            triton.next_power_of_2(d),
+            rms_eps,
+            num_warps=4,
+            enable_fp_fusion=False,
+        )
+        return y, output, post
+    y = torch.empty((n, hc, d), dtype=x.dtype, device=x.device)
+    output = torch.empty((n, d), dtype=x.dtype, device=x.device)
+    post = torch.empty((n, hc), dtype=torch.float32, device=x.device)
+    if n == 0:
+        return y, output, post
+    k = hc * d
+    hc_pow2 = triton.next_power_of_2(hc)
+    block_d = triton.next_power_of_2(d) if norm_weight is not None else 1024
+    partial_stride = 1 + 2 * hc
+    if use_projection:
+        block_m = 32
+        block_k = 64
+        if n < 4096:
+            splits = 12 if n < 2048 else 6
+        elif n < 8192:
+            splits = 12
+        else:
+            splits = 6 if n < 16384 else 3
+    else:
+        block_k = 512
+        splits = triton.cdiv(k, block_k)
+    sumsq = torch.empty(
+        (n, splits, partial_stride),
+        dtype=torch.float64 if use_projection else torch.float32,
+        device=x.device,
+    )
+    if use_projection:
+        # Short BF16 dot products feed FP64 partial sums to preserve gate
+        # precision, including when the learned scales amplify dot errors.
+        packed = torch.empty((3, 8, k), dtype=torch.bfloat16, device=x.device)
+        _ihc_pack_weight[(triton.cdiv(8 * k, 1024),)](weight, packed, 8 * k, 1024)
+        _ihc_post_pre_projection[(triton.cdiv(n, block_m), splits)](
+            x,
+            residual,
+            attn_post,
+            packed,
+            y,
+            sumsq,
+            n,
+            d,
+            block_m,
+            block_k,
+            splits,
+            1,
+            num_warps=2,
+            enable_fp_fusion=False,
+        )
+    else:
+        _ihc_post_pre_split_k[(n, splits)](
+            x,
+            residual,
+            attn_post,
+            weight,
+            y,
+            sumsq,
+            d,
+            k,
+            hc,
+            2 * hc_pow2,
+            splits,
+            block_k,
+            partial_stride,
+            num_warps=1,
+            enable_fp_fusion=False,
+        )
+    _ihc_post_pre_stage2[(n, triton.cdiv(d, block_d))](
+        y,
+        sumsq,
+        scale,
+        base,
+        norm_weight if norm_weight is not None else output,
+        output,
+        post,
+        n,
+        d,
+        hc,
+        hc_pow2,
+        splits,
+        triton.next_power_of_2(splits),
+        partial_stride,
+        block_d,
+        magnitude,
+        hc_eps,
+        norm_eps,
+        norm_weight is not None,
+        rms_eps,
+        num_warps=4,
+        enable_fp_fusion=False,
+    )
+    return y, output, post
