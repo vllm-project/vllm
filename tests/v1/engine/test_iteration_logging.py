@@ -29,10 +29,10 @@ def make_iteration_details() -> SchedulerIterationDetails:
 
 
 def make_fake_engine(
-    log_stats: bool = True, gpu_iteration_timing: bool = False
+    collect_stats: bool = True, gpu_iteration_timing: bool = False
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        log_stats=log_stats,
+        collect_stats=collect_stats,
         vllm_config=SimpleNamespace(
             observability_config=SimpleNamespace(
                 enable_logging_iteration_details=True,
@@ -43,7 +43,7 @@ def make_fake_engine(
 
 
 def test_untimed_iteration_details_disabled_without_log_stats():
-    engine = make_fake_engine(log_stats=False)
+    engine = make_fake_engine(collect_stats=False)
 
     assert EngineCore._untimed_iteration_details(engine, None) is None
     assert not hasattr(engine, "_iteration_index")
