@@ -94,6 +94,7 @@ class HYV4VLForConditionalGeneration(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str:
+        modality = modality.removesuffix("_embeds")
         if modality in ("image", "video"):
             return f"<{modality}>"
         raise ValueError(f"Unsupported HYV4 VL modality: {modality}")
