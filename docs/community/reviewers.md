@@ -29,11 +29,11 @@ Sorted alphabetically by GitHub handle:
 - [@netanel-haber](https://github.com/netanel-haber): Nemotron/NVIDIA models, Mamba/Linear attention hybrids, VLMs
 - [@Rohan138](https://github.com/Rohan138): ROCm performance, CI, torch.compile fusions
 - [@simondanielsson](https://github.com/simondanielsson): ROCm performance (CDNA), MoRI-IO.
+- [@stecasta](https://github.com/stecasta): Local AI (CUDA / SM12x: DGX Spark, RTX*)
 - [@taneem-ibrahim](https://github.com/taneem-ibrahim): Pooling models
 - [@TheEpicDolphin](https://github.com/TheEpicDolphin): Spec decode
 - [@varun-sundar-rabindranath](https://github.com/varun-sundar-rabindranath): KV cache offloading, LoRA
 - [@vllmellm](https://github.com/vllmellm)
-- [@wangxiyuan](https://github.com/wangxiyuan): Platform, KV cache, Mooncake
 
 ## The Reviewer Role
 
