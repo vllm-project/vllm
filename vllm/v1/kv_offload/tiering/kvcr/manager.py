@@ -71,14 +71,15 @@ from vllm.v1.kv_offload.base import (
     OffloadingMetricMetadata,
     OffloadKey,
     ReqContext,
-    RequestOffloadingContext,
     get_offload_block_hash,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.cpu.policies.base import order_request_keys
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     ParentManager,
     SecondaryTierManager,
+    SecondaryTierRequestContext,
     TransferJob,
 )
 
@@ -314,9 +315,14 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         local_dram_backend: str = "UCX",
         remote_fw_dram_backend: str = "UCX",
         backpressure_detector: "BackpressureDetector | None" = None,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
     ) -> None:
         super().__init__(
-            offloading_spec, primary_kv_view, tier_type, backpressure_detector
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+            backpressure_detector,
+            access_mode=access_mode,
         )
         selected_policy = _resolve_policy(policy)
         if (kvcr_service_socket_path is None) != (compatibility_digest is None):
@@ -625,13 +631,13 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         return events
 
     @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+    def on_new_request(self, req_context: ReqContext) -> SecondaryTierRequestContext:
         if (hint := req_context.kv_hints) is not None:
             self._kvcr.submit_hint(
                 request_id=req_context.req_id,
                 hints=hint,
             )
-        return RequestOffloadingContext()
+        return SecondaryTierRequestContext()
 
     def _align_sequence(
         self,
