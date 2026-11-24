@@ -34,7 +34,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature, ProcessorMixin
+from transformers import BatchFeature
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     smart_resize as image_smart_resize,
@@ -103,6 +103,10 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+)
+from vllm.multimodal.processing.processor import (
+    MultiModalPromptUpdates,
+    PlaceholderFeaturesInfo,
 )
 from vllm.multimodal.video_prune.evs import (
     compute_mrope_for_media,
@@ -1368,13 +1372,55 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         return kwargs
 
     @staticmethod
-    def _expands_only_video_token(hf_processor: ProcessorMixin) -> bool:
-        """Transformers>=5.10 processors override `replace_video_token`
-        to expand only the bare video token, keeping the prompt's outer
-        `<|vision_start|>`/`<|vision_end|>` markers."""
-        mixin_impl = getattr(ProcessorMixin, "replace_video_token", None)
-        proc_impl = getattr(type(hf_processor), "replace_video_token", None)
-        return proc_impl is not None and proc_impl is not mixin_impl
+    def _strip_video_placeholder_markers(
+        token_ids: list[int],
+        *,
+        video_token_id: int,
+        vision_start_token_id: int,
+        vision_end_token_id: int,
+    ) -> list[int]:
+        """Collapse each `<|vision_start|><|video_pad|><|vision_end|>` in the
+        prompt into a bare `<|video_pad|>`.
+
+        The video replacement wraps every frame group in its own
+        `<|vision_start|>`/`<|vision_end|>` pair, so the pair the chat
+        template puts around the placeholder has to go, as in the processor
+        the models were trained with (transformers<5.10). Since 5.10, HF's
+        `replace_video_token` expands only the bare video token and keeps the
+        outer pair, which nests the per-frame markers inside it.
+        """
+        stripped: list[int] = []
+        i = 0
+        n = len(token_ids)
+        while i < n:
+            if (
+                token_ids[i] == vision_start_token_id
+                and i + 2 < n
+                and token_ids[i + 1] == video_token_id
+                and token_ids[i + 2] == vision_end_token_id
+            ):
+                stripped.append(video_token_id)
+                i += 3
+            else:
+                stripped.append(token_ids[i])
+                i += 1
+        return stripped
+
+    def _apply_prompt_updates(
+        self,
+        token_ids: list[int],
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        if mm_prompt_updates.get("video"):
+            hf_config = self.info.get_hf_config()
+            token_ids = self._strip_video_placeholder_markers(
+                token_ids,
+                video_token_id=hf_config.video_token_id,
+                vision_start_token_id=hf_config.vision_start_token_id,
+                vision_end_token_id=hf_config.vision_end_token_id,
+            )
+
+        return super()._apply_prompt_updates(token_ids, mm_prompt_updates)
 
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
@@ -1620,26 +1666,18 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 select_token_id=select_token_id,
             )
 
-        if self._expands_only_video_token(hf_processor):
-            # transformers>=5.10 expands only the bare video_token
-            video_target = [video_token_id]
-        else:
-            # Old-style processors expand the full placeholder
-            video_target = [
-                vision_start_token_id,
-                video_token_id,
-                vision_end_token_id,
-            ]
-
         return [
             PromptReplacement(
                 modality="image",
                 target=[hf_processor.image_token_id],
                 replacement=get_image_replacement_qwen3vl,
             ),
+            # `_apply_prompt_updates` has already removed the chat template's
+            # `<|vision_start|>`/`<|vision_end|>` pair around each video, so
+            # this matches both wrapped and bare placeholders.
             PromptReplacement(
                 modality="video",
-                target=video_target,
+                target=[video_token_id],
                 replacement=get_video_replacement_qwen3vl,
             ),
         ]
