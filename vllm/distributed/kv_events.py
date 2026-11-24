@@ -378,7 +378,8 @@ class ZmqEventPublisher(EventPublisher):
                 replay_endpoint=self._replay_endpoint,
             )
             if config is not None
-            else PublisherConfig(
+            else KVEventsConfig(
+                enable_kv_cache_events=True,
                 publisher="zmq",
                 endpoint=self._endpoint,
                 replay_endpoint=self._replay_endpoint,
