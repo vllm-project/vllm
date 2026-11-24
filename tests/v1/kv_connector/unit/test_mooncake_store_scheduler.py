@@ -89,6 +89,7 @@ def _make_bare_scheduler(
     scheduler.load_specs = {}
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
+    scheduler._load_failed_req_ids = set()
     scheduler._request_trackers = {}
     scheduler._finished_partial_tail_metas = {}
     scheduler._finished_lookahead_metas = {}
@@ -266,8 +267,8 @@ def _preempt(scheduler: MooncakeStoreScheduler):
     return scheduler.build_connector_meta(_make_preemption_scheduler_output())
 
 
-def _make_worker_output(completed_saves: dict[int, int]) -> SimpleNamespace:
-    return SimpleNamespace(
+def _make_worker_output(completed_saves: dict[int, int]) -> KVConnectorOutput:
+    return KVConnectorOutput(
         kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
             completed_saves=completed_saves
         )
@@ -1241,6 +1242,42 @@ def test_sub_block_prompt_not_looked_up_without_fine_grained():
     assert need_to_allocate == 0
     assert load_async is False
     assert "req-0" not in scheduler.load_specs
+
+
+def test_failed_load_skips_store_lookup_until_finished():
+    # A store whose lookup keeps hitting while the GET keeps failing must not
+    # make the request reload forever; it recomputes locally instead.
+    scheduler = _make_bare_scheduler()
+    scheduler.load_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=32)
+    request = _make_admission_request()
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (32, True)
+    scheduler.update_connector_output(
+        KVConnectorOutput(failed_recving={request.request_id})
+    )
+
+    num_lookups = len(scheduler.client.num_tokens)
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert len(scheduler.client.num_tokens) == num_lookups
+
+    finished_output = _make_preemption_scheduler_output()
+    finished_output.preempted_req_ids = set()
+    finished_output.finished_req_ids = {request.request_id}
+    scheduler.build_connector_meta(finished_output)
+    assert scheduler._load_failed_req_ids == set()
+
+
+def test_failed_load_of_aborted_request_is_not_tracked():
+    # An abort cleans the request up before its in-flight load reports the
+    # failure; the late report must not leave a stale entry behind.
+    scheduler = _make_bare_scheduler()
+    finished_output = _make_preemption_scheduler_output()
+    finished_output.preempted_req_ids = set()
+    finished_output.finished_req_ids = {"req-0"}
+    scheduler.build_connector_meta(finished_output)
+
+    scheduler.update_connector_output(KVConnectorOutput(failed_recving={"req-0"}))
+    assert scheduler._load_failed_req_ids == set()
 
 
 def test_disabled_lookup_reports_no_hit_without_querying_client():
