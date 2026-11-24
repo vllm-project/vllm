@@ -3,6 +3,7 @@
 """Inkling2 attention: relative-bias GQA with short-conv K/V, L2-clipped
 q/k/r, gated output and per-token attention sinks."""
 
+from functools import partial
 from typing import cast
 
 import torch
@@ -23,12 +24,17 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.inkling.amd.sconv_swa_attn import InklingConvState
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
-from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    CommonAttentionMetadata,
+    max_decode_query_len,
+)
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionMetadata,
     FlashAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
@@ -46,11 +52,30 @@ from .sconv import K_STREAM, V_STREAM, Inkling2ShortConv, conv_metadata
 
 
 class Inkling2AttentionMetadataBuilder(FlashAttentionMetadataBuilder):
-    """Orders decode/verify requests first."""
+    """Orders decode/verify requests first and records the split, so that a
+    mixed batch runs its decode part on `rel_decode_attention`."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> FlashAttentionMetadata:
+        md = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        assert self.reorder_batch_threshold is not None
+        (
+            md.num_decode_reqs,
+            md.num_prefill_reqs,
+            md.num_decode_tokens,
+            md.num_prefill_tokens,
+        ) = split_decodes_and_prefills(
+            common_attn_metadata, decode_threshold=self.reorder_batch_threshold
+        )
+        return md
 
 
 class Inkling2AttentionBackend(FlashAttentionBackend):
@@ -167,6 +192,7 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         supported = ("auto", "bfloat16")
         if vllm_config.cache_config.cache_dtype not in supported:
             raise ValueError(f"Inkling2 KV cache dtype must be one of {supported}")
+        self.max_decode_query_len = max_decode_query_len(vllm_config)
         self.kv_cache = torch.tensor([])
         forward_context = vllm_config.compilation_config.static_forward_context
         if prefix in forward_context:
@@ -174,7 +200,13 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         forward_context[prefix] = self
 
     def process_weights_after_loading(self) -> None:
-        self.rel_proj_shifted = shift_rel_proj(self.rel_logits_proj, self.is_local)
+        shifted = shift_rel_proj(self.rel_logits_proj, self.is_local)
+        if getattr(self, "rel_proj_shifted", None) is None:
+            self.rel_proj_shifted = shifted
+        else:
+            # Weight reloads refill it in place: full CUDA graphs captured
+            # its address.
+            self.rel_proj_shifted.copy_(shifted)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return Inkling2AttentionBackend
@@ -316,16 +348,32 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
             rel_threshold=self.rel_clip,
             norm_eps=self.eps,
         )
+        self._rel_attention(
+            md, clipped_q, key_cache, value_cache, rel_logits, gate, sinks, output
+        )
+
+    def _rel_attention(
+        self,
+        md: FlashAttentionMetadata,
+        clipped_q: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        rel_logits: torch.Tensor,
+        gate: torch.Tensor,
+        sinks: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
         # Decode and verify batches split the keys; the split count follows
         # the batch alone, so it holds for every replay of a CUDA graph.
-        num_splits = plan_decode_attention(
+        num_reqs = md.seq_lens.shape[0]
+        plan = partial(
+            plan_decode_attention,
             self.is_local,
-            md.seq_lens.shape[0],
-            md.max_query_len,
-            self.num_heads,
-            self.num_kv_heads,
-            self.rel_extent,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            rel_extent=self.rel_extent,
         )
+        num_splits = plan(num_reqs=num_reqs, max_query_len=md.max_query_len)
         if num_splits:
             rel_decode_attention(
                 clipped_q,
@@ -345,19 +393,52 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
                 num_splits=num_splits,
             )
             return
+        # Mixed batches run eagerly (see `_attention`), so the decode/verify
+        # requests leading one can split their keys too; the query tiles
+        # take the rest.
+        num_decodes, num_decode_tokens = 0, 0
+        if 0 < md.num_decode_reqs < num_reqs:
+            max_query_len = min(
+                self.max_decode_query_len,
+                md.num_decode_tokens - md.num_decode_reqs + 1,
+            )
+            num_splits = plan(num_reqs=md.num_decode_reqs, max_query_len=max_query_len)
+            if num_splits:
+                num_decodes = md.num_decode_reqs
+                num_decode_tokens = md.num_decode_tokens
+                rel_decode_attention(
+                    clipped_q[:num_decode_tokens],
+                    key_cache,
+                    value_cache,
+                    rel_logits,
+                    gate[:num_decode_tokens],
+                    sinks[:num_decode_tokens],
+                    output[:num_decode_tokens],
+                    block_table=md.block_table[:num_decodes],
+                    cache_seqlens=md.seq_lens[:num_decodes],
+                    cu_seqlens_q=md.query_start_loc[: num_decodes + 1],
+                    max_query_len=max_query_len,
+                    num_actual_tokens=num_decode_tokens,
+                    softmax_scale=self.scaling,
+                    is_local=self.is_local,
+                    num_splits=num_splits,
+                )
+        cu_seqlens_q = md.query_start_loc[num_decodes:]
+        if num_decodes:
+            cu_seqlens_q = cu_seqlens_q - num_decode_tokens
         gated_rel_attention(
-            clipped_q,
+            clipped_q[num_decode_tokens:],
             key_cache,
             value_cache,
-            rel_logits,
-            gate,
-            sinks,
-            output,
-            block_table=md.block_table,
-            cache_seqlens=md.seq_lens,
-            cu_seqlens_q=md.query_start_loc,
+            rel_logits[num_decode_tokens:],
+            gate[num_decode_tokens:],
+            sinks[num_decode_tokens:],
+            output[num_decode_tokens:],
+            block_table=md.block_table[num_decodes:],
+            cache_seqlens=md.seq_lens[num_decodes:],
+            cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=md.max_query_len,
-            num_actual_tokens=md.num_actual_tokens,
+            num_actual_tokens=md.num_actual_tokens - num_decode_tokens,
             softmax_scale=self.scaling,
             window=self.window,
         )

@@ -5,20 +5,26 @@ meta:
   provider: "Thinking Machines Lab"
   description: "MXFP8 checkpoint of Inkling 2 Small, the multimodal (text and image in, text out) MoE from Thinking Machines Lab with 594B total and 17B active parameters, up to 1M context, and a bundled DSpark speculator."
   date_added: 2026-11-20
-  date_updated: 2026-11-20
+  date_updated: 2026-11-23
   tasks:
     - multimodal
   related_recipes:
     - thinkingmachines/Inkling-2-Small
   hardware:
     h200: verified
+    mi300x: unsupported
+    mi325x: unsupported
+    mi350x: supported
+    mi355x: verified
 
 model:
   model_id: "thinkingmachines/Inkling-2-Small-MXFP8"
   # Inkling2ForConditionalGeneration is not in v0.34.0; the next release at the earliest.
   min_vllm_version: "0.35.0"
   nightly_required: true
-  docker_image: "vllm/vllm-openai:nightly"
+  docker_image:
+    nvidia: "vllm/vllm-openai:nightly"
+    amd: "vllm/vllm-openai-rocm:nightly"
   architecture: moe
   parameter_count: "594B"
   active_parameters: "17B"
@@ -50,16 +56,18 @@ opt_in_features:
 variants:
   default:
     precision: mxfp8
-    # Blackwell runs the experts as native MXFP8; Hopper as W8A16 (Humming GEMMs).
-    precision_hardware:
-      brand: NVIDIA
     # 623 GB of safetensors x 1.2.
     vram_minimum_gb: 747
+    tp:
+      amd: 4
+    # Blackwell and gfx950 run the experts as native MXFP8; Hopper as W8A16
+    # (Humming GEMMs).
     supported_hardware:
       - h200
       - arch:sm100
       - arch:sm103
-    description: "All routed experts in MXFP8; attention, routers, attention-residual queries and the LM head in BF16/FP32. ~623 GB on disk including the DSpark draft. Blackwell quantizes expert activations to MXFP8; Hopper keeps them in BF16 (W8A16)."
+      - arch:gfx950
+    description: "All routed experts in MXFP8; attention, routers, attention-residual queries and the LM head in BF16/FP32. ~623 GB on disk including the DSpark draft. Blackwell and AMD gfx950 quantize expert activations to MXFP8; Hopper keeps them in BF16 (W8A16)."
 
 compatible_strategies:
   - single_node_tp
@@ -96,6 +104,12 @@ strategy_overrides:
           - "524288"
           - "--max-num-seqs"
           - "256"
+      amd:
+        extra_args:
+          - "--max-model-len"
+          - "1048576"
+          - "--max-num-seqs"
+          - "256"
   # --no-numa-bind works around a headless-node startup crash with vLLM's
   # default NUMA binding.
   multi_node_tp:
@@ -107,6 +121,11 @@ strategy_overrides:
           - "--max-num-seqs"
           - "256"
           - "--no-numa-bind"
+
+notes:
+  - title: "Multi-node TP is not validated on AMD"
+    when: { hardware: [amd], strategies: [multi_node_tp] }
+    body: "Only TP4 on one MI355X node has been run. Four MI355X or MI350X GPUs hold the checkpoint, so one node is enough."
 
 troubleshooting:
   - title: "AssertionError: Executable was changed during NUMA binding context"
@@ -121,21 +140,25 @@ guide: |
   the same model, with every routed expert in MXFP8 instead of NVFP4 (layers 0-39) and MXFP8
   (layers 40-47). Inkling 2 Small was trained in NVFP4, and Thinking Machines recommends the
   NVFP4 checkpoint for all use cases. MXFP8 scores 1-2 points higher on evals, at about 1.6x the
-  memory. See the NVFP4 recipe for the architecture, LoRA support, client usage and benchmarking.
+  memory. On AMD, only this MXFP8 checkpoint runs. See the NVFP4 recipe for the architecture,
+  LoRA support, client usage and benchmarking.
 
   ## Runtime
 
   Inkling 2 Small is supported in vLLM main. Use the `vllm/vllm-openai:nightly` image or a
-  nightly wheel until it is in a vLLM release.
+  nightly wheel until it is in a vLLM release; on AMD, use `vllm/vllm-openai-rocm:nightly`.
 
   ## Configurations
 
   The checkpoint needs about 750 GB, so it runs at TP8 (TP8 attention with EP8 experts): one
-  8-GPU H200, B200 or B300 node, or two GB200 or GB300 trays.
+  8-GPU H200, B200 or B300 node, or two GB200 or GB300 trays. On AMD, four 288 GB GPUs are
+  enough: TP4 attention with EP4 experts.
 
   - **H200, TP8:** contexts up to 524,288 tokens. With the command above (DSpark and the
     reasoning parser), GSM8K is 0.972-0.974 (0-shot, chat) with a DSpark acceptance length of 4.5.
   - **Blackwell, TP8:** the full 1,048,576-token context.
+  - **MI355X, TP4:** the full 1,048,576-token context; the KV cache holds 1.9M tokens with
+    DSpark. MI350X is the same gfx950 architecture and is supported.
 
   On Hopper, the experts run as W8A16 GEMMs with BF16 activations.
 

@@ -8,6 +8,9 @@ The attention reference uses scale-after-add relative bias::
     rel_bias(i, j, h) = rel_logits[i, h, i - j] if 0 <= i - j < rel_extent else 0
 """
 
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
 import torch
 
@@ -650,3 +653,259 @@ def test_gate_sink(num_tokens):
     expected = output.view(num_tokens, -1) * torch.sigmoid(gate.float()) * scale
     assert actual.dtype == torch.bfloat16
     torch.testing.assert_close(actual.float(), expected, atol=1e-2, rtol=1e-2)
+
+
+def _paged_batch(seqs, num_heads, num_kv_heads, block_size, num_padding=0):
+    """Random inputs of `(query_len, kv_len)` requests in the model's layouts,
+    followed by `num_padding` padding tokens (NaN)."""
+    device = "cuda"
+    num_tokens = sum(q_len for q_len, _ in seqs)
+    max_blocks = -(-max(kv_len for _, kv_len in seqs) // block_size)
+    num_blocks = len(seqs) * max_blocks + 1
+    kv = torch.randn(num_blocks, block_size, num_kv_heads, 2 * HEAD_DIM, device=device)
+    kv[..., :HEAD_DIM] = torch.nn.functional.normalize(kv[..., :HEAD_DIM], dim=-1) * 2
+    key_cache, value_cache = kv.bfloat16().split(HEAD_DIM, dim=-1)
+    block_table = (torch.randperm(num_blocks - 1, device=device) + 1).int()
+    q = torch.randn(num_tokens + num_padding, num_heads, HEAD_DIM, device=device)
+    q = (torch.nn.functional.normalize(q, dim=-1) * 3).bfloat16()
+    width = num_heads * HEAD_DIM
+    proj = torch.randn(num_tokens + num_padding, width + num_heads + 4, device=device)
+    proj = proj.bfloat16()
+    q[num_tokens:] = proj[num_tokens:] = float("nan")
+    q_lens = torch.tensor([0, *[q_len for q_len, _ in seqs]], device=device)
+    return SimpleNamespace(
+        q=q,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        block_table=block_table.view(len(seqs), max_blocks),
+        rel_logits=torch.randn(
+            num_tokens, num_heads, REL_EXTENT, device=device, dtype=torch.bfloat16
+        ),
+        gate=proj[:, :width],
+        sinks=proj[:, width : width + num_heads],
+        cu_seqlens_q=q_lens.cumsum(0).int(),
+        seq_lens=torch.tensor(
+            [kv_len for _, kv_len in seqs], dtype=torch.int32, device=device
+        ),
+        num_tokens=num_tokens,
+    )
+
+
+def _gated_reference(batch, seqs, window_left):
+    """`_ref_attention` of a `_paged_batch`, gated and with the sink."""
+    nt = batch.num_tokens
+    out, lse = _ref_attention(
+        batch.q[:nt],
+        batch.key_cache,
+        batch.value_cache,
+        batch.rel_logits,
+        seqs,
+        batch.block_table,
+        HEAD_DIM**-0.5,
+        window_left,
+    )
+    gate, sinks = batch.gate[:nt].float(), batch.sinks[:nt].float()
+    expected = out.view(nt, -1) * torch.sigmoid(gate)
+    return expected * torch.sigmoid(lse - sinks).repeat_interleave(HEAD_DIM, dim=1)
+
+
+@requires_rocm
+@pytest.mark.parametrize("is_local", [False, True])
+@torch.inference_mode()
+def test_inkling2_reload_refills_rel_proj(is_local):
+    """Full CUDA graphs capture the address of `rel_proj_shifted`: a weight
+    reload refills it in place."""
+    from vllm.models.inkling2 import shift_rel_proj
+    from vllm.models.inkling2.amd.attention import Inkling2Attention
+
+    proj = torch.randn(16, REL_EXTENT, device="cuda").bfloat16()
+    layer = cast(
+        Inkling2Attention, SimpleNamespace(rel_logits_proj=proj, is_local=is_local)
+    )
+    Inkling2Attention.process_weights_after_loading(layer)
+    captured = layer.rel_proj_shifted
+    proj.copy_(torch.randn_like(proj))
+    Inkling2Attention.process_weights_after_loading(layer)
+    assert layer.rel_proj_shifted is captured
+    expected = shift_rel_proj(proj, is_local)
+    torch.testing.assert_close(captured, expected, atol=0, rtol=0)
+
+
+@requires_rocm
+@pytest.mark.parametrize(
+    "seqs,num_splits",
+    [
+        ([(1, 3000), (1, 1500)], 1),
+        ([(1, 3000), (1, 1500)], 9),
+        # 0: the query tiles of `gated_rel_attention`.
+        ([(200, 3000), (37, 2100)], 0),
+    ],
+)
+@torch.inference_mode()
+def test_inkling2_window_skips_expired_pages(seqs, num_splits):
+    """A local layer's window starts mid key block here. The pages before it
+    may have been freed (to the null block, or reused): their NaNs must not
+    reach the output."""
+    from vllm.models.inkling2.amd.ops.attention import (
+        gated_rel_attention,
+        rel_decode_attention,
+    )
+
+    torch.manual_seed(0)
+    block_size, window = 16, REL_EXTENT - 1
+    batch = _paged_batch(seqs, 24, 8, block_size)
+    expected = _gated_reference(batch, seqs, window)
+    # Whole expired pages map to the null block; the window's first page
+    # keeps its live keys only.
+    block_table = batch.block_table.clone()
+    for cache in (batch.key_cache, batch.value_cache):
+        cache[0] = float("nan")
+    for i, (q_len, kv_len) in enumerate(seqs):
+        lo = max(kv_len - q_len - window, 0)
+        assert lo % 64, "the window must start mid key block"
+        block_table[i, : lo // block_size] = 0
+        for cache in (batch.key_cache, batch.value_cache):
+            page = batch.block_table[i, lo // block_size]
+            cache[page, : lo % block_size] = float("nan")
+    rel_in = shear_rel_logits(batch.rel_logits, seqs, 128, True)
+    out = torch.empty_like(batch.gate)
+    if num_splits:
+        rel_decode_attention(
+            batch.q,
+            batch.key_cache,
+            batch.value_cache,
+            rel_in,
+            batch.gate,
+            batch.sinks,
+            out,
+            block_table=block_table,
+            cache_seqlens=batch.seq_lens,
+            cu_seqlens_q=batch.cu_seqlens_q,
+            max_query_len=max(q_len for q_len, _ in seqs),
+            num_actual_tokens=batch.num_tokens,
+            softmax_scale=HEAD_DIM**-0.5,
+            is_local=True,
+            num_splits=num_splits,
+        )
+    else:
+        gated_rel_attention(
+            batch.q,
+            batch.key_cache,
+            batch.value_cache,
+            rel_in,
+            batch.gate,
+            batch.sinks,
+            out,
+            block_table=block_table,
+            cache_seqlens=batch.seq_lens,
+            cu_seqlens_q=batch.cu_seqlens_q,
+            max_seqlen_q=max(q_len for q_len, _ in seqs),
+            num_actual_tokens=batch.num_tokens,
+            softmax_scale=HEAD_DIM**-0.5,
+            window=window,
+        )
+    torch.testing.assert_close(out.float(), expected, atol=1e-2, rtol=1e-2)
+
+
+@requires_rocm
+@pytest.mark.parametrize("window_left", [None, REL_EXTENT - 1])
+@torch.inference_mode()
+def test_inkling2_gated_rel_attention_zeroes_padding(window_left):
+    """Padding tokens come out zero even with a NaN gate and sink, as in a
+    batch padded to a CUDA graph's size."""
+    from vllm.models.inkling2.amd.ops.attention import gated_rel_attention
+
+    torch.manual_seed(0)
+    seqs = [(37, 37), (200, 1700)]
+    batch = _paged_batch(seqs, 24, 8, 16, num_padding=5)
+    out = torch.full_like(batch.gate, float("nan"))
+    gated_rel_attention(
+        batch.q,
+        batch.key_cache,
+        batch.value_cache,
+        shear_rel_logits(batch.rel_logits, seqs, 128, window_left is not None),
+        batch.gate,
+        batch.sinks,
+        out,
+        block_table=batch.block_table,
+        cache_seqlens=batch.seq_lens,
+        cu_seqlens_q=batch.cu_seqlens_q,
+        max_seqlen_q=200,
+        num_actual_tokens=batch.num_tokens,
+        softmax_scale=HEAD_DIM**-0.5,
+        window=-1 if window_left is None else window_left,
+    )
+    nt = batch.num_tokens
+    expected = _gated_reference(batch, seqs, window_left)
+    torch.testing.assert_close(out[:nt].float(), expected, atol=1e-2, rtol=1e-2)
+    assert (out[nt:] == 0).all()
+
+
+@requires_rocm
+@pytest.mark.parametrize("is_local", [False, True])
+@pytest.mark.parametrize(
+    "num_heads,num_kv_heads,verify_len,split",
+    [
+        (48, 8, 1, True),
+        (48, 8, 8, True),
+        # 8 queries of 16 heads per KV head exceed a split-KV program.
+        (24, 2, 8, False),
+    ],
+)
+@torch.inference_mode()
+def test_inkling2_mixed_batch_splits_leading_decodes(
+    monkeypatch, is_local, num_heads, num_kv_heads, verify_len, split
+):
+    """A batch of decode/verify requests followed by prefills runs the former
+    on split-KV when a program holds their queries, and the rest on the query
+    tiles; padding tokens come out zero."""
+    from vllm.models.inkling2.amd import attention as amd_attention
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+
+    decode_tokens: list[int] = []
+    rel_decode_attention = amd_attention.rel_decode_attention
+
+    def record(*args, **kwargs):
+        decode_tokens.append(kwargs["num_actual_tokens"])
+        rel_decode_attention(*args, **kwargs)
+
+    monkeypatch.setattr(amd_attention, "rel_decode_attention", record)
+    torch.manual_seed(0)
+    seqs = [(verify_len, 3000), (1, 900), (200, 1700), (37, 37)]
+    window_left = REL_EXTENT - 1 if is_local else None
+    batch = _paged_batch(seqs, num_heads, num_kv_heads, 16, num_padding=3)
+    layer = SimpleNamespace(
+        is_local=is_local,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        rel_extent=REL_EXTENT,
+        scaling=HEAD_DIM**-0.5,
+        window=-1 if window_left is None else window_left,
+        max_decode_query_len=8,
+    )
+    md = SimpleNamespace(
+        seq_lens=batch.seq_lens,
+        max_query_len=200,
+        block_table=batch.block_table,
+        query_start_loc=batch.cu_seqlens_q,
+        num_actual_tokens=batch.num_tokens,
+        num_decode_reqs=2,
+        num_decode_tokens=verify_len + 1,
+    )
+    out = torch.full_like(batch.gate, float("nan"))
+    amd_attention.Inkling2Attention._rel_attention(
+        cast(amd_attention.Inkling2Attention, layer),
+        cast(FlashAttentionMetadata, md),
+        batch.q,
+        batch.key_cache,
+        batch.value_cache,
+        shear_rel_logits(batch.rel_logits, seqs, 128, is_local),
+        batch.gate,
+        batch.sinks,
+        out,
+    )
+    assert decode_tokens == ([verify_len + 1] if split else [])
+    nt = batch.num_tokens
+    expected = _gated_reference(batch, seqs, window_left)
+    torch.testing.assert_close(out[:nt].float(), expected, atol=1e-2, rtol=1e-2)
+    assert (out[nt:] == 0).all()

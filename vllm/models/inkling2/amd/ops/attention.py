@@ -115,9 +115,12 @@ def _rel_attention_kernel(
         tile_end = tl.minimum((q_idx // 128 + 1) * 128, q_len)
         key0 = tl.cdiv(past + tile_end, 128) * 128 - E_PAD
         bias_rows = Bias + token * stride_bt + head * stride_bh - key0
+    # No query of the tile sees a key before `lo`, its first query's window.
+    # Those keys are not loaded: their pages may have been freed and reused
+    # (or be the null block), and a zero weight times a NaN value is NaN.
     lo = 0
     if WINDOW >= 0:
-        lo = tl.maximum(first_pos - WINDOW, 0) // BLOCK_N * BLOCK_N
+        lo = tl.maximum(first_pos - WINDOW, 0)
     table = BlockTable + req * stride_table
     m_i = tl.full([BLOCK_M], float("-inf"), tl.float32)
     l_i = tl.zeros([BLOCK_M], tl.float32)
@@ -126,7 +129,7 @@ def _rel_attention_kernel(
     num_iters = tl.maximum(tl.cdiv(tl.cdiv(hi, BLOCK_N) - n_first, step), 0)
     for i in range(num_iters):
         keys = (n_first + i * step) * BLOCK_N + tl.arange(0, BLOCK_N)
-        key_valid = keys < hi
+        key_valid = (keys >= lo) & (keys < hi)
         page = tl.load(table + keys // PAGE, key_valid, other=0).to(tl.int64)
         slot = keys % PAGE
         k = tl.load(
@@ -243,8 +246,8 @@ def gated_rel_attention(
     window: int,
 ) -> None:
     """Write the gated bf16 `(T, H * D)` attention output (`gate_sink` of
-    `rel_attention`) to `result`. Tokens from `num_actual_tokens` on are
-    zeroed."""
+    `rel_attention`) to `result`. Tokens after the last request's are
+    zeroed: `gate_sink` reads their count from `cu_seqlens_q`."""
     num_tokens, num_heads = q.shape[:2]
     nt = num_actual_tokens
     out = q.new_empty(q.shape, dtype=torch.float32)
@@ -263,9 +266,7 @@ def gated_rel_attention(
         out=out[:nt],
         lse=lse[:, :nt],
     )
-    out[nt:].zero_()
-    lse[:, nt:].zero_()
-    gate_sink(out, gate, lse.t(), sinks, result)
+    gate_sink(out, gate, lse.t(), sinks, result, cu_seqlens_q=cu_seqlens_q)
 
 
 def plan_decode_attention(
@@ -591,13 +592,15 @@ def _sigmoid(x):
     return 1.0 / (1.0 + tl.math.exp2(-x * 1.4426950408889634))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_reqs"])
 def _gate_sink_kernel(
     X,
     Gate,
     LSE,
     Sink,
     Y,
+    CuSeqlensQ,
+    num_reqs,
     stride_x,
     stride_gate,
     stride_lse_t,
@@ -606,10 +609,18 @@ def _gate_sink_kernel(
     H: tl.constexpr,
     D: tl.constexpr,
     BLOCK: tl.constexpr,
+    PADDED: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     mask = col < H * D
+    # Tokens of no request (padding) come out zero, whatever their gate.
+    if PADDED:
+        num_tokens = tl.load(CuSeqlensQ + num_reqs)
+        if row >= num_tokens:
+            zeros = tl.zeros([BLOCK], Y.dtype.element_ty)
+            tl.store(Y + row * H * D + col, zeros, mask)
+            return
     head = col // D
     x = tl.load(X + row * stride_x + col, mask, other=0)
     gate = tl.load(Gate + row * stride_gate + col, mask, other=0).to(tl.float32)
@@ -626,12 +637,15 @@ def gate_sink(
     lse: torch.Tensor,
     sinks: torch.Tensor,
     result: torch.Tensor,
+    cu_seqlens_q: torch.Tensor | None = None,
 ) -> None:
     """Write bf16 `output * sigmoid(gate) * sigmoid(lse - sink)` per head to
     `result`.
 
     `gate` and `result` are `(T, H * D)`, `sinks` and `lse` are
-    `(T, H)` and `output` is `(T, H, D)`.
+    `(T, H)` and `output` is `(T, H, D)`. With `cu_seqlens_q`, the tokens
+    after its last entry are zeroed without reading their inputs, so this
+    also holds when a CUDA graph is replayed on a smaller batch.
     """
     num_tokens, num_heads = sinks.shape
     assert lse.shape == (num_tokens, num_heads)
@@ -639,12 +653,16 @@ def gate_sink(
     assert gate.stride(1) == sinks.stride(1) == 1
     assert result.shape == gate.shape and result.is_contiguous()
     width = gate.shape[1]
+    padded = cu_seqlens_q is not None
+    num_reqs = 0 if cu_seqlens_q is None else cu_seqlens_q.shape[0] - 1
     _gate_sink_kernel[(num_tokens, triton.cdiv(width, 512))](
         output,
         gate,
         lse,
         sinks,
         result,
+        sinks if cu_seqlens_q is None else cu_seqlens_q,
+        num_reqs,
         output.stride(0),
         gate.stride(0),
         lse.stride(0),
@@ -653,6 +671,7 @@ def gate_sink(
         num_heads,
         width // num_heads,
         512,
+        padded,
         enable_fp_fusion=False,
     )
 

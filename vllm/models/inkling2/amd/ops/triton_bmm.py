@@ -112,8 +112,12 @@ def bmm(
     (`tiles`: the `moe.route` metadata). Rows past each tile's routed rows
     are left uninitialized."""
     num_experts, n, k = weight.shape
-    assert act.shape == (plan.rows, k) and weight.dtype == torch.float8_e4m3fn
+    # The kernel addresses every operand as packed rows.
+    assert act.shape == (plan.rows, k) and act.dtype == torch.float8_e4m3fn
+    assert act_scale.shape == (plan.rows, k // 32) and act_scale.dtype == torch.uint8
+    assert weight.dtype == torch.float8_e4m3fn
     assert weight_scale.shape == (num_experts, n, k // 32)
+    assert act.is_contiguous() and act_scale.is_contiguous()
     assert weight.is_contiguous() and weight_scale.is_contiguous()
     out = torch.empty((plan.rows, n), dtype=torch.bfloat16, device=act.device)
     tile = plan.tile

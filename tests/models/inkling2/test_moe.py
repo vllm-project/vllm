@@ -58,6 +58,8 @@ mxfp8_quantize = import_module(f"{_PACKAGE}.ops.mxfp8").mxfp8_quantize
 FORMATS = ["mxfp8"] if _is_rocm else ["nvfp4", "mxfp8"]
 MIN_TILE = 16 if _is_rocm else 8
 TILES = [tile for tile in (8, 16, 32, 64, 128, 256) if tile >= MIN_TILE]
+# Rows per expert; on ROCm also experts spanning several token tiles.
+COUNTS = [[3, 0, 17, 1], [257, 0, 129, 1]] if _is_rocm else [[3, 0, 17, 1]]
 _IS_ROCM = tl.constexpr(_is_rocm)
 requires_nvfp4 = pytest.mark.skipif(
     _is_rocm, reason="NVFP4 experts and their shuffled rows are CUDA-only"
@@ -273,12 +275,14 @@ requires_packed_experts = pytest.mark.skipif(
 @pytest.mark.parametrize("fmt", FORMATS)
 @pytest.mark.parametrize("tile", TILES)
 @pytest.mark.parametrize("n,k", [(256, 1024), (2304, 1152), (1152, 2304)])
-def test_bmm_matches_dequantized_matmul(fmt: str, tile: int, n: int, k: int):
+@pytest.mark.parametrize("counts", COUNTS)
+def test_bmm_matches_dequantized_matmul(
+    fmt: str, tile: int, n: int, k: int, counts: list[int]
+):
     """Expert GEMM over tile-padded expert segments equals an fp64 matmul of
     the dequantized operands, scaled per row (NVFP4) and rounded to bf16."""
     torch.manual_seed(0)
     nvfp4 = fmt == "nvfp4"
-    counts = [3, 0, 17, 1]
     random_q = random_nvfp4 if nvfp4 else random_mxfp8
     weight, weight_scale = random_q(len(counts), n, k)
     if _is_rocm:
