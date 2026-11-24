@@ -188,6 +188,13 @@ Our online Server provides endpoints that correspond to the offline APIs:
     - [Cohere Rerank API](scoring.md#cohere-rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 - Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
 
+Completion-style input batches to `/v1/embeddings`, `/pooling`, and
+`/classify` are limited to 1,024 items by default. The same limit applies to
+each input list in scoring and reranking requests. Split larger batches
+across requests or set `VLLM_MAX_COMPLETION_PROMPTS` when starting the server
+to use a different limit. IO processor plugins define and validate their
+own `data` payloads.
+
 The following introduces the Pooling API. For other APIs, please refer to the link above.
 
 ### Pooling API
