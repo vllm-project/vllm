@@ -43,6 +43,16 @@ Note: Online FP8 = [Online Quantization](https://docs.vllm.ai/en/latest/features
 | Qwen/Qwen1.5-14B-Chat                           | QwenForCausalLM                                  | BF16/Online FP8       |
 | Qwen/Qwen1.5-32B-Chat                           | QwenForCausalLM                                  | BF16/Online FP8       |
 | RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8-dynamic | LlamaForCausalLM                                 | FP8                   |
+| thinkingmachines/Inkling-2-Mini (experimental)  | Inkling2LoopForConditionalGeneration             | NVFP4 + MXFP8         |
+
+Note: Inkling-2-Mini on XPU is experimental and text-only: image inputs,
+LoRA, DSpark speculative decoding and the FP8 KV cache are rejected (serve
+it with `--language-model-only`). It was validated on Intel Arc Pro
+B-series (B70) at TP1 with a BF16 KV cache. Its routed experts run NVFP4
+weights with bf16 activations (W4A16; the checkpoint's
+recipe quantizes them to NVFP4) and, on B-series, MXFP8 weights with bf16
+activations (W8A16). Inkling-2-Small and Inkling-2-Small-MXFP8 are not
+validated on XPU: only checkpoints cut to their first six layers were run.
 
 ### Multimodal Language Models
 

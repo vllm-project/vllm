@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Hidden-stream short conv fused with the AttnRes mix + RMSNorm of the next
-sublayer, for large batches of an already reduced input (CUDA)."""
+sublayer, for large batches of an already reduced input: the `csrc/inkling2`
+ops on CUDA Hopper / SM10x, `short_conv` + `attn_res` elsewhere."""
 
 import torch
 

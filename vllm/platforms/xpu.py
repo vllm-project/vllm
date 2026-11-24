@@ -142,6 +142,7 @@ class XPUPlatform(Platform):
         "modelopt",
         "modelopt_mxfp8",
         "compressed-tensors",
+        "inkling2",
     ]
 
     @classmethod

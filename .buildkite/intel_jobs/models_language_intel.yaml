@@ -49,3 +49,59 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       pytest -v -s models/language/pooling/test_auto_prefix_cache_support.py'
+
+- label: ":intel: (B70) Inkling 2"
+  key: inkling2-xpu
+  # This command took 24.9 min cold on one B70 (fresh container: empty
+  # Triton and driver compile caches), and 39.6 min with the driver cache
+  # disabled within the run (NEO_CACHE_PERSISTENT=0, so every engine
+  # recompiles) while a second run shared the host CPU; hence the margin.
+  timeout_in_minutes: 75
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/vllm-workspace/"
+  env:
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/models/inkling2/
+  - vllm/models/inkling/
+  - vllm/model_executor/layers/fused_moe/moe_align_block_size.py
+  - vllm/model_executor/layers/fused_moe/experts/nvfp4_emulation_moe.py
+  - vllm/model_executor/layers/quantization/utils/nvfp4_emulation_utils.py
+  - vllm/model_executor/layers/quantization/utils/mxfp8_utils.py
+  - vllm/model_executor/layers/fused_moe/fused_moe.py
+  - vllm/model_executor/layers/fused_moe/utils.py
+  - vllm/_xpu_ops.py
+  - vllm/_custom_ops.py
+  - vllm/v1/attention/backends/flash_attn.py
+  - vllm/v1/core/single_type_kv_cache_manager.py
+  - vllm/v1/attention/backend.py
+  - vllm/v1/attention/backends/utils.py
+  - vllm/v1/kv_cache_interface.py
+  - vllm/v1/worker/encoder_cudagraph_defs.py
+  - vllm/v1/worker/gpu/spec_decode/dspark/config.py
+  - vllm/config/speculative.py
+  - vllm/model_executor/warmup/jit_warmup.py
+  - vllm/utils/flashinfer.py
+  - vllm/utils/platform_utils.py
+  - vllm/compilation/breakable_cudagraph.py
+  - vllm/triton_utils/
+  - vllm/platforms/xpu.py
+  - requirements/xpu.txt
+  - tests/models/inkling2/
+  - tests/kernels/moe/test_nvfp4_emulation_moe.py
+  - tests/kernels/quantization/nvfp4_utils.py
+  commands:
+    # The portable Triton kernels, the tiny-model engines, the XPU expert
+    # backends and their NVFP4 kernel, and the XPU gates (DSpark, LoRA,
+    # image inputs, FP8 KV).
+    - cd tests
+    - >-
+      pytest -v -s
+      models/inkling2/test_core_ops.py
+      models/inkling2/test_attention.py
+      models/inkling2/test_model.py
+      models/inkling2/test_xpu_experts.py
+      models/inkling2/test_platform_gates.py
+      kernels/moe/test_nvfp4_emulation_moe.py

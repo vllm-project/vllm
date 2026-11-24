@@ -3,12 +3,14 @@
 """End-to-end smoke test of a tiny random-weight Inkling2 model (TP=1)."""
 
 import copy
+import functools
 import json
 from typing import Any
 
 import pytest
 import torch
 
+from tests.models.inkling2.utils import DEVICE, TINY_CONFIG
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.models.inkling2.configs import (
@@ -24,48 +26,18 @@ if not (
     or current_platform.is_device_capability(90)
     or current_platform.is_device_capability_family(120)
     or current_platform.is_device_capability_family(80)
+    or current_platform.is_xpu()
 ):
-    pytest.skip("Inkling2 requires Ampere or newer", allow_module_level=True)
+    pytest.skip("Inkling2 requires Ampere or newer, or XPU", allow_module_level=True)
 
-TINY_CONFIG: dict[str, Any] = {
-    "architectures": ["Inkling2ForConditionalGeneration"],
-    "model_type": "inkling2",
-    "eos_token_id": 1,
-    "text_config": {
-        "torch_dtype": "bfloat16",
-        "hidden_size": 512,
-        "num_hidden_layers": 2,
-        "local_layer_ids": [0],
-        "sliding_window_size": 128,
-        "vocab_size": 1024,
-        "unpadded_vocab_size": 1000,
-        "num_attention_heads": 8,
-        "num_key_value_heads": 2,
-        "head_dim": 128,
-        "n_routed_experts": 16,
-        "num_experts_per_tok": 8,
-        "intermediate_size": 256,
-        "mlp_gate_softcap": 4.0,
-        "mlp_up_softcap": 25.0,
-    },
-    "mtp_config": {
-        "hidden_size": 512,
-        "num_hidden_layers": 2,
-        "num_attention_heads": 8,
-        "num_key_value_heads": 2,
-        "head_dim": 128,
-        "intermediate_size": 512,
-        "rms_norm_eps": 1e-6,
-        "rope_theta": 1e6,
-        "max_position_embeddings": 4096,
-        "local_layer_ids": [0],
-        "sliding_window_size": 128,
-        "block_size": 8,
-        "markov_rank": 32,
-        "markov_head_type": "rnn_hidden",
-        "target_layer_ids": [1, 2],
-    },
-}
+
+def _memory_fraction(fraction: float, min_gib: float = 4.0) -> float:
+    """`fraction` of the device memory. On XPU (e.g. 32 GB cards) at least
+    `min_gib` GiB, so that the engine fits; CUDA keeps `fraction`."""
+    if not current_platform.is_xpu():
+        return fraction
+    total = current_platform.get_device_total_memory() / 2**30
+    return max(fraction, min_gib / total)
 
 
 # A looped variant: layer 0 is the prelude, layers 1-2 (one local, one full)
@@ -105,7 +77,7 @@ def _tiny_looped_llm(tmp_path, text_overrides: dict[str, Any]) -> LLM:
         load_format="dummy",
         skip_tokenizer_init=True,
         tokenizer_mode="hf",
-        gpu_memory_utilization=0.035,
+        gpu_memory_utilization=_memory_fraction(0.035),
         # These cache comparisons use at most 216 tokens in a single prefill.
         max_num_batched_tokens=256,
         max_model_len=2048,
@@ -251,7 +223,7 @@ def test_portable_fp16_kv_config(tmp_path, looped):
     ),
 )
 def test_tiny_model_generates(
-    tmp_path, draft_sample_method, kv_cache_dtype, moe_backend, looped
+    tmp_path, capfd, draft_sample_method, kv_cache_dtype, moe_backend, looped
 ):
     """One local and one full layer load (dummy weights) and decode with the
     paged KV and conv-state caches and CUDA graphs, optionally speculating
@@ -259,7 +231,8 @@ def test_tiny_model_generates(
     Probabilistic drafting caches the draft's bf16 logits for rejection."""
     config = copy.deepcopy(TINY_LOOP_CONFIG if looped else TINY_CONFIG)
     (tmp_path / "config.json").write_text(json.dumps(config))
-    llm = LLM(
+    make_llm = functools.partial(
+        LLM,
         speculative_config=(
             None
             if draft_sample_method is None
@@ -275,7 +248,7 @@ def test_tiny_model_generates(
         tokenizer_mode="hf",
         kv_cache_dtype=kv_cache_dtype,
         kernel_config={"moe_backend": moe_backend},
-        gpu_memory_utilization=0.10 if looped else 0.035,
+        gpu_memory_utilization=_memory_fraction(0.10 if looped else 0.035),
         # Bound warmup memory and exercise chunking of the 298-token prompt.
         max_num_batched_tokens=256,
         max_model_len=2048,
@@ -283,6 +256,15 @@ def test_tiny_model_generates(
         limit_mm_per_prompt={"image": 0},
         disable_log_stats=False,
     )
+    if current_platform.is_xpu() and draft_sample_method is not None:
+        # The DSpark draft runs CUDA kernels: on XPU the engine core fails
+        # at model init with the gate's error (logged by the engine core).
+        with pytest.raises(RuntimeError, match="Engine core initialization failed"):
+            make_llm()
+        err = capfd.readouterr().err
+        assert "Inkling2 on XPU does not support DSpark speculative decoding" in err
+        return
+    llm = make_llm()
     prompts = [list(range(2, 300)), [5, 5, 5]]
     outputs = llm.generate(
         [{"prompt_token_ids": p} for p in prompts],
@@ -332,7 +314,7 @@ def _record_moe_routing(model: torch.nn.Module) -> None:
 
     calls: list[torch.Tensor] = []
     model.routing_calls = calls
-    generator = torch.Generator(device="cuda").manual_seed(0)
+    generator = torch.Generator(device=DEVICE).manual_seed(0)
 
     def hook(moe: Inkling2MoE, args: tuple) -> None:
         gate = moe.gate
@@ -370,7 +352,8 @@ def test_tiny_model_routed_experts(tmp_path, enable_pickle, looped):
         load_format="dummy",
         skip_tokenizer_init=True,
         tokenizer_mode="hf",
-        gpu_memory_utilization=0.10 if looped else 0.035,
+        # The profile run takes the default 8192-token batch.
+        gpu_memory_utilization=_memory_fraction(0.10 if looped else 0.035),
         max_model_len=2048,
         max_num_seqs=4,
         enforce_eager=True,
@@ -406,7 +389,7 @@ def _chunked_mixed_run(model: str, enforce_eager: bool) -> list[list[float]]:
         load_format="dummy",
         skip_tokenizer_init=True,
         tokenizer_mode="hf",
-        gpu_memory_utilization=0.035,
+        gpu_memory_utilization=_memory_fraction(0.035),
         max_model_len=2048,
         max_num_seqs=16,
         max_num_batched_tokens=256,
@@ -522,7 +505,7 @@ def test_sm12x_logits_preserve_softcap_and_vocabulary(tmp_path, dist_init, token
         )
     )
     torch.manual_seed(0)
-    with set_current_vllm_config(config), torch.device("cuda"):
+    with set_current_vllm_config(config), torch.device(DEVICE):
         head = ParallelLMHead(1024, 512, params_dtype=torch.bfloat16)
         head.weight.data.normal_(std=0.02)
         candidate = Inkling2LogitsProcessor(1024, org_vocab_size=1000, soft_cap=3.0)

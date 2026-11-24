@@ -11,13 +11,22 @@ The attention reference uses scale-after-add relative bias::
 import pytest
 import torch
 
+from tests.models.inkling2.utils import DEVICE, device_graph
 from vllm.models.inkling.nvidia.ops.fa4_rel_attention import bucket_max_seqlen_q
 from vllm.platforms import current_platform
 
 _cap = current_platform.get_device_capability() if current_platform.is_cuda() else None
+_cuda_attention = _cap is not None and _cap.major in (8, 9, 10, 11, 12)
 requires_sm90 = pytest.mark.skipif(
-    _cap is None or _cap.major not in (8, 9, 10, 11, 12),
-    reason="Inkling2 attention requires Ampere or newer",
+    not _cuda_attention, reason="Inkling2 attention requires Ampere or newer"
+)
+# The FP8 KV kernel cases run on CUDA (the model itself accepts FP8 KV caches
+# where `supported_kv_cache_dtypes` lists them).
+FP8_KV_DTYPES = [torch.float8_e4m3fn] if _cuda_attention else []
+# The Triton attention kernels also run on XPU.
+requires_triton_attention = pytest.mark.skipif(
+    not (_cuda_attention or current_platform.is_xpu()),
+    reason="Inkling2 attention requires Ampere or newer, or XPU",
 )
 
 HEAD_DIM = 128
@@ -106,8 +115,8 @@ def test_e4m3_kv_load_preserves_all_byte_values_and_masks():
         indices = rows[:, None] * 256 + tl.arange(0, 256)[None, :]
         tl.store(output + indices, values)
 
-    source = torch.arange(256, device="cuda").to(torch.uint8).view(torch.float8_e4m3fn)
-    output = torch.empty(512, device="cuda", dtype=torch.bfloat16)
+    source = torch.arange(256, device=DEVICE).to(torch.uint8).view(torch.float8_e4m3fn)
+    output = torch.empty(512, device=DEVICE, dtype=torch.bfloat16)
     load_values[(1,)](e4m3_arg(source), output)
     expected = torch.cat((source.bfloat16(), torch.zeros_like(output[256:])))
     nan = expected.isnan()
@@ -116,8 +125,8 @@ def test_e4m3_kv_load_preserves_all_byte_values_and_masks():
     assert torch.equal(output[~nan].view(torch.int16), expected[~nan].view(torch.int16))
 
 
-@requires_sm90
-@pytest.mark.parametrize("cache_dtype", [torch.float16, torch.float8_e4m3fn])
+@requires_triton_attention
+@pytest.mark.parametrize("cache_dtype", [torch.float16, *FP8_KV_DTYPES])
 @pytest.mark.parametrize("query_len,splits", [(37, 1), (1, 1), (1, 3), (8, 1), (8, 3)])
 @pytest.mark.parametrize("window", [0, 1024])
 @torch.inference_mode()
@@ -133,21 +142,21 @@ def test_portable_attention_dequantizes_kv_before_mma(
 
     torch.manual_seed(42)
     heads, kv_heads, page, dim = 24, 8, 16, 128
-    q = torch.randn(query_len, heads, dim, device="cuda").bfloat16()
-    kv = torch.randn(80, page, kv_heads, 2 * dim, device="cuda").to(cache_dtype)
-    table = torch.randperm(80, device="cuda").view(1, -1).int()
-    lengths = torch.tensor([1200], device="cuda", dtype=torch.int32)
-    cu = torch.tensor([0, query_len], device="cuda", dtype=torch.int32)
-    rel = torch.randn(query_len, heads, 1024, device="cuda").bfloat16()
+    q = torch.randn(query_len, heads, dim, device=DEVICE).bfloat16()
+    kv = torch.randn(80, page, kv_heads, 2 * dim, device=DEVICE).to(cache_dtype)
+    table = torch.randperm(80, device=DEVICE).view(1, -1).int()
+    lengths = torch.tensor([1200], device=DEVICE, dtype=torch.int32)
+    cu = torch.tensor([0, query_len], device=DEVICE, dtype=torch.int32)
+    rel = torch.randn(query_len, heads, 1024, device=DEVICE).bfloat16()
     sheared = shear_rel_logits(rel, [(query_len, 1200)], 128, bool(window))
 
     def run(cache):
         if splits == 1:
             out = torch.empty_like(q, dtype=torch.float32)
-            lse = torch.empty(heads, query_len, device="cuda")
+            lse = torch.empty(heads, query_len, device=DEVICE)
         else:
-            out = torch.empty(splits, *q.shape, device="cuda")
-            lse = torch.empty(splits, query_len, heads, device="cuda")
+            out = torch.empty(splits, *q.shape, device=DEVICE)
+            lse = torch.empty(splits, query_len, heads, device=DEVICE)
         k, v = cache.split(dim, dim=-1)
         rel_attention(
             q,
@@ -173,7 +182,7 @@ def test_portable_attention_dequantizes_kv_before_mma(
         torch.testing.assert_close(observed, reference, atol=0, rtol=0)
 
 
-@requires_sm90
+@requires_triton_attention
 @pytest.mark.parametrize(
     "num_heads,num_kv_heads,block_size,window_left,scenario",
     [
@@ -206,16 +215,13 @@ def test_inkling2_rel_attention(
         MODE_OUT_LSE,
         rel_attention,
     )
-    from vllm.models.inkling2.nvidia.ops import use_sm100_kernels
-    from vllm.models.inkling2.nvidia.ops.attention import (
-        _INKLING2_FA4_REL_ATTENTION_KERNEL,
-    )
+    from vllm.models.inkling2.common.ops.platform import use_sm100_kernels
 
     sm100 = use_sm100_kernels()
     if not sm100 and (num_splits, use_scheduler) != (1, True):
-        pytest.skip("the Hopper kernel does not split prefill")
+        pytest.skip("only FA4 (SM10x) splits prefill; `rel_attention` does not")
     torch.manual_seed(0)
-    device = "cuda"
+    device = DEVICE
     seqs = SCENARIOS[scenario]
     q_lens = [q_len for q_len, _ in seqs]
     num_tokens = sum(q_lens)
@@ -250,6 +256,10 @@ def test_inkling2_rel_attention(
     lse = torch.empty(q.shape[1::-1], device=device)
 
     if sm100:
+        from vllm.models.inkling2.nvidia.ops.attention import (
+            _INKLING2_FA4_REL_ATTENTION_KERNEL,
+        )
+
         _INKLING2_FA4_REL_ATTENTION_KERNEL(
             q,
             key_cache,
@@ -293,7 +303,7 @@ def test_inkling2_rel_attention(
     torch.testing.assert_close(lse, ref_lse, atol=1e-4, rtol=1e-5)
 
 
-@requires_sm90
+@requires_triton_attention
 @pytest.mark.parametrize(
     "num_heads,num_kv_heads,window_left",
     [
@@ -325,7 +335,7 @@ def test_inkling2_rel_decode_attention(
     from vllm.models.inkling2.common.ops.attention import rel_decode_attention
 
     torch.manual_seed(0)
-    device = "cuda"
+    device = DEVICE
     seqs = list(zip(query_lens, kv_lens))
     num_tokens = sum(query_lens)
     max_blocks = -(-max(kv_lens) // block_size)
@@ -387,7 +397,7 @@ def test_inkling2_rel_decode_attention(
     assert (out[num_tokens:] == 0).all()
 
 
-@requires_sm90
+@requires_triton_attention
 @pytest.mark.parametrize("is_local", [False, True])
 @pytest.mark.parametrize("num_splits", [1, 9])
 @torch.inference_mode()
@@ -399,7 +409,7 @@ def test_inkling2_decode_attention_after_prologue(is_local, num_splits):
     from vllm.models.inkling2.common.ops.sconv import attention_prologue, shift_rel_proj
 
     torch.manual_seed(0)
-    device = "cuda"
+    device = DEVICE
     heads, kv_heads, d_rel, page = 12, 2, 16, 128
     q_lens, kv_lens = [8, 1], [3000, 300]
     num_reqs, num_tokens = len(q_lens), sum(q_lens)
@@ -493,8 +503,8 @@ def test_inkling2_decode_attention_after_prologue(is_local, num_splits):
     run()
     expected = out.clone()
     sync = False
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    graph, capture = device_graph()
+    with capture:
         run()
     for _ in range(3):
         kv.copy_(kv_init)
@@ -504,7 +514,10 @@ def test_inkling2_decode_attention_after_prologue(is_local, num_splits):
         torch.testing.assert_close(out, expected, atol=0, rtol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_xpu()),
+    reason="requires CUDA or XPU",
+)
 @pytest.mark.parametrize("num_tokens", [1, 300])
 def test_gate_sink(num_tokens):
     from vllm.models.inkling2.common.ops.attention import gate_sink
@@ -512,11 +525,11 @@ def test_gate_sink(num_tokens):
     torch.manual_seed(0)
     num_heads, head_dim = 12, 128
     width = num_heads * head_dim
-    output = torch.randn(num_tokens, num_heads, head_dim, device="cuda")
+    output = torch.randn(num_tokens, num_heads, head_dim, device=DEVICE)
     # gate and sinks are strided column slices of a fused projection.
-    proj = torch.randn(num_tokens, width + num_heads + 4, device="cuda").bfloat16()
+    proj = torch.randn(num_tokens, width + num_heads + 4, device=DEVICE).bfloat16()
     gate, sinks = proj[:, :width], proj[:, width : width + num_heads]
-    lse = (torch.randn(num_heads, num_tokens, device="cuda") * 5).t()
+    lse = (torch.randn(num_heads, num_tokens, device=DEVICE) * 5).t()
 
     actual = torch.empty(gate.shape, device=gate.device, dtype=torch.bfloat16)
     gate_sink(output, gate, lse, sinks, actual)

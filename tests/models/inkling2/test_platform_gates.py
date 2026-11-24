@@ -160,3 +160,111 @@ def test_linear_small_batches_without_flashinfer(monkeypatch, rows):
     else:
         expected = torch.nn.functional.linear(x, weight)
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+def _vllm_config(tmp_path, lora: bool, cache_dtype: str = "auto"):
+    import json
+
+    from tests.models.inkling2.utils import TINY_CONFIG
+    from vllm.config import CacheConfig, LoRAConfig, ModelConfig, VllmConfig
+
+    (tmp_path / "config.json").write_text(json.dumps(TINY_CONFIG))
+    return VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            dtype="bfloat16",
+            skip_tokenizer_init=True,
+            tokenizer_mode="hf",
+            max_model_len=2048,
+            limit_mm_per_prompt={"image": 0},
+        ),
+        cache_config=CacheConfig(cache_dtype=cache_dtype),
+        lora_config=LoRAConfig(max_lora_rank=8) if lora else None,
+    )
+
+
+@pytest.mark.parametrize(
+    "lora,vision,expected",
+    [
+        (False, False, []),
+        (True, False, ["LoRA"]),
+        (False, True, ["image inputs"]),
+        (True, True, ["image inputs", "LoRA"]),
+    ],
+    ids=["text", "lora", "image", "image-and-lora"],
+)
+def test_xpu_unsupported_features(tmp_path, lora, vision, expected):
+    """The features XPU rejects at model init, for explicit requests: image
+    inputs and LoRA (DSpark: `test_model.py`); a text-only model has
+    none."""
+    from vllm.models.inkling2.common.model import xpu_unsupported_features
+
+    features = xpu_unsupported_features(_vllm_config(tmp_path, lora), vision)
+    assert [f.split(" (")[0] for f in features] == expected
+
+
+@pytest.mark.parametrize("lora", [False, True])
+def test_model_init_gate_fires_on_xpu_only(tmp_path, lora):
+    """On XPU the model-init gate raises for LoRA and passes a text-only
+    model; on other platforms it passes LoRA too."""
+    from vllm.models.inkling2.common.model import (
+        _check_platform_support,
+        xpu_unsupported_features,
+    )
+
+    config = _vllm_config(tmp_path, lora)
+    assert xpu_unsupported_features(config, False) == (["LoRA"] if lora else [])
+    if current_platform.is_xpu() and lora:
+        with pytest.raises(NotImplementedError, match=r"does not support LoRA$"):
+            _check_platform_support(config, vision=False)
+    else:
+        _check_platform_support(config, vision=False)
+
+
+def test_flat_experts_per_platform():
+    """The flat-row expert backend: the XPU backends on XPU, Humming
+    elsewhere."""
+    import functools
+
+    from vllm.models.inkling2.common.moe import flat_experts_class
+
+    for quant_format in ("nvfp4", "mxfp8"):
+        backend = flat_experts_class(quant_format, 8, 4.0, 25.0)
+        if current_platform.is_xpu():
+            from vllm.models.inkling2.xpu.experts import (
+                XpuMxfp8Experts,
+                XpuNvfp4Experts,
+            )
+
+            expected = XpuNvfp4Experts if quant_format == "nvfp4" else XpuMxfp8Experts
+            assert isinstance(backend, functools.partial)
+            assert backend.func is expected
+        else:
+            from vllm.models.inkling2.nvidia.ops.moe_sm90 import HummingExperts
+
+            assert backend is HummingExperts
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="builds the model on the device",
+)
+def test_fp8_kv_cache_follows_the_attention_layer_support(tmp_path, dist_init):
+    """An FP8 KV cache builds where the attention layers list it
+    (`supported_kv_cache_dtypes`) and is rejected at model init elsewhere
+    (e.g. on XPU)."""
+    import torch
+
+    from vllm.config import set_current_vllm_config
+    from vllm.models.inkling2.common.attention import supported_kv_cache_dtypes
+    from vllm.models.inkling2.common.model import Inkling2ForConditionalGeneration
+
+    config = _vllm_config(tmp_path, lora=False, cache_dtype="fp8_e4m3")
+    with set_current_vllm_config(config), torch.device(current_platform.device_type):
+        if "fp8_e4m3" in supported_kv_cache_dtypes():
+            Inkling2ForConditionalGeneration(vllm_config=config)
+        else:
+            with pytest.raises(ValueError, match="KV cache dtype must be one of"):
+                Inkling2ForConditionalGeneration(vllm_config=config)
+    if current_platform.is_xpu():
+        assert "fp8_e4m3" not in supported_kv_cache_dtypes()

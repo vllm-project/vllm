@@ -11,6 +11,7 @@ import torch
 
 import vllm.models.inkling2.common.ops.sconv as sconv_ops
 from tests.models.inkling2.test_attention import shear_rel_logits
+from tests.models.inkling2.utils import DEVICE, device_graph
 from vllm.models.inkling2.common.ops.attn_res import attn_res
 from vllm.models.inkling2.common.ops.conv_mix import conv_mix
 from vllm.models.inkling2.common.ops.norm import rms_norm
@@ -21,9 +22,10 @@ from vllm.models.inkling2.common.ops.sconv import (
 )
 from vllm.platforms import current_platform
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-
-DEVICE = "cuda"
+pytestmark = pytest.mark.skipif(
+    not (torch.cuda.is_available() or current_platform.is_xpu()),
+    reason="needs CUDA or XPU",
+)
 
 
 @pytest.mark.parametrize("in_dtype", [torch.bfloat16, torch.float32])
@@ -104,8 +106,8 @@ def test_loop_norm_preserves_stacked_reference_and_graph(tokens, broadcast):
     out = pair_rms_norm(dest, message)
     torch.testing.assert_close(out, reference(), atol=0, rtol=0)
     if tokens:
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
+        graph, capture = device_graph()
+        with capture:
             out = pair_rms_norm(dest, message)
         for _ in range(3):
             source.copy_(torch.randn_like(source))

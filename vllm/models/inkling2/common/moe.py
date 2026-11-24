@@ -5,6 +5,12 @@
 Experts are sharded contiguously over the TP group (EP size = TP size); each
 rank returns the full all-reduced bf16 output. Checkpoint names under
 `model.llm.layers.N.mlp` map 1:1 to parameters.
+
+Blackwell (SM10x) and SM12x route into tile-padded expert rows with quantized
+activations (`nvidia/ops/moe.py`). Everywhere else the flow is Hopper's:
+`select_experts`, then a `FlatExperts` backend for the expert GEMMs on the
+flat rows (Humming on CUDA), then `combine` (a backend whose `combines`
+is True sums the rows itself).
 """
 
 from collections.abc import Callable, Sequence
@@ -40,6 +46,53 @@ from .ops.moe import combine, select_experts
 from .ops.platform import use_sm100_kernels
 
 QuantFormat = Literal["nvfp4", "mxfp8"]
+
+
+class FlatExperts(Protocol):
+    """Expert GEMMs over the flat (token * topk + slot) rows of
+    `select_experts` (`HummingExperts` is the reference): built after
+    loading as `cls(weights, shapes, nvfp4)` from the checkpoint-layout
+    weights, block scales and NVFP4 global scales of `w13` (interleaved
+    gate / up rows) and `w2`. A call returns the bf16 `[T * topk, H]`
+    down-projection rows of the local slots of `ids` (-1: not local), with
+    the softcapped SiTU (`gate_cap`, `up_cap`) of the `w13` output scaled by
+    the routing `weights`; the other rows are left unset.
+
+    A backend whose `combines` is True (e.g. the SYCL fused MoE on XPU)
+    returns the combined bf16 `[T, H]` output instead: the routing weight
+    scales each down-projection row in fp32 and the sum is rounded once to
+    bf16, as `combine` does. It serves only the reduced output (no
+    `reduce=False` rows, no `push`). Without the attribute it is False.
+
+    A backend whose `keeps_parameters` is True (the XPU ones) is built from
+    the layer's Parameters instead of their `.data` and keeps them, in the
+    checkpoint layout or rewritten in place into its kernel layout; the
+    other backends get the `.data` tensors and the Parameters are emptied
+    after the build."""
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        ids: torch.Tensor,
+        weights: torch.Tensor,
+        src2dst: torch.Tensor,
+        num_global_experts: int,
+        gate_cap: float,
+        up_cap: float,
+    ) -> torch.Tensor: ...
+
+
+def flat_experts_class(
+    quant_format: QuantFormat, topk: int, gate_cap: float, up_cap: float
+) -> Callable[..., FlatExperts]:
+    """This platform's `FlatExperts` constructor for `quant_format` experts
+    with `topk` slots per token and the SiTU softcaps of the layer: the XPU
+    backends on XPU, Humming elsewhere."""
+    if current_platform.is_xpu():
+        from vllm.models.inkling2.xpu.experts import xpu_flat_experts
+
+        return xpu_flat_experts(quant_format, topk, gate_cap, up_cap)
+    return HummingExperts
 
 
 class ExpertsLoRA(Protocol):
@@ -160,7 +213,15 @@ class Inkling2Experts(nn.Module):
             and vllm_config is not None
             and vllm_config.kernel_config.moe_backend == "humming"
         )
-        self.humming: HummingExperts | None = None
+        self.humming: HummingNVFP4Experts | None = None
+        # Experts of the flat `select_experts` rows (neither SM10x nor SM12x),
+        # built after loading; unsupported formats fail here.
+        self.flat_experts: FlatExperts | None = None
+        self.flat_experts_cls = (
+            None
+            if self.sm100 or self.sm120
+            else flat_experts_class(quant_format, self.topk, self.gate_cap, self.up_cap)
+        )
         if self.sm100:
             load_kernels(
                 (self.w13_weight, self.w2_weight),
@@ -184,6 +245,21 @@ class Inkling2Experts(nn.Module):
         set_weight_attrs(param, {"weight_loader": loader})
         self.register_parameter(name, param)
 
+    def _refuse_reload(self, param: nn.Parameter) -> None:
+        """Refuse a weight load into a layer whose flat backend already
+        computes on its Parameters (`keeps_parameters`), before anything is
+        written: they hold the backend's kernel layout (and NVFP4 global
+        scales were taken at the build), so a reload, direct or layerwise
+        (whose copy-back writes the loaded layout into them), would corrupt
+        the experts."""
+        if self.flat_experts is not None and self._flat_experts_keep_parameters():
+            raise RuntimeError(
+                f"Inkling2Experts: {type(self.flat_experts).__name__} computes on "
+                "the routed experts' Parameters in its own layout; reloading "
+                "their weights into a built layer is not supported "
+                f"(parameter of shape {tuple(param.shape)})."
+            )
+
     def _load_expert_shard(self, param: nn.Parameter, loaded: torch.Tensor) -> None:
         start = self.ep_rank * self.num_experts
         self._load_full(param, loaded[start : start + self.num_experts])
@@ -198,16 +274,35 @@ class Inkling2Experts(nn.Module):
         if self.sm100:
             param.data.copy_(swizzle_block_scales(shuffle_rows(param.data)))
 
-    @staticmethod
-    def _load_full(param: nn.Parameter, loaded: torch.Tensor) -> None:
+    def _load_full(self, param: nn.Parameter, loaded: torch.Tensor) -> None:
+        self._refuse_reload(param)
         assert loaded.shape == param.shape and loaded.dtype == param.dtype, (
             f"{loaded.shape} {loaded.dtype} != {param.shape} {param.dtype}"
         )
         param.data.copy_(loaded)
 
+    def _flat_experts_keep_parameters(self) -> bool:
+        """Whether the flat backend is built from the Parameters themselves
+        (its `keeps_parameters`): it keeps them, rewritten in place into its
+        kernel layout where it needs one, so they stay module state."""
+        backend = self.flat_experts_cls
+        # The XPU constructors are `functools.partial`s of the backend.
+        backend = getattr(backend, "func", backend)
+        return bool(getattr(backend, "keeps_parameters", False))
+
     def process_weights_after_loading(self) -> None:
         if self.sm100 or (self.sm120 and not self.humming_nvfp4):
             return
+        # Only the backends that keep the Parameters in their kernel layout
+        # (the XPU ones) refuse a second build; the CUDA paths are unchanged.
+        if self.flat_experts is not None and self._flat_experts_keep_parameters():
+            raise RuntimeError(
+                "Inkling2Experts.process_weights_after_loading was already "
+                "called: the expert kernels were built from the loaded "
+                "weights, which now hold the kernel layout. Reloading the "
+                "routed experts' weights into a built layer is not supported."
+            )
+        keep = not self.humming_nvfp4 and self._flat_experts_keep_parameters()
         weights = {}
         for name in ("w13", "w2"):
             amax, denominator = self.scales(name)
@@ -216,17 +311,19 @@ class Inkling2Experts(nn.Module):
                 global_scale = (
                     self.ones if self.humming_nvfp4 else amax.data / denominator.data
                 )
-            weights[name] = (
-                getattr(self, f"{name}_weight").data,
-                getattr(self, f"{name}_weight_scale").data,
-                global_scale,
-            )
-        self.humming = (
-            HummingNVFP4Experts(weights, self.shapes)
-            if self.humming_nvfp4
-            else HummingExperts(weights, self.shapes, self.nvfp4)
-        )
-        # The Humming copies replace the checkpoint layout.
+            weight = getattr(self, f"{name}_weight")
+            scale = getattr(self, f"{name}_weight_scale")
+            if not keep:
+                weight, scale = weight.data, scale.data
+            weights[name] = (weight, scale, global_scale)
+        if self.humming_nvfp4:
+            self.humming = HummingNVFP4Experts(weights, self.shapes)
+        else:
+            assert self.flat_experts_cls is not None
+            self.flat_experts = self.flat_experts_cls(weights, self.shapes, self.nvfp4)
+        if keep:
+            return
+        # The repacked copies replace the checkpoint layout.
         for name in ("w13", "w2"):
             for suffix in ("weight", "weight_scale"):
                 param = getattr(self, f"{name}_{suffix}")
@@ -274,7 +371,9 @@ class Inkling2Experts(nn.Module):
         """`routing` and `quantized` (`x` in the expert layout) are from
         `ops.moe.route` (on Hopper, `routing` is from
         `ops.moe_sm90.select_experts` and `quantized` is None). The routing
-        weight is applied inside the SwiGLU, before the down projection.
+        weight is applied inside the SwiGLU, before the down projection,
+        except by a `combines` flat backend, which applies it to the
+        down-projection rows in fp32 while summing them.
         Without `reduce`, returns the local expert rows and `src2dst` for
         the consumer to combine and reduce, or pushes their combine to the
         token shard owners."""
@@ -294,9 +393,9 @@ class Inkling2Experts(nn.Module):
             del gate_up
             down = self._gemm(activated, "w2", tiles, plan, 1)
         else:
-            assert self.humming is not None, "process_weights_after_loading"
+            assert self.flat_experts is not None, "process_weights_after_loading"
             ids, gammas, src2dst = routing
-            down = self.humming(
+            down = self.flat_experts(
                 x,
                 ids,
                 gammas,
@@ -305,6 +404,16 @@ class Inkling2Experts(nn.Module):
                 self.gate_cap,
                 self.up_cap,
             )
+            if getattr(self.flat_experts, "combines", False):
+                if push is not None or not reduce:
+                    raise NotImplementedError(
+                        f"{type(self.flat_experts).__name__} combines the expert "
+                        "rows itself; it has no unreduced rows to return or push"
+                    )
+                # The fp32 combine was rounded once to bf16 by the experts.
+                if self.ep_size == 1:
+                    return down
+                return tensor_model_parallel_all_reduce(down)
         if push is not None:
             # Each rank's fp32 combine is rounded once to bf16.
             combine_push(down, src2dst, self.topk, push)

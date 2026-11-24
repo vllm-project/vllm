@@ -20,6 +20,11 @@ if not (
 import vllm.models.inkling2.common.moe as moe_module  # noqa: E402
 import vllm.models.inkling2.nvidia.ops.moe_sm120 as moe_sm120  # noqa: E402
 import vllm.models.inkling2.nvidia.ops.trtllm_bmm as trtllm_bmm  # noqa: E402
+from tests.models.inkling2.utils import (  # noqa: E402
+    E2M1,
+    dequant_mxfp8,
+    dequant_nvfp4,
+)
 from vllm.models.inkling2.common.moe import Inkling2MoE  # noqa: E402
 from vllm.models.inkling2.common.ops.activation import (  # noqa: E402
     _div_rn,
@@ -38,19 +43,6 @@ from vllm.models.inkling2.nvidia.ops.mxfp8 import mxfp8_quantize  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.nvfp4 import nvfp4_quantize  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.trtllm_bmm import ExpertPlan  # noqa: E402
 from vllm.triton_utils import tl, triton  # noqa: E402
-
-E2M1 = [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6]
-
-
-def dequant_nvfp4(values: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
-    lut = torch.tensor(E2M1, device=values.device)
-    v = torch.stack([lut[(values & 0xF).long()], lut[(values >> 4).long()]], -1)
-    return v.flatten(-2) * scales.float().repeat_interleave(16, -1)
-
-
-def dequant_mxfp8(values: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
-    exp2 = torch.exp2(scales.float() - 127).repeat_interleave(32, -1)
-    return values.float() * exp2
 
 
 def unshuffle_rows(x: torch.Tensor) -> torch.Tensor:
@@ -761,7 +753,9 @@ def test_padding_tokens_route_to_no_expert(
     assert (out[tokens:] == 0).all()
     # Humming picks its kernels by row count: the rows match bitwise where
     # both batches get the same kernels (on SM8x, 200 and 256 tokens do not).
-    humming = moe.experts.humming
+    # The SM12x Humming NVFP4 experts, or the flat-row backend (Humming
+    # everywhere else on CUDA).
+    humming = moe.experts.humming or moe.experts.flat_experts
     if humming is None or all(
         _humming_kernel(humming, name, tokens * 8)
         == _humming_kernel(humming, name, padded * 8)

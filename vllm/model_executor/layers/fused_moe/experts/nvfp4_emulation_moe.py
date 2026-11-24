@@ -10,6 +10,7 @@ Weights are dequantized on the fly during each forward, we fall back to calling
 is applied on `a13`, `a2`.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -44,6 +45,56 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
+
+
+@triton.jit
+def _block_scales_to_f32(raw):
+    """fp32 values of FP8-E4M3 block scales stored as uint8."""
+    return tl.cast(raw, tl.float8e4nv, bitcast=True).to(tl.float32)
+
+
+@triton.jit
+def _split_dots_step(
+    accumulator,
+    a_ptrs,
+    raw_bytes,
+    s_ptrs,
+    token_mask,
+    k_left,
+    stride_ak,
+    block_k_diviable: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    group_size: tl.constexpr,
+    compute_type: tl.constexpr,
+):
+    """One K step of the SPLIT_DOTS path: `accumulator` plus the even and
+    the odd K indices of the A rows (`a_ptrs`: the even ones) times the
+    weight tile `raw_bytes` [BLOCK_SIZE_N, BLOCK_SIZE_K // 2] (low nibble:
+    even K index) with its block scales at `s_ptrs` [BLOCK_SIZE_N,
+    BLOCK_SIZE_K // group_size]. `k_left`: the K indices from this step on."""
+    GROUPS: tl.constexpr = BLOCK_SIZE_K // group_size
+    if block_k_diviable:
+        a_mask = token_mask[:, None]
+        scale_raw = tl.load(s_ptrs)
+    else:
+        offs_k_packed = tl.arange(0, BLOCK_SIZE_K // 2)
+        # K is even, so an even index below k_left has its odd one too.
+        a_mask = token_mask[:, None] & (2 * offs_k_packed[None, :] < k_left)
+        offs_g = tl.arange(0, GROUPS)
+        scale_raw = tl.load(s_ptrs, mask=offs_g[None, :] * group_size < k_left, other=0)
+    a_even = tl.load(a_ptrs, mask=a_mask, other=0.0)
+    a_odd = tl.load(a_ptrs + stride_ak, mask=a_mask, other=0.0)
+    # The scale of K index pair j (2j, 2j + 1) is scale[:, j // (group / 2)].
+    scale = _block_scales_to_f32(scale_raw)
+    scale = tl.reshape(
+        tl.broadcast_to(scale[:, :, None], (BLOCK_SIZE_N, GROUPS, group_size // 2)),
+        (BLOCK_SIZE_N, BLOCK_SIZE_K // 2),
+    )
+    w_even = (_e2m1_inline(raw_bytes & 0x0F) * scale).to(compute_type)
+    w_odd = (_e2m1_inline((raw_bytes >> 4) & 0x0F) * scale).to(compute_type)
+    accumulator = tl.dot(a_even, tl.trans(w_even), acc=accumulator)
+    return tl.dot(a_odd, tl.trans(w_odd), acc=accumulator)
 
 
 @triton.jit
@@ -84,6 +135,7 @@ def fused_moe_nvfp4_emulation_kernel(
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
     group_size: tl.constexpr,
+    SPLIT_DOTS: tl.constexpr = False,
 ):
     """Fused MoE kernel for emulated NVFP4 weight-only dequantization + GEMM.
 
@@ -101,6 +153,15 @@ def fused_moe_nvfp4_emulation_kernel(
     extracted, decoded and scaled, then tl.interleave produces the
     [BLOCK_SIZE_N, BLOCK_SIZE_K] dequantized tile which is transposed to
     [BLOCK_SIZE_K, BLOCK_SIZE_N] for tl.dot.
+
+    SPLIT_DOTS (for small batches) keeps the two nibbles apart instead: the
+    even and odd K indices of the tile are two [BLOCK_SIZE_N, BLOCK_SIZE_K //
+    2] weight tiles, each multiplied (tl.dot) with the matching strided
+    columns of A, so there is no interleave or [N, K] transpose. The block
+    scales are loaded once per group ([BLOCK_SIZE_N, BLOCK_SIZE_K //
+    group_size]) and broadcast over the group, and the global scale is
+    applied to the fp32 accumulator: the e2m1 x e4m3 products (at most 6
+    significant bits) are then exact in bf16 / fp16.
     """
     BLOCK_SIZE_K_PACKED: tl.constexpr = BLOCK_SIZE_K // 2
 
@@ -145,10 +206,27 @@ def fused_moe_nvfp4_emulation_kernel(
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     offs_k_packed = tl.arange(0, BLOCK_SIZE_K_PACKED)
 
-    # A pointers: [BLOCK_SIZE_M, BLOCK_SIZE_K]
-    a_ptrs = a_ptr + (
-        offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
-    )
+    if SPLIT_DOTS:
+        # A pointers: even K indices [BLOCK_SIZE_M, BLOCK_SIZE_K_PACKED]; the
+        # odd ones are one stride_ak further.
+        a_ptrs = a_ptr + (
+            offs_token[:, None] // top_k * stride_am
+            + 2 * offs_k_packed[None, :] * stride_ak
+        )
+        # Block scales of the tile: one per group of K.
+        GROUPS: tl.constexpr = BLOCK_SIZE_K // group_size
+        offs_g = tl.arange(0, GROUPS)
+        s_ptrs = (
+            b_scale_ptr
+            + off_experts * stride_bse
+            + offs_bn[:, None] * stride_bsn
+            + offs_g[None, :] * stride_bsk
+        )
+    else:
+        # A pointers: [BLOCK_SIZE_M, BLOCK_SIZE_K]
+        a_ptrs = a_ptr + (
+            offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
+        )
 
     # B pointers: [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED] — N-major so that
     # tl.interleave (which operates on the last dim) produces a
@@ -176,67 +254,97 @@ def fused_moe_nvfp4_emulation_kernel(
     # K-loop with FP32 accumulation
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # Load A tile [BLOCK_SIZE_M, BLOCK_SIZE_K].
-        if block_k_diviable:
-            a = tl.load(
+    if SPLIT_DOTS:
+        for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+            # Packed weight tile [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED].
+            if block_k_diviable:
+                raw_bytes = tl.load(b_ptrs)
+            else:
+                kp_mask = offs_k_packed[None, :] < (K // 2) - k * BLOCK_SIZE_K_PACKED
+                raw_bytes = tl.load(b_ptrs, mask=kp_mask, other=0)
+            accumulator = _split_dots_step(
+                accumulator,
                 a_ptrs,
-                mask=token_mask[:, None],
-                other=0.0,
+                raw_bytes,
+                s_ptrs,
+                token_mask,
+                K - k * BLOCK_SIZE_K,
+                stride_ak,
+                block_k_diviable,
+                BLOCK_SIZE_N,
+                BLOCK_SIZE_K,
+                group_size,
+                compute_type,
             )
-        else:
-            a = tl.load(
-                a_ptrs,
-                mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
-                other=0.0,
+            a_ptrs += BLOCK_SIZE_K * stride_ak
+            b_ptrs += BLOCK_SIZE_K_PACKED * stride_bk
+            s_ptrs += GROUPS * stride_bsk
+        accumulator = accumulator * w_global_scale
+    else:
+        for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+            # Load A tile [BLOCK_SIZE_M, BLOCK_SIZE_K].
+            if block_k_diviable:
+                a = tl.load(
+                    a_ptrs,
+                    mask=token_mask[:, None],
+                    other=0.0,
+                )
+            else:
+                a = tl.load(
+                    a_ptrs,
+                    mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+                    other=0.0,
+                )
+
+            # Load packed weight tile [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED].
+            if block_k_diviable:
+                raw_bytes = tl.load(b_ptrs)
+            else:
+                kp_mask = offs_k_packed[None, :] < (K // 2) - k * BLOCK_SIZE_K_PACKED
+                raw_bytes = tl.load(b_ptrs, mask=kp_mask, other=0)
+
+            # Extract both nibbles from each byte (each [N, K_packed]).
+            low_nibble = raw_bytes & 0x0F
+            high_nibble = (raw_bytes >> 4) & 0x0F
+
+            low_decoded = _e2m1_inline(low_nibble)
+            high_decoded = _e2m1_inline(high_nibble)
+
+            # Load and apply per-block FP8 scales.
+            # Scale shape: [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED], one scale per
+            # group_size_packed packed elements.
+            b_scale_ptrs = (
+                b_scale_ptr
+                + off_experts * stride_bse
+                + offs_bn[:, None] * stride_bsn
+                + (
+                    (offs_k_packed[None, :] + BLOCK_SIZE_K_PACKED * k)
+                    // group_size_packed
+                )
+                * stride_bsk
             )
+            if block_k_diviable:
+                b_scale_raw = tl.load(b_scale_ptrs)
+            else:
+                b_scale_raw = tl.load(b_scale_ptrs, mask=kp_mask, other=0.0)
 
-        # Load packed weight tile [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED].
-        if block_k_diviable:
-            raw_bytes = tl.load(b_ptrs)
-        else:
-            kp_mask = offs_k_packed[None, :] < (K // 2) - k * BLOCK_SIZE_K_PACKED
-            raw_bytes = tl.load(b_ptrs, mask=kp_mask, other=0)
+            b_scale = tl.cast(b_scale_raw, tl.float8e4nv, bitcast=True).to(tl.float32)
+            b_scale = b_scale * w_global_scale
 
-        # Extract both nibbles from each byte (each [N, K_packed]).
-        low_nibble = raw_bytes & 0x0F
-        high_nibble = (raw_bytes >> 4) & 0x0F
+            # Scale both halves with the same per-block scale (the two
+            # elements packed in one byte always belong to the same group).
+            low_scaled = low_decoded * b_scale
+            high_scaled = high_decoded * b_scale
 
-        low_decoded = _e2m1_inline(low_nibble)
-        high_decoded = _e2m1_inline(high_nibble)
+            # Interleave along last dim: [N, K_packed] x2 -> [N, K],
+            # then transpose to [K, N] for tl.dot.
+            b = tl.trans(tl.interleave(low_scaled, high_scaled)).to(compute_type)
 
-        # Load and apply per-block FP8 scales.
-        # Scale shape: [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED], one scale per
-        # group_size_packed packed elements.
-        b_scale_ptrs = (
-            b_scale_ptr
-            + off_experts * stride_bse
-            + offs_bn[:, None] * stride_bsn
-            + ((offs_k_packed[None, :] + BLOCK_SIZE_K_PACKED * k) // group_size_packed)
-            * stride_bsk
-        )
-        if block_k_diviable:
-            b_scale_raw = tl.load(b_scale_ptrs)
-        else:
-            b_scale_raw = tl.load(b_scale_ptrs, mask=kp_mask, other=0.0)
+            accumulator = tl.dot(a, b, acc=accumulator)
 
-        b_scale = tl.cast(b_scale_raw, tl.float8e4nv, bitcast=True).to(tl.float32)
-        b_scale = b_scale * w_global_scale
-
-        # Scale both halves with the same per-block scale (the two
-        # elements packed in one byte always belong to the same group).
-        low_scaled = low_decoded * b_scale
-        high_scaled = high_decoded * b_scale
-
-        # Interleave along last dim: [N, K_packed] x2 -> [N, K],
-        # then transpose to [K, N] for tl.dot.
-        b = tl.trans(tl.interleave(low_scaled, high_scaled)).to(compute_type)
-
-        accumulator = tl.dot(a, b, acc=accumulator)
-
-        # Advance pointers along K.
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K_PACKED * stride_bk
+            # Advance pointers along K.
+            a_ptrs += BLOCK_SIZE_K * stride_ak
+            b_ptrs += BLOCK_SIZE_K_PACKED * stride_bk
 
     # Router weight multiplication (in float32 for stability)
     if MUL_ROUTED_WEIGHT:
@@ -267,14 +375,34 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
     top_k: int,
     config: dict[str, Any],
     compute_type: tl.dtype,
+    launch_options: Mapping[str, Any] | None = None,
+    split_dots: bool = False,
 ):
     """Launch the fused NVFP4 emulation MoE kernel.
 
     B has shape [E, N, K_packed] where K_packed = K // 2 (two FP4 per byte).
     B_scale has shape [E, N, K // group_size] in FP8-E4M3 (stored as uint8).
     w_global_scale has shape [E] (per-expert scalar).
+    `launch_options` are passed to the launch as they are (`num_warps`,
+    `num_stages`, and backend options such as `grf_mode` on XPU), for a
+    caller that chose them for this kernel. Without them the launch takes
+    Triton's defaults: the `num_warps` / `num_stages` entries of `config`
+    are not used, since both of its sources (`get_default_config` and the
+    tuned files) choose them for `fused_moe_kernel`.
+    Returns the launched (compiled) kernel.
+    `split_dots` selects the kernel's SPLIT_DOTS path (meant for small
+    batches; the caller picks it); its numerics differ from the default path
+    (exact dequantized bf16 / fp16 weights, global scale on the fp32
+    accumulator).
     """
     assert B_scale is not None and B_scale.ndim == 3
+    group_size = 16
+    if split_dots:
+        # Whole scale groups per K tile, and a tl.dot inner dimension
+        # (BLOCK_SIZE_K // 2) of at least 16, which Triton requires.
+        assert (
+            config["BLOCK_SIZE_K"] % group_size == 0 and config["BLOCK_SIZE_K"] >= 32
+        ), config
 
     N = B.size(1)
     K = A.size(1)
@@ -293,7 +421,7 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
     )
 
-    fused_moe_nvfp4_emulation_kernel[grid](
+    return fused_moe_nvfp4_emulation_kernel[grid](
         A,
         B,
         C,
@@ -323,11 +451,13 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
-        group_size=16,
+        group_size=group_size,
+        SPLIT_DOTS=split_dots,
         BLOCK_SIZE_M=config["BLOCK_SIZE_M"],
         BLOCK_SIZE_N=config["BLOCK_SIZE_N"],
         BLOCK_SIZE_K=config["BLOCK_SIZE_K"],
         GROUP_SIZE_M=config["GROUP_SIZE_M"],
+        **(launch_options or {}),
     )
 
 
