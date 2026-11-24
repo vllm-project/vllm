@@ -102,6 +102,14 @@ class TestPlotFilters:
 
         assert result["request_rate"].tolist() == [20]
 
+    @pytest.mark.parametrize(("op", "expected"), [("==", ["001"]), ("!=", ["1"])])
+    def test_numeric_looking_labels(self, op, expected):
+        df = pd.DataFrame({"label": ["001", "1"]})
+
+        result = PlotFilters.parse_str(f"label{op}001").apply(df)
+
+        assert result["label"].tolist() == expected
+
     def test_boolean_target_is_literal_for_string_column(self):
         """String labels named true/false must keep string comparisons."""
         df = pd.DataFrame({"label": ["true", "false"]})

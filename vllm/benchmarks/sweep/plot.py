@@ -50,6 +50,11 @@ class PlotFilterBase(ABC):
 
 def _parse_filter_target(series, target: str) -> float | bool | str:
     """Parse a filter target using the column's value type when needed."""
+    from pandas.api.types import infer_dtype
+
+    if infer_dtype(series, skipna=True) == "string":
+        return target
+
     if target.casefold() in ("true", "false"):
         dtype_kind = getattr(series.dtype, "kind", None)
         non_null_values = series.dropna()
