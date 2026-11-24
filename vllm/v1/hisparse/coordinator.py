@@ -772,11 +772,14 @@ class HiSparseCoordinator:
         transition watermark, the imported pages are restored into resident
         blocks too, so decode reads them like a locally computed prefix. They
         are clean copies of durable host pages: the residency policy unpins
-        them, and the pool reclaims them only after every other free block.
+        them.
+
+        Promotion takes only blocks that hold no cached prefix: a host prefix
+        hit also needs its prefix-cached indexer blocks, and a promoted block
+        costs one block per resident group.
         """
         assert self.host_manager is not None
         num_managers = len(self.resident_managers)
-        spare = self.gpu_pool.get_num_free_blocks() - self.transition_watermark
         host_blocks = self.host_manager.req_to_blocks[request_id]
         num_blocks = min(
             num_blocks,
@@ -801,7 +804,14 @@ class HiSparseCoordinator:
             block_idx
             for block_idx, blocks in zip(candidates, zip(*columns))
             if all(block.is_null for block in blocks)
-        ][: max(spare, 0) // num_managers]
+        ]
+        spare = min(
+            self.gpu_pool.get_num_free_blocks() - self.transition_watermark,
+            self.gpu_pool.get_num_uncached_free_blocks(
+                len(block_indices) * num_managers
+            ),
+        )
+        block_indices = block_indices[: max(spare, 0) // num_managers]
         if not block_indices:
             return []
         blocks = self.gpu_pool.get_new_blocks(len(block_indices) * num_managers)
@@ -1164,25 +1174,34 @@ class HiSparseCoordinator:
             # Preemption can cancel a scheduled forward after its spills were
             # planned, so its copies do not prove that the KV was computed.
             state.publication = None
-        for manager in self.resident_managers:
-            blocks = manager.get_residency_row(request_id)
-            released: list[KVCacheBlock] = []
-            dropped: list[int] = []
-            # Tail first, so a prefix loses its tail blocks before its head.
-            for block_idx in reversed(range(len(blocks))):
-                block = blocks[block_idx]
-                if block.is_null:
+        rows = [
+            manager.get_residency_row(request_id) for manager in self.resident_managers
+        ]
+        released: list[KVCacheBlock] = []
+        reclaimable: list[KVCacheBlock] = []
+        dropped: list[list[int]] = [[] for _ in rows]
+        # Tail blocks first, each block index's blocks across groups adjacent.
+        for block_idx in reversed(range(max(map(len, rows), default=0))):
+            for row, row_dropped in zip(rows, dropped):
+                if block_idx >= len(row) or row[block_idx].is_null:
                     continue
+                block = row[block_idx]
                 if block_idx in state.unpinned_blocks:
                     self._discard_owner(block.block_id, (request_id, block_idx))
                 elif self._is_clean(state, block_idx):
                     released.append(block)
                 else:
                     continue
-                dropped.append(block_idx)
-            if released:
-                self.gpu_pool.unpin_blocks(released, self._reuse_watcher)
-            manager.drop_resident_blocks(request_id, dropped)
+                reclaimable.append(block)
+                row_dropped.append(block_idx)
+        if released:
+            self.gpu_pool.unpin_blocks(released, self._reuse_watcher)
+        if reclaimable:
+            self.gpu_pool.deprioritize_blocks(
+                block for block in reclaimable if block.block_id not in self._owners
+            )
+        for manager, row_dropped in zip(self.resident_managers, dropped):
+            manager.drop_resident_blocks(request_id, row_dropped)
 
 
 def get_hisparse_coordinator(
