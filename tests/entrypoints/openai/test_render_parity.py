@@ -446,12 +446,18 @@ class TestReasoningRenderParity:
             },
         )
 
-    async def test_reasoning_effort_none_rejected_by_harmony(self, online_renderer):
+    @pytest.mark.parametrize(
+        "effort_kwargs",
+        [{"reasoning_effort": "none"}, {"thinking": {"effort": "none"}}],
+    )
+    async def test_reasoning_effort_none_rejected_by_harmony(
+        self, online_renderer, effort_kwargs
+    ):
         """Harmony rejects reasoning_effort="none" as invalid user input."""
         request = ChatCompletionRequest(
             model=_MODEL,
             messages=_USER,
-            reasoning_effort="none",
+            **effort_kwargs,
         )
         with pytest.raises(
             VLLMValidationError, match="Harmony does not support"

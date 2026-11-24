@@ -59,6 +59,9 @@ def _apply_k3_thinking_kwargs(
     elif reasoning_effort is not None:
         kwargs.setdefault("thinking_effort", reasoning_effort)
 
+    if not kwargs.get("thinking", True):
+        kwargs.pop("thinking_effort", None)
+
     thinking_effort = kwargs.get("thinking_effort")
     if thinking_effort is not None and thinking_effort not in thinking_efforts:
         supported = ", ".join(thinking_efforts)
@@ -152,6 +155,8 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
     `encoding_k3` instead. We tokenize eagerly so the structural markers keep
     their special-token ids while user- and tool-supplied text stays ordinary.
     """
+
+    supports_reasoning_history = True
 
     def __init__(self, config: VllmConfig, tokenizer: HfTokenizer | None) -> None:
         super().__init__(config, tokenizer)

@@ -106,6 +106,9 @@ class _SwappableExecutor(Executor):
 
 
 class BaseRenderer(ABC, Generic[_T]):
+    supports_reasoning_history: bool = False
+    """Whether prompts keep the reasoning of earlier assistant turns."""
+
     def __init__(self, config: "VllmConfig", tokenizer: _T | None) -> None:
         super().__init__()
 
