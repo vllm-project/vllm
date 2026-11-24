@@ -65,9 +65,9 @@ def test_no_event_recorded_without_pending(fake_events):
     assert fake_events.recorded == [] and dbr.ready() == set()
 
 
-def _host_pinned_d_scheduler(kv_buffer_device: str = "cuda"):
+def _host_pinned_d_scheduler(kv_buffer_device: str = "cuda", kv_role="kv_consumer"):
     """A D-side scheduler with the NIXL connector and a host-pinned KV cache."""
-    vllm_config = create_vllm_config(kv_role="kv_consumer")
+    vllm_config = create_vllm_config(kv_role=kv_role)
     vllm_config.cache_config.kv_cache_host_pinned = True
     vllm_config.kv_transfer_config.kv_buffer_device = kv_buffer_device
     scheduler = create_scheduler(vllm_config)
@@ -195,3 +195,32 @@ def test_abort_after_recv_before_scheduling_is_deferred():
     assert connector._reqs_receiving == set()
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     _release_by_worker(scheduler, connector, request)
+
+
+def _finish_locally(scheduler, request):
+    """Run a request with no transfer params (served locally) to a normal finish."""
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output, create_model_runner_output([request], use_eos=True)
+    )
+    assert request.status == RequestStatus.FINISHED_STOPPED
+
+
+def test_local_request_on_decode_node_is_deferred():
+    """A request without transfer params on a decode node frees blocks that a
+    later pull can land in, so it waits for the guard like a P/D request."""
+    scheduler, connector = _host_pinned_d_scheduler()
+    request = create_request(request_id=7, num_tokens=40, max_tokens=1)
+    assert request.kv_transfer_params is None
+    _finish_locally(scheduler, request)
+    _release_by_worker(scheduler, connector, request)
+
+
+def test_local_request_on_producer_node_is_not_deferred():
+    """No pull lands on a producer-only node: nothing to guard against."""
+    scheduler, connector = _host_pinned_d_scheduler(kv_role="kv_producer")
+    request = create_request(request_id=8, num_tokens=40, max_tokens=1)
+    _finish_locally(scheduler, request)
+    assert connector._reqs_to_release == []
+    assert request.request_id not in scheduler.requests

@@ -195,6 +195,18 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             params["do_remote_prefill"] = False
             params["_remote_blocks_processed"] = True
 
+    def _defers_release(self, block_ids: "BlockIds") -> bool:
+        """Whether these blocks wait for the worker's release guard: zero-copy
+        pulls into a host-pinned KV cache (see DeferredBlockRelease)."""
+        transfer_config = self.vllm_config.kv_transfer_config
+        return (
+            self.vllm_config.cache_config.kv_cache_host_pinned
+            and not self.use_host_buffer
+            and transfer_config is not None
+            and transfer_config.is_kv_consumer
+            and any(len(group) > 0 for group in block_ids)
+        )
+
     def request_finished(
         self,
         request: "Request",
@@ -214,6 +226,11 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             params,
         )
         if not params:
+            # A local request on a decode node: a later pull may land in its
+            # blocks while its last step's drafter still writes them.
+            if self._defers_release(block_ids):
+                self._reqs_to_release.append(request.request_id)
+                return True, None
             return False, None
 
         is_p_node = bool(params.get("do_remote_decode"))
@@ -239,12 +256,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             return False, None
 
         if is_d_node and not self.is_bidirectional_kv_xfer_enabled:
-            if (
-                self.vllm_config.cache_config.kv_cache_host_pinned
-                and not self.use_host_buffer
-                and not receiving
-                and any(len(group) > 0 for group in block_ids)
-            ):
+            if not receiving and self._defers_release(block_ids):
                 # The next pull may RDMA into these blocks while this step's GPU
                 # work (e.g. the MTP drafter) still writes them. A request still
                 # receiving keeps the upstream path: it is freed on recv done.
