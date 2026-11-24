@@ -81,17 +81,25 @@ def test_apply_repetition_penalties(
     )
 
 
+@pytest.mark.parametrize(
+    ("num_seqs", "vocab_size"),
+    [
+        pytest.param(0, 17, id="zero_seqs"),
+        pytest.param(8, 0, id="zero_vocab"),
+    ],
+)
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="This test for checking CUDA/ROCm kernel",
 )
 @torch.inference_mode()
-def test_apply_repetition_penalties_zero_seqs() -> None:
-    """Test the apply_repetition_penalties custom op with num_seqs=0
-    against a reference implementation.
+def test_apply_repetition_penalties_degenerate_shapes(
+    num_seqs: int,
+    vocab_size: int,
+) -> None:
+    """Test the apply_repetition_penalties custom op with degenerate shapes
+    (num_seqs=0 or vocab_size=0) against a reference implementation.
     """
-    num_seqs = 0
-    vocab_size = 17
     repetition_penalty = 1.05
     dtype = torch.float32
     seed = 0
@@ -99,19 +107,17 @@ def test_apply_repetition_penalties_zero_seqs() -> None:
     set_random_seed(seed)
     torch.set_default_device("cuda:0")
 
-    # Create test data
+    # Create test data with degenerate dimension
     logits = torch.randn(num_seqs, vocab_size, dtype=dtype)
 
-    # Create masks with some random tokens marked as repeated
+    # Create masks with degenerate dimension
     prompt_mask = torch.zeros(num_seqs, vocab_size, dtype=torch.bool)
     output_mask = torch.zeros(num_seqs, vocab_size, dtype=torch.bool)
-
-    # No tokens to mark as repeated since num_seqs=0
 
     # Create repetition penalties tensor
     repetition_penalties = torch.full((num_seqs,), repetition_penalty, dtype=dtype)
 
-    # Run all three implementations
+    # Run reference and CUDA op implementations
     logits_torch = logits.clone()
     logits_cuda = logits.clone()
 
@@ -130,3 +136,5 @@ def test_apply_repetition_penalties_zero_seqs() -> None:
         torch.ops._C.apply_repetition_penalties_,
         (logits.clone(), prompt_mask, output_mask, repetition_penalties),
     )
+
+
