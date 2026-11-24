@@ -245,6 +245,7 @@ _requantize_fp8_weights_for_sm90_mega_moe_impl: Callable[..., Any] | None = None
 _relayout_fp4_weights_for_sm90_mega_moe_impl: Callable[..., Any] | None = None
 _transform_fp4_sf_for_sm90_mega_moe_impl: Callable[..., Any] | None = None
 _transform_fp8_block_sf_for_sm90_mega_moe_impl: Callable[..., Any] | None = None
+_transform_nvfp4_weights_for_sm90_mega_moe_impl: Callable[..., Any] | None = None
 _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
 _get_theoretical_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = (
     None
@@ -322,6 +323,7 @@ def _lazy_init() -> None:
     global _relayout_fp4_weights_for_sm90_mega_moe_impl
     global _transform_fp4_sf_for_sm90_mega_moe_impl
     global _transform_fp8_block_sf_for_sm90_mega_moe_impl
+    global _transform_nvfp4_weights_for_sm90_mega_moe_impl
     global _get_mk_alignment_for_contiguous_layout_impl
     global _get_theoretical_mk_alignment_for_contiguous_layout_impl
     global _transform_sf_into_required_layout_impl
@@ -404,6 +406,9 @@ def _lazy_init() -> None:
     )
     _transform_fp8_block_sf_for_sm90_mega_moe_impl = getattr(
         _dg, "transform_fp8_block_sf_for_sm90_mega_moe", None
+    )
+    _transform_nvfp4_weights_for_sm90_mega_moe_impl = getattr(
+        _dg, "transform_nvfp4_weights_for_sm90_mega_moe", None
     )
     _get_mk_alignment_for_contiguous_layout_impl = getattr(
         _dg, "get_mk_alignment_for_contiguous_layout", None
@@ -622,6 +627,27 @@ def transform_fp8_block_sf_for_sm90_mega_moe(
     if _transform_fp8_block_sf_for_sm90_mega_moe_impl is None:
         return _missing()
     return _transform_fp8_block_sf_for_sm90_mega_moe_impl(w, sf, is_l1)
+
+
+NVFP4Weights = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+
+
+def transform_nvfp4_weights_for_sm90_mega_moe(
+    l1: NVFP4Weights, l2: NVFP4Weights
+) -> tuple[NVFP4Weights, NVFP4Weights]:
+    """Lay out checkpoint NVFP4 experts for SM90 MegaMoE.
+
+    Each projection is `(codes [E, N, K / 2], E4M3 scales [E, N, K / 16],
+    FP32 global scales [E])`; L1 rows alternate gate and up.
+
+    Raises:
+        ValueError: If a shape is unsupported or a scale is negative or NaN.
+
+    """
+    _lazy_init()
+    if _transform_nvfp4_weights_for_sm90_mega_moe_impl is None:
+        return _missing()
+    return _transform_nvfp4_weights_for_sm90_mega_moe_impl(l1, l2)
 
 
 def fp8_gemm_nt(*args, **kwargs):
@@ -1210,5 +1236,6 @@ __all__ = [
     "relayout_fp4_weights_for_sm90_mega_moe",
     "transform_fp4_sf_for_sm90_mega_moe",
     "transform_fp8_block_sf_for_sm90_mega_moe",
+    "transform_nvfp4_weights_for_sm90_mega_moe",
     "get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor",
 ]

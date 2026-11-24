@@ -6,8 +6,8 @@ Each `MEGA_MOE_*` format is one row of the feature matrix. MX weights and
 activations carry one UE8M0 scale per 1x32 block (`MEGA_MOE_MXFP4_SM90`
 activations use one FP32 scale per 1x128 block). NVFP4 weights carry one
 E4M3 scale per 1x16 block plus a per-expert FP32 global scale; NVFP4 dispatch
-scales each token by its own FP32 scale. `MEGA_MOE_FP8_BLOCK_SM90` weights
-carry one FP32 scale per 128x128 block.
+scales each token by its own FP32 scale; `MEGA_MOE_NVFP4_SM90` dispatches BF16.
+`MEGA_MOE_FP8_BLOCK_SM90` weights carry one FP32 scale per 128x128 block.
 """
 
 import math
@@ -78,7 +78,9 @@ class MegaMoEActivation:
 
     def kernel_kwargs(self) -> dict[str, Any]:
         # Defaults stay implicit so DeepGEMM builds without alpha/beta still work.
-        kwargs: dict[str, Any] = {"activation_clamp": self.clamp}
+        kwargs: dict[str, Any] = {}
+        if self.clamp is not None:
+            kwargs["activation_clamp"] = self.clamp
         if self.name != "swiglu":
             kwargs["activation"] = self.name
         if self.alpha != 1.0:
@@ -208,6 +210,28 @@ MEGA_MOE_FP8_BLOCK_SM90 = replace(
     routed=_FP8_BLOCK_WEIGHT,
     shared=(_FP8_BLOCK_WEIGHT,),
 )
+# NVFP4 routed experts decoded to BF16 on SM90, with BF16 tokens; the weights
+# come from `transform_nvfp4_weights_for_sm90_mega_moe`.
+MEGA_MOE_NVFP4_SM90 = MegaMoEWeightFormat(
+    name="nvfp4_sm90",
+    mma_type="bf16xnvfp4",
+    kernel="bf16_nvfp4_mega_moe",
+    routed=_NVFP4_WEIGHT,
+    shared=(),
+    hidden_quant=None,
+    activations=frozenset({"situ"}),
+    sm90=True,
+)
+
+
+def deep_gemm_supports_sm90_nvfp4() -> bool:
+    """Whether the installed DeepGEMM runs NVFP4 experts on SM90."""
+    from vllm.utils.deep_gemm import _import_deep_gemm
+
+    deep_gemm = _import_deep_gemm()
+    return hasattr(deep_gemm, "bf16_nvfp4_mega_moe") and hasattr(
+        deep_gemm, "transform_nvfp4_weights_for_sm90_mega_moe"
+    )
 
 
 def check_deep_gemm_mega_moe_supported(
@@ -227,8 +251,8 @@ def check_deep_gemm_mega_moe_supported(
     if current_platform.is_device_capability(90, device_id=device_id):
         if not (weight_format.sm90 or weight_format == MEGA_MOE_MXFP4):
             raise NotImplementedError(
-                "DeepGEMM MegaMoE on SM90 supports MXFP4 and block-FP8 experts "
-                f"only, not {weight_format.name}."
+                "DeepGEMM MegaMoE on SM90 supports MXFP4, block-FP8 and the "
+                f"SM90 NVFP4 format only, not {weight_format.name}."
             )
     elif not current_platform.is_device_capability_family(100, device_id=device_id):
         raise NotImplementedError("DeepGEMM MegaMoE requires SM90 or SM100 GPUs.")
@@ -339,6 +363,12 @@ class DeepGemmMegaMoEExperts(nn.Module):
             raise NotImplementedError(
                 f"DeepGEMM MegaMoE {weight_format.name} experts support "
                 f"{sorted(weight_format.activations)}, not {activation.name!r}."
+            )
+        if weight_format == MEGA_MOE_NVFP4_SM90 and not deep_gemm_supports_sm90_nvfp4():
+            raise NotImplementedError(
+                "DeepGEMM MegaMoE NVFP4 experts on SM90 need a DeepGEMM with "
+                "`bf16_nvfp4_mega_moe` and "
+                "`transform_nvfp4_weights_for_sm90_mega_moe`."
             )
 
         self.prefix = prefix
@@ -1048,6 +1078,13 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 hidden_quant=fmt.hidden_quant,
                 eplb_state=self.eplb_state,
             )
+        if fmt == MEGA_MOE_NVFP4_SM90:
+            kwargs.update(
+                l1_global_scales=self.w13_weight_scale_2,
+                l2_global_scales=self.w2_weight_scale_2,
+            )
+        else:
+            kwargs["fast_math"] = self.fast_math
 
         if self.has_fused_shared_experts:
             kwargs["shared_l1_weights"] = self._kernel_weights("shared_l1")
@@ -1058,7 +1095,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
             self.l1_weights,
             self.l2_weights,
             symm_buffer,
-            fast_math=self.fast_math,
             **kwargs,
         )
         if shared_experts is not None:
