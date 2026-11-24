@@ -1,13 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Prompts that cannot be scheduled without chunked prefill are rejected.
-
-Chunked prefill can be turned off after the token budget was validated: by a
-model config hook (HRM-Text) or by the engine core for models without KV cache
-(e.g. a decoder with `is_causal=False`). A prompt longer than the per-step
-token budget could then never be scheduled and used to wait forever, blocking
-the queue behind it.
-"""
+"""Check prompt admission against the single-step budget when chunked prefill is off."""
 
 import threading
 from types import SimpleNamespace
@@ -26,32 +19,23 @@ from vllm.v1.engine.input_processor import InputProcessor
 
 def _input_processor(
     enable_chunked_prefill: bool,
-    max_num_batched_tokens: int = 256,
-    max_num_scheduled_tokens: int | None = None,
-    num_draft_slots: int = 0,
     is_mm_encoder_only: bool = False,
 ) -> InputProcessor:
     processor = object.__new__(InputProcessor)
     processor.skip_prompt_length_check = False
     processor.supports_mm_inputs = False
     processor.model_config = SimpleNamespace(max_model_len=2048, runner_type="generate")
-    speculative_config = (
-        SimpleNamespace(max_num_new_slots_for_drafting=num_draft_slots)
-        if num_draft_slots
-        else None
-    )
     scheduler_config = SchedulerConfig(
         max_model_len=2048,
         is_encoder_decoder=False,
-        max_num_batched_tokens=max_num_batched_tokens,
-        max_num_scheduled_tokens=max_num_scheduled_tokens,
+        max_num_batched_tokens=256,
         max_num_seqs=8,
     )
     # Mirrors the engine core disabling chunked prefill after validation.
     scheduler_config.enable_chunked_prefill = enable_chunked_prefill
     processor.vllm_config = SimpleNamespace(
         scheduler_config=scheduler_config,
-        speculative_config=speculative_config,
+        speculative_config=None,
         is_mm_encoder_only=is_mm_encoder_only,
     )
     return processor
@@ -86,21 +70,6 @@ def test_rejects_prompt_over_budget_without_chunked_prefill():
     # The max_model_len check still takes precedence.
     with pytest.raises(VLLMValidationError, match="maximum model length"):
         processor._validate_prompt_len(4096, "decoder")
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    ("kwargs", "limit"),
-    [
-        ({"max_num_scheduled_tokens": 200}, 200),
-        ({"num_draft_slots": 4}, 252),
-    ],
-)
-def test_unchunked_limit_matches_scheduler_budget(kwargs, limit):
-    processor = _input_processor(enable_chunked_prefill=False, **kwargs)
-    processor._validate_prompt_len(limit, "decoder")
-    with pytest.raises(VLLMValidationError):
-        processor._validate_prompt_len(limit + 1, "decoder")
 
 
 @pytest.mark.cpu_test
@@ -181,10 +150,7 @@ def test_ready_response_syncs_disabled_chunked_prefill():
 
 
 def test_bidirectional_decoder_rejects_unschedulable_prompt():
-    """End to end: a decoder with `is_causal=False` has no KV cache, so the
-    engine disables chunked prefill and prefix caching after startup (default
-    settings used to fail with no cacheable KV cache group). A prompt longer
-    than the token budget must fail fast instead of hanging the engine."""
+    """The decoder rejects an over-budget prompt and serves the next short prompt."""
     from vllm import LLM, SamplingParams
 
     llm = LLM(

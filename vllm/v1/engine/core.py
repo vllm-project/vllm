@@ -145,7 +145,7 @@ def _warn_unchunked_prompt_limit(vllm_config: VllmConfig) -> None:
             "Chunked prefill is disabled, so a prompt must be scheduled in a "
             "single step: prompts longer than %d tokens will be rejected "
             "although max_model_len is %d. Increase --max-num-batched-tokens "
-            "to accept longer prompts.",
+            "(and --max-num-scheduled-tokens, if set) to accept longer prompts.",
             limit,
             max_model_len,
         )

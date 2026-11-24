@@ -7153,7 +7153,8 @@ async fn unchunked_prompt_longer_than_step_is_bad_request() {
         json["error"]["message"],
         "The decoder prompt (length 5) is longer than the 4 tokens this model can schedule \
          in one step. Chunked prefill is disabled for this model, so longer prompts can never \
-         be scheduled. Increase `max_num_batched_tokens` or shorten the prompt."
+         be scheduled. Increase `max_num_batched_tokens` (and `max_num_scheduled_tokens`, if \
+         set) or shorten the prompt."
     );
 
     let (status, json) = post_json(&mut app, "/v1/completions", completion(&[1, 2])).await;

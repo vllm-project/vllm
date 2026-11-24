@@ -641,7 +641,8 @@ class InputProcessor:
                 f"the {max_unchunked_len} tokens this model can schedule in one "
                 "step. Chunked prefill is disabled for this model, so longer "
                 "prompts can never be scheduled. Increase "
-                "`max_num_batched_tokens` or shorten the prompt."
+                "`max_num_batched_tokens` (and `max_num_scheduled_tokens`, if "
+                "set) or shorten the prompt."
             )
         elif prompt_len == max_prompt_len and model_config.runner_type == "generate":
             suggestion = (

@@ -45,8 +45,8 @@ pub enum Error {
     #[error(
         "The decoder prompt (length {prompt_len}) is longer than the {max_prompt_len} tokens \
          this model can schedule in one step. Chunked prefill is disabled for this model, so \
-         longer prompts can never be scheduled. Increase `max_num_batched_tokens` or shorten \
-         the prompt."
+         longer prompts can never be scheduled. Increase `max_num_batched_tokens` (and \
+         `max_num_scheduled_tokens`, if set) or shorten the prompt."
     )]
     PromptExceedsUnchunkedLimit {
         prompt_len: usize,
