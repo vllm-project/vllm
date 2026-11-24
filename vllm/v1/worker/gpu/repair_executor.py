@@ -1755,6 +1755,29 @@ def _core_logical_strides_ok(view: torch.Tensor, layout_name: str | None) -> boo
     return _row_major_strides(view) or permuted
 
 
+def _per_kv_strides_ok(view: torch.Tensor) -> bool:
+    """Strides consistent with a per-K/V plane.
+
+    Dims 1..3 must be row-major from the channel dim (how K/V-quantized
+    or channel-split views are bound is the CORE convention, refused
+    here), and the block stride must be an exact multiple of one block's
+    span: a fully contiguous per-K/V view, or K/V planes sliced from a
+    [num_kv, num_blocks, ...] stack -- the Ascend binding, where each
+    view's block stride carries the sibling planes' spans (verified on
+    hardware: [num_blocks, heads, bs, dim] with stride(0) = 2 * span).
+    """
+    if view.dim() == 4:
+        if view.stride(3) != 1:
+            return False
+        if view.stride(2) != int(view.shape[3]):
+            return False
+        if view.stride(1) != int(view.shape[2]) * view.stride(2):
+            return False
+        span = int(view.shape[1]) * view.stride(1)
+        return view.stride(0) >= span and view.stride(0) % span == 0
+    return _row_major_strides(view)
+
+
 def _repair_geometry_from_binding(
     binding: "RepairViewBinding | None", views: list[torch.Tensor]
 ) -> _RepairGeometry:
@@ -1878,12 +1901,13 @@ def _repair_geometry_from_binding(
                     f"{dim} (shape {tuple(view.shape)}); the binding "
                     "contract covers only flat 2D/3D and 4D views"
                 )
-            if not _row_major_strides(view):
+            if not _per_kv_strides_ok(view):
                 raise ValueError(
                     f"hole repair: the bound per-K/V view shape "
                     f"{tuple(view.shape)} strides {tuple(view.stride())} "
-                    "are not consistent with a contiguous per-K/V view; "
-                    "the view contradicts the binding contract"
+                    "are not consistent with a per-K/V plane (contiguous, "
+                    "or sliced from a K/V stack); the view contradicts "
+                    "the binding contract"
                 )
         return _RepairGeometry(
             block_size=binding.block_size,

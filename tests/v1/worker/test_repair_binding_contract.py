@@ -149,7 +149,7 @@ def _run(model, works, tokens, positions, meta, binding):
         )
 
 
-class Case1HeadEqualsBlockSizeAccepted:
+class TestCase1HeadEqualsBlockSizeAccepted:
     def test_accepted_and_slot_exact_in_k_and_v(self):
         k = _sentinel(torch.Size((N_BLOCKS, BS, BS, HEAD_DIM)), 1.0)  # h == bs
         v = _sentinel(torch.Size((N_BLOCKS, BS, BS, HEAD_DIM)), 500_000.0)
@@ -175,7 +175,48 @@ class Case1HeadEqualsBlockSizeAccepted:
         assert torch.equal(v[~expected], v_before[~expected])
 
 
-class Case2ContradictoryOrMissingRefusedBeforeWrite:
+class TestCase1bHardwareStackSlicedBinding:
+    """The REAL Ascend hardware binding (closure smoke, die 0, 2026-11-24):
+    K and V are planes sliced from a [num_kv, num_blocks, h, bs, d]
+    stack, so each 4D view's block stride carries the sibling plane's
+    span (stride(0) = 2 * span) instead of being fully contiguous."""
+
+    def test_stack_sliced_planes_accepted_and_slot_exact(self):
+        # Per-block K/V interleave: the physical allocation carries the
+        # K/V selector INSIDE each block ([num_blocks, num_kv, h, bs, d]),
+        # so each bound 4D plane's block stride is exactly twice one
+        # block's span -- the measured hardware strides
+        # ([36694, 2, 128, 64] with [32768, 8192, 64, 1]).
+        physical = _sentinel(
+            torch.Size((N_BLOCKS, 2, N_HEADS, BS, HEAD_DIM)), 1.0
+        )
+        k, v = physical[:, 0], physical[:, 1]
+        span = N_HEADS * BS * HEAD_DIM
+        assert k.stride(0) == 2 * span  # not contiguous
+        attn = SimpleNamespace(kv_cache=[k, v], layer_name="model.layers.0")
+        layer = SimpleNamespace(self_attn=SimpleNamespace(attn=attn))
+        binding = per_kv_repair_binding(BS, 2, "LBHNC")
+        geo = _repair_geometry_from_binding(binding, _repair_cache_views(layer))
+        assert geo.token_axis == 2
+
+        works, tokens, positions, meta = _span_work(layer_end=1)
+        k_before, v_before = k.clone(), v.clone()
+        _rezero_repair_span([layer], meta, geo)
+        expected = _expected_token_rows_mask(
+            k, block=2, lo=SPAN[0], hi=SPAN[1], token_axis=2
+        )
+        assert torch.equal(k == 0, expected)
+        assert torch.equal(v == 0, expected)
+        assert torch.equal(k[~expected], k_before[~expected])
+        assert torch.equal(v[~expected], v_before[~expected])
+        # The cleared rows land in the SHARED backing storage (the K and
+        # V planes of block 2 are the only cleared cells there).
+        physical_expected = torch.zeros_like(physical, dtype=torch.bool)
+        physical_expected[2, :, :, SPAN[0]:SPAN[1], :] = True
+        assert torch.equal(physical == 0, physical_expected)
+
+
+class TestCase2ContradictoryOrMissingRefusedBeforeWrite:
     def test_missing_binding_refused(self):
         k = _sentinel(torch.Size((N_BLOCKS, N_HEADS, BS, HEAD_DIM)), 1.0)
         v = _sentinel(torch.Size((N_BLOCKS, N_HEADS, BS, HEAD_DIM)), 500_000.0)
@@ -234,12 +275,13 @@ class Case2ContradictoryOrMissingRefusedBeforeWrite:
             assert torch.equal(layer.self_attn.attn.kv_cache[1], vb)
 
 
-class Case3CoreEqualShapesDifferentStrides:
+class TestCase3CoreEqualShapesDifferentStrides:
     def test_both_layouts_clear_the_same_logical_rows_in_storage(self):
-        blocks, heads, chan = 2, BS, 2 * HEAD_DIM  # H == N: equal shapes
+        blocks, heads, chan = 4, BS, 2 * HEAD_DIM  # H == N: equal shapes
         # Token-major (LBNHC) physical storage, bound as the permuted
         # logical [B, H, N, C] view; head-major (LBHNC) physical storage
-        # bound as itself (row-major).
+        # bound as itself (row-major). The span targets BLOCK 2, leaving
+        # blocks 1 and 3 as untouched neighbors.
         storage_lbnhc = _sentinel(torch.Size((blocks, heads, heads, chan)), 1.0)
         storage_lbhnc = _sentinel(torch.Size((blocks, heads, heads, chan)), 500_000.0)
         view_lbnhc = storage_lbnhc.permute(0, 2, 1, 3)
@@ -282,28 +324,30 @@ class Case3CoreEqualShapesDifferentStrides:
             geo_b,
         )
         # The SAME logical rows cleared in both BACKING storages:
-        # the span's tokens of block 1 are zero in both, every other
-        # cell keeps its sentinel. storage_lbnhc is token-major (the
-        # cleared logical rows live on physical dim 1); storage_lbhnc is
-        # head-major (they live on physical dim 2).
+        # the span's tokens of BLOCK 2 are zero in both, every other
+        # cell keeps its sentinel (neighboring blocks 1 and 3 intact).
+        # storage_lbnhc is token-major (the cleared logical rows live
+        # on physical dim 1); storage_lbhnc is head-major (dim 2).
         assert torch.equal(
-            storage_lbnhc[1, SPAN[0] : SPAN[1]] == 0,
-            torch.ones(heads, SPAN[1] - SPAN[0], chan, dtype=torch.bool),
+            storage_lbnhc[2, SPAN[0] : SPAN[1]] == 0,
+            torch.ones(SPAN[1] - SPAN[0], heads, chan, dtype=torch.bool),
         )
-        assert float(storage_lbnhc[1, : SPAN[0]].abs().max()) > 0
-        assert float(storage_lbnhc[1, SPAN[1] :].abs().max()) > 0
-        assert float(storage_lbnhc[0].abs().max()) > 0
+        assert float(storage_lbnhc[2, : SPAN[0]].abs().max()) > 0
+        assert float(storage_lbnhc[2, SPAN[1] :].abs().max()) > 0
+        assert float(storage_lbnhc[1].abs().max()) > 0
+        assert float(storage_lbnhc[3].abs().max()) > 0
         # storage_lbhnc: head-major -> tokens on physical dim 2
         assert torch.equal(
-            storage_lbhnc[1, :, SPAN[0] : SPAN[1]] == 0,
+            storage_lbhnc[2, :, SPAN[0] : SPAN[1]] == 0,
             torch.ones(heads, SPAN[1] - SPAN[0], chan, dtype=torch.bool),
         )
-        assert float(storage_lbhnc[1, :, : SPAN[0]].abs().max()) > 0
-        assert float(storage_lbhnc[1, :, SPAN[1] :].abs().max()) > 0
-        assert float(storage_lbhnc[0].abs().max()) > 0
+        assert float(storage_lbhnc[2, :, : SPAN[0]].abs().max()) > 0
+        assert float(storage_lbhnc[2, :, SPAN[1] :].abs().max()) > 0
+        assert float(storage_lbhnc[1].abs().max()) > 0
+        assert float(storage_lbhnc[3].abs().max()) > 0
 
 
-class Case4TwoBlocksLeadingDimIsBlocks:
+class TestCase4TwoBlocksLeadingDimIsBlocks:
     def test_exactly_two_blocks_indexed_as_blocks(self):
         # A core cache with EXACTLY two blocks: the leading dim is
         # blocks by the binding, never a K/V selector.
@@ -350,7 +394,7 @@ class Case4TwoBlocksLeadingDimIsBlocks:
             _repair_geometry_from_binding(binding, [cache])
 
 
-class Case5PartialWriteExceptionCleanup:
+class TestCase5PartialWriteExceptionCleanup:
     def test_cleanup_covers_throwing_layer_preserves_neighbors(self):
         layers = [_Kv4DLayer(f"model.layers.{i}", fill=10.0 + i) for i in range(4)]
         layers[1] = _Kv4DBoomLayer("model.layers.1", fill=11.0)
