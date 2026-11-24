@@ -437,9 +437,12 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
         if loader_max_frames is None:
             _, loader_max_frames = EmbeddingGemma2VideoBackend._get_processor_defaults()
         max_frames = int(loader_max_frames)
-        if (processor_max_frames := video_kwargs.get("max_frames")) is not None:
+        frame_cap = EmbeddingGemma2VideoBackend._MAX_ALLOWED_FRAMES
+        if video_kwargs.get("overflow_strategy") is None:
+            max_frames = frame_cap
+        elif (processor_max_frames := video_kwargs.get("max_frames")) is not None:
             max_frames = max(max_frames, int(processor_max_frames))
-        max_frames = min(max_frames, 128)
+        max_frames = min(max_frames, frame_cap)
 
         video_opts = mm_config.limit_per_prompt.get("video") if mm_config else None
         if video_opts is not None:

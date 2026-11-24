@@ -1128,6 +1128,9 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=unit * width_factor, height=unit * height_factor)
 
     def _get_video_size_with_most_features(self) -> ImageSize:
+        video_options = self.ctx.get_mm_config().limit_per_prompt.get("video")
+        if video_options and (video_options.width or video_options.height):
+            return self.get_image_size_with_most_features()
         merged_mm_kwargs = self._merge_and_resolve_mm_processor_kwargs({})
         size = self._get_vision_size(
             merged_mm_kwargs.get("videos_kwargs", {}),

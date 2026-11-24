@@ -41,12 +41,45 @@ def test_video_budget_reads_configured_max_soft_tokens(
     [
         {"max_frames": 1},
         {"videos_kwargs": {"max_frames": 1}},
-        {"max_frames": None, "overflow_strategy": None},
-        {"videos_kwargs": {"max_frames": None, "overflow_strategy": None}},
     ],
 )
 def test_video_budget_covers_loader_frames(mm_processor_kwargs: dict[str, object]):
     assert _video_budget(mm_processor_kwargs) == _video_budget(None)
+
+
+@pytest.mark.parametrize(
+    "mm_processor_kwargs",
+    [
+        {"overflow_strategy": None},
+        {"max_frames": None, "overflow_strategy": None},
+        {"videos_kwargs": {"max_frames": None, "overflow_strategy": None}},
+    ],
+)
+def test_video_budget_covers_video_without_frame_limit(
+    mm_processor_kwargs: dict[str, object],
+):
+    num_frames = 40
+    frames = np.zeros((num_frames, 480, 672, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 1.0,
+        "duration": float(num_frames),
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+    }
+    processor = _processor(mm_processor_kwargs)
+    inputs = ProcessorInputs(
+        prompt=processor.info.get_tokenizer().encode(
+            "<|video|>", add_special_tokens=False
+        ),
+        mm_data_items=processor.info.parse_mm_data({"video": [(frames, metadata)]}),
+        hf_processor_mm_kwargs={},
+    )
+    outputs = processor.apply(inputs, TimingContext(enabled=False))
+    placeholder = outputs["mm_placeholders"]["video"][0]
+
+    assert placeholder.get_num_embeds() == num_frames * 140
+    assert placeholder.length <= _video_budget(mm_processor_kwargs)
 
 
 def test_video_budget_covers_processor_frames():
