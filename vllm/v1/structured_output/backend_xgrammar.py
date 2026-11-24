@@ -33,13 +33,16 @@ else:
 
 logger = init_logger(__name__)
 
-_MAX_LARK_GRAMMAR_SIZE = 64 * 1024
+
+class LarkGrammarSizeError(ValueError):
+    """The xgrammar Lark input exceeds the configured byte limit."""
 
 
 def _validate_lark_grammar_size(grammar: str) -> None:
-    if len(grammar.encode("utf-8")) > _MAX_LARK_GRAMMAR_SIZE:
-        raise ValueError(
-            f"Lark grammar exceeds the maximum size of {_MAX_LARK_GRAMMAR_SIZE} bytes"
+    max_bytes = vllm.envs.VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES
+    if len(grammar) > max_bytes or len(grammar.encode("utf-8")) > max_bytes:
+        raise LarkGrammarSizeError(
+            f"Lark grammar exceeds the maximum size of {max_bytes} bytes"
         )
 
 
