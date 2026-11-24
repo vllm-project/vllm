@@ -97,11 +97,12 @@ def test_share_target_lm_head_installs_the_copy_the_caller_resolved(monkeypatch)
     the drafter ends up with the copy, and the target keeps its own head."""
     target_head, spec, copy = _UnquantizedHead(torch.ones(4, 8)), object(), object()
     seen = []
-    monkeypatch.setattr(
-        eagle_utils,
-        "quantized_lm_head_copy",
-        lambda head, got: seen.append((head, got)) or copy,
-    )
+
+    def fake_copy(head, got):
+        seen.append((head, got))
+        return copy
+
+    monkeypatch.setattr(eagle_utils, "quantized_lm_head_copy", fake_copy)
     drafter = _drafter()
     assert share_target_lm_head(drafter, target_head, spec) is copy
     assert seen == [(target_head, spec)]
