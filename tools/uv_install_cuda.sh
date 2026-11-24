@@ -23,8 +23,7 @@ cuda_tag="cu$(echo "${CUDA_VERSION}" | cut -d. -f1,2 | tr -d '.')"
 
 if [ "${torch_nightly}" = "1" ]; then
     nightly_index="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/${cuda_tag}"
-    # shellcheck disable=SC2046
-    uv pip install --system $(xargs < torch_lib_versions.txt) --pre \
+    uv pip install --system -r torch_lib_versions.txt --pre \
         --index-url "${nightly_index}"
     uv pip install --system "$@" --verbose \
         --extra-index-url "${nightly_index}"
