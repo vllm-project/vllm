@@ -36,10 +36,13 @@ class FaultToleranceConfig:
     """GPU kernel timeout (in milliseconds) of the `nixl_ep` all2all backend.
     When a rank waits longer than this for a peer in dispatch or combine,
     NIXL EP marks the peer invalid and masks it out. With fault tolerance
-    enabled, surviving engines detect a dead rank on another engine when this
-    timeout or the CPU group timeout (`cpu_distributed_timeout_seconds`)
-    expires. If None, NIXL EP's default (30000 ms) applies. Other all2all
-    backends ignore this setting.
+    enabled, a surviving engine that waits on a dead rank in the all2all
+    reports the fault only after this timeout, and `retry` or `scale_down`
+    recovery completes only after it, because recovery first waits for the
+    GPU. Engines blocked in a CPU group collective report the fault when the
+    CPU group timeout (`cpu_distributed_timeout_seconds`) expires. If None,
+    NIXL EP's default (30000 ms) applies. Other all2all backends ignore this
+    setting.
     """
 
     def compile_factors(self) -> CompileFactors:

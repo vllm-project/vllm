@@ -462,13 +462,6 @@ Both retry and scale-down require `--enable-fault-tolerance`,
 `deepep_low_latency`).
 Retry can recover from a fault when all workers remain alive.
 
-Engines detect a dead rank on another engine when a collective with it times out:
-a CPU group collective (`--cpu-distributed-timeout-seconds`) or, during the
-forward pass, an all2all kernel. With `nixl_ep`, the kernel timeout defaults to
-30000 ms; lower `--fault-tolerance-config.nixl_ep_timeout_ms` together with
-`--cpu-distributed-timeout-seconds` to detect faults sooner. Too low a value can
-mask a healthy peer that is only slow.
-
 For scale-down recovery, also enable `--enable-eplb` and configure enough
 redundant expert slots with `--eplb-config.num_redundant_experts` to fit all
 logical experts on the surviving ranks. The original checkpoint must remain
@@ -486,6 +479,17 @@ this way.
 To discard queued requests for a particular retry, include `"abort": true` in
 the retry request's `params`. This parameter must be a JSON boolean and defaults
 to `false`; resumption still requires `request_failure_policy="recompute"`.
+
+Two timeouts bound how fast engines report a dead rank and recover. An engine
+blocked in a CPU group collective with the dead rank reports the fault when
+`--cpu-distributed-timeout-seconds` expires; set it explicitly, because the
+default is PyTorch's Gloo timeout of 1800 s. With `nixl_ep`, an engine waiting
+on the dead rank in the all2all kernel reports the fault only when the kernel
+timeout expires, and `retry` or `scale_down` completes only after it, because
+recovery first waits for the GPU. The kernel timeout defaults to 30000 ms; set
+it in the same JSON as any other fault tolerance setting, for example
+`--fault-tolerance-config '{"nixl_ep_timeout_ms": 5000}'`. Too low a value can
+mask a healthy peer that is only slow.
 
 ### Coordinating recovery
 
