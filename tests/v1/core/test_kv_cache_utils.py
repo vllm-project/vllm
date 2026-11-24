@@ -1514,7 +1514,6 @@ def test_dcp_target_allocates_replicated_draft_independently(
         hash_block_size=16,
         scheduler_block_size=64,
         dcp_world_size=4,
-        pcp_world_size=pcp_size,
         enable_caching=True,
     )
     assert manager.coordinator.group_block_sizes == (64, 16)
