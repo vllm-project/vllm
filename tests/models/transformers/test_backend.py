@@ -19,6 +19,7 @@ from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
+    AutoModelForMultimodalLM,
     PreTrainedConfig,
 )
 
@@ -200,7 +201,8 @@ def test_eagle3_mm(vllm_runner: type[VllmRunner], tmp_path) -> None:
 
 
 def test_infer_dynamic_arg_dims():
-    """Only unannotated and (legacy) tensor arguments are dynamic."""
+    """Unannotated and tensor arguments are dynamic, unless a non-`None` default
+    means they are passed as a plain value (e.g. Gemma 4's `logits_to_keep=0`)."""
 
     class Encoder(nn.Module):
         def forward(
@@ -210,12 +212,15 @@ def test_infer_dynamic_arg_dims():
             mask: torch.BoolTensor | None = None,
             grid: tuple[int, int] = (1, 1),
             tiles: list[torch.Tensor] | None = None,
+            use_cache=False,
+            logits_to_keep: int | torch.Tensor = 0,
             **kwargs,
         ):
             pass
 
-    expected = {"pixel_values": 0, "position_ids": 0, "mask": 0}
-    assert infer_dynamic_arg_dims(Encoder) == expected
+    dynamic = ("pixel_values", "position_ids", "mask")
+    assert infer_dynamic_arg_dims(Encoder) == dict.fromkeys(dynamic, 0)
+    assert infer_dynamic_arg_dims(Encoder, dim=1) == dict.fromkeys(dynamic, 1)
 
 
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
@@ -998,6 +1003,47 @@ def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch)
                 layer.get_parameter(param_name).cpu(),
                 weights[f"{mtp}.{ckpt_name}"].to(torch.bfloat16),
             )
+
+
+def test_mtp_draft_for_multimodal_model(tmp_path, tp_init):
+    """A multimodal model, which is not an `AutoModelForCausalLM`, gets an MTP draft
+    from the MTP layers in its checkpoint (loading fails if any are missing)."""
+    model_info = HF_EXAMPLE_MODELS.get_hf_info("GraniteDoclingForConditionalGeneration")
+    model_info.check_transformers_version(on_fail="skip")
+    from transformers.modeling_layers import MtpModel
+
+    num_mtp_layers = 2
+    # With fewer decoder than MTP layers, `MtpModel` would rename `mtp.layers` too
+    sizes = dict(hidden_size=64, intermediate_size=128, num_hidden_layers=2)
+    heads = dict(num_attention_heads=2, num_key_value_heads=2)
+    text_config = dict(vocab_size=128, pad_token_id=0, num_mtp_layers=num_mtp_layers)
+    config = AutoConfig.for_model(
+        "granite_docling",
+        text_config=sizes | heads | text_config,
+        vision_config=sizes | heads | dict(out_hidden_size=64),
+    )
+    main_model = AutoModelForMultimodalLM.from_config(config)
+    main_model.save_pretrained(tmp_path)
+    # Granite Docling stores MTP layer `k` under `mtp.layers.{k}`
+    weights = load_file(tmp_path / "model.safetensors")
+    for name, param in MtpModel(main_model, num_mtp_layers).named_parameters():
+        if name.startswith("layers."):
+            weights[f"mtp.{name.replace('.mtp_block.', '.')}"] = param.detach()
+    save_file(weights, tmp_path / "model.safetensors", {"format": "pt"})
+
+    target = ModelConfig(str(tmp_path), model_impl="transformers", dtype="bfloat16")
+    speculative_config = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=num_mtp_layers,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+    draft = speculative_config.draft_model_config
+    assert draft.architecture == "TransformersForMTP"
+    vllm_config = VllmConfig(model_config=target, speculative_config=speculative_config)
+    with set_current_vllm_config(vllm_config):
+        model = model_loader.get_model(vllm_config=vllm_config, model_config=draft)
+    assert len(model.model.layers) == num_mtp_layers
 
 
 def test_init_parameters_keeps_declared_dtype_and_requires_grad():

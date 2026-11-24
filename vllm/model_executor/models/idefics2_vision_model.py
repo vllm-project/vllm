@@ -19,7 +19,9 @@
 """PyTorch Idefics2 model."""
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -38,10 +40,36 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 
 from .utils import AutoWeightsLoader, WeightsMapper
-from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
+from .vision import (
+    get_fp8_padded_hidden_size,
+    is_vit_use_data_parallel,
+    run_dp_sharded_vision_model,
+)
+
+
+@dataclass
+class Idefics2VarlenMetadata:
+    token_index: torch.Tensor
+    batch_size: int
+    seq_len: int
+    cu_seqlens: torch.Tensor
+    max_seqlen: torch.Tensor
+    sequence_lengths: torch.Tensor | None
+
+    def pack(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Packs the valid tokens of a padded (B, L, D) batch into (1, N, D)."""
+        flat = hidden_states.flatten(0, 1)
+        return flat.index_select(0, self.token_index).unsqueeze(0)
+
+    def unpack(self, packed: torch.Tensor) -> torch.Tensor:
+        """Unpacks a packed (1, N, D) tensor into a padded (B, L, D) tensor."""
+        out = packed.new_zeros(self.batch_size * self.seq_len, packed.size(-1))
+        out.index_copy_(0, self.token_index, packed.squeeze(0))
+        return out.view(self.batch_size, self.seq_len, -1)
 
 
 class Idefics2VisionEmbeddings(nn.Module):
@@ -205,15 +233,23 @@ class Idefics2VisionAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
+        varlen: Idefics2VarlenMetadata | None = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(
             hidden_states
         )  # batch_size, q_len, 3 * num_heads_per_partition * head_dim
         query_states, key_states, value_states = qkv.chunk(3, dim=-1)
 
-        # If attention_mask is provided, prefer Torch SDPA so the mask is
-        # correctly applied (aligns with HuggingFace NaViT SigLIP behavior).
-        if attention_mask is None:
+        if varlen is not None:
+            out = self.attn(
+                query_states,
+                key_states,
+                value_states,
+                cu_seqlens=varlen.cu_seqlens,
+                max_seqlen=varlen.max_seqlen,
+                sequence_lengths=varlen.sequence_lengths,
+            )
+        elif attention_mask is None:
             # Use unified MMEncoderAttention implementation
             out = self.attn(query_states, key_states, value_states)
         else:
@@ -305,6 +341,7 @@ class Idefics2EncoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
+        varlen: Idefics2VarlenMetadata | None = None,
     ) -> torch.Tensor:
         """Args:
         hidden_states (`torch.FloatTensor`):
@@ -313,7 +350,9 @@ class Idefics2EncoderLayer(nn.Module):
         """
         residual = hidden_states
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(hidden_states, attention_mask=attention_mask)
+        hidden_states = self.self_attn(
+            hidden_states, attention_mask=attention_mask, varlen=varlen
+        )
         hidden_states += residual
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
@@ -364,6 +403,7 @@ class Idefics2Encoder(nn.Module):
         self,
         inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
+        varlen: Idefics2VarlenMetadata | None = None,
     ) -> torch.Tensor:
         r"""Args:
         inputs_embeds (torch.Tensor):
@@ -374,10 +414,14 @@ class Idefics2Encoder(nn.Module):
             internal embedding lookup matrix.
 
         """
-        hidden_states = inputs_embeds
+        hidden_states = inputs_embeds if varlen is None else varlen.pack(inputs_embeds)
         for encoder_layer in self.layers:
-            layer_outputs = encoder_layer(hidden_states, attention_mask=attention_mask)
+            layer_outputs = encoder_layer(
+                hidden_states, attention_mask=attention_mask, varlen=varlen
+            )
             hidden_states = layer_outputs
+        if varlen is not None:
+            hidden_states = varlen.unpack(hidden_states)
         return hidden_states
 
 
@@ -437,6 +481,14 @@ class Idefics2VisionTransformer(nn.Module):
         self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
             orig_to_new_prefix=orig_to_new_prefix
         )
+        head_size = config.hidden_size // config.num_attention_heads
+        self.attn_backend = self.encoder.layers[0].self_attn.attn.attn_backend
+        self.tp_size = (
+            1 if self.use_data_parallel else get_tensor_model_parallel_world_size()
+        )
+        self.fp8_padded_hidden_size = get_fp8_padded_hidden_size(
+            config.num_attention_heads, head_size
+        )
 
     def get_input_embeddings(self):
         return self.embeddings
@@ -447,6 +499,7 @@ class Idefics2VisionTransformer(nn.Module):
         patch_attention_mask: torch.BoolTensor | None = None,
         tgt_sizes: torch.IntTensor | None = None,
         position_ids: torch.Tensor | None = None,
+        use_varlen: bool = False,
     ) -> torch.Tensor:
         batch_size = pixel_values.size(0)
 
@@ -477,19 +530,32 @@ class Idefics2VisionTransformer(nn.Module):
         # - if apply_encoder_attention_mask is False, skip (not all models
         #   sharing this encoder apply masking in attention, e.g. Aria, Phi4)
         # - if patch_attention_mask was None, skip attention masking
+        varlen = None
         if not self.apply_encoder_attention_mask or flat_patch_mask is None:
             attention_mask = None
         else:
-            # Additive mask: masked positions receive a large negative value.
-            # Shape: (B, 1, 1, L) broadcastable to (B, H, Q, K).
-            min_val = torch.finfo(hidden_states.dtype).min
-            attention_mask = (~flat_patch_mask).to(dtype=hidden_states.dtype) * min_val
-            attention_mask = attention_mask[:, None, None, :]
+            if (
+                self.prefer_varlen_attention
+                and use_varlen
+                and not self.use_data_parallel
+            ):
+                varlen = self.get_varlen_metadata(flat_patch_mask)
+                attention_mask = None
+            else:
+                # Additive mask: masked positions receive a large negative value.
+                # Shape: (B, 1, 1, L) broadcastable to (B, H, Q, K).
+                min_val = torch.finfo(hidden_states.dtype).min
+                attention_mask = (~flat_patch_mask).to(
+                    dtype=hidden_states.dtype
+                ) * min_val
+                attention_mask = attention_mask[:, None, None, :]
 
         if self.use_data_parallel:
             encoder_outputs = run_dp_sharded_vision_model(hidden_states, self.encoder)
         else:
-            encoder_outputs = self.encoder(hidden_states, attention_mask=attention_mask)
+            encoder_outputs = self.encoder(
+                hidden_states, attention_mask=attention_mask, varlen=varlen
+            )
         last_hidden_state = self.post_layernorm(encoder_outputs)
         return last_hidden_state
 
@@ -509,3 +575,56 @@ class Idefics2VisionTransformer(nn.Module):
                 yield name, w
 
         return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)
+
+    def get_varlen_metadata(
+        self, patch_mask: torch.Tensor
+    ) -> Idefics2VarlenMetadata | None:
+        """Returns None if no token is padded."""
+        with gpu_sync_allowed():
+            patch_mask_cpu = patch_mask.cpu()
+        if patch_mask_cpu.all():
+            return None
+
+        device = patch_mask.device
+        batch_size, seq_len = patch_mask_cpu.shape
+        seq_lens = patch_mask_cpu.sum(dim=1).numpy()
+        cu_seqlens = np.concatenate([[0], np.cumsum(seq_lens)]).astype(np.int32)
+        token_index = patch_mask_cpu.flatten().nonzero().squeeze(1)
+
+        max_seqlen = MMEncoderAttention.compute_max_seqlen(
+            self.attn_backend,
+            cu_seqlens,
+        )
+        max_seqlen = torch.tensor(max_seqlen, dtype=torch.int32)
+        sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend,
+            cu_seqlens,
+            device,
+        )
+
+        cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.attn_backend,
+            cu_seqlens,
+            self.config.hidden_size,
+            self.tp_size,
+            device,
+            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
+        )
+
+        return Idefics2VarlenMetadata(
+            token_index=async_tensor_h2d(token_index, device),
+            batch_size=batch_size,
+            seq_len=seq_len,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
+        )
+
+    @property
+    def prefer_varlen_attention(self) -> bool:
+        """Whether to prefer varlen attention over masked SDPA.
+
+        FlashAttention backends are faster than masked SDPA when using varlen attention
+        while Triton varlen attention is slower.
+        """
+        return self.encoder.layers[0].self_attn.attn.is_flash_attn_backend
