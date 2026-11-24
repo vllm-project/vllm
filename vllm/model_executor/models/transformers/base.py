@@ -29,7 +29,7 @@ import torch
 import transformers
 from packaging.version import Version
 from torch import nn
-from transformers import AutoModel, PreTrainedConfig, core_model_loading
+from transformers import AutoModel, PreTrainedConfig
 from transformers.conversion_mapping import (
     WeightConverter,
     WeightRenaming,
@@ -102,11 +102,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
-
-_SPLIT_OPS = tuple(
-    op for name in ("Chunk", "Split") if (op := getattr(core_model_loading, name, None))
-)
-"""Conversion ops that split a tensor (`Split` needs Transformers 5.22)."""
 
 
 class SplitWeights:
@@ -451,8 +446,9 @@ class Base(
             if isinstance(mapping, WeightRenaming):
                 orig_to_new_renaming.append(mapping)
             # Handle weights which Transformers splits into several
+            # TODO: Use `isinstance` once the minimum Transformers version is >= 5.22
             elif isinstance(mapping, WeightConverter) and all(
-                isinstance(op, _SPLIT_OPS) for op in mapping.operations
+                type(op).__name__ in ("Chunk", "Split") for op in mapping.operations
             ):
                 splits.append(mapping)
             # TODO: Handle other WeightConverters to enable layer merging
