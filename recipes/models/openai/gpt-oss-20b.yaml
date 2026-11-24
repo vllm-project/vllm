@@ -54,6 +54,15 @@ variants:
     vram_minimum_gb: 16
     description: "MXFP4 MoE weights — fits in 16GB VRAM on a single consumer or datacenter GPU"
     supported_hardware: [h100, h200, b200, mi300x, mi325x, mi355x, arc_pro_b60, arc_pro_b70, xeon6]
+    hardware_overrides:
+      arc_pro_b60:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
+      arc_pro_b70:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
 
 compatible_strategies:
   - single_node_tp
@@ -71,8 +80,6 @@ hardware_overrides:
       - "ROCM_AITER_UNIFIED_ATTN"
       - "-cc.pass_config.fuse_rope_kvcache=True"
       - "-cc.use_inductor_graph_partition=True"
-      - "--gpu-memory-utilization"
-      - "0.95"
       - "--block-size=64"
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
@@ -194,7 +201,6 @@ guide: |
     --attention-backend ROCM_AITER_UNIFIED_ATTN \
     -cc.pass_config.fuse_rope_kvcache=True \
     -cc.use_inductor_graph_partition=True \
-    --gpu-memory-utilization 0.95 \
     --block-size 64
   ```
 

@@ -102,8 +102,10 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if act_quant_desc.group_shape != GroupShape(1, 128):
             return (
                 False,
-                "Supports only dynamic per token group activation "
-                "quantization with group_shape=(1,128).",
+                (
+                    "Supports only dynamic per token group activation "
+                    "quantization with group_shape=(1,128)."
+                ),
             )
 
         if not should_use_flashinfer_for_blockscale_fp8_gemm(
@@ -200,8 +202,10 @@ def _flashinfer_fp8_blockscale_gemm_impl(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
 ) -> torch.Tensor:
+    # The sm90 binding takes only a data pointer and assumes packed rows, so a
+    # strided input (e.g. a column slice) misreads every row after the first.
     return flashinfer_fp8_blockscale_gemm(
-        input=input,
+        input=input.contiguous(),
         weight=weight,
         weight_scale=weight_scale,
         out_dtype=torch.bfloat16,
@@ -267,8 +271,9 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
+        # Packed rows required, see _flashinfer_fp8_blockscale_gemm_impl.
         return flashinfer_fp8_blockscale_gemm(
-            input=input,
+            input=input.contiguous(),
             weight=weight,
             weight_scale=weight_scale,
             out_dtype=torch.bfloat16,

@@ -3,7 +3,7 @@
 """Ricursive Ripple parser for reasoning and tool calls.
 
 Ripple decides per turn whether to think; the generation prompt does not open
-``<think>``. Tool calls are JSON objects in Hermes-style tags::
+`<think>`. Tool calls are JSON objects in Hermes-style tags::
 
     <think>
     ...reasoning...
@@ -41,7 +41,7 @@ TOOL_CALL_END = "</tool_call>"
 
 
 def _framed(marker: str, before: bool = True, after: bool = True) -> tuple[str, ...]:
-    """Spellings of ``marker`` with its optional framing newlines, longest first."""
+    """Spellings of `marker` with its optional framing newlines, longest first."""
     heads = ("\n", "") if before else ("",)
     tails = ("\n", "") if after else ("",)
     spellings = {head + marker + tail for head in heads for tail in tails}

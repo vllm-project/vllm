@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from datetime import timedelta
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import torch
 from torch.distributed import TCPStore
 
 from vllm.config import set_current_vllm_config
+from vllm.config.utils import hash_config_cached
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -16,7 +17,6 @@ from vllm.distributed import (
     stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,
 )
-from vllm.distributed.eplb.eplb_state import _commit_eplb_maps
 from vllm.distributed.utils import (
     allocate_group_ports,
     enter_steady_state,
@@ -39,7 +39,6 @@ from vllm.v1.worker.sentinel.eplb_redistribute import (
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
@@ -57,7 +56,7 @@ def _reinit_cpu_group(
     size: int,
     timeout: timedelta | None = None,
 ) -> None:
-    """Rebuild a group's Gloo cpu_group over a port coordinated via ``store``"""
+    """Rebuild a group's Gloo cpu_group over a port coordinated via `store`"""
     # Rendezvous recovery groups on their actual leader hosts: DP replicas and
     # pipeline stages can span nodes independently of the deployment master.
     if rank == 0:
@@ -106,11 +105,6 @@ class WorkerSentinel:
             raise ValueError("Fault tolerance does not support MoE draft models yet.")
         if worker.parallel_config.prefill_context_parallel_size > 1:
             raise ValueError("Fault tolerance does not support PCP yet.")
-        if not worker.vllm_config.use_v2_model_runner:
-            raise ValueError(
-                "Fault tolerance requires the v2 model runner "
-                "(VLLM_USE_V2_MODEL_RUNNER=1)."
-            )
 
     def handle_command(self, ft_request: FaultToleranceRequest):
         """Dispatch an FT command by instruction name."""
@@ -255,7 +249,7 @@ class WorkerSentinel:
         model_runner = self.worker.model_runner
         assert model_runner.eplb_state is not None
         return model_runner.eplb_state.model_states[
-            model_runner.model_config.compute_hash()
+            hash_config_cached(model_runner.model_config)
         ]
 
     def _redistribute_experts(self, dead_ep_ranks: set[int]) -> None:
@@ -273,7 +267,7 @@ class WorkerSentinel:
             p2l, num_logical, num_local_experts
         )
         # p2l was updated in place; the commit derives l2p/lrc from it.
-        _commit_eplb_maps(eplb_model_state, p2l.cpu())
+        eplb_model_state._commit_eplb_maps(p2l.cpu())
         # Preserve physical expert IDs: slot ownership is unchanged by EPLB;
         # only the logical expert stored in each surviving slot changes.
 
@@ -296,6 +290,5 @@ class WorkerSentinel:
     def _clean_worker_state(self):
         model_runner = self.worker.model_runner
         model_runner.execute_model_state = None
-        runner = cast("GPUModelRunnerV2", model_runner)
-        for req_id in list(runner.req_states.req_id_to_index):
-            runner._remove_request(req_id)
+        for req_id in list(model_runner.req_states.req_id_to_index):
+            model_runner._remove_request(req_id)

@@ -33,6 +33,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_mm_encoder_only_safetensors_files,
     filter_safetensors_files_by_weight_name,
     get_quant_config,
+    get_safetensors_files_in_index,
     instanttensor_weights_iterator,
     maybe_download_from_modelscope,
     multi_thread_pt_weights_iterator,
@@ -60,7 +61,7 @@ class DefaultModelLoader(BaseModelLoader):
     # default number of thread when enable multithread weight loading
     DEFAULT_NUM_THREADS = 8
 
-    @dataclasses.dataclass
+    @dataclasses.dataclass(slots=True)
     class Source:
         """A source for weights."""
 
@@ -230,6 +231,32 @@ class DefaultModelLoader(BaseModelLoader):
         hf_weights_files: list[str] = []
         for pattern in allow_patterns:
             hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
+            if (
+                not hf_weights_files
+                and allow_patterns_overrides is None
+                and pattern.endswith(".safetensors")
+            ):
+                # The index may list shards in a subdirectory, like tensors/.
+                # A Hub snapshot has them without the index if the repo
+                # listing failed or the model is in a subfolder.
+                if (
+                    not is_local
+                    and not os.path.isfile(os.path.join(hf_folder, index_file))
+                    and any(
+                        glob.iglob(
+                            os.path.join(hf_folder, "**", pattern), recursive=True
+                        )
+                    )
+                ):
+                    download_safetensors_index_file_from_hf(
+                        model_name_or_path,
+                        index_file,
+                        cache_dir=self.load_config.download_dir,
+                        subfolder=subfolder,
+                        revision=revision,
+                    )
+                index_files = get_safetensors_files_in_index(hf_folder, index_file)
+                hf_weights_files = [f for f in index_files or () if os.path.isfile(f)]
             if len(hf_weights_files) > 0:
                 if pattern.endswith(".safetensors"):
                     use_safetensors = True
@@ -241,7 +268,11 @@ class DefaultModelLoader(BaseModelLoader):
             # safetensors file. Using both breaks.
             # Here, we download the `model.safetensors.index.json` and filter
             # any files not found in the index.
-            if not is_local and len(hf_weights_files) > 1:
+            if (
+                not is_local
+                and len(hf_weights_files) > 1
+                and not os.path.isfile(os.path.join(hf_folder, index_file))
+            ):
                 download_safetensors_index_file_from_hf(
                     model_name_or_path,
                     index_file,
@@ -335,6 +366,9 @@ class DefaultModelLoader(BaseModelLoader):
                         max_workers=extra_config.get(
                             "num_threads", self.DEFAULT_NUM_THREADS
                         ),
+                        shuffle_safetensors_files=(
+                            self.load_config.shuffle_safetensors_files
+                        ),
                     )
                 else:
                     weights_iterator = safetensors_weights_iterator(
@@ -347,6 +381,9 @@ class DefaultModelLoader(BaseModelLoader):
                         ),
                         safetensors_prefetch_block_size=(
                             self.load_config.safetensors_prefetch_block_size
+                        ),
+                        shuffle_safetensors_files=(
+                            self.load_config.shuffle_safetensors_files
                         ),
                     )
         else:
@@ -412,17 +449,13 @@ class DefaultModelLoader(BaseModelLoader):
             self._encoder_only_weights_mapper = None
             return
 
-        # Derive from _language_model_names; fail-closed on shared HF roots
-        # (Molmo/Phi-4-MM/Muse). Qwen nested/flat keys classified via mapper.
-        weights_mapper = cast(
-            "WeightsMapper | None", getattr(model, "hf_to_vllm_mapper", None)
-        )
+        # Derive from _language_model_names. Qwen nested/flat keys are classified
+        # via the mapper when filtering shards.
         self._encoder_only_lm_prefixes = resolve_mm_encoder_only_lm_prefixes(
-            getattr(model, "_language_model_names", None),
-            weights_mapper=weights_mapper,
+            getattr(model, "_language_model_names", None)
         )
-        self._encoder_only_weights_mapper = (
-            weights_mapper if self._encoder_only_lm_prefixes is not None else None
+        self._encoder_only_weights_mapper = cast(
+            "WeightsMapper | None", getattr(model, "hf_to_vllm_mapper", None)
         )
 
     def _init_ep_weight_filter(

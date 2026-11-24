@@ -6,7 +6,6 @@ import inspect
 import logging
 import sys
 import textwrap
-import traceback
 from argparse import SUPPRESS, Action, HelpFormatter
 from collections.abc import Callable, Iterable
 from importlib.machinery import ModuleSpec
@@ -35,6 +34,17 @@ def mock_if_no_torch(mock_module: str, mock: MagicMock):
         sys.modules[mock_module] = mock
 
 
+class MockBase:
+    """Real base for classes that inherit from a mock."""
+
+    def __class_getitem__(cls, item):
+        return cls
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler):
+        return core_schema.any_schema()
+
+
 class PydanticMagicMock(MagicMock):
     """`MagicMock` that's able to generate pydantic-core schemas."""
 
@@ -45,6 +55,10 @@ class PydanticMagicMock(MagicMock):
 
     def __get_pydantic_core_schema__(self, source_type, handler):
         return core_schema.any_schema()
+
+    # A fresh type each time so two mocks can be bases of one class
+    def __mro_entries__(self, bases):
+        return (type("MockBase", (MockBase,), {}),)
 
 
 # Mock custom op code
@@ -90,7 +104,7 @@ class MockModule:
 
 # Make torch.nn.Parameter and torch.nn.Module safe to inherit from.
 # `import torch.nn` resolves the attribute on `torch`, so mock both.
-mock_nn = MagicMock(Parameter=object, Module=MockModule)
+mock_nn = PydanticMagicMock(name="torch.nn", Parameter=object, Module=MockModule)
 mock_if_no_torch("torch.nn", mock_nn)
 mock_if_no_torch("torch", PydanticMagicMock(name="torch", nn=mock_nn))
 
@@ -266,13 +280,12 @@ def create_parser(add_cli_args, **kwargs) -> FlexibleArgumentParser:
         with patch("vllm.config.DeviceConfig.__post_init__"):
             _parser = add_cli_args(parser, **kwargs)
     except ModuleNotFoundError as e:
-        # Auto-mock runtime imports
-        if tb_list := traceback.extract_tb(e.__traceback__):
-            path = Path(tb_list[-1].filename).relative_to(ROOT_DIR)
-            auto_mock(module_name=".".join(path.parent.parts), attr=path.stem)
-            return create_parser(add_cli_args, **kwargs)
-        else:
-            raise e
+        # Auto-mock missing modules that are imported lazily at runtime
+        if not e.name or e.name in sys.modules:
+            raise
+        logger.info("Mocking %s for argparse doc generation", e.name)
+        sys.modules[e.name] = PydanticMagicMock(name=e.name)
+        return create_parser(add_cli_args, **kwargs)
     # add_cli_args might be in-place so return parser if _parser is None
     return _parser or parser
 

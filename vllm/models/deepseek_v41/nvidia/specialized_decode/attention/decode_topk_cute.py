@@ -3,23 +3,23 @@
 """Decode top-k of the dense indexers straight from their BF16 logits, in CuTe DSL.
 
 The problem. In a decode step each dense indexer layer scores every compressed
-token of a row (SM100's paged MQA logits are BF16) and keeps the ``k`` largest:
+token of a row (SM100's paged MQA logits are BF16) and keeps the `k` largest:
 the token top-512, and in the candidate source also the top-2048 of the rows'
-8-token block maxima. ``cooperative_topk`` reads FP32, so the logits used to be
+8-token block maxima. `cooperative_topk` reads FP32, so the logits used to be
 upcast first, and it builds a radix histogram of every value with shared-memory
 atomics. Real indexer logits crowd a few histogram bins (a row of 150K logits
 holds about 200 distinct BF16 values), where those atomics serialize.
 
-What this module computes. ``DecodeTopK`` writes, for each row, the indices of
-its ``k`` largest elements in any order (exact: every index whose value exceeds
-the k-th largest, then enough of those equal to it), or ``0 .. n-1`` and -1
-padding when the row has at most ``k`` elements. An element is one BF16 logit
+What this module computes. `DecodeTopK` writes, for each row, the indices of
+its `k` largest elements in any order (exact: every index whose value exceeds
+the k-th largest, then enough of those equal to it), or `0 .. n-1` and -1
+padding when the row has at most `k` elements. An element is one BF16 logit
 (token mode), or the NaN-propagating maximum of an aligned group of 8 logits
 (block mode, the candidate blocks), with the row's newest block pinned at +inf
 and blocks scoring -inf written as -1. Values are compared through an
 order-preserving 16-bit key of their BF16 bits, so ties are exact.
 
-How. One thread block cluster of ``C`` CTAs per row: 8 CTAs of 512 threads
+How. One thread block cluster of `C` CTAs per row: 8 CTAs of 512 threads
 while every row's cluster can be resident at once, else 4 of 1024 (a second
 wave of clusters would nearly double the time). Each CTA copies one
 contiguous chunk of the row into shared memory, as 16-byte vectors (8 logits,
@@ -201,7 +201,7 @@ def max_nan_bf16x2(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
 
 @dsl_user_op
 def shfl_up(value: Uint32, delta: int, *, loc=None, ip=None) -> Uint32:
-    """``value`` of the lane ``delta`` below (own value in the lowest lanes)."""
+    """`value` of the lane `delta` below (own value in the lowest lanes)."""
     return Uint32(
         _asm(
             T.i32(),
@@ -231,7 +231,7 @@ def shared_red(address: Int32, value: Uint32, *, loc=None, ip=None) -> None:
 
 @dsl_user_op
 def peer_address(address: Int32, rank, *, loc=None, ip=None) -> Int32:
-    """The cluster address of this CTA's shared ``address`` in CTA ``rank``."""
+    """The cluster address of this CTA's shared `address` in CTA `rank`."""
     return Int32(
         _asm(
             T.i32(),
@@ -322,7 +322,7 @@ def cluster_store_u16(address: Int32, value, *, loc=None, ip=None) -> None:
 
 @cute.jit
 def order_key(bits: Uint32) -> Uint32:
-    """The order-preserving key of the BF16 value in the low half of ``bits``:
+    """The order-preserving key of the BF16 value in the low half of `bits`:
     a larger value has a larger key, NaNs of either sign outside the
     numbers."""
     b = bits & Uint32(0xFFFF)
@@ -341,8 +341,8 @@ def block_key(w0: Uint32, w1: Uint32, w2: Uint32, w3: Uint32) -> Uint32:
 def hist_add(
     hist_address: Int32, bin_: Uint32, valid, copies: bool, lane: Int32
 ) -> None:
-    """Count each valid lane's ``bin_`` with one shared atomic. ``copies``:
-    lane ``l`` counts into copy ``l % COPIES`` of a ``[COPIES][256]``
+    """Count each valid lane's `bin_` with one shared atomic. `copies`:
+    lane `l` counts into copy `l % COPIES` of a `[COPIES][256]`
     histogram (whole-row histograms: crowded bins would serialize the
     atomics of one copy); else into a plain 256-word one."""
     if valid:
@@ -354,10 +354,10 @@ def hist_add(
 
 @cute.jit
 def select_bin(hist: cute.Tensor, q: Uint32, ctl: cute.Tensor, lane: Int32) -> None:
-    """Warp 0: the bin ``b`` of a 256-bin histogram holding the ``q``-th
-    largest entry (q >= 1), into ``ctl[BIN]``, and ``q`` minus the entries
-    in the bins above ``b`` into ``ctl[REMAIN]``. Lane ``l`` scans bins
-    ``255 - 8 l`` down to ``248 - 8 l``."""
+    """Warp 0: the bin `b` of a 256-bin histogram holding the `q`-th
+    largest entry (q >= 1), into `ctl[BIN]`, and `q` minus the entries
+    in the bins above `b` into `ctl[REMAIN]`. Lane `l` scans bins
+    `255 - 8 l` down to `248 - 8 l`."""
     low = shared_load_u32x4(Int32(hist.iterator.toint()) + (248 - 8 * lane) * 4)
     high = shared_load_u32x4(Int32(hist.iterator.toint()) + (252 - 8 * lane) * 4)
     counts = (high[3], high[2], high[1], high[0], low[3], low[2], low[1], low[0])
@@ -385,11 +385,11 @@ def select_bin(hist: cute.Tensor, q: Uint32, ctl: cute.Tensor, lane: Int32) -> N
 class DecodeTopK:
     """The decode top-k (module docstring) of rows of BF16 logits.
 
-    ``k``: 512, 1024 or 2048; ``cluster``: 4, 8 or 16 CTAs a row (4: 1024
-    threads, else 512); ``vector_count``: 16-byte vectors a thread stages (8,
+    `k`: 512, 1024 or 2048; `cluster`: 4, 8 or 16 CTAs a row (4: 1024
+    threads, else 512); `vector_count`: 16-byte vectors a thread stages (8,
     or 16 at 8 or 16 CTAs: the first 8 also stay in registers), so a row
-    holds at most ``cluster * threads * vector_count`` vectors;
-    ``block_mode``: elements are 8-logit block maxima.
+    holds at most `cluster * threads * vector_count` vectors;
+    `block_mode`: elements are 8-logit block maxima.
     """
 
     def __init__(
@@ -424,9 +424,9 @@ class DecodeTopK:
         fallback: Int32,
         stream: cuda.CUstream,
     ):
-        """``logits``: BF16 rows ``row_bytes`` apart (16-byte aligned), each
-        valid below ``lengths[r]`` (int32, clamped to [0, width]); ``out``:
-        int32 rows ``out_stride`` apart. ``fallback`` nonzero forces the
+        """`logits`: BF16 rows `row_bytes` apart (16-byte aligned), each
+        valid below `lengths[r]` (int32, clamped to [0, width]); `out`:
+        int32 rows `out_stride` apart. `fallback` nonzero forces the
         direct path (tests)."""
         self.kernel(
             cute.make_tensor(lengths_ptr, cute.make_layout(rows)),
@@ -446,13 +446,13 @@ class DecodeTopK:
 
     @cute.jit
     def vector_words(self, data_address: Int32, vector: Int32):
-        """The four words of the chunk's vector ``vector`` in shared memory."""
+        """The four words of the chunk's vector `vector` in shared memory."""
         return shared_load_u32x4(data_address + vector * 16)
 
     @cute.jit
     def vector_top(self, words, element: Int32, pinned: Int32) -> Uint32:
         """The largest key of a staged vector whose first element is
-        ``element`` (block mode: the pinned newest block ranks first)."""
+        `element` (block mode: the pinned newest block ranks first)."""
         top = block_key(words[0], words[1], words[2], words[3])
         if cutlass.const_expr(self.block_mode):  # noqa: SIM102
             if element == pinned:
@@ -461,7 +461,7 @@ class DecodeTopK:
 
     @cute.jit
     def word_key(self, words, e: int, element: Int32, pinned: Int32) -> Uint32:
-        """The key of element ``e`` of a vector's ``words`` (``element``: its
+        """The key of element `e` of a vector's `words` (`element`: its
         row index, for the pinned block)."""
         key = Uint32(0)
         if cutlass.const_expr(self.block_mode):
@@ -474,7 +474,7 @@ class DecodeTopK:
 
     @cute.jit
     def scan2(self, a: Uint32, b: Uint32, scan: cute.Tensor, tid: Int32):
-        """Exclusive CTA prefix sums of ``a`` and ``b`` over the threads, and
+        """Exclusive CTA prefix sums of `a` and `b` over the threads, and
         their totals (every thread calls it; three barriers)."""
         lane = tid & 31
         warp = tid >> 5
@@ -526,8 +526,8 @@ class DecodeTopK:
         ctl: cute.Tensor,
         tid: Int32,
     ):
-        """The ``q``-th largest of ``keys[0:count]`` (shared Uint16, q <= count)
-        and how many of the keys equal to it rank within the top ``q``. Every
+        """The `q`-th largest of `keys[0:count]` (shared Uint16, q <= count)
+        and how many of the keys equal to it rank within the top `q`. Every
         thread calls it."""
         lane = tid & 31
         h1 = Int32(hist.iterator.toint())
@@ -584,7 +584,7 @@ class DecodeTopK:
         scan,
         queue,
     ) -> Int32:
-        """Queue this CTA's vectors that can hold a key >= ``cutoff`` (by
+        """Queue this CTA's vectors that can hold a key >= `cutoff` (by
         their maximum) and return how many (every thread)."""
         threads, per = self.threads, self.per_vector
         hits = Uint32(0)
@@ -627,8 +627,8 @@ class DecodeTopK:
         tid: Int32,
         queue,
     ):
-        """This thread's keys above and equal to ``cutoff`` in its share of
-        the queued vectors (entries ``tid``, ``tid + threads``, ...)."""
+        """This thread's keys above and equal to `cutoff` in its share of
+        the queued vectors (entries `tid`, `tid + threads`, ...)."""
         per = self.per_vector
         gt = Uint32(0)
         eq = Uint32(0)
@@ -647,8 +647,8 @@ class DecodeTopK:
 
     @cute.jit
     def reserve(self, gt: Uint32, eq: Uint32, totals: int, tid: Int32, ctl, scan):
-        """This thread's first slots for its ``gt`` / ``eq`` keys in the
-        cluster-wide lists counted at CTA 0's ``ctl[totals]`` pair: a CTA
+        """This thread's first slots for its `gt` / `eq` keys in the
+        cluster-wide lists counted at CTA 0's `ctl[totals]` pair: a CTA
         scan, then one 64-bit cluster atomic for the CTA."""
         first_gt, first_eq, cta_gt, cta_eq = self.scan2(gt, eq, scan, tid)
         if tid == 0:
@@ -680,7 +680,7 @@ class DecodeTopK:
         g_idx,
         g_eq,
     ):
-        """Sampled path: push this CTA's keys above ``cutoff`` and up to k
+        """Sampled path: push this CTA's keys above `cutoff` and up to k
         equal to it to CTA 0 and return the cluster's totals (every CTA)."""
         k, per = self.k, self.per_vector
         queued = self.queue_vectors(
@@ -731,9 +731,9 @@ class DecodeTopK:
         hist_address: Int32,
         lane: Int32,
     ) -> None:
-        """Count a staged vector (``words``, its first element ``first``) into
+        """Count a staged vector (`words`, its first element `first`) into
         a whole-row histogram: level 0 the high bytes of its keys, level 1
-        the low bytes of those whose high byte is ``high``."""
+        the low bytes of those whose high byte is `high`."""
         per = self.per_vector
         if cutlass.const_expr(level == 0):
             if cute.arch.vote_any_sync(first < length):
@@ -857,7 +857,7 @@ class DecodeTopK:
         queue,
     ) -> None:
         """Direct path: the exact cutoff, then every CTA writes its keys
-        above it and its share of the ``need`` equal ones to the output."""
+        above it and its share of the `need` equal ones to the output."""
         k, per = self.k, self.per_vector
         tau, need = self.exact_cutoff(
             regs, data_address, start, length, pinned, tid, ctl, hist, hist_a, hist_b
@@ -1170,7 +1170,7 @@ class DecodeTopK:
 
 
 def _pointer(dtype: type[cutlass.Numeric], tensor: torch.Tensor, align: int):
-    """A CuTe DSL global-memory pointer to ``tensor``'s data."""
+    """A CuTe DSL global-memory pointer to `tensor`'s data."""
     return make_ptr(
         dtype, tensor.data_ptr(), cute.AddressSpace.gmem, assumed_align=align
     )
@@ -1185,7 +1185,7 @@ def _fake(dtype: type[cutlass.Numeric], align: int):
 def _kernel(
     device_index: int, k: int, cluster: int, vector_count: int, block_mode: bool
 ):
-    """``DecodeTopK`` compiled for a device, k, cluster size, staged vectors
+    """`DecodeTopK` compiled for a device, k, cluster size, staged vectors
     a thread and mode."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
@@ -1215,7 +1215,7 @@ def vector_choices(cluster: int) -> tuple[int, ...]:
 
 def vectors_for(width: int, cluster: int) -> int | None:
     """The fewest staged vectors a thread whose cluster holds a row of
-    ``width`` logits (a 16-byte vector: 8 logits, or one block), or None."""
+    `width` logits (a 16-byte vector: 8 logits, or one block), or None."""
     for count in vector_choices(cluster):
         if width // 8 <= cluster * threads_for(cluster) * count:
             return count
@@ -1224,7 +1224,7 @@ def vectors_for(width: int, cluster: int) -> int | None:
 
 @cache
 def _resident_clusters(device_index: int, cluster: int) -> int:
-    """Clusters of ``cluster`` CTAs the device runs at once, one CTA an SM
+    """Clusters of `cluster` CTAs the device runs at once, one CTA an SM
     (the kernel's shared memory allows no more): 36 of 4, 15 of 8 and 7 of 16
     on a 152-SM GB300."""
     with torch.accelerator.device_index(device_index):
@@ -1244,8 +1244,8 @@ def cluster_for(rows: int, width: int, device_index: int) -> int:
 
 
 def precompile(device_index: int, width: int, k: int, block_mode: bool) -> None:
-    """Compile the ``DecodeTopK`` variants `decode_topk` launches on rows of
-    ``width`` logits for ``k`` and ``block_mode``, at any row count, and read
+    """Compile the `DecodeTopK` variants `decode_topk` launches on rows of
+    `width` logits for `k` and `block_mode`, at any row count, and read
     the cluster occupancy it plans with, before graph capture."""
     if k not in TOP_KS:
         return
@@ -1267,7 +1267,7 @@ def supports_decode_topk(
 ) -> bool:
     """Whether `decode_topk` takes these BF16 logits (16-byte aligned rows
     whose width, a multiple of 8, fits one cluster of at most 16 CTAs) for
-    ``rows`` rows. Rows that need 16 CTAs are taken for at most two waves of
+    `rows` rows. Rows that need 16 CTAs are taken for at most two waves of
     clusters: beyond, the waves cost more than the upcast and the stock
     top-k."""
     if logits.dtype != torch.bfloat16 or logits.dim() != 2 or logits.stride(1) != 1:
@@ -1297,7 +1297,7 @@ def decode_topk(
     """Launch `DecodeTopK` on the current stream.
 
     Args:
-        logits: [rows, width] BF16, row ``r`` valid below ``lengths[r]``
+        logits: [rows, width] BF16, row `r` valid below `lengths[r]`
             (see `supports_decode_topk`).
         lengths: Contiguous [rows] int32 valid lengths in logits columns.
         out: [rows, k] int32 (unit column stride) for the indices: tokens, or
