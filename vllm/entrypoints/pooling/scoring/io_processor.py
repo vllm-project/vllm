@@ -719,7 +719,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             target_prompt = extract_target_prompt(self.model_config, engine_prompt)
             target_prompt.update(prompt_extras)
 
-        skip_mm_cache = prompt_extras.pop("skip_mm_cache", False)
+        skip_mm_cache = (prompt_extras or {}).pop("skip_mm_cache", False)
         engine_input = self.renderer.process_for_engine(
             engine_prompt, arrival_time, skip_mm_cache=skip_mm_cache
         )

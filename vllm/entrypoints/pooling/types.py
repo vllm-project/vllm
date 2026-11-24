@@ -167,9 +167,11 @@ class OfflineInputsContext:
         return default_tok_params.with_kwargs(**tok_kwargs)
 
     def build_prompt_extras(
-        self, params: PoolingParams, mm_config: MultiModalConfig | None = None
+        self, params: PoolingParams | None, mm_config: MultiModalConfig | None = None
     ):
-        prompt_extras: dict[str, Any] = dict(params.extra_kwargs or {})
+        prompt_extras: dict[str, Any] = dict(
+            params.extra_kwargs if params and params.extra_kwargs else {}
+        )
         merged = {
             k: v
             for k in ("skip_mm_cache", "cache_salt", "mm_processor_kwargs")

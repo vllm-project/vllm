@@ -258,8 +258,7 @@ class CohereEmbedInput(BaseModel):
     content: list[CohereEmbedContent]
 
 
-class CohereEmbedRequest(BaseModel):
-    model: str | None = None
+class CohereEmbedRequest(PoolingBasicRequestMixin):
     input_type: str | None = None
     texts: list[str] | None = None
     images: list[str] | None = None
@@ -268,7 +267,6 @@ class CohereEmbedRequest(BaseModel):
     embedding_types: list[CohereEmbeddingType] | None = None
     truncate: CohereTruncate = "END"
     max_tokens: int | None = None
-    priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
 
     @model_validator(mode="after")
     def validate_input_fields(self):
