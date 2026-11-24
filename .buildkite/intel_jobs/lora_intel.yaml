@@ -154,6 +154,7 @@ steps:
   working_dir: "/vllm-workspace/"
   env:
     VLLM_TEST_DEVICE: "xpu"
+    VLLM_BATCH_INVARIANT: "1"
   source_file_dependencies:
     - vllm/lora
     - vllm/model_executor/layers/fused_moe
