@@ -158,6 +158,9 @@ When batch invariance is enabled, vLLM:
 5. On CUDA devices with tuned matmul table entries for the model's bf16 unquantized forward linear layers (Ada, Hopper, Blackwell),
    runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out.
 6. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
+7. On the supported NVIDIA CUDA batch-invariant BMM path, uses smaller row tiles when the matrix row count (M) is at most 64, while keeping the reduction tile and precision settings fixed. Larger row counts and non-CUDA paths keep the original BMM row tile.
+
+Local correctness and performance validation of this BMM row-tile optimization was performed on NVIDIA H20 only. Other CUDA architectures have not been locally validated, and the measured speedups should not be extrapolated to them.
 
 For multimodal vision attention, `VLLM_BATCH_INVARIANT=1` disables Split-KV when
 the `FLASH_ATTN` encoder backend uses FlashAttention 3 on Hopper. On B200,

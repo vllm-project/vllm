@@ -881,23 +881,29 @@ def bmm_batch_invariant(a, b, *, out=None):
 
     if not _BLOCK_SIZES_RESOLVED:
         _resolve_block_sizes()
+    # Keep K-reduction and precision settings fixed across row-tile choices.
+    block_m = 128
+    if current_platform.is_cuda():
+        block_m = 16
+        while block_m < min(M, 128):
+            block_m *= 2
     configs = {
         torch.bfloat16: {
-            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_M": block_m,
             "BLOCK_SIZE_N": 128,
             "BLOCK_SIZE_K": 64,
             "num_stages": 3,
             "num_warps": 8,
         },
         torch.float16: {
-            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_M": block_m,
             "BLOCK_SIZE_N": _fp16_block_size_n,
             "BLOCK_SIZE_K": 64,
             "num_stages": 3,
             "num_warps": 8,
         },
         torch.float32: {
-            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_M": block_m,
             "BLOCK_SIZE_N": _fp32_block_size_n if N == 1 else 128,
             "BLOCK_SIZE_K": 32,
             "num_stages": _fp32_num_stages if N == 1 else 3,
