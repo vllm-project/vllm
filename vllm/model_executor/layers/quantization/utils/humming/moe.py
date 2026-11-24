@@ -249,7 +249,7 @@ def select_humming_moe_experts(
             activation_format,
         )
         if supported:
-            logger.info_once(_make_log_backend(k_cls))
+            logger.debug_once(_make_log_backend(k_cls))
             return k_cls
         else:
             logger.debug_once(_make_log_unsupported(k_cls, reason))

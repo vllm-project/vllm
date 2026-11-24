@@ -58,6 +58,15 @@ class KVConnectorFactory:
                 f"Connector {connector_cls.__name__} does not support HMA but "
                 f"HMA is enabled. Please set `--disable-hybrid-kv-cache-manager`."
             )
+        if (
+            role == KVConnectorRole.SCHEDULER
+            and config.num_hash_lookahead_tokens
+            and not connector_cls.supports_lookahead_block_hashes(kv_transfer_config)
+        ):
+            logger.warning(
+                "%s does not support hash lookahead; spec decode acceptance may drop.",
+                connector_cls.__name__,
+            )
 
         logger.info(
             "Creating v1 connector with name: %s and engine_id: %s",

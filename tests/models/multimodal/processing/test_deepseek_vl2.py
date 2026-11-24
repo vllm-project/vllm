@@ -10,6 +10,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing.context import TimingContext
 from vllm.multimodal.processing.inputs import ProcessorInputs
 
+from ...utils import build_model_context
+
 
 @pytest.fixture
 def processor():
@@ -68,3 +70,35 @@ def test_image_embedding_cache_identity_ignores_image_count(processor, use_uuid:
     assert hashes[0] == hashes[1]
     if use_uuid:
         assert hashes[0] == "uuid:embedding-0"
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize("prompt_as_tokens", [False, True])
+def test_request_candidate_resolutions_match_engine(prompt_as_tokens):
+    """A request crop limit must change placeholders along with image features."""
+    kwargs = {"candidate_resolutions": ((384, 384),)}
+    image = Image.new("RGB", (1600, 1200))
+    results = []
+    for on_engine in (False, True):
+        ctx = build_model_context(
+            "deepseek-ai/deepseek-vl2-tiny",
+            mm_processor_kwargs=kwargs if on_engine else None,
+            mm_processor_cache_gb=0.01,
+        )
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+        hf = processor.info.get_hf_processor(**kwargs)
+        prompt = "<image>\nDescribe."
+        expected = hf(text=prompt, images=[image])["num_image_tokens"]
+        if prompt_as_tokens:
+            prompt = ctx.get_tokenizer().encode(prompt)
+        for _ in range(2):
+            result = processor(
+                prompt,
+                mm_items=processor.info.parse_mm_data({"image": image}),
+                hf_processor_mm_kwargs={} if on_engine else kwargs,
+            )
+            assert [p.length for p in result["mm_placeholders"]["image"]] == list(
+                expected
+            )
+        results.append(result["prompt_token_ids"])
+    assert results[0] == results[1]
