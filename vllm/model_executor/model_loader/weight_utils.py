@@ -597,7 +597,7 @@ def filter_duplicate_safetensors_files(
         )
     dropped = set(hf_weights_files) - set(weight_files_in_index)
     if any(os.path.basename(f) == SAFE_WEIGHTS_NAME for f in dropped):
-        logger.warning(
+        logger.warning_once(
             "Ignoring %s because it is not listed in %s. Other tools may load "
             "it instead of the indexed shards.",
             SAFE_WEIGHTS_NAME,
