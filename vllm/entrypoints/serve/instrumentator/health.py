@@ -35,7 +35,16 @@ async def health(raw_request: Request) -> Response:
         return Response(status_code=503)
 
 
-@router.get("/health_generate", response_class=Response)
+@router.get(
+    "/health_generate",
+    response_class=Response,
+    responses={
+        503: {
+            "description": "Engine is not ready to serve generation requests.",
+            "content": {"application/json": {"schema": {"type": "object"}}},
+        }
+    },
+)
 async def health_generate(
     raw_request: Request, timeout_s: Annotated[float, Query(gt=0)] = 20.0
 ) -> Response:
