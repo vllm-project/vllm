@@ -37,6 +37,7 @@ from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers import causal
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.causal import (
+    _OpaqueBaseModel,
     probe_output_head,
     stub_base_model,
     to_output_head,
@@ -1004,6 +1005,12 @@ def build_causal_lm(model_type: str, arch: str, device: str, **overrides):
         return model_cls._from_config(config, dtype=torch.float32)
 
 
+def stub(model: nn.Module) -> nn.Module:
+    """`model` with its base model stubbed out, as `stub_base_model` builds it."""
+    setattr(model, model.base_model_prefix, _OpaqueBaseModel(model.base_model))
+    return model
+
+
 OUTPUT_HEADS = [
     # (model_type, arch, overrides, renames of the output embeddings)
     ("llama", "LlamaForCausalLM", {}, {"lm_head.weight": "lm_head.weight"}),
@@ -1064,7 +1071,7 @@ def test_output_head_reproduces_logits(model_type, arch, overrides, renames):
         expected = model(input_ids=torch.zeros(1, 3, dtype=torch.long)).logits
 
         embeddings = model.get_output_embeddings()
-        output_head = to_output_head(model, type(model.base_model))
+        output_head = to_output_head(stub(model))
         assert output_head is not None
         lm_head_renames = {
             k: v for k, v in output_head.renames.items() if v.startswith("lm_head.")
@@ -1091,7 +1098,7 @@ def test_logit_transform_is_detected(model_type, arch, overrides, renames):
     """Heads which only scale or soft cap the logits are left to `LogitsProcessor`,
     so they keep its fused path and batch-sharded sampling."""
     model = build_causal_lm(model_type, arch, "meta", **overrides)
-    assert (output_head := to_output_head(model, type(model.base_model)))
+    assert (output_head := to_output_head(stub(model)))
     logit_transform = probe_output_head(output_head, model.config.hidden_size)
     assert logit_transform == LOGIT_TRANSFORMS.get(arch)
 
@@ -1132,7 +1139,7 @@ def test_output_head_renames_modules(model_type, arch, overrides, module_renames
     """Quantization configs name the head's layers (e.g. to skip them) by their
     checkpoint names, so the renames cover modules as well as parameters."""
     model = build_causal_lm(model_type, arch, "meta", **overrides)
-    assert (output_head := to_output_head(model, type(model.base_model)))
+    assert (output_head := to_output_head(stub(model)))
     mapper = output_head.weights_mapper()
     assert mapper.apply_list(list(module_renames)) == list(module_renames.values())
 

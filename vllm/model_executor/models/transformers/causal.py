@@ -145,14 +145,11 @@ class OutputHead:
         return WeightsMapper(orig_to_new_regex=renames)
 
 
-def to_output_head(
-    model: PreTrainedModel, base_model_cls: type[nn.Module] = _OpaqueBaseModel
-) -> OutputHead | None:
-    """Turn `model`, a `ForCausalLM`, into its output head in place.
+def to_output_head(model: PreTrainedModel) -> OutputHead | None:
+    """Turn `model`, a `ForCausalLM` built with `stub_base_model`, into its output
+    head in place.
 
-    The base model, the submodule of type `base_model_cls`, is replaced with
-    `_OpaqueBaseModel` (unless it already is one), and the output embeddings with
-    `_OutputEmbeddings`, so
+    The output embeddings are replaced with `_OutputEmbeddings`, so
     `model(inputs_embeds=h)` applies everything the `ForCausalLM` applies after its
     base model (e.g. a dense -> act -> norm transform, a soft cap, a scale).
 
@@ -162,17 +159,8 @@ def to_output_head(
     vocab_size = model.config.get_text_config().vocab_size
     if not isinstance(embeddings, nn.Linear) or embeddings.out_features != vocab_size:
         return None
-    base_model_name = next(
-        (n for n, m in model.named_modules() if n and isinstance(m, base_model_cls)),
-        None,
-    )
-    if base_model_name is None:
+    if not any(isinstance(m, _OpaqueBaseModel) for m in model.modules()):
         return None
-
-    parent_name, _, child_name = base_model_name.rpartition(".")
-    parent = model.get_submodule(parent_name)
-    if not isinstance(base_model := getattr(parent, child_name), _OpaqueBaseModel):
-        setattr(parent, child_name, _OpaqueBaseModel(base_model))
     output_embeddings = _OutputEmbeddings()
     params = {id(embeddings.weight): "lm_head.weight"}
     if embeddings.bias is not None:
