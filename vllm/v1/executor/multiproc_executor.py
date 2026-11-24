@@ -402,14 +402,7 @@ class MultiprocExecutor(Executor):
             if not _self or getattr(_self, "shutting_down", False):
                 logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
-            # Claim the failure flag and any registered callback atomically
-            # under the same lock `register_failure_callback` uses: the
-            # callback is either fetched here or invoked by the registering
-            # thread, never neither (see #69292).
-            with _self._failure_lock:
-                _self.is_failed = True
-                callback = _self.failure_callback
-                _self.failure_callback = None
+            callback = _self._claim_failure()
             proc = next(h.proc for h in workers if h.proc.sentinel == died[0])
             logger.error(
                 "Worker proc %s died unexpectedly (exit code: %s), "
@@ -428,6 +421,19 @@ class MultiprocExecutor(Executor):
             return
 
         monitor_workers()
+
+    def _claim_failure(self) -> FailureCallback | None:
+        """Atomically claim the failure flag and any registered callback.
+
+        The callback is either fetched here or invoked by the registering
+        thread, never neither; callers must invoke any returned callback
+        after shutdown work, outside the lock.
+        """
+        with self._failure_lock:
+            self.is_failed = True
+            callback = self.failure_callback
+            self.failure_callback = None
+        return callback
 
     def register_failure_callback(self, callback: FailureCallback):
         invoke_now = False
