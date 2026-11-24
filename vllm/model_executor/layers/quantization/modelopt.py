@@ -1160,9 +1160,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer.w13_input_scale.data.fill_(1.0)
             layer.w2_input_scale.data.fill_(1.0)
 
-        # Use a single gscale for w13.
-        if self.moe.is_act_and_mul and not torch.allclose(
-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
+        # Use a single gscale for w13. Humming is the exception: its converter
+        # reads both halves' scales from the layer (a per-channel global scale),
+        # so a w1/w3 mismatch needs neither the fold nor the warning there.
+        if (
+            self.moe.is_act_and_mul
+            and self.nvfp4_backend != NvFp4MoeBackend.HUMMING
+            and not torch.allclose(
+                layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
+            )
         ):
             can_fold = (
                 self.nvfp4_backend == NvFp4MoeBackend.MARLIN
