@@ -109,10 +109,6 @@ _SPLIT_OPS = tuple(
 """Conversion ops that split a tensor (`Split` needs Transformers 5.22)."""
 
 
-def _only_splits(converter: WeightConverter) -> bool:
-    return all(isinstance(op, _SPLIT_OPS) for op in converter.operations)
-
-
 class SplitWeights:
     """Apply a Transformers conversion that only splits a checkpoint tensor (e.g. a
     fused `query_key_value` into `q_proj`, `k_proj` and `v_proj`) to the weights.
@@ -455,8 +451,9 @@ class Base(
             if isinstance(mapping, WeightRenaming):
                 orig_to_new_renaming.append(mapping)
             # Handle weights which Transformers splits into several
-            elif isinstance(mapping, WeightConverter) and _only_splits(mapping):
-                splits.append(mapping)
+            elif isinstance(mapping, WeightConverter):
+                if all(isinstance(op, _SPLIT_OPS) for op in mapping.operations):
+                    splits.append(mapping)
             # TODO: Handle other WeightConverters to enable layer merging
 
         # Standardise base model prefix
